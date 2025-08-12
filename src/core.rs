@@ -1,4 +1,3 @@
-use std::time::Duration;
 use crate::mmu::MMU;
 use crate::opcode::{OpCode, Register, Register16, Register16Mem, Register16Stack, JumpCondition};
 use crate::registers::RegisterSet;
@@ -121,24 +120,17 @@ impl Core {
         }
     }
 
-    /// update all internal state
-    pub fn update(&mut self, delta: Duration) {
-        self.mmu.update(delta);
-    }
-
     pub fn fetch(&mut self) -> OpCode {
         if self.mode == CoreMode::Normal {
             OpCode::parse(self)
         } else {
+            // execute a "virtual" nop if not in normal mode
+            // this keeps the clocks ticking
             OpCode::Nop
         }
     }
 
     pub fn execute(&mut self, opcode: OpCode) {
-        if self.mode != CoreMode::Normal {
-            return;
-        }
-
         match opcode {
             OpCode::Load { source, destination } => {
                 self.set_register(destination, self.register(source));
@@ -458,7 +450,10 @@ impl Core {
                 self.mode = CoreMode::Crash;
             }
         }
-        self.machine_cycles += opcode.machine_cycles();
+
+        let new_machine_cycles = opcode.machine_cycles();
+        self.machine_cycles += new_machine_cycles;
+        self.mmu.update(new_machine_cycles);
     }
 
     pub fn handle_interrupts(&mut self) {
@@ -1997,7 +1992,7 @@ mod tests {
             core.interrupts_enabled = true;
             core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
             core.mmu.write(0xFF0F, 0xFF); // request all interrupts
-            core.update(Duration::from_millis(10));
+            core.execute(OpCode::Nop); // update core state
             core.handle_interrupts();
             assert_eq!(core.mode, CoreMode::Normal);
         }
@@ -2013,7 +2008,7 @@ mod tests {
             core.interrupts_enabled = true;
             core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
             core.mmu.write(0xFF0F, 0xFF); // request all interrupts
-            core.update(Duration::from_millis(10));
+            core.execute(OpCode::Nop); // update core state
             core.handle_interrupts();
             assert_eq!(core.mode, CoreMode::Normal);
         }

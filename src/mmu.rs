@@ -1,4 +1,3 @@
-use std::time::Duration;
 use crate::core::CoreMode;
 use crate::header::CartHeader;
 use crate::interrupt::{InterruptFlags, InterruptType};
@@ -59,7 +58,7 @@ impl MMU {
     }
 
     /// update internal state of the MMU, should be called every CPU cycle
-    pub fn update(&mut self, delta: Duration) {
+    pub fn update(&mut self, delta_machine_cycles: u64) {
         // update interrupt register
         for interrupt in InterruptType::all() {
             let interrupt_required = match interrupt {
