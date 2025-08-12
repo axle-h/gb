@@ -378,7 +378,7 @@ pub enum OpCode {
     /// flag to 0 without looking at the resulting value of the calculation.
     /// Flags Z = 0, N = 0, H = 0, C = *
     #[strum(to_string = "RLCA")]
-    RotateLeftWithCarryAccumulator,
+    RotateLeftCircularAccumulator,
 
     /// RRCA: Rotate right circular (accumulator)
     /// Rotates the 8-bit A register value right in a circular manner (carry flag is updated but not used).
@@ -387,7 +387,7 @@ pub enum OpCode {
     /// flag to 0 without looking at the resulting value of the calculation.
     /// Flags Z = 0, N = 0, H = 0, C = *
     #[strum(to_string = "RRCA")]
-    RotateRightWithCarryAccumulator,
+    RotateRightCircularAccumulator,
 
     /// RLA: Rotate left (accumulator)
     /// Rotates the 8-bit A register value left through the carry flag.
@@ -574,7 +574,7 @@ pub enum OpCode {
 }
 
 impl OpCode {
-    pub fn machine_cycles(&self) -> u8 {
+    pub fn machine_cycles(&self) -> u64 {
         match self {
             OpCode::Illegal { .. } => 1,
             OpCode::Nop => 1,
@@ -612,7 +612,7 @@ impl OpCode {
             OpCode::ComplementCarryFlag | OpCode::SetCarryFlag | OpCode::DecimalAdjustAccumulator | OpCode::ComplementAccumulator => 1,
             OpCode::Increment16 { .. } | OpCode::Decrement16 { .. } | OpCode::Add16 { .. } => 2,
             OpCode::AddStackPointer { .. } => 4,
-            OpCode::RotateLeftWithCarryAccumulator | OpCode::RotateLeftAccumulator | OpCode::RotateRightWithCarryAccumulator | OpCode::RotateRightAccumulator => 1,
+            OpCode::RotateLeftCircularAccumulator | OpCode::RotateLeftAccumulator | OpCode::RotateRightCircularAccumulator | OpCode::RotateRightAccumulator => 1,
             OpCode::RotateRightCircular { register } | OpCode::RotateLeftCircular { register } |
             OpCode::RotateRight { register } | OpCode::RotateLeft { register } |
             OpCode::ShiftLeftArithmetic { register } | OpCode::ShiftRightArithmetic { register } |
@@ -642,8 +642,8 @@ impl OpCode {
                 OpCode::Illegal { raw: raw.0 }
             }
             0x00 => OpCode::Nop, // 0x00 NOP
-            0x07 => OpCode::RotateLeftWithCarryAccumulator, // 0x07 RLCA
-            0x0F => OpCode::RotateRightWithCarryAccumulator, // 0x0F RRCA
+            0x07 => OpCode::RotateLeftCircularAccumulator, // 0x07 RLCA
+            0x0F => OpCode::RotateRightCircularAccumulator, // 0x0F RRCA
             0x17 => OpCode::RotateLeftAccumulator, // 0x17 RLA
             0x1F => OpCode::RotateRightAccumulator, // 0x1F RRA
             0x27 => OpCode::DecimalAdjustAccumulator, // 0x27 DAA

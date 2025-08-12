@@ -38,7 +38,7 @@ impl FlagsRegister {
 #[derive(Debug, Clone, Copy)]
 pub struct RegisterSet {
     pub a: u8,
-    pub f: FlagsRegister,
+    pub flags: FlagsRegister,
     pub b: u8,
     pub c: u8,
     pub d: u8,
@@ -53,7 +53,7 @@ impl RegisterSet {
     pub fn dmg() -> Self {
         Self {
             a: 0x01,
-            f: FlagsRegister {
+            flags: FlagsRegister {
                 z: true,
                 n: false,
                 h: false,
@@ -116,12 +116,12 @@ impl RegisterSet {
     }
 
     pub fn af(&self) -> u16 {
-        u16::from_be_bytes([self.a, self.f.to_byte()])
+        u16::from_be_bytes([self.a, self.flags.to_byte()])
     }
 
     pub fn set_af(&mut self, value: u16) {
         self.a = (value >> 8) as u8;
-        self.f = FlagsRegister::from_byte(value as u8);
+        self.flags = FlagsRegister::from_byte(value as u8);
     }
 }
 
@@ -166,10 +166,10 @@ mod tests {
     fn register_set_initialization() {
         let registers = RegisterSet::dmg();
         assert_eq!(registers.a, 0x01);
-        assert_eq!(registers.f.z, true);
-        assert_eq!(registers.f.n, false);
-        assert_eq!(registers.f.h, false);
-        assert_eq!(registers.f.c, false);
+        assert_eq!(registers.flags.z, true);
+        assert_eq!(registers.flags.n, false);
+        assert_eq!(registers.flags.h, false);
+        assert_eq!(registers.flags.c, false);
         assert_eq!(registers.b, 0x00);
         assert_eq!(registers.c, 0x13);
         assert_eq!(registers.d, 0x00);
@@ -210,7 +210,7 @@ mod tests {
         registers.set_af(0x1234);
         assert_eq!(registers.af(), 0x1230);
         assert_eq!(registers.a, 0x12);
-        assert_eq!(registers.f.to_byte(), 0x30);
+        assert_eq!(registers.flags.to_byte(), 0x30);
     }
 
     #[test]
