@@ -1,12 +1,17 @@
 use crate::core::CoreMode;
+use crate::cycles::MachineCycles;
+use crate::divider::Divider;
 use crate::header::CartHeader;
-use crate::interrupt::{InterruptFlags, InterruptType};
+use crate::interrupt::{InterruptFlags, InterruptSource, InterruptType};
 use crate::joypad::JoypadRegister;
+use crate::ppu::PPU;
+use crate::serial::Serial;
+use crate::timer::Timer;
 
 const RAM_BANK_SIZE: usize = 0x2000; // 8KB
 const ROM_BANK_SIZE: usize = 0x4000; // 16KB
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MMU {
     data: Vec<u8>,
     header: CartHeader,
@@ -16,6 +21,10 @@ pub struct MMU {
     ram_bank_register: usize,
     work_ram: [u8; 0x2000], // 8KB of work RAM (DMG mode only)
     high_ram: [u8; 0x7F], // 128 bytes of high RAM
+    ppu: PPU,
+    serial: Serial,
+    divider: Divider,
+    timer: Timer,
     interrupt_enable: InterruptFlags,
     interrupt_register: InterruptFlags,
     joypad_register: JoypadRegister,
@@ -39,9 +48,13 @@ impl MMU {
             ram_bank_register: 0,
             work_ram: [0; 0x2000],
             high_ram: [0; 0x7F],
-            interrupt_enable: InterruptFlags::new(),
-            interrupt_register: InterruptFlags::new(),
-            joypad_register: JoypadRegister::new(),
+            ppu: PPU::default(),
+            interrupt_enable: InterruptFlags::default(),
+            interrupt_register: InterruptFlags::default(),
+            joypad_register: JoypadRegister::default(),
+            serial: Serial::default(),
+            divider: Divider::default(),
+            timer: Timer::default(),
         })
     }
 
@@ -57,15 +70,51 @@ impl MMU {
         &mut self.joypad_register
     }
 
+    pub fn ppu(&self) -> &PPU {
+        &self.ppu
+    }
+
+    pub fn serial(&self) -> &Serial {
+        &self.serial
+    }
+
+    pub fn serial_mut(&mut self) -> &mut Serial {
+        &mut self.serial
+    }
+
+    pub fn stop(&mut self) {
+        self.divider.disable();
+    }
+
+    pub fn restart(&mut self) {
+        self.divider.enable();
+    }
+
     /// update internal state of the MMU, should be called every CPU cycle
-    pub fn update(&mut self, delta_machine_cycles: u64) {
+    pub fn update(&mut self, delta_machine_cycles: MachineCycles) {
+        if let Some(transfer) = self.ppu.dma_mut().update(delta_machine_cycles) {
+            // DMA transfer is in progress, we need to copy data from ROM to OAM
+            for i in 0 .. 0xA0 {
+                let value = self.read(transfer.address + i);
+                self.ppu.write_oam(i, value);
+            }
+        }
+
+        self.ppu.update(delta_machine_cycles);
+        self.serial.update(delta_machine_cycles);
+        self.divider.update(delta_machine_cycles);
+        self.timer.update(delta_machine_cycles);
+
         // update interrupt register
         for interrupt in InterruptType::all() {
-            let interrupt_required = match interrupt {
-                InterruptType::Joypad => self.joypad_register.interrupt_required(),
-                _ => false // TODO
+            let interrupt_pending = match interrupt {
+                InterruptType::Joypad => self.joypad_register.consume_pending_interrupt(),
+                InterruptType::LcdStatus => self.ppu.lcd_status_mut().consume_pending_interrupt(),
+                InterruptType::VBlank => self.ppu.consume_pending_interrupt(),
+                InterruptType::Serial => self.serial.is_interrupt_pending(),
+                InterruptType::Timer => self.timer.is_interrupt_pending(),
             };
-            if interrupt_required {
+            if interrupt_pending {
                 self.interrupt_register.set_interrupt(interrupt);
             }
         }
@@ -108,6 +157,8 @@ impl MMU {
                 let bank_offset = self.rom_bank_register * ROM_BANK_SIZE;
                 self.data[bank_offset + (address - 0x4000) as usize]
             }
+            // vram
+            0x8000..=0x9FFF => self.ppu.read_vram(address - 0x8000),
             // external ram
             0xA000..=0xBFFF if self.ram_enabled && self.header.ram_banks() > 0 => {
                 // https://gbdev.io/pandocs/MBC1.html#a000bfff--ram-bank-0003-if-any
@@ -116,13 +167,32 @@ impl MMU {
             }
             0xC000..=0xDFFF => self.work_ram[(address - 0xC000) as usize], // work ram
             0xE000..=0xFDFF => self.work_ram[(address - 0xE000) as usize], // echo ram
+            0xFE00..=0xFE9F => self.ppu.read_oam(address - 0xFE00), // OAM (Object Attribute Memory)
             0xFF00 => self.joypad_register.get(), // joypad register
+            0xFF01 => self.serial.get_data(), // serial data register
+            0xFF02 => self.serial.control(), // serial control register
+            0xFF04 => self.divider.value(), // DIV register
+            0xFF05 => self.timer.value(), // TIMA register
+            0xFF06 => self.timer.modulo(), // TMA register
+            0xFF07 => self.timer.control(), // TAC register
             0xFF0F => self.interrupt_register.get(), // interrupt flags
+            0xFF40 => self.ppu.lcd_control().get(), // LCD control register
+            0xFF41 => self.ppu.lcd_status().stat(), // LCD status register
+            0xFF42 => self.ppu.scroll().y, // SCY register
+            0xFF43 => self.ppu.scroll().x, // SCX register
+            0xFF44 => self.ppu.lcd_status().ly(), // LY register (read-only)
+            0xFF45 => self.ppu.lcd_status().lyc(), // LYC register
+            0xFF46 => 0, // DMA register (write-only, returns 0 when read)
+            0xFF47 => self.ppu.palette().background().to_byte(), // BGP register
+            0xFF48 => self.ppu.palette().object0().to_byte(), // OBP0 register
+            0xFF49 => self.ppu.palette().object1().to_byte(), // OBP1 register
+            0xFF4A => self.ppu.window_position().y, // WY register
+            0xFF4B => self.ppu.window_position().x, // WX register
             0xFF80..=0xFFFE => self.high_ram[(address - 0xFF80) as usize], // high ram
             0xFFFF => self.interrupt_enable.get(),
             _ => {
                 // ignore
-                0
+                0xFF
             }
         }
     }
@@ -149,14 +219,35 @@ impl MMU {
                 // https://gbdev.io/pandocs/MBC1.html#40005fff--ram-bank-number--or--upper-bits-of-rom-bank-number-write-only
                 self.ram_bank_register = ((value & 0x03) as usize).min(self.header.ram_banks() - 1);
             }
+            // vram
+            0x8000..=0x9FFF => self.ppu.write_vram(address - 0x8000, value),
             0xA000..=0xBFFF if self.ram_enabled && self.header.ram_banks() > 0 => {
                 let ram_bank = &mut self.ram_banks[self.ram_bank_register];
                 ram_bank[(address - 0xA000) as usize] = value;
             }
             0xC000..=0xDFFF => self.work_ram[(address - 0xC000) as usize] = value, // work ram
             0xE000..=0xFDFF => self.work_ram[(address - 0xE000) as usize] = value, // echo ram
+            0xFE00..=0xFE9F => self.ppu.write_oam(address - 0xFE00, value), // OAM (Object Attribute Memory)
             0xFF00 => self.joypad_register.set(value),
+            0xFF01 => self.serial.set_data(value), // serial data register
+            0xFF02 => self.serial.set_control(value), // serial control register
+            0xFF04 => self.divider.reset(), // DIV register (reset on write)
+            0xFF05 => self.timer.set_value(value), // TIMA register
+            0xFF06 => self.timer.set_modulo(value), // TMA register
+            0xFF07 => self.timer.set_control(value), // TAC register
             0xFF0F => self.interrupt_register.set(value),
+            0xFF40 => self.ppu.lcd_control_mut().set(value), // LCD control register
+            0xFF41 => self.ppu.lcd_status_mut().set_stat(value), // LCD status register
+            0xFF42 => self.ppu.scroll_mut().y = value, // SCY register
+            0xFF43 => self.ppu.scroll_mut().x = value, // SCX register
+            0xFF44 => {} // LY register is read-only, writing to it has no effect
+            0xFF45 => self.ppu.lcd_status_mut().set_lyc(value), // LYC register
+            0xFF46 => self.ppu.dma_mut().set(value), // DMA register (write-only)
+            0xFF47 => self.ppu.palette_mut().background_mut().set_from_byte(value), // BGP register
+            0xFF48 => self.ppu.palette_mut().object0_mut().set_from_byte(value), // OBP0 register
+            0xFF49 => self.ppu.palette_mut().object1_mut().set_from_byte(value), // OBP1 register
+            0xFF4A => self.ppu.window_position_mut().y = value, // WY register
+            0xFF4B => self.ppu.window_position_mut().x = value, // WX register
             0xFF80..=0xFFFE => self.high_ram[(address - 0xFF80) as usize] = value, // high ram
             0xFFFF => self.interrupt_enable.set(value),
             _ => {

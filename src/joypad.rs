@@ -1,3 +1,5 @@
+use crate::interrupt::{InterruptSource, InterruptType};
+
 /// https://gbdev.io/pandocs/Joypad_Input.html#ff00--p1joyp-joypad
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoypadRegister {
@@ -11,11 +13,11 @@ pub struct JoypadRegister {
     start: bool,
     select_buttons: bool,
     select_directions: bool,
-    interrupt_required: bool,
+    interrupt_pending: bool,
 }
 
-impl JoypadRegister {
-    pub fn new() -> Self {
+impl Default for JoypadRegister {
+    fn default() -> Self {
         Self {
             up: false,
             down: false,
@@ -27,10 +29,12 @@ impl JoypadRegister {
             start: false,
             select_buttons: false,
             select_directions: false,
-            interrupt_required: false,
+            interrupt_pending: false,
         }
     }
+}
 
+impl JoypadRegister {
     pub fn set(&mut self, value: u8) {
         self.select_buttons = (value & 0x20) != 0;
         self.select_directions = (value & 0x10) != 0;
@@ -65,7 +69,7 @@ impl JoypadRegister {
     }
 
     pub fn update_button(&mut self, button: JoypadButton, pressed: bool) {
-        self.interrupt_required = self.interrupt_required || (pressed && !self.is_button_pressed(button));
+        self.interrupt_pending = self.interrupt_pending || (pressed && !self.is_button_pressed(button));
         match button {
             JoypadButton::Up => self.up = pressed,
             JoypadButton::Down => self.down = pressed,
@@ -85,19 +89,15 @@ impl JoypadRegister {
     pub fn release_button(&mut self, button: JoypadButton) {
         self.update_button(button, false);
     }
-
-    pub fn interrupt_required(&self) -> bool {
-        self.interrupt_required
-    }
-
-    pub fn clear_interrupt(&mut self) {
-        self.interrupt_required = false;
-    }
 }
 
-impl Default for JoypadRegister {
-    fn default() -> Self {
-        Self::new()
+impl InterruptSource for JoypadRegister {
+    fn is_interrupt_pending(&self) -> bool {
+        self.interrupt_pending
+    }
+
+    fn clear_interrupt(&mut self) {
+        self.interrupt_pending = false;
     }
 }
 
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn to_byte() {
-        let mut joypad = JoypadRegister::new();
+        let mut joypad = JoypadRegister::default();
         assert_eq!(joypad.get(), 0xF); // All buttons released
         joypad.set(0x20); // Select buttons
         assert_eq!(joypad.get(), 0x2F);
@@ -141,13 +141,13 @@ mod tests {
 
     #[test]
     fn interrupts() {
-        let mut joypad = JoypadRegister::new();
-        assert!(!joypad.interrupt_required); // disabled by default
+        let mut joypad = JoypadRegister::default();
+        assert!(!joypad.interrupt_pending); // disabled by default
         joypad.release_button(A);
-        assert!(!joypad.interrupt_required); // no interrupt on release
+        assert!(!joypad.interrupt_pending); // no interrupt on release
         joypad.press_button(A);
-        assert!(joypad.interrupt_required); // interrupt on press
+        assert!(joypad.interrupt_pending); // interrupt on press
         joypad.release_button(A);
-        assert!(joypad.interrupt_required); // still interrupt required until read
+        assert!(joypad.interrupt_pending); // still interrupt required until read
     }
 }

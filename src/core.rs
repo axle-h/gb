@@ -1,6 +1,9 @@
+use crate::cycles::MachineCycles;
 use crate::mmu::MMU;
 use crate::opcode::{OpCode, Register, Register16, Register16Mem, Register16Stack, JumpCondition};
 use crate::registers::RegisterSet;
+use crate::roms::blarg::CPU_INSTRUCTIONS;
+use crate::roms::commercial::TETRIS;
 use crate::roms::test::DMG_ACID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,19 +18,29 @@ pub struct Core {
     registers: RegisterSet,
     mmu: MMU,
     interrupts_enabled: bool,
-    machine_cycles: u64,
     mode: CoreMode
 }
 
 impl Core {
     pub fn dmg_hello_world() -> Self {
+        Self::dmg(DMG_ACID)
+    }
+
+    pub fn dmg(cart: &[u8]) -> Self {
         Self {
             registers: RegisterSet::dmg(),
-            mmu: MMU::from_rom(DMG_ACID).expect("could not load DMG_ACID ROM"),
+            mmu: MMU::from_rom(cart).expect("could not load ROM"),
             interrupts_enabled: false,
-            machine_cycles: 0,
             mode: CoreMode::Normal,
         }
+    }
+
+    pub fn mmu(&self) -> &MMU {
+        &self.mmu
+    }
+
+    pub fn mmu_mut(&mut self) -> &mut MMU {
+        &mut self.mmu
     }
 
     fn register(&self, register: Register) -> u8 {
@@ -130,7 +143,8 @@ impl Core {
         }
     }
 
-    pub fn execute(&mut self, opcode: OpCode) {
+    pub fn execute(&mut self, opcode: OpCode) -> MachineCycles {
+        let mut condition_met = false;
         match opcode {
             OpCode::Load { source, destination } => {
                 self.set_register(destination, self.register(source));
@@ -258,27 +272,23 @@ impl Core {
                 self.registers.flags.h = false;
             }
             OpCode::DecimalAdjustAccumulator => {
-                let mut result = self.registers.a as u16;
-                if !self.registers.flags.n {
-                    if self.registers.flags.h || (result & 0x0F) > 9 {
-                        result = result.wrapping_add(0x06);
-                    }
-                    if self.registers.flags.c || result > 0x9F {
-                        result = result.wrapping_add(0x60);
-                    }
-                } else {
-                    if self.registers.flags.h {
-                        result = result.wrapping_sub(0x06);
-                    }
-                    if self.registers.flags.c {
-                        result = result.wrapping_sub(0x60);
-                    }
+                let mut offset = 0;
+                if (!self.registers.flags.n && self.registers.a & 0xF > 9) || self.registers.flags.h {
+                    offset |= 0x06;
+                }
+                if (!self.registers.flags.n && self.registers.a > 0x99) || self.registers.flags.c {
+                    offset |= 0x60;
                 }
 
-                self.registers.a = result as u8;
+                self.registers.a = if self.registers.flags.n {
+                    self.registers.a.wrapping_sub(offset)
+                } else {
+                    self.registers.a.wrapping_add(offset)
+                };
+
                 self.registers.flags.z = self.registers.a == 0;
                 self.registers.flags.h = false;
-                self.registers.flags.c = result & 0x100 > 0;
+                self.registers.flags.c = offset & 0x60 > 0;
             }
             OpCode::ComplementAccumulator => {
                 self.registers.a = !self.registers.a;
@@ -343,15 +353,14 @@ impl Core {
                 self.set_register(register, result);
             }
             OpCode::ShiftLeftArithmetic { register } => {
-                self.registers.flags.c = false;
+                self.registers.flags.c = false; // hack change rotate to shift
                 let value = self.register(register);
                 let result = self.alu_rotate_left(value, false, true);
                 self.set_register(register, result);
             }
             OpCode::ShiftRightArithmetic { register } => {
-                self.registers.flags.c = false;
                 let value = self.register(register);
-                let result = self.alu_rotate_right(value, false, true);
+                let result = self.alu_shift_right_arithmetic(value);
                 self.set_register(register, result);
             }
             OpCode::Swap { register } => {
@@ -396,6 +405,7 @@ impl Core {
             }
             OpCode::JumpConditional { condition, address } => {
                 if self.condition_met(condition) {
+                    condition_met = true;
                     self.registers.pc = address;
                 }
             }
@@ -404,17 +414,17 @@ impl Core {
             }
             OpCode::JumpRelativeConditional { condition, offset } => {
                 if self.condition_met(condition) {
+                    condition_met = true;
                     self.registers.pc = self.registers.pc.wrapping_add_signed(offset as i16);
                 }
             }
             OpCode::Call { address } => {
-                self.push_stack(self.registers.pc);
-                self.registers.pc = address;
+                self.call(address);
             }
             OpCode::CallConditional { condition, address } => {
                 if self.condition_met(condition) {
-                    self.push_stack(self.registers.pc);
-                    self.registers.pc = address;
+                    condition_met = true;
+                    self.call(address);
                 }
             }
             OpCode::Return => {
@@ -422,6 +432,7 @@ impl Core {
             }
             OpCode::ReturnConditional { condition } => {
                 if self.condition_met(condition) {
+                    condition_met = true;
                     self.registers.pc = self.pop_stack();
                 }
             }
@@ -430,14 +441,16 @@ impl Core {
                 self.interrupts_enabled = true;
             }
             OpCode::Restart { lsb } => {
-                self.push_stack(self.registers.pc);
-                self.registers.pc = lsb as u16;
+                self.call(lsb as u16);
             }
             OpCode::Halt => {
                 self.mode = CoreMode::Halt;
+                self.interrupts_enabled = true;
             }
             OpCode::Stop => {
                 self.mode = CoreMode::Stop;
+                self.interrupts_enabled = true;
+                self.mmu.stop();
             }
             OpCode::Nop => {}
             OpCode::DisableInterrupts => {
@@ -447,34 +460,40 @@ impl Core {
                 self.interrupts_enabled = true;
             }
             OpCode::Illegal { .. } => {
+                println!("Illegal opcode encountered: {:?}", opcode);
                 self.mode = CoreMode::Crash;
+                self.mmu.stop();
             }
         }
 
-        let new_machine_cycles = opcode.machine_cycles();
-        self.machine_cycles += new_machine_cycles;
-        self.mmu.update(new_machine_cycles);
+        let cycles = MachineCycles::of_machine(opcode.machine_cycles(condition_met));
+        if self.mode != CoreMode::Crash {
+            self.mmu.update(cycles);
+        }
+        cycles
     }
 
-    pub fn handle_interrupts(&mut self) {
-        if !self.interrupts_enabled {
-            return;
-        }
+    fn call(&mut self, address: u16) {
+        self.push_stack(self.registers.pc);
+        self.registers.pc = address;
+    }
 
-        if let Some(interrupt) = self.mmu.check_interrupts(self.mode) {
-            self.mode = CoreMode::Normal; // clear halted state if an interrupt occurs
+    pub fn handle_interrupts(&mut self) -> MachineCycles {
+        if !self.interrupts_enabled || self.mode == CoreMode::Crash {
+            MachineCycles::ZERO
+        } else if let Some(interrupt) = self.mmu.check_interrupts(self.mode) {
+            if self.mode == CoreMode::Halt || self.mode == CoreMode::Stop {
+                // interrupts clear the Halt/Stop state
+                self.mode = CoreMode::Normal;
+                self.mmu.restart();
+            }
 
             // avoid nested interrupts
             self.interrupts_enabled = false;
-
-            // 1. Two wait states are executed (2 M-cycles pass while nothing happens; presumably the CPU is executing nops during this time).
-            self.machine_cycles += 2;
-            // 2. The current value of the PC register is pushed onto the stack, consuming 2 more M-cycles.
-            self.push_stack(self.registers.pc);
-            self.machine_cycles += 2;
-            // 3. The PC register is set to the address of the handler (one of: $40, $48, $50, $58, $60). This consumes one last M-cycle.
-            self.registers.pc = interrupt.address();
-            self.machine_cycles += 1;
+            self.call(interrupt.address());
+            MachineCycles::of_machine(5) // total 5 machine cycles for handling the interrupt
+        } else {
+            MachineCycles::ZERO
         }
     }
 
@@ -582,6 +601,16 @@ impl Core {
         let carry = value & 0x01;
         let result = (value >> 1) | (if circular { carry } else { self.registers.flags.c as u8 }) << 7;
         self.registers.flags.z = z_flag && result == 0;
+        self.registers.flags.n = false;
+        self.registers.flags.h = false;
+        self.registers.flags.c = carry > 0;
+        result
+    }
+
+    fn alu_shift_right_arithmetic(&mut self, value: u8) -> u8 {
+        let carry = value & 0x01;
+        let result = value >> 1 | (value & 0x80); // keep the sign bit
+        self.registers.flags.z = result == 0;
         self.registers.flags.n = false;
         self.registers.flags.h = false;
         self.registers.flags.c = carry > 0;
@@ -1666,14 +1695,14 @@ mod tests {
             let mut core = Core::dmg_hello_world();
             core.registers.b = 0b10101010;
             core.execute(OpCode::ShiftRightArithmetic { register: Register::B });
-            assert_eq!(core.registers.b, 0b01010101);
+            assert_eq!(core.registers.b, 0b11010101);
             assert!(!core.registers.flags.z);
             assert!(!core.registers.flags.n);
             assert!(!core.registers.flags.h);
             assert!(!core.registers.flags.c);
 
             core.execute(OpCode::ShiftRightArithmetic { register: Register::B });
-            assert_eq!(core.registers.b, 0b00101010);
+            assert_eq!(core.registers.b, 0b11101010);
             assert!(!core.registers.flags.z);
             assert!(!core.registers.flags.n);
             assert!(!core.registers.flags.h);

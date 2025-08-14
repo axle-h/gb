@@ -574,7 +574,7 @@ pub enum OpCode {
 }
 
 impl OpCode {
-    pub fn machine_cycles(&self) -> u64 {
+    pub fn machine_cycles(&self, condition_met: bool) -> usize {
         match self {
             OpCode::Illegal { .. } => 1,
             OpCode::Nop => 1,
@@ -622,13 +622,13 @@ impl OpCode {
             OpCode::ResetBit { register, .. } | OpCode::SetBit { register, .. } => if register == &Register::mHL { 4 } else { 2 },
             OpCode::Jump { .. } => 4,
             OpCode::JumpHL => 1,
-            OpCode::JumpConditional { .. } => 4, // TODO 4 is true, 3 is false
+            OpCode::JumpConditional { .. }  => if condition_met { 4 } else { 3 },
             OpCode::JumpRelative { .. } => 3,
-            OpCode::JumpRelativeConditional { .. } => 3, // TODO 3 is true, 2 is false
+            OpCode::JumpRelativeConditional { .. } => if condition_met { 3 } else { 2 },
             OpCode::Call { .. } => 6,
-            OpCode::CallConditional { .. } => 6, // TODO 6 is true, 3 is false
+            OpCode::CallConditional { .. } => if condition_met { 6 } else { 3 },
             OpCode::Return | OpCode::ReturnInterrupt | OpCode::Restart { .. } => 4,
-            OpCode::ReturnConditional { ..} => 5, // TODO 5 is true, 2 is false
+            OpCode::ReturnConditional { ..} => if condition_met { 5 } else { 2 },
             _ => unreachable!("Machine cycles not defined for opcode: {:?}", self),
         }
     }
@@ -658,8 +658,8 @@ impl OpCode {
             0xD9 => OpCode::ReturnInterrupt, // 0xD9 RETI
             0x18 => OpCode::JumpRelative { offset: fetch.fetch_i8() }, // 0x18 JR e
             0x08 => OpCode::LoadDirectStackPointer { address: fetch.fetch_u16() }, // 0x08 LD (nn), SP
-            0xE0 => OpCode::LoadHighDirectAccumulator { lsb: fetch.fetch_u8() }, // 0xE0 LDH A, (n)
-            0xF0 => OpCode::LoadHighAccumulatorDirect { lsb: fetch.fetch_u8() }, // 0xF0 LDH (n), A
+            0xE0 => OpCode::LoadHighDirectAccumulator { lsb: fetch.fetch_u8() }, // 0xE0 LDH (n), A
+            0xF0 => OpCode::LoadHighAccumulatorDirect { lsb: fetch.fetch_u8() }, // 0xF0 LDH A, (n)
             0xE9 => OpCode::JumpHL, // 0xE9 JP HL
             0xE2 => OpCode::LoadHighIndirectAccumulator, // 0xE2 LD (C), A
             0xEA => OpCode::LoadDirectAccumulator { address: fetch.fetch_u16() }, // 0xEA LD (nn), A
@@ -894,7 +894,7 @@ mod tests {
                     let mut fetch = StubFetch::new(bytes);
                     let opcode = OpCode::parse(&mut fetch);
                     assert_eq!(opcode.to_string(), $expected_string);
-                    assert_eq!(opcode.machine_cycles(), $expected_cycles);
+                    assert_eq!(opcode.machine_cycles(true), $expected_cycles);
                 }
             )*
         };

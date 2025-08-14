@@ -10,8 +10,8 @@ pub struct InterruptFlags {
     v_blank: bool,
 }
 
-impl InterruptFlags {
-    pub fn new() -> Self {
+impl Default for InterruptFlags {
+    fn default() -> Self {
         Self {
             joypad: false,
             serial: false,
@@ -20,7 +20,9 @@ impl InterruptFlags {
             v_blank: false,
         }
     }
+}
 
+impl InterruptFlags {
     pub fn set(&mut self, value: u8) {
         self.joypad = (value & 0x10) != 0;
         self.serial = (value & 0x08) != 0;
@@ -42,7 +44,7 @@ impl InterruptFlags {
     pub fn is_set(&self, interrupt: InterruptType) -> bool {
         match interrupt {
             InterruptType::VBlank => self.v_blank,
-            InterruptType::LcdStat => self.lcd_stat,
+            InterruptType::LcdStatus => self.lcd_stat,
             InterruptType::Timer => self.timer,
             InterruptType::Serial => self.serial,
             InterruptType::Joypad => self.joypad,
@@ -52,7 +54,7 @@ impl InterruptFlags {
     pub fn clear_interrupt(&mut self, interrupt: InterruptType) {
         match interrupt {
             InterruptType::VBlank => self.v_blank = false,
-            InterruptType::LcdStat => self.lcd_stat = false,
+            InterruptType::LcdStatus => self.lcd_stat = false,
             InterruptType::Timer => self.timer = false,
             InterruptType::Serial => self.serial = false,
             InterruptType::Joypad => self.joypad = false,
@@ -62,7 +64,7 @@ impl InterruptFlags {
     pub fn set_interrupt(&mut self, interrupt: InterruptType) {
         match interrupt {
             InterruptType::VBlank => self.v_blank = true,
-            InterruptType::LcdStat => self.lcd_stat = true,
+            InterruptType::LcdStatus => self.lcd_stat = true,
             InterruptType::Timer => self.timer = true,
             InterruptType::Serial => self.serial = true,
             InterruptType::Joypad => self.joypad = true,
@@ -70,16 +72,10 @@ impl InterruptFlags {
     }
 }
 
-impl Default for InterruptFlags {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::EnumIter)]
 pub enum InterruptType {
     VBlank,
-    LcdStat,
+    LcdStatus,
     Timer,
     Serial,
     Joypad,
@@ -93,10 +89,26 @@ impl InterruptType {
     pub fn address(self) -> u16 {
         match self {
             InterruptType::VBlank => 0x0040,
-            InterruptType::LcdStat => 0x0048,
+            InterruptType::LcdStatus => 0x0048,
             InterruptType::Timer => 0x0050,
             InterruptType::Serial => 0x0058,
             InterruptType::Joypad => 0x0060,
+        }
+    }
+}
+
+pub trait InterruptSource {
+
+    fn is_interrupt_pending(&self) -> bool;
+
+    fn clear_interrupt(&mut self);
+
+    fn consume_pending_interrupt(&mut self) -> bool {
+        if self.is_interrupt_pending() {
+            self.clear_interrupt();
+            true
+        } else {
+            false
         }
     }
 }
@@ -107,7 +119,7 @@ mod tests {
 
     #[test]
     fn interrupt_flags() {
-        let mut flags = InterruptFlags::new();
+        let mut flags = InterruptFlags::default();
         assert_eq!(flags.get(), 0x00); // No flags set
         flags.set(0x10);
         assert!(flags.joypad);
