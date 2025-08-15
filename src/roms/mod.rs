@@ -17,8 +17,20 @@ pub mod blarg {
     pub const INSTRUCTION_TIMING: &[u8] = include_bytes!("instr_timing.gb");
 }
 
-pub mod test {
+pub mod acid {
     pub const DMG_ACID: &[u8] = include_bytes!("dmg-acid2.gb");
+}
+
+pub mod button_test {
+    pub const ROM: &[u8] = include_bytes!("button_test/rom.gb");
+    pub const EXPECTED_A: &[u8] = include_bytes!("button_test/a.png");
+    pub const EXPECTED_B: &[u8] = include_bytes!("button_test/b.png");
+    pub const EXPECTED_SELECT: &[u8] = include_bytes!("button_test/select.png");
+    pub const EXPECTED_START: &[u8] = include_bytes!("button_test/start.png");
+    pub const EXPECTED_UP: &[u8] = include_bytes!("button_test/up.png");
+    pub const EXPECTED_DOWN: &[u8] = include_bytes!("button_test/down.png");
+    pub const EXPECTED_LEFT: &[u8] = include_bytes!("button_test/left.png");
+    pub const EXPECTED_RIGHT: &[u8] = include_bytes!("button_test/right.png");
 }
 
 pub mod commercial {

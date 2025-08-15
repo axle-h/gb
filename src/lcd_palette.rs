@@ -1,4 +1,5 @@
 use std::ops::{Deref, DerefMut};
+use image::Rgb;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::FromRepr, Default)]
 #[repr(u8)]
@@ -8,6 +9,18 @@ pub enum DMGColor {
     LightGray = 1,
     DarkGray = 2,
     Black = 3,
+}
+
+impl DMGColor {
+
+    pub fn to_rgb(self) -> Rgb<u8> {
+        match self {
+            DMGColor::White => Rgb([0xFF, 0xFF, 0xFF]),      // Pure white
+            DMGColor::LightGray => Rgb([0xAA, 0xAA, 0xAA]),  // Light gray
+            DMGColor::DarkGray => Rgb([0x55, 0x55, 0x55]),      // Dark gray
+            DMGColor::Black => Rgb([0x00, 0x00, 0x00]),            // Pure black
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

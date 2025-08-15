@@ -12,6 +12,14 @@ pub struct Timer {
 }
 
 impl Timer {
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+    
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+    
     pub fn control(&self) -> u8 {
         self.mode as u8 | if self.enabled { 0b0100 } else { 0 }
     }
@@ -51,7 +59,7 @@ impl Timer {
                 self.value = self.modulo;
                 self.interrupt_pending = true;
             } else {
-                self.value = self.value.wrapping_add(1);
+                self.value += 1;
             }
         }
     }

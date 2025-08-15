@@ -36,8 +36,8 @@ impl Default for JoypadRegister {
 
 impl JoypadRegister {
     pub fn set(&mut self, value: u8) {
-        self.select_buttons = (value & 0x20) != 0;
-        self.select_directions = (value & 0x10) != 0;
+        self.select_buttons = (value & 0x20) == 0;
+        self.select_directions = (value & 0x10) == 0;
     }
 
     pub fn get(&self) -> u8 {
@@ -46,13 +46,13 @@ impl JoypadRegister {
         } else { 0 };
 
         let direction_bits = if self.select_directions {
-            (self.up as u8) | ((self.down as u8) << 1) | ((self.left as u8) << 2) | ((self.right as u8) << 3)
+            (self.right as u8) | ((self.left as u8) << 1) | ((self.up as u8) << 2) | ((self.down as u8) << 3)
         } else { 0 };
 
         let value = button_bits | direction_bits;
 
         // Button pressed = bit is 0, so invert the lower 4 bits
-        (!value & 0xF) | (self.select_buttons as u8) << 5 | (self.select_directions as u8) << 4
+        (!value & 0xF) | (!self.select_buttons as u8) << 5 | (!self.select_directions as u8) << 4
     }
 
     pub fn is_button_pressed(&self, button: JoypadButton) -> bool {
@@ -101,7 +101,7 @@ impl InterruptSource for JoypadRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::EnumIter, strum_macros::Display)]
 pub enum JoypadButton {
     Up,
     Down,
@@ -121,33 +121,33 @@ mod tests {
     #[test]
     fn to_byte() {
         let mut joypad = JoypadRegister::default();
-        assert_eq!(joypad.get(), 0xF); // All buttons released
-        joypad.set(0x20); // Select buttons
-        assert_eq!(joypad.get(), 0x2F);
+        assert_eq!(joypad.get(), 0x3F); // All buttons released
+        joypad.set(0x10); // Select buttons
+        assert_eq!(joypad.get(), 0x1F); // none pressed
         joypad.press_button(A);
         joypad.press_button(B);
         joypad.press_button(Select);
         joypad.press_button(Start);
-        assert_eq!(joypad.get(), 0x20);
+        assert_eq!(joypad.get(), 0x10);
 
-        joypad.set(0x10); // Select directions
-        assert_eq!(joypad.get(), 0x1F);
+        joypad.set(0x20); // Select directions
+        assert_eq!(joypad.get(), 0x2F); // none pressed
         joypad.press_button(Up);
         joypad.press_button(Down);
         joypad.press_button(Left);
         joypad.press_button(Right);
-        assert_eq!(joypad.get(), 0x10); // All directions pressed
+        assert_eq!(joypad.get(), 0x20); // All directions pressed
     }
 
     #[test]
     fn interrupts() {
         let mut joypad = JoypadRegister::default();
-        assert!(!joypad.interrupt_pending); // disabled by default
+        assert!(!joypad.is_interrupt_pending()); // disabled by default
         joypad.release_button(A);
-        assert!(!joypad.interrupt_pending); // no interrupt on release
+        assert!(!joypad.is_interrupt_pending()); // no interrupt on release
         joypad.press_button(A);
-        assert!(joypad.interrupt_pending); // interrupt on press
+        assert!(joypad.is_interrupt_pending()); // interrupt on press
         joypad.release_button(A);
-        assert!(joypad.interrupt_pending); // still interrupt required until read
+        assert!(joypad.is_interrupt_pending()); // still interrupt required until read
     }
 }

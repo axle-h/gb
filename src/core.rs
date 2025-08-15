@@ -1,10 +1,8 @@
 use crate::cycles::MachineCycles;
+use crate::interrupt::{InterruptSource, InterruptType};
 use crate::mmu::MMU;
 use crate::opcode::{OpCode, Register, Register16, Register16Mem, Register16Stack, JumpCondition};
 use crate::registers::RegisterSet;
-use crate::roms::blarg::CPU_INSTRUCTIONS;
-use crate::roms::commercial::TETRIS;
-use crate::roms::test::DMG_ACID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreMode {
@@ -18,12 +16,13 @@ pub struct Core {
     registers: RegisterSet,
     mmu: MMU,
     interrupts_enabled: bool,
+    interrupts_enabled_on_next_instruction: bool,
     mode: CoreMode
 }
 
 impl Core {
     pub fn dmg_hello_world() -> Self {
-        Self::dmg(DMG_ACID)
+        Self::dmg(crate::roms::acid::DMG_ACID)
     }
 
     pub fn dmg(cart: &[u8]) -> Self {
@@ -32,6 +31,7 @@ impl Core {
             mmu: MMU::from_rom(cart).expect("could not load ROM"),
             interrupts_enabled: false,
             mode: CoreMode::Normal,
+            interrupts_enabled_on_next_instruction: false,
         }
     }
 
@@ -144,6 +144,11 @@ impl Core {
     }
 
     pub fn execute(&mut self, opcode: OpCode) -> MachineCycles {
+        if self.interrupts_enabled_on_next_instruction {
+            self.interrupts_enabled = true;
+            self.interrupts_enabled_on_next_instruction = false;
+        }
+
         let mut condition_met = false;
         match opcode {
             OpCode::Load { source, destination } => {
@@ -438,18 +443,16 @@ impl Core {
             }
             OpCode::ReturnInterrupt => {
                 self.registers.pc = self.pop_stack();
-                self.interrupts_enabled = true;
+                self.interrupts_enabled_on_next_instruction = true;
             }
             OpCode::Restart { lsb } => {
                 self.call(lsb as u16);
             }
             OpCode::Halt => {
                 self.mode = CoreMode::Halt;
-                self.interrupts_enabled = true;
             }
             OpCode::Stop => {
                 self.mode = CoreMode::Stop;
-                self.interrupts_enabled = true;
                 self.mmu.stop();
             }
             OpCode::Nop => {}
@@ -457,7 +460,7 @@ impl Core {
                 self.interrupts_enabled = false;
             }
             OpCode::EnableInterrupts => {
-                self.interrupts_enabled = true;
+                self.interrupts_enabled_on_next_instruction = true;
             }
             OpCode::Illegal { .. } => {
                 println!("Illegal opcode encountered: {:?}", opcode);
@@ -467,34 +470,55 @@ impl Core {
         }
 
         let cycles = MachineCycles::of_machine(opcode.machine_cycles(condition_met));
-        if self.mode != CoreMode::Crash {
-            self.mmu.update(cycles);
+
+        let interrupt_cycles = match self.mode {
+            CoreMode::Normal | CoreMode::Halt => {
+                self.mmu.update(cycles);
+                self.interrupt()
+            }
+            CoreMode::Stop => {
+                // do not run timers in stop mode
+                if self.mmu.joypad().is_interrupt_pending() {
+                    // stop is interrupted by any joypad input
+                    self.mode = CoreMode::Normal;
+                }
+                MachineCycles::ZERO
+            }
+            CoreMode::Crash => {
+                // do nothing, the CPU is crashed
+                MachineCycles::ZERO
+            }
+        };
+
+        self.mmu.update(interrupt_cycles);
+
+        cycles + interrupt_cycles
+    }
+
+    fn interrupt(&mut self) -> MachineCycles {
+        if let Some(interrupt) = self.mmu.interrupt_pending() {
+            if self.mode == CoreMode::Halt {
+                // if we are in halt mode, we exit it, regardless of whether interrupts are enabled
+                self.mode = CoreMode::Normal;
+            }
+
+            if !self.interrupts_enabled {
+                return MachineCycles::ZERO;
+            }
+
+            debug_assert!(self.interrupts_enabled, "Interrupts are not enabled");
+            self.mmu.clear_interrupt_request(interrupt);
+            self.interrupts_enabled = false;
+            self.call(interrupt.address());
+            MachineCycles::of_machine(5)
+        } else {
+            MachineCycles::ZERO
         }
-        cycles
     }
 
     fn call(&mut self, address: u16) {
         self.push_stack(self.registers.pc);
         self.registers.pc = address;
-    }
-
-    pub fn handle_interrupts(&mut self) -> MachineCycles {
-        if !self.interrupts_enabled || self.mode == CoreMode::Crash {
-            MachineCycles::ZERO
-        } else if let Some(interrupt) = self.mmu.check_interrupts(self.mode) {
-            if self.mode == CoreMode::Halt || self.mode == CoreMode::Stop {
-                // interrupts clear the Halt/Stop state
-                self.mode = CoreMode::Normal;
-                self.mmu.restart();
-            }
-
-            // avoid nested interrupts
-            self.interrupts_enabled = false;
-            self.call(interrupt.address());
-            MachineCycles::of_machine(5) // total 5 machine cycles for handling the interrupt
-        } else {
-            MachineCycles::ZERO
-        }
     }
 
     fn push_stack(&mut self, value: u16) {
@@ -1935,6 +1959,7 @@ mod tests {
             core.execute(OpCode::ReturnInterrupt);
             assert_eq!(core.registers.pc, 0x0100);
             assert_eq!(core.registers.sp, 0xFFFE);
+            core.execute(OpCode::Nop); // update core state
             assert!(core.interrupts_enabled); // interrupts should be re-enabled after return
         }
 
@@ -2022,7 +2047,6 @@ mod tests {
             core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
             core.mmu.write(0xFF0F, 0xFF); // request all interrupts
             core.execute(OpCode::Nop); // update core state
-            core.handle_interrupts();
             assert_eq!(core.mode, CoreMode::Normal);
         }
 
@@ -2033,23 +2057,10 @@ mod tests {
             core.execute(OpCode::Stop);
             assert_eq!(core.mode, CoreMode::Stop);
 
-            // interrupts wake it up
-            core.interrupts_enabled = true;
-            core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
-            core.mmu.write(0xFF0F, 0xFF); // request all interrupts
+            // joypad input wakes it up
+            core.mmu.joypad_mut().press_button(JoypadButton::A);
             core.execute(OpCode::Nop); // update core state
-            core.handle_interrupts();
             assert_eq!(core.mode, CoreMode::Normal);
-        }
-
-        #[test]
-        fn enable_interrupts() {
-            let mut core = Core::dmg_hello_world();
-            assert!(!core.interrupts_enabled);
-            core.execute(OpCode::EnableInterrupts);
-            assert!(core.interrupts_enabled);
-            core.execute(OpCode::DisableInterrupts);
-            assert!(!core.interrupts_enabled);
         }
     }
 
@@ -2061,8 +2072,13 @@ mod tests {
         fn interrupt_master_enabled() {
             let mut core = Core::dmg_hello_world();
             assert!(!core.interrupts_enabled);
+
             core.execute(OpCode::EnableInterrupts);
+            assert!(!core.interrupts_enabled);
+            assert!(core.interrupts_enabled_on_next_instruction);
+            core.execute(OpCode::Nop); // execute next instruction to enable interrupts
             assert!(core.interrupts_enabled);
+
             core.execute(OpCode::DisableInterrupts);
             assert!(!core.interrupts_enabled);
         }
@@ -2072,7 +2088,7 @@ mod tests {
             let mut core = Core::dmg_hello_world();
             core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
             core.mmu.write(0xFF0F, 0xFF); // request all interrupts
-            core.handle_interrupts();
+            core.execute(OpCode::Nop);
             assert_eq!(core.registers.pc, 0x0100); // PC should not change
         }
 
@@ -2087,7 +2103,7 @@ mod tests {
             // run all interrupts in sequence
             let expected_interrupts = [0x0040, 0x0048, 0x0050, 0x0058, 0x0060];
             for expected_address in expected_interrupts {
-                core.handle_interrupts();
+                core.execute(OpCode::Nop);
 
                 assert_eq!(core.registers.pc, expected_address);
                 assert!(!core.interrupts_enabled);
@@ -2095,13 +2111,14 @@ mod tests {
                 assert_eq!(core.mmu.read_u16_le(0xFFFC), 0x0100); // PC pushed onto stack
 
                 core.execute(OpCode::ReturnInterrupt);
-                assert!(core.interrupts_enabled); // interrupts are re-enabled
                 assert_eq!(core.registers.pc, 0x0100); // PC restored from stack
                 assert_eq!(core.registers.sp, 0xFFFE); // stack pointer incremented twice
+
+                println!("Handled interrupt at address: {:#04X}", expected_address);
             }
 
             // after that there should be no more interrupts
-            core.handle_interrupts();
+            core.execute(OpCode::Nop);
             assert_eq!(core.registers.pc, 0x0100); // PC should not change
         }
     }

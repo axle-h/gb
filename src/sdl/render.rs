@@ -1,3 +1,5 @@
+use std::thread::sleep;
+use std::time::Duration;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
@@ -8,6 +10,7 @@ use crate::sdl::frame_rate::FrameRate;
 use crate::lcd_palette::DMGColor;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
 use crate::roms::blarg::*;
+use crate::roms::commercial::TETRIS;
 
 const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
 
@@ -20,7 +23,7 @@ pub fn render() -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let mut canvas = window.into_canvas().present_vsync().build()
+    let mut canvas = window.into_canvas().build()
         .map_err(|e| e.to_string())?;
     canvas.set_draw_color(Color::RGB(0, 0, 0));
     canvas.clear();
@@ -32,7 +35,7 @@ pub fn render() -> Result<(), String> {
         PixelFormatEnum::RGB24, LCD_WIDTH as u32, LCD_HEIGHT as u32
     ).map_err(|e| e.to_string())?;
 
-    let mut gb = GameBoy::dmg(CPU_INSTRUCTIONS);
+    let mut gb = GameBoy::dmg(TETRIS);
 
     let mut frame_rate = FrameRate::default();
     let mut event_pump = sdl_context.event_pump()?;
@@ -45,6 +48,34 @@ pub fn render() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                     break 'running
                 },
+                Event::KeyDown { keycode: Some(keycode), repeat: false, .. } => {
+                    use crate::joypad::JoypadButton::*;
+                    match keycode {
+                        Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().press_button(Up),
+                        Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().press_button(Down),
+                        Keycode::Left => gb.core_mut().mmu_mut().joypad_mut().press_button(Left),
+                        Keycode::Right => gb.core_mut().mmu_mut().joypad_mut().press_button(Right),
+                        Keycode::X => gb.core_mut().mmu_mut().joypad_mut().press_button(A),
+                        Keycode::Z => gb.core_mut().mmu_mut().joypad_mut().press_button(B),
+                        Keycode::Return => gb.core_mut().mmu_mut().joypad_mut().press_button(Start),
+                        Keycode::Backspace => gb.core_mut().mmu_mut().joypad_mut().press_button(Select),
+                        _ => {}
+                    };
+                }
+                Event::KeyUp { keycode: Some(keycode), repeat: false, .. } => {
+                    use crate::joypad::JoypadButton::*;
+                    match keycode {
+                        Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().release_button(Up),
+                        Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().release_button(Down),
+                        Keycode::Left => gb.core_mut().mmu_mut().joypad_mut().release_button(Left),
+                        Keycode::Right => gb.core_mut().mmu_mut().joypad_mut().release_button(Right),
+                        Keycode::X => gb.core_mut().mmu_mut().joypad_mut().release_button(A),
+                        Keycode::Z => gb.core_mut().mmu_mut().joypad_mut().release_button(B),
+                        Keycode::Return => gb.core_mut().mmu_mut().joypad_mut().release_button(Start),
+                        Keycode::Backspace => gb.core_mut().mmu_mut().joypad_mut().release_button(Select),
+                        _ => {}
+                    };
+                }
                 _ => {}
             }
         }
@@ -56,8 +87,8 @@ pub fn render() -> Result<(), String> {
         lcd_texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
             for y in 0..LCD_HEIGHT {
                 for x in 0..LCD_WIDTH {
-                    let dmg_color = lcd[y * LCD_WIDTH + x];
-                    let pixel_color = dmg_color_to_rgb(dmg_color);
+                    let [r, g, b] = lcd[y * LCD_WIDTH + x].to_rgb().0;
+                    let pixel_color = Color::RGB(r, g, b);
                     let offset = y * pitch + x * 3;
                     buffer[offset] = pixel_color.r;
                     buffer[offset + 1] = pixel_color.g;
@@ -71,16 +102,9 @@ pub fn render() -> Result<(), String> {
         canvas.copy(&lcd_texture, None, Rect::new(0, 0, width, height))
             .map_err(|e| e.to_string())?;
         canvas.present();
+
+        sleep(Duration::from_millis(1));
     }
 
     Ok(())
-}
-
-fn dmg_color_to_rgb(color: DMGColor) -> Color {
-    match color {
-        DMGColor::White => Color::RGB(224, 248, 208),      // Light green-tinted white
-        DMGColor::LightGray => Color::RGB(136, 192, 112),  // Light green
-        DMGColor::DarkGray => Color::RGB(52, 104, 86),     // Dark green
-        DMGColor::Black => Color::RGB(8, 24, 32),          // Very dark green
-    }
 }

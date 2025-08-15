@@ -26,7 +26,7 @@ pub struct MMU {
     divider: Divider,
     timer: Timer,
     interrupt_enable: InterruptFlags,
-    interrupt_register: InterruptFlags,
+    interrupt_request: InterruptFlags,
     joypad_register: JoypadRegister,
 }
 
@@ -50,7 +50,7 @@ impl MMU {
             high_ram: [0; 0x7F],
             ppu: PPU::default(),
             interrupt_enable: InterruptFlags::default(),
-            interrupt_register: InterruptFlags::default(),
+            interrupt_request: InterruptFlags::default(),
             joypad_register: JoypadRegister::default(),
             serial: Serial::default(),
             divider: Divider::default(),
@@ -64,6 +64,10 @@ impl MMU {
 
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn joypad(&self) -> &JoypadRegister {
+        &self.joypad_register
     }
 
     pub fn joypad_mut(&mut self) -> &mut JoypadRegister {
@@ -84,14 +88,20 @@ impl MMU {
 
     pub fn stop(&mut self) {
         self.divider.disable();
+        self.timer.disable();
     }
 
     pub fn restart(&mut self) {
         self.divider.enable();
+        self.timer.enable();
     }
 
     /// update internal state of the MMU, should be called every CPU cycle
     pub fn update(&mut self, delta_machine_cycles: MachineCycles) {
+        if delta_machine_cycles == MachineCycles::ZERO {
+            return; // no cycles to update
+        }
+
         if let Some(transfer) = self.ppu.dma_mut().update(delta_machine_cycles) {
             // DMA transfer is in progress, we need to copy data from ROM to OAM
             for i in 0 .. 0xA0 {
@@ -105,38 +115,48 @@ impl MMU {
         self.divider.update(delta_machine_cycles);
         self.timer.update(delta_machine_cycles);
 
-        // update interrupt register
+        // consume pending, an interrupt is triggered on a rising edge
         for interrupt in InterruptType::all() {
             let interrupt_pending = match interrupt {
                 InterruptType::Joypad => self.joypad_register.consume_pending_interrupt(),
                 InterruptType::LcdStatus => self.ppu.lcd_status_mut().consume_pending_interrupt(),
                 InterruptType::VBlank => self.ppu.consume_pending_interrupt(),
-                InterruptType::Serial => self.serial.is_interrupt_pending(),
-                InterruptType::Timer => self.timer.is_interrupt_pending(),
+                InterruptType::Serial => self.serial.consume_pending_interrupt(),
+                InterruptType::Timer => self.timer.consume_pending_interrupt(),
             };
             if interrupt_pending {
-                self.interrupt_register.set_interrupt(interrupt);
+                self.interrupt_request.set_interrupt(interrupt);
             }
         }
     }
 
-    pub fn check_interrupts(&mut self, core_mode: CoreMode) -> Option<InterruptType> {
-        // check if enabled interrupts in order of priority
-        let interrupts_to_check = match core_mode {
-            CoreMode::Stop => {
-                // In STOP mode, interrupts are not processed, but we still check for JOYPAD interrupts
-                vec![InterruptType::Joypad]
+    pub fn interrupt_pending(&self) -> Option<InterruptType> {
+        for interrupt in InterruptType::all() {
+            if self.interrupt_enable.is_set(interrupt) && self.interrupt_request.is_set(interrupt) {
+                return Some(interrupt);
             }
-            CoreMode::Crash => {
-                // In CRASH mode, no interrupts are processed
-                vec![]
-            }
-            _ => InterruptType::all().collect()
-        };
+        }
+        None
+    }
 
-        for interrupt in interrupts_to_check {
-            if self.interrupt_enable.is_set(interrupt) && self.interrupt_register.is_set(interrupt) {
-                self.interrupt_register.clear_interrupt(interrupt);
+    pub fn clear_interrupt_request(&mut self, interrupt: InterruptType) {
+        self.interrupt_request.clear_interrupt(interrupt);
+
+    }
+
+    pub fn check_interrupts(&mut self, interrupt_master_enable: bool, core_mode: CoreMode) -> Option<InterruptType> {
+        if !interrupt_master_enable || core_mode == CoreMode::Crash {
+            return None;
+        }
+
+        // check if enabled interrupts in order of priority
+        for interrupt in InterruptType::all() {
+            if core_mode == CoreMode::Stop && interrupt != InterruptType::Joypad {
+                continue; // In STOP mode, only JOYPAD interrupts are checked
+            }
+
+            if self.interrupt_enable.is_set(interrupt) && self.interrupt_request.is_set(interrupt) {
+                self.interrupt_request.clear_interrupt(interrupt);
                 return Some(interrupt);
             }
         }
@@ -175,7 +195,7 @@ impl MMU {
             0xFF05 => self.timer.value(), // TIMA register
             0xFF06 => self.timer.modulo(), // TMA register
             0xFF07 => self.timer.control(), // TAC register
-            0xFF0F => self.interrupt_register.get(), // interrupt flags
+            0xFF0F => self.interrupt_request.get(), // IF register (interrupt request flags)
             0xFF40 => self.ppu.lcd_control().get(), // LCD control register
             0xFF41 => self.ppu.lcd_status().stat(), // LCD status register
             0xFF42 => self.ppu.scroll().y, // SCY register
@@ -235,7 +255,7 @@ impl MMU {
             0xFF05 => self.timer.set_value(value), // TIMA register
             0xFF06 => self.timer.set_modulo(value), // TMA register
             0xFF07 => self.timer.set_control(value), // TAC register
-            0xFF0F => self.interrupt_register.set(value),
+            0xFF0F => self.interrupt_request.set(value), // IF register (interrupt request flags)
             0xFF40 => self.ppu.lcd_control_mut().set(value), // LCD control register
             0xFF41 => self.ppu.lcd_status_mut().set_stat(value), // LCD status register
             0xFF42 => self.ppu.scroll_mut().y = value, // SCY register
@@ -312,9 +332,9 @@ mod tests {
     fn mmu_interrupt_flags() {
         let mut mmu = MMU::from_rom(crate::roms::blarg::CPU_INSTRUCTIONS).unwrap();
         mmu.write(0xFF0F, 0x1F); // Set all interrupt flags
-        assert_eq!(mmu.interrupt_register.get(), 0x1F);
+        assert_eq!(mmu.interrupt_request.get(), 0x1F);
         mmu.write(0xFF0F, 0x00); // Clear all interrupt flags
-        assert_eq!(mmu.interrupt_register.get(), 0x00);
+        assert_eq!(mmu.interrupt_request.get(), 0x00);
     }
 
     #[test]

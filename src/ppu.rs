@@ -6,6 +6,7 @@ use crate::lcd_control::{LcdControl, TileDataMode};
 use crate::lcd_dma::LcdDma;
 use crate::lcd_palette::{DMGColor, LcdPalette};
 use crate::lcd_status::{LcdMode, LcdStatus};
+use image::{ImageBuffer, Rgb, RgbImage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PPU {
@@ -125,6 +126,20 @@ impl PPU {
         &mut self.dma
     }
 
+    /// Generate a screenshot of the current PPU state as an in-memory RGB image
+    pub fn screenshot(&self) -> RgbImage {
+        let mut img = ImageBuffer::new(LCD_WIDTH as u32, LCD_HEIGHT as u32);
+
+        for y in 0..LCD_HEIGHT {
+            for x in 0..LCD_WIDTH {
+                let rgb_color = self.lcd[y * LCD_WIDTH + x].to_rgb();
+                img.put_pixel(x as u32, y as u32, rgb_color);
+            }
+        }
+
+        img
+    }
+
     pub fn update(&mut self, delta_machine_cycles: MachineCycles) {
         if !self.lcd_control.is_enabled() {
             // TODO should the screen be blanked?
@@ -221,6 +236,7 @@ impl PPU {
         self.lcd[y * LCD_WIDTH + x] = tile.pixel(x % TILE_PIXELS, y % TILE_PIXELS);
     }
 }
+
 
 const VRAM_BASE_ADDRESS: usize = 0x8000;
 pub const LCD_WIDTH: usize = 160;
