@@ -33,10 +33,8 @@ pub struct MMU {
 impl MMU {
     pub fn from_rom(data: &[u8]) -> Result<Self, String> {
         let header = CartHeader::parse(data)?;
-        if header.rom_banks() > 0x20 {
-            // TODO support mode 1 of MBC1 https://gbdev.io/pandocs/MBC1.html
-            return Err("game not supported with greater than 0x20 rom banks".to_string());
-        }
+
+        println!("{:?}", header);
 
         let ram_banks = Vec::from_iter((0..header.ram_banks()).map(|_| [0; RAM_BANK_SIZE]));
         Ok(Self {
@@ -141,7 +139,6 @@ impl MMU {
 
     pub fn clear_interrupt_request(&mut self, interrupt: InterruptType) {
         self.interrupt_request.clear_interrupt(interrupt);
-
     }
 
     pub fn check_interrupts(&mut self, interrupt_master_enable: bool, core_mode: CoreMode) -> Option<InterruptType> {
@@ -231,7 +228,8 @@ impl MMU {
             }
             0x2000..=0x3FFF if self.header.rom_banks() > 2 => {
                 // https://gbdev.io/pandocs/MBC1.html#20003fff--rom-bank-number-write-only
-                self.rom_bank_register = ((value & 0x1F) as usize)
+                // TODO MBC1 should mask to 0x1F
+                self.rom_bank_register = ((value & 0x7F) as usize)
                     .min(self.header.rom_banks() - 1)
                     .max(1);
             }
