@@ -1,7 +1,7 @@
 use crate::interrupt::{InterruptSource, InterruptType};
 
 /// https://gbdev.io/pandocs/STAT.html
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LcdStatus {
     ly: u8,   // Current line (read only)
     lyc: u8,  // LY Compare (read-write)
@@ -49,7 +49,7 @@ impl LcdStatus {
 
         // check interrupt
         // TODO emulate STAT blocking
-        self.interrupt_pending = match mode {
+        self.interrupt_pending |= match mode {
             LcdMode::HBlank => self.hblank_interrupt,
             LcdMode::VBlank => self.vblank_interrupt,
             LcdMode::OAM => self.oam_interrupt,
@@ -75,9 +75,7 @@ impl LcdStatus {
     }
 
     fn check_lyc_interrupt(&mut self) {
-        if self.lyc_interrupt {
-            self.interrupt_pending = self.lyc == self.ly;
-        }
+        self.interrupt_pending |= self.lyc_interrupt && self.lyc == self.ly;
     }
 }
 

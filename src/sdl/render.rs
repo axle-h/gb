@@ -6,11 +6,11 @@ use sdl2::pixels::Color;
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::rect::Rect;
 use crate::game_boy::GameBoy;
+use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::sdl::frame_rate::FrameRate;
-use crate::lcd_palette::DMGColor;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
 use crate::roms::blarg::*;
-use crate::roms::commercial::TETRIS;
+use crate::roms::commercial::*;
 
 const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
 
@@ -35,7 +35,7 @@ pub fn render() -> Result<(), String> {
         PixelFormatEnum::RGB24, LCD_WIDTH as u32, LCD_HEIGHT as u32
     ).map_err(|e| e.to_string())?;
 
-    let mut gb = GameBoy::dmg(TETRIS);
+    let mut gb = GameBoy::dmg(POKEMON_RED);
 
     let mut frame_rate = FrameRate::default();
     let mut event_pump = sdl_context.event_pump()?;
@@ -51,6 +51,21 @@ pub fn render() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(keycode), repeat: false, .. } => {
                     use crate::joypad::JoypadButton::*;
                     match keycode {
+                        Keycode::F1 => {
+                            let ppu = gb.core().mmu().ppu();
+                            ppu.dump_tilemap(TileMapMode::Lower, TileDataMode::Lower)
+                                .save("tilemap_lower_lower.png")
+                                .map_err(|e| e.to_string())?;
+                            ppu.dump_tilemap(TileMapMode::Lower, TileDataMode::Upper)
+                                .save("tilemap_lower_upper.png")
+                                .map_err(|e| e.to_string())?;
+                            ppu.dump_tilemap(TileMapMode::Upper, TileDataMode::Lower)
+                                .save("tilemap_upper_lower.png")
+                                .map_err(|e| e.to_string())?;
+                            ppu.dump_tilemap(TileMapMode::Upper, TileDataMode::Upper)
+                                .save("tilemap_upper_upper.png")
+                                .map_err(|e| e.to_string())?;
+                        }
                         Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().press_button(Up),
                         Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().press_button(Down),
                         Keycode::Left => gb.core_mut().mmu_mut().joypad_mut().press_button(Left),

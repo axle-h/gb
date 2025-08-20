@@ -14,7 +14,7 @@ impl GameBoy {
     }
 
     pub fn dmg_hello_world() -> Self {
-        Self::dmg(crate::roms::acid::DMG_ACID)
+        Self::dmg(crate::roms::acid::ROM)
     }
 
     pub fn update(&mut self, delta: Duration) {
@@ -215,6 +215,31 @@ mod tests {
                 let result_path = format!("target/button_test_result_{}.png", button);
                 result.save(result_path.clone()).expect("Failed to save result image");
                 panic!("Test failed, saved result image to {}", result_path);
+            }
+        }
+    }
+
+    mod ppu {
+        use std::io::BufReader;
+        use image::{ImageFormat, ImageReader};
+        use crate::roms::acid::*;
+        use super::*;
+
+        #[test]
+        fn ppu() {
+            let mut gb = GameBoy::dmg(ROM);
+            gb.run(MachineCycles::of_machine(180_000));
+
+            let result = gb.core().mmu().ppu().screenshot();
+            let expected_image = ImageReader::with_format(BufReader::new(std::io::Cursor::new(EXPECTED_DMG)), ImageFormat::Png)
+                .decode()
+                .expect("Failed to decode expected image")
+                .to_rgb8();
+
+            if result != expected_image {
+                let result_path = "target/ppu_test_result.png";
+                result.save(result_path).expect("Failed to save result image");
+                panic!("PPU test failed, saved result image to {}", result_path);
             }
         }
     }

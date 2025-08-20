@@ -1,15 +1,15 @@
 use crate::ppu::TILE_BYTES;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LcdControl {
-    enabled: bool,
-    window_tile_map: bool,
-    window_enabled: bool,
-    bg_tile_data: bool,
-    bg_tile_map: bool,
-    obj_size: bool,
-    obj_enabled: bool,
-    bg_window_enabled: bool,
+    enabled: bool, // Bit 7 - LCD Display Enable (0=Off, 1=On)
+    window_tile_map: bool, // Bit 6 - Window Tile Map Display Select (0=9800-9BFF, 1=9C00-9FFF)
+    window_enabled: bool, // Bit 5 - Window Display Enable (0=Off, 1=On)
+    bg_tile_data: bool, // Bit 4 - BG & Window Tile Data Select (0=8800-97FF, 1=8000-8FFF)
+    bg_tile_map: bool, // Bit 3 - BG Tile Map Display Select (0=9800-9BFF, 1=9C00-9FFF)
+    obj_size: bool, // Bit 2 - OBJ (Sprite) Size (0=8x8, 1=8x16)
+    obj_enabled: bool, // Bit 1 - OBJ (Sprite) Display Enable (0=Off, 1=On)
+    bg_window_enabled: bool, // Bit 0 - BG Display (not for CGB) (0=Off, 1=On)
 }
 
 impl LcdControl {
@@ -73,7 +73,7 @@ impl LcdControl {
 impl Default for LcdControl {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             window_tile_map: false,
             window_enabled: false,
             bg_tile_data: false,
@@ -88,19 +88,20 @@ impl Default for LcdControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileDataMode { Lower, Upper }
 
-
-
 impl TileDataMode {
     pub fn from_value(value: bool) -> Self {
         if value { Self::Lower } else { Self::Upper }
     }
 
     pub fn tile_address(&self, tile_index: u8) -> u16 {
-        match self {
-            Self::Lower => 0x8000 + tile_index as u16 * TILE_BYTES as u16,
-            Self::Upper if tile_index < 0x80 => 0x9000 + tile_index as u16 * TILE_BYTES as u16,
-            _ => 0x8800 + (tile_index as u16 - 0x80) * TILE_BYTES as u16, // signed tiles
-        }
+        let base_address = if self == &Self::Upper && tile_index < 0x80 {
+            // tiles 0-127 of mode 2 are in block 2
+            0x9000
+        } else {
+            // otherwise in block 0 or 1
+            0x8000
+        };
+        base_address | (tile_index as u16) << 4
     }
 }
 
@@ -128,7 +129,7 @@ impl ObjectSizeMode {
         if value { Self::Double } else { Self::Single }
     }
 
-    pub fn height(&self) -> u8 {
+    pub fn height(&self) -> usize {
         match self {
             Self::Single => 8,
             Self::Double => 16,
@@ -276,7 +277,9 @@ mod tests {
         let mode = TileDataMode::Upper;
         assert_eq!(mode.tile_address(0x00), 0x9000);
         assert_eq!(mode.tile_address(0x01), 0x9010);
+        assert_eq!(mode.tile_address(0x7F), 0x97F0);
         assert_eq!(mode.tile_address(0x80), 0x8800);
+        assert_eq!(mode.tile_address(0xFE), 0x8FE0);
         assert_eq!(mode.tile_address(0xFF), 0x8FF0);
     }
 }

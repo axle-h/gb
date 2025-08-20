@@ -18,7 +18,8 @@ pub mod blarg {
 }
 
 pub mod acid {
-    pub const DMG_ACID: &[u8] = include_bytes!("dmg-acid2.gb");
+    pub const ROM: &[u8] = include_bytes!("dmg-acid2/dmg-acid2.gb");
+    pub const EXPECTED_DMG: &[u8] = include_bytes!("dmg-acid2/reference-dmg.png");
 }
 
 pub mod button_test {
@@ -35,4 +36,6 @@ pub mod button_test {
 
 pub mod commercial {
     pub const TETRIS: &[u8] = include_bytes!("tetris.gb");
+    pub const ALLEYWAY: &[u8] = include_bytes!("alleyway.gb");
+    pub const POKEMON_RED: &[u8] = include_bytes!("pokemon-red.gb");
 }

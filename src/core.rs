@@ -22,7 +22,7 @@ pub struct Core {
 
 impl Core {
     pub fn dmg_hello_world() -> Self {
-        Self::dmg(crate::roms::acid::DMG_ACID)
+        Self::dmg(crate::roms::acid::ROM)
     }
 
     pub fn dmg(cart: &[u8]) -> Self {
