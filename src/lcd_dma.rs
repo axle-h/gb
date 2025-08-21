@@ -39,7 +39,7 @@ pub struct DmaTransfer {
     pub address: u16
 }
 
-const DMA_TRANSFER_CYCLES: MachineCycles = MachineCycles::of_machine(160);
+const DMA_TRANSFER_CYCLES: MachineCycles = MachineCycles::new(160);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct LcdDmaState {

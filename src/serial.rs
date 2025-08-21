@@ -1,7 +1,7 @@
 use crate::cycles::MachineCycles;
 use crate::interrupt::InterruptSource;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Serial {
     data: u8,
     transfer_enable: bool,
@@ -9,6 +9,19 @@ pub struct Serial {
     state: SerialState,
     buffer: Option<Vec<u8>>,
     interrupt_pending: bool,
+}
+
+impl Default for Serial {
+    fn default() -> Self {
+        Self {
+            data: 0xFF,
+            transfer_enable: false,
+            master: false,
+            state: SerialState::Idle,
+            buffer: None,
+            interrupt_pending: false,
+        }
+    }
 }
 
 impl Serial {
@@ -39,7 +52,7 @@ impl Serial {
         self.transfer_enable = (control & 0x80) != 0;
         self.master = (control & 0x01) != 0;
 
-        if self.master && self.transfer_enable && self.state == SerialState::Idle {
+        if self.master && self.transfer_enable {
             self.state = SerialState::Transferring { cycles: MachineCycles::ZERO };
         }
     }
@@ -52,7 +65,7 @@ impl Serial {
                     buffer.push(self.data);
                 }
                 self.transfer_enable = false;
-                self.data = 0;
+                self.data = 0xFF;
                 self.interrupt_pending = true;
                 SerialState::Idle
             } else {

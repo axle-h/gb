@@ -245,20 +245,21 @@ impl PPU {
                             } else {
                                 0
                             } as usize;
+                            let bg_color = self.palette.background()[bg_color_index];
 
                             let color = self.scanline_sprites.iter()
                                 .filter(|sprite| sprite.x <= x as isize && sprite.x + TILE_PIXELS as isize > x as isize)
                                 .map(|sprite| (sprite, self.sprite_pixel(sprite, x, y)))
+                                .filter(|&(_, sprite_color)| sprite_color != 0) // filter out transparent pixels
                                 .sorted_by_key(|&(sprite, _)| sprite.x) // overlapping sprites are sorted by x position
                                 .next()
-                                .and_then(|(sprite, sprite_color)| {
+                                .map_or(bg_color, |(sprite, sprite_color)| {
                                     if sprite_color == 0 || sprite.bg_priority && bg_color_index != 0 {
-                                        None
+                                        bg_color
                                     } else {
-                                        Some(sprite.palette(&self.palette)[sprite_color as usize])
+                                        sprite.palette(&self.palette)[sprite_color as usize]
                                     }
-                                })
-                                .unwrap_or_else(|| self.palette.background()[bg_color_index]);
+                                });
 
                             self.lcd[y * LCD_WIDTH + x] = color;
                         }

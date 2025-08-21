@@ -469,7 +469,7 @@ impl Core {
             }
         }
 
-        let cycles = MachineCycles::of_machine(opcode.machine_cycles(condition_met));
+        let cycles = MachineCycles::new(opcode.machine_cycles(condition_met));
 
         let interrupt_cycles = match self.mode {
             CoreMode::Normal | CoreMode::Halt => {
@@ -510,7 +510,7 @@ impl Core {
             self.mmu.clear_interrupt_request(interrupt);
             self.interrupts_enabled = false;
             self.call(interrupt.address());
-            MachineCycles::of_machine(5)
+            MachineCycles::new(5)
         } else {
             MachineCycles::ZERO
         }

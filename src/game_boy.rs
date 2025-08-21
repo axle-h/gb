@@ -17,9 +17,9 @@ impl GameBoy {
         Self::dmg(crate::roms::acid::ROM)
     }
 
-    pub fn update(&mut self, delta: Duration) {
-        let delta_cycles = MachineCycles::of_real_time(delta.min(Duration::from_micros(33333)));
-        self.run(delta_cycles);
+    pub fn update(&mut self, delta: Duration) -> MachineCycles {
+        let delta_cycles = MachineCycles::from_duration(delta.min(Duration::from_micros(33333)));
+        self.run(delta_cycles)
     }
 
     pub fn run(&mut self, min_cycles: MachineCycles) -> MachineCycles {
@@ -48,12 +48,12 @@ mod tests {
         let mut gb = GameBoy::dmg(cart);
         gb.core.mmu_mut().serial_mut().enable_buffer();
 
-        let mut max_cycles = MachineCycles::of_machine(100_000_000);
+        let mut max_cycles = MachineCycles::new(100_000_000);
         let mut cycles = MachineCycles::ZERO;
         let mut output = String::new();
         let mut failed = false;
         while cycles < max_cycles {
-            cycles += gb.run(MachineCycles::of_machine(1000));
+            cycles += gb.run(MachineCycles::new(1000));
 
             output = gb.core.mmu().serial()
                 .buffered_bytes()
@@ -64,7 +64,7 @@ mod tests {
                 return;
             } else if !failed && output.contains("Failed") {
                 // Run for a few more cycles to collect more output
-                max_cycles = cycles + MachineCycles::of_machine(10_000);
+                max_cycles = cycles + MachineCycles::new(10_000);
                 failed = true;
             }
         }
@@ -192,17 +192,17 @@ mod tests {
 
         fn test_button(button: JoypadButton, expected_image: &[u8]) {
             let mut gb = GameBoy::dmg(ROM);
-            gb.run(MachineCycles::of_machine(400_000));
+            gb.run(MachineCycles::new(400_000));
 
             gb.core_mut().mmu_mut().joypad_mut()
                 .press_button(button);
 
-            gb.run(MachineCycles::of_machine(20_000));
+            gb.run(MachineCycles::new(20_000));
 
             gb.core_mut().mmu_mut().joypad_mut()
                 .release_button(button);
 
-            gb.run(MachineCycles::of_machine(20_000));
+            gb.run(MachineCycles::new(20_000));
 
             let result = gb.core().mmu().ppu().screenshot();
 
@@ -228,7 +228,7 @@ mod tests {
         #[test]
         fn ppu() {
             let mut gb = GameBoy::dmg(ROM);
-            gb.run(MachineCycles::of_machine(180_000));
+            gb.run(MachineCycles::new(180_000));
 
             let result = gb.core().mmu().ppu().screenshot();
             let expected_image = ImageReader::with_format(BufReader::new(std::io::Cursor::new(EXPECTED_DMG)), ImageFormat::Png)
