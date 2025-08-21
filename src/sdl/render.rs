@@ -1,18 +1,22 @@
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use itertools::Itertools;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::pixels::PixelFormatEnum;
-use sdl2::rect::Rect;
+use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
-use crate::roms::blarg::*;
 use crate::roms::commercial::*;
+use crate::sdl::font::FontTextures;
 
 const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
+const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
+const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
@@ -34,13 +38,24 @@ pub fn render() -> Result<(), String> {
     let mut lcd_texture = texture_creator.create_texture_streaming(
         PixelFormatEnum::RGB24, LCD_WIDTH as u32, LCD_HEIGHT as u32
     ).map_err(|e| e.to_string())?;
+    let mut font = FontTextures::roboto_regular(
+        &texture_creator,
+        16.0,
+        Color::RGBA(255, 0, 0, 255)
+    )?;
 
-    let mut gb = GameBoy::dmg(POKEMON_RED);
+    let mut gb = GameBoy::dmg(ALLEYWAY);
 
     let mut frame_rate = FrameRate::default();
     let mut event_pump = sdl_context.event_pump()?;
+
+    let mut since_last_render = Duration::ZERO;
+    let mut frame_timestamps = VecDeque::new();
+    let mut cycles_per_update = VecDeque::new();
+
     'running: loop {
         let delta = frame_rate.update()?;
+        since_last_render += delta;
 
         for event in event_pump.poll_iter() {
             match event {
@@ -95,30 +110,65 @@ pub fn render() -> Result<(), String> {
             }
         }
 
-        gb.update(delta);
-        let lcd = gb.core().mmu().ppu().lcd();
+        let cycles = gb.update(delta);
+        cycles_per_update.push_back(cycles);
+        while cycles_per_update.len() > 10_000 {
+            cycles_per_update.pop_front();
+        }
 
-        // Copy LCD data to texture
-        lcd_texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
-            for y in 0..LCD_HEIGHT {
-                for x in 0..LCD_WIDTH {
-                    let [r, g, b] = lcd[y * LCD_WIDTH + x].to_rgb().0;
-                    let pixel_color = Color::RGB(r, g, b);
-                    let offset = y * pitch + x * 3;
-                    buffer[offset] = pixel_color.r;
-                    buffer[offset + 1] = pixel_color.g;
-                    buffer[offset + 2] = pixel_color.b;
+        if since_last_render >= TARGET_FRAME_TIME {
+            since_last_render -= TARGET_FRAME_TIME;
+
+            canvas.clear();
+
+            // Copy LCD data to texture
+            lcd_texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
+                let lcd = gb.core().mmu().ppu().lcd();
+                for y in 0..LCD_HEIGHT {
+                    for x in 0..LCD_WIDTH {
+                        let [r, g, b] = lcd[y * LCD_WIDTH + x].to_rgb().0;
+                        let pixel_color = Color::RGB(r, g, b);
+                        let offset = y * pitch + x * 3;
+                        buffer[offset] = pixel_color.r;
+                        buffer[offset + 1] = pixel_color.g;
+                        buffer[offset + 2] = pixel_color.b;
+                    }
                 }
+            }).map_err(|e| e.to_string())?;
+            canvas.copy(&lcd_texture, None, None)
+                .map_err(|e| e.to_string())?;
+
+            frame_timestamps.push_back(Instant::now());
+            while frame_timestamps.len() > FPS_WINDOW_SIZE {
+                frame_timestamps.pop_front();
             }
-        }).map_err(|e| e.to_string())?;
 
-        canvas.clear();
-        let (width, height) = canvas.window().size();
-        canvas.copy(&lcd_texture, None, Rect::new(0, 0, width, height))
-            .map_err(|e| e.to_string())?;
-        canvas.present();
+            let frame_times: Vec<Duration> = frame_timestamps.iter()
+                .tuple_windows()
+                .map(|(start, end)| end.duration_since(*start))
+                .collect();
 
-        sleep(Duration::from_millis(1));
+            let average_fps = frame_times.len() as f64 / frame_times.iter().sum::<Duration>().as_secs_f64();
+            font.render_text(
+                &mut canvas,
+                &format!("FPS: {:.2}", average_fps),
+                5,
+                5
+            )?;
+
+            let avg_cycles_per_update = cycles_per_update.iter().map(|&cycles| cycles.0)
+                .sum::<usize>() as f64 / cycles_per_update.len() as f64;
+            font.render_text(
+                &mut canvas,
+                &format!("core resolution (cycles): {:.2}", avg_cycles_per_update),
+                5,
+                30
+            )?;
+
+            canvas.present();
+        }
+
+        sleep(Duration::ZERO); // allow other threads to run
     }
 
     Ok(())
