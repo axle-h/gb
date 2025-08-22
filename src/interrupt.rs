@@ -97,22 +97,6 @@ impl InterruptType {
     }
 }
 
-pub trait InterruptSource {
-
-    fn is_interrupt_pending(&self) -> bool;
-
-    fn clear_interrupt(&mut self);
-
-    fn consume_pending_interrupt(&mut self) -> bool {
-        if self.is_interrupt_pending() {
-            self.clear_interrupt();
-            true
-        } else {
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,7 +2,7 @@ use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Ord, PartialOrd)]
-pub struct MachineCycles(pub usize);
+pub struct MachineCycles(usize);
 
 impl MachineCycles {
     pub const ZERO: Self = Self(0);
@@ -10,11 +10,15 @@ impl MachineCycles {
     pub const PER_SERIAL_BYTE_TRANSFER: MachineCycles = MachineCycles::from_hz(8192 / 8); // 8192 Hz serial transfer rate
     pub const PER_DIVIDER_TICK: MachineCycles = MachineCycles::from_hz(16384);
 
-    pub const fn new(cycles: usize) -> Self {
+    pub const fn from_m(cycles: usize) -> Self {
         Self(cycles)
     }
+    
+    pub fn m_cycles(self) -> usize {
+        self.0
+    }
 
-    pub fn to_ticks(self) -> usize {
+    pub fn t_cycles(self) -> usize {
         self.0 * 4 // 1 tick = 4 machine cycles
     }
 
@@ -30,7 +34,7 @@ impl MachineCycles {
     }
     
     pub fn to_hz(self) -> usize {
-        Self::CPU_FREQ / self.to_ticks()
+        Self::CPU_FREQ / self.t_cycles()
     }
 
     pub const fn from_t(ticks: usize) -> Self {
@@ -90,19 +94,19 @@ mod tests {
 
     #[test]
     fn conversion() {
-        let cycles = MachineCycles::new(100);
-        assert_eq!(cycles.to_ticks(), 400);
+        let cycles = MachineCycles::from_m(100);
+        assert_eq!(cycles.t_cycles(), 400);
         assert_eq!(MachineCycles::from_t(400), cycles);
 
         let duration = Duration::from_millis(1);
         let converted_cycles = MachineCycles::from_duration(duration);
-        assert_eq!(converted_cycles, MachineCycles::new(1048));
+        assert_eq!(converted_cycles, MachineCycles::from_m(1048));
     }
 
     #[test]
     fn from_duration() {
         let one_second = MachineCycles::from_duration(Duration::from_secs(1));
-        assert_eq!(one_second, MachineCycles::new(MachineCycles::CPU_FREQ / 4));
+        assert_eq!(one_second, MachineCycles::from_m(MachineCycles::CPU_FREQ / 4));
     }
 
     #[test]
@@ -115,8 +119,8 @@ mod tests {
 
     #[test]
     fn to_duration() {
-        let cycles = MachineCycles::new(100);
+        let cycles = MachineCycles::from_m(100);
         let back_to_cycles = MachineCycles::from_duration(cycles.to_duration());
-        assert_eq!(back_to_cycles, MachineCycles::new(99));
+        assert_eq!(back_to_cycles, MachineCycles::from_m(99));
     }
 }

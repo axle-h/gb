@@ -1,8 +1,10 @@
+use crate::activation::Activation;
+use crate::audio::Audio;
 use crate::core::CoreMode;
 use crate::cycles::MachineCycles;
 use crate::divider::Divider;
 use crate::header::CartHeader;
-use crate::interrupt::{InterruptFlags, InterruptSource, InterruptType};
+use crate::interrupt::{InterruptFlags, InterruptType};
 use crate::joypad::JoypadRegister;
 use crate::ppu::PPU;
 use crate::serial::Serial;
@@ -28,6 +30,7 @@ pub struct MMU {
     interrupt_enable: InterruptFlags,
     interrupt_request: InterruptFlags,
     joypad_register: JoypadRegister,
+    audio: Audio,
 }
 
 impl MMU {
@@ -53,6 +56,7 @@ impl MMU {
             serial: Serial::default(),
             divider: Divider::default(),
             timer: Timer::default(),
+            audio: Audio::default(),
         })
     }
 
@@ -74,6 +78,10 @@ impl MMU {
 
     pub fn ppu(&self) -> &PPU {
         &self.ppu
+    }
+
+    pub fn audio(&self) -> &Audio {
+        &self.audio
     }
 
     pub fn serial(&self) -> &Serial {
@@ -108,19 +116,21 @@ impl MMU {
             }
         }
 
-        self.ppu.update(delta_machine_cycles);
+
         self.serial.update(delta_machine_cycles);
-        self.divider.update(delta_machine_cycles);
+        let div_clocks = self.divider.update(delta_machine_cycles);
         self.timer.update(delta_machine_cycles);
+        self.ppu.update(delta_machine_cycles);
+        self.audio.update(delta_machine_cycles, div_clocks);
 
         // consume pending, an interrupt is triggered on a rising edge
         for interrupt in InterruptType::all() {
             let interrupt_pending = match interrupt {
-                InterruptType::Joypad => self.joypad_register.consume_pending_interrupt(),
-                InterruptType::LcdStatus => self.ppu.lcd_status_mut().consume_pending_interrupt(),
-                InterruptType::VBlank => self.ppu.consume_pending_interrupt(),
-                InterruptType::Serial => self.serial.consume_pending_interrupt(),
-                InterruptType::Timer => self.timer.consume_pending_interrupt(),
+                InterruptType::Joypad => self.joypad_register.consume_pending_activation(),
+                InterruptType::LcdStatus => self.ppu.lcd_status_mut().consume_pending_activation(),
+                InterruptType::VBlank => self.ppu.consume_pending_activation(),
+                InterruptType::Serial => self.serial.consume_pending_activation(),
+                InterruptType::Timer => self.timer.consume_pending_activation(),
             };
             if interrupt_pending {
                 self.interrupt_request.set_interrupt(interrupt);
@@ -193,6 +203,18 @@ impl MMU {
             0xFF06 => self.timer.modulo(), // TMA register
             0xFF07 => self.timer.control(), // TAC register
             0xFF0F => self.interrupt_request.get(), // IF register (interrupt request flags)
+            0xFF10 => self.audio.channel1().sweep_register().get(), // NR10: Channel 1 sweep register
+            0xFF11 => self.audio.channel1().length_duty_register().get(), // NR11: Channel 1 length and duty register
+            0xFF12 => self.audio.channel1().volume_envelope_register().get(), // NR12: Channel 1 volume and envelope register
+            0xFF13 => self.audio.channel1().period_control_register().get_low(), // NR13: Channel 1 period low byte
+            0xFF14 => self.audio.channel1().period_control_register().get_high(), // NR14: Channel 1 period high byte and control
+            0xFF16 => self.audio.channel2().length_duty_register().get(), // NR21: Channel 2 length and duty register
+            0xFF17 => self.audio.channel2().volume_envelope_register().get(), // NR22: Channel 2 volume and envelope register
+            0xFF18 => self.audio.channel2().period_control_register().get_low(), // NR23: Channel 2 period low byte
+            0xFF19 => self.audio.channel2().period_control_register().get_high(), // NR24: Channel 2 period high byte and control
+            0xFF24 => self.audio.master_volume().get(), // NR50: Sound volume register
+            0xFF25 => self.audio.panning().get(), // NR51: Sound panning register
+            0xFF26 => self.audio.control().get(), // NR52: Sound control register
             0xFF40 => self.ppu.lcd_control().get(), // LCD control register
             0xFF41 => self.ppu.lcd_status().stat(), // LCD status register
             0xFF42 => self.ppu.scroll().y, // SCY register
@@ -254,6 +276,18 @@ impl MMU {
             0xFF06 => self.timer.set_modulo(value), // TMA register
             0xFF07 => self.timer.set_control(value), // TAC register
             0xFF0F => self.interrupt_request.set(value), // IF register (interrupt request flags)
+            0xFF10 => self.audio.channel1_mut().sweep_register_mut().set(value), // NR10: Channel 1 sweep register
+            0xFF11 => self.audio.channel1_mut().length_duty_register_mut().set(value), // NR11: Channel 1 length and duty register
+            0xFF12 => self.audio.channel1_mut().volume_envelope_register_mut().set(value), // NR12: Channel 1 volume and envelope register
+            0xFF13 => self.audio.channel1_mut().period_control_register_mut().set_low(value), // NR13: Channel 1 period low byte
+            0xFF14 => self.audio.channel1_mut().period_control_register_mut().set_high(value), // NR14: Channel 1 period high byte and control
+            0xFF16 => self.audio.channel2_mut().length_duty_register_mut().set(value), // NR21: Channel 2 length and duty register
+            0xFF17 => self.audio.channel2_mut().volume_envelope_register_mut().set(value), // NR22: Channel 2 volume and envelope register
+            0xFF18 => self.audio.channel2_mut().period_control_register_mut().set_low(value), // NR23: Channel 2 period low byte
+            0xFF19 => self.audio.channel2_mut().period_control_register_mut().set_high(value), // NR24: Channel 2 period high byte and control
+            0xFF24 => self.audio.master_volume_mut().set(value), // NR50: Sound volume register
+            0xFF25 => self.audio.panning_mut().set(value), // NR51: Sound panning register
+            0xFF26 => self.audio.control_mut().set(value), // NR52: Sound control register
             0xFF40 => self.ppu.lcd_control_mut().set(value), // LCD control register
             0xFF41 => self.ppu.lcd_status_mut().set_stat(value), // LCD status register
             0xFF42 => self.ppu.scroll_mut().y = value, // SCY register

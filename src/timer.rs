@@ -1,5 +1,5 @@
 use crate::cycles::MachineCycles;
-use crate::interrupt::InterruptSource;
+use crate::activation::Activation;
 
 #[derive(Debug, Clone, Default)]
 pub struct Timer {
@@ -65,12 +65,12 @@ impl Timer {
     }
 }
 
-impl InterruptSource for Timer {
-    fn is_interrupt_pending(&self) -> bool {
+impl Activation for Timer {
+    fn is_activation_pending(&self) -> bool {
         self.interrupt_pending
     }
 
-    fn clear_interrupt(&mut self) {
+    fn clear_activation(&mut self) {
         self.interrupt_pending = false;
     }
 }
@@ -88,10 +88,10 @@ enum TimerMode {
 impl TimerMode {
     pub fn cycles_per_tick(self) -> MachineCycles {
         match self {
-            TimerMode::M256 => MachineCycles(256),
-            TimerMode::M4 => MachineCycles(4),
-            TimerMode::M16 => MachineCycles(16),
-            TimerMode::M64 => MachineCycles(64),
+            TimerMode::M256 => MachineCycles::from_m(256),
+            TimerMode::M4 => MachineCycles::from_m(4),
+            TimerMode::M16 => MachineCycles::from_m(16),
+            TimerMode::M64 => MachineCycles::from_m(64),
         }
     }
 }

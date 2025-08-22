@@ -18,6 +18,8 @@ mod serial;
 mod cycles;
 mod divider;
 mod timer;
+mod audio;
+mod activation;
 
 pub fn main() -> Result<(), String> {
     sdl::render::render()

@@ -1,5 +1,5 @@
 use crate::cycles::MachineCycles;
-use crate::interrupt::InterruptSource;
+use crate::activation::Activation;
 
 #[derive(Debug, Clone)]
 pub struct Serial {
@@ -82,12 +82,12 @@ enum SerialState {
     Transferring { cycles: MachineCycles },
 }
 
-impl InterruptSource for Serial {
-    fn is_interrupt_pending(&self) -> bool {
+impl Activation for Serial {
+    fn is_activation_pending(&self) -> bool {
         self.interrupt_pending
     }
 
-    fn clear_interrupt(&mut self) {
+    fn clear_activation(&mut self) {
         self.interrupt_pending = false
     }
 }

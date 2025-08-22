@@ -1,5 +1,4 @@
-use crate::interrupt::{InterruptSource, InterruptType};
-
+use crate::activation::Activation;
 /// https://gbdev.io/pandocs/STAT.html
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LcdStatus {
@@ -79,12 +78,12 @@ impl LcdStatus {
     }
 }
 
-impl InterruptSource for LcdStatus {
-    fn is_interrupt_pending(&self) -> bool {
+impl Activation for LcdStatus {
+    fn is_activation_pending(&self) -> bool {
         self.interrupt_pending
     }
 
-    fn clear_interrupt(&mut self) {
+    fn clear_activation(&mut self) {
         self.interrupt_pending = false;
     }
 }

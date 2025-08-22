@@ -148,8 +148,8 @@ mod tests {
     #[test]
     fn test_lcd_control_new() {
         let lcd = LcdControl::default();
-        assert_eq!(lcd.get(), 0x00);
-        assert!(!lcd.is_enabled());
+        assert_eq!(lcd.get(), 0x80); // enabled by default
+        assert!(lcd.is_enabled());
         assert!(!lcd.window_enabled());
         assert!(!lcd.objects_enabled());
         assert!(!lcd.background_enabled());
