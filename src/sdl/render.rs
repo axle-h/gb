@@ -2,11 +2,11 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use itertools::Itertools;
+use sdl2::audio::{AudioCallback, AudioSpec, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::pixels::PixelFormatEnum;
-use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::sdl::frame_rate::FrameRate;
@@ -18,9 +18,48 @@ const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
 const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
+struct AudioBuffer {
+    sample_duration: Duration,
+    buffer_size: usize,
+    buffer: VecDeque<(f32, f32)>
+}
+
+impl AudioBuffer {
+    pub fn new(spec: AudioSpec)  -> Self {
+        let buffer_size = spec.samples as usize * 2;
+        Self {
+            buffer_size,
+            buffer: VecDeque::with_capacity(buffer_size),
+            sample_duration: Duration::from_secs_f32(1.0 / spec.freq as f32),
+        }
+    }
+
+    pub fn update(&mut self, gb: &GameBoy) {
+        if self.buffer.len() == self.buffer_size {
+            self.buffer.pop_front();
+        }
+        self.buffer.push_back(gb.core().mmu().audio().output());
+    }
+}
+
+impl AudioCallback for AudioBuffer {
+    type Channel = f32;
+
+    fn callback(&mut self, out: &mut [f32]) {
+        let mut last_sample = (0.0, 0.0);
+        for frame in out.chunks_mut(2) {
+            let sample = self.buffer.pop_front().unwrap_or(last_sample);
+            last_sample = sample;
+            frame[0] = sample.0; // Left channel
+            frame[1] = sample.1; // Right channel
+        }
+    }
+}
+
 pub fn render() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
+    let audio_subsystem = sdl_context.audio()?;
 
     let window = video_subsystem.window("gb", LCD_WIDTH as u32 * SCALE_FACTOR, LCD_HEIGHT as u32 * SCALE_FACTOR)
         .position_centered()
@@ -33,6 +72,14 @@ pub fn render() -> Result<(), String> {
     canvas.clear();
     canvas.present();
 
+    let mut audio_device = audio_subsystem.open_playback(None, &AudioSpecDesired {
+        freq: Some(22050),
+        channels: Some(2),  // stereo
+        samples: None       // default sample size
+    }, |spec| AudioBuffer::new(spec))?;
+
+    audio_device.resume();
+
     // Create texture creator for LCD rendering
     let texture_creator = canvas.texture_creator();
     let mut lcd_texture = texture_creator.create_texture_streaming(
@@ -44,18 +91,21 @@ pub fn render() -> Result<(), String> {
         Color::RGBA(255, 0, 0, 255)
     )?;
 
-    let mut gb = GameBoy::dmg(ALLEYWAY);
+    let mut gb = GameBoy::dmg(TETRIS);
 
     let mut frame_rate = FrameRate::default();
     let mut event_pump = sdl_context.event_pump()?;
 
     let mut since_last_render = Duration::ZERO;
+    let mut since_last_audio_sample = Duration::ZERO;
+    let audio_sample_duration = audio_device.lock().sample_duration;
     let mut frame_timestamps = VecDeque::new();
     let mut cycles_per_update = VecDeque::new();
 
     'running: loop {
         let delta = frame_rate.update()?;
         since_last_render += delta;
+        since_last_audio_sample += delta;
 
         for event in event_pump.poll_iter() {
             match event {
@@ -116,6 +166,11 @@ pub fn render() -> Result<(), String> {
             cycles_per_update.pop_front();
         }
 
+        while since_last_audio_sample >= audio_sample_duration {
+            since_last_audio_sample -= audio_sample_duration;
+            audio_device.lock().update(&gb);
+        }
+
         if since_last_render >= TARGET_FRAME_TIME {
             since_last_render -= TARGET_FRAME_TIME;
 
@@ -156,7 +211,7 @@ pub fn render() -> Result<(), String> {
                 5
             )?;
 
-            let avg_cycles_per_update = cycles_per_update.iter().map(|&cycles| cycles.0)
+            let avg_cycles_per_update = cycles_per_update.iter().map(|cycles| cycles.m_cycles())
                 .sum::<usize>() as f64 / cycles_per_update.len() as f64;
             font.render_text(
                 &mut canvas,

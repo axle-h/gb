@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use crate::cycles::MachineCycles;
 use crate::geometry::Point8;
-use crate::interrupt::InterruptSource;
+use crate::activation::Activation;
 use crate::lcd_control::{LcdControl, ObjectSizeMode, TileDataMode, TileMapMode};
 use crate::lcd_dma::LcdDma;
 use crate::lcd_palette::{DMGColor, DMGPaletteRegister, LcdPalette};
@@ -194,7 +194,7 @@ impl PPU {
             return
         }
 
-        self.current_ticks += delta_machine_cycles.to_ticks(); // TODO the PPU is twice as slow in CGB double speed mode
+        self.current_ticks += delta_machine_cycles.t_cycles(); // TODO the PPU is twice as slow in CGB double speed mode
 
         match self.lcd_status.mode() {
             LcdMode::OAM => {
@@ -398,12 +398,12 @@ const OAM_TICKS: usize = 80;
 const INITIAL_FIFO_LOAD_TICKS: usize = 12;
 const SCANLINE_TICKS: usize = 456;
 
-impl InterruptSource for PPU {
-    fn is_interrupt_pending(&self) -> bool {
+impl Activation for PPU {
+    fn is_activation_pending(&self) -> bool {
         self.vblank_interrupt_pending
     }
 
-    fn clear_interrupt(&mut self) {
+    fn clear_activation(&mut self) {
         self.vblank_interrupt_pending = false;
     }
 }

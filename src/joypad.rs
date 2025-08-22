@@ -1,5 +1,4 @@
-use crate::interrupt::{InterruptSource, InterruptType};
-
+use crate::activation::Activation;
 /// https://gbdev.io/pandocs/Joypad_Input.html#ff00--p1joyp-joypad
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoypadRegister {
@@ -91,12 +90,12 @@ impl JoypadRegister {
     }
 }
 
-impl InterruptSource for JoypadRegister {
-    fn is_interrupt_pending(&self) -> bool {
+impl Activation for JoypadRegister {
+    fn is_activation_pending(&self) -> bool {
         self.interrupt_pending
     }
 
-    fn clear_interrupt(&mut self) {
+    fn clear_activation(&mut self) {
         self.interrupt_pending = false;
     }
 }
@@ -142,12 +141,12 @@ mod tests {
     #[test]
     fn interrupts() {
         let mut joypad = JoypadRegister::default();
-        assert!(!joypad.is_interrupt_pending()); // disabled by default
+        assert!(!joypad.is_activation_pending()); // disabled by default
         joypad.release_button(A);
-        assert!(!joypad.is_interrupt_pending()); // no interrupt on release
+        assert!(!joypad.is_activation_pending()); // no interrupt on release
         joypad.press_button(A);
-        assert!(joypad.is_interrupt_pending()); // interrupt on press
+        assert!(joypad.is_activation_pending()); // interrupt on press
         joypad.release_button(A);
-        assert!(joypad.is_interrupt_pending()); // still interrupt required until read
+        assert!(joypad.is_activation_pending()); // still interrupt required until read
     }
 }

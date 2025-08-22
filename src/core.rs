@@ -1,7 +1,7 @@
+use crate::activation::Activation;
 use crate::cycles::MachineCycles;
-use crate::interrupt::{InterruptSource, InterruptType};
 use crate::mmu::MMU;
-use crate::opcode::{OpCode, Register, Register16, Register16Mem, Register16Stack, JumpCondition};
+use crate::opcode::{JumpCondition, OpCode, Register, Register16, Register16Mem, Register16Stack};
 use crate::registers::RegisterSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,7 +469,7 @@ impl Core {
             }
         }
 
-        let cycles = MachineCycles::new(opcode.machine_cycles(condition_met));
+        let cycles = MachineCycles::from_m(opcode.machine_cycles(condition_met));
 
         let interrupt_cycles = match self.mode {
             CoreMode::Normal | CoreMode::Halt => {
@@ -478,7 +478,7 @@ impl Core {
             }
             CoreMode::Stop => {
                 // do not run timers in stop mode
-                if self.mmu.joypad().is_interrupt_pending() {
+                if self.mmu.joypad().is_activation_pending() {
                     // stop is interrupted by any joypad input
                     self.mode = CoreMode::Normal;
                 }
@@ -510,7 +510,7 @@ impl Core {
             self.mmu.clear_interrupt_request(interrupt);
             self.interrupts_enabled = false;
             self.call(interrupt.address());
-            MachineCycles::new(5)
+            MachineCycles::from_m(5)
         } else {
             MachineCycles::ZERO
         }

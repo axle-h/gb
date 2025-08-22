@@ -48,12 +48,12 @@ mod tests {
         let mut gb = GameBoy::dmg(cart);
         gb.core.mmu_mut().serial_mut().enable_buffer();
 
-        let mut max_cycles = MachineCycles::new(100_000_000);
+        let mut max_cycles = MachineCycles::from_m(100_000_000);
         let mut cycles = MachineCycles::ZERO;
         let mut output = String::new();
         let mut failed = false;
         while cycles < max_cycles {
-            cycles += gb.run(MachineCycles::new(1000));
+            cycles += gb.run(MachineCycles::from_m(1000));
 
             output = gb.core.mmu().serial()
                 .buffered_bytes()
@@ -64,7 +64,7 @@ mod tests {
                 return;
             } else if !failed && output.contains("Failed") {
                 // Run for a few more cycles to collect more output
-                max_cycles = cycles + MachineCycles::new(10_000);
+                max_cycles = cycles + MachineCycles::from_m(10_000);
                 failed = true;
             }
         }
@@ -192,17 +192,17 @@ mod tests {
 
         fn test_button(button: JoypadButton, expected_image: &[u8]) {
             let mut gb = GameBoy::dmg(ROM);
-            gb.run(MachineCycles::new(400_000));
+            gb.run(MachineCycles::from_m(400_000));
 
             gb.core_mut().mmu_mut().joypad_mut()
                 .press_button(button);
 
-            gb.run(MachineCycles::new(20_000));
+            gb.run(MachineCycles::from_m(20_000));
 
             gb.core_mut().mmu_mut().joypad_mut()
                 .release_button(button);
 
-            gb.run(MachineCycles::new(20_000));
+            gb.run(MachineCycles::from_m(20_000));
 
             let result = gb.core().mmu().ppu().screenshot();
 
@@ -228,7 +228,7 @@ mod tests {
         #[test]
         fn ppu() {
             let mut gb = GameBoy::dmg(ROM);
-            gb.run(MachineCycles::new(180_000));
+            gb.run(MachineCycles::from_m(180_000));
 
             let result = gb.core().mmu().ppu().screenshot();
             let expected_image = ImageReader::with_format(BufReader::new(std::io::Cursor::new(EXPECTED_DMG)), ImageFormat::Png)
