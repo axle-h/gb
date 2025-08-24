@@ -1,9 +1,10 @@
-use channel::Channel;
+use std::collections::VecDeque;
 use master_control::MasterControlRegister;
 use panning::AudioPanningRegister;
 use master_volume::MasterVolumeRegister;
 use square_channel::SquareWaveChannel;
 use crate::audio::channel::Channel::{Channel1, Channel2};
+use crate::audio::sample::AudioSample;
 use crate::cycles::MachineCycles;
 use crate::divider::DividerClocks;
 
@@ -17,6 +18,9 @@ mod volume;
 mod control;
 mod square_channel;
 mod frame_sequencer;
+mod sample;
+
+pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 
 #[derive(Debug, Clone)]
 pub struct Audio {
@@ -25,9 +29,7 @@ pub struct Audio {
     master_volume: MasterVolumeRegister,
     channel1: SquareWaveChannel,
     channel2: SquareWaveChannel,
-
-    output_left: f32,
-    output_right: f32
+    buffer: VecDeque<f32>,
 }
 
 impl Default for Audio {
@@ -38,19 +40,19 @@ impl Default for Audio {
             master_volume: MasterVolumeRegister::default(),
             channel1: SquareWaveChannel::channel1(),
             channel2: SquareWaveChannel::channel2(),
-            output_left: 0.0,
-            output_right: 0.0
+            buffer: VecDeque::with_capacity(2 * GB_SAMPLE_RATE / 10), // buffer for 100ms of audio, 2 channels
         }
     }
 }
 
 impl Audio {
-    pub fn output(&self) -> (f32, f32) {
-        (self.output_left, self.output_right)
+    pub fn buffer_mut(&mut self) -> &mut VecDeque<f32> {
+        &mut self.buffer
     }
 
     pub fn update(&mut self, delta: MachineCycles, div_clocks: DividerClocks) {
         if !self.control.is_enabled() {
+            self.push_sample(delta, AudioSample::ZERO);
             return;
         }
 
@@ -60,12 +62,25 @@ impl Audio {
         self.channel2.update(delta, div_clocks);
         self.control.set_channel_enabled(Channel1, self.channel2.is_active());
 
-        let (ch1_left, ch1_right) = self.panning.panning(Channel1).pan(self.channel1.output_f32());
-        let (ch2_left, ch2_right) = self.panning.panning(Channel2).pan(self.channel2.output_f32());
+        let channel1 = self.panning.panning(Channel1).pan(self.channel1.output_f32());
+        let channel2 = self.panning.panning(Channel2).pan(self.channel2.output_f32());
         // TODO channel 3, 4
 
-        self.output_left = self.master_volume.left_volume_f32() * (ch1_left + ch2_left /* + ch3_left + ch4_left*/) / 2.0;
-        self.output_right = self.master_volume.right_volume_f32() * (ch1_right + ch2_right  /*+ ch3_left + ch4_left*/) / 2.0;
+        let volume = self.master_volume.volume_sample();
+        let sample = volume * (channel1 + channel2) / 2.0;
+        // TODO implement DAC capacitor effect
+        self.push_sample(delta, sample);
+    }
+
+    fn push_sample(&mut self, delta: MachineCycles, sample: AudioSample) {
+        for _ in 0..delta.m_cycles() {
+            self.buffer.push_back(sample.left);
+            self.buffer.push_back(sample.right);
+            if self.buffer.len() >= self.buffer.capacity() {
+                // audio buffer overflow :-(
+                self.buffer.drain(..2);
+            }
+        }
     }
 
     pub fn control(&self) -> &MasterControlRegister {

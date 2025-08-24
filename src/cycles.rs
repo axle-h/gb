@@ -6,6 +6,7 @@ pub struct MachineCycles(usize);
 
 impl MachineCycles {
     pub const ZERO: Self = Self(0);
+    pub const ONE: Self = Self(1);
     pub const CPU_FREQ: usize = 4194304; // 4.194304 MHz t-cycles/s
     pub const PER_SERIAL_BYTE_TRANSFER: MachineCycles = MachineCycles::from_hz(8192 / 8); // 8192 Hz serial transfer rate
     pub const PER_DIVIDER_TICK: MachineCycles = MachineCycles::from_hz(16384);
@@ -45,6 +46,7 @@ impl MachineCycles {
         Duration::from_nanos((self.0 as u64 * 4_000_000_000) / Self::CPU_FREQ as u64)
     }
 }
+
 
 impl From<usize> for MachineCycles {
     fn from(cycles: usize) -> Self {
@@ -87,6 +89,7 @@ impl Mul<usize> for MachineCycles {
         Self(self.0 * rhs)
     }
 }
+
 
 #[cfg(test)]
 mod tests {

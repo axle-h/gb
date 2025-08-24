@@ -15,6 +15,8 @@ pub mod blarg {
     pub const CPU_INSTRUCTIONS_11: &[u8] = include_bytes!("cpu_instrs/11-op a,(hl).gb");
 
     pub const INSTRUCTION_TIMING: &[u8] = include_bytes!("instr_timing.gb");
+
+    pub const AUDIO_REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.gb");
 }
 
 pub mod acid {

@@ -17,11 +17,6 @@ impl GameBoy {
         Self::dmg(crate::roms::acid::ROM)
     }
 
-    pub fn update(&mut self, delta: Duration) -> MachineCycles {
-        let delta_cycles = MachineCycles::from_duration(delta.min(Duration::from_micros(33333)));
-        self.run(delta_cycles)
-    }
-
     pub fn run(&mut self, min_cycles: MachineCycles) -> MachineCycles {
         let mut cycles = MachineCycles::ZERO;
         while cycles < min_cycles {

@@ -31,6 +31,10 @@ impl SweepRegister {
         self.subtraction = (value & 0x08) != 0; // Bit 3
         self.individual_step = value & 0x07; // Bits 0-2
     }
+
+    pub fn sweep_period(&self) -> u8 {
+        if self.sweep_period == 0 { 8 } else { self.sweep_period }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -52,7 +56,7 @@ impl Sweep {
 
     pub fn reset(&mut self, period: usize) -> SweepResult {
         self.shadow_period = period;
-        self.sweep_timer = if self.register.sweep_period > 0 { self.register.sweep_period } else { 8 };
+        self.sweep_timer = self.register.sweep_period();
         self.enabled = self.register.sweep_period != 0 || self.register.individual_step != 0;
 
         // If the individual step is non-zero, frequency calculation and overflow check are performed immediately.
@@ -72,7 +76,7 @@ impl Sweep {
             return None;
         }
 
-        self.sweep_timer = if self.register.sweep_period > 0 { self.register.sweep_period } else { 8 };
+        self.sweep_timer = self.register.sweep_period();
 
         if !self.enabled || self.register.sweep_period == 0 {
             return None;

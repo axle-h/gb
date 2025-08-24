@@ -84,6 +84,10 @@ impl MMU {
         &self.audio
     }
 
+    pub fn audio_mut(&mut self) -> &mut Audio {
+        &mut self.audio
+    }
+
     pub fn serial(&self) -> &Serial {
         &self.serial
     }
