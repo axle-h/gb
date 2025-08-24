@@ -1,4 +1,5 @@
 use crate::audio::channel::Channel;
+use crate::audio::sample::AudioSample;
 
 /// FF25 — NR51: Sound panning
 #[derive(Debug, Clone, Default)]
@@ -68,10 +69,10 @@ pub struct ChannelPanning {
 }
 
 impl ChannelPanning {
-    pub fn pan(&self, raw: f32) -> (f32, f32) {
+    pub fn pan(&self, raw: f32) -> AudioSample {
         let left = if self.left { raw } else { 0.0 };
         let right = if self.right { raw } else { 0.0 };
-        (left, right)
+        AudioSample::new(left, right)
     }
 }
 

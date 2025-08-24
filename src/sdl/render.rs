@@ -2,11 +2,15 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use itertools::Itertools;
-use sdl2::audio::{AudioCallback, AudioSpec, AudioSpecDesired};
+use rubato::{Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction, Async, FixedAsync, Indexing};
+use audioadapter::direct::InterleavedSlice;
+use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::pixels::PixelFormatEnum;
+use crate::audio::GB_SAMPLE_RATE;
+use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::sdl::frame_rate::FrameRate;
@@ -18,45 +22,10 @@ const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
 const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
-struct AudioBuffer {
-    sample_duration: Duration,
-    buffer_size: usize,
-    buffer: VecDeque<(f32, f32)>
-}
-
-impl AudioBuffer {
-    pub fn new(spec: AudioSpec)  -> Self {
-        let buffer_size = spec.samples as usize * 2;
-        Self {
-            buffer_size,
-            buffer: VecDeque::with_capacity(buffer_size),
-            sample_duration: Duration::from_secs_f32(1.0 / spec.freq as f32),
-        }
-    }
-
-    pub fn update(&mut self, gb: &GameBoy) {
-        if self.buffer.len() == self.buffer_size {
-            self.buffer.pop_front();
-        }
-        self.buffer.push_back(gb.core().mmu().audio().output());
-    }
-}
-
-impl AudioCallback for AudioBuffer {
-    type Channel = f32;
-
-    fn callback(&mut self, out: &mut [f32]) {
-        let mut last_sample = (0.0, 0.0);
-        for frame in out.chunks_mut(2) {
-            let sample = self.buffer.pop_front().unwrap_or(last_sample);
-            last_sample = sample;
-            frame[0] = sample.0; // Left channel
-            frame[1] = sample.1; // Right channel
-        }
-    }
-}
 
 pub fn render() -> Result<(), String> {
+    let mut gb = GameBoy::dmg(TETRIS);
+
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     let audio_subsystem = sdl_context.audio()?;
@@ -72,13 +41,28 @@ pub fn render() -> Result<(), String> {
     canvas.clear();
     canvas.present();
 
-    let mut audio_device = audio_subsystem.open_playback(None, &AudioSpecDesired {
-        freq: Some(22050),
-        channels: Some(2),  // stereo
-        samples: None       // default sample size
-    }, |spec| AudioBuffer::new(spec))?;
+    let audio_queue: AudioQueue<f32> = audio_subsystem.open_queue(None,
+        &AudioSpecDesired { freq: Some(44100), channels: Some(2), samples: Some(256) }
+    )?;
+    let audio_spec = audio_queue.spec();
+    audio_queue.resume();
 
-    audio_device.resume();
+    // Create audio resampler from Game Boy native frequency (1048576 Hz) to SDL2 frequency
+    let mut resampler = Async::<f32>::new_sinc(
+        audio_spec.freq as usize as f64 / GB_SAMPLE_RATE as f64,
+        2.0,  // max_resample_ratio_relative
+        SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        },
+        1024, // chunk_size, 1024 is a close common factor of the GB sample rate and 44100hz
+        audio_spec.channels as usize,
+        FixedAsync::Input,
+    ).map_err(|e| e.to_string())?;
+    let mut resampled_audio_buffer = vec![0.0f32; resampler.input_frames_max() * 2];
 
     // Create texture creator for LCD rendering
     let texture_creator = canvas.texture_creator();
@@ -91,21 +75,19 @@ pub fn render() -> Result<(), String> {
         Color::RGBA(255, 0, 0, 255)
     )?;
 
-    let mut gb = GameBoy::dmg(TETRIS);
-
     let mut frame_rate = FrameRate::default();
     let mut event_pump = sdl_context.event_pump()?;
 
     let mut since_last_render = Duration::ZERO;
-    let mut since_last_audio_sample = Duration::ZERO;
-    let audio_sample_duration = audio_device.lock().sample_duration;
     let mut frame_timestamps = VecDeque::new();
-    let mut cycles_per_update = VecDeque::new();
+    let duration_per_cycle = MachineCycles::from_m(1).to_duration();
+    let mut since_last_update = Duration::ZERO;
+    let mut ahead_by_cycles = MachineCycles::ZERO;
 
     'running: loop {
         let delta = frame_rate.update()?;
         since_last_render += delta;
-        since_last_audio_sample += delta;
+        since_last_update += delta;
 
         for event in event_pump.poll_iter() {
             match event {
@@ -160,15 +142,35 @@ pub fn render() -> Result<(), String> {
             }
         }
 
-        let cycles = gb.update(delta);
-        cycles_per_update.push_back(cycles);
-        while cycles_per_update.len() > 10_000 {
-            cycles_per_update.pop_front();
+        let mut min_cycles = MachineCycles::ZERO;
+        while since_last_update >= duration_per_cycle {
+            since_last_update -= duration_per_cycle;
+
+            if ahead_by_cycles > MachineCycles::ZERO {
+                ahead_by_cycles -= MachineCycles::ONE;
+            } else {
+                min_cycles += MachineCycles::ONE;
+            }
         }
 
-        while since_last_audio_sample >= audio_sample_duration {
-            since_last_audio_sample -= audio_sample_duration;
-            audio_device.lock().update(&gb);
+        if min_cycles > MachineCycles::ZERO {
+            let cycles =  gb.run(min_cycles);
+            ahead_by_cycles += cycles - min_cycles;
+        }
+
+        let audio_buffer = gb.core_mut().mmu_mut().audio_mut().buffer_mut();
+        let required_input_frames = resampler.input_frames_next();
+        let required_input_samples = required_input_frames * 2; // stereo
+        while audio_buffer.len() >= required_input_samples {
+            let audio_sample = audio_buffer.drain(..required_input_samples).collect::<Vec<f32>>();
+            let input_adapter = InterleavedSlice::new(&audio_sample, 2, audio_sample.len() / 2)
+                .map_err(|e| format!("could not create input_adapter: {}", e))?;
+            let mut output_adapter =
+                InterleavedSlice::new_mut(&mut resampled_audio_buffer, 2, resampler.output_frames_next() * 2)
+                    .map_err(|e| format!("could not create output_adapter: {}", e))?;
+            let (_, frames_written) = resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)
+                .map_err(|e| format!("Audio error: {}", e))?;
+            audio_queue.queue_audio(&resampled_audio_buffer[..frames_written * 2])?;
         }
 
         if since_last_render >= TARGET_FRAME_TIME {
@@ -211,15 +213,6 @@ pub fn render() -> Result<(), String> {
                 5
             )?;
 
-            let avg_cycles_per_update = cycles_per_update.iter().map(|cycles| cycles.m_cycles())
-                .sum::<usize>() as f64 / cycles_per_update.len() as f64;
-            font.render_text(
-                &mut canvas,
-                &format!("core resolution (cycles): {:.2}", avg_cycles_per_update),
-                5,
-                30
-            )?;
-
             canvas.present();
         }
 
@@ -228,3 +221,4 @@ pub fn render() -> Result<(), String> {
 
     Ok(())
 }
+

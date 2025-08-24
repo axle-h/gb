@@ -1,3 +1,5 @@
+use crate::audio::sample::AudioSample;
+
 /// FF24 — NR50: Master volume & VIN panning
 /// VIN left/right: Set to 0 if external sound hardware is not being used.
 /// Left/right volume: These specify the master volume, i.e. how much each output should be scaled.
@@ -33,16 +35,12 @@ impl MasterVolumeRegister {
         self.left_volume
     }
 
-    pub fn left_volume_f32(&self) -> f32 {
-        Self::to_f32(self.left_volume)
-    }
-
     pub fn right_volume(&self) -> u8 {
         self.right_volume
     }
 
-    pub fn right_volume_f32(&self) -> f32 {
-        Self::to_f32(self.right_volume)
+    pub fn volume_sample(&self) -> AudioSample {
+        AudioSample::new(Self::to_f32(self.left_volume), Self::to_f32(self.right_volume))
     }
 
     pub fn vin_left(&self) -> bool {

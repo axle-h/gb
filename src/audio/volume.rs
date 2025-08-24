@@ -39,7 +39,7 @@ impl VolumeAndEnvelopeRegister {
     }
 
     pub fn sweep_pace(&self) -> u8 {
-        self.sweep_pace
+        if { self.sweep_pace == 0 } { 8 } else { self.sweep_pace }
     }
 }
 
@@ -71,7 +71,7 @@ impl EnvelopeFunction {
 
     pub fn reset(&mut self) {
         self.current_volume = self.register.initial_volume;
-        self.period_counter = self.register.sweep_pace;
+        self.period_counter = self.register.sweep_pace();
     }
 
     pub fn step(&mut self) {
@@ -87,7 +87,7 @@ impl EnvelopeFunction {
             return;
         }
 
-        self.period_counter = self.register.sweep_pace;
+        self.period_counter = self.register.sweep_pace();
 
         if self.register.envelope_direction {
             // Increase volume
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(register.get(), 0);
         assert_eq!(register.initial_volume(), 0);
         assert!(!register.envelope_direction());
-        assert_eq!(register.sweep_pace(), 0);
+        assert_eq!(register.sweep_pace(), 8);
     }
 
     #[test]
