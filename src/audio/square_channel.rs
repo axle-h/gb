@@ -233,18 +233,18 @@ mod tests {
 
     #[test]
     fn basic_tone() {
-        todo!("this no longer works as expected since the sweep was added");
         let mut channel = SquareWaveChannel::channel2();
         channel.length_duty_register.set(0b10000000); // 50% duty cycle
         channel.period_control_register.set_low(0x00); // low byte of period
         channel.period_control_register.set_high(0b00000101); // high byte of period (period = 0x500)
+        channel.envelope.register_mut().set(0xF0); // initial volume 15
         channel.trigger();
 
         // With a period of 0x500, we should get a frequency of 1 sample per 768 machine cycles
         // at 50% duty cycle, we should get 4 samples of 0x00 followed by 4 samples of 0xFF
         let expected_waveform: [u8; 768 * 8] = std::array::from_fn(|i| {
             let phase = i / 768;
-            if phase < 4 { 0x00 } else { 0xFF }
+            if phase < 4 { 0x00 } else { 0xF }
         });
         let mut waveform = [0u8; 768 * 8];
         for i in 0..waveform.len() {
