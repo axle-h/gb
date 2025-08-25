@@ -49,18 +49,28 @@ impl LengthTimerAndDutyCycleRegister {
 
 #[derive(Debug, Clone, Default)]
 pub struct LengthTimer {
-    offset: u8,
-    value: u8
+    offset: u16,
+    value: u16
 }
 
 impl LengthTimer {
     pub fn square_channel(register: &LengthTimerAndDutyCycleRegister) -> Self {
-        let offset = 64;
-        Self { value: offset - register.initial_length_timer, offset }
+        Self::new(64, register.initial_length_timer)
     }
 
-    pub fn reset(&mut self, register: &LengthTimerAndDutyCycleRegister) {
-        self.value = self.offset - register.initial_length_timer;
+    pub fn wave_channel(initial_length_timer: u8) -> Self {
+        Self::new(256, initial_length_timer)
+    }
+
+    fn new(offset: u16, initial_length_timer: u8) -> Self {
+        Self { value: offset - initial_length_timer as u16, offset }
+    }
+
+    pub fn reset(&mut self, initial_length_timer: u8) {
+        // If length timer expired it is reset.
+        if self.value == 0 {
+            self.value = self.offset - initial_length_timer as u16;
+        }
     }
 
     pub fn step(&mut self) -> bool {

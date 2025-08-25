@@ -1,5 +1,6 @@
 use crate::activation::Activation;
 use crate::audio::control::PeriodAndControlRegisters;
+use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer, LengthTimerAndDutyCycleRegister};
 use crate::audio::sweep::{Sweep, SweepRegister};
@@ -99,26 +100,7 @@ impl SquareWaveChannel {
 
     pub fn output_f32(&self) -> f32 {
         if self.dac_on() {
-            match self.output {
-                0 => 1.0,
-                1 => 0.866666666666667,
-                2 => 0.733333333333333,
-                3 => 0.6,
-                4 => 0.466666666666667,
-                5 => 0.333333333333333,
-                6 => 0.2,
-                7 => 0.0666666666666667,
-                8 => -0.0666666666666667,
-                9 => -0.2,
-                10 => -0.333333333333333,
-                11 => -0.466666666666667,
-                12 => -0.6,
-                13 => -0.733333333333333,
-                14 => -0.866666666666667,
-                15 => -1.0,
-                _ => 0.0,
-            }
-            // self.output as f32 / 15.0
+            dac_sample(self.output)
         } else {
             0.0
         }
@@ -126,6 +108,8 @@ impl SquareWaveChannel {
 
     pub fn trigger(&mut self) {
         self.active = true;
+        self.length_timer.reset(self.length_duty_register.initial_length_timer());
+
         // When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT modified.
         self.frequency_timer = self.frequency_timer & 0b00000011;
         self.current_period = if self.sweep_enabled {
@@ -137,7 +121,6 @@ impl SquareWaveChannel {
         } else {
             self.period_control_register.period() as usize
         };
-        self.frame_sequencer.reset();
         self.envelope.reset();
     }
 
@@ -190,11 +173,7 @@ impl SquareWaveChannel {
     }
 
     fn update_length_counter(&mut self) {
-        if !self.period_control_register.length_enable() {
-            return;
-        }
-
-        if self.length_timer.step() {
+        if self.period_control_register.length_enable() && self.length_timer.step() {
             // length overflowed, disable the channel
             self.active = false;
         }
