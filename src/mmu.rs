@@ -216,9 +216,15 @@ impl MMU {
             0xFF17 => self.audio.channel2().volume_envelope_register().get(), // NR22: Channel 2 volume and envelope register
             0xFF18 => self.audio.channel2().period_control_register().get_low(), // NR23: Channel 2 period low byte
             0xFF19 => self.audio.channel2().period_control_register().get_high(), // NR24: Channel 2 period high byte and control
+            0xFF1A => self.audio.channel3().nr30(), // NR30: Channel 3 DAC power
+            0xFF1B => self.audio.channel3().nr31(), // NR31: Channel 3 length timer
+            0xFF1C => self.audio.channel3().nr32(), // NR32: Channel 3 output level
+            0xFF1D => self.audio.channel3().nr33(), // NR33: Channel 3 frequency low
+            0xFF1E => self.audio.channel3().nr34(), // NR34: Channel 3 frequency high and control
             0xFF24 => self.audio.master_volume().get(), // NR50: Sound volume register
             0xFF25 => self.audio.panning().get(), // NR51: Sound panning register
             0xFF26 => self.audio.control().get(), // NR52: Sound control register
+            0xFF30..=0xFF3F => self.audio.channel3().wave_ram((address - 0xFF30) as usize), // Wave RAM (0xFF30-0xFF3F)
             0xFF40 => self.ppu.lcd_control().get(), // LCD control register
             0xFF41 => self.ppu.lcd_status().stat(), // LCD status register
             0xFF42 => self.ppu.scroll().y, // SCY register
@@ -289,9 +295,15 @@ impl MMU {
             0xFF17 => self.audio.channel2_mut().volume_envelope_register_mut().set(value), // NR22: Channel 2 volume and envelope register
             0xFF18 => self.audio.channel2_mut().period_control_register_mut().set_low(value), // NR23: Channel 2 period low byte
             0xFF19 => self.audio.channel2_mut().period_control_register_mut().set_high(value), // NR24: Channel 2 period high byte and control
+            0xFF1A => self.audio.channel3_mut().set_nr30(value), // NR30: Channel 3 DAC power
+            0xFF1B => self.audio.channel3_mut().set_nr31(value), // NR31: Channel 3 length timer
+            0xFF1C => self.audio.channel3_mut().set_nr32(value), // NR32: Channel 3 output level
+            0xFF1D => self.audio.channel3_mut().set_nr33(value), // NR33: Channel 3 frequency low
+            0xFF1E => self.audio.channel3_mut().set_nr34(value), // NR34: Channel 3 frequency high and control
             0xFF24 => self.audio.master_volume_mut().set(value), // NR50: Sound volume register
             0xFF25 => self.audio.panning_mut().set(value), // NR51: Sound panning register
             0xFF26 => self.audio.control_mut().set(value), // NR52: Sound control register
+            0xFF30..=0xFF3F => self.audio.channel3_mut().set_wave_ram((address - 0xFF30) as usize, value), // Wave RAM (0xFF30-0xFF3F)
             0xFF40 => self.ppu.lcd_control_mut().set(value), // LCD control register
             0xFF41 => self.ppu.lcd_status_mut().set_stat(value), // LCD status register
             0xFF42 => self.ppu.scroll_mut().y = value, // SCY register

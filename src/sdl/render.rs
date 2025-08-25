@@ -23,9 +23,8 @@ const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
 const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
-
 pub fn render() -> Result<(), String> {
-    let mut gb = GameBoy::dmg(TETRIS);
+    let mut gb = GameBoy::dmg(AUDIO_REGISTERS);
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;

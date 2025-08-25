@@ -5,6 +5,7 @@ use master_volume::MasterVolumeRegister;
 use square_channel::SquareWaveChannel;
 use crate::audio::channel::Channel::{Channel1, Channel2};
 use crate::audio::sample::AudioSample;
+use crate::audio::wave_channel::WaveChannel;
 use crate::cycles::MachineCycles;
 use crate::divider::DividerClocks;
 
@@ -19,6 +20,8 @@ mod control;
 mod square_channel;
 mod frame_sequencer;
 mod sample;
+mod dac;
+mod wave_channel;
 
 pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 
@@ -29,6 +32,7 @@ pub struct Audio {
     master_volume: MasterVolumeRegister,
     channel1: SquareWaveChannel,
     channel2: SquareWaveChannel,
+    channel3: WaveChannel,
     buffer: VecDeque<f32>,
 }
 
@@ -40,6 +44,7 @@ impl Default for Audio {
             master_volume: MasterVolumeRegister::default(),
             channel1: SquareWaveChannel::channel1(),
             channel2: SquareWaveChannel::channel2(),
+            channel3: WaveChannel::default(),
             buffer: VecDeque::with_capacity(2 * GB_SAMPLE_RATE / 10), // buffer for 100ms of audio, 2 channels
         }
     }
@@ -121,6 +126,14 @@ impl Audio {
 
     pub fn channel2_mut(&mut self) -> &mut SquareWaveChannel {
         &mut self.channel2
+    }
+    
+    pub fn channel3(&self) -> &WaveChannel {
+        &self.channel3
+    }
+    
+    pub fn channel3_mut(&mut self) -> &mut WaveChannel {
+        &mut self.channel3
     }
 }
 
