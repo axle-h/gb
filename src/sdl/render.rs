@@ -2,7 +2,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use itertools::Itertools;
-use rubato::{Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction, Async, FixedAsync, Indexing};
+use rubato::{Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction, Async, FixedAsync};
 use audioadapter::direct::InterleavedSlice;
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
@@ -15,6 +15,7 @@ use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
+use crate::roms::blarg::AUDIO_REGISTERS;
 use crate::roms::commercial::*;
 use crate::sdl::font::FontTextures;
 
@@ -48,6 +49,12 @@ pub fn render() -> Result<(), String> {
     audio_queue.resume();
 
     // Create audio resampler from Game Boy native frequency (1048576 Hz) to SDL2 frequency
+    // TODO use a much simpler resampler with lower latency and fewer dependencies
+    //      E.g. GameBoy audio is 1048576hz, to get to 48khz we need to resample by a factor of 1048576/48000 = 8192/375
+    //      So, (ref: https://en.wikipedia.org/wiki/Downsampling_(signal_processing)) we can:
+    //      1. Increase (resample) the sequence by a factor of 375 (i.e. insert 374 zeros between each sample)
+    //      2. Apply a low-pass filter (probably an FFT, not sure what the cut off frequency should be)
+    //      3. Decrease (resample) the sequence by a factor of 8192 (i.e. keep every 8192nd sample, simple decimation)
     let mut resampler = Async::<f32>::new_sinc(
         audio_spec.freq as usize as f64 / GB_SAMPLE_RATE as f64,
         2.0,  // max_resample_ratio_relative
@@ -165,8 +172,9 @@ pub fn render() -> Result<(), String> {
             let audio_sample = audio_buffer.drain(..required_input_samples).collect::<Vec<f32>>();
             let input_adapter = InterleavedSlice::new(&audio_sample, 2, audio_sample.len() / 2)
                 .map_err(|e| format!("could not create input_adapter: {}", e))?;
+            let output_frames = resampler.output_frames_next();
             let mut output_adapter =
-                InterleavedSlice::new_mut(&mut resampled_audio_buffer, 2, resampler.output_frames_next() * 2)
+                InterleavedSlice::new_mut(&mut resampled_audio_buffer, audio_spec.channels as usize, output_frames * 2)
                     .map_err(|e| format!("could not create output_adapter: {}", e))?;
             let (_, frames_written) = resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)
                 .map_err(|e| format!("Audio error: {}", e))?;
