@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use frame_sequencer::FrameSequencer;
-use high_pass::HighPassFilter;
+use filters::CapacitanceFilter;
 use master_volume::MasterVolume;
 use square_channel::SquareWaveChannel;
 use crate::audio::noise_channel::NoiseChannel;
@@ -21,7 +21,7 @@ pub mod sample;
 pub mod dac;
 pub mod wave_channel;
 pub mod noise_channel;
-mod high_pass;
+mod filters;
 
 pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 
@@ -35,7 +35,7 @@ pub struct Audio {
     channel2: SquareWaveChannel,
     channel3: WaveChannel,
     channel4: NoiseChannel,
-    high_pass_filter: HighPassFilter,
+    high_pass_filter: CapacitanceFilter,
     buffer: VecDeque<f32>,
 }
 
@@ -50,7 +50,7 @@ impl Default for Audio {
             channel2: SquareWaveChannel::channel2(),
             channel3: WaveChannel::default(),
             channel4: NoiseChannel::default(),
-            high_pass_filter: HighPassFilter::default(),
+            high_pass_filter: CapacitanceFilter::default(),
             buffer: VecDeque::with_capacity(2 * GB_SAMPLE_RATE / 10), // buffer for 100ms of audio, 2 channels
         }
     }
