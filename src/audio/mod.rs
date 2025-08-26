@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use frame_sequencer::FrameSequencer;
+use high_pass::HighPassFilter;
 use master_volume::MasterVolume;
 use square_channel::SquareWaveChannel;
 use crate::audio::noise_channel::NoiseChannel;
@@ -20,6 +21,7 @@ pub mod sample;
 pub mod dac;
 pub mod wave_channel;
 pub mod noise_channel;
+mod high_pass;
 
 pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 
@@ -33,6 +35,7 @@ pub struct Audio {
     channel2: SquareWaveChannel,
     channel3: WaveChannel,
     channel4: NoiseChannel,
+    high_pass_filter: HighPassFilter,
     buffer: VecDeque<f32>,
 }
 
@@ -47,6 +50,7 @@ impl Default for Audio {
             channel2: SquareWaveChannel::channel2(),
             channel3: WaveChannel::default(),
             channel4: NoiseChannel::default(),
+            high_pass_filter: HighPassFilter::default(),
             buffer: VecDeque::with_capacity(2 * GB_SAMPLE_RATE / 10), // buffer for 100ms of audio, 2 channels
         }
     }
@@ -75,29 +79,32 @@ impl Audio {
         }
 
         let events = self.frame_sequencer.update(div_clocks);
-
         self.channel1.update(delta, events);
-        let channel1 = self.panning.channel1.pan(self.channel1.output_f32());
-
         self.channel2.update(delta, events);
-        let channel2 = self.panning.channel2.pan(self.channel2.output_f32());
-
         self.channel3.update(delta, events);
-        let channel3 = self.panning.channel3.pan(self.channel3.output_f32());
-
         self.channel4.update(delta, events);
+
+        if !self.channel1.dac_enabled() && !self.channel2.dac_enabled() && !self.channel3.dac_enabled() && !self.channel4.dac_enabled() {
+            // When all four channel DACs are off, the master volume units are disconnected from the sound output and the output level becomes 0
+            self.push_sample(delta, AudioSample::ZERO);
+            return;
+        }
+
+        let channel1 = self.panning.channel1.pan(self.channel1.output_f32());
+        let channel2 = self.panning.channel2.pan(self.channel2.output_f32());
+        let channel3 = self.panning.channel3.pan(self.channel3.output_f32());
         let channel4 = self.panning.channel4.pan(self.channel4.output_f32());
 
         let volume = self.master_volume.volume_sample();
         let sample = volume * (channel1 + channel2 + channel3 + channel4) / 4.0;
-        // TODO implement DAC capacitor effect
         self.push_sample(delta, sample);
     }
 
     fn push_sample(&mut self, delta: MachineCycles, sample: AudioSample) {
         for _ in 0..delta.m_cycles() {
-            self.buffer.push_back(sample.left);
-            self.buffer.push_back(sample.right);
+            let filtered_sample = self.high_pass_filter.process(sample);
+            self.buffer.push_back(filtered_sample.left);
+            self.buffer.push_back(filtered_sample.right);
             if self.buffer.len() >= self.buffer.capacity() {
                 // audio buffer overflow :-(
                 self.buffer.drain(..2);

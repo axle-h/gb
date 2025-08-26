@@ -127,6 +127,10 @@ impl SquareWaveChannel {
         self.active
     }
 
+    pub fn dac_enabled(&self) -> bool {
+        self.envelope_function.dac_enabled()
+    }
+
     pub fn output(&self) -> u8 {
         self.output
     }
