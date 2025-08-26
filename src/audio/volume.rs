@@ -39,7 +39,7 @@ impl VolumeAndEnvelopeRegister {
     }
 
     pub fn sweep_pace(&self) -> u8 {
-        if { self.sweep_pace == 0 } { 8 } else { self.sweep_pace }
+        if self.sweep_pace == 0 { 8 } else { self.sweep_pace }
     }
 }
 
@@ -65,8 +65,8 @@ impl Default for EnvelopeFunction {
 impl EnvelopeFunction {
     pub const MAX_VOLUME: u8 = 0xF;
 
-    pub fn dac_off(&self) -> bool {
-        self.register.initial_volume == 0 && !self.register.envelope_direction
+    pub fn dac_enabled(&self) -> bool {
+        self.register.initial_volume != 0 || self.register.envelope_direction
     }
 
     pub fn reset(&mut self) {

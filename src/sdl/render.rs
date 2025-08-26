@@ -15,7 +15,6 @@ use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
-use crate::roms::blarg::AUDIO_REGISTERS;
 use crate::roms::commercial::*;
 use crate::sdl::font::FontTextures;
 
@@ -24,7 +23,7 @@ const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
-    let mut gb = GameBoy::dmg(AUDIO_REGISTERS);
+    let mut gb = GameBoy::dmg(crate::roms::blargg_dmg_sound::TRIGGER);
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;

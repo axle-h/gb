@@ -1,48 +1,61 @@
 use crate::activation::Activation;
-use crate::audio::control::PeriodAndControlRegisters;
 use crate::audio::dac::dac_sample;
-use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
-use crate::audio::length::{LengthTimer, LengthTimerAndDutyCycleRegister};
+use crate::audio::frame_sequencer::{FrameSequencerEvent};
+use crate::audio::length::{LengthTimer};
 use crate::audio::sweep::{Sweep, SweepRegister};
 use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
-use crate::divider::DividerClocks;
 
 #[derive(Debug, Clone)]
 pub struct SquareWaveChannel {
-    active: bool, // the channel has been triggered and is active
-    sweep_enabled: bool, // channel 1 only
-    sweep: Sweep,
-    envelope: EnvelopeFunction,
-    length_duty_register: LengthTimerAndDutyCycleRegister,
-    period_control_register: PeriodAndControlRegisters,
-    frame_sequencer: FrameSequencer,
+    /// NR10 (channel 1 only)
+    sweep: Option<Sweep>,
+
+    /// NRx1  Length timer & duty cycle
+    /// bits 6-7 Duty cycle
+    /// Controls the output waveform as follows:
+    /// - 00: 12.5% duty cycle
+    /// - 01: 25% duty cycle
+    /// - 10: 50% duty cycle
+    /// - 11: 75% duty cycle
+    wave_duty_cycle: u8,
+    /// bits 0-5 Initial length timer
+    /// The higher this field is, the shorter the time before the channel is cut.
+    initial_length_timer: u8,
     length_timer: LengthTimer,
 
+    /// NRx2 Volume & envelope
+    envelope_function: EnvelopeFunction,
+
+    /// NRx3 Period low
+    /// NRx4 Period high & control
+    period: u16, // 11 bits
+    length_enabled: bool, // bit 6 of high byte
+
+    /// Internal state
+    active: bool, // The channel has been triggered and is active
     current_period: usize, // copy of the period register for this duty cycle
     frequency_timer: usize, // internal counter that overflows at current_period
     wave_duty_index: [usize; 4], // current index into the wave duty pattern (0-7) for the current duty cycle
-
     output: u8,
 }
 
 impl SquareWaveChannel {
     pub fn new(sweep_enabled: bool) -> Self {
-        let period_control_register = PeriodAndControlRegisters::default();
-        let length_duty_register = LengthTimerAndDutyCycleRegister::default();
         Self {
+            sweep: if sweep_enabled { Some(Sweep::default()) } else { None },
+            wave_duty_cycle: 0,
+            initial_length_timer: 0,
+            length_timer: LengthTimer::square_or_noise_channel(),
+            envelope_function: EnvelopeFunction::default(),
+            period: 0,
+            length_enabled: false,
+
             active: false,
-            sweep_enabled,
-            sweep: Sweep::default(),
-            envelope: EnvelopeFunction::default(),
-            current_period: period_control_register.period() as usize,
-            frame_sequencer: FrameSequencer::default(),
+            current_period: 0,
             frequency_timer: 0,
             wave_duty_index: [0; 4], // this is to store an index per wave duty, is this correct?
-            length_timer: LengthTimer::square_channel(&length_duty_register),
             output: 0,
-            length_duty_register,
-            period_control_register,
         }
     }
 
@@ -55,36 +68,60 @@ impl SquareWaveChannel {
     }
 
     pub fn sweep_register(&self) -> &SweepRegister {
-        &self.sweep.register()
+        &self.sweep.as_ref().expect("sweep is disabled").register()
     }
 
     pub fn sweep_register_mut(&mut self) -> &mut SweepRegister {
-        self.sweep.register_mut()
+        self.sweep.as_mut().expect("sweep is disabled").register_mut()
     }
 
-    pub fn length_duty_register(&self) -> &LengthTimerAndDutyCycleRegister {
-        &self.length_duty_register
+    pub fn nrx1_length_timer_duty_cycle(&self) -> u8 {
+        // write only bits 0-5 always read as 1
+        0x3F | ((self.wave_duty_cycle & 0x03) << 6) // Bits 6-7: Wave duty cycle
     }
 
-    pub fn length_duty_register_mut(&mut self) -> &mut LengthTimerAndDutyCycleRegister {
-        &mut self.length_duty_register
+    pub fn set_nrx1_length_timer_duty_cycle(&mut self, value: u8, apu_active: bool) {
+        if apu_active {
+            // can only set the wave duty cycle when APU is active
+            self.wave_duty_cycle = (value >> 6) & 0x03; // Bits 6-7
+        }
+        self.initial_length_timer = value & 0x3F; // Bits 0-5
+
+        // the length timer can be reset at any time
+        self.length_timer.reset(self.initial_length_timer);
     }
 
     pub fn volume_envelope_register(&self) -> &VolumeAndEnvelopeRegister {
-        &self.envelope.register()
+        &self.envelope_function.register()
     }
 
     pub fn volume_envelope_register_mut(&mut self) -> &mut VolumeAndEnvelopeRegister {
-        self.envelope.register_mut()
+        self.envelope_function.register_mut()
     }
 
-    pub fn period_control_register(&self) -> &PeriodAndControlRegisters {
-        &self.period_control_register
+    pub fn nrx3_period_low(&self) -> u8 {
+        0xFF // the lower 8 bits of the period, write-only bits return 1
     }
 
-    pub fn period_control_register_mut(&mut self) -> &mut PeriodAndControlRegisters {
-        &mut self.period_control_register
+    pub fn set_nrx3_period_low(&mut self, value: u8) {
+        self.period = (self.period & 0xFF00) | value as u16; // Set the lower 8 bits
     }
+
+    pub fn nrx4_period_high_and_control(&self) -> u8 {
+        // Bits 0-5 & 7 are always 1 when read
+        0xBF | if self.length_enabled { 0x40 } else { 0 }
+    }
+
+    pub fn set_nrx4_period_high_and_control(&mut self, value: u8) {
+        self.period = (self.period & 0x00FF) | ((value as u16 & 0x07) << 8); // Set the upper 3 bits
+        let trigger = (value & 0x80) != 0; // bit 7
+        self.length_enabled = (value & 0x40) != 0; // bit 6
+
+        if trigger {
+            self.trigger();
+        }
+    }
+
 
     pub fn is_active(&self) -> bool {
         self.active
@@ -94,12 +131,8 @@ impl SquareWaveChannel {
         self.output
     }
 
-    pub fn dac_on(&self) -> bool {
-        !self.envelope.dac_off()
-    }
-
     pub fn output_f32(&self) -> f32 {
-        if self.dac_on() {
+        if self.envelope_function.dac_enabled() {
             dac_sample(self.output)
         } else {
             0.0
@@ -107,35 +140,43 @@ impl SquareWaveChannel {
     }
 
     pub fn trigger(&mut self) {
+        if !self.envelope_function.dac_enabled() {
+            return;
+        }
+
         self.active = true;
-        self.length_timer.reset(self.length_duty_register.initial_length_timer());
+        self.length_timer.restart_from_max_if_expired();
 
         // When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT modified.
         self.frequency_timer = self.frequency_timer & 0b00000011;
-        self.current_period = if self.sweep_enabled {
-            let initial_sweep = self.sweep.reset(self.current_period);
+        self.current_period = if let Some(sweep) = self.sweep.as_mut() {
+            let initial_sweep = sweep.reset(self.current_period);
             if initial_sweep.overflows {
                 self.active = false;
             }
             initial_sweep.value
         } else {
-            self.period_control_register.period() as usize
+            self.period as usize
         };
-        self.envelope.reset();
+        self.envelope_function.reset();
     }
 
-    pub fn update(&mut self, delta: MachineCycles, div_clocks: DividerClocks) {
-        if self.period_control_register.consume_pending_activation() {
-            self.trigger();
+    pub fn update(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
+        if self.active && !self.envelope_function.dac_enabled() {
+            self.active = false;
         }
 
         if !self.active {
+            self.output = 0;
+
+            // disabled channels still clock the length counter
+            if events.contains(FrameSequencerEvent::LengthCounter) {
+                self.update_length_counter();
+            }
             return
         }
 
         // Sweep -> Period Counter -> Duty -> Length Timer -> Envelope
-        let events = self.frame_sequencer.update(div_clocks);
-
         if events.contains(FrameSequencerEvent::Sweep) {
             self.update_sweep();
         }
@@ -150,37 +191,45 @@ impl SquareWaveChannel {
             self.update_volume_envelope();
         }
 
-        let wave_duty = self.wave_duty_index[self.length_duty_register.wave_duty_cycle() as usize];
+        let wave_duty = self.wave_duty_index[self.wave_duty_cycle as usize];
         let waveform_bit = 7 - wave_duty;
-        let waveform_sample = (self.length_duty_register.waveform() >> waveform_bit) & 0x1;
-        self.output = self.envelope.current_volume() * waveform_sample;
+        let waveform_sample = (self.waveform() >> waveform_bit) & 0x1;
+        self.output = self.envelope_function.current_volume() * waveform_sample;
+    }
+
+    fn waveform(&self) -> u8 {
+        match self.wave_duty_cycle {
+            0 => 0b00000001, // 12.5% duty cycle
+            1 => 0b00000011, // 25% duty cycle
+            2 => 0b00001111, // 50% duty cycle
+            3 => 0b11111100, // 75% duty cycle
+            _ => unreachable!(), // Should never happen
+        }
     }
 
     fn update_sweep(&mut self) {
-        if !self.sweep_enabled {
-            // channel 2 has no sweep
-            return
-        }
-
-        if let Some(next_sweep) = self.sweep.step() {
-            if next_sweep.overflows {
-                self.active = false;
-            } else {
-                self.current_period = next_sweep.value;
-                self.period_control_register.set_period(next_sweep.value as u16);
+        // channel 2 has no sweep
+        if let Some(sweep) = self.sweep.as_mut() {
+            if let Some(next_sweep) = sweep.step() {
+                if next_sweep.overflows {
+                    self.active = false;
+                } else {
+                    self.current_period = next_sweep.value;
+                    self.period = (next_sweep.value & 0x07FF) as u16;
+                }
             }
         }
     }
 
     fn update_length_counter(&mut self) {
-        if self.period_control_register.length_enable() && self.length_timer.step() {
+        if self.length_enabled && self.length_timer.step() {
             // length overflowed, disable the channel
             self.active = false;
         }
     }
 
     fn update_volume_envelope(&mut self) {
-        self.envelope.step();
+        self.envelope_function.step();
     }
 
     fn update_wave_duty(&mut self, delta: MachineCycles) {
@@ -196,12 +245,12 @@ impl SquareWaveChannel {
             // overflow, emit a sample
             self.frequency_timer -= frequency;
 
-            let wave_duty = &mut self.wave_duty_index[self.length_duty_register.wave_duty_cycle() as usize];
+            let wave_duty = &mut self.wave_duty_index[self.wave_duty_cycle as usize];
             *wave_duty += 1;
             *wave_duty %= 8;
 
             // Period changes (written to NR13 or NR14) only take effect after the current “sample” ends
-            self.current_period = self.period_control_register.period() as usize;
+            self.current_period = self.period as usize;
         }
     }
 }
@@ -213,10 +262,10 @@ mod tests {
     #[test]
     fn basic_tone() {
         let mut channel = SquareWaveChannel::channel2();
-        channel.length_duty_register.set(0b10000000); // 50% duty cycle
-        channel.period_control_register.set_nrx3(0x00); // low byte of period
-        channel.period_control_register.set_nrx4(0b00000101); // high byte of period (period = 0x500)
-        channel.envelope.register_mut().set(0xF0); // initial volume 15
+        channel.set_nrx1_length_timer_duty_cycle(0b10000000, true); // 50% duty cycle
+        channel.set_nrx3_period_low(0x00); // low byte of period
+        channel.set_nrx4_period_high_and_control(0b00000101); // high byte of period (period = 0x500)
+        channel.envelope_function.register_mut().set(0xF0); // initial volume 15
         channel.trigger();
 
         // With a period of 0x500, we should get a frequency of 1 sample per 768 machine cycles
@@ -227,7 +276,7 @@ mod tests {
         });
         let mut waveform = [0u8; 768 * 8];
         for i in 0..waveform.len() {
-            channel.update(MachineCycles::from_m(1), DividerClocks::ZERO);
+            channel.update(MachineCycles::from_m(1), FrameSequencerEvent::empty());
             waveform[i] = channel.output;
         }
 

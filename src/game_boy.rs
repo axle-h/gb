@@ -37,110 +37,143 @@ impl GameBoy {
 
 #[cfg(test)]
 mod tests {
+    use std::io::BufReader;
+    use image::{ImageFormat, ImageReader, RgbImage};
+    use crate::roms::roms::parse_png;
     use super::*;
 
-    fn serial_console_test(cart: &[u8]) {
-        let mut gb = GameBoy::dmg(cart);
-        gb.core.mmu_mut().serial_mut().enable_buffer();
-
-        let mut max_cycles = MachineCycles::from_m(100_000_000);
-        let mut cycles = MachineCycles::ZERO;
-        let mut output = String::new();
-        let mut failed = false;
-        while cycles < max_cycles {
-            cycles += gb.run(MachineCycles::from_m(1000));
-
-            output = gb.core.mmu().serial()
-                .buffered_bytes()
-                .map(|b| String::from_utf8_lossy(b).to_string())
-                .unwrap_or_default();
-
-            if output.contains("Passed") {
-                return;
-            } else if !failed && output.contains("Failed") {
-                // Run for a few more cycles to collect more output
-                max_cycles = cycles + MachineCycles::from_m(10_000);
-                failed = true;
-            }
-        }
-
-        panic!("Test failed with output: {}", output);
-    }
-
-    mod blargg {
+    mod blargg_cpu {
         use super::*;
-        use crate::roms::blarg::*;
-
-        #[test]
-        fn cpu() {
-            // this slows down the test but I think it is necessary as it fails in different ways to the individual roms
-            serial_console_test(CPU_INSTRUCTIONS);
-        }
+        use crate::roms::blargg_cpu::*;
 
         #[test]
         fn cpu_01_special() {
-            serial_console_test(CPU_INSTRUCTIONS_01);
+            serial_console_test("cpu-01", CPU_INSTRUCTIONS_01);
         }
 
         #[test]
         fn cpu_02_interrupts() {
-            serial_console_test(CPU_INSTRUCTIONS_02);
+            serial_console_test("cpu-02", CPU_INSTRUCTIONS_02);
         }
 
         #[test]
         fn cpu_03_op_sp_hl() {
-            serial_console_test(CPU_INSTRUCTIONS_03);
+            serial_console_test("cpu-03", CPU_INSTRUCTIONS_03);
         }
 
         #[test]
         fn cpu_04_op_r_imm() {
-            serial_console_test(CPU_INSTRUCTIONS_04);
+            serial_console_test("cpu-04", CPU_INSTRUCTIONS_04);
         }
 
         #[test]
         fn cpu_05_op_rp() {
-            serial_console_test(CPU_INSTRUCTIONS_05);
+            serial_console_test("cpu-05", CPU_INSTRUCTIONS_05);
         }
 
         #[test]
         fn cpu_06_ld_r_r() {
-            serial_console_test(CPU_INSTRUCTIONS_06);
+            serial_console_test("cpu-06", CPU_INSTRUCTIONS_06);
         }
 
         #[test]
         fn cpu_07_jr_jp_call_ret_rst() {
-            serial_console_test(CPU_INSTRUCTIONS_07);
+            serial_console_test("cpu-07", CPU_INSTRUCTIONS_07);
         }
 
         #[test]
         fn cpu_08_misc_instrs() {
-            serial_console_test(CPU_INSTRUCTIONS_08);
+            serial_console_test("cpu-08", CPU_INSTRUCTIONS_08);
         }
 
         #[test]
         fn cpu_09_op_r_r() {
-            serial_console_test(CPU_INSTRUCTIONS_09);
+            serial_console_test("cpu-09", CPU_INSTRUCTIONS_09);
         }
 
         #[test]
         fn cpu_10_bit_ops() {
-            serial_console_test(CPU_INSTRUCTIONS_10);
+            serial_console_test("cpu-10", CPU_INSTRUCTIONS_10);
         }
 
         #[test]
         fn cpu_11_op_a_hl() {
-            serial_console_test(CPU_INSTRUCTIONS_11);
+            serial_console_test("cpu-11", CPU_INSTRUCTIONS_11);
         }
 
         #[test]
         fn instruction_timing() {
-            serial_console_test(INSTRUCTION_TIMING);
+            serial_console_test("instruction-timing", INSTRUCTION_TIMING);
         }
     }
 
+    mod blargg_dmg_sound {
+        use crate::roms::blargg_dmg_sound::*;
+        use super::*;
+
+        #[test]
+        fn registers() {
+            ppu_test("audio-registers", REGISTERS, EXPECTED_REGISTERS);
+        }
+
+        #[test]
+        fn length_counter() {
+            ppu_test("audio-length-counter", LENGTH_COUNTER, EXPECTED_LENGTH_COUNTER);
+        }
+
+        #[test]
+        fn trigger() {
+            ppu_test("audio-trigger", TRIGGER, EXPECTED_TRIGGER);
+        }
+
+        #[test]
+        fn sweep() {
+            ppu_test("audio-sweep", SWEEP, EXPECTED_SWEEP);
+        }
+
+        #[test]
+        fn sweep_details() {
+            ppu_test("audio-sweep-details", SWEEP_DETAILS, EXPECTED_SWEEP_DETAILS);
+        }
+
+        #[test]
+        fn overflow_on_trigger() {
+            ppu_test("audio-overflow-on-trigger", OVERFLOW_ON_TRIGGER, EXPECTED_OVERFLOW_ON_TRIGGER);
+        }
+
+        #[test]
+        fn length_sweep_period_sync() {
+            ppu_test("audio-length-sweep-period-sync", LENGTH_SWEEP_PERIOD_SYNC, EXPECTED_LENGTH_SWEEP_PERIOD_SYNC);
+        }
+
+        #[test]
+        fn length_counter_during_power() {
+            ppu_test("audio-length-counter-during-power", LENGTH_COUNTER_DURING_POWER, EXPECTED_LENGTH_COUNTER_DURING_POWER);
+        }
+
+        #[test]
+        fn wave_read_while_on() {
+            ppu_test("audio-wave-read-while-on", WAVE_READ_WHILE_ON, EXPECTED_WAVE_READ_WHILE_ON);
+        }
+
+        #[test]
+        fn wave_trigger_while_on() {
+            ppu_test("audio-wave-trigger-while-on", WAVE_TRIGGER_WHILE_ON, EXPECTED_WAVE_TRIGGER_WHILE_ON);
+        }
+
+        #[test]
+        fn registers_after_power() {
+            ppu_test("audio-registers-after-power", REGISTERS_AFTER_POWER, EXPECTED_REGISTERS_AFTER_POWER);
+        }
+
+        #[test]
+        fn wave_write_while_on() {
+            ppu_test("audio-wave-write-while-on", WAVE_WRITE_WHILE_ON, EXPECTED_WAVE_WRITE_WHILE_ON);
+        }
+
+    }
+
     mod joypad {
-        use std::io::BufReader;
-        use image::{ImageFormat, ImageReader};
         use crate::joypad::JoypadButton;
         use super::*;
         use crate::roms::button_test::*;
@@ -185,7 +218,7 @@ mod tests {
             test_button(JoypadButton::Right, EXPECTED_RIGHT);
         }
 
-        fn test_button(button: JoypadButton, expected_image: &[u8]) {
+        fn test_button(button: JoypadButton, expected_screenshot: &[u8]) {
             let mut gb = GameBoy::dmg(ROM);
             gb.run(MachineCycles::from_m(400_000));
 
@@ -201,18 +234,14 @@ mod tests {
 
             let result = gb.core().mmu().ppu().screenshot();
 
-            let expected_image = ImageReader::with_format(BufReader::new(std::io::Cursor::new(expected_image)), ImageFormat::Png)
-                .decode()
-                .expect("Failed to decode expected image")
-                .to_rgb8();
-
-            if result != expected_image {
-                let result_path = format!("target/button_test_result_{}.png", button);
-                result.save(result_path.clone()).expect("Failed to save result image");
-                panic!("Test failed, saved result image to {}", result_path);
+            let expected_screenshot = parse_png(expected_screenshot);
+            if result != expected_screenshot {
+                gb_test_failed_with_screenshot(result, &format!("{}-button", button), "screenshot does not match");
             }
         }
     }
+
+
 
     mod ppu {
         use std::io::BufReader;
@@ -232,10 +261,66 @@ mod tests {
                 .to_rgb8();
 
             if result != expected_image {
-                let result_path = "target/ppu_test_result.png";
-                result.save(result_path).expect("Failed to save result image");
-                panic!("PPU test failed, saved result image to {}", result_path);
+                gb_test_failed_with_screenshot(result, "ppu", "screenshot does not match");
             }
         }
+    }
+
+    fn serial_console_test(name: &str, cart: &[u8]) {
+        let mut gb = GameBoy::dmg(cart);
+        gb.core.mmu_mut().serial_mut().enable_buffer();
+
+        let mut max_cycles = MachineCycles::from_m(1_000_000);
+        let mut cycles = MachineCycles::ZERO;
+        let mut serial_output = String::new();
+        let mut failed = false;
+        while cycles < max_cycles {
+            cycles += gb.run(MachineCycles::from_m(1000));
+
+            serial_output = gb.core.mmu().serial()
+                .buffered_bytes()
+                .map(|b| String::from_utf8_lossy(b).to_string())
+                .unwrap_or_default();
+
+            if serial_output.contains("Passed") {
+                return;
+            } else if !failed && serial_output.contains("Failed") {
+                // Run for a few more cycles to collect more output
+                max_cycles = cycles + MachineCycles::from_m(10_000);
+                failed = true;
+            }
+        }
+
+        gb_test_failed(&gb, name, &serial_output);
+    }
+
+    fn ppu_test(name: &str, cart: &[u8], expected_screenshot: &[u8]) {
+        let expected_screenshot = parse_png(expected_screenshot);
+        let mut gb = GameBoy::dmg(cart);
+        let max_cycles = MachineCycles::from_m(10_000_000);
+        let mut cycles = MachineCycles::ZERO;
+        let mut last_screenshot = gb.core().mmu().ppu().screenshot();
+
+        while cycles < max_cycles {
+            cycles += gb.run(MachineCycles::from_m(1000));
+            last_screenshot = gb.core().mmu().ppu().screenshot();
+
+            if last_screenshot == expected_screenshot {
+                return;
+            }
+        }
+
+        gb_test_failed_with_screenshot(last_screenshot, name, "screenshot does not match");
+    }
+
+    fn gb_test_failed(gb: &GameBoy, name: &str, reason: &str) {
+        let image = gb.core().mmu().ppu().screenshot();
+        gb_test_failed_with_screenshot(image, name, reason);
+    }
+
+    fn gb_test_failed_with_screenshot(image: RgbImage, name: &str, reason: &str) {
+        let result_path = &format!("target/test_failure_{}.png", name);
+        image.save(result_path).expect("Failed to save result image");
+        panic!("{} test failed, saved result image to {}, reason: {}", name, result_path, reason);
     }
 }

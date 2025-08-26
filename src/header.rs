@@ -115,11 +115,12 @@ impl CartHeader {
 
 #[cfg(test)]
 mod tests {
+    use crate::roms::blargg_cpu::CPU_INSTRUCTIONS;
     use super::*;
 
     #[test]
     fn parse_cpu_instrs() {
-        let header = CartHeader::parse(crate::roms::blarg::CPU_INSTRUCTIONS)
+        let header = CartHeader::parse(CPU_INSTRUCTIONS)
             .expect("Failed to parse CPU_INSTRS header");
         assert_eq!(header.title(), "CPU_INSTRS");
         assert_eq!(header.cgb_mode(), CGBMode::Enhanced);

@@ -1,6 +1,6 @@
 
 
-pub mod blarg {
+pub mod blargg_cpu {
     pub const CPU_INSTRUCTIONS: &[u8] = include_bytes!("cpu_instrs/cpu_instrs.gb");
     pub const CPU_INSTRUCTIONS_01: &[u8] = include_bytes!("cpu_instrs/01-special.gb");
     pub const CPU_INSTRUCTIONS_02: &[u8] = include_bytes!("cpu_instrs/02-interrupts.gb");
@@ -15,8 +15,34 @@ pub mod blarg {
     pub const CPU_INSTRUCTIONS_11: &[u8] = include_bytes!("cpu_instrs/11-op a,(hl).gb");
 
     pub const INSTRUCTION_TIMING: &[u8] = include_bytes!("instr_timing.gb");
+}
 
-    pub const AUDIO_REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.gb");
+pub mod blargg_dmg_sound {
+
+    pub const REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.gb");
+    pub const EXPECTED_REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.png");
+    pub const LENGTH_COUNTER: &[u8] = include_bytes!("dmg_sound/02-len ctr.gb");
+    pub const EXPECTED_LENGTH_COUNTER: &[u8] = include_bytes!("dmg_sound/02-len ctr.png");
+    pub const TRIGGER: &[u8] = include_bytes!("dmg_sound/03-trigger.gb");
+    pub const EXPECTED_TRIGGER: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const SWEEP: &[u8] = include_bytes!("dmg_sound/04-sweep.gb");
+    pub const EXPECTED_SWEEP: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const SWEEP_DETAILS: &[u8] = include_bytes!("dmg_sound/05-sweep details.gb");
+    pub const EXPECTED_SWEEP_DETAILS: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const OVERFLOW_ON_TRIGGER: &[u8] = include_bytes!("dmg_sound/06-overflow on trigger.gb");
+    pub const EXPECTED_OVERFLOW_ON_TRIGGER: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const LENGTH_SWEEP_PERIOD_SYNC: &[u8] = include_bytes!("dmg_sound/07-len sweep period sync.gb");
+    pub const EXPECTED_LENGTH_SWEEP_PERIOD_SYNC: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const LENGTH_COUNTER_DURING_POWER: &[u8] = include_bytes!("dmg_sound/08-len ctr during power.gb");
+    pub const EXPECTED_LENGTH_COUNTER_DURING_POWER: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const WAVE_READ_WHILE_ON: &[u8] = include_bytes!("dmg_sound/09-wave read while on.gb");
+    pub const EXPECTED_WAVE_READ_WHILE_ON: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const WAVE_TRIGGER_WHILE_ON: &[u8] = include_bytes!("dmg_sound/10-wave trigger while on.gb");
+    pub const EXPECTED_WAVE_TRIGGER_WHILE_ON: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const REGISTERS_AFTER_POWER: &[u8] = include_bytes!("dmg_sound/11-regs after power.gb");
+    pub const EXPECTED_REGISTERS_AFTER_POWER: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const WAVE_WRITE_WHILE_ON: &[u8] = include_bytes!("dmg_sound/12-wave write while on.gb");
+    pub const EXPECTED_WAVE_WRITE_WHILE_ON: &[u8] = EXPECTED_REGISTERS; // TODO
 }
 
 pub mod acid {
@@ -40,4 +66,16 @@ pub mod commercial {
     pub const TETRIS: &[u8] = include_bytes!("tetris.gb");
     pub const ALLEYWAY: &[u8] = include_bytes!("alleyway.gb");
     pub const POKEMON_RED: &[u8] = include_bytes!("pokemon-red.gb");
+}
+
+pub mod roms {
+    use std::io::BufReader;
+    use image::{ImageFormat, ImageReader, RgbImage};
+
+    pub fn parse_png(data: &[u8]) -> RgbImage {
+        ImageReader::with_format(BufReader::new(std::io::Cursor::new(data)), ImageFormat::Png)
+            .decode()
+            .expect("Failed to decode expected image")
+            .to_rgb8()
+    }
 }
