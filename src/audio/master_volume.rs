@@ -7,15 +7,15 @@ use crate::audio::sample::AudioSample;
 ///                    and a value of 7 is treated as a volume of 8 (no volume reduction).
 ///                    Importantly, the amplifier never mutes a non-silent input.
 #[derive(Debug, Clone, Default)]
-pub struct MasterVolumeRegister {
+pub struct MasterVolume {
     vin_left: bool, // bit 7
     vin_right: bool, // bit 3
     left_volume: u8, // bits 4-6
     right_volume: u8, // bits 0-2
 }
 
-impl MasterVolumeRegister {
-    pub fn get(&self) -> u8 {
+impl MasterVolume {
+    pub fn get_byte(&self) -> u8 {
         let mut byte = 0;
         if self.vin_left { byte |= 0x80; }
         if self.vin_right { byte |= 0x08; }
@@ -24,7 +24,7 @@ impl MasterVolumeRegister {
         byte
     }
 
-    pub fn set(&mut self, value: u8) {
+    pub fn set_byte(&mut self, value: u8) {
         self.vin_left = (value & 0x80) != 0; // bit 7
         self.vin_right = (value & 0x08) != 0; // bit 3
         self.left_volume = (value >> 4) & 0x07; // bits 4-6
@@ -72,8 +72,8 @@ mod tests {
 
     #[test]
     fn default_values() {
-        let volume = MasterVolumeRegister::default();
-        assert_eq!(volume.get(), 0);
+        let volume = MasterVolume::default();
+        assert_eq!(volume.get_byte(), 0);
         assert_eq!(volume.left_volume(), 0);
         assert_eq!(volume.right_volume(), 0);
         assert!(!volume.vin_left());
@@ -82,10 +82,10 @@ mod tests {
 
     #[test]
     fn set_and_get_all_bits() {
-        let mut volume = MasterVolumeRegister::default();
-        volume.set(0xFF); // All bits set
+        let mut volume = MasterVolume::default();
+        volume.set_byte(0xFF); // All bits set
 
-        assert_eq!(volume.get(), 0xFF);
+        assert_eq!(volume.get_byte(), 0xFF);
         assert!(volume.vin_left());
         assert!(volume.vin_right());
         assert_eq!(volume.left_volume(), 7);  // bits 4-6 = 0b111 = 7
@@ -94,54 +94,54 @@ mod tests {
 
     #[test]
     fn vin_bits() {
-        let mut volume = MasterVolumeRegister::default();
+        let mut volume = MasterVolume::default();
 
         // Test VIN left (bit 7)
-        volume.set(0x80);
+        volume.set_byte(0x80);
         assert!(volume.vin_left());
         assert!(!volume.vin_right());
         assert_eq!(volume.left_volume(), 0);
         assert_eq!(volume.right_volume(), 0);
-        assert_eq!(volume.get(), 0x80);
+        assert_eq!(volume.get_byte(), 0x80);
 
         // Test VIN right (bit 3)
-        volume.set(0x08);
+        volume.set_byte(0x08);
         assert!(!volume.vin_left());
         assert!(volume.vin_right());
         assert_eq!(volume.left_volume(), 0);
         assert_eq!(volume.right_volume(), 0);
-        assert_eq!(volume.get(), 0x08);
+        assert_eq!(volume.get_byte(), 0x08);
     }
 
     #[test]
     fn volume_levels() {
-        let mut volume = MasterVolumeRegister::default();
+        let mut volume = MasterVolume::default();
 
         // Test left volume (bits 4-6)
         for level in 0..=7 {
-            volume.set(level << 4);
+            volume.set_byte(level << 4);
             assert_eq!(volume.left_volume(), level);
             assert_eq!(volume.right_volume(), 0);
-            assert_eq!(volume.get(), level << 4);
+            assert_eq!(volume.get_byte(), level << 4);
         }
 
         // Test right volume (bits 0-2)
         for level in 0..=7 {
-            volume.set(level);
+            volume.set_byte(level);
             assert_eq!(volume.right_volume(), level);
             assert_eq!(volume.left_volume(), 0);
-            assert_eq!(volume.get(), level);
+            assert_eq!(volume.get_byte(), level);
         }
     }
 
     #[test]
     fn roundtrip_consistency() {
-        let mut volume = MasterVolumeRegister::default();
+        let mut volume = MasterVolume::default();
 
         // Test that set/get roundtrips work for all valid combinations
         for value in 0..=255 {
-            volume.set(value);
-            assert_eq!(volume.get(), value);
+            volume.set_byte(value);
+            assert_eq!(volume.get_byte(), value);
         }
     }
 }

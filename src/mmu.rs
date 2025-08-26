@@ -207,37 +207,7 @@ impl MMU {
             0xFF06 => self.timer.modulo(), // TMA register
             0xFF07 => self.timer.control(), // TAC register
             0xFF0F => self.interrupt_request.get(), // IF register (interrupt request flags)
-
-            0xFF10..=0xFF3F => {
-                let value = match address {
-                    0xFF10 => self.audio.channel1().sweep_register().get(), // NR10: Channel 1 sweep register
-                    0xFF11 => self.audio.channel1().length_duty_register().get(), // NR11: Channel 1 length and duty register
-                    0xFF12 => self.audio.channel1().volume_envelope_register().get(), // NR12: Channel 1 volume and envelope register
-                    0xFF13 => self.audio.channel1().period_control_register().nrx3(), // NR13: Channel 1 period low byte
-                    0xFF14 => self.audio.channel1().period_control_register().nrx4(), // NR14: Channel 1 period high byte and control
-                    0xFF16 => self.audio.channel2().length_duty_register().get(), // NR21: Channel 2 length and duty register
-                    0xFF17 => self.audio.channel2().volume_envelope_register().get(), // NR22: Channel 2 volume and envelope register
-                    0xFF18 => self.audio.channel2().period_control_register().nrx3(), // NR23: Channel 2 period low byte
-                    0xFF19 => self.audio.channel2().period_control_register().nrx4(), // NR24: Channel 2 period high byte and control
-                    0xFF1A => self.audio.channel3().nr30(), // NR30: Channel 3 DAC power
-                    0xFF1B => self.audio.channel3().nr31(), // NR31: Channel 3 length timer
-                    0xFF1C => self.audio.channel3().nr32(), // NR32: Channel 3 output level
-                    0xFF1D => self.audio.channel3().nr33(), // NR33: Channel 3 frequency low
-                    0xFF1E => self.audio.channel3().nr34(), // NR34: Channel 3 frequency high and control
-                    0xFF24 => self.audio.master_volume().get(), // NR50: Sound volume register
-                    0xFF25 => self.audio.panning().get(), // NR51: Sound panning register
-                    0xFF26 => self.audio.control().get(), // NR52: Sound control register
-                    0xFF30..=0xFF3F => self.audio.channel3().wave_ram((address - 0xFF30) as usize), // Wave RAM (0xFF30-0xFF3F)
-                    _ => {
-                        // ignore other audio registers for now
-                        0xFF
-                    }
-                };
-
-                println!("Read from audio register: {:04X} = {:02X}", address, value);
-                value
-            }
-
+            0xFF10..=0xFF3F => self.audio.read(address),
             0xFF40 => self.ppu.lcd_control().get(), // LCD control register
             0xFF41 => self.ppu.lcd_status().stat(), // LCD status register
             0xFF42 => self.ppu.scroll().y, // SCY register
@@ -299,33 +269,7 @@ impl MMU {
             0xFF06 => self.timer.set_modulo(value), // TMA register
             0xFF07 => self.timer.set_control(value), // TAC register
             0xFF0F => self.interrupt_request.set(value), // IF register (interrupt request flags)
-
-            0xFF10..=0xFF3F => {
-                println!("Write to audio register: {:04X} = {:02X}", address, value);
-                match address {
-                    0xFF10 => self.audio.channel1_mut().sweep_register_mut().set(value), // NR10: Channel 1 sweep register
-                    0xFF11 => self.audio.channel1_mut().length_duty_register_mut().set(value), // NR11: Channel 1 length and duty register
-                    0xFF12 => self.audio.channel1_mut().volume_envelope_register_mut().set(value), // NR12: Channel 1 volume and envelope register
-                    0xFF13 => self.audio.channel1_mut().period_control_register_mut().set_nrx3(value), // NR13: Channel 1 period low byte
-                    0xFF14 => self.audio.channel1_mut().period_control_register_mut().set_nrx4(value), // NR14: Channel 1 period high byte and control
-                    0xFF16 => self.audio.channel2_mut().length_duty_register_mut().set(value), // NR21: Channel 2 length and duty register
-                    0xFF17 => self.audio.channel2_mut().volume_envelope_register_mut().set(value), // NR22: Channel 2 volume and envelope register
-                    0xFF18 => self.audio.channel2_mut().period_control_register_mut().set_nrx3(value), // NR23: Channel 2 period low byte
-                    0xFF19 => self.audio.channel2_mut().period_control_register_mut().set_nrx4(value), // NR24: Channel 2 period high byte and control
-                    0xFF1A => self.audio.channel3_mut().set_nr30(value), // NR30: Channel 3 DAC power
-                    0xFF1B => self.audio.channel3_mut().set_nr31(value), // NR31: Channel 3 length timer
-                    0xFF1C => self.audio.channel3_mut().set_nr32(value), // NR32: Channel 3 output level
-                    0xFF1D => self.audio.channel3_mut().set_nr33(value), // NR33: Channel 3 frequency low
-                    0xFF1E => self.audio.channel3_mut().set_nr34(value), // NR34: Channel 3 frequency high and control
-                    0xFF24 => self.audio.master_volume_mut().set(value), // NR50: Sound volume register
-                    0xFF25 => self.audio.panning_mut().set(value), // NR51: Sound panning register
-                    0xFF26 => self.audio.control_mut().set(value), // NR52: Sound control register
-                    0xFF30..=0xFF3F => self.audio.channel3_mut().set_wave_ram((address - 0xFF30) as usize, value), // Wave RAM (0xFF30-0xFF3F)
-                    _ => {
-                        // ignore other audio registers for now
-                    }
-                }
-            }
+            0xFF10..=0xFF3F => self.audio.write(address, value),
             0xFF40 => self.ppu.lcd_control_mut().set(value), // LCD control register
             0xFF41 => self.ppu.lcd_status_mut().set_stat(value), // LCD status register
             0xFF42 => self.ppu.scroll_mut().y = value, // SCY register
@@ -356,18 +300,19 @@ impl MMU {
 
 #[cfg(test)]
 mod tests {
+    use crate::roms::blargg_cpu::CPU_INSTRUCTIONS;
     use super::*;
 
     #[test]
     fn mmu_enable_ram() {
-        let mut mmu = MMU::from_rom(crate::roms::blarg::CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
         mmu.write(0x0000, 0xA); // Enable RAM
         assert!(mmu.ram_enabled);
     }
 
     #[test]
     fn mmu_rom_banks() {
-        let mut mmu = MMU::from_rom(crate::roms::blarg::CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
         assert_eq!(mmu.read(0x0101), 0xC3); // Read from ROM bank 0, should be a JP instruction
         mmu.write(0x2000, 0x01);
         assert_eq!(mmu.rom_bank_register, 1);
@@ -381,7 +326,7 @@ mod tests {
 
     #[test]
     fn mmu_work_ram() {
-        let mut mmu = MMU::from_rom(crate::roms::blarg::CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
         mmu.write(0xC000, 0x42); // Write to work RAM
         assert_eq!(mmu.read(0xC000), 0x42);
         mmu.write(0xE000, 0x24); // Write to echo RAM
@@ -391,7 +336,7 @@ mod tests {
 
     #[test]
     fn mmu_high_ram() {
-        let mut mmu = MMU::from_rom(crate::roms::blarg::CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
         mmu.write(0xFF80, 0xAB); // Write to high RAM
         assert_eq!(mmu.read(0xFF80), 0xAB);
         mmu.write(0xFFFE, 0xCD); // Write to high RAM
@@ -400,7 +345,7 @@ mod tests {
 
     #[test]
     fn mmu_interrupt_flags() {
-        let mut mmu = MMU::from_rom(crate::roms::blarg::CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
         mmu.write(0xFF0F, 0x1F); // Set all interrupt flags
         assert_eq!(mmu.interrupt_request.get(), 0x1F);
         mmu.write(0xFF0F, 0x00); // Clear all interrupt flags
@@ -409,7 +354,7 @@ mod tests {
 
     #[test]
     fn interrupt_enable() {
-        let mut mmu = MMU::from_rom(crate::roms::blarg::CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
         mmu.write(0xFFFF, 0x1F); // Enable all interrupts
         assert_eq!(mmu.interrupt_enable.get(), 0x1F);
         mmu.write(0xFFFF, 0x00); // Disable all interrupts
