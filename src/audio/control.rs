@@ -5,32 +5,30 @@ use crate::activation::Activation;
 #[derive(Debug, Clone, Default)]
 pub struct PeriodAndControlRegisters {
     period: u16, // 11 bits
-    trigger: bool, // bit 7 of high byte
     length_enable: bool, // bit 6 of high byte
     pending_activation: bool,
 }
 
 impl PeriodAndControlRegisters {
-    pub fn get_low(&self) -> u8 {
-        (self.period & 0xFF) as u8 // Get the lower 8 bits
+    pub fn nrx3(&self) -> u8 {
+        0xFF // Get the lower 8 bits, write-only bits return 1
     }
 
-    pub fn set_low(&mut self, value: u8) {
+    pub fn set_nrx3(&mut self, value: u8) {
         self.period = (self.period & 0xFF00) | value as u16; // Set the lower 8 bits
     }
 
-    pub fn get_high(&self) -> u8 {
-        ((self.period >> 8) & 0x07) as u8
-            | if self.trigger { 0x80 } else { 0 }
-            | if self.length_enable { 0x40 } else { 0 }
+    pub fn nrx4(&self) -> u8 {
+        // Bits 0-5 & 7 are always 1 when read
+        0xBF | if self.length_enable { 0x40 } else { 0 }
     }
 
-    pub fn set_high(&mut self, value: u8) {
+    pub fn set_nrx4(&mut self, value: u8) {
         self.period = (self.period & 0x00FF) | ((value as u16 & 0x07) << 8); // Set the upper 3 bits
-        self.trigger = (value & 0x80) != 0; // bit 7
+        let trigger = (value & 0x80) != 0; // bit 7
         self.length_enable = (value & 0x40) != 0; // bit 6
 
-        if self.trigger {
+        if trigger {
             self.pending_activation = true; // Set pending activation if trigger is set
         }
     }
@@ -65,8 +63,8 @@ mod tests {
     #[test]
     fn default_values() {
         let registers = PeriodAndControlRegisters::default();
-        assert_eq!(registers.get_low(), 0);
-        assert_eq!(registers.get_high(), 0);
+        assert_eq!(registers.nrx3(), 0xFF);
+        assert_eq!(registers.nrx4(), 0xBF); // Bits 0-5 & 7 are always 1
         assert!(!registers.is_activation_pending());
         assert!(!registers.length_enable());
         assert_eq!(registers.period(), 0);
@@ -75,14 +73,14 @@ mod tests {
     #[test]
     fn get_and_set() {
         let mut registers = PeriodAndControlRegisters::default();
-        registers.set_high(0xFF);
+        registers.set_nrx4(0xFF);
         assert!(registers.is_activation_pending()); // Bit 7 is set
         assert!(registers.length_enable()); // Bit 6 is set
-        assert_eq!(registers.get_high(), 0xC7);
+        assert_eq!(registers.nrx4(), 0xFF);
         assert_eq!(registers.period(), 0x0700);
 
-        registers.set_low(0xFF);
-        assert_eq!(registers.get_low(), 0xFF);
+        registers.set_nrx3(0xFF);
+        assert_eq!(registers.nrx3(), 0xFF);
         assert_eq!(registers.period(), 0x7FF);
     }
 }

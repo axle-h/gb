@@ -58,10 +58,12 @@ impl Default for WaveChannel {
 
 impl WaveChannel {
     pub fn nr30(&self) -> u8 {
+        // Bit 7: DAC power (0=Off, 1=On)
+        // Bits 0-6: Read as 1
         if self.dac_enabled {
-            0x80
+            0xFF
         } else {
-            0x00
+            0x7F
         }
     }
 
@@ -70,7 +72,7 @@ impl WaveChannel {
     }
 
     pub fn nr31(&self) -> u8 {
-        self.initial_length_timer
+        0xFF // nr31 is write-only
     }
 
     pub fn set_nr31(&mut self, value: u8) {
@@ -78,7 +80,10 @@ impl WaveChannel {
     }
 
     pub fn nr32(&self) -> u8 {
-        (self.volume_register & 0b11) << 5
+        // Bits 0-4: Read as 1
+        // Bits 5-6: Volume code
+        // Bit 7: Read as 1
+        0x9F | ((self.volume_register & 0b11) << 5)
     }
 
     pub fn set_nr32(&mut self, value: u8) {
@@ -86,7 +91,7 @@ impl WaveChannel {
     }
 
     pub fn nr33(&self) -> u8 {
-        (self.period_register & 0x00FF) as u8
+        0xFF // nr33 is write-only
     }
 
     pub fn set_nr33(&mut self, value: u8) {
@@ -94,11 +99,8 @@ impl WaveChannel {
     }
 
     pub fn nr34(&self) -> u8 {
-        let mut value = ((self.period_register >> 8) & 0b111) as u8;
-        if self.length_enabled {
-            value |= 0b01000000;
-        }
-        value
+        // Bits 0-5 & 7 are always 1 when read
+        0xBF | if self.length_enabled { 0b01000000 } else { 0 }
     }
 
     pub fn set_nr34(&mut self, value: u8) {
