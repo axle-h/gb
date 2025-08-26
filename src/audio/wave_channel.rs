@@ -143,6 +143,10 @@ impl WaveChannel {
         self.active
     }
 
+    pub fn dac_enabled(&self) -> bool {
+        self.dac_enabled
+    }
+
     pub fn output_f32(&self) -> f32 {
         if self.dac_enabled {
             dac_sample(self.output)
