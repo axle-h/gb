@@ -214,8 +214,8 @@ mod tests {
     fn basic_tone() {
         let mut channel = SquareWaveChannel::channel2();
         channel.length_duty_register.set(0b10000000); // 50% duty cycle
-        channel.period_control_register.set_low(0x00); // low byte of period
-        channel.period_control_register.set_high(0b00000101); // high byte of period (period = 0x500)
+        channel.period_control_register.set_nrx3(0x00); // low byte of period
+        channel.period_control_register.set_nrx4(0b00000101); // high byte of period (period = 0x500)
         channel.envelope.register_mut().set(0xF0); // initial volume 15
         channel.trigger();
 

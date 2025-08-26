@@ -17,10 +17,8 @@ pub struct LengthTimerAndDutyCycleRegister {
 
 impl LengthTimerAndDutyCycleRegister {
     pub fn get(&self) -> u8 {
-        let mut byte = 0;
-        byte |= (self.wave_duty_cycle & 0x03) << 6; // Bits 6-7: Wave duty cycle
-        byte |= self.initial_length_timer & 0x3F; // Bits 0-5: Initial length timer
-        byte
+        // write only bits 0-5 always read as 1
+        0x3F | ((self.wave_duty_cycle & 0x03) << 6) // Bits 6-7: Wave duty cycle
     }
 
     pub fn set(&mut self, value: u8) {
@@ -88,7 +86,7 @@ mod tests {
     #[test]
     fn default_values() {
         let register = LengthTimerAndDutyCycleRegister::default();
-        assert_eq!(register.get(), 0);
+        assert_eq!(register.get(), 0x3F);
         assert_eq!(register.wave_duty_cycle(), 0);
         assert_eq!(register.initial_length_timer(), 0);
     }
@@ -97,7 +95,7 @@ mod tests {
     fn set_and_get_wave_duty_cycle() {
         let mut register = LengthTimerAndDutyCycleRegister::default();
         register.set(0b11000000); // Set duty cycle to 11 (75%)
-        assert_eq!(register.get(), 0b11000000);
+        assert_eq!(register.get(), 0xFF); // Bits 0-5 are always set
         assert_eq!(register.wave_duty_cycle(), 3); // 11 in binary
     }
 

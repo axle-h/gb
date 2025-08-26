@@ -17,7 +17,7 @@ pub struct SweepRegister {
 
 impl SweepRegister {
     pub fn get(&self) -> u8 {
-        let mut byte = 0;
+        let mut byte = 0x80; // Bit 7: Unused, always 1
         byte |= (self.sweep_period & 0x07) << 4; // Bits 4-6: Pace
         if self.subtraction {
             byte |= 0x08; // Bit 3: Direction (1 = Subtraction)
@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(register.sweep_period, 0);
         assert_eq!(register.subtraction, false);
         assert_eq!(register.individual_step, 0);
-        assert_eq!(register.get(), 0);
+        assert_eq!(register.get(), 0x80); // Bit 7 is always set
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(register.sweep_period, 7); // Only bits 4-6 used
         assert_eq!(register.subtraction, true); // Only bit 3 used
         assert_eq!(register.individual_step, 7); // Only bits 0-2 used
-        assert_eq!(register.get(), 0b01111111); // Bit 7 should not be set in output
+        assert_eq!(register.get(), 0b11111111); // Bit 7 is always set
     }
 
     #[test]
@@ -177,9 +177,9 @@ mod tests {
         let mut register = SweepRegister::default();
 
         // Test that set followed by get returns the same value for all valid combinations
-        for value in 0..=0b01111111 { // Only test valid 7-bit values
+        for value in 0..=0b01111111 {
             register.set(value);
-            assert_eq!(register.get(), value, "Round trip failed for value: {:#08b}", value);
+            assert_eq!(register.get(), value | 0x80, "Round trip failed for value: {:#08b}", value);
         }
     }
 
