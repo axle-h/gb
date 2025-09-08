@@ -54,7 +54,7 @@ impl Sweep {
         &mut self.register
     }
 
-    pub fn reset(&mut self, period: usize) -> SweepResult {
+    pub fn trigger(&mut self, period: usize) -> SweepResult {
         self.shadow_period = period;
         self.sweep_timer = self.register.sweep_period();
         self.enabled = self.register.sweep_period != 0 || self.register.individual_step != 0;
@@ -67,7 +67,7 @@ impl Sweep {
         }
     }
 
-    pub fn step(&mut self) -> Option<SweepResult> {
+    pub fn clock(&mut self) -> Option<SweepResult> {
         if self.sweep_timer > 0 {
             self.sweep_timer -= 1;
         }

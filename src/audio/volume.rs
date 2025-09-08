@@ -57,7 +57,7 @@ impl Default for EnvelopeFunction {
             period_counter: 0,
             register: VolumeAndEnvelopeRegister::default()
         };
-        default.reset();
+        default.trigger();
         default
     }
 }
@@ -69,7 +69,7 @@ impl EnvelopeFunction {
         self.register.initial_volume != 0 || self.register.envelope_direction
     }
 
-    pub fn reset(&mut self) {
+    pub fn trigger(&mut self) {
         self.current_volume = self.register.initial_volume;
         self.period_counter = self.register.sweep_pace();
     }

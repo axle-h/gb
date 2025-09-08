@@ -112,7 +112,7 @@ impl NoiseChannel {
         }
         self.active = true;
         self.length_timer.trigger(frame_sequencer);
-        self.envelope_function.reset();
+        self.envelope_function.trigger();
         self.lfsr = 0;
     }
 
