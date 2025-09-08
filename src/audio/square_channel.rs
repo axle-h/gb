@@ -1,4 +1,3 @@
-use crate::activation::Activation;
 use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
@@ -32,6 +31,7 @@ pub struct SquareWaveChannel {
     period: u16, // 11 bits
 
     /// Internal state
+    initialised: bool, // the channel has been triggered at least once
     active: bool, // The channel has been triggered and is active
     current_period: usize, // copy of the period register for this duty cycle
     frequency_timer: usize, // internal counter that overflows at current_period
@@ -50,6 +50,8 @@ impl SquareWaveChannel {
             period: 0,
 
             active: false,
+            initialised: true,
+            // Just after powering on, the first duty step of the square waves after they are triggered for the first time is played as if it were 0
             current_period: 0,
             frequency_timer: 0,
             wave_duty_index: 0,
@@ -145,9 +147,11 @@ impl SquareWaveChannel {
 
     fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
         if !self.envelope_function.dac_enabled() {
+            // the length timer is still triggered even when the dac is disabled.
+            self.length_timer.trigger(frame_sequencer);
             return;
         }
-
+        self.initialised = true;
         self.active = true;
         self.length_timer.trigger(frame_sequencer);
 
@@ -185,8 +189,6 @@ impl SquareWaveChannel {
             self.update_sweep();
         }
 
-        self.update_wave_duty(delta);
-
         if events.is_length_counter() {
             self.length_timer.clock(&mut self.active);
         }
@@ -195,6 +197,13 @@ impl SquareWaveChannel {
             self.update_volume_envelope();
         }
 
+        // Obscure behavior: Just after powering on, the first duty step of the square waves after they are triggered for the first time is played as if it were 0.
+        // Obscure behavior: the square duty sequence clocking is disabled until the first trigger.
+        if !self.initialised {
+            return;
+        }
+
+        self.update_wave_duty(delta);
         let waveform_bit = 7 - self.wave_duty_index;
         let waveform_sample = (self.waveform() >> waveform_bit) & 0x1;
         self.output = self.envelope_function.current_volume() * waveform_sample;

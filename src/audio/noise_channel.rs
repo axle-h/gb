@@ -106,6 +106,8 @@ impl NoiseChannel {
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
         if !self.envelope_function.dac_enabled() {
+            // the length timer is still triggered even when the dac is disabled.
+            self.length_timer.trigger(frame_sequencer);
             return;
         }
         self.active = true;
