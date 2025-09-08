@@ -163,6 +163,8 @@ impl WaveChannel {
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
         if !self.dac_enabled {
+            // the length timer is still triggered even when the dac is disabled.
+            self.length_timer.trigger(frame_sequencer);
             return;
         }
         self.active = true;
@@ -173,11 +175,15 @@ impl WaveChannel {
     }
 
     pub fn update(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
+        if self.active && !self.dac_enabled() {
+            self.active = false;
+        }
+
         if !self.active {
             self.output = 0;
 
             // disabled channels still clock the length counter
-            if events.contains(FrameSequencerEvent::LengthCounter) {
+            if events.is_length_counter() {
                 self.length_timer.clock(&mut self.active);
             }
             return;
@@ -185,7 +191,7 @@ impl WaveChannel {
 
         self.update_wave_duty(delta);
 
-        if events.contains(FrameSequencerEvent::LengthCounter) {
+        if events.is_length_counter() {
             self.length_timer.clock(&mut self.active);
         }
 

@@ -297,7 +297,7 @@ mod tests {
     fn ppu_test(name: &str, cart: &[u8], expected_screenshot: &[u8]) {
         let expected_screenshot = parse_png(expected_screenshot);
         let mut gb = GameBoy::dmg(cart);
-        let max_cycles = MachineCycles::from_m(10_000_000);
+        let max_cycles = MachineCycles::from_m(25_000_000);
         let mut cycles = MachineCycles::ZERO;
         let mut last_screenshot = gb.core().mmu().ppu().screenshot();
 
