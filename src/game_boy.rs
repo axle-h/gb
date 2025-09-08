@@ -125,12 +125,12 @@ mod tests {
         fn trigger() {
             ppu_test("audio-trigger", TRIGGER, EXPECTED_TRIGGER);
         }
-/*
+
         #[test]
         fn sweep() {
             ppu_test("audio-sweep", SWEEP, EXPECTED_SWEEP);
         }
-
+/*
         #[test]
         fn sweep_details() {
             ppu_test("audio-sweep-details", SWEEP_DETAILS, EXPECTED_SWEEP_DETAILS);
@@ -297,7 +297,7 @@ mod tests {
     fn ppu_test(name: &str, cart: &[u8], expected_screenshot: &[u8]) {
         let expected_screenshot = parse_png(expected_screenshot);
         let mut gb = GameBoy::dmg(cart);
-        let max_cycles = MachineCycles::from_m(25_000_000);
+        let max_cycles = MachineCycles::from_m(20_000_000);
         let mut cycles = MachineCycles::ZERO;
         let mut last_screenshot = gb.core().mmu().ppu().screenshot();
 

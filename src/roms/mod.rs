@@ -27,7 +27,7 @@ pub mod blargg_dmg_sound {
     pub const TRIGGER: &[u8] = include_bytes!("dmg_sound/03-trigger.gb");
     pub const EXPECTED_TRIGGER: &[u8] = include_bytes!("dmg_sound/03-trigger.png");
     pub const SWEEP: &[u8] = include_bytes!("dmg_sound/04-sweep.gb");
-    pub const EXPECTED_SWEEP: &[u8] = EXPECTED_REGISTERS; // TODO
+    pub const EXPECTED_SWEEP: &[u8] = include_bytes!("dmg_sound/04-sweep.png");
     pub const SWEEP_DETAILS: &[u8] = include_bytes!("dmg_sound/05-sweep details.gb");
     pub const EXPECTED_SWEEP_DETAILS: &[u8] = EXPECTED_REGISTERS; // TODO
     pub const OVERFLOW_ON_TRIGGER: &[u8] = include_bytes!("dmg_sound/06-overflow on trigger.gb");

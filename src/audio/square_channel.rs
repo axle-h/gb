@@ -158,7 +158,7 @@ impl SquareWaveChannel {
         // When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT modified.
         self.frequency_timer = self.frequency_timer & 0b00000011;
         self.current_period = if let Some(sweep) = self.sweep.as_mut() {
-            let initial_sweep = sweep.reset(self.current_period);
+            let initial_sweep = sweep.trigger(self.period as usize);
             if initial_sweep.overflows {
                 self.active = false;
             }
@@ -166,7 +166,7 @@ impl SquareWaveChannel {
         } else {
             self.period as usize
         };
-        self.envelope_function.reset();
+        self.envelope_function.trigger();
     }
 
     pub fn update(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
@@ -222,7 +222,7 @@ impl SquareWaveChannel {
     fn update_sweep(&mut self) {
         // channel 2 has no sweep
         if let Some(sweep) = self.sweep.as_mut() {
-            if let Some(next_sweep) = sweep.step() {
+            if let Some(next_sweep) = sweep.clock() {
                 if next_sweep.overflows {
                     self.active = false;
                 } else {
