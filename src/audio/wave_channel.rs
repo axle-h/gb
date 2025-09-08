@@ -1,5 +1,5 @@
 use crate::audio::dac::dac_sample;
-use crate::audio::frame_sequencer::{FrameSequencerEvent};
+use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
 use crate::cycles::MachineCycles;
 
@@ -32,7 +32,6 @@ pub struct WaveChannel {
 
     /// Internal state
     active: bool, // the channel has been triggered and is active
-    length_enabled: bool,
     current_period: usize, // copy of the period register for this duty cycle
     current_volume: u8, // copy of the initial volume for this duty cycle
     wave_index: usize, // current index into the wave pattern (0-31)
@@ -51,7 +50,6 @@ impl Default for WaveChannel {
             wave_ram: [0; 16],
 
             active: false,
-            length_enabled: false,
             current_period: 0,
             current_volume: 0,
             // When CH3 is started, the first sample read is the one at index 1,
@@ -71,8 +69,7 @@ impl WaveChannel {
         // wave ram is not touched on reset
 
         self.initial_length_timer = 0;
-        self.length_timer.reset(0);
-        self.length_enabled = false;
+        self.length_timer = LengthTimer::wave_channel();
         self.current_period = 0;
         self.current_volume = 0;
         self.wave_index = 1;
@@ -128,14 +125,15 @@ impl WaveChannel {
 
     pub fn nr34_period_high_and_control(&self) -> u8 {
         // Bits 0-5 & 7 are always 1 when read
-        0xBF | if self.length_enabled { 0b01000000 } else { 0 }
+        0xBF | if self.length_timer.enabled() { 0b01000000 } else { 0 }
     }
 
-    pub fn set_nr34_period_high_and_control(&mut self, value: u8) {
+    pub fn set_nr34_period_high_and_control(&mut self, value: u8, frame_sequencer: &FrameSequencer) {
         self.period_register = (self.period_register & 0x00FF) | (((value & 0b111) as u16) << 8);
-        self.length_enabled = value & 0b01000000 != 0;
+        let length_enabled = value & 0b01000000 != 0;
+        self.length_timer.set_enabled(length_enabled, frame_sequencer, &mut self.active);
         if value & 0b10000000 != 0 {
-            self.trigger();
+            self.trigger(frame_sequencer);
         }
     }
 
@@ -163,12 +161,12 @@ impl WaveChannel {
         self.wave_ram[index] = value;
     }
 
-    pub fn trigger(&mut self) {
+    pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
         if !self.dac_enabled {
             return;
         }
         self.active = true;
-        self.length_timer.restart_from_max_if_expired();
+        self.length_timer.trigger(frame_sequencer);
         self.current_period = self.period_register as usize;
         self.current_volume = self.volume_register;
         self.wave_index = 0;
@@ -180,7 +178,7 @@ impl WaveChannel {
 
             // disabled channels still clock the length counter
             if events.contains(FrameSequencerEvent::LengthCounter) {
-                self.update_length_counter();
+                self.length_timer.clock(&mut self.active);
             }
             return;
         }
@@ -188,18 +186,11 @@ impl WaveChannel {
         self.update_wave_duty(delta);
 
         if events.contains(FrameSequencerEvent::LengthCounter) {
-            self.update_length_counter();
+            self.length_timer.clock(&mut self.active);
         }
 
         // TODO wave output logic
         self.output = 0;
-    }
-
-    fn update_length_counter(&mut self) {
-        if self.length_enabled && self.length_timer.step() {
-            // length overflowed, disable the channel
-            self.active = false;
-        }
     }
 
     fn update_wave_duty(&mut self, delta: MachineCycles) {

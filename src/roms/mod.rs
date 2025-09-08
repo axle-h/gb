@@ -1,23 +1,24 @@
 
 
 pub mod blargg_cpu {
-    pub const CPU_INSTRUCTIONS: &[u8] = include_bytes!("cpu_instrs/cpu_instrs.gb");
-    pub const CPU_INSTRUCTIONS_01: &[u8] = include_bytes!("cpu_instrs/01-special.gb");
-    pub const CPU_INSTRUCTIONS_02: &[u8] = include_bytes!("cpu_instrs/02-interrupts.gb");
-    pub const CPU_INSTRUCTIONS_03: &[u8] = include_bytes!("cpu_instrs/03-op sp,hl.gb");
-    pub const CPU_INSTRUCTIONS_04: &[u8] = include_bytes!("cpu_instrs/04-op r,imm.gb");
-    pub const CPU_INSTRUCTIONS_05: &[u8] = include_bytes!("cpu_instrs/05-op rp.gb");
-    pub const CPU_INSTRUCTIONS_06: &[u8] = include_bytes!("cpu_instrs/06-ld r,r.gb");
-    pub const CPU_INSTRUCTIONS_07: &[u8] = include_bytes!("cpu_instrs/07-jr,jp,call,ret,rst.gb");
-    pub const CPU_INSTRUCTIONS_08: &[u8] = include_bytes!("cpu_instrs/08-misc instrs.gb");
-    pub const CPU_INSTRUCTIONS_09: &[u8] = include_bytes!("cpu_instrs/09-op r,r.gb");
-    pub const CPU_INSTRUCTIONS_10: &[u8] = include_bytes!("cpu_instrs/10-bit ops.gb");
-    pub const CPU_INSTRUCTIONS_11: &[u8] = include_bytes!("cpu_instrs/11-op a,(hl).gb");
+    pub const ROM: &[u8] = include_bytes!("cpu_instrs/cpu_instrs.gb");
+    pub const SPECIAL_01: &[u8] = include_bytes!("cpu_instrs/01-special.gb");
+    pub const INTERRUPTS_02: &[u8] = include_bytes!("cpu_instrs/02-interrupts.gb");
+    pub const OP_SP_HL_03: &[u8] = include_bytes!("cpu_instrs/03-op sp,hl.gb");
+    pub const OP_R_IMM_04: &[u8] = include_bytes!("cpu_instrs/04-op r,imm.gb");
+    pub const OP_RP_05: &[u8] = include_bytes!("cpu_instrs/05-op rp.gb");
+    pub const LD_R_R_06: &[u8] = include_bytes!("cpu_instrs/06-ld r,r.gb");
+    pub const JR_JP_CALL_RET_RST_07: &[u8] = include_bytes!("cpu_instrs/07-jr,jp,call,ret,rst.gb");
+    pub const MISC_INSTRUCTIONS_08: &[u8] = include_bytes!("cpu_instrs/08-misc instrs.gb");
+    pub const OP_R_R_09: &[u8] = include_bytes!("cpu_instrs/09-op r,r.gb");
+    pub const BIT_OPS_10: &[u8] = include_bytes!("cpu_instrs/10-bit ops.gb");
+    pub const OP_A_HL_11: &[u8] = include_bytes!("cpu_instrs/11-op a,(hl).gb");
 
     pub const INSTRUCTION_TIMING: &[u8] = include_bytes!("instr_timing.gb");
 }
 
 pub mod blargg_dmg_sound {
+    pub const ROM: &[u8] = include_bytes!("dmg_sound/dmg_sound.gb");
 
     pub const REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.gb");
     pub const EXPECTED_REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.png");
