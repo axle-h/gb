@@ -1,5 +1,5 @@
 use crate::audio::dac::dac_sample;
-use crate::audio::frame_sequencer::FrameSequencerEvent;
+use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
 use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
@@ -19,9 +19,6 @@ pub struct NoiseChannel {
     lfsr_width: bool, // bit 3 LFSR width (0=15 bits, 1=7 bits)
     clock_divider: u8, // bits 0-2 Dividing ratio of frequencies (0-7)
 
-    /// NR44 control
-    length_enabled: bool,
-
     /// internal state
     active: bool,
     lfsr: u16, // 15-bit LFSR
@@ -37,7 +34,6 @@ impl Default for NoiseChannel {
             clock_shift: 0,
             lfsr_width: false,
             clock_divider: 0,
-            length_enabled: false,
             active: false,
             lfsr: 0,
             output: 0
@@ -77,13 +73,14 @@ impl NoiseChannel {
 
     pub fn nr44_control(&self) -> u8 {
         // only bit 6 is readable, all other bits read as 1
-        if self.length_enabled { 0xFF } else { 0xBF }
+        if self.length_timer.enabled() { 0xFF } else { 0xBF }
     }
 
-    pub fn set_nr44_control(&mut self, value: u8) {
-        self.length_enabled = (value & 0x40) != 0; // bit 6
+    pub fn set_nr44_control(&mut self, value: u8, frame_sequencer: &FrameSequencer) {
+        let length_enabled = (value & 0x40) != 0; // bit 6
+        self.length_timer.set_enabled(length_enabled, frame_sequencer, &mut self.active);
         if value & 0x80 != 0 {
-            self.trigger(); // trigger on bit 7
+            self.trigger(frame_sequencer); // trigger on bit 7
         }
     }
 
@@ -107,12 +104,12 @@ impl NoiseChannel {
         }
     }
 
-    pub fn trigger(&mut self) {
+    pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
         if !self.envelope_function.dac_enabled() {
             return;
         }
         self.active = true;
-        self.length_timer.restart_from_max_if_expired();
+        self.length_timer.trigger(frame_sequencer);
         self.envelope_function.reset();
         self.lfsr = 0;
     }
@@ -126,25 +123,18 @@ impl NoiseChannel {
             self.output = 0;
 
             // disabled channels still clock the length counter
-            if events.contains(FrameSequencerEvent::LengthCounter) {
-                self.update_length_counter();
+            if events.is_length_counter() {
+                self.length_timer.clock(&mut self.active);
             }
             return
         }
 
-        if events.contains(FrameSequencerEvent::LengthCounter) {
-            self.update_length_counter();
+        if events.is_length_counter() {
+            self.length_timer.clock(&mut self.active);
         }
 
         // TODO noise output logic
         self.output = 0;
-    }
-
-    fn update_length_counter(&mut self) {
-        if self.length_enabled && self.length_timer.step() {
-            // length overflowed, disable the channel
-            self.active = false;
-        }
     }
 }
 

@@ -300,19 +300,19 @@ impl MMU {
 
 #[cfg(test)]
 mod tests {
-    use crate::roms::blargg_cpu::CPU_INSTRUCTIONS;
+    use crate::roms::blargg_cpu::ROM;
     use super::*;
 
     #[test]
     fn mmu_enable_ram() {
-        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(ROM).unwrap();
         mmu.write(0x0000, 0xA); // Enable RAM
         assert!(mmu.ram_enabled);
     }
 
     #[test]
     fn mmu_rom_banks() {
-        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(ROM).unwrap();
         assert_eq!(mmu.read(0x0101), 0xC3); // Read from ROM bank 0, should be a JP instruction
         mmu.write(0x2000, 0x01);
         assert_eq!(mmu.rom_bank_register, 1);
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn mmu_work_ram() {
-        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(ROM).unwrap();
         mmu.write(0xC000, 0x42); // Write to work RAM
         assert_eq!(mmu.read(0xC000), 0x42);
         mmu.write(0xE000, 0x24); // Write to echo RAM
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn mmu_high_ram() {
-        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(ROM).unwrap();
         mmu.write(0xFF80, 0xAB); // Write to high RAM
         assert_eq!(mmu.read(0xFF80), 0xAB);
         mmu.write(0xFFFE, 0xCD); // Write to high RAM
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn mmu_interrupt_flags() {
-        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(ROM).unwrap();
         mmu.write(0xFF0F, 0x1F); // Set all interrupt flags
         assert_eq!(mmu.interrupt_request.get(), 0x1F);
         mmu.write(0xFF0F, 0x00); // Clear all interrupt flags
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn interrupt_enable() {
-        let mut mmu = MMU::from_rom(CPU_INSTRUCTIONS).unwrap();
+        let mut mmu = MMU::from_rom(ROM).unwrap();
         mmu.write(0xFFFF, 0x1F); // Enable all interrupts
         assert_eq!(mmu.interrupt_enable.get(), 0x1F);
         mmu.write(0xFFFF, 0x00); // Disable all interrupts

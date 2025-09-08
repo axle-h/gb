@@ -88,7 +88,11 @@ pub fn render() -> Result<(), String> {
     let mut since_last_update = Duration::ZERO;
     let mut ahead_by_cycles = MachineCycles::ZERO;
 
+    let mut iteration_count = 0;
+    let mut cycle_count = MachineCycles::ZERO;
+
     'running: loop {
+        iteration_count += 1;
         let delta = frame_rate.update()?;
         since_last_render += delta;
         since_last_update += delta;
@@ -159,6 +163,7 @@ pub fn render() -> Result<(), String> {
 
         if min_cycles > MachineCycles::ZERO {
             let cycles =  gb.run(min_cycles);
+            cycle_count += cycles;
             ahead_by_cycles += cycles - min_cycles;
         }
 
@@ -218,10 +223,18 @@ pub fn render() -> Result<(), String> {
                 5
             )?;
 
+            let average_cycles_per_iteration = cycle_count.m_cycles() as f64 / iteration_count as f64;
+            font.render_text(
+                &mut canvas,
+                &format!("Cycles/Iter: {:.2}", average_cycles_per_iteration),
+                5,
+                25
+            )?;
+
             canvas.present();
         }
 
-        sleep(Duration::ZERO); // allow other threads to run
+        sleep(Duration::from_nanos(0)); // allow other threads to run
     }
 
     Ok(())

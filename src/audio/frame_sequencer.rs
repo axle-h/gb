@@ -19,16 +19,21 @@ impl FrameSequencer {
         for _ in 0..delta {
             self.value += 1;
             self.value %= 8;
-            // see "FrameSequencer" in https://nightshade256.github.io/2021/03/27/gb-sound-emulation.html
-            match self.value {
-                0 | 4 => events |= FrameSequencerEvent::LengthCounter,
-                2 | 6 => events |= FrameSequencerEvent::Sweep | FrameSequencerEvent::LengthCounter,
-                7 => events |= FrameSequencerEvent::VolumeEnvelope,
-                _ => {}
-            }
+            events |= self.current_events();
         }
         events
-
+    }
+    
+    pub fn current_events(&self) -> FrameSequencerEvent {
+        // see "FrameSequencer" in https://nightshade256.github.io/2021/03/27/gb-sound-emulation.html
+        let mut events = FrameSequencerEvent::empty();
+        match self.value {
+            0 | 4 => events |= FrameSequencerEvent::LengthCounter,
+            2 | 6 => events |= FrameSequencerEvent::Sweep | FrameSequencerEvent::LengthCounter,
+            7 => events |= FrameSequencerEvent::VolumeEnvelope,
+            _ => {}
+        }
+        events
     }
 }
 
@@ -38,6 +43,20 @@ bitflags! {
         const LengthCounter = 0x1;
         const VolumeEnvelope = 0x2;
         const Sweep = 0x4;
+    }
+}
+
+impl FrameSequencerEvent {
+    pub fn is_length_counter(&self) -> bool {
+        self.contains(FrameSequencerEvent::LengthCounter)
+    }
+    
+    pub fn is_volume_envelope(&self) -> bool {
+        self.contains(FrameSequencerEvent::VolumeEnvelope)
+    }
+    
+    pub fn is_sweep(&self) -> bool {
+        self.contains(FrameSequencerEvent::Sweep)
     }
 }
 
