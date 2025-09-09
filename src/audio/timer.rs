@@ -35,14 +35,15 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
     pub fn frequency(self) -> u16 {
         self.frequency
     }
-
+    
     pub fn set_frequency(&mut self, value: u16) {
         self.frequency = value;
         self.period = 2048 - value;
-        self.phase = 0;
     }
 
     pub fn trigger(&mut self) {
+        // TODO When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT modified.
+        self.phase = 0;
         self.counter = self.period;
     }
 

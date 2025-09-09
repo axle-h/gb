@@ -22,7 +22,7 @@ const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
-    let mut gb = GameBoy::dmg(crate::roms::homebrew::TEST_CART);
+    let mut gb = GameBoy::dmg(crate::roms::commercial::POKEMON_RED);
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;

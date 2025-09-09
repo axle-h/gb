@@ -22,6 +22,7 @@ pub struct NoiseChannel {
     /// internal state
     active: bool,
     lfsr: u16, // 15-bit LFSR
+    counter: u32,
     output: u8,
 }
 
@@ -36,6 +37,7 @@ impl Default for NoiseChannel {
             clock_divider: 0,
             active: false,
             lfsr: 0,
+            counter: 2,
             output: 0
         }
     }
@@ -53,12 +55,15 @@ impl NoiseChannel {
         self.length_timer.reset(self.initial_length_timer);
     }
 
-    pub fn nr42_volume_and_envelope(&self) -> &VolumeAndEnvelopeRegister {
-        &self.envelope_function.register()
+    pub fn nr42_volume_and_envelope(&self) -> u8 {
+        self.envelope_function.register().get()
     }
 
-    pub fn nr42_volume_and_envelope_mut(&mut self) -> &mut VolumeAndEnvelopeRegister {
-        self.envelope_function.register_mut()
+    pub fn set_nr42_volume_and_envelope_mut(&mut self, value: u8) {
+        self.envelope_function.register_mut().set(value);
+        if !self.envelope_function.dac_enabled() {
+            self.active = false;
+        }
     }
 
     pub fn nr43_frequency_and_randomness(&self) -> u8 {
@@ -97,46 +102,61 @@ impl NoiseChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if self.envelope_function.dac_enabled() {
-            dac_sample(self.output)
-        } else {
+        if !self.envelope_function.dac_enabled() || !self.active {
             0.0
+        } else {
+            dac_sample(self.output)
         }
     }
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
-        if !self.envelope_function.dac_enabled() {
-            // the length timer is still triggered even when the dac is disabled.
-            self.length_timer.trigger(frame_sequencer);
-            return;
-        }
-        self.active = true;
+        // the length timer is still triggered even when the dac is disabled.
         self.length_timer.trigger(frame_sequencer);
         self.envelope_function.trigger();
-        self.lfsr = 0;
+        self.lfsr = 0x7FFF; // reset LFSR to all 1s
+        self.counter = compute_clock_period(self.clock_divider, self.clock_shift);
+        self.active = self.envelope_function.dac_enabled();
     }
 
     pub fn update(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
-        if self.active && !self.envelope_function.dac_enabled() {
-            self.active = false;
-        }
-
-        if !self.active {
-            self.output = 0;
-
-            // disabled channels still clock the length counter
-            if events.is_length_counter() {
-                self.length_timer.clock(&mut self.active);
-            }
-            return
-        }
-
+        // disabled channels still clock the length counter
         if events.is_length_counter() {
             self.length_timer.clock(&mut self.active);
         }
 
-        // TODO noise output logic
-        self.output = 0;
+        if !self.active {
+            self.output = 0;
+            return
+        }
+
+        if events.is_volume_envelope() {
+            self.envelope_function.clock();
+        }
+
+        for _ in 0..delta.m_cycles() {
+            self.counter -= 1;
+            if self.counter == 0 {
+                self.counter = compute_clock_period(self.clock_divider, self.clock_shift);
+
+                let new_bit = (self.lfsr ^ (self.lfsr >> 1)) & 0x01;
+                self.lfsr = (self.lfsr >> 1) | (new_bit << 14);
+
+                if self.lfsr_width {
+                    // 7 bits
+                    self.lfsr = (self.lfsr & !(1 << 6)) | (new_bit << 6);
+                }
+            }
+        }
+
+        self.output = if self.lfsr as u8 & 0x01 == 0 {
+            self.envelope_function.current_volume()
+        } else {
+            0
+        };
     }
 }
 
+fn compute_clock_period(divider: u8, shift: u8) -> u32 {
+    let base_divisor = if divider == 0 { 8 } else { 16 * u32::from(divider) };
+    (base_divisor << shift) / 4
+}

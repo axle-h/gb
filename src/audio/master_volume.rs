@@ -40,7 +40,7 @@ impl MasterVolume {
     }
 
     pub fn volume_sample(&self) -> AudioSample {
-        AudioSample::new(Self::to_f32(self.left_volume), Self::to_f32(self.right_volume))
+        AudioSample::new(Self::to_f32(self.left_volume), Self::to_f32(self.right_volume)) / 7.0
     }
 
     pub fn vin_left(&self) -> bool {

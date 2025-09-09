@@ -18,7 +18,7 @@ pub struct Sweep {
 
     // internal state
     enabled: bool,
-    shadow_period: usize,
+    shadow_period: u16,
     sweep_timer: u8,
     calculated_with_negate_since_trigger: bool,
 }
@@ -54,7 +54,7 @@ impl Sweep {
         self.sweep_timer = if self.sweep_period == 0 { 8 } else { self.sweep_period };
     }
 
-    pub fn trigger(&mut self, period: usize) -> SweepResult {
+    pub fn trigger(&mut self, period: u16) -> SweepResult {
         self.calculated_with_negate_since_trigger = false;
         self.shadow_period = period;
         self.reset_sweep_timer();
@@ -113,12 +113,12 @@ impl Sweep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SweepResult {
-    pub value: usize,
+    pub value: u16,
     pub overflows: bool,
 }
 
 impl SweepResult {
-    pub fn new(value: usize) -> Self {
+    pub fn new(value: u16) -> Self {
         Self {
             value,
             overflows: value > 0x7FF,
