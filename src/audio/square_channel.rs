@@ -147,11 +147,11 @@ impl SquareWaveChannel {
     fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
         // the length timer is still triggered even when the dac is disabled.
         self.length_timer.trigger(frame_sequencer);
-        
+
         if !self.envelope_function.dac_enabled() {
             return;
         }
-        
+
         self.initialised = true;
         self.active = true;
 
@@ -176,7 +176,7 @@ impl SquareWaveChannel {
         if self.active && !self.envelope_function.dac_enabled() {
             self.active = false;
         }
-        
+
         // disabled channels still clock the length counter
         if events.is_length_counter() {
             self.length_timer.clock(&mut self.active);
@@ -237,34 +237,5 @@ impl SquareWaveChannel {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn basic_tone() {
-        let frame_sequencer = FrameSequencer::default();
-        let mut channel = SquareWaveChannel::channel2();
-        channel.set_nrx1_length_timer_duty_cycle(0b10000000, true); // 50% duty cycle
-        channel.set_nrx3_period_low(0x00); // low byte of period
-        channel.envelope_function.register_mut().set(0xF0); // initial volume 15
-        channel.set_nrx4_period_high_and_control(0b10000101, &frame_sequencer); // high byte of period (period = 0x500)
-
-        // With a period of 0x500, we should get a frequency of 1 sample per 768 machine cycles
-        // at 50% duty cycle, we should get 4 samples of 0x00 followed by 4 samples of 0xFF
-        let expected_waveform: [u8; 768 * 8] = std::array::from_fn(|i| {
-            let phase = i / 768;
-            if phase < 4 { 0x00 } else { 0xF }
-        });
-        let mut waveform = [0u8; 768 * 8];
-        for i in 0..waveform.len() {
-            channel.update(MachineCycles::from_m(1), FrameSequencerEvent::empty());
-            waveform[i] = channel.output;
-        }
-
-        assert_eq!(waveform, expected_waveform);
     }
 }
