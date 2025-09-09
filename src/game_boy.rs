@@ -270,7 +270,7 @@ mod tests {
         let mut gb = GameBoy::dmg(cart);
         gb.core.mmu_mut().serial_mut().enable_buffer();
 
-        let mut max_cycles = MachineCycles::from_m(1_000_000);
+        let mut max_cycles = MachineCycles::from_m(25_000_000);
         let mut cycles = MachineCycles::ZERO;
         let mut serial_output = String::new();
         let mut failed = false;

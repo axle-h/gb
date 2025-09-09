@@ -68,6 +68,7 @@ pub mod commercial {
     pub const ALLEYWAY: &[u8] = include_bytes!("alleyway.gb");
     pub const POKEMON_RED: &[u8] = include_bytes!("pokemon-red.gb");
     pub const TARZAN: &[u8] = include_bytes!("tarzan.gb");
+    pub const CHESSMASTER: &[u8] = include_bytes!("chessmaster.gb");
 }
 
 pub mod homebrew {
