@@ -94,7 +94,7 @@ impl Audio {
         let channel1 = self.panning.channel1.pan(self.channel1.output_f32());
         let channel2 = self.panning.channel2.pan(self.channel2.output_f32());
         let channel3 = self.panning.channel3.pan(self.channel3.output_f32());
-        let channel4 = AudioSample::ZERO; //self.panning.channel4.pan(self.channel4.output_f32());
+        let channel4 = self.panning.channel4.pan(self.channel4.output_f32());
 
         let volume = self.master_volume.volume_sample();
         let sample = volume * (channel1 + channel2 + channel3 + channel4) / 4.0;
@@ -186,7 +186,7 @@ impl Audio {
             0xFF1D => self.channel3.nr33_period_low(), // NR33: Channel 3 frequency low
             0xFF1E => self.channel3.nr34_period_high_and_control(), // NR34: Channel 3 frequency high and control
             0xFF20 => self.channel4.nr41_length_timer(), // NR41: Channel 4 length register
-            0xFF21 => self.channel4.nr42_volume_and_envelope().get(), // NR42: Channel 4 volume and envelope register
+            0xFF21 => self.channel4.nr42_volume_and_envelope(), // NR42: Channel 4 volume and envelope register
             0xFF22 => self.channel4.nr43_frequency_and_randomness(), // NR43: Channel 4 frequency and randomness
             0xFF23 => self.channel4.nr44_control(), // NR44: Channel 4 control
             0xFF24 => self.nr50_master_volume(), // NR50: Sound volume register
@@ -223,7 +223,7 @@ impl Audio {
                 0xFF1D => self.channel3.set_nr33_period_low(value), // NR33: Channel 3 frequency low
                 0xFF1E => self.channel3.set_nr34_period_high_and_control(value, &self.frame_sequencer), // NR34: Channel 3 frequency high and control
                 0xFF20 => self.channel4.set_nr41_length_timer(value), // NR41: Channel 4 length register
-                0xFF21 => self.channel4.nr42_volume_and_envelope_mut().set(value), // NR42: Channel 4 volume and envelope register
+                0xFF21 => self.channel4.set_nr42_volume_and_envelope_mut(value), // NR42: Channel 4 volume and envelope register
                 0xFF22 => self.channel4.set_nr43_frequency_and_randomness(value), // NR43: Channel 4 frequency and randomness
                 0xFF23 => self.channel4.set_nr44_control(value, &self.frame_sequencer), // NR44: Channel 4 control
                 0xFF24 => self.set_nr50_master_volume(value), // NR50: Sound volume register

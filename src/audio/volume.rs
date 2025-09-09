@@ -74,7 +74,7 @@ impl EnvelopeFunction {
         self.period_counter = self.register.sweep_pace();
     }
 
-    pub fn step(&mut self) {
+    pub fn clock(&mut self) {
         if self.register.sweep_pace == 0 {
             return; // Envelope is disabled
         }

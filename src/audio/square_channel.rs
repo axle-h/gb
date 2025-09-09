@@ -2,6 +2,7 @@ use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
 use crate::audio::sweep::Sweep;
+use crate::audio::timer::PulseTimer;
 use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
 
@@ -33,9 +34,7 @@ pub struct SquareWaveChannel {
     /// Internal state
     initialised: bool, // the channel has been triggered at least once
     active: bool, // The channel has been triggered and is active
-    current_period: usize, // copy of the period register for this duty cycle
-    frequency_timer: usize, // internal counter that overflows at current_period
-    wave_duty_index: usize, // current index into the wave duty pattern (0-7) for the current duty cycle
+    frequency_timer: PulseTimer, // internal counter that overflows at current_period
     output: u8,
 }
 
@@ -52,9 +51,7 @@ impl SquareWaveChannel {
             active: false,
             initialised: true,
             // Just after powering on, the first duty step of the square waves after they are triggered for the first time is played as if it were 0
-            current_period: 0,
-            frequency_timer: 0,
-            wave_duty_index: 0,
+            frequency_timer: PulseTimer::default(),
             output: 0,
         }
     }
@@ -148,26 +145,30 @@ impl SquareWaveChannel {
     }
 
     fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
+        // the length timer is still triggered even when the dac is disabled.
+        self.length_timer.trigger(frame_sequencer);
+        
         if !self.envelope_function.dac_enabled() {
-            // the length timer is still triggered even when the dac is disabled.
-            self.length_timer.trigger(frame_sequencer);
             return;
         }
+        
         self.initialised = true;
         self.active = true;
-        self.length_timer.trigger(frame_sequencer);
 
-        // When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT modified.
-        self.frequency_timer = self.frequency_timer & 0b00000011;
-        self.current_period = if let Some(sweep) = self.sweep.as_mut() {
-            let initial_sweep = sweep.trigger(self.period as usize);
+        let initial_frequency = if let Some(sweep) = self.sweep.as_mut() {
+            let initial_sweep = sweep.trigger(self.period);
             if initial_sweep.overflows {
                 self.active = false;
+                0
+            } else {
+                initial_sweep.value
             }
-            initial_sweep.value
         } else {
-            self.period as usize
+            self.period
         };
+        self.frequency_timer.set_frequency(initial_frequency);
+        self.frequency_timer.trigger();
+
         self.envelope_function.trigger();
     }
 
@@ -175,28 +176,23 @@ impl SquareWaveChannel {
         if self.active && !self.envelope_function.dac_enabled() {
             self.active = false;
         }
-
-        if !self.active {
-            self.output = 0;
-
-            // disabled channels still clock the length counter
-            if events.is_length_counter() {
-                self.length_timer.clock(&mut self.active);
-            }
-            return
-        }
-
-        // Sweep -> Period Counter -> Duty -> Length Timer -> Envelope
-        if events.is_sweep() {
-            self.update_sweep();
-        }
-
+        
+        // disabled channels still clock the length counter
         if events.is_length_counter() {
             self.length_timer.clock(&mut self.active);
         }
 
+        if !self.active {
+            self.output = 0;
+            return
+        }
+
+        if events.is_sweep() {
+            self.update_sweep();
+        }
+
         if events.is_volume_envelope() {
-            self.update_volume_envelope();
+            self.envelope_function.clock();
         }
 
         // Obscure behavior: Just after powering on, the first duty step of the square waves after they are triggered for the first time is played as if it were 0.
@@ -205,18 +201,26 @@ impl SquareWaveChannel {
             return;
         }
 
-        self.update_wave_duty(delta);
-        let waveform_bit = 7 - self.wave_duty_index;
-        let waveform_sample = (self.waveform() >> waveform_bit) & 0x1;
-        self.output = self.envelope_function.current_volume() * waveform_sample;
+        // update wave duty
+        if self.frequency_timer.update(delta) {
+            self.output = if self.waveform_bit() {
+                self.envelope_function.current_volume()
+            } else {
+                0
+            };
+
+            // Period changes (written to NR13 or NR14) only take effect after the current “sample” ends
+            self.frequency_timer.set_frequency(self.period);
+        }
     }
 
-    fn waveform(&self) -> u8 {
+    fn waveform_bit(&self) -> bool {
+        let bit = 7 - self.frequency_timer.phase();
         match self.wave_duty_cycle {
-            0 => 0b00000001, // 12.5% duty cycle
-            1 => 0b00000011, // 25% duty cycle
-            2 => 0b00001111, // 50% duty cycle
-            3 => 0b11111100, // 75% duty cycle
+            0 => bit == 0, // 12.5% duty cycle
+            1 => bit < 2, // 25% duty cycle
+            2 => bit < 4, // 50% duty cycle
+            3 => bit > 1, // 75% duty cycle
             _ => unreachable!(), // Should never happen
         }
     }
@@ -228,35 +232,10 @@ impl SquareWaveChannel {
                 if next_sweep.overflows {
                     self.active = false;
                 } else {
-                    self.current_period = next_sweep.value;
-                    self.period = (next_sweep.value & 0x07FF) as u16;
+                    self.frequency_timer.set_frequency(next_sweep.value);
+                    self.period = next_sweep.value & 0x07FF;
                 }
             }
-        }
-    }
-
-    fn update_volume_envelope(&mut self) {
-        self.envelope_function.step();
-    }
-
-    fn update_wave_duty(&mut self, delta: MachineCycles) {
-        self.frequency_timer += delta.m_cycles();
-        // https://gbdev.io/pandocs/Audio_Registers.html#ff13--nr13-channel-1-period-low-write-only
-        // The channel treats the value in the period as a negative number in 11-bit two’s complement.
-        // The higher the period value in the register, the lower the period, and the higher the frequency.
-        // For example:
-        //     Period value $500 means -$300, or 1 sample per 768 input cycles
-        //     Period value $740 means -$C0, or 1 sample per 192 input cycles
-        let frequency = 0x800 - self.current_period;
-        while self.frequency_timer > frequency {
-            // overflow, emit a sample
-            self.frequency_timer -= frequency;
-
-            self.wave_duty_index += 1;
-            self.wave_duty_index %= 8;
-
-            // Period changes (written to NR13 or NR14) only take effect after the current “sample” ends
-            self.current_period = self.period as usize;
         }
     }
 }

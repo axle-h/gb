@@ -167,6 +167,8 @@ impl WaveChannel {
         self.active = self.dac_enabled;
         self.length_timer.trigger(frame_sequencer);
         self.frequency_timer.set_frequency(self.period_register);
+        self.frequency_timer.trigger();
+
     }
 
     pub fn update(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
