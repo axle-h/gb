@@ -12,6 +12,10 @@ impl FrameSequencer {
         self.value = 0;
     }
 
+    pub fn reset_to_max(&mut self) {
+        self.value = 7;
+    }
+
     pub fn update(&mut self, div_clocks: DividerClocks) -> FrameSequencerEvent {
         let mut events = FrameSequencerEvent::empty();
         // TODO bit 4 in normal speed mode, bit 5 in CBG (double) speed mode
@@ -23,7 +27,7 @@ impl FrameSequencer {
         }
         events
     }
-    
+
     pub fn current_events(&self) -> FrameSequencerEvent {
         // see "FrameSequencer" in https://nightshade256.github.io/2021/03/27/gb-sound-emulation.html
         let mut events = FrameSequencerEvent::empty();
@@ -50,11 +54,11 @@ impl FrameSequencerEvent {
     pub fn is_length_counter(&self) -> bool {
         self.contains(FrameSequencerEvent::LengthCounter)
     }
-    
+
     pub fn is_volume_envelope(&self) -> bool {
         self.contains(FrameSequencerEvent::VolumeEnvelope)
     }
-    
+
     pub fn is_sweep(&self) -> bool {
         self.contains(FrameSequencerEvent::Sweep)
     }

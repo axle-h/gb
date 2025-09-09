@@ -1,6 +1,7 @@
 use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
+use crate::audio::timer::WavetableTimer;
 use crate::cycles::MachineCycles;
 
 #[derive(Debug, Clone)]
@@ -32,12 +33,15 @@ pub struct WaveChannel {
 
     /// Internal state
     active: bool, // the channel has been triggered and is active
-    current_period: usize, // copy of the period register for this duty cycle
-    current_volume: u8, // copy of the initial volume for this duty cycle
-    wave_index: usize, // current index into the wave pattern (0-31)
+    frequency_timer: WavetableTimer, // internal counter that overflows at current_period
 
-    output: u8, // current output sample (0-15)
+    sample_buffer: u8, // current output sample (0-15)
 }
+
+// From https://gbdev.gg8.se/wiki/articles/Gameboy_sound_hardware#Power_Control
+const DMG_INITIAL_RAM: [u8; 16] = [
+    0x84, 0x40, 0x43, 0xAA, 0x2D, 0x78, 0x92, 0x3C, 0x60, 0x59, 0x59, 0xB0, 0x34, 0xB8, 0x2E, 0xDA,
+];
 
 impl Default for WaveChannel {
     fn default() -> Self {
@@ -47,33 +51,18 @@ impl Default for WaveChannel {
             length_timer: LengthTimer::wave_channel(),
             volume_register: 0,
             period_register: 0,
-            wave_ram: [0; 16],
-
+            wave_ram: DMG_INITIAL_RAM,
             active: false,
-            current_period: 0,
-            current_volume: 0,
-            // When CH3 is started, the first sample read is the one at index 1,
-            // i.e. the lower nibble of the first byte, NOT the upper nibble.
-            wave_index: 1,
-            output: 0
+            frequency_timer: WavetableTimer::default(),
+            sample_buffer: 0
         }
     }
 }
 
 impl WaveChannel {
     pub fn reset(&mut self) {
-        self.active = false;
-        self.dac_enabled = false;
-        self.volume_register = 0;
-        self.period_register = 0;
         // wave ram is not touched on reset
-
-        self.initial_length_timer = 0;
-        self.length_timer = LengthTimer::wave_channel();
-        self.current_period = 0;
-        self.current_volume = 0;
-        self.wave_index = 1;
-        self.output = 0;
+        *self = Self { wave_ram: self.wave_ram, ..Self::default() };
     }
 
     pub fn nr30(&self) -> u8 {
@@ -137,6 +126,20 @@ impl WaveChannel {
         }
     }
 
+    pub fn wave_ram(&self, index: usize) -> u8 {
+        // Reading from wavetable RAM while the channel is playing returns the contents of RAM at
+        // the current wave position rather than the requested address.
+        if self.active {
+            self.current_sample_byte()
+        } else {
+            self.wave_ram[index]
+        }
+    }
+
+    pub fn set_wave_ram(&mut self, index: usize, value: u8) {
+        self.wave_ram[index] = value;
+    }
+
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -146,32 +149,24 @@ impl WaveChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if self.dac_enabled {
-            dac_sample(self.output)
-        } else {
-            0.0
+        if !self.dac_enabled || self.volume_register == 0 {
+            return 0.0;
         }
-    }
 
-    pub fn wave_ram(&self, index: usize) -> u8 {
-        self.wave_ram[index]
-    }
+        let sample_byte = self.sample_buffer >> (self.volume_register - 1);
+        let sample = if self.frequency_timer.phase() & 0x1 == 0 {
+            sample_byte >> 4
+        } else {
+            sample_byte & 0xF
+        };
 
-    pub fn set_wave_ram(&mut self, index: usize, value: u8) {
-        self.wave_ram[index] = value;
+        dac_sample(sample)
     }
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
-        if !self.dac_enabled {
-            // the length timer is still triggered even when the dac is disabled.
-            self.length_timer.trigger(frame_sequencer);
-            return;
-        }
-        self.active = true;
+        self.active = self.dac_enabled;
         self.length_timer.trigger(frame_sequencer);
-        self.current_period = self.period_register as usize;
-        self.current_volume = self.volume_register;
-        self.wave_index = 0;
+        self.frequency_timer.set_frequency(self.period_register);
     }
 
     pub fn update(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
@@ -180,31 +175,38 @@ impl WaveChannel {
         }
 
         if !self.active {
-            self.output = 0;
+            self.sample_buffer = 0;
 
             // disabled channels still clock the length counter
             if events.is_length_counter() {
-                self.length_timer.clock(&mut self.active);
+                self.clock_length_timer();
             }
             return;
         }
 
-        self.update_wave_duty(delta);
-
         if events.is_length_counter() {
-            self.length_timer.clock(&mut self.active);
+            self.clock_length_timer();
         }
 
-        // TODO wave output logic
-        self.output = 0;
+        if self.active && self.frequency_timer.update(delta) {
+            // overflow, emit a sample
+            self.sample_buffer = self.current_sample_byte();
+        }
     }
 
-    fn update_wave_duty(&mut self, delta: MachineCycles) {
-        // Advance the wave index based on the current period and elapsed cycles
-        let cycles_per_step = (self.current_period + 1) * 2; // Each step takes (period + 1) * 2 machine cycles
-        // TODO: Implement wave duty update logic
-        // let steps = (delta.0 as usize) / cycles_per_step;
-        // self.wave_index = (self.wave_index + steps) % 32; // There are 32 samples in the wave pattern
+    fn current_sample_byte(&self) -> u8 {
+        self.wave_ram[(self.frequency_timer.phase() >> 1) as usize]
+    }
+
+    fn clock_length_timer(&mut self) {
+        let prev_active = self.active;
+        self.length_timer.clock(&mut self.active);
+        if prev_active && !self.active {
+            // Explicitly clear the sample buffer when the length counter disables the channel.
+            // Necessary because the wavetable channel continues to output the current sample buffer
+            // when disabled, as long as the DAC is still enabled
+            self.sample_buffer = 0;
+        }
     }
 }
 

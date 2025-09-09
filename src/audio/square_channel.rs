@@ -1,7 +1,7 @@
 use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
-use crate::audio::sweep::{Sweep, SweepRegister};
+use crate::audio::sweep::Sweep;
 use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
 
@@ -67,12 +67,14 @@ impl SquareWaveChannel {
         Self::new(false)
     }
 
-    pub fn sweep_register(&self) -> &SweepRegister {
-        &self.sweep.as_ref().expect("sweep is disabled").register()
+    pub fn nr10(&self) -> u8 {
+        self.sweep.as_ref().map(|s| s.nr10()).unwrap_or(0xFF)
     }
 
-    pub fn sweep_register_mut(&mut self) -> &mut SweepRegister {
-        self.sweep.as_mut().expect("sweep is disabled").register_mut()
+    pub fn set_nr10(&mut self, value: u8) {
+        if let Some(sweep) = self.sweep.as_mut() {
+            sweep.set_nr10(value, &mut self.active);
+        }
     }
 
     pub fn nrx1_length_timer_duty_cycle(&self) -> u8 {
@@ -138,7 +140,7 @@ impl SquareWaveChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if self.envelope_function.dac_enabled() {
+        if self.envelope_function.dac_enabled() && self.active {
             dac_sample(self.output)
         } else {
             0.0
