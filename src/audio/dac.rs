@@ -19,5 +19,4 @@ pub fn dac_sample(sample: u8) -> f32 {
         15 => -1.0,
         _ => 0.0,
     }
-    // self.output as f32 / 15.0
 }

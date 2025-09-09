@@ -22,6 +22,7 @@ pub mod dac;
 pub mod wave_channel;
 pub mod noise_channel;
 mod filters;
+mod timer;
 
 pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 
@@ -93,7 +94,7 @@ impl Audio {
         let channel1 = self.panning.channel1.pan(self.channel1.output_f32());
         let channel2 = self.panning.channel2.pan(self.channel2.output_f32());
         let channel3 = self.panning.channel3.pan(self.channel3.output_f32());
-        let channel4 = self.panning.channel4.pan(self.channel4.output_f32());
+        let channel4 = AudioSample::ZERO; //self.panning.channel4.pan(self.channel4.output_f32());
 
         let volume = self.master_volume.volume_sample();
         let sample = volume * (channel1 + channel2 + channel3 + channel4) / 4.0;
@@ -139,6 +140,9 @@ impl Audio {
         if self.enabled && !enable {
             // apu registers are cleared on the transition from 1 to 0 of bit 7
             self.reset();
+        } else if !self.enabled && enable {
+            // Reset frame sequencer when APU is re-enabled
+            self.frame_sequencer.reset_to_max();
         }
         self.enabled = enable;
     }
@@ -167,7 +171,7 @@ impl Audio {
 
     pub fn read(&self, address: u16) -> u8 {
         let value = match address {
-            0xFF10 => self.channel1.sweep_register().get(), // NR10: Channel 1 sweep register
+            0xFF10 => self.channel1.nr10(), // NR10: Channel 1 sweep register
             0xFF11 => self.channel1.nrx1_length_timer_duty_cycle(), // NR11: Channel 1 length and duty register
             0xFF12 => self.channel1.volume_envelope_register().get(), // NR12: Channel 1 volume and envelope register
             0xFF13 => self.channel1.nrx3_period_low(), // NR13: Channel 1 period low byte
@@ -204,7 +208,7 @@ impl Audio {
         let write_allowed = self.enabled || matches!(address, 0xFF11 | 0xFF16 | 0xFF1B | 0xFF20 | 0xFF26 | 0xFF30..=0xFF3F);
         if write_allowed {
             match address {
-                0xFF10 => self.channel1.sweep_register_mut().set(value), // NR10: Channel 1 sweep register
+                0xFF10 => self.channel1.set_nr10(value), // NR10: Channel 1 sweep register
                 0xFF11 => self.channel1.set_nrx1_length_timer_duty_cycle(value, self.enabled), // NR11: Channel 1 length and duty register
                 0xFF12 => self.channel1.volume_envelope_register_mut().set(value), // NR12: Channel 1 volume and envelope register
                 0xFF13 => self.channel1.set_nrx3_period_low(value), // NR13: Channel 1 period low byte
