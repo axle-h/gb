@@ -1,5 +1,7 @@
+use bincode::{Decode, Encode};
+
 /// https://gbdev.io/pandocs/The_Cartridge_Header.html#0147--cartridge-type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::FromRepr, Decode, Encode)]
 #[repr(u8)]
 pub enum CartType {
     RomOnly = 0x00,
@@ -30,14 +32,14 @@ pub enum CartType {
     HuC1RamBattery = 0xFF,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub enum CGBMode {
     None,
     Enhanced,
     Exclusive
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct CartHeader {
     title: String,
     cgb_mode: CGBMode,

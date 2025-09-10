@@ -1,7 +1,8 @@
+use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 use crate::activation::Activation;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct Serial {
     data: u8,
     transfer_enable: bool,
@@ -75,7 +76,7 @@ impl Serial {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 enum SerialState {
     #[default]
     Idle,

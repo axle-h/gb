@@ -1,10 +1,11 @@
+use bincode::{Decode, Encode};
 use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
 use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct NoiseChannel {
     /// NR41 length timer
     /// bits 0-5 Initial length timer

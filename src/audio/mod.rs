@@ -1,4 +1,8 @@
 use std::collections::VecDeque;
+use bincode::{BorrowDecode, Decode, Encode};
+use bincode::de::{BorrowDecoder, Decoder};
+use bincode::enc::Encoder;
+use bincode::error::{DecodeError, EncodeError};
 use frame_sequencer::FrameSequencer;
 use filters::CapacitanceFilter;
 use master_volume::MasterVolume;
@@ -40,6 +44,10 @@ pub struct Audio {
     buffer: VecDeque<f32>,
 }
 
+fn default_buffer() -> VecDeque<f32> {
+    VecDeque::with_capacity(2 * GB_SAMPLE_RATE / 10) // buffer for 100ms of audio, 2 channels
+}
+
 impl Default for Audio {
     fn default() -> Self {
         Self {
@@ -52,7 +60,7 @@ impl Default for Audio {
             channel3: WaveChannel::default(),
             channel4: NoiseChannel::default(),
             high_pass_filter: CapacitanceFilter::default(),
-            buffer: VecDeque::with_capacity(2 * GB_SAMPLE_RATE / 10), // buffer for 100ms of audio, 2 channels
+            buffer: default_buffer()
         }
     }
 }
@@ -270,3 +278,67 @@ impl Audio {
     }
 }
 
+impl PartialEq for Audio {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled &&
+            self.panning == other.panning &&
+            self.master_volume == other.master_volume &&
+            self.frame_sequencer == other.frame_sequencer &&
+            self.channel1 == other.channel1 &&
+            self.channel2 == other.channel2 &&
+            self.channel3 == other.channel3 &&
+            self.channel4 == other.channel4
+    }
+}
+
+impl Eq for Audio {}
+
+impl<__Context> Decode<__Context> for Audio {
+    fn decode<__D: Decoder<Context=__Context>>(decoder: &mut __D) -> Result<Self, DecodeError> {
+        Ok(Self
+        {
+            enabled: Decode::decode(decoder)?,
+            panning: Decode::decode(decoder)?,
+            master_volume: Decode::decode(decoder)?,
+            frame_sequencer: Decode::decode(decoder)?,
+            channel1: Decode::decode(decoder)?,
+            channel2: Decode::decode(decoder)?,
+            channel3: Decode::decode(decoder)?,
+            channel4: Decode::decode(decoder)?,
+            high_pass_filter: CapacitanceFilter::default(),
+            buffer: default_buffer(),
+        })
+    }
+}
+impl<'__de, __Context> BorrowDecode<'__de, __Context> for Audio {
+    fn borrow_decode<__D: BorrowDecoder<'__de, Context=__Context>>(decoder: &mut __D) -> Result<Self, DecodeError> {
+        Ok(Self
+        {
+            enabled: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            panning: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            master_volume: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            frame_sequencer: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            channel1: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            channel2: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            channel3: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            channel4: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            high_pass_filter: CapacitanceFilter::default(),
+            buffer: default_buffer(),
+        })
+    }
+}
+
+impl Encode for Audio
+{
+    fn encode<__E: Encoder>(&self, encoder: &mut __E) -> Result<(), EncodeError> {
+        Encode::encode(&self.enabled, encoder)?;
+        Encode::encode(&self.panning, encoder)?;
+        Encode::encode(&self.master_volume, encoder)?;
+        Encode::encode(&self.frame_sequencer, encoder)?;
+        Encode::encode(&self.channel1, encoder)?;
+        Encode::encode(&self.channel2, encoder)?;
+        Encode::encode(&self.channel3, encoder)?;
+        Encode::encode(&self.channel4, encoder)?;
+        Ok(())
+    }
+}

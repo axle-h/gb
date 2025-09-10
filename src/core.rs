@@ -1,10 +1,11 @@
+use bincode::{Decode, Encode};
 use crate::activation::Activation;
 use crate::cycles::MachineCycles;
 use crate::mmu::MMU;
 use crate::opcode::{JumpCondition, OpCode, Register, Register16, Register16Mem, Register16Stack};
 use crate::registers::RegisterSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub enum CoreMode {
     Normal,
     Halt,
@@ -12,6 +13,7 @@ pub enum CoreMode {
     Crash,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct Core {
     registers: RegisterSet,
     mmu: MMU,

@@ -1,3 +1,4 @@
+use bincode::{Decode, Encode};
 use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
@@ -6,7 +7,7 @@ use crate::audio::timer::PulseTimer;
 use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Decode, Eq, PartialEq, Encode)]
 pub struct SquareWaveChannel {
     /// NR10 (channel 1 only)
     sweep: Option<Sweep>,

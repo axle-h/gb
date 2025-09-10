@@ -1,7 +1,8 @@
+use bincode::{Decode, Encode};
 use crate::divider::DividerClocks;
 use bitflags::bitflags;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Decode, Encode)]
 pub struct FrameSequencer {
     value: u8,
 }

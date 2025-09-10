@@ -1,7 +1,8 @@
 use std::ops::{Deref, DerefMut};
+use bincode::{Decode, Encode};
 use image::Rgb;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::FromRepr, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::FromRepr, Default, Decode, Encode)]
 #[repr(u8)]
 pub enum DMGColor {
     #[default]
@@ -23,7 +24,7 @@ impl DMGColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 pub struct DMGPaletteRegister([DMGColor; 4]);
 
 impl Deref for DMGPaletteRegister {
@@ -58,7 +59,7 @@ impl DMGPaletteRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 pub struct LcdPalette {
     background: DMGPaletteRegister,
     object0: DMGPaletteRegister,

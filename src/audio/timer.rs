@@ -1,12 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerTickEffect {
-    None,
-    Clocked,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub struct PhaseTimer<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> {
     phase: u8,
     frequency: u16,
@@ -35,7 +30,7 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
     pub fn frequency(self) -> u16 {
         self.frequency
     }
-    
+
     pub fn set_frequency(&mut self, value: u16) {
         self.frequency = value;
         self.period = 2048 - value;

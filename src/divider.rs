@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub struct Divider {
     enabled: bool,
     value: u8,

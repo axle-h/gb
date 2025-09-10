@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::ppu::TILE_BYTES;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct LcdControl {
     enabled: bool, // Bit 7 - LCD Display Enable (0=Off, 1=On)
     window_tile_map: bool, // Bit 6 - Window Tile Map Display Select (0=9800-9BFF, 1=9C00-9FFF)

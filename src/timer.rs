@@ -1,7 +1,8 @@
+use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 use crate::activation::Activation;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Decode, Encode)]
 pub struct Timer {
     enabled: bool,
     mode: TimerMode,
@@ -75,7 +76,7 @@ impl Activation for Timer {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum_macros::FromRepr, Decode, Encode)]
 #[repr(u8)]
 enum TimerMode {
     #[default]

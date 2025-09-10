@@ -22,7 +22,7 @@ const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
-    let mut gb = GameBoy::dmg(crate::roms::blargg_dmg_sound::ROM);
+    let mut gb = GameBoy::dmg(crate::roms::commercial::POKEMON_RED);
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -120,6 +120,12 @@ pub fn render() -> Result<(), String> {
                             ppu.dump_tilemap(TileMapMode::Upper, TileDataMode::Upper)
                                 .save("tilemap_upper_upper.png")
                                 .map_err(|e| e.to_string())?;
+                        }
+                        Keycode::F8 => {
+                            gb.save_state_to_file("save-state.bin")?;
+                        }
+                        Keycode::F9 => {
+                            gb.load_state_from_file("save-state.bin")?;
                         }
                         Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().press_button(Up),
                         Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().press_button(Down),
