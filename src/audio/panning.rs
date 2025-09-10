@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::audio::sample::AudioSample;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Decode, Encode)]
 pub struct ChannelPanning {
     pub left: bool,
     pub right: bool,
@@ -14,7 +15,7 @@ impl ChannelPanning {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Decode, Encode)]
 pub struct Panning {
     pub channel1: ChannelPanning,
     pub channel2: ChannelPanning,

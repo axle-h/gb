@@ -1,7 +1,8 @@
 use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
 use std::time::Duration;
+use bincode::{Decode, Encode};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Ord, PartialOrd, Decode, Encode)]
 pub struct MachineCycles(usize);
 
 impl MachineCycles {

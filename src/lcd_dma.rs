@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Decode, Encode)]
 pub struct LcdDma {
     state: Option<LcdDmaState>,
 }
@@ -41,7 +42,7 @@ pub struct DmaTransfer {
 
 const DMA_TRANSFER_CYCLES: MachineCycles = MachineCycles::from_m(160);
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct LcdDmaState {
     address: u16,
     cycles: MachineCycles

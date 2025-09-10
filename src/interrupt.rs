@@ -1,7 +1,8 @@
+use bincode::{Decode, Encode};
 use strum::IntoEnumIterator;
 
 /// https://gbdev.io/pandocs/Interrupts.html#ffff--ie-interrupt-enable
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub struct InterruptFlags {
     joypad: bool,
     serial: bool,

@@ -1,6 +1,6 @@
-use crate::opcode::Register;
+use bincode::{Decode, Encode};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Decode, Encode)]
 pub struct FlagsRegister {
     pub z: bool, // Zero flag
     pub n: bool, // Subtract flag
@@ -35,7 +35,7 @@ impl FlagsRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Decode, Encode)]
 pub struct RegisterSet {
     pub a: u8,
     pub flags: FlagsRegister,

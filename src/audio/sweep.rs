@@ -1,7 +1,7 @@
-
+use bincode::{Decode, Encode};
 
 /// FF10 — NR10: Channel 1 sweep
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Decode, Encode)]
 pub struct Sweep {
     /// Pace: This dictates how often sweep “iterations” happen, in units of 128 Hz ticks5 (7.8 ms).
     /// A value of 0 disables the sweep.

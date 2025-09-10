@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::audio::frame_sequencer::FrameSequencer;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct LengthTimer {
     enabled: bool,
     offset: u16,

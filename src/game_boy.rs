@@ -1,7 +1,8 @@
-use std::time::Duration;
+use bincode::{Decode, Encode};
 use crate::core::Core;
 use crate::cycles::MachineCycles;
 
+#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct GameBoy {
     core: Core
 }
@@ -33,14 +34,69 @@ impl GameBoy {
     pub fn core_mut(&mut self) -> &mut Core {
         &mut self.core
     }
+
+    pub fn save_state(&self) -> Result<Vec<u8>, String> {
+        let serialized = bincode::encode_to_vec(self, bincode::config::standard())
+            .map_err(|e| e.to_string())?;
+        let compressed = lz4_flex::compress_prepend_size(&serialized);
+        Ok(compressed)
+    }
+
+    pub fn save_state_to_file(&self, path: &str) -> Result<(), String> {
+        let data = self.save_state()?;
+        std::fs::write(path, &data).map_err(|e| e.to_string())
+    }
+
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let decompressed = lz4_flex::decompress_size_prepended(data)
+            .map_err(|e| e.to_string())?;
+        let (game_boy, _): (GameBoy, usize) = bincode::decode_from_slice(&decompressed, bincode::config::standard())
+            .map_err(|e| e.to_string())?;
+
+        if game_boy.core.mmu().header() != self.core.mmu().header() {
+            return Err(format!("Incompatible save state, expected {:?}, got {:?}", self.core.mmu().header(), game_boy.core.mmu().header()));
+        }
+
+        let current_rom = self.core.mmu().data().to_vec();
+        *self = game_boy;
+        self.core_mut().mmu_mut().set_data(&current_rom);
+        Ok(())
+    }
+
+    pub fn load_state_from_file(&mut self, path: &str) -> Result<(), String> {
+        let data = std::fs::read(path)
+            .map_err(|e| e.to_string())?;
+        self.load_state(&data)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
-    use image::{ImageFormat, ImageReader, RgbImage};
+    use image::RgbImage;
     use crate::roms::roms::parse_png;
     use super::*;
+
+    #[test]
+    fn save_and_load_state() {
+        // Create a GameBoy and run it for some cycles to change its state
+        let mut original_gb = GameBoy::dmg_hello_world();
+        original_gb.run(MachineCycles::from_m(10_000));
+
+        // Save the state
+        let saved_state = original_gb.save_state()
+            .expect("Failed to save state");
+
+        // Create a new GameBoy and run it for different cycles
+        let mut different_gb = GameBoy::dmg_hello_world();
+        different_gb.run(MachineCycles::from_m(2000));
+
+        // Load the saved state
+        let mut loaded_gb = GameBoy::dmg_hello_world();
+        loaded_gb.load_state(&saved_state).expect("Failed to load state");
+
+        // Verify the loaded state matches the original
+        assert_eq!(original_gb, loaded_gb);
+    }
 
     mod blargg_cpu {
         use super::*;

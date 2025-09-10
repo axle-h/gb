@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::activation::Activation;
 /// https://gbdev.io/pandocs/STAT.html
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Decode, Encode)]
 pub struct LcdStatus {
     ly: u8,   // Current line (read only)
     lyc: u8,  // LY Compare (read-write)
@@ -88,7 +89,7 @@ impl Activation for LcdStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, strum_macros::FromRepr, Decode, Encode)]
 #[repr(u8)]
 pub enum LcdMode {
     #[default]

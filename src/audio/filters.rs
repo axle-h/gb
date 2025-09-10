@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::audio::sample::AudioSample;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Decode, Encode)]
 pub struct CapacitanceFilter {
     capacitor_left: f32,
     capacitor_right: f32,

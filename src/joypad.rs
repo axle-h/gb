@@ -1,6 +1,7 @@
+use bincode::{Decode, Encode};
 use crate::activation::Activation;
 /// https://gbdev.io/pandocs/Joypad_Input.html#ff00--p1joyp-joypad
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub struct JoypadRegister {
     up: bool,
     down: bool,

@@ -1,10 +1,11 @@
+use bincode::{Decode, Encode};
 use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
 use crate::audio::timer::WavetableTimer;
 use crate::cycles::MachineCycles;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct WaveChannel {
     /// NR30: DAC enable
     /// bit 7 DAC power (0=Off, 1=On)

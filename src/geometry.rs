@@ -1,6 +1,7 @@
 use std::ops::{Add, Div};
+use bincode::{Decode, Encode};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 pub struct Point8 {
     pub x: u8,
     pub y: u8,

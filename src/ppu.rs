@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 use crate::geometry::Point8;
 use crate::activation::Activation;
@@ -9,7 +10,7 @@ use crate::lcd_status::{LcdMode, LcdStatus};
 use image::{ImageBuffer, Rgb, RgbImage};
 use itertools::Itertools;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct PPU {
     vram: [u8; 0x2000], // 8KB VRAM
     oam: [u8; 0xA0], // 160 bytes OAM (Object Attribute Memory)
@@ -29,7 +30,7 @@ pub struct PPU {
     scanline_sprites: Vec<Sprite>
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 pub struct WindowRenderState {
     is_active: bool,
     max_y: usize,
@@ -449,7 +450,7 @@ impl<'a> Tile<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 struct Sprite {
     y: isize,
     x: isize,
