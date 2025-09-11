@@ -13,6 +13,7 @@ use crate::audio::GB_SAMPLE_RATE;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
+use crate::pokemon::{PokemonApi, PokemonParty};
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
 use crate::sdl::font::FontTextures;
@@ -23,6 +24,9 @@ const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
     let mut gb = GameBoy::dmg(crate::roms::commercial::POKEMON_RED);
+    if let Err(e) = gb.restore_sram_from_file("pokemon-red.sav") {
+        println!("Could not load save file: {}", e);
+    }
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -121,11 +125,57 @@ pub fn render() -> Result<(), String> {
                                 .save("tilemap_upper_upper.png")
                                 .map_err(|e| e.to_string())?;
                         }
+                        Keycode::F7 => {
+                            // TODO write to this file on change
+                            gb.dump_sram_to_file("pokemon-red.sav")?;
+                        }
                         Keycode::F8 => {
-                            gb.save_state_to_file("save-state.bin")?;
+                            gb.save_state_to_file("pokemon-red.bin")?;
                         }
                         Keycode::F9 => {
-                            gb.load_state_from_file("save-state.bin")?;
+                            gb.load_state_from_file("pokemon-red.bin")?;
+                        }
+                        Keycode::F10 => {
+                            let pokemon_api = PokemonApi::new(&mut gb);
+                            println!("{:?}", pokemon_api.player_state());
+                            println!("{:?}", pokemon_api.pokemon_party());
+                            println!("{:?}", pokemon_api.map_state());
+                        },
+                        Keycode::F12 => {
+                            let mut pokemon_api = PokemonApi::new(&mut gb);
+                            let mut party = pokemon_api.pokemon_party();
+                            let mut charizard = crate::pokemon::pokemon::Pokemon {
+                                nickname: "BACON".to_string(),
+                                species: crate::pokemon::species::PokemonSpecies::Charizard,
+                                current_hp: 65,
+                                status: crate::pokemon::status::PokemonStatus::None,
+                                types: [crate::pokemon::pokemon::PokemonType::Fire, crate::pokemon::pokemon::PokemonType::Flying],
+                                moves: [
+                                    Some(crate::pokemon::move_name::PokemonMove {
+                                        name: crate::pokemon::move_name::PokemonMoveName::Flamethrower,
+                                        pp: 10
+                                    }),
+                                    Some(crate::pokemon::move_name::PokemonMove {
+                                        name: crate::pokemon::move_name::PokemonMoveName::FireBlast,
+                                        pp: 5
+                                    }),
+                                    Some(crate::pokemon::move_name::PokemonMove {
+                                        name: crate::pokemon::move_name::PokemonMoveName::Fly,
+                                        pp: 6
+                                    }),
+                                    None,
+                                ],
+                                trainer_name: "LLM".to_string(),
+                                trainer_id: 57937,
+                                experience: 6457,
+                                effort_values: crate::pokemon::pokemon::PokemonStats { attack: 100, defense: 200, speed: 300, special: 400, hp: 500 },
+                                individual_values: crate::pokemon::pokemon::PokemonStats { attack: 5, defense: 10, speed: 15, special: 10, hp: 10 },
+                                level: 20,
+                                stats: crate::pokemon::pokemon::PokemonStats { attack: 41, defense: 40, speed: 51, special: 44, hp: 66 },
+                            };
+                            charizard.recalculate();
+                            party.push(charizard);
+                            pokemon_api.write_pokemon_party(party);
                         }
                         Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().press_button(Up),
                         Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().press_button(Down),

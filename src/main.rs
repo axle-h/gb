@@ -20,6 +20,7 @@ mod divider;
 mod timer;
 mod audio;
 mod activation;
+mod pokemon;
 
 pub fn main() -> Result<(), String> {
     sdl::render::render()

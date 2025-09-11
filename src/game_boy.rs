@@ -18,6 +18,14 @@ impl GameBoy {
         Self::dmg(crate::roms::acid::ROM)
     }
 
+    pub fn core(&self) -> &Core {
+        &self.core
+    }
+
+    pub fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+
     pub fn run(&mut self, min_cycles: MachineCycles) -> MachineCycles {
         let mut cycles = MachineCycles::ZERO;
         while cycles < min_cycles {
@@ -27,12 +35,26 @@ impl GameBoy {
         cycles
     }
 
-    pub fn core(&self) -> &Core {
-        &self.core
+    pub fn reset(&mut self) {
+        self.core.reset();
     }
 
-    pub fn core_mut(&mut self) -> &mut Core {
-        &mut self.core
+    pub fn dump_sram(&self) -> Vec<u8> {
+        self.core.mmu().dump_sram()
+    }
+
+    pub fn dump_sram_to_file(&self, path: &str) -> Result<(), String> {
+        let data = self.dump_sram();
+        std::fs::write(path, &data).map_err(|e| e.to_string())
+    }
+
+    pub fn restore_sram(&mut self, data: &[u8]) -> Result<(), String> {
+        self.core.mmu_mut().restore_sram(data)
+    }
+
+    pub fn restore_sram_from_file(&mut self, path: &str) -> Result<(), String> {
+        let data = std::fs::read(path).map_err(|e| e.to_string())?;
+        self.restore_sram(&data)
     }
 
     pub fn save_state(&self) -> Result<Vec<u8>, String> {
