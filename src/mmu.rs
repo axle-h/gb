@@ -71,6 +71,26 @@ impl MMU {
         &self.data
     }
 
+    pub fn dump_sram(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(self.ram_banks.len() * RAM_BANK_SIZE);
+        for bank in &self.ram_banks {
+            data.extend_from_slice(bank);
+        }
+        data
+    }
+
+    pub fn restore_sram(&mut self, data: &[u8]) -> Result<(), String> {
+        if data.len() != self.ram_banks.len() * RAM_BANK_SIZE {
+            Err(format!("Cannot restore SRAM, expected {} bytes, got {}", self.ram_banks.len() * RAM_BANK_SIZE, data.len()))
+        } else {
+            for (bank, chunk) in self.ram_banks.iter_mut().zip(data.chunks_exact(RAM_BANK_SIZE)) {
+                bank.copy_from_slice(chunk);
+            }
+            Ok(())
+        }
+
+    }
+
     /// replace rom data, only intended for reloading save states without rom data
     pub fn set_data(&mut self, data: &[u8]) {
         self.data = data.to_vec();
@@ -238,9 +258,20 @@ impl MMU {
     }
 
     pub fn read_u16_le(&self, address: u16) -> u16 {
-        let low = self.read(address);
-        let high = self.read(address + 1);
-        u16::from_le_bytes([low, high])
+        u16::from_le_bytes([self.read(address), self.read(address + 1)])
+    }
+
+    pub fn read_u16_be(&self, address: u16) -> u16 {
+        u16::from_be_bytes([self.read(address), self.read(address + 1)])
+    }
+
+    pub fn read_u32_be(&self, address: u16) -> u32 {
+        u32::from_be_bytes([
+            self.read(address),
+            self.read(address + 1),
+            self.read(address + 2),
+            self.read(address + 3)
+        ])
     }
 
     pub fn write(&mut self, address: u16, value: u8) {
@@ -299,10 +330,22 @@ impl MMU {
     }
 
     pub fn write_u16_le(&mut self, address: u16, value: u16) {
-        let low = (value & 0xFF) as u8;
-        let high = (value >> 8) as u8;
+        let [low, high] = value.to_le_bytes();
         self.write(address, low);
         self.write(address + 1, high);
+    }
+
+    pub fn write_u16_be(&mut self, address: u16, value: u16) {
+        let [low, high] = value.to_be_bytes();
+        self.write(address, low);
+        self.write(address + 1, high);
+    }
+
+    pub fn write_u32_be(&mut self, address: u16, value: u32) {
+        let bytes = value.to_be_bytes();
+        for i in 0..bytes.len() {
+            self.write(address + i as u16, bytes[i]);
+        }
     }
 }
 

@@ -37,6 +37,10 @@ impl Core {
         }
     }
 
+    pub fn reset(&mut self) {
+        todo!()
+    }
+
     pub fn mmu(&self) -> &MMU {
         &self.mmu
     }
