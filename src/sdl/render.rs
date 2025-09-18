@@ -143,7 +143,7 @@ pub fn render() -> Result<(), String> {
                         },
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);
-                            let mut party = pokemon_api.pokemon_party();
+                            let mut party = pokemon_api.pokemon_party()?;
                             let mut charizard = crate::pokemon::pokemon::Pokemon {
                                 nickname: "BACON".to_string(),
                                 species: crate::pokemon::species::PokemonSpecies::Charizard,
@@ -174,7 +174,7 @@ pub fn render() -> Result<(), String> {
                                 stats: crate::pokemon::pokemon::PokemonStats { attack: 41, defense: 40, speed: 51, special: 44, hp: 66 },
                             };
                             charizard.recalculate();
-                            party.push(charizard);
+                            party.push(charizard)?;
                             pokemon_api.write_pokemon_party(party);
                         }
                         Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().press_button(Up),

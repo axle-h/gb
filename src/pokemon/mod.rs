@@ -1,4 +1,4 @@
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use badge::Badge;
 use map::Map;
 use species::PokemonSpecies;
@@ -35,44 +35,35 @@ impl<'a> PokemonApi<'a> {
     }
 
     pub fn player_state(&self) -> Result<PlayerState, String> {
+        println!("{:x}, {:x}, {:x}", self.mmu().read(0xD347), self.mmu().read(0xD348), self.mmu().read(0xD349));
         Ok(PlayerState {
             player_id: self.mmu().read(0xD359) as u16 * 256 + self.mmu().read(0xD35A) as u16,
-            name: self.mmu().read_pokemon_string(0xD158, 0x11)?,
+            name: self.mmu().read_pokemon_string(0xD158, PokemonBlockAddresses::NAME_LENGTH)?,
             rival_name: self.mmu().read_pokemon_string(0xD34A, 0x8)?,
-            badges: Badge::parse_flags(self.mmu().read(0xD356))
+            badges: Badge::parse_flags(self.mmu().read(0xD356)),
+            money: reverse_bcd(self.mmu().read_u32_be(0xD346) & 0xFFFFFF),
         })
     }
 
-    pub fn pokemon_party(&self) -> PokemonParty {
-        // todo respect D163
+    pub fn pokemon_party(&self) -> Result<PokemonParty, String> {
         let mmu = self.mmu();
-        println!("#={} end={}", mmu.read(0xD163), mmu.read(0xD16A));
-        println!("{},{},{},{},{},{}", mmu.read(0xD164), mmu.read(0xD165), mmu.read(0xD166), mmu.read(0xD167), mmu.read(0xD168), mmu.read(0xD169));
+        let count = mmu.read(0xD163);
         let mut party = PokemonParty::default();
-        for i in 0..PokemonBlockAddresses::PARTY_MAX {
-            if let Ok(pokemon) = mmu.read_pokemon(0xD16B, i as u16) {
-                party.push(pokemon);
-            } else {
-                break;
-            }
+        for i in 0..count {
+            let pokemon = mmu.read_pokemon(0xD16B, i as u16)?;
+            party.push(pokemon)?;
         }
-        party
+        Ok(party)
     }
 
     pub fn write_pokemon_party(&mut self, party: PokemonParty) {
         let mmu = self.mmu_mut();
-        for i in 0..PokemonBlockAddresses::PARTY_MAX {
-            if let Some(pokemon) = party.get(i as usize) {
-                mmu.write_pokemon(0xD16B, i, pokemon);
-                mmu.write(0xD164 + i, pokemon.species as u8);
-            } else {
-                mmu.write(0xD164 + i as u16, 0xFF);
-            }
+        mmu.write(0xD163, party.len() as u8); // length
+        mmu.write(0xD164 + party.len() as u16, 0xFF); // list end
+        for (index, pokemon) in party.into_iter().enumerate() {
+            mmu.write_pokemon(0xD16B, index as u16, &pokemon);
+            mmu.write(0xD164 + index as u16, pokemon.species as u8);
         }
-
-        mmu.write(0xD163, party.len() as u8);
-        mmu.write(0xD16A, if party.len() >= 6 { 0xFF } else { 0x00 });
-        println!("#={} end={}", mmu.read(0xD163), mmu.read(0xD16A));
     }
 
     pub fn map_state(&self) -> Result<MapState, String> {
@@ -89,21 +80,47 @@ pub struct PlayerState {
     name: String,
     rival_name: String,
     badges: Vec<Badge>,
+    money: u32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
-pub struct PokemonParty(Vec<Pokemon>); // TODO do not deref this, keep it private to ensure it's 1-6 pokemon long
+pub struct PokemonParty(Vec<Pokemon>);
 
-impl Deref for PokemonParty {
-    type Target = Vec<Pokemon>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl PokemonParty {
+    pub fn push(&mut self, pokemon: Pokemon) -> Result<(), String> {
+        if self.0.len() >= PokemonBlockAddresses::PARTY_MAX as usize {
+            Err("Party is full".to_string())
+        } else {
+            self.0.push(pokemon);
+            Ok(())
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
-impl DerefMut for PokemonParty {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+impl Index<usize> for PokemonParty {
+    type Output = Pokemon;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.0.index(index)
+    }
+}
+
+impl IndexMut<usize> for PokemonParty {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.0.index_mut(index)
+    }
+}
+
+impl IntoIterator for PokemonParty {
+    type Item = Pokemon;
+    type IntoIter = std::vec::IntoIter<Pokemon>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -343,11 +360,34 @@ impl PokemonBlockAddresses {
     }
 }
 
+fn reverse_bcd(mut value: u32) -> u32 {
+    let mut result = 0u32;
+    let mut multiplier = 1u32;
+    while value > 0 {
+        let digit = value & 0xF;
+        result += digit * multiplier;
+        multiplier *= 10;
+        value >>= 4;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use crate::pokemon::status::PokemonStatus;
     use crate::roms::blargg_cpu::ROM;
     use super::*;
+
+    #[test]
+    fn test_reverse_bcd() {
+        assert_eq!(reverse_bcd(0x3000), 3000);
+        assert_eq!(reverse_bcd(0x1234), 1234);
+        assert_eq!(reverse_bcd(0x0000), 0);
+        assert_eq!(reverse_bcd(0x9999), 9999);
+        assert_eq!(reverse_bcd(0x0001), 1);
+        assert_eq!(reverse_bcd(0x0012), 12);
+        assert_eq!(reverse_bcd(0x0100), 100);
+    }
 
     #[test]
     fn test_pokemon_encoding() {
