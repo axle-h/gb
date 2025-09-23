@@ -144,36 +144,18 @@ pub fn render() -> Result<(), String> {
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);
                             let mut party = pokemon_api.pokemon_party()?;
-                            let mut charizard = crate::pokemon::pokemon::Pokemon {
-                                nickname: "BACON".to_string(),
-                                species: crate::pokemon::species::PokemonSpecies::Charizard,
-                                current_hp: 65,
-                                status: crate::pokemon::status::PokemonStatus::None,
-                                types: [crate::pokemon::pokemon::PokemonType::Fire, crate::pokemon::pokemon::PokemonType::Flying],
-                                moves: [
-                                    Some(crate::pokemon::move_name::PokemonMove {
-                                        name: crate::pokemon::move_name::PokemonMoveName::Flamethrower,
-                                        pp: 10
-                                    }),
-                                    Some(crate::pokemon::move_name::PokemonMove {
-                                        name: crate::pokemon::move_name::PokemonMoveName::FireBlast,
-                                        pp: 5
-                                    }),
-                                    Some(crate::pokemon::move_name::PokemonMove {
-                                        name: crate::pokemon::move_name::PokemonMoveName::Fly,
-                                        pp: 6
-                                    }),
-                                    None,
+                            let charizard = crate::pokemon::pokemon::Pokemon::maxed(
+                                crate::pokemon::species::PokemonSpecies::Charizard,
+                                "CHARIZARD",
+                                [
+                                    crate::pokemon::move_name::PokemonMoveName::Flamethrower,
+                                    crate::pokemon::move_name::PokemonMoveName::Slash,
+                                    crate::pokemon::move_name::PokemonMoveName::Fly,
+                                    crate::pokemon::move_name::PokemonMoveName::Earthquake,
                                 ],
-                                trainer_name: "LLM".to_string(),
-                                trainer_id: 57937,
-                                experience: 6457,
-                                effort_values: crate::pokemon::pokemon::PokemonStats { attack: 100, defense: 200, speed: 300, special: 400, hp: 500 },
-                                individual_values: crate::pokemon::pokemon::PokemonStats { attack: 5, defense: 10, speed: 15, special: 10, hp: 10 },
-                                level: 20,
-                                stats: crate::pokemon::pokemon::PokemonStats { attack: 41, defense: 40, speed: 51, special: 44, hp: 66 },
-                            };
-                            charizard.recalculate();
+                                "LLM".to_string(),
+                                46628
+                            );
                             party.push(charizard)?;
                             pokemon_api.write_pokemon_party(party);
                         }
