@@ -1,4 +1,4 @@
-use crate::pokemon::move_name::PokemonMove;
+use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
 
@@ -8,7 +8,7 @@ pub struct Pokemon {
     pub species: PokemonSpecies,
     pub current_hp: u16,
     pub status: PokemonStatus,
-    pub types: [PokemonType; 2], // TODO revalidate types against pokedex on write
+    pub types: [PokemonType; 2],
     pub moves: [Option<PokemonMove>; 4],
     pub trainer_name: String,
     pub trainer_id: u16,
@@ -20,16 +20,51 @@ pub struct Pokemon {
 }
 
 impl Pokemon {
+    pub fn maxed(species: PokemonSpecies, nickname: &'static str, moves: [PokemonMoveName; 4], trainer_name: String, trainer_id: u16) -> Self {
+        let metadata = species.metadata();
+        let mut result = Self {
+            nickname: nickname.to_string(),
+            species,
+            current_hp: u16::MAX, // temporary, will be recalculated
+            status: PokemonStatus::default(),
+            types: [metadata.type1, metadata.type2.unwrap_or(metadata.type1)],
+            moves: moves.map(|move_name| Some(PokemonMove::new(move_name))),
+            trainer_name,
+            trainer_id,
+            experience: metadata.experience_group.experience_for_level(100),
+            effort_values: PokemonStats::MAX_EV,
+            individual_values: PokemonStats::MAX_IV,
+            level: 100,
+            stats: PokemonStats::ZERO, // temporary, will be recalculated
+        };
+        result.recalculate();
+        result
+    }
+    
     pub fn recalculate(&mut self) {
+        let metadata = self.species.metadata();
+        
         self.experience &= 0xFFFFFF;
         self.individual_values = self.individual_values.truncated_to_iv();
-        self.level = self.species.experience_group().level_from_experience(self.experience);
+        self.level = metadata.experience_group.level_from_experience(self.experience);
         self.stats = self.recalculated_stats();
         self.current_hp = self.current_hp.min(self.stats.hp);
+
+        // Ensure all moves don't exceed their maximum PP
+        for move_slot in &mut self.moves {
+            if let Some(pokemon_move) = move_slot {
+                let max_pp = pokemon_move.name.metadata().pp;
+                pokemon_move.pp = pokemon_move.pp.min(max_pp);
+            }
+        }
+
+        // revalidate types against pokedex
+        self.types[0] = metadata.type1;
+        self.types[1] = metadata.type2.unwrap_or(metadata.type1);
     }
 
     pub fn recalculated_stats(&self) -> PokemonStats {
-        let base = self.species.base_stats();
+        let base = self.species.metadata().base_stats;
         PokemonStats {
             hp: self.stat0(base.hp, self.individual_values.hp, self.effort_values.hp) + self.level as u16 + 10,
             attack: self.stat(base.attack, self.individual_values.attack, self.effort_values.attack),
@@ -60,6 +95,14 @@ pub struct PokemonStats {
 }
 
 impl PokemonStats {
+    pub const MAX_IV: Self = Self { attack: 15, defense: 15, speed: 15, special: 15, hp: 15 };
+    pub const MAX_EV: Self = Self { attack: u16::MAX, defense: u16::MAX, speed: u16::MAX, special: u16::MAX, hp: u16::MAX };
+    
+    pub const ZERO: Self = Self { attack: 0, defense: 0, speed: 0, special: 0, hp: 0 };
+    
+    pub const fn new(hp: u16, attack: u16, defense: u16, speed: u16, special: u16) -> Self {
+        Self { attack, defense, speed, special, hp }
+    }
 
     pub fn truncated_to_iv(self) -> Self {
         let mut result = Self {

@@ -13,8 +13,9 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PokemonStatus {
+    #[default]
     None,
     Paralyzed,
     Frozen,
