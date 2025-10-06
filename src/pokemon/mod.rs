@@ -8,6 +8,7 @@ use crate::geometry::Point8;
 use crate::mmu::MMU;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
+use crate::pokemon::sprite::{Sprite, SpriteMovementStatus};
 
 pub mod badge;
 pub mod map;
@@ -15,6 +16,7 @@ pub mod pokemon;
 pub mod status;
 pub mod species;
 pub mod move_name;
+mod sprite;
 
 #[derive(Debug)]
 pub struct PokemonApi<'a> {
@@ -71,6 +73,10 @@ impl<'a> PokemonApi<'a> {
             map_number: Map::from_repr(self.mmu().read(0xD35E)).ok_or_else(|| "Invalid map number".to_string())?,
             position: Point8 { x: self.mmu().read(0xD362), y: self.mmu().read(0xD361) },
         })
+    }
+
+    pub fn sprites(&self) -> Vec<Sprite> {
+        self.mmu().read_sprites()
     }
 }
 
@@ -139,6 +145,8 @@ trait PokemonEncoding {
     fn read_pokemon(&self, base_address: u16, index: u16) -> Result<Pokemon, String>;
 
     fn write_pokemon(&mut self, base_address: u16, index: u16, pokemon: &Pokemon);
+
+    fn read_sprites(&self) -> Vec<Sprite>;
 }
 
 impl PokemonEncoding for MMU {
@@ -337,6 +345,32 @@ impl PokemonEncoding for MMU {
         self.write(addresses.pokemon + 28, speed_special);
         self.write(addresses.pokemon + 33, pokemon.level);
         write_stats(self, addresses.pokemon, 34, pokemon.stats);
+    }
+
+    fn read_sprites(&self) -> Vec<Sprite> {
+        let mut sprites: Vec<Sprite> = Vec::new();
+        for index in 0..=0xFu16 {
+            let offset = index << 4;
+            let movement_status = match SpriteMovementStatus::from_repr(self.read(0xC101 | offset)) {
+                None | Some(SpriteMovementStatus::Uninitialised) => continue,
+                Some(movement_status) => movement_status
+            };
+            let sprite = Sprite {
+                index: index as u8,
+                picture_id: self.read(0xC100 | offset),
+                movement_status,
+                position: Point8 {
+                    x: self.read(0xC205 | offset),
+                    y: self.read(0xC204 | offset)
+                },
+                screen_position: Point8 {
+                    x: self.read(0xC106 | offset) / 4,
+                    y: self.read(0xC104 | offset) / 4
+                },
+            };
+            sprites.push(sprite);
+        }
+        sprites
     }
 }
 
