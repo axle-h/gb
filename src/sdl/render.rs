@@ -124,6 +124,9 @@ pub fn render() -> Result<(), String> {
                             ppu.dump_tilemap(TileMapMode::Upper, TileDataMode::Upper)
                                 .save("tilemap_upper_upper.png")
                                 .map_err(|e| e.to_string())?;
+                            ppu.screenshot()
+                                .save("screenshot.png")
+                                .map_err(|e| e.to_string())?;
                         }
                         Keycode::F7 => {
                             // TODO write to this file on change
@@ -147,6 +150,7 @@ pub fn render() -> Result<(), String> {
                         },
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);
+                            let player_state = pokemon_api.player_state()?;
                             let mut party = pokemon_api.pokemon_party()?;
                             let charizard = crate::pokemon::pokemon::Pokemon::maxed(
                                 crate::pokemon::species::PokemonSpecies::Charizard,
@@ -157,8 +161,8 @@ pub fn render() -> Result<(), String> {
                                     crate::pokemon::move_name::PokemonMoveName::Fly,
                                     crate::pokemon::move_name::PokemonMoveName::Earthquake,
                                 ],
-                                "LLM".to_string(),
-                                46628
+                                player_state.name,
+                                player_state.player_id
                             );
                             party.push(charizard)?;
                             pokemon_api.write_pokemon_party(party);

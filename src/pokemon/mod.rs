@@ -8,7 +8,7 @@ use crate::geometry::Point8;
 use crate::mmu::MMU;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
-use crate::pokemon::sprite::{Sprite, SpriteMovementStatus};
+use crate::pokemon::sprite::{PictureId, Sprite                          };
 
 pub mod badge;
 pub mod map;
@@ -82,11 +82,11 @@ impl<'a> PokemonApi<'a> {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PlayerState {
-    player_id: u16,
-    name: String,
-    rival_name: String,
-    badges: Vec<Badge>,
-    money: u32,
+    pub player_id: u16,
+    pub name: String,
+    pub rival_name: String,
+    pub badges: Vec<Badge>,
+    pub money: u32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
@@ -351,21 +351,29 @@ impl PokemonEncoding for MMU {
         let mut sprites: Vec<Sprite> = Vec::new();
         for index in 0..=0xFu16 {
             let offset = index << 4;
-            let movement_status = match SpriteMovementStatus::from_repr(self.read(0xC101 | offset)) {
-                None | Some(SpriteMovementStatus::Uninitialised) => continue,
-                Some(movement_status) => movement_status
+            let picture_id = match PictureId::from_repr(self.read(0xC100 | offset)) {
+                Some(picture_id) => picture_id,
+                None => continue
             };
+            let sprite_image_index = self.read(0xC102 | offset);
+            if sprite_image_index == 0xFF {
+                // Sprite is not visible
+                continue;
+            }
             let sprite = Sprite {
                 index: index as u8,
-                picture_id: self.read(0xC100 | offset),
-                movement_status,
-                position: Point8 {
-                    x: self.read(0xC205 | offset),
-                    y: self.read(0xC204 | offset)
-                },
-                screen_position: Point8 {
-                    x: self.read(0xC106 | offset) / 4,
-                    y: self.read(0xC104 | offset) / 4
+                picture_id,
+                position: if picture_id == PictureId::Red {
+                    // Read player position from the map state
+                    Point8 {
+                        x: self.read(0xD362),
+                        y: self.read(0xD361)
+                    }
+                } else {
+                    Point8 {
+                        x: self.read(0xC205 | offset) - 4,
+                        y: self.read(0xC204 | offset) - 4
+                    }
                 },
             };
             sprites.push(sprite);
