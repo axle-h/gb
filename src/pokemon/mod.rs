@@ -69,14 +69,45 @@ impl<'a> PokemonApi<'a> {
     }
 
     pub fn map_state(&self) -> Result<MapState, String> {
-        Ok(MapState {
-            map_number: Map::from_repr(self.mmu().read(0xD35E)).ok_or_else(|| "Invalid map number".to_string())?,
-            position: Point8 { x: self.mmu().read(0xD362), y: self.mmu().read(0xD361) },
-        })
-    }
+        let mmu = self.mmu();
 
-    pub fn sprites(&self) -> Vec<Sprite> {
-        self.mmu().read_sprites()
+        // any rom data we read must be directly from the rom banks as the game is not guaranteed to have the correct bank loaded
+        let map_number = Map::from_repr(mmu.read(0xD35E)).ok_or_else(|| "Invalid map number".to_string())?;
+        let map_bank = mmu.rom_data(3, 0x023D, Map::COUNT)[map_number as usize];
+        let map_header_pointer = mmu.read_u16_le(0x01AE + map_number as u16 * 2);
+        println!("map bank: {:x}", map_bank);
+        println!("map_header_pointer: {:x}", map_header_pointer);
+
+        let tileset_id = mmu.read(0xD367);
+        let map_height = mmu.read(0xD368);
+        let map_width = mmu.read(0xD369);
+        let tileset_bank = mmu.read(0xD52B);
+        println!("tileset_id: {:#4x}", tileset_id);
+        println!("tileset_bank: {:x}", tileset_bank);
+
+        // collision data is always in bank 0
+        let collision_address = mmu.read_u16_le(0xD530);
+        let mut collision_tiles = vec![];
+        for index in 0..20 {
+            let collision_byte = mmu.read(collision_address + index);
+            if collision_byte == 0xff {
+                break;
+            }
+            collision_tiles.push(collision_byte);
+        }
+
+        let map_data_address = mmu.read_u16_le(0xD36A);
+        let map_data = mmu.rom_data_from_pointer(map_bank as usize, map_data_address, map_height as usize * map_width as usize);
+        for block_id in map_data {
+            print!("{:x} ", block_id);
+        }
+        print!("\n");
+
+        Ok(MapState {
+            map_number,
+            position: Point8 { x: mmu.read(0xD362), y: mmu.read(0xD361) },
+            sprites: mmu.read_sprites()
+        })
     }
 }
 
@@ -131,10 +162,11 @@ impl IntoIterator for PokemonParty {
 }
 
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MapState {
     map_number: Map,
     position: Point8,
+    sprites: Vec<Sprite>
 }
 
 trait PokemonEncoding {
@@ -349,7 +381,7 @@ impl PokemonEncoding for MMU {
 
     fn read_sprites(&self) -> Vec<Sprite> {
         let mut sprites: Vec<Sprite> = Vec::new();
-        for index in 0..=0xFu16 {
+        for index in 1..=0xFu16 { // do not read index=0 as it is always the player
             let offset = index << 4;
             let picture_id = match PictureId::from_repr(self.read(0xC100 | offset)) {
                 Some(picture_id) => picture_id,
