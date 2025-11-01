@@ -13,8 +13,8 @@ use crate::ppu::PPU;
 use crate::serial::Serial;
 use crate::timer::Timer;
 
-const RAM_BANK_SIZE: usize = 0x2000; // 8KB
-const ROM_BANK_SIZE: usize = 0x4000; // 16KB
+pub const RAM_BANK_SIZE: usize = 0x2000; // 8KB
+pub const ROM_BANK_SIZE: usize = 0x4000; // 16KB
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MMU {
@@ -69,6 +69,40 @@ impl MMU {
 
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn rom_bank_register(&self) -> usize {
+        self.rom_bank_register
+    }
+
+    pub fn set_rom_bank_register(&mut self, value: usize) {
+        // TODO MBC1 should mask to 0x1F
+        self.rom_bank_register = (value & 0x7F)
+            .min(self.header.rom_banks() - 1)
+            .max(1);
+    }
+
+    pub fn rom_data(&self, bank: usize, index: usize, length: usize) -> &[u8] {
+        let start = bank * ROM_BANK_SIZE + index;
+        let end = start + length;
+        self.data.get(start..end)
+            .unwrap_or_else(|| panic!("ROM slice out of bounds: bank={} index={} length={}", bank, index, length))
+    }
+
+    pub fn rom_data_from_pointer(&self, bank: usize, pointer: u16, length: usize) -> &[u8] {
+        if bank == 0 {
+            assert!(
+                pointer < ROM_BANK_SIZE as u16,
+                "Pointer {:04X} is invalid for bank {}", pointer, bank
+            );
+            self.rom_data(bank, pointer as usize, length)
+        } else {
+            assert!(
+                pointer >= ROM_BANK_SIZE as u16 && pointer < ROM_BANK_SIZE as u16 * 2,
+                "Pointer {:04X} is invalid for bank {}", pointer, bank
+            );
+            self.rom_data(bank, pointer as usize - ROM_BANK_SIZE, length)
+        }
     }
 
     pub fn dump_sram(&self) -> Vec<u8> {
@@ -282,10 +316,7 @@ impl MMU {
             }
             0x2000..=0x3FFF if self.header.rom_banks() > 2 => {
                 // https://gbdev.io/pandocs/MBC1.html#20003fff--rom-bank-number-write-only
-                // TODO MBC1 should mask to 0x1F
-                self.rom_bank_register = ((value & 0x7F) as usize)
-                    .min(self.header.rom_banks() - 1)
-                    .max(1);
+                self.set_rom_bank_register(value as usize);
             }
             0x4000..=0x5FFF if self.header.ram_banks() > 0 => {
                 // https://gbdev.io/pandocs/MBC1.html#40005fff--ram-bank-number--or--upper-bits-of-rom-bank-number-write-only

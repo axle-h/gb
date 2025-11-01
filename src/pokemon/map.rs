@@ -227,3 +227,7 @@ pub enum Map {
     BrunosRoom = 0xF6,
     AgathasRoom = 0xF7,
 }
+
+impl Map {
+    pub const COUNT: usize = 0xF8;
+}
