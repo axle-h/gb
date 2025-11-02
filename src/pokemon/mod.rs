@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use badge::Badge;
 use map::Map;
@@ -71,42 +73,13 @@ impl<'a> PokemonApi<'a> {
     pub fn map_state(&self) -> Result<MapState, String> {
         let mmu = self.mmu();
 
-        // any rom data we read must be directly from the rom banks as the game is not guaranteed to have the correct bank loaded
-        let map_number = Map::from_repr(mmu.read(0xD35E)).ok_or_else(|| "Invalid map number".to_string())?;
-        let map_bank = mmu.rom_data(3, 0x023D, Map::COUNT)[map_number as usize];
-        let map_header_pointer = mmu.read_u16_le(0x01AE + map_number as u16 * 2);
-        println!("map bank: {:x}", map_bank);
-        println!("map_header_pointer: {:x}", map_header_pointer);
-
-        let tileset_id = mmu.read(0xD367);
-        let map_height = mmu.read(0xD368);
-        let map_width = mmu.read(0xD369);
-        let tileset_bank = mmu.read(0xD52B);
-        println!("tileset_id: {:#4x}", tileset_id);
-        println!("tileset_bank: {:x}", tileset_bank);
-
-        // collision data is always in bank 0
-        let collision_address = mmu.read_u16_le(0xD530);
-        let mut collision_tiles = vec![];
-        for index in 0..20 {
-            let collision_byte = mmu.read(collision_address + index);
-            if collision_byte == 0xff {
-                break;
-            }
-            collision_tiles.push(collision_byte);
-        }
-
-        let map_data_address = mmu.read_u16_le(0xD36A);
-        let map_data = mmu.rom_data_from_pointer(map_bank as usize, map_data_address, map_height as usize * map_width as usize);
-        for block_id in map_data {
-            print!("{:x} ", block_id);
-        }
-        print!("\n");
+        let map_parser = MapParser::from_mmu(mmu)?;
+        println!("{}", map_parser);
 
         Ok(MapState {
-            map_number,
+            map: map_parser.map,
             position: Point8 { x: mmu.read(0xD362), y: mmu.read(0xD361) },
-            sprites: mmu.read_sprites()
+            sprites: mmu.read_sprites()?
         })
     }
 }
@@ -164,9 +137,9 @@ impl IntoIterator for PokemonParty {
 
 #[derive(Debug, Clone)]
 pub struct MapState {
-    map_number: Map,
-    position: Point8,
-    sprites: Vec<Sprite>
+    pub map: Map,
+    pub position: Point8,
+    pub sprites: Vec<Sprite>
 }
 
 trait PokemonEncoding {
@@ -178,7 +151,7 @@ trait PokemonEncoding {
 
     fn write_pokemon(&mut self, base_address: u16, index: u16, pokemon: &Pokemon);
 
-    fn read_sprites(&self) -> Vec<Sprite>;
+    fn read_sprites(&self) -> Result<Vec<Sprite>, String>;
 }
 
 impl PokemonEncoding for MMU {
@@ -379,7 +352,12 @@ impl PokemonEncoding for MMU {
         write_stats(self, addresses.pokemon, 34, pokemon.stats);
     }
 
-    fn read_sprites(&self) -> Vec<Sprite> {
+    fn read_sprites(&self) -> Result<Vec<Sprite>, String> {
+        let map = Map::from_repr(self.read(0xD35E)).ok_or_else(|| "Invalid map number".to_string())?;
+        let map_sprites = map.sprites();
+
+        let missable_objects = self.read_slice(0xD5A6, 31);
+
         let mut sprites: Vec<Sprite> = Vec::new();
         for index in 1..=0xFu16 { // do not read index=0 as it is always the player
             let offset = index << 4;
@@ -387,11 +365,21 @@ impl PokemonEncoding for MMU {
                 Some(picture_id) => picture_id,
                 None => continue
             };
+            let map_sprite = match map_sprites.get(index as usize - 1) {
+                Some(map_sprite) => map_sprite,
+                None => continue
+            };
+
+            let hidden = match map_sprite.hidden_object_id {
+                Some(hidden_object_bit) => {
+                    let mask = 1 << hidden_object_bit;
+                    (missable_objects[(hidden_object_bit / 8) as usize] & mask) == mask
+                }
+              None => false,
+            };
+
             let sprite_image_index = self.read(0xC102 | offset);
-            if sprite_image_index == 0xFF {
-                // Sprite is not visible
-                continue;
-            }
+
             let sprite = Sprite {
                 index: index as u8,
                 picture_id,
@@ -407,10 +395,114 @@ impl PokemonEncoding for MMU {
                         y: self.read(0xC204 | offset) - 4
                     }
                 },
+                on_screen: sprite_image_index != 0xFF,
+                hidden,
+                name: map_sprite.name
             };
             sprites.push(sprite);
         }
-        sprites
+        Ok(sprites)
+    }
+}
+
+pub struct MapParser {
+    map: Map,
+    map_width_blocks: usize,
+    map_height_blocks: usize,
+    map_data: Vec<u8>,
+    block_data: Vec<u8>,
+    collision_tiles: HashSet<u8>,
+}
+
+impl MapParser {
+
+    pub fn from_mmu(mmu: &MMU) -> Result<Self, String> {
+        // any rom data we read must be directly from the rom banks as the game is not guaranteed to have the correct bank loaded
+        let map = Map::from_repr(mmu.read(0xD35E)).ok_or_else(|| "Invalid map number".to_string())?;
+        let map_bank = mmu.rom_data(3, 0x023D, Map::COUNT)[map as usize] as usize;
+        let map_height_blocks = mmu.read(0xD368) as usize;
+        let map_width_blocks = mmu.read(0xD369) as usize;
+        let tileset_bank = mmu.read(0xD52B) as usize;
+
+        // collision data is always in bank 0
+        let collision_address = mmu.read_u16_le(0xD530);
+        let mut collision_tiles = HashSet::new();
+        for index in 0..20 {
+            let collision_byte = mmu.read(collision_address + index);
+            if collision_byte == 0xff {
+                break;
+            }
+            collision_tiles.insert(collision_byte);
+        }
+
+        let map_data_address = mmu.read_u16_le(0xD36A);
+        let map_data = mmu.rom_data_from_pointer(map_bank, map_data_address, map_height_blocks * map_width_blocks).to_vec();
+
+        let max_block_id = *map_data.iter().max().unwrap() as usize;
+        let block_data_address = mmu.read_u16_le(0xD52C);
+        let block_data = mmu.rom_data_from_pointer(tileset_bank, block_data_address, (max_block_id + 1) * Self::BLOCK_TILES).to_vec();
+
+        Ok(Self {
+            map,
+            map_width_blocks,
+            map_height_blocks,
+            map_data,
+            block_data,
+            collision_tiles,
+        })
+    }
+
+    pub const BLOCK_TILE_WIDTH: usize = 4; // a block is 4x4 tiles
+    pub const BLOCK_TILES: usize = Self::BLOCK_TILE_WIDTH * Self::BLOCK_TILE_WIDTH;
+    pub const TILES_PER_POSITION: usize = 2; // a position on the map is 2x2 tiles
+
+    pub fn can_walk_over_tile(&self, x: usize, y: usize) -> bool {
+        let block_index = self.map_data[(x / Self::BLOCK_TILE_WIDTH) + (y / Self::BLOCK_TILE_WIDTH) * self.map_width_blocks] as usize;
+        let block_offset = block_index * Self::BLOCK_TILES;
+        let tile_offset = (x % Self::BLOCK_TILE_WIDTH) + (y % Self::BLOCK_TILE_WIDTH) * Self::BLOCK_TILE_WIDTH;
+        let tile_index = self.block_data[block_offset + tile_offset];
+        self.collision_tiles.contains(&tile_index)
+    }
+
+    pub fn navigable_map(&self) -> Vec<bool> {
+        let width = self.map_width_blocks * Self::TILES_PER_POSITION;
+        let height = self.map_height_blocks * Self::TILES_PER_POSITION;
+        let mut result = vec![false; width * height];
+
+        let width_tiles = self.map_width_blocks * Self::BLOCK_TILE_WIDTH;
+        let height_tiles = self.map_height_blocks * Self::BLOCK_TILE_WIDTH;
+        for tile_y in 0..height_tiles {
+            let y = tile_y / Self::TILES_PER_POSITION;
+            for tile_x in 0..width_tiles {
+                let x = tile_x / Self::TILES_PER_POSITION;
+                let index = x + y * width;
+                // if you can walk over any tile in a map position (2x2 tiles) then you can walk over the whole position
+                if !result[index] && self.can_walk_over_tile(tile_x, tile_y) {
+                    result[index] = true;
+                }
+            }
+        }
+
+        result
+    }
+}
+
+impl Display for MapParser {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let navigable_map = self.navigable_map();
+        let width = self.map_width_blocks * Self::TILES_PER_POSITION;
+        let height = self.map_height_blocks * Self::TILES_PER_POSITION;
+        for y in 0..height {
+            for x in 0..width {
+                if navigable_map[x + y * width] {
+                    write!(f, "#")?;
+                } else {
+                    write!(f, " ")?;
+                }
+            }
+            writeln!(f)?;
+        }
+        writeln!(f)
     }
 }
 
