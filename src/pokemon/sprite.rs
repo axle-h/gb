@@ -1,10 +1,14 @@
 use crate::geometry::Point8;
+use crate::pokemon::map::MapSprite;
 
 #[derive(Debug, Copy, Clone)]
 pub struct Sprite {
     pub index: u8,
     pub picture_id: PictureId,
     pub position: Point8,
+    pub on_screen: bool,
+    pub hidden: bool,
+    pub name: &'static str
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, strum_macros::FromRepr)]

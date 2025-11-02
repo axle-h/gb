@@ -307,6 +307,14 @@ impl MMU {
             self.read(address + 3)
         ])
     }
+    
+    pub fn read_slice(&self, address: u16, length: usize) -> Vec<u8> {
+        let mut result = vec![0; length];
+        for i in 0..length {
+            result[i] = self.read(address + i as u16);
+        }
+        result
+    }
 
     pub fn write(&mut self, address: u16, value: u8) {
         match address {
