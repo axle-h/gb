@@ -1,7 +1,7 @@
 use crate::geometry::Point8;
 use crate::pokemon::map::MapSprite;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Sprite {
     pub index: u8,
     pub picture_id: PictureId,
