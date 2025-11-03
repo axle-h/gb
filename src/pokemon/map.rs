@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, strum_macros::Display, strum_macros::FromRepr)]
 #[repr(u8)]
 pub enum Map {
     PalletTown = 0x00,
