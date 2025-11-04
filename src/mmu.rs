@@ -122,7 +122,10 @@ impl MMU {
             }
             Ok(())
         }
-
+    }
+    
+    pub fn work_ram(&self) -> &[u8] {
+        &self.work_ram
     }
 
     /// replace rom data, only intended for reloading save states without rom data

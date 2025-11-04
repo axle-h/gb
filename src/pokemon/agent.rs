@@ -1,13 +1,18 @@
 use std::collections::VecDeque;
+use std::time::Duration;
+use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::pokemon::actions::{OverworldAction};
 use crate::pokemon::{GameMode, MetaTile, PokemonApi};
 use crate::pokemon::map::Map;
 
+const RESOLUTION: MachineCycles = MachineCycles::from_hz(60);
+
 #[derive(Debug, Default)]
 pub struct PokemonAgent {
     state: State,
     event_buffer: VecDeque<AgentEvent>,
+    cycles: MachineCycles,
 }
 
 #[derive(Debug)]
@@ -43,7 +48,16 @@ impl PokemonAgent {
         self.state = State::OverworldMovement { destination: action.tile, map: action.map };
     }
 
-    pub fn update(&mut self, gb: &mut GameBoy) -> Result<(), String> {
+    pub fn update(&mut self, gb: &mut GameBoy, delta_cycles: MachineCycles) -> Result<(), String> {
+        self.cycles += delta_cycles;
+        if self.cycles < RESOLUTION {
+            return Ok(());
+        }
+        while self.cycles >= RESOLUTION {
+            // skip unused cycles
+            self.cycles -= RESOLUTION;
+        }
+
         let mut api = PokemonApi::new(gb);
         match self.state {
             State::Idle => {},

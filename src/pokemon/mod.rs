@@ -60,11 +60,6 @@ impl<'a> PokemonApi<'a> {
     pub fn game_mode(&self) -> GameMode {
         let mmu = self.mmu();
 
-        let menu_y = mmu.read(0xcc24);
-        let menu_x = mmu.read(0xcc25);
-        let wTextBoxID = mmu.read(0xd125);
-        println!("menu position: {}, {}: {}", menu_x, menu_y, wTextBoxID);
-
         // ; lost battle, this is -1
         // ; no battle, this is 0
         // ; wild battle, this is 1
@@ -72,7 +67,16 @@ impl<'a> PokemonApi<'a> {
         match mmu.read(0xD057) {
             1 => GameMode::WildBattle,
             2 => GameMode::TrainerBattle,
-            _ => GameMode::Overworld // TODO menu
+            _ => {
+                // wFontLoaded infers a text box is open
+                // it is set in DisplayTextIDInit and reset in ReloadMapSpriteTilePatterns
+                let font_loaded = mmu.read(0xcfc4) & 0x01 == 1;
+                if font_loaded {
+                    GameMode::Menu
+                } else {
+                    GameMode::Overworld
+                }
+            }
         }
     }
 

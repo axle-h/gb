@@ -99,6 +99,7 @@ pub fn render() -> Result<(), String> {
     let mut iteration_count = 0;
     let mut cycle_count = MachineCycles::ZERO;
 
+    let mut previous_wram = [0u8; 0x2000];
     'running: loop {
         iteration_count += 1;
         let delta = frame_rate.update()?;
@@ -132,6 +133,19 @@ pub fn render() -> Result<(), String> {
                                 .save("screenshot.png")
                                 .map_err(|e| e.to_string())?;
                         }
+                        Keycode::F2 => {
+                            // compare wram to previous wram
+                            let current_wram = gb.core().mmu().work_ram();
+                            let diff = current_wram.into_iter()
+                                .zip(previous_wram.iter())
+                                .enumerate();
+                            for (index, (&current, &previous)) in diff {
+                                if current != previous {
+                                    println!("{:04x}: {:02x} -> {:02x}", index + 0xC000, previous, current);
+                                }
+                            }
+                            previous_wram.copy_from_slice(current_wram);
+                        }
                         Keycode::F7 => {
                             // TODO write to this file on change
                             gb.dump_sram_to_file("pokemon-red.sav")?;
@@ -151,7 +165,7 @@ pub fn render() -> Result<(), String> {
                             pokemon_api.map_state()?;
                             println!("{}", pokemon_api.game_mode());
                         },
-                        Keycode::F11 => {
+                        Keycode::W => {
                             let pokemon_api = PokemonApi::new(&mut gb);
                             if let Some(action) = pokemon_api.map_state()?.actions.into_iter().choose(&mut rand::rng()) {
                                 pokemon_agent.take_overworld_action(action);
@@ -205,8 +219,6 @@ pub fn render() -> Result<(), String> {
             }
         }
 
-        pokemon_agent.update(&mut gb)?;
-
         let mut min_cycles = MachineCycles::ZERO;
         while since_last_update >= duration_per_cycle {
             since_last_update -= duration_per_cycle;
@@ -218,11 +230,14 @@ pub fn render() -> Result<(), String> {
             }
         }
 
+        let mut actual_cycles = MachineCycles::ZERO;
         if min_cycles > MachineCycles::ZERO {
-            let cycles =  gb.run(min_cycles);
-            cycle_count += cycles;
-            ahead_by_cycles += cycles - min_cycles;
+            actual_cycles =  gb.run(min_cycles);
+            cycle_count += actual_cycles;
+            ahead_by_cycles += actual_cycles - min_cycles;
         }
+
+        pokemon_agent.update(&mut gb, actual_cycles)?;
 
         let audio_buffer = gb.core_mut().mmu_mut().audio_mut().buffer_mut();
         let required_input_frames = resampler.input_frames_next();
