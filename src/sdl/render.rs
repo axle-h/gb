@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use itertools::Itertools;
 use rubato::{Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use audioadapter::direct::InterleavedSlice;
+use rand::seq::{IndexedRandom, IteratorRandom};
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -13,6 +14,7 @@ use crate::audio::GB_SAMPLE_RATE;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
+use crate::pokemon::agent::PokemonAgent;
 use crate::pokemon::PokemonApi;
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
@@ -24,6 +26,8 @@ const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
     let mut gb = GameBoy::dmg(crate::roms::commercial::POKEMON_RED);
+    let mut pokemon_agent = PokemonAgent::default();
+
     if let Err(e) = gb.restore_sram_from_file("pokemon-red.sav") {
         println!("Could not load save file: {}", e);
     }
@@ -144,8 +148,13 @@ pub fn render() -> Result<(), String> {
                             // println!("{:?}", pokemon_api.pokemon_party());
                             //println!("{:?}", pokemon_api.map_state());
 
-                            for sprite in pokemon_api.map_state()?.sprites.iter() {
-                                println!("{:?}", sprite);
+                            pokemon_api.map_state()?;
+                            println!("{}", pokemon_api.game_mode());
+                        },
+                        Keycode::F11 => {
+                            let pokemon_api = PokemonApi::new(&mut gb);
+                            if let Some(action) = pokemon_api.map_state()?.actions.into_iter().choose(&mut rand::rng()) {
+                                pokemon_agent.take_overworld_action(action);
                             }
                         },
                         Keycode::F12 => {
@@ -195,6 +204,8 @@ pub fn render() -> Result<(), String> {
                 _ => {}
             }
         }
+
+        pokemon_agent.update(&mut gb)?;
 
         let mut min_cycles = MachineCycles::ZERO;
         while since_last_update >= duration_per_cycle {

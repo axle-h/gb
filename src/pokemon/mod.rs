@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut, Index, IndexMut};
+use strum::IntoEnumIterator;
 use badge::Badge;
 use map::Map;
 use species::PokemonSpecies;
 use unicode_segmentation::UnicodeSegmentation;
+use actions::OverworldAction;
 use party::PokemonParty;
 use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
+use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
@@ -21,6 +24,8 @@ pub mod species;
 pub mod move_name;
 pub mod sprite;
 pub mod party;
+pub mod agent;
+pub mod actions;
 
 #[derive(Debug)]
 pub struct PokemonApi<'a> {
@@ -38,6 +43,37 @@ impl<'a> PokemonApi<'a> {
 
     fn mmu_mut(&mut self) -> &mut MMU {
         self.game_boy.core_mut().mmu_mut()
+    }
+
+    pub fn release_all_buttons(&mut self) {
+        let joypad = self.mmu_mut().joypad_mut();
+        for button in JoypadButton::iter() {
+            joypad.release_button(button);
+        }
+    }
+
+    pub fn press_button(&mut self, button: JoypadButton) {
+        let joypad = self.mmu_mut().joypad_mut();
+        joypad.press_button(button);
+    }
+
+    pub fn game_mode(&self) -> GameMode {
+        let mmu = self.mmu();
+
+        let menu_y = mmu.read(0xcc24);
+        let menu_x = mmu.read(0xcc25);
+        let wTextBoxID = mmu.read(0xd125);
+        println!("menu position: {}, {}: {}", menu_x, menu_y, wTextBoxID);
+
+        // ; lost battle, this is -1
+        // ; no battle, this is 0
+        // ; wild battle, this is 1
+        // ; trainer battle, this is 2
+        match mmu.read(0xD057) {
+            1 => GameMode::WildBattle,
+            2 => GameMode::TrainerBattle,
+            _ => GameMode::Overworld // TODO menu
+        }
     }
 
     pub fn player_state(&self) -> Result<PlayerState, String> {
@@ -74,22 +110,32 @@ impl<'a> PokemonApi<'a> {
 
     pub fn map_state(&self) -> Result<MapState, String> {
         let mmu = self.mmu();
-
-        let position = Point8 { x: mmu.read(0xD362), y: mmu.read(0xD361) };
-        let map = CurrentMap::from_mmu(mmu)?;
-        let meta_tile_map = MetaTileMap::new(&map);
-        println!("{}", meta_tile_map);
-        let routes = meta_tile_map.routes(position);
-        for route in routes.into_iter() {
-            println!("{:?}", route);
-        }
+        let meta_tile_map = MetaTileMap::new(&CurrentMap::from_mmu(mmu)?);
+        // println!("{}", meta_tile_map);
+        let actions = meta_tile_map.actions();
+        // for action in actions.iter() {
+        //     println!("{:?}", action);
+        // }
 
         Ok(MapState {
-            map: map.map,
-            position,
-            sprites: map.sprites
+            map: meta_tile_map.map,
+            player_position: meta_tile_map.player_position,
+            player_tile: meta_tile_map.player_tile(),
+            sprites: meta_tile_map.sprites,
+            actions,
         })
     }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, strum_macros::Display)]
+pub enum GameMode {
+    Overworld,
+    #[strum(serialize = "Wild Pokemon Battle")]
+    WildBattle,
+    #[strum(serialize = "Trainer Battle")]
+    TrainerBattle,
+    Menu,
+    Dialogue,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -105,8 +151,10 @@ pub struct PlayerState {
 #[derive(Debug, Clone)]
 pub struct MapState {
     pub map: Map,
-    pub position: Point8,
-    pub sprites: Vec<Sprite>
+    pub player_position: Point8,
+    pub player_tile: MetaTile,
+    pub sprites: Vec<Sprite>,
+    pub actions: Vec<OverworldAction>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -347,7 +395,7 @@ impl PokemonEncoding for MMU {
 
             let hidden = match map_sprite.hidden_object_id {
                 Some(hidden_object_bit) => {
-                    let mask = 1 << hidden_object_bit;
+                    let mask = 1 << hidden_object_bit % 8;
                     (missable_objects[(hidden_object_bit / 8) as usize] & mask) == mask
                 }
               None => false,
@@ -401,18 +449,40 @@ impl PokemonEncoding for MMU {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum_macros::Display)]
 pub enum MetaTile {
     Empty,
     Obstacle,
-    Sprite(Sprite),
+    Sprite(&'static str),
     Warp(Map),
     // TODO map connection
     // TODO signs
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
+#[repr(u8)]
+pub enum PlayerFacingDirection {
+    Up = 8,
+    Down = 4,
+    Left = 2,
+    Right = 1,
+}
+
+impl Into<JoypadButton> for PlayerFacingDirection {
+    fn into(self) -> JoypadButton {
+        match self {
+            PlayerFacingDirection::Up => JoypadButton::Up,
+            PlayerFacingDirection::Down => JoypadButton::Down,
+            PlayerFacingDirection::Left => JoypadButton::Left,
+            PlayerFacingDirection::Right => JoypadButton::Right,
+        }
+    }
+}
+
 pub struct CurrentMap {
     map: Map,
+    player_position: Point8,
+    player_direction: PlayerFacingDirection,
     map_width_blocks: usize,
     map_height_blocks: usize,
     map_data: Vec<u8>,
@@ -453,9 +523,15 @@ impl CurrentMap {
         let warp_events = mmu.read_warp_events()?;
 
         let sprites = mmu.read_sprites()?;
+        let player_position = Point8 { x: mmu.read(0xD362), y: mmu.read(0xD361) };
+
+        let player_direction = PlayerFacingDirection::from_repr(mmu.read(0xD52A))
+            .ok_or_else(|| format!("Invalid player facing direction {}", mmu.read(0xD52A)))?;
 
         Ok(Self {
             map,
+            player_position,
+            player_direction,
             map_width_blocks,
             map_height_blocks,
             map_data,
@@ -512,7 +588,7 @@ impl CurrentMap {
         // now check for sprites
         for sprite in self.sprites.iter().filter(|sprite| !sprite.hidden) {
             let index = sprite.position.x as usize + sprite.position.y as usize * width;
-            result[index] = MetaTile::Sprite(*sprite);
+            result[index] = MetaTile::Sprite(sprite.name);
         }
 
         // now check for warp events
@@ -526,6 +602,9 @@ impl CurrentMap {
 }
 
 pub struct MetaTileMap {
+    player_position: Point8,
+    player_direction: PlayerFacingDirection,
+    map: Map,
     width: usize,
     height: usize,
     meta_tiles: Vec<MetaTile>,
@@ -535,17 +614,25 @@ pub struct MetaTileMap {
 
 impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
-        let meta_tiles = map.meta_tiles();
-        let width = map.meta_width();
-        let height = map.meta_height();
-        let sprites = map.sprites.clone();
-        let warp_targets = map.warp_events.iter()
-            .map(|warp_event| warp_event.map_id)
-            .collect();
-        Self { width, height, meta_tiles, sprites, warp_targets }
+        Self {
+            player_position: map.player_position,
+            player_direction: map.player_direction,
+            map: map.map,
+            width: map.meta_width(),
+            height: map.meta_height(),
+            meta_tiles: map.meta_tiles(),
+            sprites: map.sprites.clone(),
+            warp_targets: map.warp_events.iter()
+                .map(|warp_event| warp_event.map_id)
+                .collect()
+        }
     }
 
-    pub fn route_between(&self, from: Point8, to: Point8) -> Option<Route> {
+    pub fn player_tile(&self) -> MetaTile {
+        self.meta_tiles[self.player_position.x as usize + self.player_position.y as usize * self.width]
+    }
+
+    fn player_route(&self, destination: Point8) -> Option<OverworldAction> {
         use std::collections::{BinaryHeap, HashMap};
         use std::cmp::Ordering;
 
@@ -569,21 +656,22 @@ impl MetaTileMap {
         }
 
         let heuristic = |pos: Point8| -> u32 {
-            (pos.x.abs_diff(to.x) + pos.y.abs_diff(to.y)) as u32
+            (pos.x.abs_diff(destination.x) + pos.y.abs_diff(destination.y)) as u32
         };
 
         let mut open_set = BinaryHeap::new();
-        let mut came_from: HashMap<Point8, (Point8, Direction)> = HashMap::new();
+        let mut came_from: HashMap<Point8, (Point8, JoypadButton)> = HashMap::new();
         let mut g_score: HashMap<Point8, u32> = HashMap::new();
 
-        open_set.push(Node { position: from, cost: 0, heuristic: heuristic(from) });
-        g_score.insert(from, 0);
+        let origin = self.player_position;
+        open_set.push(Node { position: origin, cost: 0, heuristic: heuristic(origin) });
+        g_score.insert(origin, 0);
 
         while let Some(current) = open_set.pop() {
-            if current.position == to {
+            if current.position == destination {
                 let mut route = vec![];
-                let mut pos = to;
-                while pos != from {
+                let mut pos = destination;
+                while pos != origin {
                     if let Some((prev, dir)) = came_from.get(&pos) {
                         route.push(*dir);
                         pos = *prev;
@@ -591,20 +679,21 @@ impl MetaTileMap {
                 }
                 route.reverse();
                 return Some(
-                    Route {
-                        from,
-                        to,
-                        tile: self.meta_tiles[to.x as usize + to.y as usize * self.width].clone(),
+                    OverworldAction {
+                        map: self.map,
+                        origin,
+                        destination,
+                        tile: self.meta_tiles[destination.x as usize + destination.y as usize * self.width].clone(),
                         route,
                     }
                 );
             }
 
             let neighbors = [
-                (Direction::Up, Point8 { x: current.position.x, y: current.position.y.saturating_sub(1) }),
-                (Direction::Down, Point8 { x: current.position.x, y: current.position.y + 1 }),
-                (Direction::Left, Point8 { x: current.position.x.saturating_sub(1), y: current.position.y }),
-                (Direction::Right, Point8 { x: current.position.x + 1, y: current.position.y }),
+                (JoypadButton::Up, Point8 { x: current.position.x, y: current.position.y.saturating_sub(1) }),
+                (JoypadButton::Down, Point8 { x: current.position.x, y: current.position.y + 1 }),
+                (JoypadButton::Left, Point8 { x: current.position.x.saturating_sub(1), y: current.position.y }),
+                (JoypadButton::Right, Point8 { x: current.position.x + 1, y: current.position.y }),
             ];
 
             for (dir, neighbor) in neighbors {
@@ -613,7 +702,7 @@ impl MetaTileMap {
                 }
 
                 let tile = &self.meta_tiles[neighbor.x as usize + neighbor.y as usize * self.width];
-                if matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_)) && neighbor != to {
+                if matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_)) && neighbor != destination {
                     continue;
                 }
 
@@ -632,7 +721,7 @@ impl MetaTileMap {
         None
     }
 
-    pub fn routes(&self, from: Point8) -> Vec<Route> {
+    pub fn actions(&self) -> Vec<OverworldAction> {
         // 1. routes to warps
         let mut routes = vec![];
         for to_map in &self.warp_targets {
@@ -642,7 +731,7 @@ impl MetaTileMap {
                 .enumerate()
                 .filter(|(_, tile)| tile == &&target_tile)
                 .map(|(index, _)| Point8 { x: (index % self.width) as u8, y: (index / self.width) as u8 })
-                .filter_map(|to| self.route_between(from, to))
+                .filter_map(|to| self.player_route(to))
                 .min_by(|a, b| a.route.len().cmp(&b.route.len()));
 
             if shortest_route.is_none() {
@@ -651,14 +740,14 @@ impl MetaTileMap {
 
             let mut shortest_route = shortest_route.unwrap();
 
-            if shortest_route.to.x == 0 {
-                shortest_route.route.push(Direction::Left);
-            } else if shortest_route.to.x == (self.width - 1) as u8 {
-                shortest_route.route.push(Direction::Right);
-            } else if shortest_route.to.y == 0 {
-                shortest_route.route.push(Direction::Up);
-            } else if shortest_route.to.y == (self.height - 1) as u8 {
-                shortest_route.route.push(Direction::Down);
+            if shortest_route.destination.x == 0 {
+                shortest_route.route.push(JoypadButton::Left);
+            } else if shortest_route.destination.x == (self.width - 1) as u8 {
+                shortest_route.route.push(JoypadButton::Right);
+            } else if shortest_route.destination.y == 0 {
+                shortest_route.route.push(JoypadButton::Up);
+            } else if shortest_route.destination.y == (self.height - 1) as u8 {
+                shortest_route.route.push(JoypadButton::Down);
             }
 
             routes.push(shortest_route);
@@ -672,10 +761,10 @@ impl MetaTileMap {
 
             let sprite_pos = sprite.position;
             let adjacent_positions = [
-                (Direction::Down, Point8 { x: sprite_pos.x, y: sprite_pos.y.saturating_sub(1) }),
-                (Direction::Up, Point8 { x: sprite_pos.x, y: sprite_pos.y + 1 }),
-                (Direction::Right, Point8 { x: sprite_pos.x.saturating_sub(1), y: sprite_pos.y }),
-                (Direction::Left, Point8 { x: sprite_pos.x + 1, y: sprite_pos.y }),
+                (PlayerFacingDirection::Down, Point8 { x: sprite_pos.x, y: sprite_pos.y.saturating_sub(1) }),
+                (PlayerFacingDirection::Up, Point8 { x: sprite_pos.x, y: sprite_pos.y + 1 }),
+                (PlayerFacingDirection::Right, Point8 { x: sprite_pos.x.saturating_sub(1), y: sprite_pos.y }),
+                (PlayerFacingDirection::Left, Point8 { x: sprite_pos.x + 1, y: sprite_pos.y }),
             ];
             let shortest_route = adjacent_positions
                 .into_iter()
@@ -684,7 +773,7 @@ impl MetaTileMap {
                         matches!(self.meta_tiles[pos.x as usize + pos.y as usize * self.width], MetaTile::Empty)
                 })
                 .filter_map(|(dir, to)| {
-                    self.route_between(from, to).map(|route| (dir, route))
+                    self.player_route(to).map(|route| (dir, route))
                 })
                 .min_by(|(_, a), (_, b)| a.route.len().cmp(&b.route.len()));
 
@@ -692,30 +781,25 @@ impl MetaTileMap {
                 continue;
             }
             let (sprite_direction, mut shortest_route) = shortest_route.unwrap();
-            shortest_route.tile = MetaTile::Sprite(*sprite);
-            if shortest_route.route.is_empty() || shortest_route.route.last().unwrap() != &sprite_direction {
-                shortest_route.route.push(sprite_direction);
+            shortest_route.tile = MetaTile::Sprite(sprite.name);
+            if shortest_route.route.is_empty() {
+                if sprite_direction != self.player_direction {
+                    // no more movement needed, just turn to face sprite
+                    shortest_route.route.push(sprite_direction.into());
+                }
+            } else {
+                // ensure we face the sprite before interacting
+                let last_move = shortest_route.route.last().unwrap();
+                let expected_button: JoypadButton = sprite_direction.into();
+                if *last_move != expected_button {
+                    shortest_route.route.push(expected_button);
+                }
             }
+            shortest_route.route.push(JoypadButton::A);
             routes.push(shortest_route);
         }
         routes
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Direction {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Route {
-    pub from: Point8,
-    pub to: Point8,
-    pub tile: MetaTile,
-    pub route: Vec<Direction>,
 }
 
 impl Display for MetaTileMap {
