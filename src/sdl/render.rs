@@ -161,34 +161,17 @@ pub fn render() -> Result<(), String> {
                             // println!("{:?}", pokemon_api.player_state());
                             // println!("{:?}", pokemon_api.pokemon_party());
                             //println!("{:?}", pokemon_api.map_state());
-
-                            pokemon_api.map_state()?;
-                            println!("{}", pokemon_api.game_mode());
+                            pokemon_api.game_state()?;
                         },
                         Keycode::W => {
                             let pokemon_api = PokemonApi::new(&mut gb);
-                            if let Some(action) = pokemon_api.map_state()?.actions.into_iter().choose(&mut rand::rng()) {
+                            if let Some(action) = pokemon_api.game_state()?.actions.into_iter().choose(&mut rand::rng()) {
                                 pokemon_agent.take_overworld_action(action);
                             }
                         },
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);
-                            let player_state = pokemon_api.player_state()?;
-                            let mut party = pokemon_api.pokemon_party()?;
-                            let charizard = crate::pokemon::pokemon::Pokemon::maxed(
-                                crate::pokemon::species::PokemonSpecies::Charizard,
-                                "CHARIZARD",
-                                [
-                                    crate::pokemon::move_name::PokemonMoveName::Flamethrower,
-                                    crate::pokemon::move_name::PokemonMoveName::Slash,
-                                    crate::pokemon::move_name::PokemonMoveName::Fly,
-                                    crate::pokemon::move_name::PokemonMoveName::Earthquake,
-                                ],
-                                player_state.name,
-                                player_state.player_id
-                            );
-                            party.push(charizard)?;
-                            pokemon_api.write_pokemon_party(party);
+                            pokemon_api.pimp_out_pokemon()?;
                         }
                         Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().press_button(Up),
                         Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().press_button(Down),

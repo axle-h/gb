@@ -82,14 +82,18 @@ impl MMU {
             .max(1);
     }
 
-    pub fn rom_data(&self, bank: usize, index: usize, length: usize) -> &[u8] {
+    pub fn rom_data<L : Into<Option<usize>>>(&self, bank: usize, index: usize, length: L) -> &[u8] {
         let start = bank * ROM_BANK_SIZE + index;
-        let end = start + length;
-        self.data.get(start..end)
-            .unwrap_or_else(|| panic!("ROM slice out of bounds: bank={} index={} length={}", bank, index, length))
+        if let Some(length) = length.into() {
+            let end = start + length;
+            self.data.get(start..end)
+                .unwrap_or_else(|| panic!("ROM slice out of bounds: bank={} index={} length={}", bank, index, length))
+        } else {
+            self.data.get(start..).unwrap_or_else(|| panic!("ROM slice out of bounds: bank={} index={}", bank, index))
+        }
     }
 
-    pub fn rom_data_from_pointer(&self, bank: usize, pointer: u16, length: usize) -> &[u8] {
+    pub fn rom_data_from_pointer<L : Into<Option<usize>>>(&self, bank: usize, pointer: u16, length: L) -> &[u8] {
         if bank == 0 {
             assert!(
                 pointer < ROM_BANK_SIZE as u16,
@@ -123,7 +127,7 @@ impl MMU {
             Ok(())
         }
     }
-    
+
     pub fn work_ram(&self) -> &[u8] {
         &self.work_ram
     }

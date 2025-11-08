@@ -1,6 +1,6 @@
 use std::ops::{Index, IndexMut};
 use crate::pokemon::pokemon::Pokemon;
-use crate::pokemon::PokemonBlockAddresses;
+use crate::pokemon::encoding::PokemonBlockAddresses;
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct PokemonParty(Vec<Pokemon>);
