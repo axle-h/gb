@@ -1,8 +1,11 @@
 use std::fmt::Display;
 use regex::Regex;
 use std::collections::HashMap;
+use std::ops::{Add, AddAssign, Sub, SubAssign};
 use once_cell::sync::Lazy;
 use crate::mmu::MMU;
+use crate::pokemon::strings::PokemonString;
+use crate::ram::{RAM, ROM};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, strum_macros::Display)]
 pub enum DmgBank {
@@ -30,6 +33,42 @@ pub struct NamedDmgPointer {
     name: &'static str,
     bank: DmgBank,
     address: u16
+}
+
+impl Add<u16> for NamedDmgPointer {
+    type Output = NamedDmgPointer;
+
+    fn add(self, rhs: u16) -> Self::Output {
+        Self::Output {
+            name: self.name,
+            bank: self.bank,
+            address: self.address.overflowing_add(rhs).0,
+        }
+    }
+}
+
+impl AddAssign<u16> for NamedDmgPointer {
+    fn add_assign(&mut self, rhs: u16) {
+        self.address = self.address.overflowing_add(rhs).0;
+    }
+}
+
+impl Sub<u16> for NamedDmgPointer {
+    type Output = NamedDmgPointer;
+
+    fn sub(self, rhs: u16) -> Self::Output {
+        Self::Output {
+            name: self.name,
+            bank: self.bank,
+            address: self.address.overflowing_sub(rhs).0,
+        }
+    }
+}
+
+impl SubAssign<u16> for NamedDmgPointer {
+    fn sub_assign(&mut self, rhs: u16) {
+        self.address = self.address.overflowing_sub(rhs).0;
+    }
 }
 
 impl NamedDmgPointer {
@@ -157,11 +196,32 @@ impl PokemonMemoryMap {
 }
 
 /// Trait for reading memory using pokered symbol file pointers
-trait NamedPointerRead {
+pub trait NamedPointerRead {
     fn read_named(&self, pointer: &NamedDmgPointer) -> u8;
     fn read_named_u16_le(&self, pointer: &NamedDmgPointer) -> u16;
     fn read_named_u16_be(&self, pointer: &NamedDmgPointer) -> u16;
-    fn read_named_slice(&self, pointer: &NamedDmgPointer, length: usize) -> Vec<u8>;
+
+    fn read_named_u24_be(&self, pointer: &NamedDmgPointer) -> u32 {
+        let mut pointer = *pointer;
+        let high = self.read_named_u16_be(&pointer) as u32;
+        pointer += 2;
+        let low = self.read_named(&pointer) as u32;
+        (high << 8) | low
+    }
+
+    fn read_named_vec(&self, pointer: &NamedDmgPointer, length: usize) -> Vec<u8>;
+
+    fn write_named(&mut self, pointer: &NamedDmgPointer, value: u8) -> Result<(), String>;
+
+    fn write_named_u16_le(&mut self, pointer: &NamedDmgPointer, value: u16) -> Result<(), String>;
+
+    fn write_named_u16_be(&mut self, pointer: &NamedDmgPointer, value: u16) -> Result<(), String>;
+
+    fn write_named_slice(&mut self, pointer: &NamedDmgPointer, value: &[u8]) -> Result<(), String>;
+
+    fn read_named_pokemon_string(&self, pointer: &NamedDmgPointer) -> PokemonString;
+
+    fn write_named_pokemon_string(&mut self, pointer: &NamedDmgPointer, string: &PokemonString) -> Result<(), String>;
 }
 
 impl NamedPointerRead for MMU {
@@ -209,7 +269,7 @@ impl NamedPointerRead for MMU {
         }
     }
 
-    fn read_named_slice(&self, pointer: &NamedDmgPointer, length: usize) -> Vec<u8> {
+    fn read_named_vec(&self, pointer: &NamedDmgPointer, length: usize) -> Vec<u8> {
         match pointer.bank {
             DmgBank::ROM { bank } => {
                 self.rom_data_from_pointer(bank as usize, pointer.address, Some(length)).to_vec()
@@ -219,6 +279,113 @@ impl NamedPointerRead for MMU {
             }
             DmgBank::SRAM { .. } => {
                 panic!("SRAM banking not implemented")
+            }
+        }
+    }
+
+    fn write_named(&mut self, pointer: &NamedDmgPointer, value: u8) -> Result<(), String> {
+        match pointer.bank {
+            DmgBank::ROM { bank } => {
+                Err("ROM is not writable".to_string())
+            }
+            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
+                self.write(pointer.address, value);
+                Ok(())
+            }
+            DmgBank::SRAM { .. } => {
+                Err("SRAM banking not implemented".to_string())
+            }
+        }
+    }
+
+    fn write_named_u16_le(&mut self, pointer: &NamedDmgPointer, value: u16) -> Result<(), String> {
+        match pointer.bank {
+            DmgBank::ROM { bank } => {
+                Err("ROM is not writable".to_string())
+            }
+            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
+                self.write_u16_le(pointer.address, value);
+                Ok(())
+            }
+            DmgBank::SRAM { .. } => {
+                Err("SRAM banking not implemented".to_string())
+            }
+        }
+    }
+
+    fn write_named_u16_be(&mut self, pointer: &NamedDmgPointer, value: u16)  -> Result<(), String> {
+        match pointer.bank {
+            DmgBank::ROM { bank } => {
+                Err("ROM is not writable".to_string())
+            }
+            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
+                self.write_u16_be(pointer.address, value);
+                Ok(())
+            }
+            DmgBank::SRAM { .. } => {
+                Err("SRAM banking not implemented".to_string())
+            }
+        }
+    }
+
+    fn write_named_slice(&mut self, pointer: &NamedDmgPointer, value: &[u8]) -> Result<(), String> {
+        match pointer.bank {
+            DmgBank::ROM { bank } => {
+                Err("ROM is not writable".to_string())
+            }
+            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
+                self.write_slice(pointer.address, value);
+                Ok(())
+            }
+            DmgBank::SRAM { .. } => {
+                Err("SRAM banking not implemented".to_string())
+            }
+        }
+    }
+
+    fn read_named_pokemon_string(&self, pointer: &NamedDmgPointer) -> PokemonString {
+        match pointer.bank {
+            DmgBank::ROM { bank } => {
+                let slice = self.rom_data_from_pointer(bank as usize, pointer.address, None);
+                let mut bytes = vec![];
+                for &byte in slice.into_iter() {
+                    bytes.push(byte);
+                    if byte == PokemonString::TERMINATOR {
+                        break;
+                    }
+                }
+                PokemonString(bytes)
+            }
+            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
+                let mut bytes = vec![];
+                for i in 0..u16::MAX {
+                    let byte = self.read(pointer.address + i);
+                    bytes.push(byte);
+                    if byte == PokemonString::TERMINATOR {
+                        break;
+                    }
+                }
+                PokemonString(bytes)
+            }
+            DmgBank::SRAM { .. } => {
+                panic!("SRAM banking not implemented")
+            }
+        }
+    }
+
+    fn write_named_pokemon_string(&mut self, pointer: &NamedDmgPointer, string: &PokemonString) -> Result<(), String> {
+        match pointer.bank {
+            DmgBank::ROM { .. } => {
+                Err("ROM is not writable".to_string())
+            }
+            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
+                for (index, byte) in string.0.iter().enumerate() {
+                    self.write(pointer.address + index as u16, *byte);
+                }
+                Ok(())
+            }
+            DmgBank::SRAM { .. } => {
+                Err("SRAM banking not implemented".to_string())
             }
         }
     }

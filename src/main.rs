@@ -21,6 +21,7 @@ mod timer;
 mod audio;
 mod activation;
 mod pokemon;
+mod ram;
 
 pub fn main() -> Result<(), String> {
     sdl::render::render()

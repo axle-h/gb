@@ -10,6 +10,7 @@ use crate::header::CartHeader;
 use crate::interrupt::{InterruptFlags, InterruptType};
 use crate::joypad::JoypadRegister;
 use crate::ppu::PPU;
+use crate::ram::{RAM, ROM};
 use crate::serial::Serial;
 use crate::timer::Timer;
 
@@ -82,7 +83,7 @@ impl MMU {
             .max(1);
     }
 
-    pub fn rom_data<L : Into<Option<usize>>>(&self, bank: usize, index: usize, length: L) -> &[u8] {
+    pub fn rom_data<L: Into<Option<usize>>>(&self, bank: usize, index: usize, length: L) -> &[u8] {
         let start = bank * ROM_BANK_SIZE + index;
         if let Some(length) = length.into() {
             let end = start + length;
@@ -93,7 +94,7 @@ impl MMU {
         }
     }
 
-    pub fn rom_data_from_pointer<L : Into<Option<usize>>>(&self, bank: usize, pointer: u16, length: L) -> &[u8] {
+    pub fn rom_data_from_pointer<L: Into<Option<usize>>>(&self, bank: usize, pointer: u16, length: L) -> &[u8] {
         if bank == 0 {
             assert!(
                 pointer < ROM_BANK_SIZE as u16,
@@ -183,7 +184,7 @@ impl MMU {
 
         if let Some(transfer) = self.ppu.dma_mut().update(delta_machine_cycles) {
             // DMA transfer is in progress, we need to copy data from ROM to OAM
-            for i in 0 .. 0xA0 {
+            for i in 0..0xA0 {
                 let value = self.read(transfer.address + i);
                 self.ppu.write_oam(i, value);
             }
@@ -242,8 +243,10 @@ impl MMU {
         }
         None
     }
+}
 
-    pub fn read(&self, address: u16) -> u8 {
+impl ROM for MMU {
+    fn read(&self, address: u16) -> u8 {
         // https://gbdev.io/pandocs/Memory_Map.html
         match address {
             // rom bank 0
@@ -297,33 +300,10 @@ impl MMU {
             }
         }
     }
+}
 
-    pub fn read_u16_le(&self, address: u16) -> u16 {
-        u16::from_le_bytes([self.read(address), self.read(address + 1)])
-    }
-
-    pub fn read_u16_be(&self, address: u16) -> u16 {
-        u16::from_be_bytes([self.read(address), self.read(address + 1)])
-    }
-
-    pub fn read_u32_be(&self, address: u16) -> u32 {
-        u32::from_be_bytes([
-            self.read(address),
-            self.read(address + 1),
-            self.read(address + 2),
-            self.read(address + 3)
-        ])
-    }
-    
-    pub fn read_slice(&self, address: u16, length: usize) -> Vec<u8> {
-        let mut result = vec![0; length];
-        for i in 0..length {
-            result[i] = self.read(address + i as u16);
-        }
-        result
-    }
-
-    pub fn write(&mut self, address: u16, value: u8) {
+impl RAM for MMU {
+    fn write(&mut self, address: u16, value: u8) {
         match address {
             0x0000..=0x1FFF => {
                 // https://gbdev.io/pandocs/MBC1.html#00001fff--ram-enable-write-only
@@ -372,25 +352,6 @@ impl MMU {
             _ => {
                 // ignore
             }
-        }
-    }
-
-    pub fn write_u16_le(&mut self, address: u16, value: u16) {
-        let [low, high] = value.to_le_bytes();
-        self.write(address, low);
-        self.write(address + 1, high);
-    }
-
-    pub fn write_u16_be(&mut self, address: u16, value: u16) {
-        let [low, high] = value.to_be_bytes();
-        self.write(address, low);
-        self.write(address + 1, high);
-    }
-
-    pub fn write_u32_be(&mut self, address: u16, value: u32) {
-        let bytes = value.to_be_bytes();
-        for i in 0..bytes.len() {
-            self.write(address + i as u16, bytes[i]);
         }
     }
 }
