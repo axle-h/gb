@@ -3,6 +3,7 @@ use crate::activation::Activation;
 use crate::cycles::MachineCycles;
 use crate::mmu::MMU;
 use crate::opcode::{JumpCondition, OpCode, Register, Register16, Register16Mem, Register16Stack};
+use crate::ram::{RAM, ROM};
 use crate::registers::RegisterSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]

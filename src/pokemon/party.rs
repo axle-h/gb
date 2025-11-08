@@ -18,6 +18,10 @@ impl PokemonParty {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+    
+    pub fn pokemon(&self) -> &[Pokemon] {
+        &self.0
+    }
 }
 
 impl Index<usize> for PokemonParty {

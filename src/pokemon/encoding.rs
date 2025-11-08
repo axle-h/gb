@@ -1,37 +1,34 @@
 use std::collections::HashSet;
-use unicode_segmentation::UnicodeSegmentation;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
 use crate::pokemon::map::Map;
-use crate::pokemon::memory_map::PokemonMemoryMap;
+use crate::pokemon::memory_map::{NamedDmgPointer, NamedPointerRead, PokemonMemoryMap};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::party::PokemonParty;
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::sprite::{PictureId, Sprite};
 use crate::pokemon::strings::PokemonString;
+use crate::ram::{RAM, ROM};
 
 pub trait PokemonEncoding {
-    fn read_pokemon_string(&self, address: u16) -> PokemonString;
 
-    fn write_pokemon_string(&mut self, address: u16, string: &PokemonString);
-
-    fn read_pokemon_party(&self, base_address: u16) -> Result<PokemonParty, String>;
+    fn read_pokemon_party(&self, base_pointer: &NamedDmgPointer) -> Result<PokemonParty, String>;
     
     fn read_player_pokemon_party(&self) -> Result<PokemonParty, String> {
-        self.read_pokemon_party(PokemonMemoryMap::address("wPartyDataStart"))
+        self.read_pokemon_party(PokemonMemoryMap::pointer("wPartyDataStart"))
     }
 
-    fn read_pokemon(&self, base_address: u16, index: u16) -> Result<Pokemon, String>;
+    fn read_pokemon(&self, party_base_pointer: &NamedDmgPointer, index: u16) -> Result<Pokemon, String>;
 
-    fn write_pokemon_party(&mut self, base_address: u16, party: PokemonParty);
+    fn write_pokemon_party(&mut self, base_pointer: &NamedDmgPointer, party: &PokemonParty) -> Result<(), String>;
     
-    fn write_player_pokemon_party(&mut self, party: PokemonParty) {
-        self.write_pokemon_party(PokemonMemoryMap::address("wPartyDataStart"), party);
+    fn write_player_pokemon_party(&mut self, party: &PokemonParty) -> Result<(), String>{
+        self.write_pokemon_party(PokemonMemoryMap::pointer("wPartyDataStart"), party)
     }
 
-    fn write_pokemon(&mut self, base_address: u16, index: u16, pokemon: &Pokemon);
+    fn write_pokemon(&mut self, party_base_pointer: &NamedDmgPointer, index: u16, pokemon: &Pokemon) -> Result<(), String>;
 
     fn read_sprites(&self) -> Result<Vec<Sprite>, String>;
 
@@ -43,48 +40,27 @@ pub trait PokemonEncoding {
 }
 
 impl PokemonEncoding for MMU {
-    fn read_pokemon_string(&self, address: u16) -> PokemonString {
-        let mut bytes = vec![];
-        for i in 0..u16::MAX {
-            let byte = self.read(address + i);
-            bytes.push(byte);
-            if byte == PokemonString::TERMINATOR {
-                break;
-            }
-        }
-        PokemonString(bytes)
-    }
 
-    fn write_pokemon_string(&mut self, address: u16, string: &PokemonString) {
-        for (index, byte) in string.0.iter().enumerate() {
-            self.write(address + index as u16, *byte);
-        }
-    }
-
-    fn read_pokemon_party(&self, base_address: u16) -> Result<PokemonParty, String> {
-        let count = self.read(base_address);
+    fn read_pokemon_party(&self, base_pointer: &NamedDmgPointer) -> Result<PokemonParty, String> {
+        let count = self.read_named(base_pointer);
         let mut party = PokemonParty::default();
+        let pokemon_pointer = *base_pointer + 8;
         for i in 0..count {
-            let pokemon = self.read_pokemon(base_address + 8, i as u16)?;
+            let pokemon = self.read_pokemon(&pokemon_pointer, i as u16)?;
             party.push(pokemon)?;
         }
         Ok(party)
     }
 
-    fn read_pokemon(&self, base_address: u16, index: u16) -> Result<Pokemon, String> {
-        let addresses = PokemonBlockAddresses::of_indexed(base_address, index);
+    fn read_pokemon(&self, party_base_pointer: &NamedDmgPointer, index: u16) -> Result<Pokemon, String> {
+        let addresses = PokemonBlockAddresses::of_indexed(*party_base_pointer, index);
 
-        fn parse_type(mmu: &MMU, pkmn_base: u16, offset: u16) -> Result<PokemonType, String> {
-            PokemonType::from_repr(mmu.read(pkmn_base + 5 + offset))
-                .ok_or_else(|| format!("Invalid Pokemon type {}", offset + 1))
-        }
-
-        fn parse_move(mmu: &MMU, pkmn_base: u16, offset: u16) -> Option<PokemonMove> {
-            if let Some(name) = PokemonMoveName::from_repr(mmu.read(pkmn_base + 8 + offset)) {
+        fn parse_move(pokemon_bytes: &[u8], offset: u16) -> Option<PokemonMove> {
+            if let Some(name) = PokemonMoveName::from_repr(pokemon_bytes.read(8 + offset)) {
                 Some(
                     PokemonMove {
                         name,
-                        pp: mmu.read(pkmn_base + 29 + offset)
+                        pp: pokemon_bytes.read(29 + offset)
                     }
                 )
             } else {
@@ -92,88 +68,103 @@ impl PokemonEncoding for MMU {
             }
         }
 
-        fn read_stats(mmu: &MMU, pkmn_base: u16, offset: u16) -> PokemonStats {
+        fn read_stats(pokemon_bytes: &[u8], offset: u16) -> PokemonStats {
             PokemonStats {
-                hp: mmu.read_u16_be(pkmn_base + offset),
-                attack: mmu.read_u16_be(pkmn_base + offset + 2),
-                defense: mmu.read_u16_be(pkmn_base + offset + 4),
-                speed: mmu.read_u16_be(pkmn_base + offset + 6),
-                special: mmu.read_u16_be(pkmn_base + offset + 8),
+                hp: pokemon_bytes.read_u16_be(offset),
+                attack: pokemon_bytes.read_u16_be(offset + 2),
+                defense: pokemon_bytes.read_u16_be(offset + 4),
+                speed: pokemon_bytes.read_u16_be(offset + 6),
+                special: pokemon_bytes.read_u16_be(offset + 8),
             }
         }
 
+        let pokemon_bytes = self.read_named_vec(&addresses.pokemon, PokemonBlockAddresses::POKEMON_BLOCK_SIZE as usize);
         Ok(Pokemon {
-            nickname: self.read_pokemon_string(addresses.nickname),
-            trainer_name: self.read_pokemon_string(addresses.trainer_name),
-            species: PokemonSpecies::from_repr(self.read(addresses.pokemon)).ok_or_else(|| "Invalid Pokemon species".to_string())?,
-            current_hp: self.read_u16_be(addresses.pokemon + 1),
-            status: self.read(addresses.pokemon + 4).into(),
+            nickname: self.read_named_pokemon_string(&addresses.nickname),
+            trainer_name: self.read_named_pokemon_string(&addresses.trainer_name),
+            species: PokemonSpecies::from_repr(pokemon_bytes.read(0)).ok_or_else(|| "Invalid Pokemon species".to_string())?,
+            current_hp: pokemon_bytes.read_u16_be(1),
+            status: pokemon_bytes.read(4).into(),
             types: [
-                parse_type(self, addresses.pokemon, 0)?,
-                parse_type(self, addresses.pokemon, 1)?,
+                PokemonType::from_repr(pokemon_bytes.read(5))
+                    .ok_or_else(|| "Invalid Pokemon type".to_string())?,
+                PokemonType::from_repr(pokemon_bytes.read(6))
+                    .ok_or_else(|| "Invalid Pokemon type".to_string())?,
             ],
-            moves: std::array::from_fn(|i| parse_move(self, addresses.pokemon, i as u16)),
-            trainer_id: self.read_u16_be(addresses.pokemon + 12),
-            experience: self.read_u32_be(addresses.pokemon + 13) & 0xFFFFFF, // 3 bytes so read as u32 offset -1 and trim top byte
-            effort_values: read_stats(self, addresses.pokemon, 17),
+            moves: std::array::from_fn(|i| parse_move(&pokemon_bytes, i as u16)),
+            trainer_id: pokemon_bytes.read_u16_be(12),
+            experience: pokemon_bytes.read_u32_be(13) & 0xFFFFFF, // 3 bytes so read as u32 offset -1 and trim top byte
+            effort_values: read_stats(&pokemon_bytes, 17),
             individual_values: PokemonStats::from_iv_bytes(
-                self.read(addresses.pokemon + 27),
-                self.read(addresses.pokemon + 28)
+                pokemon_bytes.read(27),
+                pokemon_bytes.read(28)
             ),
-            level: self.read(addresses.pokemon + 33),
-            stats: read_stats(self, addresses.pokemon, 34),
+            level: pokemon_bytes.read(33),
+            stats: read_stats(&pokemon_bytes, 34),
         })
     }
 
-    fn write_pokemon_party(&mut self, base_address: u16, party: PokemonParty) {
-        self.write(base_address, party.len() as u8); // length
-        self.write(base_address + 1 + party.len() as u16, 0xFF); // list end
-        for (index, pokemon) in party.into_iter().enumerate() {
-            self.write_pokemon(base_address + 8, index as u16, &pokemon);
-            self.write(base_address + 1 + index as u16, pokemon.species as u8);
+    fn write_pokemon_party(&mut self, base_pointer: &NamedDmgPointer, party: &PokemonParty) -> Result<(), String> {
+        self.write_named(base_pointer, party.len() as u8)?; // length
+
+        let mut species_pointer = *base_pointer + 1;
+        let pokemon_pointer = *base_pointer + 8;
+
+        for (index, pokemon) in party.pokemon().iter().enumerate() {
+            self.write_pokemon(&pokemon_pointer, index as u16, pokemon)?;
+            self.write_named(&species_pointer, pokemon.species as u8)?;
+            species_pointer += 1;
         }
+
+        // write list end
+        self.write_named(&species_pointer, 0xFF)
     }
 
-    fn write_pokemon(&mut self, base_address: u16, index: u16, pokemon: &Pokemon) {
-        let addresses = PokemonBlockAddresses::of_indexed(base_address, index);
+    fn write_pokemon(&mut self, party_base_pointer: &NamedDmgPointer, index: u16, pokemon: &Pokemon) -> Result<(), String> {
+        let addresses = PokemonBlockAddresses::of_indexed(*party_base_pointer, index);
 
-        fn write_move(mmu: &mut MMU, pkmn_base: u16, offset: u16, move_: Option<PokemonMove>) {
+        fn write_move(pokemon_bytes: &mut Vec<u8>, offset: u16, move_: Option<PokemonMove>) {
             if let Some(move_) = move_ {
-                mmu.write(pkmn_base + 8 + offset, move_.name as u8);
-                mmu.write(pkmn_base + 29 + offset, move_.pp);
+                pokemon_bytes.write(8 + offset, move_.name as u8);
+                pokemon_bytes.write(29 + offset, move_.pp);
             } else {
-                mmu.write(pkmn_base + 8 + offset, 0x00);
-                mmu.write(pkmn_base + 29 + offset, 0x00);
+                pokemon_bytes.write(8 + offset, 0x00);
+                pokemon_bytes.write(29 + offset, 0x00);
             }
         }
 
-        fn write_stats(mmu: &mut MMU, pkmn_base: u16, offset: u16, stats: PokemonStats) {
-            mmu.write_u16_be(pkmn_base + offset, stats.hp);
-            mmu.write_u16_be(pkmn_base + offset + 2, stats.attack);
-            mmu.write_u16_be(pkmn_base + offset + 4, stats.defense);
-            mmu.write_u16_be(pkmn_base + offset + 6, stats.speed);
-            mmu.write_u16_be(pkmn_base + offset + 8, stats.special);
+        fn write_stats(pokemon_bytes: &mut Vec<u8>, offset: u16, stats: PokemonStats) {
+            pokemon_bytes.write_u16_be(offset, stats.hp);
+            pokemon_bytes.write_u16_be(offset + 2, stats.attack);
+            pokemon_bytes.write_u16_be(offset + 4, stats.defense);
+            pokemon_bytes.write_u16_be(offset + 6, stats.speed);
+            pokemon_bytes.write_u16_be(offset + 8, stats.special);
         }
 
-        self.write_pokemon_string(addresses.nickname, &pokemon.nickname);
-        self.write_pokemon_string(addresses.trainer_name, &pokemon.trainer_name);
-        self.write(addresses.pokemon, pokemon.species as u8);
-        self.write_u16_be(addresses.pokemon + 1, pokemon.current_hp);
-        self.write(addresses.pokemon + 4, pokemon.status.into());
-        self.write(addresses.pokemon + 5, pokemon.types[0] as u8);
-        self.write(addresses.pokemon + 6, pokemon.types[1] as u8);
+        self.write_named_pokemon_string(&addresses.nickname, &pokemon.nickname)?;
+        self.write_named_pokemon_string(&addresses.trainer_name, &pokemon.trainer_name)?;
+
+        let mut pokemon_bytes = self.read_named_vec(&addresses.pokemon, PokemonBlockAddresses::POKEMON_BLOCK_SIZE as usize);
+        pokemon_bytes.write(0, pokemon.species as u8);
+        pokemon_bytes.write_u16_be(1, pokemon.current_hp);
+        pokemon_bytes.write(4, pokemon.status.into());
+        pokemon_bytes.write(5, pokemon.types[0] as u8);
+        pokemon_bytes.write(6, pokemon.types[1] as u8);
         for i in 0..4 {
-            write_move(self, addresses.pokemon, i as u16, pokemon.moves[i]);
+            write_move(&mut pokemon_bytes, i as u16, pokemon.moves[i]);
         }
-        self.write_u32_be(addresses.pokemon + 13, pokemon.experience & 0xFFFFFF);
-        self.write_u16_be(addresses.pokemon + 12, pokemon.trainer_id);
-        write_stats(self, addresses.pokemon, 17, pokemon.effort_values);
+        pokemon_bytes.write_u32_be(13, pokemon.experience & 0xFFFFFF);
+        pokemon_bytes.write_u16_be(12, pokemon.trainer_id);
+        write_stats(&mut pokemon_bytes,17, pokemon.effort_values);
 
         let (attack_defense, speed_special) = pokemon.individual_values.into_iv_bytes();
-        self.write(addresses.pokemon + 27, attack_defense);
-        self.write(addresses.pokemon + 28, speed_special);
-        self.write(addresses.pokemon + 33, pokemon.level);
-        write_stats(self, addresses.pokemon, 34, pokemon.stats);
+        pokemon_bytes.write(27, attack_defense);
+        pokemon_bytes.write(28, speed_special);
+        pokemon_bytes.write(33, pokemon.level);
+        write_stats(&mut pokemon_bytes, 34, pokemon.stats);
+
+        self.write_named_slice(&addresses.pokemon, &pokemon_bytes)?;
+        Ok(())
     }
 
     fn read_sprites(&self) -> Result<Vec<Sprite>, String> {
@@ -474,9 +465,9 @@ impl CurrentMap {
 }
 
 pub struct PokemonBlockAddresses {
-    pub pokemon: u16,
-    pub trainer_name: u16,
-    pub nickname: u16,
+    pub pokemon: NamedDmgPointer,
+    pub trainer_name: NamedDmgPointer,
+    pub nickname: NamedDmgPointer,
 }
 
 impl PokemonBlockAddresses {
@@ -484,11 +475,11 @@ impl PokemonBlockAddresses {
     pub const POKEMON_BLOCK_SIZE: u16 = 0x2C;
     pub const NAME_LENGTH: u16 = 0xB;
 
-    fn of_indexed(base_address: u16, index: u16) -> Self {
+    fn of_indexed(party_base_pointer: NamedDmgPointer, index: u16) -> Self {
         Self {
-            pokemon: base_address + index * Self::POKEMON_BLOCK_SIZE,
-            trainer_name: base_address + Self::PARTY_MAX * Self::POKEMON_BLOCK_SIZE + index * Self::NAME_LENGTH,
-            nickname: base_address + Self::PARTY_MAX * Self::POKEMON_BLOCK_SIZE + Self::PARTY_MAX * Self::NAME_LENGTH + index * Self::NAME_LENGTH,
+            pokemon: party_base_pointer + index * Self::POKEMON_BLOCK_SIZE,
+            trainer_name: party_base_pointer + Self::PARTY_MAX * Self::POKEMON_BLOCK_SIZE + index * Self::NAME_LENGTH,
+            nickname: party_base_pointer + Self::PARTY_MAX * Self::POKEMON_BLOCK_SIZE + Self::PARTY_MAX * Self::NAME_LENGTH + index * Self::NAME_LENGTH,
         }
     }
 }
@@ -507,11 +498,9 @@ pub fn reverse_bcd(mut value: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::pokemon::status::PokemonStatus;
     use crate::roms::blargg_cpu::ROM;
     use crate::pokemon::*;
     use crate::pokemon::encoding::reverse_bcd;
-    use crate::pokemon::strings::PokemonString;
 
     #[test]
     fn test_reverse_bcd() {
@@ -525,41 +514,128 @@ mod tests {
     }
 
     #[test]
-    fn test_pokemon_encoding() {
-        let mut mmu = MMU::from_rom(ROM).unwrap();
-        let mut charizard = Pokemon {
-            nickname: PokemonString::from_string("BACON"),
-            species: PokemonSpecies::Charizard,
-            current_hp: 65,
-            status: PokemonStatus::None,
-            types: [PokemonType::Fire, PokemonType::Flying],
-            moves: [
-                Some(PokemonMove {
-                    name: PokemonMoveName::Flamethrower,
-                    pp: 10
-                }),
-                Some(PokemonMove {
-                    name: PokemonMoveName::FireBlast,
-                    pp: 5
-                }),
-                Some(PokemonMove {
-                    name: PokemonMoveName::Fly,
-                    pp: 6
-                }),
-                None,
-            ],
-            trainer_name: PokemonString::from_string("LLM"),
-            trainer_id: 57937,
-            experience: 6457,
-            effort_values: PokemonStats { attack: 100, defense: 200, speed: 300, special: 400, hp: 500 },
-            individual_values: PokemonStats { attack: 5, defense: 10, speed: 15, special: 10, hp: 15 },
-            level: 20,
-            stats: PokemonStats { attack: 41, defense: 40, speed: 51, special: 44, hp: 66 },
-        };
+    fn test_full_pokemon_encoding() -> Result<(), String> {
+        let mut mmu = MMU::from_rom(ROM)?;
 
-        charizard.recalculate();
+        let mut party = PokemonParty::default();
+        party.push(
+            Pokemon::maxed(
+                PokemonSpecies::Charizard,
+                "CHARIZARD",
+                [
+                    PokemonMoveName::Flamethrower,
+                    PokemonMoveName::FireBlast,
+                    PokemonMoveName::Fly,
+                    PokemonMoveName::Slash,
+                ],
+                "TRAINER1",
+                11111,
+            )
+        )?;
+        party.push(
+            Pokemon::maxed(
+                PokemonSpecies::Mewtwo,
+                "MEWTWO",
+                [
+                    PokemonMoveName::Psychic,
+                    PokemonMoveName::IceBeam,
+                    PokemonMoveName::Thunderbolt,
+                    PokemonMoveName::Recover,
+                ],
+                "TRAINER2",
+                22222,
+            )
+        )?;
+        party.push(
+            Pokemon::maxed(
+                PokemonSpecies::Snorlax,
+                "SNORLAX",
+                [
+                    PokemonMoveName::BodySlam,
+                    PokemonMoveName::Rest,
+                    PokemonMoveName::Bite,
+                    PokemonMoveName::Earthquake,
+                ],
+                "TRAINER3",
+                33333,
+            )
+        )?;
+        party.push(
+            Pokemon::maxed(
+                PokemonSpecies::Gyarados,
+                "GYARADOS",
+                [
+                    PokemonMoveName::HydroPump,
+                    PokemonMoveName::DragonRage,
+                    PokemonMoveName::Bite,
+                    PokemonMoveName::Surf,
+                ],
+                "TRAINER4",
+                44444,
+            )
+        )?;
+        party.push(
+            Pokemon::maxed(
+                PokemonSpecies::Alakazam,
+                "ALAKAZAM",
+                [
+                    PokemonMoveName::Psychic,
+                    PokemonMoveName::Recover,
+                    PokemonMoveName::Psybeam,
+                    PokemonMoveName::Reflect,
+                ],
+                "TRAINER5",
+                55555,
+            )
+        )?;
+        party.push(
+            Pokemon::maxed(
+                PokemonSpecies::Dragonite,
+                "DRAGONITE",
+                [
+                    PokemonMoveName::HyperBeam,
+                    PokemonMoveName::Fly,
+                    PokemonMoveName::Thunderbolt,
+                    PokemonMoveName::Surf,
+                ],
+                "TRAINER6",
+                65535,
+            )
+        )?;
 
-        mmu.write_pokemon(0xD16B, 0, &charizard);
-        assert_eq!(charizard, mmu.read_pokemon(0xD16B, 0).unwrap());
+        mmu.write_player_pokemon_party(&party)?;
+
+        let result = mmu.read_player_pokemon_party()?;
+
+        assert_eq!(party, result);
+        Ok(())
+    }
+
+    #[test]
+    fn test_partial_pokemon_encoding() -> Result<(), String> {
+        let mut mmu = MMU::from_rom(ROM)?;
+
+        let mut party = PokemonParty::default();
+        party.push(
+            Pokemon::maxed(
+                PokemonSpecies::Charizard,
+                "CHARIZARD",
+                [
+                    PokemonMoveName::Flamethrower,
+                    PokemonMoveName::FireBlast,
+                    PokemonMoveName::Fly,
+                    PokemonMoveName::Slash,
+                ],
+                "TRAINER1",
+                11111,
+            )
+        )?;
+
+        mmu.write_player_pokemon_party(&party)?;
+
+        let result = mmu.read_player_pokemon_party()?;
+
+        assert_eq!(party, result);
+        Ok(())
     }
 }

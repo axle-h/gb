@@ -1,20 +1,18 @@
-use std::fmt::Display;
-use std::ops::{Deref, DerefMut, Index, IndexMut};
 use strum::IntoEnumIterator;
 use badge::Badge;
 use map::Map;
 use species::PokemonSpecies;
-use unicode_segmentation::UnicodeSegmentation;
 use actions::OverworldAction;
-use encoding::{GameMode, MetaTile, PokemonBlockAddresses, PokemonEncoding};
+use encoding::{GameMode, MetaTile, PokemonEncoding};
 use party::PokemonParty;
 use tile_map::MetaTileMap;
 use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
-use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
-use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
+use crate::pokemon::memory_map::{NamedPointerRead, PokemonMemoryMap};
+use crate::pokemon::move_name::{PokemonMoveName};
+use crate::pokemon::pokemon::Pokemon;
 use crate::pokemon::sprite::Sprite;
 use crate::pokemon::strings::PokemonString;
 
@@ -92,8 +90,8 @@ impl<'a> PokemonApi<'a> {
             player_state.player_id
         );
         party.push(mewtwo)?;
-        self.mmu_mut().write_player_pokemon_party(party);
-        Ok(())
+        self.mmu_mut().write_player_pokemon_party(&party)
+
     }
 
     pub fn game_state(&self) -> Result<GameState, String> {
@@ -107,11 +105,11 @@ impl<'a> PokemonApi<'a> {
         // }
 
         Ok(GameState {
-            player_id: self.mmu().read(0xD359) as u16 * 256 + self.mmu().read(0xD35A) as u16,
-            name: self.mmu().read_pokemon_string(0xD158),
-            rival_name: self.mmu().read_pokemon_string(0xD34A),
-            badges: Badge::parse_flags(self.mmu().read(0xD356)),
-            money: encoding::reverse_bcd(self.mmu().read_u32_be(0xD346) & 0xFFFFFF),
+            player_id: mmu.read_named_u16_be(PokemonMemoryMap::pointer("wPlayerID")),
+            name: mmu.read_named_pokemon_string(PokemonMemoryMap::pointer("wPlayerName")),
+            rival_name: mmu.read_named_pokemon_string(PokemonMemoryMap::pointer("wRivalName")),
+            badges: Badge::parse_flags(mmu.read_named(PokemonMemoryMap::pointer("wObtainedBadges"))),
+            money: encoding::reverse_bcd(mmu.read_named_u24_be(PokemonMemoryMap::pointer("wPlayerMoney"))),
             mode: mmu.read_game_mode(),
             pokemon: mmu.read_player_pokemon_party()?,
             map: meta_tile_map.map,
