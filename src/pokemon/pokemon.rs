@@ -1,16 +1,17 @@
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
+use crate::pokemon::strings::PokemonString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pokemon {
-    pub nickname: String,
+    pub nickname: PokemonString,
     pub species: PokemonSpecies,
     pub current_hp: u16,
     pub status: PokemonStatus,
     pub types: [PokemonType; 2],
     pub moves: [Option<PokemonMove>; 4],
-    pub trainer_name: String,
+    pub trainer_name: PokemonString,
     pub trainer_id: u16,
     pub experience: u32,
     pub effort_values: PokemonStats,
@@ -20,16 +21,16 @@ pub struct Pokemon {
 }
 
 impl Pokemon {
-    pub fn maxed(species: PokemonSpecies, nickname: &'static str, moves: [PokemonMoveName; 4], trainer_name: String, trainer_id: u16) -> Self {
+    pub fn maxed<NN: Into<PokemonString>, TN : Into<PokemonString>>(species: PokemonSpecies, nickname: NN, moves: [PokemonMoveName; 4], trainer_name: TN, trainer_id: u16) -> Self {
         let metadata = species.metadata();
         let mut result = Self {
-            nickname: nickname.to_string(),
+            nickname: nickname.into(),
             species,
             current_hp: u16::MAX, // temporary, will be recalculated
             status: PokemonStatus::default(),
             types: [metadata.type1, metadata.type2.unwrap_or(metadata.type1)],
             moves: moves.map(|move_name| Some(PokemonMove::new(move_name))),
-            trainer_name,
+            trainer_name: trainer_name.into(),
             trainer_id,
             experience: metadata.experience_group.experience_for_level(100),
             effort_values: PokemonStats::MAX_EV,

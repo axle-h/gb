@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
-use std::time::Duration;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
-use crate::pokemon::actions::{OverworldAction};
-use crate::pokemon::{GameMode, MetaTile, PokemonApi};
+use crate::pokemon::actions::OverworldAction;
+use crate::pokemon::PokemonApi;
+use crate::pokemon::encoding::{GameMode, MetaTile};
 use crate::pokemon::map::Map;
 
 const RESOLUTION: MachineCycles = MachineCycles::from_hz(60);
@@ -63,31 +63,30 @@ impl PokemonAgent {
             State::Idle => {},
             State::OverworldMovement { destination, map: expected_map } => {
                 api.release_all_buttons();
-                let game_state = api.game_mode();
-                if game_state != GameMode::Overworld {
+                let game_state = api.game_state()?;
+                if game_state.mode != GameMode::Overworld {
                     self.overworld_action_aborted(
                         destination,
-                        format!("Game is currently in state: {}", game_state)
+                        format!("Game is currently in state: {}", game_state.mode)
                     );
                     return Ok(());
                 }
 
-                let map_state = api.map_state()?;
-                if map_state.map != expected_map {
+                if game_state.map != expected_map {
                     self.overworld_action_aborted(
                         destination,
-                        format!("Player is on map {:?}, expected {:?}", map_state.map, expected_map)
+                        format!("Player is on map {:?}, expected {:?}", game_state.map, expected_map)
                     );
                     return Ok(());
                 }
 
-                if map_state.player_tile == destination {
+                if game_state.player_tile == destination {
                     self.event(AgentEvent::OverworldActionCompleted { destination });
                     self.state = State::Idle;
                     return Ok(());
                 }
 
-                let action = map_state.actions
+                let action = game_state.actions
                     .into_iter()
                     .find(|action| action.tile == destination);
                 if action.is_none() {
