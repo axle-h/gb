@@ -132,12 +132,12 @@ mod tests {
 
     #[test]
     fn parse_cpu_tetris() {
-        let header = CartHeader::parse(crate::roms::commercial::TETRIS)
-            .expect("Failed to parse TETRIS header");
-        assert_eq!(header.title(), "TETRIS");
+        let header = CartHeader::parse(crate::pokemon::roms::POKERED)
+            .expect("Failed to parse POKERED header");
+        assert_eq!(header.title(), "POKEMON RED");
         assert_eq!(header.cgb_mode(), CGBMode::None);
-        assert_eq!(header.cart_type(), CartType::RomOnly);
-        assert_eq!(header.rom_banks(), 2); // 32KB ROM
-        assert_eq!(header.ram_banks(), 0); // No RAM
+        assert_eq!(header.cart_type(), CartType::MBC3RamBattery);
+        assert_eq!(header.rom_banks(), 64);
+        assert_eq!(header.ram_banks(), 4);
     }
 }

@@ -110,6 +110,20 @@ impl MMU {
         }
     }
 
+    pub fn read_vram_slice<L : Into<Option<usize>>>(&self, address: u16, length: L) -> Result<&[u8], String> {
+        if address >= 0x8000 && address <= 0x9FFF {
+            let offset = (address - 0x8000) as usize;
+            let vram = self.ppu.vram();
+            if let Some(length) = length.into() {
+                Ok(&vram[offset..(offset + length)])
+            } else {
+                Ok(&vram[offset..])
+            }
+        } else {
+            Err(format!("Address {:04X} is invalid for VRAM", address))
+        }
+    }
+
     pub fn dump_sram(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(self.ram_banks.len() * RAM_BANK_SIZE);
         for bank in &self.ram_banks {

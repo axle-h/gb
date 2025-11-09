@@ -10,7 +10,7 @@ use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
-use crate::pokemon::memory_map::{NamedPointerRead, PokemonMemoryMap};
+use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
 use crate::pokemon::move_name::{PokemonMoveName};
 use crate::pokemon::pokemon::Pokemon;
 use crate::pokemon::sprite::Sprite;
@@ -26,10 +26,12 @@ pub mod sprite;
 pub mod party;
 pub mod agent;
 pub mod actions;
-mod tile_map;
-mod encoding;
-mod strings;
-mod memory_map;
+pub mod tile_map;
+pub mod encoding;
+pub mod strings;
+pub mod symbols;
+pub mod font;
+pub mod roms;
 
 #[derive(Debug)]
 pub struct PokemonApi<'a> {
@@ -105,11 +107,11 @@ impl<'a> PokemonApi<'a> {
         // }
 
         Ok(GameState {
-            player_id: mmu.read_named_u16_be(PokemonMemoryMap::pointer("wPlayerID")),
-            name: mmu.read_named_pokemon_string(PokemonMemoryMap::pointer("wPlayerName")),
-            rival_name: mmu.read_named_pokemon_string(PokemonMemoryMap::pointer("wRivalName")),
-            badges: Badge::parse_flags(mmu.read_named(PokemonMemoryMap::pointer("wObtainedBadges"))),
-            money: encoding::reverse_bcd(mmu.read_named_u24_be(PokemonMemoryMap::pointer("wPlayerMoney"))),
+            player_id: mmu.read_pointer_u16_be(&pokered_symbols::wPlayerID),
+            name: mmu.read_pointer_pokemon_string(&pokered_symbols::wPlayerName),
+            rival_name: mmu.read_pointer_pokemon_string(&pokered_symbols::wRivalName),
+            badges: Badge::parse_flags(mmu.read_pointer(&pokered_symbols::wObtainedBadges)),
+            money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),
             mode: mmu.read_game_mode(),
             pokemon: mmu.read_player_pokemon_party()?,
             map: meta_tile_map.map,

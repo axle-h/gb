@@ -25,7 +25,7 @@ const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
-    let mut gb = GameBoy::dmg(crate::roms::commercial::POKEMON_RED);
+    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     let mut pokemon_agent = PokemonAgent::default();
 
     if let Err(e) = gb.restore_sram_from_file("pokemon-red.sav") {

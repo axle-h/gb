@@ -94,6 +94,10 @@ impl PPU {
             0xff
         }
     }
+    
+    pub fn vram(&self) -> &[u8] {
+        &self.vram
+    }
 
     pub fn write_vram(&mut self, address: u16, value: u8) {
         if self.lcd_status.mode().vram_accessible() || self.dma.is_active() {
