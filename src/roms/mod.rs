@@ -63,11 +63,6 @@ pub mod button_test {
     pub const EXPECTED_RIGHT: &[u8] = include_bytes!("button_test/right.png");
 }
 
-pub mod commercial {
-    pub const TETRIS: &[u8] = include_bytes!("tetris.gb");
-    pub const POKEMON_RED: &[u8] = include_bytes!("../../pokered/pokered.gbc");
-}
-
 pub mod homebrew {
     pub const TEST_CART: &[u8] = include_bytes!("Jayro's Test Cart v2.3.0.gb");
 }

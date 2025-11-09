@@ -2,33 +2,35 @@ use std::collections::HashSet;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
+use crate::pokemon::font::FontAware;
 use crate::pokemon::map::Map;
-use crate::pokemon::memory_map::{NamedDmgPointer, NamedPointerRead, PokemonMemoryMap};
+use crate::pokemon::symbols::{DmgPointer, DmgPointerRead};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::party::PokemonParty;
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::sprite::{PictureId, Sprite};
+use crate::pokemon::symbols::{pokered_symbols};
 use crate::pokemon::strings::PokemonString;
 use crate::ram::{RAM, ROM};
 
 pub trait PokemonEncoding {
 
-    fn read_pokemon_party(&self, base_pointer: &NamedDmgPointer) -> Result<PokemonParty, String>;
+    fn read_pokemon_party(&self, base_pointer: &DmgPointer) -> Result<PokemonParty, String>;
     
     fn read_player_pokemon_party(&self) -> Result<PokemonParty, String> {
-        self.read_pokemon_party(PokemonMemoryMap::pointer("wPartyDataStart"))
+        self.read_pokemon_party(&pokered_symbols::wPartyDataStart)
     }
 
-    fn read_pokemon(&self, party_base_pointer: &NamedDmgPointer, index: u16) -> Result<Pokemon, String>;
+    fn read_pokemon(&self, party_base_pointer: &DmgPointer, index: u16) -> Result<Pokemon, String>;
 
-    fn write_pokemon_party(&mut self, base_pointer: &NamedDmgPointer, party: &PokemonParty) -> Result<(), String>;
+    fn write_pokemon_party(&mut self, base_pointer: &DmgPointer, party: &PokemonParty) -> Result<(), String>;
     
     fn write_player_pokemon_party(&mut self, party: &PokemonParty) -> Result<(), String>{
-        self.write_pokemon_party(PokemonMemoryMap::pointer("wPartyDataStart"), party)
+        self.write_pokemon_party(&pokered_symbols::wPartyDataStart, party)
     }
 
-    fn write_pokemon(&mut self, party_base_pointer: &NamedDmgPointer, index: u16, pokemon: &Pokemon) -> Result<(), String>;
+    fn write_pokemon(&mut self, party_base_pointer: &DmgPointer, index: u16, pokemon: &Pokemon) -> Result<(), String>;
 
     fn read_sprites(&self) -> Result<Vec<Sprite>, String>;
 
@@ -41,8 +43,8 @@ pub trait PokemonEncoding {
 
 impl PokemonEncoding for MMU {
 
-    fn read_pokemon_party(&self, base_pointer: &NamedDmgPointer) -> Result<PokemonParty, String> {
-        let count = self.read_named(base_pointer);
+    fn read_pokemon_party(&self, base_pointer: &DmgPointer) -> Result<PokemonParty, String> {
+        let count = self.read_pointer(base_pointer);
         let mut party = PokemonParty::default();
         let pokemon_pointer = *base_pointer + 8;
         for i in 0..count {
@@ -52,7 +54,7 @@ impl PokemonEncoding for MMU {
         Ok(party)
     }
 
-    fn read_pokemon(&self, party_base_pointer: &NamedDmgPointer, index: u16) -> Result<Pokemon, String> {
+    fn read_pokemon(&self, party_base_pointer: &DmgPointer, index: u16) -> Result<Pokemon, String> {
         let addresses = PokemonBlockAddresses::of_indexed(*party_base_pointer, index);
 
         fn parse_move(pokemon_bytes: &[u8], offset: u16) -> Option<PokemonMove> {
@@ -78,10 +80,10 @@ impl PokemonEncoding for MMU {
             }
         }
 
-        let pokemon_bytes = self.read_named_vec(&addresses.pokemon, PokemonBlockAddresses::POKEMON_BLOCK_SIZE as usize);
+        let pokemon_bytes = self.read_pointer_vec(&addresses.pokemon, PokemonBlockAddresses::POKEMON_BLOCK_SIZE as usize);
         Ok(Pokemon {
-            nickname: self.read_named_pokemon_string(&addresses.nickname),
-            trainer_name: self.read_named_pokemon_string(&addresses.trainer_name),
+            nickname: self.read_pointer_pokemon_string(&addresses.nickname),
+            trainer_name: self.read_pointer_pokemon_string(&addresses.trainer_name),
             species: PokemonSpecies::from_repr(pokemon_bytes.read(0)).ok_or_else(|| "Invalid Pokemon species".to_string())?,
             current_hp: pokemon_bytes.read_u16_be(1),
             status: pokemon_bytes.read(4).into(),
@@ -104,23 +106,23 @@ impl PokemonEncoding for MMU {
         })
     }
 
-    fn write_pokemon_party(&mut self, base_pointer: &NamedDmgPointer, party: &PokemonParty) -> Result<(), String> {
-        self.write_named(base_pointer, party.len() as u8)?; // length
+    fn write_pokemon_party(&mut self, base_pointer: &DmgPointer, party: &PokemonParty) -> Result<(), String> {
+        self.write_pointer(base_pointer, party.len() as u8)?; // length
 
         let mut species_pointer = *base_pointer + 1;
         let pokemon_pointer = *base_pointer + 8;
 
         for (index, pokemon) in party.pokemon().iter().enumerate() {
             self.write_pokemon(&pokemon_pointer, index as u16, pokemon)?;
-            self.write_named(&species_pointer, pokemon.species as u8)?;
+            self.write_pointer(&species_pointer, pokemon.species as u8)?;
             species_pointer += 1;
         }
 
         // write list end
-        self.write_named(&species_pointer, 0xFF)
+        self.write_pointer(&species_pointer, 0xFF)
     }
 
-    fn write_pokemon(&mut self, party_base_pointer: &NamedDmgPointer, index: u16, pokemon: &Pokemon) -> Result<(), String> {
+    fn write_pokemon(&mut self, party_base_pointer: &DmgPointer, index: u16, pokemon: &Pokemon) -> Result<(), String> {
         let addresses = PokemonBlockAddresses::of_indexed(*party_base_pointer, index);
 
         fn write_move(pokemon_bytes: &mut Vec<u8>, offset: u16, move_: Option<PokemonMove>) {
@@ -141,10 +143,10 @@ impl PokemonEncoding for MMU {
             pokemon_bytes.write_u16_be(offset + 8, stats.special);
         }
 
-        self.write_named_pokemon_string(&addresses.nickname, &pokemon.nickname)?;
-        self.write_named_pokemon_string(&addresses.trainer_name, &pokemon.trainer_name)?;
+        self.write_pointer_pokemon_string(&addresses.nickname, &pokemon.nickname)?;
+        self.write_pointer_pokemon_string(&addresses.trainer_name, &pokemon.trainer_name)?;
 
-        let mut pokemon_bytes = self.read_named_vec(&addresses.pokemon, PokemonBlockAddresses::POKEMON_BLOCK_SIZE as usize);
+        let mut pokemon_bytes = self.read_pointer_vec(&addresses.pokemon, PokemonBlockAddresses::POKEMON_BLOCK_SIZE as usize);
         pokemon_bytes.write(0, pokemon.species as u8);
         pokemon_bytes.write_u16_be(1, pokemon.current_hp);
         pokemon_bytes.write(4, pokemon.status.into());
@@ -163,7 +165,7 @@ impl PokemonEncoding for MMU {
         pokemon_bytes.write(33, pokemon.level);
         write_stats(&mut pokemon_bytes, 34, pokemon.stats);
 
-        self.write_named_slice(&addresses.pokemon, &pokemon_bytes)?;
+        self.write_pointer_slice(&addresses.pokemon, &pokemon_bytes)?;
         Ok(())
     }
 
@@ -300,34 +302,10 @@ impl PokemonEncoding for MMU {
         let player_direction = PlayerFacingDirection::from_repr(self.read(0xD52A))
             .ok_or_else(|| format!("Invalid player facing direction {}", self.read(0xD52A)))?;
 
-        // read current text
-        // read wSpriteIndex from CF13 to resolve the current sprite
-        let current_sprite_index = self.read(0xCF13) as usize;
-        let current_text = if current_sprite_index == 0xFF || current_sprite_index == 0 {
-            None
-        } else {
-            println!("current_sprite_index: {}", current_sprite_index);
-
-            let text_address = self.read_u16_le(0xD36C);
-            println!("text_table_pointer: {:04X}", text_address);
-            let text_pointers = self.rom_data_from_pointer(map_bank, text_address, 0xFF * 2);
-            // read text pointer via current_sprite_index
-            let table_offset = (current_sprite_index - 1) * 2;
-            let text_pointer = u16::from_le_bytes([
-                text_pointers[table_offset],
-                text_pointers[table_offset + 1]
-            ]);
-
-
-            println!("text_pointer: {:04X}", text_pointer);
-            let text_bytes = self.rom_data_from_pointer(map_bank, text_pointer, None);
-
-            // TODO this is a dead end... text_pointer is actually a pointer to the script
-            // to truly resolve the text I will have to run the script on a forked GB with a BP on the call to PrintText
-
-            println!("TEXT: {}", PokemonString::from_slice(text_bytes));
-            Some(())
-        };
+        if self.pokemon_font_loaded() {
+            // TODO ask the ppu to get coordinates of all of these font tiles to reconstruct what text is rendered on the screen
+            println!("Pokemon font loaded");
+        }
 
         Ok(CurrentMap {
             map,
@@ -465,9 +443,9 @@ impl CurrentMap {
 }
 
 pub struct PokemonBlockAddresses {
-    pub pokemon: NamedDmgPointer,
-    pub trainer_name: NamedDmgPointer,
-    pub nickname: NamedDmgPointer,
+    pub pokemon: DmgPointer,
+    pub trainer_name: DmgPointer,
+    pub nickname: DmgPointer,
 }
 
 impl PokemonBlockAddresses {
@@ -475,7 +453,7 @@ impl PokemonBlockAddresses {
     pub const POKEMON_BLOCK_SIZE: u16 = 0x2C;
     pub const NAME_LENGTH: u16 = 0xB;
 
-    fn of_indexed(party_base_pointer: NamedDmgPointer, index: u16) -> Self {
+    fn of_indexed(party_base_pointer: DmgPointer, index: u16) -> Self {
         Self {
             pokemon: party_base_pointer + index * Self::POKEMON_BLOCK_SIZE,
             trainer_name: party_base_pointer + Self::PARTY_MAX * Self::POKEMON_BLOCK_SIZE + index * Self::NAME_LENGTH,
