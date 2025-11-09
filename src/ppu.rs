@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 use crate::geometry::Point8;
@@ -94,7 +94,7 @@ impl PPU {
             0xff
         }
     }
-    
+
     pub fn vram(&self) -> &[u8] {
         &self.vram
     }
@@ -347,6 +347,58 @@ impl PPU {
         )
     }
 
+    pub fn tile_indexes_of_vram_addresses(&self, address: u16, length: usize) -> Vec<u8> {
+        debug_assert!(
+            TileDataMode::is_valid_tile_address(address),
+            "Tile addresses must be in the range 0x8000-0x9FFF"
+        );
+        debug_assert!(length % TILE_BYTES == 0, "Length must be a multiple of 16 bytes");
+
+        let mode = self.lcd_control.tile_data_mode();
+        let mut indexes = Vec::with_capacity(length / TILE_BYTES);
+
+        for offset in (0..length).step_by(TILE_BYTES) {
+            if let Some(index) = mode.tile_index(address + offset as u16) {
+                indexes.push(index);
+            }
+        }
+        indexes
+    }
+
+    pub fn tile_coordinates(&self, tile_indexes: &[u8]) -> Vec<(usize, Point8)> {
+        let mut coordinates = Vec::new();
+        let bg_tile_map = self.tile_map(self.lcd_control.background_tile_map());
+        let window_tile_map = self.tile_map(self.lcd_control.window_tile_map());
+        
+        // map of tile indexes to their position in the tile_indexes array
+        let tile_lookups: HashMap<u8, usize> = tile_indexes.iter().enumerate()
+            .map(|(i, &index)| (index, i))
+            .collect(); 
+
+        let window_enabled = self.lcd_control.window_enabled();
+        for y in 0..TILE_MAP_SIZE {
+            for x in 0..TILE_MAP_SIZE {
+
+                if window_enabled {
+                    let window_tile_index = window_tile_map.tile_index(x, y);
+
+                    if let Some(&index) = tile_lookups.get(&window_tile_index) {
+                        coordinates.push((index, Point8 { x: x as u8, y: y as u8 }));
+                        continue; // window overlays bg
+                    }
+                }
+
+                let bg_tile_index = bg_tile_map.tile_index(x, y);
+                if let Some(&index) = tile_lookups.get(&bg_tile_index) {
+                    coordinates.push((index, Point8 { x: x as u8, y: y as u8 }));
+                }
+            }
+        }
+
+        coordinates
+    }
+
+
     fn sprite_pixel(&self, sprite: &Sprite, x: usize, y: usize) -> u8 {
         let object_size = self.lcd_control.object_size();
         let sprite_x = (x as isize - sprite.x) as usize;
@@ -373,8 +425,6 @@ impl PPU {
         let tile = self.tile(data_mode, tile_index);
         tile.pixel(x % TILE_PIXELS, y % TILE_PIXELS)
     }
-
-
 
     fn sprites(&self) -> Vec<Sprite> {
         let mut sprites = Vec::with_capacity(SPRITE_COUNT);

@@ -94,15 +94,70 @@ impl TileDataMode {
         if value { Self::Lower } else { Self::Upper }
     }
 
+    const LOWER_MODE_ADDRESSES: [u16; 256] = {
+        let mut addresses = [0u16; 256];
+        let mut i = 0;
+        while i < 256 {
+            addresses[i] = 0x8000 | ((i as u16) << 4);
+            i += 1;
+        }
+        addresses
+    };
+
+    const UPPER_MODE_ADDRESSES: [u16; 256] = {
+        let mut addresses = [0u16; 256];
+        let mut i = 0;
+        while i < 256 {
+            let base_address = if i < 0x80 { 0x9000 } else { 0x8000 };
+            addresses[i] = base_address | ((i as u16) << 4);
+            i += 1;
+        }
+        addresses
+    };
+
     pub fn tile_address(&self, tile_index: u8) -> u16 {
-        let base_address = if self == &Self::Upper && tile_index < 0x80 {
-            // tiles 0-127 of mode 2 are in block 2
-            0x9000
-        } else {
-            // otherwise in block 0 or 1
-            0x8000
-        };
-        base_address | (tile_index as u16) << 4
+        match self {
+            Self::Lower => Self::LOWER_MODE_ADDRESSES[tile_index as usize],
+            Self::Upper => Self::UPPER_MODE_ADDRESSES[tile_index as usize],
+        }
+    }
+    
+    pub fn is_valid_tile_address(address: u16) -> bool {
+        // tile addresses must be in the range 0x8000-0x97FF and must be aligned to 0x10
+        address >= 0x8000 && address < 0x9800 && (address & 0x0F) == 0
+    }
+
+    pub fn tile_index(&self, address: u16) -> Option<u8> {
+        if !Self::is_valid_tile_address(address) {
+            return None;
+        }
+
+        let tile_offset = (address - 0x8000) >> 4;
+
+        match self {
+            Self::Lower => {
+                // Block 0: 0x8000-0x87FF -> tiles 0-127
+                // Block 1: 0x8800-0x8FFF -> tiles 128-255
+                if tile_offset < 256 {
+                    Some(tile_offset as u8)
+                } else {
+                    None
+                }
+            }
+            Self::Upper => {
+                // Block 1: 0x8800-0x8FFF -> tiles 128-255 (tile_offset 128-255)
+                // Block 2: 0x9000-0x97FF -> tiles 0-127 (tile_offset 256-383)
+                if tile_offset >= 256 && tile_offset < 384 {
+                    // Block 2: map tile_offset 256-383 to tile index 0-127
+                    Some((tile_offset - 256) as u8)
+                } else if tile_offset >= 128 && tile_offset < 256 {
+                    // Block 1: map tile_offset 128-255 to tile index 128-255
+                    Some(tile_offset as u8)
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -283,4 +338,57 @@ mod tests {
         assert_eq!(mode.tile_address(0xFE), 0x8FE0);
         assert_eq!(mode.tile_address(0xFF), 0x8FF0);
     }
+
+    #[test]
+    fn test_tile_index_lower_mode_boundaries() {
+        let mode = TileDataMode::Lower;
+
+        // Block 0: 0x8000-0x87FF -> tiles 0-127
+        assert_eq!(mode.tile_index(0x8000), Some(0));   // First tile in block 0
+        assert_eq!(mode.tile_index(0x87F0), Some(127)); // Last tile in block 0
+
+        // Block 1: 0x8800-0x8FFF -> tiles 128-255
+        assert_eq!(mode.tile_index(0x8800), Some(128)); // First tile in block 1
+        assert_eq!(mode.tile_index(0x8FF0), Some(255)); // Last tile in block 1
+
+        // Block 2: Not accessible in lower mode
+        assert_eq!(mode.tile_index(0x9000), None);
+        assert_eq!(mode.tile_index(0x97F0), None);
+    }
+
+    #[test]
+    fn test_tile_index_upper_mode_boundaries() {
+        let mode = TileDataMode::Upper;
+
+        // Block 2: 0x9000-0x97FF -> tiles 0-127
+        assert_eq!(mode.tile_index(0x9000), Some(0));   // First tile in block 2
+        assert_eq!(mode.tile_index(0x97F0), Some(127)); // Last tile in block 2
+
+        // Block 1: 0x8800-0x8FFF -> tiles 128-255
+        assert_eq!(mode.tile_index(0x8800), Some(128)); // First tile in block 1
+        assert_eq!(mode.tile_index(0x8FF0), Some(255)); // Last tile in block 1
+
+        // Block 0: Not accessible in upper mode
+        assert_eq!(mode.tile_index(0x8000), None);
+        assert_eq!(mode.tile_index(0x87F0), None);
+    }
+
+    #[test]
+    fn test_tile_index_invalid_addresses() {
+        let mode = TileDataMode::Lower;
+
+        // Below valid range
+        assert_eq!(mode.tile_index(0x7FFF), None);
+
+        // Above valid range
+        assert_eq!(mode.tile_index(0x9800), None);
+        assert_eq!(mode.tile_index(0xA000), None);
+
+        // Misaligned addresses (not on 16-byte boundary)
+        assert_eq!(mode.tile_index(0x8001), None);
+        assert_eq!(mode.tile_index(0x8005), None);
+        assert_eq!(mode.tile_index(0x800F), None);
+        assert_eq!(mode.tile_index(0x8815), None);
+    }
+
 }

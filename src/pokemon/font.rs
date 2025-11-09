@@ -2,7 +2,7 @@ use std::ops::Add;
 use crate::mmu::{MMU, ROM_BANK_SIZE};
 use crate::pokemon::symbols::pokered_symbols;
 
-const fn font_bytes() -> [u8; 0x800] {
+pub const FONT_BYTES: [u8; 0x800] = {
     use crate::pokemon::roms::POKERED;
     use crate::pokemon::symbols::pokered_symbols;
     let font_pointer = pokered_symbols::FontGraphics;
@@ -25,9 +25,55 @@ const fn font_bytes() -> [u8; 0x800] {
         i += 1;
     }
     result
-}
+};
 
-pub const FONT_BYTES: [u8; 0x800] = font_bytes();
+pub fn render_font_string(indexes: &[usize]) -> String {
+    let mut result = String::new();
+    for &index in indexes {
+        match index {
+            0..=25 => result.push((b'A' + index as u8) as char),
+            26 => result.push('('),
+            27 => result.push(')'),
+            28 => result.push(':'),
+            29 => result.push(';'),
+            30 => result.push('['),
+            31 => result.push(']'),
+            32..=57 => result.push((b'a' + index as u8 - 32) as char),
+            58 => result.push('é'),
+            59 => result += "'d",
+            60 => result += "'l",
+            61 => result += "'s",
+            62 => result += "'t",
+            63 => result += "'v",
+            64..=95 => result.push(' '),
+            96 => result.push(','),
+            97 => result += "Poké",
+            98 => result += "mon",
+            99 => result.push('-'),
+            100 => result += "'r",
+            101 => result += "'m",
+            102 => result.push('?'),
+            103 => result.push('!'),
+            104 => result.push('.'),
+            105 => result += "ァ",
+            106 => result += "ゥ",
+            107 => result += "ェ",
+            108 => result += "▷",
+            109 => result += "▶",
+            110 => result += "▼",
+            111 => result += "♂",
+            112 => result += "¥",
+            113 => result += "⨯",
+            114 => result.push('.'),
+            115 => result.push('/'),
+            116 => result.push(','),
+            117 => result.push('♀'),
+            118..=127 => result.push((b'0' + index as u8 - 118) as char),
+            _ => {}
+        }
+    }
+    result
+}
 
 pub trait FontAware {
     fn pokemon_font_loaded(&self) -> bool;

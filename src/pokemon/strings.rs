@@ -35,7 +35,7 @@ impl PokemonString {
                     "▶" => 0xED,
                     "▼" => 0xEE,
                     "♂" => 0xEF,
-                    "×" => 0xF1,
+                    "⨯" => 0xF1,
                     "♀" => 0xF5,
                     _ => 0x00
                 }
@@ -116,7 +116,7 @@ impl PokemonString {
                 0xED => utf8.extend_from_slice("▶".as_bytes()),
                 0xEE => utf8.extend_from_slice("▼".as_bytes()),
                 0xEF => utf8.extend_from_slice("♂".as_bytes()),
-                0xF1 => utf8.extend_from_slice("×".as_bytes()),
+                0xF1 => utf8.extend_from_slice("⨯".as_bytes()),
                 0xF2 => utf8.push(b'.'),
                 0xF3 => utf8.push(b'/'),
                 0xF4 => utf8.push(b','),
