@@ -10,6 +10,7 @@ use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
+use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
 use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
 use crate::pokemon::move_name::{PokemonMoveName};
 use crate::pokemon::pokemon::Pokemon;
@@ -120,6 +121,40 @@ impl<'a> PokemonApi<'a> {
             sprites: meta_tile_map.sprites,
             actions,
         })
+    }
+
+    pub fn on_screen_text(&self) -> Option<String> {
+        let mmu = self.mmu();
+        if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
+            return None;
+        }
+        let ppu = mmu.ppu();
+        let font_tiles = ppu.tile_indexes_of_vram_addresses(pokered_symbols::vFont.address, FONT_BYTES.len());
+        if font_tiles.is_empty() {
+            return None;
+        }
+        let mut coordinates = ppu.tile_coordinates(&font_tiles);
+        coordinates.sort_by_key(|(_, p)| *p);
+
+        let mut font_chars = Vec::new();
+        let mut prev_pos: Option<Point8> = None;
+        let mut prev_space = false;
+        for (char_id, pos) in coordinates {
+            if let Some(prev) = prev_pos {
+                // Check for line breaks (different y coordinate) or spaces (x coordinate difference > 1)
+                let is_space = pos.y != prev.y || pos.x.saturating_sub(prev.x) > 1;
+                // only add a space (char=64) if the previous character is not a space
+                if is_space && !prev_space {
+                    font_chars.push(64);
+                }
+                prev_space = is_space;
+            }
+
+            font_chars.push(char_id);
+            prev_pos = Some(pos);
+        }
+
+        Some(render_font_string(&font_chars))
     }
 }
 

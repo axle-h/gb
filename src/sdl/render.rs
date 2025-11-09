@@ -161,7 +161,8 @@ pub fn render() -> Result<(), String> {
                             // println!("{:?}", pokemon_api.player_state());
                             // println!("{:?}", pokemon_api.pokemon_party());
                             //println!("{:?}", pokemon_api.map_state());
-                            pokemon_api.game_state()?;
+                            // pokemon_api.game_state()?;
+                            println!("{:?}", pokemon_api.on_screen_text());
                         },
                         Keycode::W => {
                             let pokemon_api = PokemonApi::new(&mut gb);

@@ -302,11 +302,6 @@ impl PokemonEncoding for MMU {
         let player_direction = PlayerFacingDirection::from_repr(self.read(0xD52A))
             .ok_or_else(|| format!("Invalid player facing direction {}", self.read(0xD52A)))?;
 
-        if self.pokemon_font_loaded() {
-            // TODO ask the ppu to get coordinates of all of these font tiles to reconstruct what text is rendered on the screen
-            println!("Pokemon font loaded");
-        }
-
         Ok(CurrentMap {
             map,
             player_position,
