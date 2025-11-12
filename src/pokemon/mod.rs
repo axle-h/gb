@@ -123,7 +123,7 @@ impl<'a> PokemonApi<'a> {
         })
     }
 
-    pub fn on_screen_text(&self) -> Option<String> {
+    pub fn on_screen_text(&self) -> Option<Vec<String>> {
         let mmu = self.mmu();
         if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
             return None;
@@ -136,25 +136,36 @@ impl<'a> PokemonApi<'a> {
         let mut coordinates = ppu.tile_coordinates(&font_tiles);
         coordinates.sort_by_key(|(_, p)| *p);
 
-        let mut font_chars = Vec::new();
+        let mut lines = Vec::new();
+        let mut current_line = Vec::new();
         let mut prev_pos: Option<Point8> = None;
-        let mut prev_space = false;
         for (char_id, pos) in coordinates {
             if let Some(prev) = prev_pos {
-                // Check for line breaks (different y coordinate) or spaces (x coordinate difference > 1)
-                let is_space = pos.y != prev.y || pos.x.saturating_sub(prev.x) > 1;
-                // only add a space (char=64) if the previous character is not a space
-                if is_space && !prev_space {
-                    font_chars.push(64);
+                if pos.y != prev.y {
+                    // line break
+                    lines.push(current_line);
+                    current_line = Vec::new();
+                } else {
+                    let is_space = pos.x.saturating_sub(prev.x) > 1;
+                    // only add a space (char=64) if the previous character is not a space
+                    if is_space && current_line.last() != Some(&64) {
+                        current_line.push(64);
+                    }
                 }
-                prev_space = is_space;
             }
 
-            font_chars.push(char_id);
+            current_line.push(char_id);
             prev_pos = Some(pos);
         }
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
 
-        Some(render_font_string(&font_chars))
+        Some(
+            lines.into_iter()
+                .map(|line| render_font_string(&line, false).trim().to_string())
+                .collect()
+        )
     }
 }
 

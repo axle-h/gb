@@ -27,7 +27,7 @@ pub const FONT_BYTES: [u8; 0x800] = {
     result
 };
 
-pub fn render_font_string(indexes: &[usize]) -> String {
+pub fn render_font_string(indexes: &[usize], menu_characters: bool) -> String {
     let mut result = String::new();
     for &index in indexes {
         match index {
@@ -58,9 +58,10 @@ pub fn render_font_string(indexes: &[usize]) -> String {
             105 => result += "ァ",
             106 => result += "ゥ",
             107 => result += "ェ",
-            108 => result += "▷",
-            109 => result += "▶",
-            110 => result += "▼",
+            // These are used for menu cursors
+            108 if menu_characters => result += "▷",
+            109 if menu_characters => result += "▶",
+            110 if menu_characters => result += "▼",
             111 => result += "♂",
             112 => result += "¥",
             113 => result += "⨯",
