@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use strum::IntoEnumIterator;
 use badge::Badge;
 use map::Map;
@@ -8,7 +9,7 @@ use party::PokemonParty;
 use tile_map::MetaTileMap;
 use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
-use crate::joypad::JoypadButton;
+use crate::joypad::{JoypadButton, JoypadButtonState};
 use crate::mmu::MMU;
 use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
 use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
@@ -64,6 +65,10 @@ impl<'a> PokemonApi<'a> {
         joypad.press_button(button);
     }
 
+    pub fn read_joypad_state(&self) -> JoypadButtonState {
+        self.mmu().joypad().state()
+    }
+
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {
         let player_state = self.game_state()?;
         let mut party = player_state.pokemon;
@@ -97,6 +102,10 @@ impl<'a> PokemonApi<'a> {
 
     }
 
+    pub fn game_mode(&self) -> GameMode {
+        self.mmu().read_game_mode()
+    }
+
     pub fn game_state(&self) -> Result<GameState, String> {
         let mmu = self.mmu();
         let current_map = mmu.read_current_map()?;
@@ -123,7 +132,7 @@ impl<'a> PokemonApi<'a> {
         })
     }
 
-    pub fn on_screen_text(&self) -> Option<Vec<String>> {
+    pub fn on_screen_text(&self) -> Option<String> {
         let mmu = self.mmu();
         if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
             return None;
@@ -164,7 +173,7 @@ impl<'a> PokemonApi<'a> {
         Some(
             lines.into_iter()
                 .map(|line| render_font_string(&line, false).trim().to_string())
-                .collect()
+                .join(" ")
         )
     }
 }

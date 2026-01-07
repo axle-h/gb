@@ -1,37 +1,12 @@
 use bincode::{Decode, Encode};
 use crate::activation::Activation;
 /// https://gbdev.io/pandocs/Joypad_Input.html#ff00--p1joyp-joypad
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode, Default)]
 pub struct JoypadRegister {
-    up: bool,
-    down: bool,
-    left: bool,
-    right: bool,
-    a: bool,
-    b: bool,
-    select: bool,
-    start: bool,
+    state: JoypadButtonState,
     select_buttons: bool,
     select_directions: bool,
     interrupt_pending: bool,
-}
-
-impl Default for JoypadRegister {
-    fn default() -> Self {
-        Self {
-            up: false,
-            down: false,
-            left: false,
-            right: false,
-            a: false,
-            b: false,
-            select: false,
-            start: false,
-            select_buttons: false,
-            select_directions: false,
-            interrupt_pending: false,
-        }
-    }
 }
 
 impl JoypadRegister {
@@ -40,13 +15,17 @@ impl JoypadRegister {
         self.select_directions = (value & 0x10) == 0;
     }
 
+    pub fn state(&self) -> JoypadButtonState {
+        self.state
+    }
+
     pub fn get(&self) -> u8 {
         let button_bits = if self.select_buttons {
-            (self.a as u8) | ((self.b as u8) << 1) | ((self.select as u8) << 2) | ((self.start as u8) << 3)
+            (self.state.a as u8) | ((self.state.b as u8) << 1) | ((self.state.select as u8) << 2) | ((self.state.start as u8) << 3)
         } else { 0 };
 
         let direction_bits = if self.select_directions {
-            (self.right as u8) | ((self.left as u8) << 1) | ((self.up as u8) << 2) | ((self.down as u8) << 3)
+            (self.state.right as u8) | ((self.state.left as u8) << 1) | ((self.state.up as u8) << 2) | ((self.state.down as u8) << 3)
         } else { 0 };
 
         let value = button_bits | direction_bits;
@@ -56,30 +35,12 @@ impl JoypadRegister {
     }
 
     pub fn is_button_pressed(&self, button: JoypadButton) -> bool {
-        match button {
-            JoypadButton::Up => self.up,
-            JoypadButton::Down => self.down,
-            JoypadButton::Left => self.left,
-            JoypadButton::Right => self.right,
-            JoypadButton::A => self.a,
-            JoypadButton::B => self.b,
-            JoypadButton::Select => self.select,
-            JoypadButton::Start => self.start,
-        }
+        self.state.is_button_pressed(button)
     }
 
     pub fn update_button(&mut self, button: JoypadButton, pressed: bool) {
-        self.interrupt_pending = self.interrupt_pending || (pressed && !self.is_button_pressed(button));
-        match button {
-            JoypadButton::Up => self.up = pressed,
-            JoypadButton::Down => self.down = pressed,
-            JoypadButton::Left => self.left = pressed,
-            JoypadButton::Right => self.right = pressed,
-            JoypadButton::A => self.a = pressed,
-            JoypadButton::B => self.b = pressed,
-            JoypadButton::Select => self.select = pressed,
-            JoypadButton::Start => self.start = pressed,
-        }
+        self.interrupt_pending = self.interrupt_pending || (pressed && !self.state.is_button_pressed(button));
+        self.state.update_button(button, pressed);
     }
 
     pub fn press_button(&mut self, button: JoypadButton) {
@@ -111,6 +72,46 @@ pub enum JoypadButton {
     B,
     Select,
     Start,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
+pub struct JoypadButtonState {
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    pub a: bool,
+    pub b: bool,
+    pub select: bool,
+    pub start: bool,
+}
+
+impl JoypadButtonState {
+    pub fn is_button_pressed(&self, button: JoypadButton) -> bool {
+        match button {
+            JoypadButton::Up => self.up,
+            JoypadButton::Down => self.down,
+            JoypadButton::Left => self.left,
+            JoypadButton::Right => self.right,
+            JoypadButton::A => self.a,
+            JoypadButton::B => self.b,
+            JoypadButton::Select => self.select,
+            JoypadButton::Start => self.start,
+        }
+    }
+
+    pub fn update_button(&mut self, button: JoypadButton, pressed: bool) {
+        match button {
+            JoypadButton::Up => self.up = pressed,
+            JoypadButton::Down => self.down = pressed,
+            JoypadButton::Left => self.left = pressed,
+            JoypadButton::Right => self.right = pressed,
+            JoypadButton::A => self.a = pressed,
+            JoypadButton::B => self.b = pressed,
+            JoypadButton::Select => self.select = pressed,
+            JoypadButton::Start => self.start = pressed,
+        }
+    }
 }
 
 #[cfg(test)]
