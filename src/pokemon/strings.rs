@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Display};
 use unicode_segmentation::UnicodeSegmentation;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct PokemonString(pub Vec<u8>);
 
 impl PokemonString {

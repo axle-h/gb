@@ -1,0 +1,123 @@
+use std::fmt::{Display, Formatter};
+use crate::joypad::JoypadButton;
+use crate::pokemon::{PokemonApi, PokemonApiTrait};
+
+#[derive(Debug, Clone, Default)]
+pub struct PokemonTextReader {
+    buffer: String,
+    had_text: bool,
+    page_cleared: bool,
+}
+
+impl Display for PokemonTextReader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.buffer.as_str())
+    }
+}
+
+impl PokemonTextReader {
+
+    pub fn update<A: PokemonApiTrait>(&mut self, api: &mut A) {
+        // mash the A button to advance the text
+        let joypad_state = api.read_joypad_state();
+        if joypad_state.a {
+            api.release_all_buttons();
+        } else {
+            api.press_button(JoypadButton::A);
+        }
+
+        let buffer_len = self.buffer.len();
+        if let Some(on_screen_text) = api.on_screen_text() {
+            let on_screen_text_len = on_screen_text.len();
+            if on_screen_text_len == 0 && self.had_text {
+                self.page_cleared = true;
+                self.had_text = false;
+            } else if on_screen_text_len > 0 && buffer_len == 0 {
+                self.buffer = on_screen_text;
+                self.had_text = true;
+                self.page_cleared = false;
+            } else if on_screen_text_len > 0 {
+                if self.page_cleared {
+                    self.buffer.push(' ');
+                    self.page_cleared = false;
+                }
+                // Try to find overlap at the end of buffer
+                let buffer_chars: Vec<char> = self.buffer.chars().collect();
+                let screen_chars: Vec<char> = on_screen_text.chars().collect();
+
+                let mut best_overlap = 0;
+                for overlap_len in (1..=buffer_chars.len().min(screen_chars.len())).rev() {
+                    if buffer_chars[buffer_chars.len() - overlap_len..] == screen_chars[..overlap_len] {
+                        best_overlap = overlap_len;
+                        break;
+                    }
+                }
+
+                // Skip the overlapping characters and append the rest
+                self.buffer.push_str(&on_screen_text.chars().skip(best_overlap).collect::<String>());
+                self.had_text = true;
+
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::joypad::JoypadButtonState;
+    use crate::pokemon::encoding::GameMode;
+    use crate::pokemon::GameState;
+    use super::*;
+
+    #[derive(Default)]
+    struct StubPokemonApi {
+        joypad: JoypadButtonState,
+        game_state: GameState,
+        on_screen_text: Option<String>,
+    }
+
+    impl PokemonApiTrait for StubPokemonApi {
+        fn release_all_buttons(&mut self) {
+            self.joypad = JoypadButtonState::default();
+        }
+
+        fn press_button(&mut self, button: JoypadButton) {
+            self.joypad.update_button(button, true)
+        }
+
+        fn read_joypad_state(&self) -> JoypadButtonState {
+            self.joypad
+        }
+
+        fn game_mode(&self) -> GameMode {
+            self.game_state.mode
+        }
+
+        fn game_state(&self) -> Result<GameState, String> {
+            Ok(self.game_state.clone())
+        }
+
+        fn on_screen_text(&self) -> Option<String> {
+            self.on_screen_text.clone()
+        }
+    }
+
+    #[test]
+    fn test_reads_text() {
+        const RAW_TEXT: &'static str = include_str!("text_box_stream_example.txt");
+
+        let mut reader: PokemonTextReader = Default::default();
+        let mut api: StubPokemonApi = Default::default();
+        api.game_state.mode = GameMode::TextBox;
+        for line in RAW_TEXT.split("\n") {
+            api.on_screen_text = Some(String::from(line));
+            reader.update(&mut api);
+        }
+
+        let result = format!("{}", reader);
+        assert_eq!(
+            result,
+            "PROF.OAK is the authority on POKéMON! Many POKéMON trainers hold him in high regard!"
+        );
+    }
+}

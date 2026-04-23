@@ -34,6 +34,16 @@ pub mod strings;
 pub mod symbols;
 pub mod font;
 pub mod roms;
+mod text;
+
+pub trait PokemonApiTrait {
+    fn release_all_buttons(&mut self);
+    fn press_button(&mut self, button: JoypadButton);
+    fn read_joypad_state(&self) -> JoypadButtonState;
+    fn game_mode(&self) -> GameMode;
+    fn game_state(&self) -> Result<GameState, String>;
+    fn on_screen_text(&self) -> Option<String>;
+}
 
 #[derive(Debug)]
 pub struct PokemonApi<'a> {
@@ -51,22 +61,6 @@ impl<'a> PokemonApi<'a> {
 
     fn mmu_mut(&mut self) -> &mut MMU {
         self.game_boy.core_mut().mmu_mut()
-    }
-
-    pub fn release_all_buttons(&mut self) {
-        let joypad = self.mmu_mut().joypad_mut();
-        for button in JoypadButton::iter() {
-            joypad.release_button(button);
-        }
-    }
-
-    pub fn press_button(&mut self, button: JoypadButton) {
-        let joypad = self.mmu_mut().joypad_mut();
-        joypad.press_button(button);
-    }
-
-    pub fn read_joypad_state(&self) -> JoypadButtonState {
-        self.mmu().joypad().state()
     }
 
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {
@@ -101,12 +95,26 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write_player_pokemon_party(&party)
 
     }
+}
 
-    pub fn game_mode(&self) -> GameMode {
+impl<'a> PokemonApiTrait for PokemonApi<'a> {
+    fn release_all_buttons(&mut self) {
+        let joypad = self.mmu_mut().joypad_mut();
+        for button in JoypadButton::iter() {
+            joypad.release_button(button);
+        }
+    }
+    fn press_button(&mut self, button: JoypadButton) {
+        let joypad = self.mmu_mut().joypad_mut();
+        joypad.press_button(button);
+    }
+    fn read_joypad_state(&self) -> JoypadButtonState {
+        self.mmu().joypad().state()
+    }
+    fn game_mode(&self) -> GameMode {
         self.mmu().read_game_mode()
     }
-
-    pub fn game_state(&self) -> Result<GameState, String> {
+    fn game_state(&self) -> Result<GameState, String> {
         let mmu = self.mmu();
         let current_map = mmu.read_current_map()?;
         let meta_tile_map = MetaTileMap::new(&current_map);
@@ -131,8 +139,7 @@ impl<'a> PokemonApi<'a> {
             actions,
         })
     }
-
-    pub fn on_screen_text(&self) -> Option<String> {
+    fn on_screen_text(&self) -> Option<String> {
         let mmu = self.mmu();
         if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
             return None;
@@ -178,7 +185,7 @@ impl<'a> PokemonApi<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GameState {
     pub player_id: u16,
     pub name: PokemonString,

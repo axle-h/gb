@@ -3,9 +3,10 @@ use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::PokemonApi;
+use crate::pokemon::{PokemonApi, PokemonApiTrait};
 use crate::pokemon::encoding::{GameMode, MetaTile};
 use crate::pokemon::map::Map;
+use crate::pokemon::text::PokemonTextReader;
 
 const RESOLUTION: MachineCycles = MachineCycles::from_hz(60);
 
@@ -28,7 +29,7 @@ enum State {
     #[default]
     Idle,
     OverworldMovement { destination: MetaTile, map: Map },
-    ReadingTextBox { buffer: String },
+    ReadingTextBox { reader: PokemonTextReader },
 }
 
 impl PokemonAgent {
@@ -66,7 +67,7 @@ impl PokemonAgent {
             State::Idle => {
                 match game_mode {
                     GameMode::TextBox => {
-                        self.state = State::ReadingTextBox { buffer: "".to_string() };
+                        self.state = State::ReadingTextBox { reader: PokemonTextReader::default() };
                     }
                     _ => {
                         // TODO wait for llm action
@@ -118,53 +119,16 @@ impl PokemonAgent {
                     api.press_button(*button.unwrap());
                 }
             }
-            State::ReadingTextBox { ref buffer } if game_mode != GameMode::TextBox => {
+            State::ReadingTextBox { ref reader } if game_mode != GameMode::TextBox => {
                 // Check if text box is closed
                 // print the collected text
-                println!("TextBox: {:?}", buffer);
+                println!("TextBox: {}", reader);
                 api.release_all_buttons();
                 self.state = State::Idle;
             }
-            State::ReadingTextBox { ref buffer } => {
-                // mash the A button to advance the text
-                let joypad_state = api.read_joypad_state();
-                if joypad_state.a {
-                    api.release_all_buttons();
-                } else {
-                    api.press_button(JoypadButton::A);
-                }
-
-                let mut next_buffer = buffer.clone();
-                let buffer_len = next_buffer.len();
-                if let Some(on_screen_text) = api.on_screen_text() {
-                    let on_screen_text_len = on_screen_text.len();
-                    if on_screen_text_len > 0 && buffer_len == 0 {
-                        next_buffer = on_screen_text;
-                    } else if on_screen_text_len > 0 {
-                        // Try to find overlap at the end of buffer
-                        let buffer_chars: Vec<char> = next_buffer.chars().collect();
-                        let screen_chars: Vec<char> = on_screen_text.chars().collect();
-
-                        let mut best_overlap = 0;
-                        for overlap_len in (1..=buffer_chars.len().min(screen_chars.len())).rev() {
-                            if buffer_chars[buffer_chars.len() - overlap_len..] == screen_chars[..overlap_len] {
-                                best_overlap = overlap_len;
-                                break;
-                            }
-                        }
-
-                        // Skip the overlapping characters and append the rest
-                        next_buffer.push_str(&on_screen_text.chars().skip(best_overlap).collect::<String>());
-
-                    }
-                }
-
-                self.state = State::ReadingTextBox { buffer: next_buffer };
+            State::ReadingTextBox { ref mut reader } => {
+                reader.update(&mut api);
             }
-
-
-
-
         }
         Ok(())
     }
