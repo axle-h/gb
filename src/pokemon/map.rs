@@ -1,6 +1,7 @@
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, strum_macros::Display, strum_macros::FromRepr, Default)]
 #[repr(u8)]
 pub enum Map {
+    #[default]
     PalletTown = 0x00,
     ViridianCity = 0x01,
     PewterCity = 0x02,

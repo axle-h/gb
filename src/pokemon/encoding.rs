@@ -317,8 +317,9 @@ impl PokemonEncoding for MMU {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, strum_macros::Display)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, strum_macros::Display, Default)]
 pub enum GameMode {
+    #[default]
     Overworld,
     #[strum(serialize = "Wild Pokemon Battle")]
     WildBattle,
@@ -334,8 +335,9 @@ pub struct WarpEvent {
     pub map_id: Map,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum_macros::Display)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum_macros::Display, Default)]
 pub enum MetaTile {
+    #[default]
     Empty,
     Obstacle,
     Sprite(&'static str),

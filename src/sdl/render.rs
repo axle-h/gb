@@ -15,7 +15,7 @@ use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::pokemon::agent::PokemonAgent;
-use crate::pokemon::PokemonApi;
+use crate::pokemon::{PokemonApi, PokemonApiTrait};
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
 use crate::sdl::font::FontTextures;
