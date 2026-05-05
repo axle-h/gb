@@ -147,14 +147,35 @@ impl MetaTileMap {
 
             let mut shortest_route = shortest_route.unwrap();
 
-            if shortest_route.destination.x == 0 {
-                shortest_route.route.push(JoypadButton::Left);
-            } else if shortest_route.destination.x == (self.width - 1) as u8 {
-                shortest_route.route.push(JoypadButton::Right);
-            } else if shortest_route.destination.y == 0 {
-                shortest_route.route.push(JoypadButton::Up);
-            } else if shortest_route.destination.y == (self.height - 1) as u8 {
-                shortest_route.route.push(JoypadButton::Down);
+            let dest = shortest_route.destination;
+            // Determine the direction the player should move to enter/trigger the warp
+            let warp_enter_dir = if dest.x == 0 {
+                JoypadButton::Left
+            } else if dest.x == (self.width - 1) as u8 {
+                JoypadButton::Right
+            } else if dest.y == 0 {
+                JoypadButton::Up
+            } else if dest.y == (self.height - 1) as u8 {
+                JoypadButton::Down
+            } else {
+                // Interior warp: use the approach direction, defaulting to Up
+                *shortest_route.route.last().unwrap_or(&JoypadButton::Up)
+            };
+
+            if shortest_route.route.is_empty() {
+                // Player is already on the warp tile — step off then back on to trigger the warp
+                let step_off = match warp_enter_dir {
+                    JoypadButton::Left => JoypadButton::Right,
+                    JoypadButton::Right => JoypadButton::Left,
+                    JoypadButton::Up => JoypadButton::Down,
+                    JoypadButton::Down => JoypadButton::Up,
+                    other => other,
+                };
+                shortest_route.route.push(step_off);
+                shortest_route.route.push(warp_enter_dir);
+            } else {
+                // Player will walk onto the warp tile; push the enter direction to trigger it
+                shortest_route.route.push(warp_enter_dir);
             }
 
             routes.push(shortest_route);
