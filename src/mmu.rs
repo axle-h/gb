@@ -9,6 +9,7 @@ use crate::divider::Divider;
 use crate::header::CartHeader;
 use crate::interrupt::{InterruptFlags, InterruptType};
 use crate::joypad::JoypadRegister;
+use crate::pokemon::symbols::{DmgBank, DmgPointer};
 use crate::ppu::PPU;
 use crate::ram::{RAM, ROM};
 use crate::serial::Serial;
@@ -94,19 +95,27 @@ impl MMU {
         }
     }
 
+    pub fn rom_data_from_rom_pointer<L: Into<Option<usize>>>(&self, pointer: &DmgPointer, length: L) -> &[u8] {
+        if let DmgPointer { bank: DmgBank::ROM { bank }, address } = pointer {
+            self.rom_data_from_pointer(*bank as usize, *address, length)
+        } else {
+            panic!("Pointer {} is not a ROM pointer", pointer)
+        }
+    }
+
     pub fn rom_data_from_pointer<L: Into<Option<usize>>>(&self, bank: usize, pointer: u16, length: L) -> &[u8] {
-        if bank == 0 {
+        if bank == 0 || pointer < ROM_BANK_SIZE as u16 {
             assert!(
                 pointer < ROM_BANK_SIZE as u16,
                 "Pointer {:04X} is invalid for bank {}", pointer, bank
             );
+            // bank 0 or a raw offset into rom bank > 0
             self.rom_data(bank, pointer as usize, length)
-        } else {
-            assert!(
-                pointer >= ROM_BANK_SIZE as u16 && pointer < ROM_BANK_SIZE as u16 * 2,
-                "Pointer {:04X} is invalid for bank {}", pointer, bank
-            );
+        } else if pointer >= ROM_BANK_SIZE as u16 && pointer < ROM_BANK_SIZE as u16 * 2 {
+            // correct for raw MMU address
             self.rom_data(bank, pointer as usize - ROM_BANK_SIZE, length)
+        } else {
+            panic!("Pointer {:04X} is invalid for bank {}", pointer, bank)
         }
     }
 

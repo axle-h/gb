@@ -89,8 +89,8 @@ mod tests {
             self.joypad
         }
 
-        fn game_mode(&self) -> GameMode {
-            self.game_state.mode
+        fn game_mode(&self) -> Option<GameMode> {
+            Some(self.game_state.mode)
         }
 
         fn game_state(&self) -> Result<GameState, String> {

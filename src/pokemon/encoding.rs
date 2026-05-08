@@ -4,14 +4,14 @@ use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
 use crate::pokemon::font::FontAware;
 use crate::pokemon::map::Map;
-use crate::pokemon::symbols::{DmgPointer, DmgPointerRead};
+use crate::pokemon::map_header::{MapHeader, MapHeaderReader};
+use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::party::PokemonParty;
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::sprite::{PictureId, Sprite};
 use crate::pokemon::symbols::{pokered_symbols};
-use crate::pokemon::strings::PokemonString;
 use crate::ram::{RAM, ROM};
 
 pub trait PokemonEncoding {
@@ -247,13 +247,13 @@ impl PokemonEncoding for MMU {
         // ; no battle, this is 0
         // ; wild battle, this is 1
         // ; trainer battle, this is 2
-        match self.read(0xD057) {
+        match self.read_pointer(&pokered_symbols::wIsInBattle) {
             1 => GameMode::WildBattle,
             2 => GameMode::TrainerBattle,
             _ => {
                 // wFontLoaded infers a text box is open
                 // it is set in DisplayTextIDInit and reset in ReloadMapSpriteTilePatterns
-                let font_loaded = self.read(0xcfc4) & 0x01 == 1;
+                let font_loaded = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01 == 1;
                 if font_loaded {
                     // TODO menu vs dialogue
                     // e.g. the game seems to set the textbox type like this for a message box
@@ -270,14 +270,12 @@ impl PokemonEncoding for MMU {
 
     fn read_current_map(&self) -> Result<CurrentMap, String> {
         // any rom data we read must be directly from the rom banks as the game is not guaranteed to have the correct bank loaded
-        let map = Map::from_repr(self.read(0xD35E)).ok_or_else(|| "Invalid map number".to_string())?;
-        let map_bank = self.rom_data(3, 0x023D, Map::COUNT)[map as usize] as usize;
-        let map_height_blocks = self.read(0xD368) as usize;
-        let map_width_blocks = self.read(0xD369) as usize;
-        let tileset_bank = self.read(0xD52B) as usize;
+        let map = Map::from_repr(self.read_pointer(&pokered_symbols::wCurMap)).ok_or_else(|| "Invalid map number".to_string())?;
+        let map_bank = self.rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT)[map as usize] as usize;
+        let tileset_bank = self.read_pointer(&pokered_symbols::wTilesetBank) as usize;
 
         // collision data is always in bank 0
-        let collision_address = self.read_u16_le(0xD530);
+        let collision_address = self.read_pointer_u16_le(&pokered_symbols::wTilesetCollisionPtr);
         let mut collision_tiles = HashSet::new();
         for index in 0..20 {
             let collision_byte = self.read(collision_address + index);
@@ -287,27 +285,32 @@ impl PokemonEncoding for MMU {
             collision_tiles.insert(collision_byte);
         }
 
-        let map_data_address = self.read_u16_le(0xD36A);
-        let map_data = self.rom_data_from_pointer(map_bank, map_data_address, map_height_blocks * map_width_blocks).to_vec();
+        let map_header_pointer = map.header_pointer().ok_or_else(|| format!("Map has no header pointer: {}", map))?;
+        let map_header = self.read_map_header(map_header_pointer).ok_or_else(|| "Invalid map header".to_string())?;
+
+        let map_data_address = self.read_pointer_u16_le(&pokered_symbols::wCurMapDataPtr);
+        let map_data = self.rom_data_from_pointer(map_bank, map_data_address, map_header.height as usize * map_header.width as usize).to_vec();
 
         let max_block_id = *map_data.iter().max().unwrap() as usize;
-        let block_data_address = self.read_u16_le(0xD52C);
-        let block_data = self.rom_data_from_pointer(tileset_bank, block_data_address, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
+        let block_data = self.rom_data_from_pointer(tileset_bank, map_header.blocks_address, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
 
         let warp_events = self.read_warp_events()?;
 
         let sprites = self.read_sprites()?;
-        let player_position = Point8 { x: self.read(0xD362), y: self.read(0xD361) };
+        let player_position = Point8 {
+            x: self.read_pointer(&pokered_symbols::wXCoord),
+            y: self.read_pointer(&pokered_symbols::wYCoord),
+        };
 
-        let player_direction = PlayerFacingDirection::from_repr(self.read(0xD52A))
-            .ok_or_else(|| format!("Invalid player facing direction {}", self.read(0xD52A)))?;
+        let player_direction_raw = self.read_pointer(&pokered_symbols::wPlayerDirection);
+        let player_direction = PlayerFacingDirection::from_repr(player_direction_raw)
+            .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?;
 
         Ok(CurrentMap {
             map,
+            map_header,
             player_position,
             player_direction,
-            map_width_blocks,
-            map_height_blocks,
             map_data,
             block_data,
             collision_tiles,
@@ -368,10 +371,9 @@ impl Into<JoypadButton> for PlayerFacingDirection {
 
 pub struct CurrentMap {
     pub map: Map,
+    pub map_header: MapHeader,
     pub player_position: Point8,
     pub player_direction: PlayerFacingDirection,
-    pub map_width_blocks: usize,
-    pub map_height_blocks: usize,
     pub map_data: Vec<u8>,
     pub block_data: Vec<u8>,
     pub collision_tiles: HashSet<u8>,
@@ -387,7 +389,7 @@ impl CurrentMap {
     pub fn is_empty(&self, tile_x: usize, tile_y: usize) -> bool {
         let block_x = tile_x / Self::BLOCK_TILE_WIDTH;
         let block_y = tile_y / Self::BLOCK_TILE_WIDTH;
-        let block_index = self.map_data[block_x + block_y * self.map_width_blocks] as usize;
+        let block_index = self.map_data[block_x + block_y * self.map_header.width as usize] as usize;
         let block_offset = block_index * Self::BLOCK_TILES;
         let tile_offset = (tile_x % Self::BLOCK_TILE_WIDTH) + (tile_y % Self::BLOCK_TILE_WIDTH) * Self::BLOCK_TILE_WIDTH;
         let tile_index = self.block_data[block_offset + tile_offset];
@@ -395,11 +397,11 @@ impl CurrentMap {
     }
 
     pub fn meta_width(&self) -> usize {
-        self.map_width_blocks * Self::TILES_PER_META
+        self.map_header.width as usize * Self::TILES_PER_META
     }
 
     pub fn meta_height(&self) -> usize {
-        self.map_height_blocks * Self::TILES_PER_META
+        self.map_header.height as usize * Self::TILES_PER_META
     }
 
     pub fn meta_tiles(&self) -> Vec<MetaTile> {
@@ -409,8 +411,8 @@ impl CurrentMap {
         // start off assuming all tiles are obstacles
         let mut result = vec![MetaTile::Obstacle; width * height];
 
-        let width_tiles = self.map_width_blocks * Self::BLOCK_TILE_WIDTH;
-        let height_tiles = self.map_height_blocks * Self::BLOCK_TILE_WIDTH;
+        let width_tiles = self.map_header.width as usize * Self::BLOCK_TILE_WIDTH;
+        let height_tiles = self.map_header.height as usize * Self::BLOCK_TILE_WIDTH;
         for tile_y in 0..height_tiles {
             let y = tile_y / Self::TILES_PER_META;
             for tile_x in 0..width_tiles {
