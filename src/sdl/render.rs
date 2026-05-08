@@ -171,7 +171,6 @@ pub fn render() -> Result<(), String> {
                         Keycode::W => {
                             let pokemon_api = PokemonApi::new(&mut gb);
                             let state = pokemon_api.game_state()?;
-                            println!("{:?}", state.map);
                         },
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);

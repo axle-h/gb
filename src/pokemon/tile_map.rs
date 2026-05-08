@@ -235,10 +235,11 @@ impl Display for MetaTileMap {
         for y in 0..self.height {
             for x in 0..self.width {
                 match self.meta_tiles[x + y * self.width] {
-                    MetaTile::Empty => write!(f, " ")?,
+                    MetaTile::Empty => write!(f, "_")?,
                     MetaTile::Obstacle => write!(f, "O")?,
                     MetaTile::Sprite(_) => write!(f, "S")?,
                     MetaTile::Warp(_) => write!(f, "W")?,
+                    MetaTile::Connection(_) => write!(f, "C")?,
                 }
             }
             writeln!(f)?;
