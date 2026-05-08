@@ -35,12 +35,13 @@ pub mod symbols;
 pub mod font;
 pub mod roms;
 mod text;
+mod map_header;
 
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
     fn press_button(&mut self, button: JoypadButton);
     fn read_joypad_state(&self) -> JoypadButtonState;
-    fn game_mode(&self) -> GameMode;
+    fn game_mode(&self) -> Option<GameMode>;
     fn game_state(&self) -> Result<GameState, String>;
     fn on_screen_text(&self) -> Option<String>;
 }
@@ -111,18 +112,12 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     fn read_joypad_state(&self) -> JoypadButtonState {
         self.mmu().joypad().state()
     }
-    fn game_mode(&self) -> GameMode {
-        self.mmu().read_game_mode()
-    }
+
     fn game_state(&self) -> Result<GameState, String> {
         let mmu = self.mmu();
         let current_map = mmu.read_current_map()?;
         let meta_tile_map = MetaTileMap::new(&current_map);
-        // println!("{}", meta_tile_map);
         let actions = meta_tile_map.actions();
-        // for action in actions.iter() {
-        //     println!("{:?}", action);
-        // }
 
         Ok(GameState {
             player_id: mmu.read_pointer_u16_be(&pokered_symbols::wPlayerID),
@@ -182,6 +177,23 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
                 .map(|line| render_font_string(&line, false).trim().to_string())
                 .join(" ")
         )
+    }
+
+    fn game_mode(&self) -> Option<GameMode> {
+        let mmu = self.mmu();
+        let player_id = mmu.read_pointer_u16_be(&pokered_symbols::wPlayerID);
+        if player_id == 0 {
+            // intro screens
+            return None;
+        }
+
+        let new_game_player = mmu.read_pointer_pokemon_string(&pokered_symbols::DebugNewGamePlayerName);
+        let player_name = mmu.read_pointer_pokemon_string(&pokered_symbols::wPlayerName);
+        if player_name == new_game_player {
+            // on new game screen
+            return None;
+        }
+        Some(mmu.read_game_mode())
     }
 }
 

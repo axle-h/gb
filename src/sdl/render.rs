@@ -100,6 +100,7 @@ pub fn render() -> Result<(), String> {
     let mut cycle_count = MachineCycles::ZERO;
 
     let mut previous_wram = [0u8; 0x2000];
+    let mut agent_running = false;
     'running: loop {
         iteration_count += 1;
         let delta = frame_rate.update()?;
@@ -146,6 +147,9 @@ pub fn render() -> Result<(), String> {
                             }
                             previous_wram.copy_from_slice(current_wram);
                         }
+                        Keycode::F5 => {
+                            agent_running = !agent_running;
+                        }
                         Keycode::F7 => {
                             // TODO write to this file on change
                             gb.dump_sram_to_file("pokemon-red.sav")?;
@@ -166,9 +170,8 @@ pub fn render() -> Result<(), String> {
                         },
                         Keycode::W => {
                             let pokemon_api = PokemonApi::new(&mut gb);
-                            if let Some(action) = pokemon_api.game_state()?.actions.into_iter().choose(&mut rand::rng()) {
-                                pokemon_agent.take_overworld_action(action);
-                            }
+                            let state = pokemon_api.game_state()?;
+                            println!("{:?}", state.map);
                         },
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);
@@ -221,7 +224,11 @@ pub fn render() -> Result<(), String> {
             ahead_by_cycles += actual_cycles - min_cycles;
         }
 
-        pokemon_agent.update(&mut gb, actual_cycles)?;
+        if agent_running {
+            if let Err(agent_error) = pokemon_agent.update(&mut gb, actual_cycles) {
+                println!("agent failed: {:?}", agent_error);
+            }
+        }
 
         let audio_buffer = gb.core_mut().mmu_mut().audio_mut().buffer_mut();
         let required_input_frames = resampler.input_frames_next();

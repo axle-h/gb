@@ -63,7 +63,7 @@ impl PokemonAgent {
         }
 
         let mut api = PokemonApi::new(gb);
-        let game_mode = api.game_mode();
+        let game_mode = api.game_mode().ok_or_else(|| "Not in game".to_string())?;
         match self.state {
             State::Idle => {
                 match game_mode {
