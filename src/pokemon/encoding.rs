@@ -4,7 +4,7 @@ use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
 use crate::pokemon::font::FontAware;
 use crate::pokemon::map::Map;
-use crate::pokemon::map_header::{MapHeader, MapHeaderReader};
+use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader};
 use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::party::PokemonParty;
@@ -292,7 +292,8 @@ impl PokemonEncoding for MMU {
         let map_data = self.rom_data_from_pointer(map_bank, map_data_address, map_header.height as usize * map_header.width as usize).to_vec();
 
         let max_block_id = *map_data.iter().max().unwrap() as usize;
-        let block_data = self.rom_data_from_pointer(tileset_bank, map_header.blocks_address, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
+        let tileset_data_address = self.read_pointer_u16_le(&pokered_symbols::wTilesetBlocksPtr);
+        let tileset_data = self.rom_data_from_pointer(tileset_bank, tileset_data_address, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
 
         let warp_events = self.read_warp_events()?;
 
@@ -312,7 +313,7 @@ impl PokemonEncoding for MMU {
             player_position,
             player_direction,
             map_data,
-            block_data,
+            tileset_data,
             collision_tiles,
             warp_events,
             sprites,
@@ -345,7 +346,8 @@ pub enum MetaTile {
     Obstacle,
     Sprite(&'static str),
     Warp(Map),
-    // TODO map connection
+    Connection(Map), // TODO determine these from connection structs
+
     // TODO signs
 }
 
@@ -375,7 +377,7 @@ pub struct CurrentMap {
     pub player_position: Point8,
     pub player_direction: PlayerFacingDirection,
     pub map_data: Vec<u8>,
-    pub block_data: Vec<u8>,
+    pub tileset_data: Vec<u8>,
     pub collision_tiles: HashSet<u8>,
     pub warp_events: Vec<WarpEvent>,
     pub sprites: Vec<Sprite>,
@@ -392,7 +394,7 @@ impl CurrentMap {
         let block_index = self.map_data[block_x + block_y * self.map_header.width as usize] as usize;
         let block_offset = block_index * Self::BLOCK_TILES;
         let tile_offset = (tile_x % Self::BLOCK_TILE_WIDTH) + (tile_y % Self::BLOCK_TILE_WIDTH) * Self::BLOCK_TILE_WIDTH;
-        let tile_index = self.block_data[block_offset + tile_offset];
+        let tile_index = self.tileset_data[block_offset + tile_offset];
         self.collision_tiles.contains(&tile_index)
     }
 
@@ -435,6 +437,44 @@ impl CurrentMap {
         for warp_event in &self.warp_events {
             let index = warp_event.position.x as usize + warp_event.position.y as usize * width;
             result[index] = MetaTile::Warp(warp_event.map_id);
+        }
+
+        // now mark connection border tiles
+        // x_alignment / y_alignment are signed tile-offsets of the connected map relative to
+        // the current map (2 tiles = 1 block). The strip starts at -alignment on the current map
+        // and is strip_length blocks (strip_length * TILES_PER_META meta-tiles) wide/tall.
+        for connection in self.map_header.connections() {
+            let strip_meta = connection.strip_length as usize * Self::TILES_PER_META;
+            match connection.direction {
+                MapConnectionDirection::North => {
+                    let x_start = (-(connection.x_alignment as i32)).max(0) as usize;
+                    let x_end = (x_start + strip_meta).min(width);
+                    for x in x_start..x_end {
+                        result[x] = MetaTile::Connection(connection.map);
+                    }
+                }
+                MapConnectionDirection::South => {
+                    let x_start = (-(connection.x_alignment as i32)).max(0) as usize;
+                    let x_end = (x_start + strip_meta).min(width);
+                    for x in x_start..x_end {
+                        result[x + (height - 1) * width] = MetaTile::Connection(connection.map);
+                    }
+                }
+                MapConnectionDirection::West => {
+                    let y_start = (-(connection.y_alignment as i32)).max(0) as usize;
+                    let y_end = (y_start + strip_meta).min(height);
+                    for y in y_start..y_end {
+                        result[y * width] = MetaTile::Connection(connection.map);
+                    }
+                }
+                MapConnectionDirection::East => {
+                    let y_start = (-(connection.y_alignment as i32)).max(0) as usize;
+                    let y_end = (y_start + strip_meta).min(height);
+                    for y in y_start..y_end {
+                        result[(width - 1) + y * width] = MetaTile::Connection(connection.map);
+                    }
+                }
+            }
         }
 
         result
