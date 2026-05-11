@@ -201,7 +201,6 @@ pub struct GameState {
     pub map: MetaTileMap,
 }
 
-
 #[cfg(test)]
 mod test {
     use crate::cycles::MachineCycles;

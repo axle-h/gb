@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
@@ -310,6 +310,13 @@ impl PokemonEncoding for MMU {
 
         let connected_strips = self.load_connected_strips(&map_header);
 
+        // HandleLedges in pokered only fires for tileset 0 (Overworld); other tilesets have no ledges.
+        let ledge_tiles = if map_header.tileset == TileSetId::Overworld {
+            self.read_ledge_tiles()
+        } else {
+            HashMap::new()
+        };
+
         Ok(CurrentMap {
             map,
             map_header,
@@ -322,11 +329,38 @@ impl PokemonEncoding for MMU {
             sprites,
             is_water_tileset,
             connected_strips,
+            ledge_tiles,
         })
     }
 }
 
 impl MMU {
+    /// Reads the `LedgeTiles` ROM table and returns a map of tile_id → JumpDirection.
+    ///
+    /// The table has 4-byte entries terminated by 0xFF:
+    ///   [facing_direction, tile_under_player, tile_in_front, jump_direction_flags]
+    /// `tile_in_front` (byte 2) is the ledge tile ID; `jump_direction_flags` (byte 3) encodes
+    /// the direction: 0x80=south, 0x20=west, 0x10=east (same bit layout as wPlayerMovingDirection).
+    fn read_ledge_tiles(&self) -> HashMap<u8, JumpDirection> {
+        let data = self.rom_data_from_rom_pointer(&pokered_symbols::LedgeTiles, 64);
+        let mut result = HashMap::new();
+        let mut i = 0;
+        while i + 3 < data.len() {
+            if data[i] == 0xFF { break; }
+            let tile_in_front   = data[i + 2];
+            let dir_flags       = data[i + 3];
+            let dir = match dir_flags {
+                0x80 => JumpDirection::South,
+                0x20 => JumpDirection::West,
+                0x10 => JumpDirection::East,
+                _    => { i += 4; continue; }
+            };
+            result.insert(tile_in_front, dir);
+            i += 4;
+        }
+        result
+    }
+
     /// Reads an FF-terminated list of walkable tile IDs from a bank-0 ROM address.
     fn read_collision_tiles(&self, ptr: u16) -> HashSet<u8> {
         let mut tiles = HashSet::new();
@@ -484,12 +518,22 @@ pub enum MetaTile {
     Obstacle,
     /// Water tile (tile ID 0x14) — can only be crossed while surfing.
     Water,
+    /// Ledge tile — can only be crossed by jumping in the specified direction.
+    Jump(JumpDirection),
     Sprite(&'static str),
     Warp(Map),
     /// Walkable entry point into an adjacent map.
     Connection(Map),
     /// Water entry point into an adjacent map — only reachable while surfing.
     ConnectionWater(Map),
+}
+
+/// The direction a ledge can be jumped over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum_macros::Display)]
+pub enum JumpDirection {
+    South,
+    West,
+    East,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
@@ -622,6 +666,9 @@ pub struct CurrentMap {
     /// meaning tile $14/$32/$48 should be treated as water/shore.
     pub is_water_tileset: bool,
     connected_strips: Vec<ConnectedMapStrip>,
+    /// Maps ledge tile IDs to their jump direction. Only populated for the Overworld tileset,
+    /// which is the only tileset where HandleLedges fires.
+    ledge_tiles: HashMap<u8, JumpDirection>,
 }
 
 impl CurrentMap {
@@ -687,8 +734,14 @@ impl CurrentMap {
                 let mx    = tile_x / Self::TILES_PER_META + x_off;
                 let index = mx + my * exp_width;
                 if result[index] != MetaTile::Water {
+                    let tile_id = self.tile_id(tile_x, tile_y);
                     if self.is_water(tile_x, tile_y) {
                         result[index] = MetaTile::Water;
+                    } else if let Some(&dir) = self.ledge_tiles.get(&tile_id) {
+                        // Ledge tiles are detected by tile ID alone (not walkability).
+                        // The bottom graphical row of a ledge block is non-walkable (not in
+                        // collision_tiles) but must still override the walkable rows above it.
+                        result[index] = MetaTile::Jump(dir);
                     } else if result[index] == MetaTile::Obstacle && self.is_empty(tile_x, tile_y) {
                         result[index] = MetaTile::Empty;
                     }

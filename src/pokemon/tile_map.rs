@@ -4,7 +4,7 @@ use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::pokemon::map::Map;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::encoding::{CurrentMap, MetaTile, PlayerFacingDirection};
+use crate::pokemon::encoding::{CurrentMap, JumpDirection, MetaTile, PlayerFacingDirection};
 use crate::pokemon::sprite::Sprite;
 
 #[derive(Debug, Clone, Default)]
@@ -81,7 +81,7 @@ impl MetaTileMap {
                 dist.insert(nb, d + 1);
                 came_from.insert(nb, (pos, dir));
                 let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
-                if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_)) {
+                if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Jump(_)) {
                     queue.push_back(nb);
                 }
             }
@@ -204,6 +204,9 @@ impl Display for MetaTileMap {
                     MetaTile::Warp(_) => write!(f, "W")?,
                     MetaTile::Connection(_) => write!(f, "C")?,
                     MetaTile::ConnectionWater(_) => write!(f, "~")?,
+                    MetaTile::Jump(JumpDirection::South) => write!(f, "v")?,
+                    MetaTile::Jump(JumpDirection::West)  => write!(f, "<")?,
+                    MetaTile::Jump(JumpDirection::East)  => write!(f, ">")?,
                 }
             }
             writeln!(f)?;
