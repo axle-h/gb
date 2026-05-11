@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_reads_text() {
-        const RAW_TEXT: &'static str = include_str!("text_box_stream_example.txt");
+        const RAW_TEXT: &'static str = include_str!("test_data/text_box_stream_example.txt");
 
         let mut reader: PokemonTextReader = Default::default();
         let mut api: StubPokemonApi = Default::default();

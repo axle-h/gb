@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use rand::seq::IteratorRandom;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
-use crate::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
 use crate::pokemon::encoding::{GameMode, MetaTile};
@@ -71,7 +70,7 @@ impl PokemonAgent {
                         self.state = State::ReadingTextBox { reader: PokemonTextReader::default() };
                     }
                     _ => {
-                        if let Some(action) = api.game_state()?.actions.into_iter().choose(&mut rand::rng()) {
+                        if let Some(action) = api.game_state()?.map.actions().into_iter().choose(&mut rand::rng()) {
                             self.take_overworld_action(action);
                         }
                     }
@@ -88,7 +87,7 @@ impl PokemonAgent {
                     return Ok(());
                 }
 
-                if game_state.map != expected_map {
+                if game_state.map.map != expected_map {
                     // For warp actions, a map change means the warp succeeded
                     if matches!(destination, MetaTile::Warp(_)) {
                         self.event(AgentEvent::OverworldActionCompleted { destination });
@@ -104,13 +103,13 @@ impl PokemonAgent {
 
                 // For warp destinations, don't complete just because the player is standing on the
                 // warp tile — they need to keep moving in the warp direction until the map changes.
-                if game_state.player_tile == destination && !matches!(destination, MetaTile::Warp(_)) {
+                if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp(_)) {
                     self.event(AgentEvent::OverworldActionCompleted { destination });
                     self.state = State::Idle;
                     return Ok(());
                 }
 
-                let action = game_state.actions
+                let action = game_state.map.actions()
                     .into_iter()
                     .find(|action| action.tile == destination);
                 if action.is_none() {

@@ -115,10 +115,6 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
     fn game_state(&self) -> Result<GameState, String> {
         let mmu = self.mmu();
-        let current_map = mmu.read_current_map()?;
-        let meta_tile_map = MetaTileMap::new(&current_map);
-        let actions = meta_tile_map.actions();
-
         Ok(GameState {
             player_id: mmu.read_pointer_u16_be(&pokered_symbols::wPlayerID),
             name: mmu.read_pointer_pokemon_string(&pokered_symbols::wPlayerName),
@@ -127,13 +123,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),
             mode: mmu.read_game_mode(),
             pokemon: mmu.read_player_pokemon_party()?,
-            map: meta_tile_map.map,
-            player_position: meta_tile_map.player_position,
-            player_tile: meta_tile_map.player_tile(),
-            sprites: meta_tile_map.sprites,
-            actions,
+            map: MetaTileMap::new(&mmu.read_current_map()?),
         })
     }
+
     fn on_screen_text(&self) -> Option<String> {
         let mmu = self.mmu();
         if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
@@ -206,9 +199,26 @@ pub struct GameState {
     pub money: u32,
     pub pokemon: PokemonParty,
     pub mode: GameMode,
-    pub map: Map,
-    pub player_position: Point8,
-    pub player_tile: MetaTile,
-    pub sprites: Vec<Sprite>,
-    pub actions: Vec<OverworldAction>,
+    pub map: MetaTileMap,
+}
+
+
+#[cfg(test)]
+mod test {
+    use crate::cycles::MachineCycles;
+    use super::*;
+
+    pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("./test_data/pallet-town-state.bin");
+
+    #[test]
+    fn test_map() {
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(PALLET_TOWN_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        assert_eq!(state.map.map, Map::PalletTown);
+
+        println!("{}", state.map);
+    }
 }
