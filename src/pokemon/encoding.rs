@@ -315,6 +315,8 @@ impl PokemonEncoding for MMU {
         let player_direction = PlayerFacingDirection::from_repr(player_direction_raw)
             .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?;
 
+        let connected_strips = self.load_connected_strips(&map_header);
+
         Ok(CurrentMap {
             map,
             map_header,
@@ -326,7 +328,135 @@ impl PokemonEncoding for MMU {
             warp_events,
             sprites,
             is_water_tileset,
+            connected_strips,
         })
+    }
+}
+
+impl MMU {
+    fn load_connected_strips(&self, map_header: &MapHeader) -> Vec<ConnectedMapStrip> {
+        // Each entry in the Tilesets ROM table is 12 bytes:
+        //   [0]     bank
+        //   [1..2]  blocks_ptr (LE)
+        //   [3..4]  gfx_ptr    (LE, unused here)
+        //   [5..6]  coll_ptr   (LE)
+        //   [7..]   remaining fields (unused here)
+        // 24 tilesets × 12 bytes = 288 bytes matches the gap to the next symbol.
+        const TILESET_ENTRY_SIZE: u16 = 12;
+
+        let all_map_banks: Vec<u8> = self
+            .rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT)
+            .to_vec();
+        let water_tilesets: Vec<u8> = self
+            .rom_data_from_rom_pointer(&pokered_symbols::WaterTilesets, 16)
+            .to_vec();
+
+        map_header.connections()
+            .into_iter()
+            .filter_map(|connection| {
+                let connected_map_bank = all_map_banks[connection.map as usize] as usize;
+                let connected_header = self.read_map_header(connection.map.header_pointer()?)?;
+
+                // Read the single block row/column that borders the current map.
+                let (border_blocks, block_sub_offset): (Vec<u8>, u8) = match connection.direction {
+                    MapConnectionDirection::South => {
+                        // First block row of the connected map.
+                        let blocks = self.rom_data_from_pointer(
+                            connected_map_bank,
+                            connection.strip_src,
+                            connection.strip_length as usize,
+                        ).to_vec();
+                        (blocks, 0)
+                    }
+                    MapConnectionDirection::North => {
+                        // strip_src points to the start of the 3-block-deep strip
+                        // (connected_height − 3 rows in). The border row is the 3rd row.
+                        let addr = connection.strip_src + 2 * connection.strip_length as u16;
+                        let blocks = self.rom_data_from_pointer(
+                            connected_map_bank,
+                            addr,
+                            connection.strip_length as usize,
+                        ).to_vec();
+                        (blocks, 1)
+                    }
+                    MapConnectionDirection::East => {
+                        // strip_src points to column 0 of each row; stride by connected_map_width.
+                        let blocks = (0..connection.strip_length as u16)
+                            .map(|row| {
+                                self.rom_data_from_pointer(
+                                    connected_map_bank,
+                                    connection.strip_src + row * connection.connected_map_width as u16,
+                                    1,
+                                )[0]
+                            })
+                            .collect();
+                        (blocks, 0)
+                    }
+                    MapConnectionDirection::West => {
+                        // strip_src points to column (width−3); border column is +2 (column width−1).
+                        let blocks = (0..connection.strip_length as u16)
+                            .map(|row| {
+                                self.rom_data_from_pointer(
+                                    connected_map_bank,
+                                    connection.strip_src + row * connection.connected_map_width as u16 + 2,
+                                    1,
+                                )[0]
+                            })
+                            .collect();
+                        (blocks, 1)
+                    }
+                };
+
+                if border_blocks.is_empty() {
+                    return None;
+                }
+                let max_block_id = *border_blocks.iter().max().unwrap() as usize;
+
+                let tileset = connected_header.tileset;
+                let entry   = pokered_symbols::Tilesets + tileset as u16 * TILESET_ENTRY_SIZE;
+                let tileset_bank       = self.read_pointer(&entry) as usize;
+                let tileset_blocks_ptr = self.read_pointer_u16_le(&(entry + 1));
+                let tileset_coll_ptr   = self.read_pointer_u16_le(&(entry + 5));
+
+                let tileset_data = self.rom_data_from_pointer(
+                    tileset_bank,
+                    tileset_blocks_ptr,
+                    (max_block_id + 1) * CurrentMap::BLOCK_TILES,
+                ).to_vec();
+
+                let mut collision_tiles = HashSet::new();
+                for index in 0..20u16 {
+                    let byte = self.read(tileset_coll_ptr + index);
+                    if byte == 0xFF { break; }
+                    collision_tiles.insert(byte);
+                }
+
+                let tileset_id_byte = tileset as u8;
+                let is_water_tileset = water_tilesets.iter()
+                    .take_while(|&&b| b != 0xFF)
+                    .any(|&b| b == tileset_id_byte);
+
+                let meta_align_offset = match connection.direction {
+                    MapConnectionDirection::North | MapConnectionDirection::South =>
+                        (-(connection.x_alignment as i32)).max(0) as usize,
+                    MapConnectionDirection::East | MapConnectionDirection::West =>
+                        (-(connection.y_alignment as i32)).max(0) as usize,
+                };
+
+                Some(ConnectedMapStrip {
+                    direction: connection.direction,
+                    map: connection.map,
+                    border_blocks,
+                    tileset_data,
+                    collision_tiles,
+                    is_water_tileset,
+                    tileset,
+                    block_sub_offset,
+                    strip_length: connection.strip_length,
+                    meta_align_offset,
+                })
+            })
+            .collect()
     }
 }
 
@@ -357,9 +487,10 @@ pub enum MetaTile {
     Water,
     Sprite(&'static str),
     Warp(Map),
-    Connection(Map), // TODO determine these from connection structs
-
-    // TODO signs
+    /// Walkable entry point into an adjacent map.
+    Connection(Map),
+    /// Water entry point into an adjacent map — only reachable while surfing.
+    ConnectionWater(Map),
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
@@ -383,6 +514,92 @@ impl Into<JoypadButton> for PlayerFacingDirection {
     }
 }
 
+/// Loaded border strip from an adjacent connected map, used to expand the rendered tilemap
+/// by one meta-tile row (N/S connections) or column (E/W connections).
+struct ConnectedMapStrip {
+    direction: MapConnectionDirection,
+    map: Map,
+    /// Block IDs along the single-block-deep border row/column of the connected map.
+    border_blocks: Vec<u8>,
+    tileset_data: Vec<u8>,
+    collision_tiles: HashSet<u8>,
+    is_water_tileset: bool,
+    tileset: TileSetId,
+    /// Sub-position within each block:
+    /// N/S: 0 = top meta-row (south connection), 1 = bottom meta-row (north connection).
+    /// E/W: 0 = left meta-col (east connection),  1 = right meta-col (west connection).
+    block_sub_offset: u8,
+    strip_length: u8,
+    /// Offset (in meta-tiles) along the perpendicular axis where the strip begins.
+    /// x-offset for N/S connections, y-offset for E/W connections.
+    meta_align_offset: usize,
+}
+
+impl ConnectedMapStrip {
+    /// Returns the MetaTile for position `strip_idx` (0..strip_length*2) in this border strip.
+    fn meta_tile_at(&self, strip_idx: usize) -> MetaTile {
+        let block_idx = strip_idx / 2;
+        if block_idx >= self.border_blocks.len() {
+            return MetaTile::Obstacle;
+        }
+        let block_id = self.border_blocks[block_idx];
+
+        // For N/S: strip_idx selects left(0)/right(1) within each block; sub_offset is the row.
+        // For E/W: strip_idx selects top(0)/bottom(1) within each block; sub_offset is the col.
+        let (sub_col, sub_row) = match self.direction {
+            MapConnectionDirection::North | MapConnectionDirection::South =>
+                (strip_idx % 2, self.block_sub_offset as usize),
+            MapConnectionDirection::East | MapConnectionDirection::West =>
+                (self.block_sub_offset as usize, strip_idx % 2),
+        };
+
+        // Indices of the four graphical tiles that form this 2×2 meta-tile within the block.
+        // tile_offset = tx_in_block + ty_in_block * BLOCK_TILE_WIDTH (4)
+        let base = sub_col * 2 + sub_row * 8;
+        let tile_indices = [base, base + 1, base + 4, base + 5];
+        let block_start = block_id as usize * CurrentMap::BLOCK_TILES;
+
+        let mut has_water = false;
+        let mut has_walkable = false;
+        for &idx in &tile_indices {
+            let pos = block_start + idx;
+            if pos >= self.tileset_data.len() {
+                continue;
+            }
+            let tile_id = self.tileset_data[pos];
+            if self.is_water_tile(tile_id) {
+                has_water = true;
+            }
+            if self.collision_tiles.contains(&tile_id) {
+                has_walkable = true;
+            }
+        }
+
+        if has_water {
+            MetaTile::ConnectionWater(self.map)
+        } else if has_walkable {
+            MetaTile::Connection(self.map)
+        } else {
+            MetaTile::Obstacle
+        }
+    }
+
+    fn is_water_tile(&self, tile_id: u8) -> bool {
+        const WATER: u8 = 0x14;
+        const EASTERN_SHORE: u8 = 0x32;
+        const SAFARI_ZONE_EASTERN_SHORE: u8 = 0x48;
+        if !self.is_water_tileset {
+            return false;
+        }
+        if self.tileset != TileSetId::ShipPort
+            && (tile_id == EASTERN_SHORE || tile_id == SAFARI_ZONE_EASTERN_SHORE)
+        {
+            return true;
+        }
+        tile_id == WATER
+    }
+}
+
 pub struct CurrentMap {
     pub map: Map,
     pub map_header: MapHeader,
@@ -396,6 +613,7 @@ pub struct CurrentMap {
     /// True if the current tileset is listed in the WaterTilesets table,
     /// meaning tile $14/$32/$48 should be treated as water/shore.
     pub is_water_tileset: bool,
+    connected_strips: Vec<ConnectedMapStrip>,
 }
 
 impl CurrentMap {
@@ -447,25 +665,35 @@ impl CurrentMap {
         self.map_header.height as usize * Self::TILES_PER_META
     }
 
+    /// Extra meta-tile rows/columns added for each connected direction.
+    pub fn north_extra(&self) -> usize { self.map_header.north_connection.is_some() as usize }
+    pub fn south_extra(&self) -> usize { self.map_header.south_connection.is_some() as usize }
+    pub fn east_extra(&self)  -> usize { self.map_header.east_connection.is_some()  as usize }
+    pub fn west_extra(&self)  -> usize { self.map_header.west_connection.is_some()  as usize }
+
     pub fn meta_tiles(&self) -> Vec<MetaTile> {
-        let width = self.meta_width();
-        let height = self.meta_height();
+        let base_width  = self.meta_width();
+        let base_height = self.meta_height();
 
-        // start off assuming all tiles are obstacles
-        let mut result = vec![MetaTile::Obstacle; width * height];
+        // Connection strips expand the map by one meta-tile row/column per direction.
+        let x_off      = self.west_extra();
+        let y_off      = self.north_extra();
+        let exp_width  = base_width  + x_off + self.east_extra();
+        let exp_height = base_height + y_off + self.south_extra();
 
-        let width_tiles = self.map_header.width as usize * Self::BLOCK_TILE_WIDTH;
+        let mut result = vec![MetaTile::Obstacle; exp_width * exp_height];
+
+        // Fill current map tiles, shifted by the connection offsets.
+        // Priority: Water > Empty > Obstacle (default).
+        // Water beats walkable: if any sub-tile of a 2×2 meta-tile is water/shore, the whole
+        // meta-tile is Water, even if other sub-tiles are walkable (e.g. north-shore + water).
+        let width_tiles  = self.map_header.width  as usize * Self::BLOCK_TILE_WIDTH;
         let height_tiles = self.map_header.height as usize * Self::BLOCK_TILE_WIDTH;
         for tile_y in 0..height_tiles {
-            let y = tile_y / Self::TILES_PER_META;
+            let my = tile_y / Self::TILES_PER_META + y_off;
             for tile_x in 0..width_tiles {
-                let x = tile_x / Self::TILES_PER_META;
-                let index = x + y * width;
-                // Priority: Water > Empty > Obstacle (default)
-                // Water beats walkable: if any sub-tile of a 2x2 meta-tile is water/shore,
-                // the whole meta-tile is Water, even if other sub-tiles are walkable.
-                // This correctly handles block boundaries where e.g. the top row of a block
-                // is north-shore (walkable $33) and the bottom row is water ($14).
+                let mx    = tile_x / Self::TILES_PER_META + x_off;
+                let index = mx + my * exp_width;
                 if result[index] != MetaTile::Water {
                     if self.is_water(tile_x, tile_y) {
                         result[index] = MetaTile::Water;
@@ -476,62 +704,54 @@ impl CurrentMap {
             }
         }
 
-        // now check for sprites
-        for sprite in self.sprites.iter().filter(|sprite| !sprite.hidden) {
-            let index = sprite.position.x as usize + sprite.position.y as usize * width;
-            result[index] = MetaTile::Sprite(sprite.name);
+        for sprite in self.sprites.iter().filter(|s| !s.hidden) {
+            let mx = sprite.position.x as usize + x_off;
+            let my = sprite.position.y as usize + y_off;
+            result[mx + my * exp_width] = MetaTile::Sprite(sprite.name);
         }
 
-        // now check for warp events
-        for warp_event in &self.warp_events {
-            let index = warp_event.position.x as usize + warp_event.position.y as usize * width;
-            result[index] = MetaTile::Warp(warp_event.map_id);
+        for warp in &self.warp_events {
+            let mx = warp.position.x as usize + x_off;
+            let my = warp.position.y as usize + y_off;
+            result[mx + my * exp_width] = MetaTile::Warp(warp.map_id);
         }
 
-        // now mark connection border tiles
-        // x_alignment / y_alignment are signed tile-offsets of the connected map relative to
-        // the current map (2 tiles = 1 block). The strip starts at -alignment on the current map
-        // and is strip_length blocks (strip_length * TILES_PER_META meta-tiles) wide/tall.
-        for connection in self.map_header.connections() {
-            let strip_meta = connection.strip_length as usize * Self::TILES_PER_META;
-            match connection.direction {
+        // Fill the extra border rows/columns from connected map strips.
+        for strip in &self.connected_strips {
+            let strip_meta = strip.strip_length as usize * Self::TILES_PER_META;
+            match strip.direction {
                 MapConnectionDirection::North => {
-                    let x_start = (-(connection.x_alignment as i32)).max(0) as usize;
-                    let x_end = (x_start + strip_meta).min(width);
-                    for x in x_start..x_end {
-                        if result[x] == MetaTile::Empty {
-                            result[x] = MetaTile::Connection(connection.map);
-                        }
+                    let x_start = strip.meta_align_offset + x_off;
+                    for i in 0..strip_meta {
+                        let mx = x_start + i;
+                        if mx >= exp_width { break; }
+                        result[mx] = strip.meta_tile_at(i);
                     }
                 }
                 MapConnectionDirection::South => {
-                    let x_start = (-(connection.x_alignment as i32)).max(0) as usize;
-                    let x_end = (x_start + strip_meta).min(width);
-                    for x in x_start..x_end {
-                        let index = x + (height - 1) * width;
-                        if result[index] == MetaTile::Empty {
-                            result[index] = MetaTile::Connection(connection.map);
-                        }
+                    let x_start = strip.meta_align_offset + x_off;
+                    let sy = y_off + base_height;
+                    for i in 0..strip_meta {
+                        let mx = x_start + i;
+                        if mx >= exp_width { break; }
+                        result[mx + sy * exp_width] = strip.meta_tile_at(i);
                     }
                 }
                 MapConnectionDirection::West => {
-                    let y_start = (-(connection.y_alignment as i32)).max(0) as usize;
-                    let y_end = (y_start + strip_meta).min(height);
-                    for y in y_start..y_end {
-                        let index = y * width;
-                        if result[index] == MetaTile::Empty {
-                            result[index] = MetaTile::Connection(connection.map);
-                        }
+                    let y_start = strip.meta_align_offset + y_off;
+                    for i in 0..strip_meta {
+                        let my = y_start + i;
+                        if my >= exp_height { break; }
+                        result[my * exp_width] = strip.meta_tile_at(i);
                     }
                 }
                 MapConnectionDirection::East => {
-                    let y_start = (-(connection.y_alignment as i32)).max(0) as usize;
-                    let y_end = (y_start + strip_meta).min(height);
-                    for y in y_start..y_end {
-                        let index = (width - 1) + y * width;
-                        if result[index] == MetaTile::Empty {
-                            result[index] = MetaTile::Connection(connection.map);
-                        }
+                    let y_start = strip.meta_align_offset + y_off;
+                    let ex = x_off + base_width;
+                    for i in 0..strip_meta {
+                        let my = y_start + i;
+                        if my >= exp_height { break; }
+                        result[ex + my * exp_width] = strip.meta_tile_at(i);
                     }
                 }
             }

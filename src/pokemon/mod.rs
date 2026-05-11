@@ -3,8 +3,7 @@ use strum::IntoEnumIterator;
 use badge::Badge;
 use map::Map;
 use species::PokemonSpecies;
-use actions::OverworldAction;
-use encoding::{GameMode, MetaTile, PokemonEncoding};
+use encoding::{GameMode, PokemonEncoding};
 use party::PokemonParty;
 use tile_map::MetaTileMap;
 use crate::game_boy::GameBoy;
@@ -15,7 +14,6 @@ use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
 use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
 use crate::pokemon::move_name::{PokemonMoveName};
 use crate::pokemon::pokemon::Pokemon;
-use crate::pokemon::sprite::Sprite;
 use crate::pokemon::strings::PokemonString;
 
 pub mod badge;
@@ -223,13 +221,19 @@ mod test {
         KEY:
         * _ -> Empty, walkable
         * O -> Obstacle (not walkable)
-        * C -> Connection (to another map)
+        * C -> Connection (walkable entry into adjacent map)
+        * ~ -> ConnectionWater (water entry into adjacent map, requires surfing)
         * W -> Warp (to another map)
         * S -> Sprite (normally a character)
         * X -> Water/Shore (not walkable but can be 'surfed')
 
+        The tilemap is expanded by one meta-tile row/column for each connected map.
+        The border rows/columns show the actual terrain of the adjacent map so that
+        obstacles are correct (e.g. you can only enter Route 21 by surfing).
+
         This is printed:
-        CCCOCCCCCOCCOCCCCCOC
+        CCCOCCCCCOCCOCCCCCOC   <- Route 1's last row (border with Pallet Town)
+        ___O_____O__O_____O_   <- Pallet Town row 0
         OOOOOOOOOO__OOOOOOOO
         O__________________O
         O___OOOO____OOOO___O
@@ -246,22 +250,8 @@ mod test {
         O___XXXX___S_______O
         O___XXXX___________O
         O___XXXX___________O
-        OOCCXXXXOOOOOOOOOOOO
-
-        Water detection mirrors `IsNextTileShoreOrWater` (item_effects.asm):
-        - Only active when the current tileset is in the `WaterTilesets` ROM table
-          (Overworld, Forest, Dojo, Gym, Ship, ShipPort, Cavern, Facility, Plateau).
-        - Tile $14 is the universal water tile.
-        - Tiles $32 (eastern shore) and $48 (Safari Zone eastern shore) are shore tiles,
-          except on ShipPort (Vermilion Dock) where $32 is dock planks instead.
-        Priority is Water > Empty > Obstacle: if ANY sub-tile in a 2x2 meta-tile is
-        water/shore, the whole meta-tile is Water. This correctly handles block
-        boundaries where e.g. the top row is walkable north-shore ($33) and the
-        bottom row is water ($14).
-
-        Note: the last row is the bottom of Pallet Town's own block data.
-        The additional beach/water rows visible in-game belong to the Route 21
-        connection strip — that is issue #2 (shared border rows with adjacent maps).
+        OO__XXXXOOOOOOOOOOOO   <- Pallet Town row 17 (actual tiles, no forced C)
+        OOOO~~~~OOOOOOOOOOOO   <- Route 21's first row (all water: surf-only entry)
          */
 
         println!("{}", state.map);
