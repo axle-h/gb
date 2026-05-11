@@ -226,6 +226,42 @@ impl MetaTileMap {
             shortest_route.route.push(JoypadButton::A);
             routes.push(shortest_route);
         }
+
+        // 3. routes to connections
+        // Collect unique connected maps from connection tiles, then find the shortest
+        // route to any connection tile for each map and add the edge-exit button press.
+        // TODO can this be more efficient?
+        let connection_maps: HashSet<Map> = self.meta_tiles.iter()
+            .filter_map(|t| if let MetaTile::Connection(m) = t { Some(*m) } else { None })
+            .collect();
+
+        for to_map in &connection_maps {
+            let target_tile = MetaTile::Connection(*to_map);
+            let shortest_route = self.meta_tiles
+                .iter()
+                .enumerate()
+                .filter(|(_, tile)| tile == &&target_tile)
+                .map(|(index, _)| Point8 { x: (index % self.width) as u8, y: (index / self.width) as u8 })
+                .filter_map(|to| self.player_route(to))
+                .min_by(|a, b| a.route.len().cmp(&b.route.len()));
+
+            let Some(mut shortest_route) = shortest_route else { continue };
+
+            // Connection tiles are always on a map edge; the exit direction is unambiguous.
+            let dest = shortest_route.destination;
+            let enter_dir = if dest.y == 0 {
+                JoypadButton::Up
+            } else if dest.y == (self.height - 1) as u8 {
+                JoypadButton::Down
+            } else if dest.x == 0 {
+                JoypadButton::Left
+            } else {
+                JoypadButton::Right
+            };
+            shortest_route.route.push(enter_dir);
+            routes.push(shortest_route);
+        }
+
         routes
     }
 }
