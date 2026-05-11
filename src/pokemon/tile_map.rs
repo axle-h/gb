@@ -21,14 +21,24 @@ pub struct MetaTileMap {
 
 impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
+        let north_extra = map.north_extra();
+        let west_extra  = map.west_extra();
         Self {
-            player_position: map.player_position,
+            player_position: Point8 {
+                x: map.player_position.x + west_extra as u8,
+                y: map.player_position.y + north_extra as u8,
+            },
             player_direction: map.player_direction,
             map: map.map,
-            width: map.meta_width(),
-            height: map.meta_height(),
+            width:  map.meta_width()  + west_extra + map.east_extra(),
+            height: map.meta_height() + north_extra + map.south_extra(),
             meta_tiles: map.meta_tiles(),
-            sprites: map.sprites.clone(),
+            sprites: map.sprites.iter().map(|s| {
+                let mut s = *s;
+                s.position.x += west_extra as u8;
+                s.position.y += north_extra as u8;
+                s
+            }).collect(),
             warp_targets: map.warp_events.iter()
                 .map(|warp_event| warp_event.map_id)
                 .collect()
@@ -110,7 +120,7 @@ impl MetaTileMap {
                 }
 
                 let tile = &self.meta_tiles[neighbor.x as usize + neighbor.y as usize * self.width];
-                if matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water) && neighbor != destination {
+                if matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_)) && neighbor != destination {
                     continue;
                 }
 
@@ -278,6 +288,7 @@ impl Display for MetaTileMap {
                     MetaTile::Sprite(_) => write!(f, "S")?,
                     MetaTile::Warp(_) => write!(f, "W")?,
                     MetaTile::Connection(_) => write!(f, "C")?,
+                    MetaTile::ConnectionWater(_) => write!(f, "~")?,
                 }
             }
             writeln!(f)?;
