@@ -276,14 +276,7 @@ impl PokemonEncoding for MMU {
 
         // collision data is always in bank 0
         let collision_address = self.read_pointer_u16_le(&pokered_symbols::wTilesetCollisionPtr);
-        let mut collision_tiles = HashSet::new();
-        for index in 0..20 {
-            let collision_byte = self.read(collision_address + index);
-            if collision_byte == 0xff {
-                break;
-            }
-            collision_tiles.insert(collision_byte);
-        }
+        let collision_tiles = self.read_collision_tiles(collision_address);
 
         let map_header_pointer = map.header_pointer().ok_or_else(|| format!("Map has no header pointer: {}", map))?;
         let map_header = self.read_map_header(map_header_pointer).ok_or_else(|| "Invalid map header".to_string())?;
@@ -334,6 +327,17 @@ impl PokemonEncoding for MMU {
 }
 
 impl MMU {
+    /// Reads an FF-terminated list of walkable tile IDs from a bank-0 ROM address.
+    fn read_collision_tiles(&self, ptr: u16) -> HashSet<u8> {
+        let mut tiles = HashSet::new();
+        for index in 0..20u16 {
+            let byte = self.read(ptr + index);
+            if byte == 0xFF { break; }
+            tiles.insert(byte);
+        }
+        tiles
+    }
+
     fn load_connected_strips(&self, map_header: &MapHeader) -> Vec<ConnectedMapStrip> {
         // Each entry in the Tilesets ROM table is 12 bytes:
         //   [0]     bank
@@ -424,12 +428,7 @@ impl MMU {
                     (max_block_id + 1) * CurrentMap::BLOCK_TILES,
                 ).to_vec();
 
-                let mut collision_tiles = HashSet::new();
-                for index in 0..20u16 {
-                    let byte = self.read(tileset_coll_ptr + index);
-                    if byte == 0xFF { break; }
-                    collision_tiles.insert(byte);
-                }
+                let collision_tiles = self.read_collision_tiles(tileset_coll_ptr);
 
                 let tileset_id_byte = tileset as u8;
                 let is_water_tileset = water_tilesets.iter()
@@ -514,6 +513,26 @@ impl Into<JoypadButton> for PlayerFacingDirection {
     }
 }
 
+/// Returns true if `tile_id` is a water or shore tile for the given tileset.
+///
+/// Mirrors `IsNextTileShoreOrWater` from `engine/items/item_effects.asm`:
+/// - Tile `$14` is the universal water tile.
+/// - Tiles `$32` (eastern shore) and `$48` (Safari Zone shore) are shore tiles,
+///   **unless** the tileset is `ShipPort` (Vermilion Dock), where `$32` is dock planks.
+/// - Returns false for any tileset not listed in the `WaterTilesets` ROM table.
+fn is_water_tile_id(tile_id: u8, is_water_tileset: bool, tileset: TileSetId) -> bool {
+    const WATER: u8 = 0x14;
+    const EASTERN_SHORE: u8 = 0x32;
+    const SAFARI_ZONE_EASTERN_SHORE: u8 = 0x48;
+    if !is_water_tileset {
+        return false;
+    }
+    if tileset != TileSetId::ShipPort && (tile_id == EASTERN_SHORE || tile_id == SAFARI_ZONE_EASTERN_SHORE) {
+        return true;
+    }
+    tile_id == WATER
+}
+
 /// Loaded border strip from an adjacent connected map, used to expand the rendered tilemap
 /// by one meta-tile row (N/S connections) or column (E/W connections).
 struct ConnectedMapStrip {
@@ -585,18 +604,7 @@ impl ConnectedMapStrip {
     }
 
     fn is_water_tile(&self, tile_id: u8) -> bool {
-        const WATER: u8 = 0x14;
-        const EASTERN_SHORE: u8 = 0x32;
-        const SAFARI_ZONE_EASTERN_SHORE: u8 = 0x48;
-        if !self.is_water_tileset {
-            return false;
-        }
-        if self.tileset != TileSetId::ShipPort
-            && (tile_id == EASTERN_SHORE || tile_id == SAFARI_ZONE_EASTERN_SHORE)
-        {
-            return true;
-        }
-        tile_id == WATER
+        is_water_tile_id(tile_id, self.is_water_tileset, self.tileset)
     }
 }
 
@@ -636,25 +644,9 @@ impl CurrentMap {
 
     /// Returns true if this sub-tile is a water or shore tile.
     ///
-    /// Mirrors `IsNextTileShoreOrWater` from `engine/items/item_effects.asm`:
-    /// 1. The current tileset must be listed in the `WaterTilesets` ROM table.
-    /// 2. Tile `$14` is the universal water tile.
-    /// 3. Tiles `$32` (usual eastern shore) and `$48` (Safari Zone eastern shore) are shore tiles,
-    ///    **unless** the tileset is `SHIP_PORT` (Vermilion Dock), where `$32` is dock planks.
+    /// Mirrors `IsNextTileShoreOrWater` from `engine/items/item_effects.asm`.
     pub fn is_water(&self, tile_x: usize, tile_y: usize) -> bool {
-        const WATER: u8 = 0x14;
-        const EASTERN_SHORE: u8 = 0x32;
-        const SAFARI_ZONE_EASTERN_SHORE: u8 = 0x48;
-
-        if !self.is_water_tileset {
-            return false;
-        }
-        let tile = self.tile_id(tile_x, tile_y);
-        // Shore tiles — not applicable on Vermilion Dock where $32 is dock planks
-        if self.map_header.tileset != TileSetId::ShipPort && (tile == EASTERN_SHORE || tile == SAFARI_ZONE_EASTERN_SHORE) {
-            return true;
-        }
-        tile == WATER
+        is_water_tile_id(self.tile_id(tile_x, tile_y), self.is_water_tileset, self.map_header.tileset)
     }
 
     pub fn meta_width(&self) -> usize {
@@ -720,38 +712,22 @@ impl CurrentMap {
         for strip in &self.connected_strips {
             let strip_meta = strip.strip_length as usize * Self::TILES_PER_META;
             match strip.direction {
-                MapConnectionDirection::North => {
+                MapConnectionDirection::North | MapConnectionDirection::South => {
                     let x_start = strip.meta_align_offset + x_off;
+                    let row = if strip.direction == MapConnectionDirection::North { 0 } else { y_off + base_height };
                     for i in 0..strip_meta {
                         let mx = x_start + i;
                         if mx >= exp_width { break; }
-                        result[mx] = strip.meta_tile_at(i);
+                        result[mx + row * exp_width] = strip.meta_tile_at(i);
                     }
                 }
-                MapConnectionDirection::South => {
-                    let x_start = strip.meta_align_offset + x_off;
-                    let sy = y_off + base_height;
-                    for i in 0..strip_meta {
-                        let mx = x_start + i;
-                        if mx >= exp_width { break; }
-                        result[mx + sy * exp_width] = strip.meta_tile_at(i);
-                    }
-                }
-                MapConnectionDirection::West => {
+                MapConnectionDirection::West | MapConnectionDirection::East => {
                     let y_start = strip.meta_align_offset + y_off;
+                    let col = if strip.direction == MapConnectionDirection::West { 0 } else { x_off + base_width };
                     for i in 0..strip_meta {
                         let my = y_start + i;
                         if my >= exp_height { break; }
-                        result[my * exp_width] = strip.meta_tile_at(i);
-                    }
-                }
-                MapConnectionDirection::East => {
-                    let y_start = strip.meta_align_offset + y_off;
-                    let ex = x_off + base_width;
-                    for i in 0..strip_meta {
-                        let my = y_start + i;
-                        if my >= exp_height { break; }
-                        result[ex + my * exp_width] = strip.meta_tile_at(i);
+                        result[col + my * exp_width] = strip.meta_tile_at(i);
                     }
                 }
             }
