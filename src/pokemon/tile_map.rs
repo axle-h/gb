@@ -78,11 +78,39 @@ impl MetaTileMap {
             for (dir, nb) in neighbors {
                 if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }
                 if dist.contains_key(&nb) { continue; }
-                dist.insert(nb, d + 1);
-                came_from.insert(nb, (pos, dir));
+
                 let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
-                if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Jump(_)) {
-                    queue.push_back(nb);
+
+                if let MetaTile::Jump(jump_dir) = tile {
+                    // The player never stands on a Jump tile — they either jump over it
+                    // (one button press, two tiles of movement) or are blocked.
+                    // Jump tiles are never added to `dist`; only the landing position is.
+                    let can_jump = matches!((dir, jump_dir),
+                        (JoypadButton::Down,  JumpDirection::South) |
+                        (JoypadButton::Left,  JumpDirection::West)  |
+                        (JoypadButton::Right, JumpDirection::East)
+                    );
+                    if can_jump {
+                        if let Some(landing) = step_one(nb, dir, self.width, self.height) {
+                            if !dist.contains_key(&landing) {
+                                dist.insert(landing, d + 1);
+                                came_from.insert(landing, (pos, dir));
+                                let landing_tile = &self.meta_tiles[landing.x as usize + landing.y as usize * self.width];
+                                if !matches!(landing_tile,
+                                    MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water |
+                                    MetaTile::ConnectionWater(_) | MetaTile::Jump(_)
+                                ) {
+                                    queue.push_back(landing);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    dist.insert(nb, d + 1);
+                    came_from.insert(nb, (pos, dir));
+                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_)) {
+                        queue.push_back(nb);
+                    }
                 }
             }
         }
@@ -212,6 +240,21 @@ impl Display for MetaTileMap {
             writeln!(f)?;
         }
         writeln!(f)
+    }
+}
+
+/// Returns the position one step in `dir` from `pos`, or `None` if that would be out of bounds.
+fn step_one(pos: Point8, dir: JoypadButton, width: usize, height: usize) -> Option<Point8> {
+    match dir {
+        JoypadButton::Up    => (pos.y > 0)
+            .then(|| Point8 { x: pos.x, y: pos.y - 1 }),
+        JoypadButton::Down  => (pos.y as usize + 1 < height)
+            .then(|| Point8 { x: pos.x, y: pos.y + 1 }),
+        JoypadButton::Left  => (pos.x > 0)
+            .then(|| Point8 { x: pos.x - 1, y: pos.y }),
+        JoypadButton::Right => (pos.x as usize + 1 < width)
+            .then(|| Point8 { x: pos.x + 1, y: pos.y }),
+        _ => None,
     }
 }
 
