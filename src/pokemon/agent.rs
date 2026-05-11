@@ -70,6 +70,7 @@ impl PokemonAgent {
                         self.state = State::ReadingTextBox { reader: PokemonTextReader::default() };
                     }
                     _ => {
+                        // pick a random action
                         if let Some(action) = api.game_state()?.map.actions().into_iter().choose(&mut rand::rng()) {
                             self.take_overworld_action(action);
                         }
@@ -95,7 +96,7 @@ impl PokemonAgent {
                     } else {
                         self.overworld_action_aborted(
                             destination,
-                            format!("Player is on map {:?}, expected {:?}", game_state.map, expected_map)
+                            format!("Player is on map {:?}, expected {:?}", game_state.map.map, expected_map)
                         );
                     }
                     return Ok(());

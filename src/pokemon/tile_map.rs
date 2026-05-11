@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
@@ -49,228 +49,143 @@ impl MetaTileMap {
         self.meta_tiles[self.player_position.x as usize + self.player_position.y as usize * self.width]
     }
 
-    fn player_route(&self, destination: Point8) -> Option<OverworldAction> {
-        use std::collections::{BinaryHeap, HashMap};
-        use std::cmp::Ordering;
-        use crate::joypad::JoypadButton;
+    /// BFS from `player_position` outward.
+    ///
+    /// Returns `(dist, came_from)` where `dist[p]` is the minimum step-count to reach `p`
+    /// and `came_from[p]` is the `(previous_position, direction)` on the shortest path.
+    ///
+    /// Passable tiles (Empty, Warp, Connection) are expanded. Impassable tiles
+    /// (Obstacle, Sprite, Water, ConnectionWater) are recorded as reachable destinations
+    /// but not expanded — they are dead ends for traversal.
+    fn bfs_from_player(&self) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
+        use std::collections::{HashMap, VecDeque};
 
-        #[derive(Clone, Eq, PartialEq)]
-        struct Node {
-            position: Point8,
-            cost: u32,
-            heuristic: u32,
-        }
-
-        impl Ord for Node {
-            fn cmp(&self, other: &Self) -> Ordering {
-                (other.cost + other.heuristic).cmp(&(self.cost + self.heuristic))
-            }
-        }
-
-        impl PartialOrd for Node {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-
-        let heuristic = |pos: Point8| -> u32 {
-            (pos.x.abs_diff(destination.x) + pos.y.abs_diff(destination.y)) as u32
-        };
-
-        let mut open_set = BinaryHeap::new();
+        let mut dist: HashMap<Point8, u32> = HashMap::new();
         let mut came_from: HashMap<Point8, (Point8, JoypadButton)> = HashMap::new();
-        let mut g_score: HashMap<Point8, u32> = HashMap::new();
+        let mut queue = VecDeque::new();
 
-        let origin = self.player_position;
-        open_set.push(Node { position: origin, cost: 0, heuristic: heuristic(origin) });
-        g_score.insert(origin, 0);
+        dist.insert(self.player_position, 0);
+        queue.push_back(self.player_position);
 
-        while let Some(current) = open_set.pop() {
-            if current.position == destination {
-                let mut route = vec![];
-                let mut pos = destination;
-                while pos != origin {
-                    if let Some((prev, dir)) = came_from.get(&pos) {
-                        route.push(*dir);
-                        pos = *prev;
-                    }
-                }
-                route.reverse();
-                return Some(
-                    OverworldAction {
-                        map: self.map,
-                        origin,
-                        destination,
-                        tile: self.meta_tiles[destination.x as usize + destination.y as usize * self.width].clone(),
-                        route,
-                    }
-                );
-            }
-
+        while let Some(pos) = queue.pop_front() {
+            let d = dist[&pos];
             let neighbors = [
-                (JoypadButton::Up, Point8 { x: current.position.x, y: current.position.y.saturating_sub(1) }),
-                (JoypadButton::Down, Point8 { x: current.position.x, y: current.position.y + 1 }),
-                (JoypadButton::Left, Point8 { x: current.position.x.saturating_sub(1), y: current.position.y }),
-                (JoypadButton::Right, Point8 { x: current.position.x + 1, y: current.position.y }),
+                (JoypadButton::Up,    Point8 { x: pos.x,                   y: pos.y.saturating_sub(1) }),
+                (JoypadButton::Down,  Point8 { x: pos.x,                   y: pos.y + 1               }),
+                (JoypadButton::Left,  Point8 { x: pos.x.saturating_sub(1), y: pos.y                   }),
+                (JoypadButton::Right, Point8 { x: pos.x + 1,               y: pos.y                   }),
             ];
-
-            for (dir, neighbor) in neighbors {
-                if neighbor.x as usize >= self.width || neighbor.y as usize >= self.height {
-                    continue;
-                }
-
-                let tile = &self.meta_tiles[neighbor.x as usize + neighbor.y as usize * self.width];
-                if matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_)) && neighbor != destination {
-                    continue;
-                }
-
-                let tentative_g = g_score.get(&current.position).unwrap_or(&u32::MAX) + 1;
-                if tentative_g < *g_score.get(&neighbor).unwrap_or(&u32::MAX) {
-                    came_from.insert(neighbor, (current.position, dir));
-                    g_score.insert(neighbor, tentative_g);
-                    open_set.push(Node {
-                        position: neighbor,
-                        cost: tentative_g,
-                        heuristic: heuristic(neighbor),
-                    });
+            for (dir, nb) in neighbors {
+                if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }
+                if dist.contains_key(&nb) { continue; }
+                dist.insert(nb, d + 1);
+                came_from.insert(nb, (pos, dir));
+                let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
+                if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_)) {
+                    queue.push_back(nb);
                 }
             }
         }
-        None
+        (dist, came_from)
     }
 
     pub fn actions(&self) -> Vec<OverworldAction> {
-        // 1. routes to warps
-        let mut routes = vec![];
-        for to_map in &self.warp_targets {
-            let target_tile = MetaTile::Warp(*to_map);
-            let shortest_route = self.meta_tiles
-                .iter()
+        // Single BFS from player_position computes shortest distances to every reachable tile.
+        // All per-action lookups then become O(candidates) instead of O(candidates × map_size).
+        let (dist, came_from) = self.bfs_from_player();
+
+        // Reconstruct the step sequence from came_from back-pointers.
+        let reconstruct = |dest: Point8| -> Vec<JoypadButton> {
+            let mut route = vec![];
+            let mut pos = dest;
+            while pos != self.player_position {
+                let &(prev, dir) = came_from.get(&pos).unwrap();
+                route.push(dir);
+                pos = prev;
+            }
+            route.reverse();
+            route
+        };
+
+        // Find the nearest tile matching `pred` that BFS reached.
+        let nearest = |pred: &dyn Fn(&MetaTile) -> bool| -> Option<Point8> {
+            self.meta_tiles.iter()
                 .enumerate()
-                .filter(|(_, tile)| tile == &&target_tile)
-                .map(|(index, _)| Point8 { x: (index % self.width) as u8, y: (index / self.width) as u8 })
-                .filter_map(|to| self.player_route(to))
-                .min_by(|a, b| a.route.len().cmp(&b.route.len()));
+                .filter(|(_, t)| pred(t))
+                .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
+                .filter(|p| dist.contains_key(p))
+                .min_by_key(|p| dist[p])
+        };
 
-            if shortest_route.is_none() {
-                continue;
-            }
+        let mut routes = vec![];
 
-            let mut shortest_route = shortest_route.unwrap();
+        // 1. Routes to warps
+        for &to_map in &self.warp_targets {
+            let Some(dest) = nearest(&|t| t == &MetaTile::Warp(to_map)) else { continue };
+            let mut route = reconstruct(dest);
 
-            let dest = shortest_route.destination;
-            // Determine the direction the player should move to enter/trigger the warp
-            let warp_enter_dir = if dest.x == 0 {
-                JoypadButton::Left
-            } else if dest.x == (self.width - 1) as u8 {
-                JoypadButton::Right
-            } else if dest.y == 0 {
-                JoypadButton::Up
-            } else if dest.y == (self.height - 1) as u8 {
-                JoypadButton::Down
+            let enter_dir = if dest.x == 0 { JoypadButton::Left }
+                else if dest.x == (self.width - 1) as u8 { JoypadButton::Right }
+                else if dest.y == 0 { JoypadButton::Up }
+                else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
+                else { *route.last().unwrap_or(&JoypadButton::Up) };
+
+            if route.is_empty() {
+                // Already on the warp tile: step off then back on to trigger it.
+                route.push(opposite_dir(enter_dir));
+                route.push(enter_dir);
             } else {
-                // Interior warp: use the approach direction, defaulting to Up
-                *shortest_route.route.last().unwrap_or(&JoypadButton::Up)
-            };
-
-            if shortest_route.route.is_empty() {
-                // Player is already on the warp tile — step off then back on to trigger the warp
-                let step_off = match warp_enter_dir {
-                    JoypadButton::Left => JoypadButton::Right,
-                    JoypadButton::Right => JoypadButton::Left,
-                    JoypadButton::Up => JoypadButton::Down,
-                    JoypadButton::Down => JoypadButton::Up,
-                    other => other,
-                };
-                shortest_route.route.push(step_off);
-                shortest_route.route.push(warp_enter_dir);
-            } else {
-                // Player will walk onto the warp tile; push the enter direction to trigger it
-                shortest_route.route.push(warp_enter_dir);
+                route.push(enter_dir);
             }
-
-            routes.push(shortest_route);
+            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Warp(to_map), route });
         }
 
-        // 2. routes to sprites - keep shortest route per sprite
-        for sprite in &self.sprites {
-            if sprite.hidden {
-                continue;
-            }
-
-            let sprite_pos = sprite.position;
-            let adjacent_positions = [
-                (PlayerFacingDirection::Down, Point8 { x: sprite_pos.x, y: sprite_pos.y.saturating_sub(1) }),
-                (PlayerFacingDirection::Up, Point8 { x: sprite_pos.x, y: sprite_pos.y + 1 }),
-                (PlayerFacingDirection::Right, Point8 { x: sprite_pos.x.saturating_sub(1), y: sprite_pos.y }),
-                (PlayerFacingDirection::Left, Point8 { x: sprite_pos.x + 1, y: sprite_pos.y }),
+        // 2. Routes to sprites (route to an adjacent empty tile, then face the sprite)
+        for sprite in self.sprites.iter().filter(|s| !s.hidden) {
+            let sp = sprite.position;
+            let adjacent = [
+                (PlayerFacingDirection::Down,  Point8 { x: sp.x,                   y: sp.y.saturating_sub(1) }),
+                (PlayerFacingDirection::Up,    Point8 { x: sp.x,                   y: sp.y + 1               }),
+                (PlayerFacingDirection::Right, Point8 { x: sp.x.saturating_sub(1), y: sp.y                   }),
+                (PlayerFacingDirection::Left,  Point8 { x: sp.x + 1,               y: sp.y                   }),
             ];
-            let shortest_route = adjacent_positions
-                .into_iter()
-                .filter(|(_, pos)| {
-                    pos.x < self.width as u8 && pos.y < self.height as u8 &&
-                        matches!(self.meta_tiles[pos.x as usize + pos.y as usize * self.width], MetaTile::Empty)
-                })
-                .filter_map(|(dir, to)| {
-                    self.player_route(to).map(|route| (dir, route))
-                })
-                .min_by(|(_, a), (_, b)| a.route.len().cmp(&b.route.len()));
 
-            if shortest_route.is_none() {
-                continue;
+            let Some((face_dir, dest)) = adjacent.iter()
+                .filter(|(_, p)| {
+                    (p.x as usize) < self.width && (p.y as usize) < self.height
+                    && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
+                    && dist.contains_key(p)
+                })
+                .min_by_key(|(_, p)| dist[p])
+                .copied()
+            else { continue };
+
+            let mut route = reconstruct(dest);
+            let face_button: JoypadButton = face_dir.into();
+            if route.is_empty() {
+                if face_dir != self.player_direction { route.push(face_button); }
+            } else if route.last() != Some(&face_button) {
+                route.push(face_button);
             }
-            let (sprite_direction, mut shortest_route) = shortest_route.unwrap();
-            shortest_route.tile = MetaTile::Sprite(sprite.name);
-            if shortest_route.route.is_empty() {
-                if sprite_direction != self.player_direction {
-                    // no more movement needed, just turn to face sprite
-                    shortest_route.route.push(sprite_direction.into());
-                }
-            } else {
-                // ensure we face the sprite before interacting
-                let last_move = shortest_route.route.last().unwrap();
-                let expected_button: JoypadButton = sprite_direction.into();
-                if *last_move != expected_button {
-                    shortest_route.route.push(expected_button);
-                }
-            }
-            shortest_route.route.push(JoypadButton::A);
-            routes.push(shortest_route);
+            route.push(JoypadButton::A);
+            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
         }
 
-        // 3. routes to connections
-        // Collect unique connected maps from connection tiles, then find the shortest
-        // route to any connection tile for each map and add the edge-exit button press.
-        // TODO can this be more efficient?
+        // 3. Routes to map connections (nearest reachable connection tile per adjacent map)
         let connection_maps: HashSet<Map> = self.meta_tiles.iter()
             .filter_map(|t| if let MetaTile::Connection(m) = t { Some(*m) } else { None })
             .collect();
 
-        for to_map in &connection_maps {
-            let target_tile = MetaTile::Connection(*to_map);
-            let shortest_route = self.meta_tiles
-                .iter()
-                .enumerate()
-                .filter(|(_, tile)| tile == &&target_tile)
-                .map(|(index, _)| Point8 { x: (index % self.width) as u8, y: (index / self.width) as u8 })
-                .filter_map(|to| self.player_route(to))
-                .min_by(|a, b| a.route.len().cmp(&b.route.len()));
+        for to_map in connection_maps {
+            let Some(dest) = nearest(&|t| t == &MetaTile::Connection(to_map)) else { continue };
+            let mut route = reconstruct(dest);
 
-            let Some(mut shortest_route) = shortest_route else { continue };
-
-            // Connection tiles are always on a map edge; the exit direction is unambiguous.
-            let dest = shortest_route.destination;
-            let enter_dir = if dest.y == 0 {
-                JoypadButton::Up
-            } else if dest.y == (self.height - 1) as u8 {
-                JoypadButton::Down
-            } else if dest.x == 0 {
-                JoypadButton::Left
-            } else {
-                JoypadButton::Right
-            };
-            shortest_route.route.push(enter_dir);
-            routes.push(shortest_route);
+            let enter_dir = if dest.y == 0 { JoypadButton::Up }
+                else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
+                else if dest.x == 0 { JoypadButton::Left }
+                else { JoypadButton::Right };
+            route.push(enter_dir);
+            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Connection(to_map), route });
         }
 
         routes
@@ -294,5 +209,15 @@ impl Display for MetaTileMap {
             writeln!(f)?;
         }
         writeln!(f)
+    }
+}
+
+fn opposite_dir(dir: JoypadButton) -> JoypadButton {
+    match dir {
+        JoypadButton::Left  => JoypadButton::Right,
+        JoypadButton::Right => JoypadButton::Left,
+        JoypadButton::Up    => JoypadButton::Down,
+        JoypadButton::Down  => JoypadButton::Up,
+        other               => other,
     }
 }
