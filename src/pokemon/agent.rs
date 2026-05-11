@@ -1,20 +1,26 @@
 use std::collections::VecDeque;
-use rand::seq::IteratorRandom;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
 use crate::pokemon::encoding::{GameMode, MetaTile};
 use crate::pokemon::map::Map;
+use crate::pokemon::policy::{Policy, RandomPolicy};
 use crate::pokemon::text::PokemonTextReader;
 
 const RESOLUTION: MachineCycles = MachineCycles::from_hz(60);
 
-#[derive(Debug, Default)]
 pub struct PokemonAgent {
     state: State,
     event_buffer: VecDeque<AgentEvent>,
     cycles: MachineCycles,
+    policy: Box<dyn Policy>,
+}
+
+impl Default for PokemonAgent {
+    fn default() -> Self {
+        Self::new(Box::new(RandomPolicy))
+    }
 }
 
 #[derive(Debug)]
@@ -33,6 +39,15 @@ enum State {
 }
 
 impl PokemonAgent {
+    pub fn new(policy: Box<dyn Policy>) -> Self {
+        Self {
+            state: State::default(),
+            event_buffer: VecDeque::new(),
+            cycles: MachineCycles::default(),
+            policy,
+        }
+    }
+
     fn event(&mut self, event: AgentEvent) {
         println!("{:?}", event);
         self.event_buffer.push_back(event);
@@ -70,8 +85,8 @@ impl PokemonAgent {
                         self.state = State::ReadingTextBox { reader: PokemonTextReader::default() };
                     }
                     _ => {
-                        // pick a random action
-                        if let Some(action) = api.game_state()?.map.actions().into_iter().choose(&mut rand::rng()) {
+                        let game_state = api.game_state()?;
+                        if let Some(action) = self.policy.pick_action(&game_state) {
                             self.take_overworld_action(action);
                         }
                     }

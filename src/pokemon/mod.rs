@@ -26,6 +26,7 @@ pub mod sprite;
 pub mod party;
 pub mod agent;
 pub mod actions;
+pub mod policy;
 pub mod tile_map;
 pub mod encoding;
 pub mod strings;
@@ -207,53 +208,16 @@ mod test {
     use super::*;
 
     pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("./test_data/pallet-town-state.bin");
+    pub const ROUTE1_STATE: &[u8] = include_bytes!("./test_data/route1-state.bin");
 
     #[test]
-    fn test_pallet_town() {
+    fn test_route_1() {
         let mut gb = GameBoy::dmg(roms::POKERED);
-        gb.load_state(PALLET_TOWN_STATE).unwrap();
+        gb.load_state(ROUTE1_STATE).unwrap();
         gb.run(MachineCycles::from_m(1000));
         let api = PokemonApi::new(&mut gb);
         let state = api.game_state().unwrap();
-        assert_eq!(state.map.map, Map::PalletTown);
-
-        /*
-        KEY:
-        * _ -> Empty, walkable
-        * O -> Obstacle (not walkable)
-        * C -> Connection (walkable entry into adjacent map)
-        * ~ -> ConnectionWater (water entry into adjacent map, requires surfing)
-        * W -> Warp (to another map)
-        * S -> Sprite (normally a character)
-        * X -> Water/Shore (not walkable but can be 'surfed')
-
-        The tilemap is expanded by one meta-tile row/column for each connected map.
-        The border rows/columns show the actual terrain of the adjacent map so that
-        obstacles are correct (e.g. you can only enter Route 21 by surfing).
-
-        This is printed:
-        CCCOCCCCCOCCOCCCCCOC   <- Route 1's last row (border with Pallet Town)
-        ___O_____O__O_____O_   <- Pallet Town row 0
-        OOOOOOOOOO__OOOOOOOO
-        O__________________O
-        O___OOOO____OOOO___O
-        O___OOOO____OOOO___O
-        O__OOWOO___OOWOO___O
-        O__________________O
-        O__________________O
-        O__S______OOOOOO___O
-        O___OOOO__OOOOOO___O
-        O_________OOOOOO___O
-        O_________OOWOOO___O
-        O__________________O
-        O_________OOOOOO___O
-        O___XXXX___S_______O
-        O___XXXX___________O
-        O___XXXX___________O
-        OO__XXXXOOOOOOOOOOOO   <- Pallet Town row 17 (actual tiles, no forced C)
-        OOOO~~~~OOOOOOOOOOOO   <- Route 21's first row (all water: surf-only entry)
-         */
-
+        assert_eq!(state.map.map, Map::Route1);
         println!("{}", state.map);
     }
 

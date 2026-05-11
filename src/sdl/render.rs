@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use itertools::Itertools;
 use rubato::{Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use audioadapter::direct::InterleavedSlice;
-use rand::seq::{IndexedRandom, IteratorRandom};
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -16,6 +15,7 @@ use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::pokemon::agent::PokemonAgent;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
+use crate::pokemon::policy::ConsolePolicy;
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
 use crate::sdl::font::FontTextures;
@@ -26,7 +26,7 @@ const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
-    let mut pokemon_agent = PokemonAgent::default();
+    let mut pokemon_agent = PokemonAgent::new(Box::new(ConsolePolicy));
 
     if let Err(e) = gb.restore_sram_from_file("pokemon-red.sav") {
         println!("Could not load save file: {}", e);
