@@ -209,7 +209,7 @@ mod test {
     pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("./test_data/pallet-town-state.bin");
 
     #[test]
-    fn test_map() {
+    fn test_pallet_town() {
         let mut gb = GameBoy::dmg(roms::POKERED);
         gb.load_state(PALLET_TOWN_STATE).unwrap();
         gb.run(MachineCycles::from_m(1000));
@@ -255,6 +255,50 @@ mod test {
          */
 
         println!("{}", state.map);
+    }
+
+    #[test]
+    fn test_pallet_town_actions() {
+        use encoding::MetaTile;
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(PALLET_TOWN_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        let map = &state.map;
+
+        let actions = map.actions();
+
+        // Sanity-check that the test is actually exercising something.
+        assert!(!map.warp_targets.is_empty(), "expected warp targets in Pallet Town");
+        assert!(map.sprites.iter().any(|s| !s.hidden), "expected visible sprites in Pallet Town");
+
+        // Every warp target must produce an action with a non-empty route.
+        for &to_map in &map.warp_targets {
+            let action = actions.iter().find(|a| a.tile == MetaTile::Warp(to_map));
+            assert!(action.is_some(), "no action for warp to {to_map}");
+            assert!(!action.unwrap().route.is_empty(), "empty route to warp {to_map}");
+        }
+
+        // Every visible (non-hidden) sprite must produce an action with a non-empty route.
+        for sprite in map.sprites.iter().filter(|s| !s.hidden) {
+            let action = actions.iter().find(|a| a.tile == MetaTile::Sprite(sprite.name));
+            assert!(action.is_some(), "no action for sprite '{}'", sprite.name);
+            assert!(!action.unwrap().route.is_empty(), "empty route to sprite '{}'", sprite.name);
+        }
+
+        // Route 1 is walkable from Pallet Town — must have a connection action.
+        assert!(
+            actions.iter().any(|a| a.tile == MetaTile::Connection(Map::Route1)),
+            "missing connection action for Route1"
+        );
+
+        // Route 21 is water-only from Pallet Town — no walkable Connection action expected.
+        assert!(
+            !actions.iter().any(|a| a.tile == MetaTile::Connection(Map::Route21)),
+            "unexpected walkable connection to Route21 (should be water-only)"
+        );
     }
 }
 

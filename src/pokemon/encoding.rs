@@ -699,13 +699,17 @@ impl CurrentMap {
         for sprite in self.sprites.iter().filter(|s| !s.hidden) {
             let mx = sprite.position.x as usize + x_off;
             let my = sprite.position.y as usize + y_off;
-            result[mx + my * exp_width] = MetaTile::Sprite(sprite.name);
+            if mx < exp_width && my < exp_height {
+                result[mx + my * exp_width] = MetaTile::Sprite(sprite.name);
+            }
         }
 
         for warp in &self.warp_events {
             let mx = warp.position.x as usize + x_off;
             let my = warp.position.y as usize + y_off;
-            result[mx + my * exp_width] = MetaTile::Warp(warp.map_id);
+            if mx < exp_width && my < exp_height {
+                result[mx + my * exp_width] = MetaTile::Warp(warp.map_id);
+            }
         }
 
         // Fill the extra border rows/columns from connected map strips.
