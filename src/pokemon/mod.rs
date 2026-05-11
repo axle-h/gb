@@ -3,6 +3,7 @@ use strum::IntoEnumIterator;
 use badge::Badge;
 use map::Map;
 use species::PokemonSpecies;
+use battle::{BattleState, BattleStateReader};
 use encoding::{GameMode, PokemonEncoding};
 use party::PokemonParty;
 use tile_map::MetaTileMap;
@@ -26,6 +27,7 @@ pub mod sprite;
 pub mod party;
 pub mod agent;
 pub mod actions;
+pub mod battle;
 pub mod policy;
 pub mod tile_map;
 pub mod encoding;
@@ -35,6 +37,7 @@ pub mod font;
 pub mod roms;
 mod text;
 mod map_header;
+mod item;
 
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
@@ -123,6 +126,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             mode: mmu.read_game_mode(),
             pokemon: mmu.read_player_pokemon_party()?,
             map: MetaTileMap::new(&mmu.read_current_map()?),
+            battle: mmu.read_battle_state(),
         })
     }
 
@@ -199,15 +203,91 @@ pub struct GameState {
     pub pokemon: PokemonParty,
     pub mode: GameMode,
     pub map: MetaTileMap,
+    /// Populated whenever `mode` is `WildBattle` or `TrainerBattle`.
+    pub battle: Option<BattleState>,
 }
 
 #[cfg(test)]
 mod test {
     use crate::cycles::MachineCycles;
+    use crate::pokemon::item::ItemId;
     use super::*;
 
     pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("./test_data/pallet-town-state.bin");
     pub const ROUTE1_STATE: &[u8] = include_bytes!("./test_data/route1-state.bin");
+    pub const BATTLE_STATE: &[u8] = include_bytes!("./test_data/battle-state.bin");
+
+    #[test]
+    fn test_battle_state_reading() {
+        use battle::{BagWriter, BattleStateReader, BattleType};
+        use crate::pokemon::move_name::PokemonMoveName;
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(BATTLE_STATE).unwrap();
+        gb.run(MachineCycles::from_m(500));
+
+        // Add items and a second Pokemon so every BattleAction variant is exercisable.
+        {
+            // 3 Potions + 1 Full Heal — replaces whatever was in the bag.
+            gb.core_mut().mmu_mut()
+                .write_bag(&[(ItemId::Potion as u8, 3), (ItemId::FullHeal as u8, 1)]);
+        }
+        {
+            let mut party = gb.core().mmu().read_player_pokemon_party().unwrap();
+            party.push(Pokemon::maxed(
+                PokemonSpecies::Pidgey,
+                "PIDGEY",
+                [PokemonMoveName::Tackle, PokemonMoveName::SandAttack,
+                 PokemonMoveName::Gust, PokemonMoveName::Whirlwind],
+                "RED", 12345,
+            )).unwrap();
+            gb.core_mut().mmu_mut().write_player_pokemon_party(&party).unwrap();
+        }
+
+        let battle = gb.core().mmu().read_battle_state().expect("should be in battle");
+
+        // Basic battle validity
+        assert_eq!(battle.battle_type, BattleType::Wild);
+        assert!(battle.enemy.level > 0, "enemy level should be non-zero");
+        assert!(battle.enemy.max_hp > 0, "enemy max HP should be non-zero");
+        assert!(battle.enemy.current_hp <= battle.enemy.max_hp);
+        assert!(battle.player.moves.iter().any(|m| m.is_some()), "player needs at least one move");
+
+        // Bag — we wrote exactly 2 items, so expect exactly those 2.
+        assert_eq!(battle.bag[0].id, ItemId::Potion, "bag[0] should be POTION");
+        assert_eq!(battle.bag[0].quantity, 3);
+        assert!(battle.bag.iter().any(|i| i.id == ItemId::FullHeal),
+            "FULL HEAL should be in the bag");
+
+        // Party includes the Pidgey we just added, and at least that one Pokemon.
+        println!("Party ({} members):", battle.party.len());
+        for p in battle.party.pokemon() {
+            println!("  {:?} Lv.{} HP {}/{}", p.species, p.level, p.current_hp, p.stats.hp);
+        }
+        assert!(battle.party.len() >= 1, "party should not be empty");
+        // The Pidgey we added should be the last in the party.
+        let last = battle.party.pokemon().last().expect("non-empty party");
+        assert_eq!(last.species, PokemonSpecies::Pidgey, "last party member should be Pidgey");
+
+        // All BattleAction navigation_targets are non-empty
+        use battle::BattleAction;
+        assert!(!BattleAction::Fight(0).navigation_targets().is_empty());
+        assert!(!BattleAction::UseItem(0).navigation_targets().is_empty());
+        assert!(!BattleAction::SwitchPokemon(1).navigation_targets().is_empty());
+        assert!(!BattleAction::Run.navigation_targets().is_empty());
+
+        println!("Enemy:  {:?} Lv.{} HP {}/{}",
+            battle.enemy.species, battle.enemy.level,
+            battle.enemy.current_hp, battle.enemy.max_hp);
+        println!("Player: {:?} Lv.{} HP {}/{}",
+            battle.player.species, battle.player.level,
+            battle.player.current_hp, battle.player.max_hp);
+        for m in battle.player.moves.iter().flatten() {
+            println!("  Move {:?} PP={}", m.name, m.current_pp);
+        }
+        println!("Bag: {:?}", battle.bag.iter().map(|i| format!("{}×{}", i.id, i.quantity)).collect::<Vec<_>>());
+        println!("Party slots: {}", battle.party.len());
+    }
 
     #[test]
     fn test_route_1() {
