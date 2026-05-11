@@ -219,6 +219,52 @@ mod test {
         let state = api.game_state().unwrap();
         assert_eq!(state.map.map, Map::PalletTown);
 
+        /*
+        KEY:
+        * _ -> Empty, walkable
+        * O -> Obstacle (not walkable)
+        * C -> Connection (to another map)
+        * W -> Warp (to another map)
+        * S -> Sprite (normally a character)
+        * X -> Water/Shore (not walkable but can be 'surfed')
+
+        This is printed:
+        CCCOCCCCCOCCOCCCCCOC
+        OOOOOOOOOO__OOOOOOOO
+        O__________________O
+        O___OOOO____OOOO___O
+        O___OOOO____OOOO___O
+        O__OOWOO___OOWOO___O
+        O__________________O
+        O__________________O
+        O__S______OOOOOO___O
+        O___OOOO__OOOOOO___O
+        O_________OOOOOO___O
+        O_________OOWOOO___O
+        O__________________O
+        O_________OOOOOO___O
+        O___XXXX___S_______O
+        O___XXXX___________O
+        O___XXXX___________O
+        OOCCXXXXOOOOOOOOOOOO
+
+        Water detection mirrors `IsNextTileShoreOrWater` (item_effects.asm):
+        - Only active when the current tileset is in the `WaterTilesets` ROM table
+          (Overworld, Forest, Dojo, Gym, Ship, ShipPort, Cavern, Facility, Plateau).
+        - Tile $14 is the universal water tile.
+        - Tiles $32 (eastern shore) and $48 (Safari Zone eastern shore) are shore tiles,
+          except on ShipPort (Vermilion Dock) where $32 is dock planks instead.
+        Priority is Water > Empty > Obstacle: if ANY sub-tile in a 2x2 meta-tile is
+        water/shore, the whole meta-tile is Water. This correctly handles block
+        boundaries where e.g. the top row is walkable north-shore ($33) and the
+        bottom row is water ($14).
+
+        Note: the last row is the bottom of Pallet Town's own block data.
+        The additional beach/water rows visible in-game belong to the Route 21
+        connection strip — that is issue #2 (shared border rows with adjacent maps).
+         */
+
         println!("{}", state.map);
     }
 }
+

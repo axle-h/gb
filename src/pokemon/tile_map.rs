@@ -110,7 +110,7 @@ impl MetaTileMap {
                 }
 
                 let tile = &self.meta_tiles[neighbor.x as usize + neighbor.y as usize * self.width];
-                if matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_)) && neighbor != destination {
+                if matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water) && neighbor != destination {
                     continue;
                 }
 
@@ -274,6 +274,7 @@ impl Display for MetaTileMap {
                 match self.meta_tiles[x + y * self.width] {
                     MetaTile::Empty => write!(f, "_")?,
                     MetaTile::Obstacle => write!(f, "O")?,
+                    MetaTile::Water => write!(f, "X")?,
                     MetaTile::Sprite(_) => write!(f, "S")?,
                     MetaTile::Warp(_) => write!(f, "W")?,
                     MetaTile::Connection(_) => write!(f, "C")?,
