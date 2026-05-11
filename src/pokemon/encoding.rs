@@ -4,7 +4,7 @@ use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
 use crate::pokemon::font::FontAware;
 use crate::pokemon::map::Map;
-use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader};
+use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader, TileSetId};
 use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::party::PokemonParty;
@@ -298,6 +298,14 @@ impl PokemonEncoding for MMU {
         let warp_events = self.read_warp_events()?;
 
         let sprites = self.read_sprites()?;
+
+        // Check if the current tileset is in the WaterTilesets table (FF-terminated ROM list).
+        // Mirrors the `IsNextTileShoreOrWater` logic in item_effects.asm.
+        let tileset_id = map_header.tileset as u8;
+        let water_tilesets = self.rom_data_from_rom_pointer(&pokered_symbols::WaterTilesets, 16);
+        let is_water_tileset = water_tilesets.iter()
+            .take_while(|&&b| b != 0xFF)
+            .any(|&b| b == tileset_id);
         let player_position = Point8 {
             x: self.read_pointer(&pokered_symbols::wXCoord),
             y: self.read_pointer(&pokered_symbols::wYCoord),
@@ -317,6 +325,7 @@ impl PokemonEncoding for MMU {
             collision_tiles,
             warp_events,
             sprites,
+            is_water_tileset,
         })
     }
 }
@@ -344,6 +353,8 @@ pub enum MetaTile {
     #[default]
     Empty,
     Obstacle,
+    /// Water tile (tile ID 0x14) — can only be crossed while surfing.
+    Water,
     Sprite(&'static str),
     Warp(Map),
     Connection(Map), // TODO determine these from connection structs
@@ -382,6 +393,9 @@ pub struct CurrentMap {
     pub collision_tiles: HashSet<u8>,
     pub warp_events: Vec<WarpEvent>,
     pub sprites: Vec<Sprite>,
+    /// True if the current tileset is listed in the WaterTilesets table,
+    /// meaning tile $14/$32/$48 should be treated as water/shore.
+    pub is_water_tileset: bool,
 }
 
 impl CurrentMap {
@@ -389,14 +403,40 @@ impl CurrentMap {
     pub const BLOCK_TILES: usize = Self::BLOCK_TILE_WIDTH * Self::BLOCK_TILE_WIDTH;
     pub const TILES_PER_META: usize = 2; // a meta tile on the map is 2x2 graphical tiles
 
-    pub fn is_empty(&self, tile_x: usize, tile_y: usize) -> bool {
+    pub fn tile_id(&self, tile_x: usize, tile_y: usize) -> u8 {
         let block_x = tile_x / Self::BLOCK_TILE_WIDTH;
         let block_y = tile_y / Self::BLOCK_TILE_WIDTH;
         let block_index = self.map_data[block_x + block_y * self.map_header.width as usize] as usize;
         let block_offset = block_index * Self::BLOCK_TILES;
         let tile_offset = (tile_x % Self::BLOCK_TILE_WIDTH) + (tile_y % Self::BLOCK_TILE_WIDTH) * Self::BLOCK_TILE_WIDTH;
-        let tile_index = self.tileset_data[block_offset + tile_offset];
-        self.collision_tiles.contains(&tile_index)
+        self.tileset_data[block_offset + tile_offset]
+    }
+
+    pub fn is_empty(&self, tile_x: usize, tile_y: usize) -> bool {
+        self.collision_tiles.contains(&self.tile_id(tile_x, tile_y))
+    }
+
+    /// Returns true if this sub-tile is a water or shore tile.
+    ///
+    /// Mirrors `IsNextTileShoreOrWater` from `engine/items/item_effects.asm`:
+    /// 1. The current tileset must be listed in the `WaterTilesets` ROM table.
+    /// 2. Tile `$14` is the universal water tile.
+    /// 3. Tiles `$32` (usual eastern shore) and `$48` (Safari Zone eastern shore) are shore tiles,
+    ///    **unless** the tileset is `SHIP_PORT` (Vermilion Dock), where `$32` is dock planks.
+    pub fn is_water(&self, tile_x: usize, tile_y: usize) -> bool {
+        const WATER: u8 = 0x14;
+        const EASTERN_SHORE: u8 = 0x32;
+        const SAFARI_ZONE_EASTERN_SHORE: u8 = 0x48;
+
+        if !self.is_water_tileset {
+            return false;
+        }
+        let tile = self.tile_id(tile_x, tile_y);
+        // Shore tiles — not applicable on Vermilion Dock where $32 is dock planks
+        if self.map_header.tileset != TileSetId::ShipPort && (tile == EASTERN_SHORE || tile == SAFARI_ZONE_EASTERN_SHORE) {
+            return true;
+        }
+        tile == WATER
     }
 
     pub fn meta_width(&self) -> usize {
@@ -421,9 +461,17 @@ impl CurrentMap {
             for tile_x in 0..width_tiles {
                 let x = tile_x / Self::TILES_PER_META;
                 let index = x + y * width;
-                // if you can walk over any tile in a map position (2x2 tiles) then you can walk over the whole meta tile
-                if result[index] == MetaTile::Obstacle && self.is_empty(tile_x, tile_y) {
-                    result[index] = MetaTile::Empty;
+                // Priority: Water > Empty > Obstacle (default)
+                // Water beats walkable: if any sub-tile of a 2x2 meta-tile is water/shore,
+                // the whole meta-tile is Water, even if other sub-tiles are walkable.
+                // This correctly handles block boundaries where e.g. the top row of a block
+                // is north-shore (walkable $33) and the bottom row is water ($14).
+                if result[index] != MetaTile::Water {
+                    if self.is_water(tile_x, tile_y) {
+                        result[index] = MetaTile::Water;
+                    } else if result[index] == MetaTile::Obstacle && self.is_empty(tile_x, tile_y) {
+                        result[index] = MetaTile::Empty;
+                    }
                 }
             }
         }
