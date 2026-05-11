@@ -221,6 +221,76 @@ mod test {
     }
 
     #[test]
+    fn test_route_1_ledge_routing() {
+        use encoding::{JumpDirection, MetaTile};
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(ROUTE1_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        let map = state.map;
+        assert_eq!(map.map, Map::Route1);
+
+        // Find a south-facing ledge tile that has walkable ground on both sides.
+        let (lx, ly) = (0..map.height)
+            .flat_map(|y| (0..map.width).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                y > 0 && y + 1 < map.height
+                    && matches!(map.meta_tiles[x + y * map.width], MetaTile::Jump(JumpDirection::South))
+                    && matches!(map.meta_tiles[x + (y - 1) * map.width], MetaTile::Empty)
+                    && matches!(map.meta_tiles[x + (y + 1) * map.width], MetaTile::Empty)
+            })
+            .expect("Route 1 should have south-facing ledges");
+
+        let north_of_ledge = Point8 { x: lx as u8, y: (ly - 1) as u8 };
+        let south_of_ledge = Point8 { x: lx as u8, y: (ly + 1) as u8 };
+
+        // Returns the shortest route length to a connection at the given edge y-row.
+        let shortest_to_connection = |pos: Point8, target_y: u8| -> Option<usize> {
+            let mut m = map.clone();
+            m.player_position = pos;
+            m.actions().into_iter()
+                .filter(|a| matches!(a.tile, MetaTile::Connection(_)) && a.destination.y == target_y)
+                .map(|a| a.route.len())
+                .min()
+        };
+
+        let south_row = (map.height - 1) as u8; // Pallet Town connection row
+        let north_row = 0u8;                     // Viridian City connection row
+
+        // ── Southward: jump is used ──────────────────────────────────────────────
+        // Pressing Down once from north-of-ledge jumps two tiles (over the ledge),
+        // landing at south-of-ledge. So the south route is exactly 1 step longer
+        // than starting from south-of-ledge.
+        let north_to_south = shortest_to_connection(north_of_ledge, south_row)
+            .expect("Pallet Town reachable from north of ledge via jump");
+        let south_to_south = shortest_to_connection(south_of_ledge, south_row)
+            .expect("Pallet Town reachable from south of ledge");
+
+        assert!(
+            north_to_south <= south_to_south + 1,
+            "jumping south over ledge ({north_to_south} steps) should cost at most \
+             1 more than starting just south of it ({south_to_south} steps)"
+        );
+
+        // ── Northward: ledge forces a detour ────────────────────────────────────
+        // Ledges block northward movement. A player south of the ledge must navigate
+        // around the entire ledge row, adding many more steps than from north of it.
+        let north_to_north = shortest_to_connection(north_of_ledge, north_row)
+            .expect("Viridian City reachable from north of ledge");
+        let south_to_north = shortest_to_connection(south_of_ledge, north_row)
+            .expect("Viridian City reachable from south of ledge via detour");
+
+        assert!(
+            south_to_north > north_to_north,
+            "going north from south-of-ledge ({south_to_north} steps) must take more \
+             steps than from north-of-ledge ({north_to_north} steps) — ledge forces detour"
+        );
+
+    }
+
+    #[test]
     fn test_pallet_town_actions() {
         use encoding::MetaTile;
 
