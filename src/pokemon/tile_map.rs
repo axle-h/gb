@@ -7,6 +7,7 @@ use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::encoding::{CurrentMap, MetaTile, PlayerFacingDirection};
 use crate::pokemon::sprite::Sprite;
 
+#[derive(Debug, Clone, Default)]
 pub struct MetaTileMap {
     pub player_position: Point8,
     pub player_direction: PlayerFacingDirection,

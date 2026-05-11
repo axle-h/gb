@@ -351,9 +351,10 @@ pub enum MetaTile {
     // TODO signs
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
 #[repr(u8)]
 pub enum PlayerFacingDirection {
+    #[default]
     Up = 8,
     Down = 4,
     Left = 2,
@@ -450,28 +451,39 @@ impl CurrentMap {
                     let x_start = (-(connection.x_alignment as i32)).max(0) as usize;
                     let x_end = (x_start + strip_meta).min(width);
                     for x in x_start..x_end {
-                        result[x] = MetaTile::Connection(connection.map);
+                        if result[x] == MetaTile::Empty {
+                            result[x] = MetaTile::Connection(connection.map);
+                        }
                     }
                 }
                 MapConnectionDirection::South => {
                     let x_start = (-(connection.x_alignment as i32)).max(0) as usize;
                     let x_end = (x_start + strip_meta).min(width);
                     for x in x_start..x_end {
-                        result[x + (height - 1) * width] = MetaTile::Connection(connection.map);
+                        let index = x + (height - 1) * width;
+                        if result[index] == MetaTile::Empty {
+                            result[index] = MetaTile::Connection(connection.map);
+                        }
                     }
                 }
                 MapConnectionDirection::West => {
                     let y_start = (-(connection.y_alignment as i32)).max(0) as usize;
                     let y_end = (y_start + strip_meta).min(height);
                     for y in y_start..y_end {
-                        result[y * width] = MetaTile::Connection(connection.map);
+                        let index = y * width;
+                        if result[index] == MetaTile::Empty {
+                            result[index] = MetaTile::Connection(connection.map);
+                        }
                     }
                 }
                 MapConnectionDirection::East => {
                     let y_start = (-(connection.y_alignment as i32)).max(0) as usize;
                     let y_end = (y_start + strip_meta).min(height);
                     for y in y_start..y_end {
-                        result[(width - 1) + y * width] = MetaTile::Connection(connection.map);
+                        let index = (width - 1) + y * width;
+                        if result[index] == MetaTile::Empty {
+                            result[index] = MetaTile::Connection(connection.map);
+                        }
                     }
                 }
             }
