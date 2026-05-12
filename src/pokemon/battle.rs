@@ -1,32 +1,24 @@
 use crate::mmu::MMU;
-use crate::ram::{RAM, ROM};
-use crate::pokemon::encoding::PokemonEncoding;
+use crate::ram::ROM;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::move_name::PokemonMoveName;
-use crate::pokemon::party::PokemonParty;
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
-use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
-
-// ── Battle state ──────────────────────────────────────────────────────────────
+use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BattleType { Wild, Trainer }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct BattleState {
     pub battle_type:       BattleType,
     pub player:            BattlePokemon,
     pub enemy:             BattlePokemon,
-    /// Full party, needed for choosing who to switch in.
-    pub party:             PokemonParty,
-    /// 0-based index into `party` for the currently-active Pokemon.
+    /// 0-based index into the pokemon party for the currently-active Pokemon.
     pub active_party_slot: u8,
-    /// Items currently in the bag.
-    pub bag:               Vec<BagItem>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct BattlePokemon {
     pub species:    PokemonSpecies,
     pub level:      u8,
@@ -47,8 +39,6 @@ pub struct BagItem {
     pub id:       ItemId,
     pub quantity: u8,
 }
-
-// ── Battle actions ────────────────────────────────────────────────────────────
 
 /// Action the player can take on their turn.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -77,8 +67,6 @@ impl BattleAction {
     }
 }
 
-// ── Reading ───────────────────────────────────────────────────────────────────
-
 pub trait BattleStateReader {
     fn read_battle_state(&self) -> Option<BattleState>;
 }
@@ -91,23 +79,19 @@ impl BattleStateReader for MMU {
         }
         let battle_type = if is_in_battle == 2 { BattleType::Trainer } else { BattleType::Wild };
 
-        let party             = self.read_player_pokemon_party().ok()?;
         let active_party_slot = self.read_pointer(&pokered_symbols::wBattleMonPartyPos);
-        let bag               = read_bag(self);
 
         Some(BattleState {
             battle_type,
             player: read_battle_mon(self),
             enemy:  read_enemy_mon(self),
-            party,
             active_party_slot,
-            bag,
         })
     }
 }
 
 fn read_battle_mon(mmu: &MMU) -> BattlePokemon {
-    let species    = PokemonSpecies::from_repr(mmu.read_pointer(&pokered_symbols::wBattleMonSpecies))
+    let species    = PokemonSpecies::from_repr(mmu.read_pointer(&pokered_symbols::wBattleMonSpecies2))
         .unwrap_or(PokemonSpecies::Bulbasaur);
     let level      = mmu.read_pointer(&pokered_symbols::wBattleMonLevel);
     let current_hp = mmu.read_u16_be(pokered_symbols::wBattleMonHP.address);
@@ -128,7 +112,7 @@ fn read_battle_mon(mmu: &MMU) -> BattlePokemon {
 }
 
 fn read_enemy_mon(mmu: &MMU) -> BattlePokemon {
-    let species    = PokemonSpecies::from_repr(mmu.read_pointer(&pokered_symbols::wEnemyMonSpecies))
+    let species    = PokemonSpecies::from_repr(mmu.read_pointer(&pokered_symbols::wEnemyMonSpecies2))
         .unwrap_or(PokemonSpecies::Bulbasaur);
     let level      = mmu.read_pointer(&pokered_symbols::wEnemyMonLevel);
     let current_hp = mmu.read_u16_be(pokered_symbols::wEnemyMonHP.address);
@@ -148,38 +132,3 @@ fn read_enemy_mon(mmu: &MMU) -> BattlePokemon {
     BattlePokemon { species, level, current_hp, max_hp, status, moves }
 }
 
-fn read_bag(mmu: &MMU) -> Vec<BagItem> {
-    let count = mmu.read_pointer(&pokered_symbols::wNumBagItems) as usize;
-    let base  = pokered_symbols::wBagItems.address;
-    (0..count)
-        .filter_map(|i| {
-            let item_base = base + i as u16 * 2;
-            if let Some(id) = ItemId::from_repr(mmu.read(item_base)) {
-                Some(BagItem { id, quantity: mmu.read(item_base + 1) })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-// ── Writing (test helpers) ────────────────────────────────────────────────────
-
-pub trait BagWriter {
-    /// Replaces the bag contents with the given `(item_id, quantity)` pairs.
-    fn write_bag(&mut self, items: &[(u8, u8)]);
-}
-
-impl BagWriter for MMU {
-    fn write_bag(&mut self, items: &[(u8, u8)]) {
-        let count = items.len().min(20) as u8;
-        self.write(pokered_symbols::wNumBagItems.address, count);
-        let base = pokered_symbols::wBagItems.address;
-        for (i, &(id, qty)) in items.iter().take(20).enumerate() {
-            self.write(base + i as u16 * 2,     id);
-            self.write(base + i as u16 * 2 + 1, qty);
-        }
-        // FF terminator
-        self.write(base + count as u16 * 2, 0xFF);
-    }
-}

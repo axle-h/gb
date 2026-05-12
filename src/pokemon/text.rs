@@ -67,6 +67,7 @@ mod tests {
     use crate::joypad::JoypadButtonState;
     use crate::pokemon::encoding::GameMode;
     use crate::pokemon::GameState;
+    use crate::pokemon::menu::MenuState;
     use super::*;
 
     #[derive(Default)]
@@ -99,6 +100,10 @@ mod tests {
 
         fn on_screen_text(&self) -> Option<String> {
             self.on_screen_text.clone()
+        }
+
+        fn menu_state(&self) -> Option<MenuState> {
+            None
         }
     }
 

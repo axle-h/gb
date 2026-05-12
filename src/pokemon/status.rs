@@ -13,7 +13,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, strum_macros::Display)]
 pub enum PokemonStatus {
     #[default]
     None,
