@@ -26,7 +26,7 @@ const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 
 pub fn render() -> Result<(), String> {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
-    let mut pokemon_agent = PokemonAgent::new(Box::new(ConsolePolicy));
+    let mut pokemon_agent = PokemonAgent::new(Box::new(ConsolePolicy::default()));
 
     if let Err(e) = gb.restore_sram_from_file("pokemon-red.sav") {
         println!("Could not load save file: {}", e);

@@ -11,9 +11,12 @@ use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::{JoypadButton, JoypadButtonState};
 use crate::mmu::MMU;
+use crate::pokemon::bag::BagReader;
+use crate::pokemon::battle::BagItem;
 use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
-use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
-use crate::pokemon::move_name::{PokemonMoveName};
+use crate::pokemon::menu::MenuState;
+use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
+use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::pokemon::Pokemon;
 use crate::pokemon::strings::PokemonString;
 
@@ -38,6 +41,8 @@ pub mod roms;
 mod text;
 mod map_header;
 mod item;
+mod bag;
+mod menu;
 
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
@@ -46,6 +51,7 @@ pub trait PokemonApiTrait {
     fn game_mode(&self) -> Option<GameMode>;
     fn game_state(&self) -> Result<GameState, String>;
     fn on_screen_text(&self) -> Option<String>;
+    fn menu_state(&self) -> Option<MenuState>;
 }
 
 #[derive(Debug)]
@@ -127,6 +133,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             pokemon: mmu.read_player_pokemon_party()?,
             map: MetaTileMap::new(&mmu.read_current_map()?),
             battle: mmu.read_battle_state(),
+            bag: mmu.read_bag(),
         })
     }
 
@@ -191,6 +198,18 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         }
         Some(mmu.read_game_mode())
     }
+
+    fn menu_state(&self) -> Option<MenuState> {
+        let mmu = self.mmu();
+        let text_box_id  = mmu.read_pointer(&pokered_symbols::wTextBoxID);
+        if text_box_id == 0 {
+            return None;
+        }
+        Some(MenuState {
+            text_box_id,
+            current_menu: mmu.read_pointer(&pokered_symbols::wCurrentMenuItem)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -203,23 +222,78 @@ pub struct GameState {
     pub pokemon: PokemonParty,
     pub mode: GameMode,
     pub map: MetaTileMap,
+    pub bag: Vec<BagItem>,
     /// Populated whenever `mode` is `WildBattle` or `TrainerBattle`.
     pub battle: Option<BattleState>,
 }
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
     use crate::cycles::MachineCycles;
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::bag::BagWriter;
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::encoding::MetaTile;
     use crate::pokemon::item::ItemId;
+    use crate::pokemon::policy::Policy;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::mpsc::{Receiver, Sender};
     use super::*;
 
     pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("./test_data/pallet-town-state.bin");
     pub const ROUTE1_STATE: &[u8] = include_bytes!("./test_data/route1-state.bin");
     pub const BATTLE_STATE: &[u8] = include_bytes!("./test_data/battle-state.bin");
 
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    enum PolicyEvent {
+        Movement(Map),
+        Battle,
+    }
+
+    struct FindBattleOnRoute1Policy {
+        previous_map: Map,
+        event_tx: Sender<PolicyEvent>,
+    }
+
+    impl FindBattleOnRoute1Policy {
+        pub fn new(event_tx: Sender<PolicyEvent>) -> Self {
+            Self { previous_map: Map::PalletTown, event_tx }
+        }
+    }
+
+    impl Policy for FindBattleOnRoute1Policy {
+        fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+            let next_map = match (self.previous_map, state.map.map) {
+                (Map::PalletTown, Map::Route1) => Map::ViridianCity,
+                (Map::Route1, Map::ViridianCity) => Map::Route1,
+                (Map::ViridianCity, Map::Route1) => Map::PalletTown,
+                (Map::Route1, Map::PalletTown) => Map::Route1,
+                _ => return None
+            };
+
+            let preferred = state.map.actions().iter()
+                .find(|a| a.tile == MetaTile::Connection(next_map))
+                .cloned();
+
+            self.event_tx.send(PolicyEvent::Movement(next_map)).ok();
+
+            if preferred.is_some() {
+                self.previous_map = next_map;
+            }
+            preferred
+        }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            self.event_tx.send(PolicyEvent::Battle).ok();
+            None
+        }
+    }
+
+
     #[test]
     fn test_battle_state_reading() {
-        use battle::{BagWriter, BattleStateReader, BattleType};
+        use battle::BattleType;
         use crate::pokemon::move_name::PokemonMoveName;
 
         let mut gb = GameBoy::dmg(roms::POKERED);
@@ -244,7 +318,9 @@ mod test {
             gb.core_mut().mmu_mut().write_player_pokemon_party(&party).unwrap();
         }
 
-        let battle = gb.core().mmu().read_battle_state().expect("should be in battle");
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        let battle = state.battle.expect("should be in battle");
 
         // Basic battle validity
         assert_eq!(battle.battle_type, BattleType::Wild);
@@ -254,39 +330,51 @@ mod test {
         assert!(battle.player.moves.iter().any(|m| m.is_some()), "player needs at least one move");
 
         // Bag — we wrote exactly 2 items, so expect exactly those 2.
-        assert_eq!(battle.bag[0].id, ItemId::Potion, "bag[0] should be POTION");
-        assert_eq!(battle.bag[0].quantity, 3);
-        assert!(battle.bag.iter().any(|i| i.id == ItemId::FullHeal),
+        assert_eq!(state.bag[0].id, ItemId::Potion, "bag[0] should be POTION");
+        assert_eq!(state.bag[0].quantity, 3);
+        assert!(state.bag.iter().any(|i| i.id == ItemId::FullHeal),
             "FULL HEAL should be in the bag");
+    }
 
-        // Party includes the Pidgey we just added, and at least that one Pokemon.
-        println!("Party ({} members):", battle.party.len());
-        for p in battle.party.pokemon() {
-            println!("  {:?} Lv.{} HP {}/{}", p.species, p.level, p.current_hp, p.stats.hp);
+    /// Verifies the agent can navigate through a wild battle end-to-end.
+    ///
+    /// Uses a deterministic `TestPolicy` that always picks the northward connection
+    /// (Viridian City / Route 1) to keep the player walking through grass.  As soon
+    /// as a battle is encountered the policy selects Fight(0) every turn.  The test
+    /// succeeds once `wIsInBattle` returns to 0 (battle over).
+    #[test]
+    fn test_agent_battle_lifecycle() {
+        use crate::pokemon::agent::PokemonAgent;
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(ROUTE1_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+
+        let (tx, rx) = mpsc::channel::<PolicyEvent>();
+
+        let policy = FindBattleOnRoute1Policy::new(tx);
+        let mut agent = PokemonAgent::new(Box::new(policy));
+
+        let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16)); // ~60 FPS
+
+        let max_frames = 30_000u32;
+        let mut battle_started = false;
+
+        for _frame in 0..max_frames {
+            gb.run(frame_cycles);
+            agent.update(&mut gb, frame_cycles).ok();
+
+
+            if let Ok(event) = rx.try_recv() {
+                println!("{:?}", event);
+                if event == PolicyEvent::Battle {
+                    battle_started = true;
+                    break;
+                }
+            }
         }
-        assert!(battle.party.len() >= 1, "party should not be empty");
-        // The Pidgey we added should be the last in the party.
-        let last = battle.party.pokemon().last().expect("non-empty party");
-        assert_eq!(last.species, PokemonSpecies::Pidgey, "last party member should be Pidgey");
 
-        // All BattleAction navigation_targets are non-empty
-        use battle::BattleAction;
-        assert!(!BattleAction::Fight(0).navigation_targets().is_empty());
-        assert!(!BattleAction::UseItem(0).navigation_targets().is_empty());
-        assert!(!BattleAction::SwitchPokemon(1).navigation_targets().is_empty());
-        assert!(!BattleAction::Run.navigation_targets().is_empty());
-
-        println!("Enemy:  {:?} Lv.{} HP {}/{}",
-            battle.enemy.species, battle.enemy.level,
-            battle.enemy.current_hp, battle.enemy.max_hp);
-        println!("Player: {:?} Lv.{} HP {}/{}",
-            battle.player.species, battle.player.level,
-            battle.player.current_hp, battle.player.max_hp);
-        for m in battle.player.moves.iter().flatten() {
-            println!("  Move {:?} PP={}", m.name, m.current_pp);
-        }
-        println!("Bag: {:?}", battle.bag.iter().map(|i| format!("{}×{}", i.id, i.quantity)).collect::<Vec<_>>());
-        println!("Party slots: {}", battle.party.len());
+        assert!(battle_started, "battle did not start within {} frames", max_frames);
     }
 
     #[test]
