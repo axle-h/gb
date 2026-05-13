@@ -116,7 +116,6 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         }
     }
     fn press_button(&mut self, button: JoypadButton) {
-        println!("Pressing {:?} button", button);
         self.mmu_mut().joypad_mut().press_button(button);
     }
 
@@ -127,6 +126,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     fn toggle_button(&mut self, button: JoypadButton) {
         let joypad = self.mmu_mut().joypad_mut();
         let pressed = !joypad.state().is_button_pressed(button);
+        // release all other buttons
+        for btn in JoypadButton::iter() {
+            joypad.release_button(btn);
+        }
         joypad.update_button(button, pressed);
     }
 

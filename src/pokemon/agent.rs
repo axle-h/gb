@@ -8,13 +8,12 @@ use crate::pokemon::battle::BattleAction;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
 use crate::pokemon::encoding::{GameMode, MetaTile};
 use crate::pokemon::map::Map;
+use crate::pokemon::menu::BattleMenuState;
 use crate::pokemon::policy::{Policy, RandomPolicy};
 use crate::pokemon::text::PokemonTextReader;
 
-const RESOLUTION: MachineCycles = MachineCycles::from_hz(60);
-
-/// Time to wait between agent actions e.g. between the cursor landing on a menu item and pressing A
-const ACTION_DELAY: MachineCycles = MachineCycles::from_duration(Duration::from_millis(50));
+// too long and player veers off course on the overworld, too short and the game doesn't get chance to update values between turns
+const RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
 
 pub struct PokemonAgent {
     state: AgentState,
@@ -33,7 +32,7 @@ pub enum AgentEvent {
     BattleEnded,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
     #[default]
@@ -41,15 +40,8 @@ enum BattleState {
     /// Battle menu is up but policy hasn't returned an action yet.
     AwaitingPolicy,
 
-    /// Queue-based navigation: each `u8` in `targets` is a `wCurrentMenuItem`
-    /// value to navigate to; the agent moves the cursor there then presses A,
-    /// then waits `delay` frames before popping the next target.
-    Navigating {
-        targets:       VecDeque<u8>,
-    },
-
-    /// Waiting for the next menu prompt or battle end.
-    WaitingForResult,
+    /// Navigating the menus
+    Navigating { action: BattleAction },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -238,13 +230,8 @@ impl PokemonAgent {
 
         match battle_state {
             BattleState::WaitingForMenu => {
-                let is_battle_menu = if let Some(menu_state) = api.menu_state() {
-                    menu_state.is_battle_menu()
-                } else {
-                    false
-                };
-                if is_battle_menu {
-                    api.release_button(JoypadButton::A);
+                if api.menu_state().map(|s| s.battle_menu_state()).flatten() == Some(BattleMenuState::Fight) {
+                    api.release_all_buttons();
                     self.set_battle_state(BattleState::AwaitingPolicy);
                 } else {
                     // pulse the A button until the menu is up
@@ -256,73 +243,55 @@ impl PokemonAgent {
                 let game_state = api.game_state()?;
                 if let Some(action) = self.policy.pick_battle_action(&game_state) {
                     self.event(AgentEvent::BattleActionStarted { action });
-                    self.set_battle_state(BattleState::Navigating {
-                        targets:       action.navigation_targets().into(),
-                    });
+                    self.set_battle_state(BattleState::Navigating { action });
                 }
             }
 
-            BattleState::Navigating { mut targets } => {
-                let menu_state = api.menu_state();
+            BattleState::Navigating { action } => {
+                let menu_state = api.menu_state().map(|s| s.battle_menu_state()).flatten();
                 if menu_state.is_none() {
                     // wait for menu state
                     return Ok(());
                 }
                 let menu_state = menu_state.unwrap();
 
-                println!("{:?}", menu_state);
+                println!("{:?}, {:?}", api.menu_state().unwrap(), menu_state);
 
-                // All targets confirmed — hand off to BattleWaitingForResult so A-pulse
-                // can advance the battle text (the pulse doesn't run in this state).
-                let target = match targets.front().copied() {
-                    Some(t) => t,
-                    None => {
-                        api.release_all_buttons();
-                        self.set_battle_state(BattleState::WaitingForResult);
-                        return Ok(());
-                    }
-                };
+                let menu_target = BattleMenuState::from_action(action);
 
-                if !menu_state.is_battle_menu() {
-                    // Menu closed (animation playing) — keep waiting, pulse the A button
-                    api.toggle_button(JoypadButton::A);
-                    self.set_battle_state(BattleState::Navigating { targets });
+                if menu_state == menu_target {
+                    api.release_all_buttons();
+                    self.set_battle_state(BattleState::WaitingForMenu);
                     return Ok(());
                 }
 
-                if menu_state.current_item == target {
-                    // Cursor is on the correct slot, start pulsing the A button & remove item
-                    api.toggle_button(JoypadButton::A);
-                    targets.pop_front();
-                    self.set_battle_state(BattleState::Navigating { targets });
+                let resolved_target = if let Some(target_parent) = menu_target.parent() {
+                    if menu_state.parent() == Some(target_parent) {
+                        menu_target
+                    } else {
+                        target_parent
+                    }
                 } else {
-                    // Navigate towards target using the 2D grid layout.
-                    let cur_row = menu_state.current_item / 2;
-                    let cur_col = menu_state.current_item % 2;
-                    let tgt_row = target / 2;
-                    let tgt_col = target % 2;
-
-                    let btn = if tgt_col > cur_col      { JoypadButton::Right }
-                              else if tgt_col < cur_col  { JoypadButton::Left  }
-                              else if tgt_row > cur_row  { JoypadButton::Down  }
-                              else                        { JoypadButton::Up    };
-
-                    api.toggle_button(btn);
-                }
-            }
-
-            BattleState::WaitingForResult => {
-                let is_battle_menu = if let Some(menu_state) = api.menu_state() {
-                    menu_state.is_battle_menu()
-                } else {
-                    false
+                    menu_target
                 };
-                if is_battle_menu {
-                    api.release_button(JoypadButton::A);
-                    self.set_battle_state(BattleState::WaitingForMenu);
+
+                let target_location = resolved_target.location();
+                let current_location = menu_state.location();
+
+
+                let btn = if target_location == current_location {
+                    JoypadButton::A
+                } else if target_location.x > current_location.x {
+                    JoypadButton::Right
+                } else if target_location.x < current_location.x {
+                    JoypadButton::Left
+                } else if target_location.y > current_location.y {
+                    JoypadButton::Down
                 } else {
-                    api.toggle_button(JoypadButton::A);
-                }
+                    JoypadButton::Up
+                };
+
+                api.toggle_button(btn);
             }
 
             _ => {}
