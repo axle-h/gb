@@ -135,6 +135,9 @@ pub fn render() -> Result<(), String> {
                                 .map_err(|e| e.to_string())?;
                         }
                         Keycode::F2 => {
+                            previous_wram.copy_from_slice(gb.core().mmu().work_ram());
+                        }
+                        Keycode::F3 => {
                             // compare wram to previous wram
                             let current_wram = gb.core().mmu().work_ram();
                             let diff = current_wram.into_iter()
@@ -170,7 +173,8 @@ pub fn render() -> Result<(), String> {
                         },
                         Keycode::W => {
                             let pokemon_api = PokemonApi::new(&mut gb);
-                            let state = pokemon_api.game_state()?;
+                            let menu_state = pokemon_api.menu_state().unwrap();
+                            println!("{:?}", menu_state);
                         },
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);

@@ -46,12 +46,6 @@ enum BattleState {
     /// then waits `delay` frames before popping the next target.
     Navigating {
         targets:       VecDeque<u8>,
-        /// Accumulated time the cursor has been sitting on the target slot.
-        at_target_for: MachineCycles,
-        /// Remaining cooldown after the last A press.
-        delay_after_a: MachineCycles,
-        /// Remaining cooldown after a DPAD press (game uses edge detection).
-        dpad_cooldown: MachineCycles,
     },
 
     /// Waiting for the next menu prompt or battle end.
@@ -244,8 +238,12 @@ impl PokemonAgent {
 
         match battle_state {
             BattleState::WaitingForMenu => {
-                let menu_state = api.menu_state().unwrap_or_default();
-                if menu_state.is_battle_menu() {
+                let is_battle_menu = if let Some(menu_state) = api.menu_state() {
+                    menu_state.is_battle_menu()
+                } else {
+                    false
+                };
+                if is_battle_menu {
                     api.release_button(JoypadButton::A);
                     self.set_battle_state(BattleState::AwaitingPolicy);
                 } else {
@@ -260,82 +258,47 @@ impl PokemonAgent {
                     self.event(AgentEvent::BattleActionStarted { action });
                     self.set_battle_state(BattleState::Navigating {
                         targets:       action.navigation_targets().into(),
-                        at_target_for: MachineCycles::ZERO,
-                        delay_after_a: MachineCycles::ZERO,
-                        dpad_cooldown: MachineCycles::ZERO,
                     });
                 }
             }
 
-            BattleState::Navigating { mut targets, at_target_for, delay_after_a, dpad_cooldown } => {
-                api.release_all_buttons();
-                let menu_state = api.menu_state().unwrap_or_default();
+            BattleState::Navigating { mut targets } => {
+                let menu_state = api.menu_state();
+                if menu_state.is_none() {
+                    // wait for menu state
+                    return Ok(());
+                }
+                let menu_state = menu_state.unwrap();
+
+                println!("{:?}", menu_state);
 
                 // All targets confirmed — hand off to BattleWaitingForResult so A-pulse
                 // can advance the battle text (the pulse doesn't run in this state).
-                if targets.is_empty() {
-                    self.set_battle_state(BattleState::WaitingForResult);
-                    return Ok(());
-                }
-
-                if !menu_state.is_battle_menu() {
-                    // Menu closed (animation playing) — keep waiting.
-                    self.set_battle_state(BattleState::Navigating { targets, at_target_for, delay_after_a, dpad_cooldown });
-                    return Ok(());
-                }
-
-                // Drain the post-A cooldown before doing anything else.
-                if delay_after_a > MachineCycles::ZERO {
-                    self.set_battle_state(BattleState::Navigating {
-                        targets,
-                        at_target_for,
-                        delay_after_a: delay_after_a - delta,
-                        dpad_cooldown: MachineCycles::ZERO,
-                    });
-                    return Ok(());
-                }
-
                 let target = match targets.front().copied() {
                     Some(t) => t,
                     None => {
+                        api.release_all_buttons();
                         self.set_battle_state(BattleState::WaitingForResult);
                         return Ok(());
                     }
                 };
 
-                if menu_state.current_menu == target {
-                    // Cursor is on the correct slot — wait AT_TARGET_MIN before confirming.
-                    let new_at_target = at_target_for + delta;
-                    if new_at_target >= ACTION_DELAY {
-                        api.press_button(JoypadButton::A);
-                        targets.pop_front();
-                        self.set_battle_state(BattleState::Navigating {
-                            targets,
-                            at_target_for: MachineCycles::ZERO,
-                            delay_after_a: ACTION_DELAY,
-                            dpad_cooldown: MachineCycles::ZERO,
-                        });
-                    } else {
-                        self.set_battle_state(BattleState::Navigating {
-                            targets,
-                            at_target_for: new_at_target,
-                            delay_after_a: MachineCycles::ZERO,
-                            dpad_cooldown: MachineCycles::ZERO,
-                        });
-                    }
-                } else if dpad_cooldown > MachineCycles::ZERO {
-                    // Cooldown after last DPAD press — DPAD already blanket-released above,
-                    // so the game will see an edge (0→1) when we press again after cooldown.
-                    self.set_battle_state(BattleState::Navigating {
-                        targets,
-                        at_target_for: MachineCycles::ZERO,
-                        delay_after_a: MachineCycles::ZERO,
-                        dpad_cooldown: dpad_cooldown - delta,
-                    });
+                if !menu_state.is_battle_menu() {
+                    // Menu closed (animation playing) — keep waiting, pulse the A button
+                    api.toggle_button(JoypadButton::A);
+                    self.set_battle_state(BattleState::Navigating { targets });
+                    return Ok(());
+                }
+
+                if menu_state.current_item == target {
+                    // Cursor is on the correct slot, start pulsing the A button & remove item
+                    api.toggle_button(JoypadButton::A);
+                    targets.pop_front();
+                    self.set_battle_state(BattleState::Navigating { targets });
                 } else {
                     // Navigate towards target using the 2D grid layout.
-                    let cur_row = menu_state.current_menu / 2;
-                    let cur_col = menu_state.current_menu % 2;
+                    let cur_row = menu_state.current_item / 2;
+                    let cur_col = menu_state.current_item % 2;
                     let tgt_row = target / 2;
                     let tgt_col = target % 2;
 
@@ -344,25 +307,22 @@ impl PokemonAgent {
                               else if tgt_row > cur_row  { JoypadButton::Down  }
                               else                        { JoypadButton::Up    };
 
-                    api.press_button(btn);
-                    self.set_battle_state(BattleState::Navigating {
-                        targets,
-                        at_target_for: MachineCycles::ZERO,
-                        delay_after_a: MachineCycles::ZERO,
-                        dpad_cooldown: ACTION_DELAY,
-                    });
+                    api.toggle_button(btn);
                 }
             }
 
             BattleState::WaitingForResult => {
-                let menu_state = api.menu_state().unwrap_or_default();
-                if menu_state.is_battle_menu() {
+                let is_battle_menu = if let Some(menu_state) = api.menu_state() {
+                    menu_state.is_battle_menu()
+                } else {
+                    false
+                };
+                if is_battle_menu {
                     api.release_button(JoypadButton::A);
                     self.set_battle_state(BattleState::WaitingForMenu);
                 } else {
-                    api.toggle_button(JoypadButton::B);
+                    api.toggle_button(JoypadButton::A);
                 }
-                // else: A-pulse already handles advance in the unthrottled section above.
             }
 
             _ => {}

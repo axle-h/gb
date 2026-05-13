@@ -14,7 +14,7 @@ use crate::mmu::MMU;
 use crate::pokemon::bag::BagReader;
 use crate::pokemon::battle::BagItem;
 use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
-use crate::pokemon::menu::MenuState;
+use crate::pokemon::menu::{MenuState, MenuStateReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::pokemon::Pokemon;
@@ -213,15 +213,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     }
 
     fn menu_state(&self) -> Option<MenuState> {
-        let mmu = self.mmu();
-        let text_box_id  = mmu.read_pointer(&pokered_symbols::wTextBoxID);
-        if text_box_id == 0 {
-            return None;
-        }
-        Some(MenuState {
-            text_box_id,
-            current_menu: mmu.read_pointer(&pokered_symbols::wCurrentMenuItem)
-        })
+        self.mmu().read_menu_state()
     }
 }
 
