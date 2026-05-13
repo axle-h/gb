@@ -46,26 +46,11 @@ pub enum BattleAction {
     /// Use the move in the given slot (0–3).
     Fight(u8),
     /// Use the bag item at `bag_slot` (index into `BattleState.bag`).
-    UseItem(usize),
+    UseItem(u8),
     /// Switch to the party Pokemon at `party_slot` (index into `BattleState.party`).
-    SwitchPokemon(usize),
+    SwitchPokemon(u8),
     /// Attempt to flee (wild battles only).
     Run,
-}
-
-impl BattleAction {
-    /// Sequence of `wCurrentMenuItem` targets to navigate to and confirm with A, in order.
-    /// The main battle menu layout: FIGHT=0, PKMN=1, ITEM=2, RUN=3.
-    /// The move sub-menu uses 1-indexed `wCurrentMenuItem`: move slot 0 → position 1,
-    /// slot 1 → position 2, etc. (`MoveSelectionMenu` sets it to `wPlayerMoveListIndex + 1`).
-    pub fn navigation_targets(self) -> Vec<u8> {
-        match self {
-            BattleAction::Fight(slot)          => vec![0, slot + 1],
-            BattleAction::UseItem(bag_slot)    => vec![2, bag_slot as u8],
-            BattleAction::SwitchPokemon(slot)  => vec![1, slot as u8, 0], // 0 = SWITCH option
-            BattleAction::Run                  => vec![3],
-        }
-    }
 }
 
 pub trait BattleStateReader {

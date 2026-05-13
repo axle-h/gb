@@ -171,7 +171,7 @@ fn battle_options(state: &GameState) -> Option<Vec<(String, BattleAction)>> {
         }
     }
     for (i, item) in state.bag.iter().enumerate() {
-        opts.push((format!("ITEM   {} ×{}", item.id, item.quantity), BattleAction::UseItem(i)));
+        opts.push((format!("ITEM   {} ×{}", item.id, item.quantity), BattleAction::UseItem(i as u8)));
     }
 
     let pokemon = state.pokemon.pokemon();
@@ -181,7 +181,7 @@ fn battle_options(state: &GameState) -> Option<Vec<(String, BattleAction)>> {
         if p.stats.hp == 0 { continue; }
         opts.push((format!("PKMN   {:?} Lv.{} HP {}/{}", p.species, p.level,
                            p.current_hp, p.stats.hp),
-                   BattleAction::SwitchPokemon(slot)));
+                   BattleAction::SwitchPokemon(slot as u8)));
     }
     opts.push(("RUN".to_string(), BattleAction::Run));
     Some(opts)
