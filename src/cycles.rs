@@ -24,7 +24,7 @@ impl MachineCycles {
         self.0 * 4 // 1 tick = 4 machine cycles
     }
 
-    pub fn from_duration(duration: Duration) -> Self {
+    pub const fn from_duration(duration: Duration) -> Self {
         let nanos = duration.as_nanos() as usize;
         let t_cycles = (nanos * Self::CPU_FREQ) / 1_000_000_000;
         let m_cycles = t_cycles / 4; // 1 machine cycle = 4 clock cycles

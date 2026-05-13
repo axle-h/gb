@@ -86,6 +86,14 @@ mod tests {
             self.joypad.update_button(button, true)
         }
 
+        fn release_button(&mut self, button: JoypadButton) {
+            self.joypad.update_button(button, false)
+        }
+
+        fn toggle_button(&mut self, button: JoypadButton) {
+            self.joypad.update_button(button, !self.joypad.is_button_pressed(button))
+        }
+
         fn read_joypad_state(&self) -> JoypadButtonState {
             self.joypad
         }

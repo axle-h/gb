@@ -56,10 +56,11 @@ pub enum BattleAction {
 impl BattleAction {
     /// Sequence of `wCurrentMenuItem` targets to navigate to and confirm with A, in order.
     /// The main battle menu layout: FIGHT=0, PKMN=1, ITEM=2, RUN=3.
-    /// Sub-menus (move/bag/party) also use `wCurrentMenuItem`.
+    /// The move sub-menu uses 1-indexed `wCurrentMenuItem`: move slot 0 → position 1,
+    /// slot 1 → position 2, etc. (`MoveSelectionMenu` sets it to `wPlayerMoveListIndex + 1`).
     pub fn navigation_targets(self) -> Vec<u8> {
         match self {
-            BattleAction::Fight(slot)          => vec![0, slot],
+            BattleAction::Fight(slot)          => vec![0, slot + 1],
             BattleAction::UseItem(bag_slot)    => vec![2, bag_slot as u8],
             BattleAction::SwitchPokemon(slot)  => vec![1, slot as u8, 0], // 0 = SWITCH option
             BattleAction::Run                  => vec![3],
