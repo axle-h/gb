@@ -47,6 +47,8 @@ mod menu;
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
     fn press_button(&mut self, button: JoypadButton);
+    fn release_button(&mut self, button: JoypadButton);
+    fn toggle_button(&mut self, button: JoypadButton);
     fn read_joypad_state(&self) -> JoypadButtonState;
     fn game_mode(&self) -> Option<GameMode>;
     fn game_state(&self) -> Result<GameState, String>;
@@ -114,9 +116,20 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         }
     }
     fn press_button(&mut self, button: JoypadButton) {
-        let joypad = self.mmu_mut().joypad_mut();
-        joypad.press_button(button);
+        println!("Pressing {:?} button", button);
+        self.mmu_mut().joypad_mut().press_button(button);
     }
+
+    fn release_button(&mut self, button: JoypadButton) {
+        self.mmu_mut().joypad_mut().release_button(button);
+    }
+
+    fn toggle_button(&mut self, button: JoypadButton) {
+        let joypad = self.mmu_mut().joypad_mut();
+        let pressed = !joypad.state().is_button_pressed(button);
+        joypad.update_button(button, pressed);
+    }
+
     fn read_joypad_state(&self) -> JoypadButtonState {
         self.mmu().joypad().state()
     }
@@ -375,6 +388,95 @@ mod test {
         }
 
         assert!(battle_started, "battle did not start within {} frames", max_frames);
+    }
+
+    /// Verifies the agent can fight through a wild battle using the first available
+    /// move until the enemy faints, then the player is returned to the overworld on Route 1.
+    #[test]
+    fn test_battle_fight_to_victory_returns_to_route1() {
+        use crate::pokemon::agent::PokemonAgent;
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum FightEvent { BattleStarted, BattleEnded }
+
+        struct FightFirstMovePolicy {
+            previous_map: Map,
+            in_battle: bool,
+            event_tx: Sender<FightEvent>,
+        }
+
+        impl FightFirstMovePolicy {
+            fn new(event_tx: Sender<FightEvent>) -> Self {
+                Self { previous_map: Map::PalletTown, in_battle: false, event_tx }
+            }
+        }
+
+        impl Policy for FightFirstMovePolicy {
+            fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+                if self.in_battle {
+                    self.in_battle = false;
+                    self.event_tx.send(FightEvent::BattleEnded).ok();
+                }
+                let next_map = match (self.previous_map, state.map.map) {
+                    (Map::PalletTown, Map::Route1) => Map::ViridianCity,
+                    (Map::Route1, Map::ViridianCity) => Map::Route1,
+                    (Map::ViridianCity, Map::Route1) => Map::PalletTown,
+                    (Map::Route1, Map::PalletTown) => Map::Route1,
+                    _ => return None,
+                };
+                let preferred = state.map.actions().iter()
+                    .find(|a| a.tile == MetaTile::Connection(next_map))
+                    .cloned();
+                if preferred.is_some() {
+                    self.previous_map = next_map;
+                }
+                preferred
+            }
+
+            fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+                if !self.in_battle {
+                    self.in_battle = true;
+                    self.event_tx.send(FightEvent::BattleStarted).ok();
+                }
+                let battle = state.battle.as_ref()?;
+                let slot = battle.player.moves.iter()
+                    .position(|m| m.map_or(false, |m| m.current_pp > 0))
+                    .unwrap_or(0) as u8;
+                Some(BattleAction::Fight(slot))
+            }
+        }
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(ROUTE1_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+
+        let (tx, rx) = mpsc::channel::<FightEvent>();
+        let policy = FightFirstMovePolicy::new(tx);
+        let mut agent = PokemonAgent::new(Box::new(policy));
+
+        let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16));
+        let max_frames = 100_000u32;
+        let mut battle_ended = false;
+
+        for _frame in 0..max_frames {
+            gb.run(frame_cycles);
+            agent.update(&mut gb, frame_cycles).ok();
+
+            if let Ok(event) = rx.try_recv() {
+                println!("{:?}", event);
+                if event == FightEvent::BattleEnded {
+                    battle_ended = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(battle_ended, "battle did not end within {} frames", max_frames);
+
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        assert_eq!(state.mode, GameMode::Overworld, "player should be on the overworld after battle");
+        assert_eq!(state.map.map, Map::Route1, "player should be on Route 1 after battle");
     }
 
     #[test]

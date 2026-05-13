@@ -1,4 +1,5 @@
 use std::collections::{VecDeque};
+use std::time::Duration;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::joypad::JoypadButton;
@@ -12,35 +13,13 @@ use crate::pokemon::text::PokemonTextReader;
 
 const RESOLUTION: MachineCycles = MachineCycles::from_hz(60);
 
-
-
-/// Time to wait after pressing A before attempting the next navigation step.
-/// Expressed in MachineCycles so it scales correctly regardless of how often `update` is called.
-/// 0.5 s ≈ 30 frames at 60 fps — enough for any battle animation to begin.
-const POST_A_DELAY: MachineCycles = MachineCycles::from_hz(2);
-
-/// Minimum time the cursor must be on the target slot before we press A.
-/// One frame is enough; this guards against pressing A on the wrong slot.
-const AT_TARGET_MIN: MachineCycles = MachineCycles::from_hz(60);
-
-/// A-pulse half-period: A is pressed for this duration, then released for the same duration.
-/// ~10 frames at 60 fps gives a clear edge on each cycle.
-const A_PULSE_HALF: MachineCycles = MachineCycles::from_hz(6);
-
-/// After pressing a DPAD direction, wait this long before pressing again.
-/// The game uses edge detection (wNewKeys) so we must release for at least 1 frame.
-/// 3 frames is comfortable insurance.
-const DPAD_COOLDOWN: MachineCycles = MachineCycles::from_hz(20);
-
+/// Time to wait between agent actions e.g. between the cursor landing on a menu item and pressing A
+const ACTION_DELAY: MachineCycles = MachineCycles::from_duration(Duration::from_millis(50));
 
 pub struct PokemonAgent {
     state: AgentState,
     event_buffer: VecDeque<AgentEvent>,
     cycles: MachineCycles,
-    /// Accumulates every delta passed to `update()` (not throttled) for A-pulsing during
-    /// battle text. Keeping this outside the throttle gate ensures A is pulsed even when
-    /// the render loop passes very small deltas.
-    a_pulse: MachineCycles,
     policy: Box<dyn Policy>,
 }
 
@@ -55,23 +34,17 @@ pub enum AgentEvent {
 }
 
 #[derive(Debug, Clone, Default)]
-enum AgentState {
-    #[default]
-    Idle,
-    /// Policy returned None for an overworld action — re-polling each frame.
-    AwaitingOverworldAction,
-    OverworldMovement { destination: MetaTile, map: Map },
-    ReadingTextBox { reader: PokemonTextReader },
-
+enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
-    BattleWaitingForMenu,
+    #[default]
+    WaitingForMenu,
     /// Battle menu is up but policy hasn't returned an action yet.
-    AwaitingBattleAction,
+    AwaitingPolicy,
 
     /// Queue-based navigation: each `u8` in `targets` is a `wCurrentMenuItem`
     /// value to navigate to; the agent moves the cursor there then presses A,
     /// then waits `delay` frames before popping the next target.
-    BattleNavigating {
+    Navigating {
         targets:       VecDeque<u8>,
         /// Accumulated time the cursor has been sitting on the target slot.
         at_target_for: MachineCycles,
@@ -82,7 +55,29 @@ enum AgentState {
     },
 
     /// Waiting for the next menu prompt or battle end.
-    BattleWaitingForResult,
+    WaitingForResult,
+}
+
+#[derive(Debug, Clone, Default)]
+enum AgentState {
+    #[default]
+    Idle,
+    /// Policy returned None for an overworld action — re-polling each frame.
+    AwaitingOverworldAction,
+    OverworldMovement { destination: MetaTile, map: Map },
+    ReadingTextBox { reader: PokemonTextReader },
+
+    Battle(BattleState),
+}
+
+impl AgentState {
+    pub fn battle_state(&self) -> Result<BattleState, String> {
+        if let AgentState::Battle(s) = self {
+            Ok(s.clone()) // TODO make the state copyable
+        } else {
+            Err("Not in battle".to_string())
+        }
+    }
 }
 
 impl Default for PokemonAgent {
@@ -95,7 +90,6 @@ impl PokemonAgent {
             state: AgentState::default(),
             event_buffer: VecDeque::new(),
             cycles: MachineCycles::default(),
-            a_pulse: MachineCycles::ZERO,
             policy,
         }
     }
@@ -119,75 +113,38 @@ impl PokemonAgent {
     }
 
     pub fn update(&mut self, gb: &mut GameBoy, delta_cycles: MachineCycles) -> Result<(), String> {
-        // ── A-pulse for battle text (NOT throttled) ───────────────────────────────
-        // Runs on every call so A is pulsed correctly even when the render loop
-        // passes very small delta_cycles that would otherwise not fire the throttle.
-        self.a_pulse += delta_cycles;
-        let pulse_window = A_PULSE_HALF * 2;
-        while self.a_pulse >= pulse_window {
-            self.a_pulse -= pulse_window;
-        }
-        let pulse_press = self.a_pulse < A_PULSE_HALF;
-
-        let api = PokemonApi::new(gb);
-
-        let game_mode = api.game_mode()
-            .ok_or_else(|| "Not in game".to_string())?;
-        let in_battle = matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle);
-
-        // While waiting for a battle menu, pulse A to advance intro / result text.
-        // Navigation states manage their own A presses and don't need the pulse.
-        if in_battle && matches!(self.state,
-            AgentState::BattleWaitingForMenu | AgentState::BattleWaitingForResult |
-            AgentState::AwaitingBattleAction)
-        {
-
-            let menu_state = api.menu_state().unwrap_or_default();
-            if !menu_state.is_battle_menu() {
-                if pulse_press {
-                    gb.core_mut().mmu_mut().joypad_mut().press_button(JoypadButton::A);
-                } else {
-                    gb.core_mut().mmu_mut().joypad_mut().release_button(JoypadButton::A);
-                }
-            }
-        }
-
         // ── Throttled decision-making ─────────────────────────────────────────────
         self.cycles += delta_cycles;
         if self.cycles < RESOLUTION { return Ok(()); }
         while self.cycles >= RESOLUTION { self.cycles -= RESOLUTION; }
 
-        if in_battle {
-            // Switch any non-battle state to BattleWaitingForMenu.
+        let api = PokemonApi::new(gb);
+
+        let game_mode = api.game_mode()
+            .ok_or_else(|| "Not in game".to_string())?;
+
+        if  matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle) {
+            // entering battle
             match self.state {
-                AgentState::BattleWaitingForMenu
-                | AgentState::AwaitingBattleAction
-                | AgentState::BattleNavigating { .. }
-                | AgentState::BattleWaitingForResult => {}
+                AgentState::Battle(_) => {}
                 AgentState::OverworldMovement { destination, .. } => {
                     let d = destination;
                     self.abort_overworld(d, "battle started".into());
                     self.event(AgentEvent::BattleStarted);
-                    self.state = AgentState::BattleWaitingForMenu;
+                    self.set_battle_state(BattleState::WaitingForMenu);
                 }
                 _ => {
                     self.event(AgentEvent::BattleStarted);
-                    self.state = AgentState::BattleWaitingForMenu;
+                    self.set_battle_state(BattleState::WaitingForMenu);
                 }
             }
             return self.update_battle(gb, delta_cycles);
         }
 
         // Leaving battle.
-        match self.state {
-            AgentState::BattleWaitingForMenu
-            | AgentState::AwaitingBattleAction
-            | AgentState::BattleNavigating { .. }
-            | AgentState::BattleWaitingForResult => {
-                self.event(AgentEvent::BattleEnded);
-                self.state = AgentState::Idle;
-            }
-            _ => {}
+        if matches!(self.state, AgentState::Battle(_)) {
+            self.event(AgentEvent::BattleEnded);
+            self.state = AgentState::Idle;
         }
         self.update_overworld(gb, game_mode)
     }
@@ -274,58 +231,74 @@ impl PokemonAgent {
 
     // ── Battle ─────────────────────────────────────────────────────────────────
 
+    fn set_battle_state(&mut self, state: BattleState) {
+        // TODO emit an event
+        println!("Battle state: {:?}", state);
+        self.state = AgentState::Battle(state);
+    }
+
     fn update_battle(&mut self, gb: &mut GameBoy, delta: MachineCycles) -> Result<(), String> {
+        let battle_state = self.state.battle_state()?;
+
         let mut api = PokemonApi::new(gb);
-        api.release_all_buttons();
 
-        match self.state.clone() {
-
-            AgentState::BattleWaitingForMenu => {
+        match battle_state {
+            BattleState::WaitingForMenu => {
                 let menu_state = api.menu_state().unwrap_or_default();
                 if menu_state.is_battle_menu() {
-                    // Menu is up — release A so navigation gets clean edges.
-                    gb.core_mut().mmu_mut().joypad_mut().release_button(JoypadButton::A);
-                    self.state = AgentState::AwaitingBattleAction;
+                    api.release_button(JoypadButton::A);
+                    self.set_battle_state(BattleState::AwaitingPolicy);
+                } else {
+                    // pulse the A button until the menu is up
+                    api.toggle_button(JoypadButton::A);
                 }
-                // else: A-pulse (unthrottled) is advancing intro/result text.
             }
 
-            AgentState::AwaitingBattleAction => {
+            BattleState::AwaitingPolicy => {
                 let game_state = api.game_state()?;
                 if let Some(action) = self.policy.pick_battle_action(&game_state) {
                     self.event(AgentEvent::BattleActionStarted { action });
-                    self.state = AgentState::BattleNavigating {
+                    self.set_battle_state(BattleState::Navigating {
                         targets:       action.navigation_targets().into(),
                         at_target_for: MachineCycles::ZERO,
                         delay_after_a: MachineCycles::ZERO,
                         dpad_cooldown: MachineCycles::ZERO,
-                    };
+                    });
                 }
             }
 
-            AgentState::BattleNavigating { mut targets, at_target_for, delay_after_a, dpad_cooldown } => {
+            BattleState::Navigating { mut targets, at_target_for, delay_after_a, dpad_cooldown } => {
+                api.release_all_buttons();
                 let menu_state = api.menu_state().unwrap_or_default();
+
+                // All targets confirmed — hand off to BattleWaitingForResult so A-pulse
+                // can advance the battle text (the pulse doesn't run in this state).
+                if targets.is_empty() {
+                    self.set_battle_state(BattleState::WaitingForResult);
+                    return Ok(());
+                }
+
                 if !menu_state.is_battle_menu() {
                     // Menu closed (animation playing) — keep waiting.
-                    self.state = AgentState::BattleNavigating { targets, at_target_for, delay_after_a, dpad_cooldown };
+                    self.set_battle_state(BattleState::Navigating { targets, at_target_for, delay_after_a, dpad_cooldown });
                     return Ok(());
                 }
 
                 // Drain the post-A cooldown before doing anything else.
                 if delay_after_a > MachineCycles::ZERO {
-                    self.state = AgentState::BattleNavigating {
+                    self.set_battle_state(BattleState::Navigating {
                         targets,
                         at_target_for,
                         delay_after_a: delay_after_a - delta,
                         dpad_cooldown: MachineCycles::ZERO,
-                    };
+                    });
                     return Ok(());
                 }
 
                 let target = match targets.front().copied() {
                     Some(t) => t,
                     None => {
-                        self.state = AgentState::BattleWaitingForResult;
+                        self.set_battle_state(BattleState::WaitingForResult);
                         return Ok(());
                     }
                 };
@@ -333,32 +306,32 @@ impl PokemonAgent {
                 if menu_state.current_menu == target {
                     // Cursor is on the correct slot — wait AT_TARGET_MIN before confirming.
                     let new_at_target = at_target_for + delta;
-                    if new_at_target >= AT_TARGET_MIN {
-                        gb.core_mut().mmu_mut().joypad_mut().press_button(JoypadButton::A);
+                    if new_at_target >= ACTION_DELAY {
+                        api.press_button(JoypadButton::A);
                         targets.pop_front();
-                        self.state = AgentState::BattleNavigating {
+                        self.set_battle_state(BattleState::Navigating {
                             targets,
                             at_target_for: MachineCycles::ZERO,
-                            delay_after_a: POST_A_DELAY,
+                            delay_after_a: ACTION_DELAY,
                             dpad_cooldown: MachineCycles::ZERO,
-                        };
+                        });
                     } else {
-                        self.state = AgentState::BattleNavigating {
+                        self.set_battle_state(BattleState::Navigating {
                             targets,
                             at_target_for: new_at_target,
                             delay_after_a: MachineCycles::ZERO,
                             dpad_cooldown: MachineCycles::ZERO,
-                        };
+                        });
                     }
                 } else if dpad_cooldown > MachineCycles::ZERO {
                     // Cooldown after last DPAD press — DPAD already blanket-released above,
                     // so the game will see an edge (0→1) when we press again after cooldown.
-                    self.state = AgentState::BattleNavigating {
+                    self.set_battle_state(BattleState::Navigating {
                         targets,
                         at_target_for: MachineCycles::ZERO,
                         delay_after_a: MachineCycles::ZERO,
                         dpad_cooldown: dpad_cooldown - delta,
-                    };
+                    });
                 } else {
                     // Navigate towards target using the 2D grid layout.
                     let cur_row = menu_state.current_menu / 2;
@@ -371,21 +344,23 @@ impl PokemonAgent {
                               else if tgt_row > cur_row  { JoypadButton::Down  }
                               else                        { JoypadButton::Up    };
 
-                    gb.core_mut().mmu_mut().joypad_mut().press_button(btn);
-                    self.state = AgentState::BattleNavigating {
+                    api.press_button(btn);
+                    self.set_battle_state(BattleState::Navigating {
                         targets,
                         at_target_for: MachineCycles::ZERO,
                         delay_after_a: MachineCycles::ZERO,
-                        dpad_cooldown: DPAD_COOLDOWN,
-                    };
+                        dpad_cooldown: ACTION_DELAY,
+                    });
                 }
             }
 
-            AgentState::BattleWaitingForResult => {
+            BattleState::WaitingForResult => {
                 let menu_state = api.menu_state().unwrap_or_default();
                 if menu_state.is_battle_menu() {
-                    gb.core_mut().mmu_mut().joypad_mut().release_button(JoypadButton::A);
-                    self.state = AgentState::BattleWaitingForMenu;
+                    api.release_button(JoypadButton::A);
+                    self.set_battle_state(BattleState::WaitingForMenu);
+                } else {
+                    api.toggle_button(JoypadButton::B);
                 }
                 // else: A-pulse already handles advance in the unthrottled section above.
             }
