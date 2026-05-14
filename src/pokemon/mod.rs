@@ -11,9 +11,10 @@ use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::{JoypadButton, JoypadButtonState};
 use crate::mmu::MMU;
-use crate::pokemon::bag::BagReader;
+use crate::pokemon::bag::{BagReader, BagWriter};
 use crate::pokemon::battle::BagItem;
 use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
+use crate::pokemon::item::ItemId;
 use crate::pokemon::menu::{MenuState, MenuStateReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::move_name::PokemonMoveName;
@@ -76,7 +77,31 @@ impl<'a> PokemonApi<'a> {
 
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {
         let player_state = self.game_state()?;
-        let mut party = player_state.pokemon;
+
+        let bag_items = [
+            BagItem::new(ItemId::Revive, 99),
+            BagItem::new(ItemId::FullHeal, 99),
+            BagItem::new(ItemId::Potion, 99),
+            BagItem::new(ItemId::SuperPotion, 99),
+            BagItem::new(ItemId::HyperPotion, 99),
+            BagItem::new(ItemId::MaxPotion, 99),
+            BagItem::new(ItemId::Bicycle, 1),
+            BagItem::new(ItemId::TownMap, 1),
+            BagItem::new(ItemId::EscapeRope, 99),
+            BagItem::new(ItemId::FireStone, 99),
+            BagItem::new(ItemId::WaterStone, 99),
+            BagItem::new(ItemId::LeafStone, 99),
+            BagItem::new(ItemId::MoonStone, 99),
+            BagItem::new(ItemId::ThunderStone, 99),
+            BagItem::new(ItemId::PokeBall, 99),
+            BagItem::new(ItemId::GreatBall, 99),
+            BagItem::new(ItemId::UltraBall, 99),
+            BagItem::new(ItemId::MasterBall, 99),
+            BagItem::new(ItemId::RareCandy, 99),
+            BagItem::new(ItemId::SuperRod, 1),
+        ];
+
+        let mut party = PokemonParty::default();
         let charizard = Pokemon::maxed(
             PokemonSpecies::Charizard,
             "CHARIZARD",
@@ -90,6 +115,35 @@ impl<'a> PokemonApi<'a> {
             player_state.player_id
         );
         party.push(charizard)?;
+
+        let venusaur = Pokemon::maxed(
+            PokemonSpecies::Venusaur,
+            "VENUSAUR",
+            [
+                PokemonMoveName::RazorLeaf,
+                PokemonMoveName::Solarbeam,
+                PokemonMoveName::Absorb,
+                PokemonMoveName::Acid,
+            ],
+            player_state.name.clone(),
+            player_state.player_id
+        );
+        party.push(venusaur)?;
+
+        let blastoise = Pokemon::maxed(
+            PokemonSpecies::Blastoise,
+            "BLASTOISE",
+            [
+                PokemonMoveName::Surf,
+                PokemonMoveName::HydroPump,
+                PokemonMoveName::Blizzard,
+                PokemonMoveName::Waterfall,
+            ],
+            player_state.name.clone(),
+            player_state.player_id
+        );
+        party.push(blastoise)?;
+
         let mewtwo = Pokemon::maxed(
             PokemonSpecies::Mewtwo,
             "MEWTWO",
@@ -99,12 +153,43 @@ impl<'a> PokemonApi<'a> {
                 PokemonMoveName::IceBeam,
                 PokemonMoveName::Recover,
             ],
-            player_state.name,
+            player_state.name.clone(),
             player_state.player_id
         );
         party.push(mewtwo)?;
-        self.mmu_mut().write_player_pokemon_party(&party)
 
+        let dragonite = Pokemon::maxed(
+            PokemonSpecies::Dragonite,
+            "DRAGONITE",
+            [
+                PokemonMoveName::DragonRage,
+                PokemonMoveName::HyperBeam,
+                PokemonMoveName::Slam,
+                PokemonMoveName::ThunderWave,
+            ],
+            player_state.name.clone(),
+            player_state.player_id
+        );
+        party.push(dragonite)?;
+
+
+        let tauros = Pokemon::maxed(
+            PokemonSpecies::Tauros,
+            "TAUROS",
+            [
+                PokemonMoveName::HyperBeam,
+                PokemonMoveName::BodySlam,
+                PokemonMoveName::Earthquake,
+                PokemonMoveName::Blizzard,
+            ],
+            player_state.name,
+            player_state.player_id
+        );
+        party.push(tauros)?;
+
+        let mmu = self.mmu_mut();
+        mmu.write_bag(&bag_items);
+        mmu.write_player_pokemon_party(&party)
     }
 }
 
@@ -312,7 +397,7 @@ mod test {
         {
             // 3 Potions + 1 Full Heal — replaces whatever was in the bag.
             gb.core_mut().mmu_mut()
-                .write_bag(&[(ItemId::Potion as u8, 3), (ItemId::FullHeal as u8, 1)]);
+                .write_bag(&[BagItem::new(ItemId::Potion, 3), BagItem::new(ItemId::FullHeal, 1)]);
         }
         {
             let mut party = gb.core().mmu().read_player_pokemon_party().unwrap();

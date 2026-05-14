@@ -100,10 +100,6 @@ pub fn render() -> Result<(), String> {
     let mut cycle_count = MachineCycles::ZERO;
     let mut cycle_duration = REALTIME_CYCLE_DURATION;
 
-    fn set_ff(factor: u32) -> Duration {
-        REALTIME_CYCLE_DURATION / factor
-    }
-
     let mut previous_wram = [0u8; 0x2000];
     let mut agent_running = false;
     'running: loop {
@@ -121,11 +117,11 @@ pub fn render() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(keycode), repeat: false, .. } => {
                     use crate::joypad::JoypadButton::*;
                     match keycode {
-                        Keycode::Num1 => cycle_duration = set_ff(1),
-                        Keycode::Num2 => cycle_duration = set_ff(2),
-                        Keycode::Num3 => cycle_duration = set_ff(3),
-                        Keycode::Num4 => cycle_duration = set_ff(4),
-                        Keycode::Num5 => cycle_duration = set_ff(5),
+                        Keycode::Num1 => cycle_duration = REALTIME_CYCLE_DURATION,
+                        Keycode::Num2 => cycle_duration = REALTIME_CYCLE_DURATION / 2,
+                        Keycode::Num3 => cycle_duration = REALTIME_CYCLE_DURATION / 3,
+                        Keycode::Num4 => cycle_duration = REALTIME_CYCLE_DURATION / 4,
+                        Keycode::Num5 => cycle_duration = REALTIME_CYCLE_DURATION / 5,
                         Keycode::F1 => {
                             let ppu = gb.core().mmu().ppu();
                             ppu.dump_tilemap(TileMapMode::Lower, TileDataMode::Lower)

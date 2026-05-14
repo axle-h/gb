@@ -40,6 +40,12 @@ pub struct BagItem {
     pub quantity: u8,
 }
 
+impl BagItem {
+    pub fn new(id: ItemId, quantity: u8) -> Self {
+        Self { id, quantity }
+    }
+}
+
 /// Action the player can take on their turn.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BattleAction {
