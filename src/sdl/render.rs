@@ -23,6 +23,7 @@ use crate::sdl::font::FontTextures;
 const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
 const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
 const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
+const REALTIME_CYCLE_DURATION: Duration = MachineCycles::from_m(1).to_duration();
 
 pub fn render() -> Result<(), String> {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -92,12 +93,16 @@ pub fn render() -> Result<(), String> {
 
     let mut since_last_render = Duration::ZERO;
     let mut frame_timestamps = VecDeque::new();
-    let duration_per_cycle = MachineCycles::from_m(1).to_duration();
     let mut since_last_update = Duration::ZERO;
     let mut ahead_by_cycles = MachineCycles::ZERO;
 
     let mut iteration_count = 0;
     let mut cycle_count = MachineCycles::ZERO;
+    let mut cycle_duration = REALTIME_CYCLE_DURATION;
+
+    fn set_ff(factor: u32) -> Duration {
+        REALTIME_CYCLE_DURATION / factor
+    }
 
     let mut previous_wram = [0u8; 0x2000];
     let mut agent_running = false;
@@ -116,6 +121,11 @@ pub fn render() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(keycode), repeat: false, .. } => {
                     use crate::joypad::JoypadButton::*;
                     match keycode {
+                        Keycode::Num1 => cycle_duration = set_ff(1),
+                        Keycode::Num2 => cycle_duration = set_ff(2),
+                        Keycode::Num3 => cycle_duration = set_ff(3),
+                        Keycode::Num4 => cycle_duration = set_ff(4),
+                        Keycode::Num5 => cycle_duration = set_ff(5),
                         Keycode::F1 => {
                             let ppu = gb.core().mmu().ppu();
                             ppu.dump_tilemap(TileMapMode::Lower, TileDataMode::Lower)
@@ -210,8 +220,8 @@ pub fn render() -> Result<(), String> {
         }
 
         let mut min_cycles = MachineCycles::ZERO;
-        while since_last_update >= duration_per_cycle {
-            since_last_update -= duration_per_cycle;
+        while since_last_update >= cycle_duration {
+            since_last_update -= cycle_duration;
 
             if ahead_by_cycles > MachineCycles::ZERO {
                 ahead_by_cycles -= MachineCycles::ONE;

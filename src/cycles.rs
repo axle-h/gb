@@ -43,7 +43,7 @@ impl MachineCycles {
         Self(ticks / 4) // 4 tick = 1 machine cycle
     }
 
-    pub fn to_duration(self) -> Duration {
+    pub const fn to_duration(self) -> Duration {
         Duration::from_nanos((self.0 as u64 * 4_000_000_000) / Self::CPU_FREQ as u64)
     }
 }
