@@ -80,8 +80,6 @@ impl BattleMenuState {
 pub struct MenuState {
     pub text_box_id: TextBoxId,
     pub current_item: u8,
-    pub last_item: u8,
-    pub saved_item: u8,
     pub scroll_offset: u8,
     pub cursor_location: u8,
     pub top_menu_item_x: u8,
@@ -89,6 +87,10 @@ pub struct MenuState {
 }
 
 impl MenuState {
+    pub fn new(text_box_id: TextBoxId, current_item: u8, scroll_offset: u8, cursor_location: u8, top_menu_item_x: u8, top_menu_item_y: u8) -> Self {
+        Self { text_box_id, current_item, scroll_offset, cursor_location, top_menu_item_x, top_menu_item_y }
+    }
+
     pub fn is_battle_menu(&self) -> bool {
         self.text_box_id.is_battle_menu()
     }
@@ -116,22 +118,30 @@ impl MenuState {
     }
 
     pub fn battle_menu_state(&self) -> Option<BattleMenuState> {
-        if !self.is_battle_menu() {
-            return None;
-        }
-        if self.is_main_battle_menu() {
-            return Some(match self.battle_menu_item() {
-                0 => BattleMenuState::Fight,
-                1 => BattleMenuState::Item,
-                2 => BattleMenuState::Pokemon,
-                3 => BattleMenuState::Run,
-                _ => return None,
+        if self.is_battle_menu() {
+            if self.is_main_battle_menu() {
+                return Some(match self.battle_menu_item() {
+                    0 => BattleMenuState::Fight,
+                    1 => BattleMenuState::Item,
+                    2 => BattleMenuState::Pokemon,
+                    3 => BattleMenuState::Run,
+                    _ => return None,
+                });
+            }
+            // Move list: top_menu_item_x=5, current_item is 1-indexed.
+            if self.text_box_id == TextBoxId::BattleMenuTemplate && self.top_menu_item_x == 5 {
+                return Some(BattleMenuState::MoveList { index: self.current_item.saturating_sub(1) });
+            }
+        } else if self.text_box_id == TextBoxId::ListMenuBox {
+            return Some(BattleMenuState::ItemList {
+                index: self.current_item.saturating_add(self.scroll_offset),
+            });
+        } else if self.text_box_id == TextBoxId::MessageBox {
+            return Some(BattleMenuState::PokemonList {
+                index: self.current_item,
             });
         }
-        // Move list: top_menu_item_x=5, current_item is 1-indexed.
-        if self.text_box_id == TextBoxId::BattleMenuTemplate && self.top_menu_item_x == 5 {
-            return Some(BattleMenuState::MoveList { index: self.current_item.saturating_sub(1) });
-        }
+
         None
     }
 }
@@ -139,66 +149,91 @@ impl MenuState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use TextBoxId::*;
 
-    fn menu_state(current_item: u8, cursor_location: u8, top_menu_item_x: u8, top_menu_item_y: u8) -> MenuState {
-        MenuState {
-            text_box_id: TextBoxId::BattleMenuTemplate,
-            current_item,
-            last_item: current_item,
-            saved_item: 0,
-            scroll_offset: 0,
-            cursor_location,
-            top_menu_item_x,
-            top_menu_item_y,
+    #[test]
+    fn battle_menu_base() {
+        assert_eq!(
+            MenuState::new(BattleMenuTemplate, 0, 0, 193, 9, 14).battle_menu_state(),
+            Some(BattleMenuState::Fight)
+        );
+
+        assert_eq!(
+            MenuState::new(BattleMenuTemplate, 1, 0, 233, 9, 14).battle_menu_state(),
+            Some(BattleMenuState::Item)
+        );
+
+        assert_eq!(
+            MenuState::new(BattleMenuTemplate, 0, 0, 199, 15, 14).battle_menu_state(),
+            Some(BattleMenuState::Pokemon)
+        );
+
+        assert_eq!(
+            MenuState::new(BattleMenuTemplate, 1, 0, 239, 15, 14).battle_menu_state(),
+            Some(BattleMenuState::Run)
+        );
+    }
+
+    #[test]
+    fn battle_menu_moves() {
+        for index in 0..4 {
+            let cursor_location = 169 + index * 20;
+            assert_eq!(
+                MenuState::new(BattleMenuTemplate, index + 1, 0, cursor_location, 5, 12).battle_menu_state(),
+                Some(BattleMenuState::MoveList { index })
+            );
         }
     }
 
     #[test]
-    fn fight() {
-        let s = menu_state(0, 193, 9, 14);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::Fight));
+    fn battle_menu_items() {
+        assert_eq!(
+            MenuState::new(ListMenuBox, 0, 0, 245, 5, 4).battle_menu_state(),
+            Some(BattleMenuState::ItemList { index: 0 })
+        );
+        assert_eq!(
+            MenuState::new(ListMenuBox, 1, 0, 29, 5, 4).battle_menu_state(),
+            Some(BattleMenuState::ItemList { index: 1 })
+        );
+        assert_eq!(
+            MenuState::new(ListMenuBox, 2, 0, 69, 5, 4).battle_menu_state(),
+            Some(BattleMenuState::ItemList { index: 2 })
+        );
+
+        for index in 3..20 {
+            assert_eq!(
+                MenuState::new(ListMenuBox, 2, index - 2, 69, 5, 4).battle_menu_state(),
+                Some(BattleMenuState::ItemList { index })
+            );
+        }
     }
 
     #[test]
-    fn item() {
-        let s = menu_state(1, 233, 9, 14);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::Item));
-    }
-
-    #[test]
-    fn pokemon() {
-        let s = menu_state(0, 199, 15, 14);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::Pokemon));
-    }
-
-    #[test]
-    fn run() {
-        let s = menu_state(1, 239, 15, 14);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::Run));
-    }
-
-    #[test]
-    fn move_first() {
-        let s = menu_state(1, 169, 5, 12);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::MoveList { index: 0 }));
-    }
-
-    #[test]
-    fn move_second() {
-        let s = menu_state(2, 189, 5, 12);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::MoveList { index: 1 }));
-    }
-
-    #[test]
-    fn move_third() {
-        let s = menu_state(3, 209, 5, 12);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::MoveList { index: 2 }));
-    }
-
-    #[test]
-    fn move_fourth() {
-        let s = menu_state(4, 229, 5, 12);
-        assert_eq!(s.battle_menu_state(), Some(BattleMenuState::MoveList { index: 3 }));
+    fn battle_menu_pokemon() {
+        assert_eq!(
+            MenuState::new(MessageBox, 0, 0, 180, 0, 1).battle_menu_state(),
+            Some(BattleMenuState::PokemonList { index: 0 })
+        );
+        assert_eq!(
+            MenuState::new(MessageBox, 1, 0, 220, 0, 1).battle_menu_state(),
+            Some(BattleMenuState::PokemonList { index: 1 })
+        );
+        assert_eq!(
+            MenuState::new(MessageBox, 2, 0, 4, 0, 1).battle_menu_state(),
+            Some(BattleMenuState::PokemonList { index: 2 })
+        );
+        assert_eq!(
+            MenuState::new(MessageBox, 3, 0, 44, 0, 1).battle_menu_state(),
+            Some(BattleMenuState::PokemonList { index: 3 })
+        );
+        assert_eq!(
+            MenuState::new(MessageBox, 4, 0, 84, 0, 1).battle_menu_state(),
+            Some(BattleMenuState::PokemonList { index: 4 })
+        );
+        assert_eq!(
+            MenuState::new(MessageBox, 5, 0, 124, 0, 1).battle_menu_state(),
+            Some(BattleMenuState::PokemonList { index: 5 })
+        );
     }
 }
 
@@ -212,8 +247,6 @@ impl MenuStateReader for MMU {
             Some(MenuState {
                 text_box_id,
                 current_item: self.read_pointer(&pokered_symbols::wCurrentMenuItem),
-                last_item: self.read_pointer(&pokered_symbols::wLastMenuItem),
-                saved_item: self.read_pointer(&pokered_symbols::wBattleAndStartSavedMenuItem),
                 scroll_offset: self.read_pointer(&pokered_symbols::wListScrollOffset),
                 cursor_location: self.read_pointer(&pokered_symbols::wMenuCursorLocation),
                 top_menu_item_x: self.read_pointer(&pokered_symbols::wTopMenuItemX),

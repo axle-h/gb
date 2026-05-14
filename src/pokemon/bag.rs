@@ -26,18 +26,18 @@ impl BagReader for MMU {
 }
 
 pub trait BagWriter {
-    /// Replaces the bag contents with the given `(item_id, quantity)` pairs.
-    fn write_bag(&mut self, items: &[(u8, u8)]);
+    /// Replaces the bag contents with the given items.
+    fn write_bag(&mut self, items: &[BagItem]);
 }
 
 impl BagWriter for MMU {
-    fn write_bag(&mut self, items: &[(u8, u8)]) {
+    fn write_bag(&mut self, items: &[BagItem]) {
         let count = items.len().min(20) as u8;
         self.write(pokered_symbols::wNumBagItems.address, count);
         let base = pokered_symbols::wBagItems.address;
-        for (i, &(id, qty)) in items.iter().take(20).enumerate() {
-            self.write(base + i as u16 * 2,     id);
-            self.write(base + i as u16 * 2 + 1, qty);
+        for (i, item) in items.iter().take(20).enumerate() {
+            self.write(base + i as u16 * 2,     item.id as u8);
+            self.write(base + i as u16 * 2 + 1, item.quantity.min(99));
         }
         // FF terminator
         self.write(base + count as u16 * 2, 0xFF);
