@@ -692,6 +692,31 @@ mod test {
         );
     }
 
+    /// The Pokémon Center nurse stands behind a counter.  The player should be able to
+    /// talk to her by approaching the counter tile (a "talking over" tile in pokered).
+    #[test]
+    fn test_viridian_pokecenter_nurse_action() {
+        use encoding::MetaTile;
+
+        const POKECENTER_STATE: &[u8] = include_bytes!("./test_data/viridian-city-pokemon-center.bin");
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(POKECENTER_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        assert_eq!(state.map.map, Map::ViridianPokecenter);
+
+        let actions = state.map.actions();
+        let tiles: Vec<_> = actions.iter().map(|a| &a.tile).collect();
+
+        assert!(
+            actions.iter().any(|a| a.tile == MetaTile::Sprite("Nurse")),
+            "expected Talk to Nurse action (counter tile should be treated as talking-over tile); actions: {tiles:?}"
+        );
+    }
+
     /// With the player already standing in Red's House 1F after descending from 2F,
     /// all three actions must be available: exit to Pallet Town, stairs to 2F, talk to Mom.
     #[test]

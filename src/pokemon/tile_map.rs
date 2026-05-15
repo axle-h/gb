@@ -108,7 +108,7 @@ impl MetaTileMap {
                 } else {
                     dist.insert(nb, d + 1);
                     came_from.insert(nb, (pos, dir));
-                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_)) {
+                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Counter) {
                         queue.push_back(nb);
                     }
                 }
@@ -171,14 +171,34 @@ impl MetaTileMap {
         // 2. Routes to sprites (route to an adjacent empty tile, then face the sprite)
         for sprite in self.sprites.iter().filter(|s| !s.hidden) {
             let sp = sprite.position;
-            let adjacent = [
+            // Direct adjacent positions (player is one tile from sprite).
+            let direct: [(PlayerFacingDirection, Point8); 4] = [
                 (PlayerFacingDirection::Down,  Point8 { x: sp.x,                   y: sp.y.saturating_sub(1) }),
                 (PlayerFacingDirection::Up,    Point8 { x: sp.x,                   y: sp.y + 1               }),
                 (PlayerFacingDirection::Right, Point8 { x: sp.x.saturating_sub(1), y: sp.y                   }),
                 (PlayerFacingDirection::Left,  Point8 { x: sp.x + 1,               y: sp.y                   }),
             ];
+            // Counter-mediated positions: if the tile adjacent to the sprite is a Counter
+            // (talking-over tile), also add the position one more step further away.
+            // The player stands there, faces the counter, presses A — pokered then looks
+            // through the counter to interact with the sprite behind it.
+            let counter_extra: Vec<(PlayerFacingDirection, Point8)> = direct.iter()
+                .filter_map(|(face_dir, adj)| {
+                    let ax = adj.x as usize;
+                    let ay = adj.y as usize;
+                    if ax >= self.width || ay >= self.height { return None; }
+                    if self.meta_tiles[ax + ay * self.width] != MetaTile::Counter { return None; }
+                    let over = match face_dir {
+                        PlayerFacingDirection::Down  => adj.y.checked_sub(1).map(|y| Point8 { x: adj.x, y }),
+                        PlayerFacingDirection::Up    => (ay + 1 < self.height).then_some(Point8 { x: adj.x, y: adj.y + 1 }),
+                        PlayerFacingDirection::Right => adj.x.checked_sub(1).map(|x| Point8 { x, y: adj.y }),
+                        PlayerFacingDirection::Left  => (ax + 1 < self.width).then_some(Point8 { x: adj.x + 1, y: adj.y }),
+                    };
+                    over.map(|p| (*face_dir, p))
+                })
+                .collect();
 
-            let Some((face_dir, dest)) = adjacent.iter()
+            let Some((face_dir, dest)) = direct.iter().chain(counter_extra.iter())
                 .filter(|(_, p)| {
                     (p.x as usize) < self.width && (p.y as usize) < self.height
                     && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
@@ -235,6 +255,7 @@ impl Display for MetaTileMap {
                     MetaTile::Jump(JumpDirection::South) => write!(f, "v")?,
                     MetaTile::Jump(JumpDirection::West)  => write!(f, "<")?,
                     MetaTile::Jump(JumpDirection::East)  => write!(f, ">")?,
+                    MetaTile::Counter => write!(f, "=")?,
                 }
             }
             writeln!(f)?;

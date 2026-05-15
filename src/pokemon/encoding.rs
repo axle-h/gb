@@ -309,6 +309,16 @@ impl PokemonEncoding for MMU {
         let is_water_tileset = water_tilesets.iter()
             .take_while(|&&b| b != 0xFF)
             .any(|&b| b == tileset_id);
+
+        // wTilesetTalkingOverTiles: 3 inline bytes in RAM holding tile IDs for counter/desk
+        // tiles that the player can interact through (pokered "talking over" mechanic).
+        // 0xFF = unused slot (no tile).
+        let talking_over_tiles: HashSet<u8> = {
+            let base = pokered_symbols::wTilesetTalkingOverTiles.address;
+            (0u16..3).map(|i| self.read(base + i))
+                     .filter(|&b| b != 0xFF)
+                     .collect()
+        };
         let player_position = Point8 {
             x: self.read_pointer(&pokered_symbols::wXCoord),
             y: self.read_pointer(&pokered_symbols::wYCoord),
@@ -335,6 +345,7 @@ impl PokemonEncoding for MMU {
             map_data,
             tileset_data,
             collision_tiles,
+            talking_over_tiles,
             warp_events,
             sprites,
             is_water_tileset,
@@ -560,6 +571,10 @@ pub enum MetaTile {
     Connection(Map),
     /// Water entry point into an adjacent map — only reachable while surfing.
     ConnectionWater(Map),
+    /// Counter / desk tile listed in `wTilesetTalkingOverTiles`.
+    /// The player cannot walk on it, but can interact with a sprite one tile behind it
+    /// by facing the counter and pressing A — pokered's "talking over" mechanic.
+    Counter,
 }
 
 /// The direction a ledge can be jumped over.
@@ -694,6 +709,9 @@ pub struct CurrentMap {
     pub map_data: Vec<u8>,
     pub tileset_data: Vec<u8>,
     pub collision_tiles: HashSet<u8>,
+    /// Tile IDs from `wTilesetTalkingOverTiles` — counters/desks the player can
+    /// interact through by facing them and pressing A (pokered "talking over" mechanic).
+    pub talking_over_tiles: HashSet<u8>,
     pub warp_events: Vec<WarpEvent>,
     pub sprites: Vec<Sprite>,
     /// True if the current tileset is listed in the WaterTilesets table,
@@ -757,9 +775,11 @@ impl CurrentMap {
         let mut result = vec![MetaTile::Obstacle; exp_width * exp_height];
 
         // Fill current map tiles, shifted by the connection offsets.
-        // Priority: Water > Empty > Obstacle (default).
+        // Priority: Water > Empty > Counter > Obstacle (default).
         // Water beats walkable: if any sub-tile of a 2×2 meta-tile is water/shore, the whole
         // meta-tile is Water, even if other sub-tiles are walkable (e.g. north-shore + water).
+        // Counter: non-walkable tile listed in wTilesetTalkingOverTiles; marks desks/counters
+        // that sprites can be talked to through.
         let width_tiles  = self.map_header.width  as usize * Self::BLOCK_TILE_WIDTH;
         let height_tiles = self.map_header.height as usize * Self::BLOCK_TILE_WIDTH;
         for tile_y in 0..height_tiles {
@@ -778,6 +798,8 @@ impl CurrentMap {
                         result[index] = MetaTile::Jump(dir);
                     } else if result[index] == MetaTile::Obstacle && self.is_empty(tile_x, tile_y) {
                         result[index] = MetaTile::Empty;
+                    } else if result[index] == MetaTile::Obstacle && self.talking_over_tiles.contains(&tile_id) {
+                        result[index] = MetaTile::Counter;
                     }
                 }
             }
