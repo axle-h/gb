@@ -271,6 +271,11 @@ impl PokemonEncoding for MMU {
                     // 	ld [wTextBoxID], a
                     // see TextBoxFunctionTable:
                     GameMode::TextBox
+                } else if self.read_pointer(&pokered_symbols::wScriptedNPCWalkCounter) != 0 {
+                    // wScriptedNPCWalkCounter is non-zero while an NPC scripted walk is in
+                    // progress (e.g. clerk NPC approaching the player in a PokéMART).
+                    // The player is frozen; the agent should press A to advance the script.
+                    GameMode::Script
                 } else {
                     GameMode::Overworld
                 }
@@ -548,6 +553,9 @@ pub enum GameMode {
     TrainerBattle,
     Menu,
     TextBox,
+    /// A map script or NPC scripted walk is running (`wCurrentMapScriptFlags` is non-zero).
+    /// The player is frozen; the agent should advance the script by pressing A.
+    Script,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

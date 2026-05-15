@@ -62,6 +62,9 @@ enum AgentState {
     AwaitingOverworldAction { delay: DelayContext },
     OverworldMovement { destination: MetaTile, map: Map },
     ReadingTextBox { reader: PokemonTextReader },
+    /// A map script or NPC scripted walk is running.  The player is frozen; the agent
+    /// toggles A each tick to advance the script and any subsequent dialogue.
+    RunningScript,
 
     Battle(BattleState),
 }
@@ -124,6 +127,13 @@ impl PokemonAgent {
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
 
+        // If a map script triggers while navigating, abort and let RunningScript handle it.
+        if game_mode == GameMode::Script {
+            if let AgentState::OverworldMovement { destination, .. } = self.state {
+                self.abort_overworld(destination, "map script started".into());
+            }
+        }
+
         if  matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle) {
             // entering battle
             match self.state {
@@ -165,16 +175,45 @@ impl PokemonAgent {
                     GameMode::TextBox => {
                         self.state = AgentState::ReadingTextBox { reader: PokemonTextReader::default() };
                     }
+                    GameMode::Script => {
+                        self.state = AgentState::RunningScript;
+                    }
                     _ => {
                         self.state = AgentState::AwaitingOverworldAction { delay: DelayContext::long() }
                     }
                 }
             }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
+                // Re-check mode before acting: game_mode may have transitioned to TextBox or Script
+                // while the delay was counting down (e.g. a map script triggered mid-wait).
+                match game_mode {
+                    GameMode::TextBox => {
+                        self.state = AgentState::ReadingTextBox { reader: PokemonTextReader::default() };
+                        return Ok(());
+                    }
+                    GameMode::Script => {
+                        self.state = AgentState::RunningScript;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 if !delay.tick(delta_cycles) { return Ok(()); }
                 let game_state = api.game_state()?;
                 if let Some(action) = self.policy.pick_overworld_action(&game_state) {
                     self.take_overworld_action(action);
+                }
+            }
+            AgentState::RunningScript => {
+                match game_mode {
+                    GameMode::Script => api.toggle_button(JoypadButton::A),
+                    GameMode::TextBox => {
+                        api.release_all_buttons();
+                        self.state = AgentState::ReadingTextBox { reader: PokemonTextReader::default() };
+                    }
+                    _ => {
+                        api.release_all_buttons();
+                        self.state = AgentState::Idle;
+                    }
                 }
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
