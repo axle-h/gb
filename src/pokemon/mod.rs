@@ -345,7 +345,7 @@ mod test {
     pub const ROUTE1_STATE: &[u8] = include_bytes!("./test_data/route1-state.bin");
     pub const BATTLE_STATE: &[u8] = include_bytes!("./test_data/battle-state.bin");
 
-    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
     enum PolicyEvent {
         Movement(Map),
         Battle,
@@ -689,6 +689,43 @@ mod test {
         assert!(
             !actions.iter().any(|a| a.tile == MetaTile::Connection(Map::Route21)),
             "unexpected walkable connection to Route21 (should be water-only)"
+        );
+    }
+
+    /// With the player already standing in Red's House 1F after descending from 2F,
+    /// all three actions must be available: exit to Pallet Town, stairs to 2F, talk to Mom.
+    #[test]
+    fn test_reds_house_1f_actions_from_save_state() {
+        use encoding::MetaTile;
+
+        const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("./test_data/reds-house-1f-state.bin");
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(REDS_HOUSE_1F_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        assert_eq!(state.map.map, Map::RedsHouse1F, "save state should start in RedsHouse1F");
+
+        let actions = state.map.actions();
+        let tiles: Vec<_> = actions.iter().map(|a| &a.tile).collect();
+
+        assert!(
+            actions.iter().any(|a| a.tile == MetaTile::Warp(Map::PalletTown)),
+            "expected exit Warp → PalletTown; actions: {tiles:?}"
+        );
+        assert!(
+            actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse2F)),
+            "expected Warp → RedsHouse2F (stairs); actions: {tiles:?}"
+        );
+        assert!(
+            actions.iter().any(|a| a.tile == MetaTile::Sprite("Mom")),
+            "expected Sprite(Mom); actions: {tiles:?}"
+        );
+        assert!(
+            !actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse1F)),
+            "self-referential Warp → RedsHouse1F must not appear; actions: {tiles:?}"
         );
     }
 
