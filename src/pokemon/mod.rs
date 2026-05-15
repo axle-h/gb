@@ -692,7 +692,54 @@ mod test {
         );
     }
 
-    /// The Pokémon Center nurse stands behind a counter.  The player should be able to
+    /// When the ViridianCity PokeMART clerk's intro script is running the agent must
+    /// advance the conversation by pressing A — not try to navigate around the map.
+    #[test]
+    fn test_viridian_pokemart_script_advances_dialogue() {
+        use std::time::Duration;
+        use crate::pokemon::agent::PokemonAgent;
+
+        const POKEMART_STATE: &[u8] = include_bytes!("./test_data/viridian-city-pokemart-during-script.bin");
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(POKEMART_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+
+        // The save state has the clerk's text box already open.
+        // The game mode must be TextBox or Script — never plain Overworld.
+        {
+            let api = PokemonApi::new(&mut gb);
+            let mode = api.game_mode().unwrap();
+            assert!(
+                matches!(mode, GameMode::TextBox | GameMode::Script),
+                "Expected TextBox or Script mode in PokeMART save state, got {:?}", mode
+            );
+        }
+
+        // Run the agent: it should press A to advance the dialogue and eventually
+        // return to Overworld mode.
+        let mut agent = PokemonAgent::new(Box::new(crate::pokemon::policy::RandomPolicy));
+        let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16));
+
+        let mut returned_to_overworld = false;
+        for _ in 0..10_000u32 {
+            gb.run(frame_cycles);
+            agent.update(&mut gb, frame_cycles).ok();
+
+            let api = PokemonApi::new(&mut gb);
+            if api.game_mode() == Some(GameMode::Overworld) {
+                returned_to_overworld = true;
+                break;
+            }
+        }
+
+        assert!(
+            returned_to_overworld,
+            "agent should advance the PokeMART dialogue and return to Overworld within 10000 frames"
+        );
+    }
+
+/// The Pokémon Center nurse stands behind a counter.  The player should be able to
     /// talk to her by approaching the counter tile (a "talking over" tile in pokered).
     #[test]
     fn test_viridian_pokecenter_nurse_action() {
