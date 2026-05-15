@@ -34,7 +34,7 @@ pub trait PokemonEncoding {
 
     fn read_sprites(&self) -> Result<Vec<Sprite>, String>;
 
-    fn read_warp_events(&self) -> Result<Vec<WarpEvent>, String>;
+    fn read_warp_events(&self, cur_map: Map, map_bank: usize, objects_address: u16) -> Result<Vec<WarpEvent>, String>;
 
     fn read_game_mode(&self) -> GameMode;
 
@@ -221,23 +221,33 @@ impl PokemonEncoding for MMU {
         Ok(sprites)
     }
 
-    fn read_warp_events(&self) -> Result<Vec<WarpEvent>, String> {
-        let warp_count = self.read(0xD3AE) as u16;
+    fn read_warp_events(&self, cur_map: Map, map_bank: usize, objects_address: u16) -> Result<Vec<WarpEvent>, String> {
+        // Read directly from ROM so we get the raw destination byte (including 0xFF / self-ref)
+        // before pokémon Red's runtime wLastMap resolution, which becomes stale when
+        // navigating between indoor floors (e.g. Red's House 1F → 2F → 1F).
+        //
+        // Object-data layout: [border_block(1), warp_count(1), warp_entries(4 each), ...]
+        let warp_count = self.rom_data_from_pointer(map_bank, objects_address + 1, 1)[0] as u16;
         let mut result = vec![];
-        let last_map_id = self.read(0xD73C);
         for index in 0..warp_count {
-            let address = 0xD3AF + index * 4;
-            let map_id = self.read(address + 3);
-            let warp = WarpEvent {
-                position: Point8 { y: self.read(address), x: self.read(address + 1) },
-                // warp_id: self.read(address + 2),
-                map_id: Map::from_repr(if map_id == 0xFF {
-                    last_map_id
-                } else {
-                    map_id
-                }).ok_or_else(|| format!("Invalid map number {}", map_id))?,
+            let base = objects_address + 2 + index * 4;
+            let entry = self.rom_data_from_pointer(map_bank, base, 4);
+            let raw_map_id = entry[3];
+            // 0xFF = LAST_MAP sentinel; self-referential (raw_map_id == cur_map) is
+            // pokémon Red's building-exit convention meaning the same thing.
+            // In both cases the true destination is the outdoor map whose warp table
+            // points back to this indoor map.
+            let map_id = if raw_map_id == 0xFF || raw_map_id == cur_map as u8 {
+                self.find_outdoor_entry_map(cur_map)
+                    .ok_or_else(|| format!("No outdoor map found for {cur_map}"))?
+            } else {
+                Map::from_repr(raw_map_id)
+                    .ok_or_else(|| format!("Invalid map number {raw_map_id}"))?
             };
-            result.push(warp);
+            result.push(WarpEvent {
+                position: Point8 { y: entry[0], x: entry[1] },
+                map_id,
+            });
         }
         Ok(result)
     }
@@ -288,7 +298,7 @@ impl PokemonEncoding for MMU {
         let tileset_data_address = self.read_pointer_u16_le(&pokered_symbols::wTilesetBlocksPtr);
         let tileset_data = self.rom_data_from_pointer(tileset_bank, tileset_data_address, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
 
-        let warp_events = self.read_warp_events()?;
+        let warp_events = self.read_warp_events(map, map_bank, map_header.objects_address)?;
 
         let sprites = self.read_sprites()?;
 
@@ -335,6 +345,30 @@ impl PokemonEncoding for MMU {
 }
 
 impl MMU {
+    /// Scans every Overworld-tileset map in ROM for a warp tile whose destination map
+    /// equals `indoor_map`.  Returns the first match — this is the outdoor map the
+    /// player should be returned to when they step on a self-referential / LAST_MAP exit warp.
+    fn find_outdoor_entry_map(&self, indoor_map: Map) -> Option<Map> {
+        let map_banks = self.rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT);
+        (0..Map::COUNT)
+            .filter_map(|id| {
+                let outdoor_map = Map::from_repr(id as u8)?;
+                let header_ptr  = outdoor_map.header_pointer()?;
+                let header      = self.read_map_header(header_ptr)?;
+                if header.tileset != TileSetId::Overworld { return None; }
+                let bank        = map_banks[id] as usize;
+                let warp_count  = self.rom_data_from_pointer(bank, header.objects_address + 1, 1)[0] as u16;
+                for wi in 0..warp_count {
+                    let entry = self.rom_data_from_pointer(bank, header.objects_address + 2 + wi * 4, 4);
+                    if entry[3] == indoor_map as u8 {
+                        return Some(outdoor_map);
+                    }
+                }
+                None
+            })
+            .next()
+    }
+
     /// Reads the `LedgeTiles` ROM table and returns a map of tile_id → JumpDirection.
     ///
     /// The table has 4-byte entries terminated by 0xFF:
