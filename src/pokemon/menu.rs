@@ -91,10 +91,6 @@ impl MenuState {
         Self { text_box_id, current_item, scroll_offset, cursor_location, top_menu_item_x, top_menu_item_y }
     }
 
-    pub fn is_battle_menu(&self) -> bool {
-        self.text_box_id.is_battle_menu()
-    }
-
     fn battle_menu_item(&self) -> u8 {
         let right_column = match self.text_box_id {
             TextBoxId::BattleMenuTemplate => self.top_menu_item_x == 15,
@@ -118,7 +114,7 @@ impl MenuState {
     }
 
     pub fn battle_menu_state(&self) -> Option<BattleMenuState> {
-        if self.is_battle_menu() {
+        if self.text_box_id.is_battle_menu() {
             if self.is_main_battle_menu() {
                 return Some(match self.battle_menu_item() {
                     0 => BattleMenuState::Fight,
@@ -132,11 +128,12 @@ impl MenuState {
             if self.text_box_id == TextBoxId::BattleMenuTemplate && self.top_menu_item_x == 5 {
                 return Some(BattleMenuState::MoveList { index: self.current_item.saturating_sub(1) });
             }
-        } else if self.text_box_id == TextBoxId::ListMenuBox {
+        } else if self.text_box_id == TextBoxId::ListMenuBox && self.top_menu_item_x == 5 && self.top_menu_item_y == 4 {
             return Some(BattleMenuState::ItemList {
                 index: self.current_item.saturating_add(self.scroll_offset),
             });
-        } else if self.text_box_id == TextBoxId::MessageBox {
+        } else if self.text_box_id == TextBoxId::MessageBox && self.top_menu_item_x == 0 && self.top_menu_item_y == 1 {
+            // on the pokemon list top x is always 0 & top y is always 1 see pokemon.asm::PartyMenuInit
             return Some(BattleMenuState::PokemonList {
                 index: self.current_item,
             });

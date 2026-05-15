@@ -7,6 +7,7 @@ pub struct PokemonTextReader {
     buffer: String,
     had_text: bool,
     page_cleared: bool,
+    message_box_only: bool,
 }
 
 impl Display for PokemonTextReader {
@@ -16,18 +17,20 @@ impl Display for PokemonTextReader {
 }
 
 impl PokemonTextReader {
+    pub fn message_box_only() -> Self {
+        Self {
+            message_box_only: true,
+            ..Self::default()
+        }
+    }
+
 
     pub fn update<A: PokemonApiTrait>(&mut self, api: &mut A) {
         // mash the A button to advance the text
-        let joypad_state = api.read_joypad_state();
-        if joypad_state.a {
-            api.release_all_buttons();
-        } else {
-            api.press_button(JoypadButton::A);
-        }
+        api.toggle_button(JoypadButton::A);
 
         let buffer_len = self.buffer.len();
-        if let Some(on_screen_text) = api.on_screen_text() {
+        if let Some(on_screen_text) = api.on_screen_text(self.message_box_only) {
             let on_screen_text_len = on_screen_text.len();
             if on_screen_text_len == 0 && self.had_text {
                 self.page_cleared = true;
@@ -106,7 +109,7 @@ mod tests {
             Ok(self.game_state.clone())
         }
 
-        fn on_screen_text(&self) -> Option<String> {
+        fn on_screen_text(&self, only_message_box: bool) -> Option<String> {
             self.on_screen_text.clone()
         }
 

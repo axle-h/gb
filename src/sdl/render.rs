@@ -175,12 +175,17 @@ pub fn render() -> Result<(), String> {
                             // println!("{:?}", pokemon_api.pokemon_party());
                             //println!("{:?}", pokemon_api.map_state());
                             // pokemon_api.game_state()?;
-                            println!("{:?}", pokemon_api.on_screen_text());
+                            println!("{:?}", pokemon_api.on_screen_text(false));
                         },
                         Keycode::W => {
                             let pokemon_api = PokemonApi::new(&mut gb);
                             let menu_state = pokemon_api.menu_state().unwrap();
                             println!("{:?}", menu_state);
+                        },
+                        Keycode::M => {
+                            let pokemon_api = PokemonApi::new(&mut gb);
+                            let map = pokemon_api.game_state()?.map;
+                            println!("{}", map);
                         },
                         Keycode::F12 => {
                             let mut pokemon_api = PokemonApi::new(&mut gb);

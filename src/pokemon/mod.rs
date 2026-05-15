@@ -53,7 +53,7 @@ pub trait PokemonApiTrait {
     fn read_joypad_state(&self) -> JoypadButtonState;
     fn game_mode(&self) -> Option<GameMode>;
     fn game_state(&self) -> Result<GameState, String>;
-    fn on_screen_text(&self) -> Option<String>;
+    fn on_screen_text(&self, only_message_box: bool) -> Option<String>;
     fn menu_state(&self) -> Option<MenuState>;
 }
 
@@ -238,7 +238,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         })
     }
 
-    fn on_screen_text(&self) -> Option<String> {
+    fn on_screen_text(&self, only_message_box: bool) -> Option<String> {
         let mmu = self.mmu();
         if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
             return None;
@@ -251,10 +251,16 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         let mut coordinates = ppu.tile_coordinates(&font_tiles);
         coordinates.sort_by_key(|(_, p)| *p);
 
+        const MESSAGE_BOX_MIN_Y: u8 = 13;
+
         let mut lines = Vec::new();
         let mut current_line = Vec::new();
         let mut prev_pos: Option<Point8> = None;
         for (char_id, pos) in coordinates {
+            if only_message_box && pos.y < MESSAGE_BOX_MIN_Y {
+                continue;
+            }
+
             if let Some(prev) = prev_pos {
                 if pos.y != prev.y {
                     // line break

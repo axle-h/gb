@@ -32,16 +32,22 @@ pub enum AgentEvent {
     BattleEnded,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
-    #[default]
-    WaitingForMenu,
+    WaitingForMenu { reader: PokemonTextReader },
+
     /// Battle menu is up but policy hasn't returned an action yet.
     AwaitingPolicy,
 
     /// Navigating the menus
     Navigating { action: BattleAction },
+}
+
+impl Default for BattleState {
+    fn default() -> Self {
+        Self::WaitingForMenu { reader: PokemonTextReader::message_box_only() }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -57,9 +63,9 @@ enum AgentState {
 }
 
 impl AgentState {
-    pub fn battle_state(&self) -> Result<BattleState, String> {
+    pub fn battle_state_mut(&mut self) -> Result<&mut BattleState, String> {
         if let AgentState::Battle(s) = self {
-            Ok(s.clone()) // TODO make the state copyable
+            Ok(s)
         } else {
             Err("Not in battle".to_string())
         }
@@ -117,18 +123,23 @@ impl PokemonAgent {
                     let d = destination;
                     self.abort_overworld(d, "battle started".into());
                     self.event(AgentEvent::BattleStarted);
-                    self.set_battle_state(BattleState::WaitingForMenu);
+                    self.set_battle_state(BattleState::default());
                 }
                 _ => {
                     self.event(AgentEvent::BattleStarted);
-                    self.set_battle_state(BattleState::WaitingForMenu);
+                    self.set_battle_state(BattleState::default());
                 }
             }
             return self.update_battle(gb, delta_cycles);
         }
 
         // Leaving battle.
-        if matches!(self.state, AgentState::Battle(_)) {
+        if let AgentState::Battle(battle_state) = &self.state {
+            if let BattleState::WaitingForMenu { reader } = battle_state {
+                // dump remaining text
+                println!("Battle text: {}", reader);
+            }
+
             self.event(AgentEvent::BattleEnded);
             self.state = AgentState::Idle;
         }
@@ -224,17 +235,32 @@ impl PokemonAgent {
     }
 
     fn update_battle(&mut self, gb: &mut GameBoy, delta: MachineCycles) -> Result<(), String> {
-        let battle_state = self.state.battle_state()?;
+        let battle_state = self.state.battle_state_mut()?;
 
         let mut api = PokemonApi::new(gb);
 
         match battle_state {
-            BattleState::WaitingForMenu => {
-                if api.menu_state().map(|s| s.battle_menu_state()).flatten() == Some(BattleMenuState::Fight) {
-                    api.release_all_buttons();
-                    self.set_battle_state(BattleState::AwaitingPolicy);
+            BattleState::WaitingForMenu { reader } => {
+                if let Some(menu_state) = api.menu_state() {
+                    match menu_state.battle_menu_state() {
+                        Some(BattleMenuState::Fight) => {
+                            println!("Battle text: {}", reader);
+
+                            api.release_all_buttons();
+                            self.set_battle_state(BattleState::AwaitingPolicy);
+                        }
+                        Some(_) => {
+                            // battle menu is showing, do not read the text
+                            api.toggle_button(JoypadButton::A);
+                        },
+                        None => {
+                            // something other than the battle menu is showing, read it!
+                            // TODO add a delay before reading text
+                            reader.update(&mut api);
+                        }
+                    }
                 } else {
-                    // pulse the A button until the menu is up
+                    // no menu is showing, click mashing the A button
                     api.toggle_button(JoypadButton::A);
                 }
             }
@@ -255,13 +281,11 @@ impl PokemonAgent {
                 }
                 let menu_state = menu_state.unwrap();
 
-                println!("{:?}, {:?}", api.menu_state().unwrap(), menu_state);
-
-                let menu_target = BattleMenuState::from_action(action);
+                let menu_target = BattleMenuState::from_action(*action);
 
                 if menu_state == menu_target {
                     api.release_all_buttons();
-                    self.set_battle_state(BattleState::WaitingForMenu);
+                    self.set_battle_state(BattleState::default());
                     return Ok(());
                 }
 
