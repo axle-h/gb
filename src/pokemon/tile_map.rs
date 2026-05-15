@@ -108,7 +108,7 @@ impl MetaTileMap {
                 } else {
                     dist.insert(nb, d + 1);
                     came_from.insert(nb, (pos, dir));
-                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Counter) {
+                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree) {
                         queue.push_back(nb);
                     }
                 }
@@ -256,6 +256,7 @@ impl Display for MetaTileMap {
                     MetaTile::Jump(JumpDirection::West)  => write!(f, "<")?,
                     MetaTile::Jump(JumpDirection::East)  => write!(f, ">")?,
                     MetaTile::Counter => write!(f, "=")?,
+                    MetaTile::CutTree => write!(f, "t")?,
                 }
             }
             writeln!(f)?;

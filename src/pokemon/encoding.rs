@@ -583,6 +583,9 @@ pub enum MetaTile {
     /// The player cannot walk on it, but can interact with a sprite one tile behind it
     /// by facing the counter and pressing A — pokered's "talking over" mechanic.
     Counter,
+    /// A shrub that blocks passage until the player uses HM Cut.
+    /// Treated as impassable until `can_use_cut` is true.
+    CutTree,
 }
 
 /// The direction a ledge can be jumped over.
@@ -799,6 +802,8 @@ impl CurrentMap {
                     let tile_id = self.tile_id(tile_x, tile_y);
                     if self.is_water(tile_x, tile_y) {
                         result[index] = MetaTile::Water;
+                    } else if self.map_header.tileset.cut_tree_tile_id() == Some(tile_id) {
+                        result[index] = MetaTile::CutTree;
                     } else if let Some(&dir) = self.ledge_tiles.get(&tile_id) {
                         // Ledge tiles are detected by tile ID alone (not walkability).
                         // The bottom graphical row of a ledge block is non-walkable (not in

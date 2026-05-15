@@ -34,6 +34,19 @@ pub enum TileSetId {
     Plateau = 23, // PLATEAU
 }
 
+impl TileSetId {
+    const GYM_CUT_TREE: u8 = 0x50;
+    const OVERWORLD_CUT_TREE: u8 = 0x3d;
+    
+    pub fn cut_tree_tile_id(&self) -> Option<u8> {
+        match self {  
+            Self::Overworld => Some(Self::OVERWORLD_CUT_TREE),
+            Self::Gym => Some(Self::GYM_CUT_TREE),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapHeader {
     pub tileset: TileSetId,

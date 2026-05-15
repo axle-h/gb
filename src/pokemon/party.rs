@@ -22,6 +22,10 @@ impl PokemonParty {
     pub fn pokemon(&self) -> &[Pokemon] {
         &self.0
     }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, Pokemon> {
+        self.0.iter()
+    }
 }
 
 impl Index<usize> for PokemonParty {
@@ -46,3 +50,13 @@ impl IntoIterator for PokemonParty {
         self.0.into_iter()
     }
 }
+
+impl<'a> IntoIterator for &'a PokemonParty {
+    type Item = &'a Pokemon;
+    type IntoIter = std::slice::Iter<'a, Pokemon>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
