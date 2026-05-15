@@ -1,26 +1,24 @@
-use strum::IntoEnumIterator;
+use std::fmt::{Display, Formatter};
+use bitflags::bitflags;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display, strum_macros::EnumIter)]
-#[repr(u8)]
-pub enum Badge {
-    BoulderBadge = 0x01,
-    CascadeBadge = 0x02,
-    ThunderBadge = 0x04,
-    RainbowBadge = 0x08,
-    SoulBadge = 0x10,
-    MarshBadge = 0x20,
-    VolcanoBadge = 0x40,
-    EarthBadge = 0x80,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Badge(u8);
+
+bitflags! {
+    impl Badge: u8 {
+        const BoulderBadge = 0x01;
+        const CascadeBadge = 0x02;
+        const ThunderBadge = 0x04;
+        const RainbowBadge = 0x08;
+        const SoulBadge = 0x10;
+        const MarshBadge = 0x20;
+        const VolcanoBadge = 0x40;
+        const EarthBadge = 0x80;
+    }
 }
 
-impl Badge {
-    pub fn parse_flags(flags: u8) -> Vec<Badge> {
-        let mut badges = Vec::new();
-        for badge in Badge::iter() {
-            if flags & (badge as u8) != 0 {
-                badges.push(badge);
-            }
-        }
-        badges
+impl Display for Badge {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        bitflags::parser::to_writer(self, f)
     }
 }
