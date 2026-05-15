@@ -6,6 +6,7 @@ use crate::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::battle::BattleAction;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
+use crate::pokemon::delay::DelayContext;
 use crate::pokemon::encoding::{GameMode, MetaTile};
 use crate::pokemon::map::Map;
 use crate::pokemon::menu::BattleMenuState;
@@ -35,18 +36,21 @@ pub enum AgentEvent {
 #[derive(Debug, Clone)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
-    WaitingForMenu { reader: PokemonTextReader },
+    WaitingForMenu { reader: PokemonTextReader, delay: DelayContext },
 
     /// Battle menu is up but policy hasn't returned an action yet.
-    AwaitingPolicy,
+    AwaitingPolicy { delay: DelayContext },
 
     /// Navigating the menus
-    Navigating { action: BattleAction },
+    Navigating { action: BattleAction, delay: DelayContext },
 }
 
 impl Default for BattleState {
     fn default() -> Self {
-        Self::WaitingForMenu { reader: PokemonTextReader::message_box_only() }
+        Self::WaitingForMenu {
+            reader: PokemonTextReader::message_box_only(),
+            delay: DelayContext::default(),
+        }
     }
 }
 
@@ -54,8 +58,8 @@ impl Default for BattleState {
 enum AgentState {
     #[default]
     Idle,
-    /// Policy returned None for an overworld action — re-polling each frame.
-    AwaitingOverworldAction,
+    /// Policy returned None for an overworld action — waiting out a delay then re-polling.
+    AwaitingOverworldAction { delay: DelayContext },
     OverworldMovement { destination: MetaTile, map: Map },
     ReadingTextBox { reader: PokemonTextReader },
 
@@ -108,7 +112,12 @@ impl PokemonAgent {
         // ── Throttled decision-making ─────────────────────────────────────────────
         self.cycles += delta_cycles;
         if self.cycles < RESOLUTION { return Ok(()); }
-        while self.cycles >= RESOLUTION { self.cycles -= RESOLUTION; }
+
+        let mut buffered_delta = MachineCycles::ZERO;
+        while self.cycles >= RESOLUTION {
+            buffered_delta += RESOLUTION;
+            self.cycles -= RESOLUTION;
+        }
 
         let api = PokemonApi::new(gb);
 
@@ -130,12 +139,12 @@ impl PokemonAgent {
                     self.set_battle_state(BattleState::default());
                 }
             }
-            return self.update_battle(gb, delta_cycles);
+            return self.update_battle(gb, buffered_delta);
         }
 
         // Leaving battle.
         if let AgentState::Battle(battle_state) = &self.state {
-            if let BattleState::WaitingForMenu { reader } = battle_state {
+            if let BattleState::WaitingForMenu { reader, .. } = battle_state {
                 // dump remaining text
                 println!("Battle text: {}", reader);
             }
@@ -143,12 +152,12 @@ impl PokemonAgent {
             self.event(AgentEvent::BattleEnded);
             self.state = AgentState::Idle;
         }
-        self.update_overworld(gb, game_mode)
+        self.update_overworld(gb, game_mode, buffered_delta)
     }
 
     // ── Overworld ──────────────────────────────────────────────────────────────
 
-    fn update_overworld(&mut self, gb: &mut GameBoy, game_mode: GameMode) -> Result<(), String> {
+    fn update_overworld(&mut self, gb: &mut GameBoy, game_mode: GameMode, delta_cycles: MachineCycles) -> Result<(), String> {
         let mut api = PokemonApi::new(gb);
         match self.state {
             AgentState::Idle => {
@@ -157,16 +166,12 @@ impl PokemonAgent {
                         self.state = AgentState::ReadingTextBox { reader: PokemonTextReader::default() };
                     }
                     _ => {
-                        let game_state = api.game_state()?;
-                        match self.policy.pick_overworld_action(&game_state) {
-                            Some(action) => self.take_overworld_action(action),
-                            None         => self.state = AgentState::AwaitingOverworldAction,
-                        }
+                        self.state = AgentState::AwaitingOverworldAction { delay: DelayContext::long() }
                     }
                 }
             }
-            AgentState::AwaitingOverworldAction => {
-                // Policy returned None last time — keep polling each frame.
+            AgentState::AwaitingOverworldAction { ref mut delay } => {
+                if !delay.tick(delta_cycles) { return Ok(()); }
                 let game_state = api.game_state()?;
                 if let Some(action) = self.policy.pick_overworld_action(&game_state) {
                     self.take_overworld_action(action);
@@ -240,23 +245,25 @@ impl PokemonAgent {
         let mut api = PokemonApi::new(gb);
 
         match battle_state {
-            BattleState::WaitingForMenu { reader } => {
+            BattleState::WaitingForMenu { reader, delay } => {
                 if let Some(menu_state) = api.menu_state() {
                     match menu_state.battle_menu_state() {
                         Some(BattleMenuState::Fight) => {
                             println!("Battle text: {}", reader);
 
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::AwaitingPolicy);
+                            self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
                         }
                         Some(_) => {
                             // battle menu is showing, do not read the text
                             api.toggle_button(JoypadButton::A);
                         },
                         None => {
-                            // something other than the battle menu is showing, read it!
-                            // TODO add a delay before reading text
-                            reader.update(&mut api);
+                            // something other than the battle menu is showing — wait for
+                            // the text box to render before reading it
+                            if delay.tick(delta) {
+                                reader.update(&mut api);
+                            }
                         }
                     }
                 } else {
@@ -265,15 +272,17 @@ impl PokemonAgent {
                 }
             }
 
-            BattleState::AwaitingPolicy => {
+            BattleState::AwaitingPolicy { delay } => {
+                if !delay.tick(delta) { return Ok(()); }
                 let game_state = api.game_state()?;
                 if let Some(action) = self.policy.pick_battle_action(&game_state) {
                     self.event(AgentEvent::BattleActionStarted { action });
-                    self.set_battle_state(BattleState::Navigating { action });
+                    self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default() });
                 }
             }
 
-            BattleState::Navigating { action } => {
+            BattleState::Navigating { action, delay } => {
+                if !delay.tick(delta) { return Ok(()); }
                 let menu_state = api.menu_state().map(|s| s.battle_menu_state()).flatten();
                 if menu_state.is_none() {
                     // wait for menu state
