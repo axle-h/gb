@@ -153,6 +153,23 @@ impl PokemonStats {
     }
 }
 
+pub enum MoveEffectiveness {
+    /// The move does base damage.
+    Base,
+    /// The move is 'not very effective' (0.5x damage)
+    Half,
+    /// The move is 'super effective' (2x damage)
+    Double,
+    /// The move has no effect (0 damage)
+    None,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug, strum_macros::Display)]
+pub enum PokemonTypeCategory {
+    Physical,
+    Special,
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Debug, strum_macros::Display, strum_macros::FromRepr)]
 #[repr(u8)]
 pub enum PokemonType {
@@ -162,6 +179,7 @@ pub enum PokemonType {
     Poison,
     Ground,
     Rock,
+    /// unused https://bulbapedia.bulbagarden.net/wiki/Bird_(type)
     Bird,
     Bug,
     Ghost,
@@ -172,4 +190,101 @@ pub enum PokemonType {
     Psychic,
     Ice,
     Dragon,
+}
+
+
+impl PokemonType {
+    pub fn category(&self) -> PokemonTypeCategory {
+        use PokemonType::*;
+        match self {
+            Bug | Fighting | Flying | Ghost | Ground | Normal | Poison | Rock | Bird => PokemonTypeCategory::Physical,
+            Dragon | Electric | Fire | Grass | Ice | Psychic | Water => PokemonTypeCategory::Special,
+        }
+    }
+
+    pub fn attack_effectiveness(&self, defending: PokemonType) -> MoveEffectiveness {
+        // https://pokemondb.net/type/old
+        use PokemonType::*;
+        match self {
+            Normal => match defending {
+                Rock => MoveEffectiveness::Half,
+                Ghost => MoveEffectiveness::None,
+                _ => MoveEffectiveness::Base,
+            },
+            Fighting => match defending {
+                Normal | Ice | Rock => MoveEffectiveness::Double,
+                Poison | Flying | Psychic | Bug => MoveEffectiveness::Half,
+                Ghost => MoveEffectiveness::None,
+                _ => MoveEffectiveness::Base,
+            }
+            Flying => match defending {
+                Grass | Fighting | Bug => MoveEffectiveness::Double,
+                Rock | Electric => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Poison => match defending {
+                Grass | Bug => MoveEffectiveness::Double,
+                Poison | Ground | Rock | Ghost => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Ground => match defending {
+                Fire | Electric | Poison | Rock => MoveEffectiveness::Double,
+                Grass | Bug => MoveEffectiveness::Half,
+                Flying => MoveEffectiveness::None,
+                _ => MoveEffectiveness::Base,
+            }
+            Rock => match defending {
+                Fire | Ice | Flying | Bug => MoveEffectiveness::Double,
+                Fighting | Ground => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Bird => MoveEffectiveness::Base,
+            Bug => match defending {
+                Grass | Poison | Psychic => MoveEffectiveness::Double,
+                Fire | Fighting | Flying | Ghost => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Ghost => match defending {
+                Ghost => MoveEffectiveness::Double,
+                Normal | Psychic => MoveEffectiveness::None,
+                _ => MoveEffectiveness::Base,
+            }
+            Fire => match defending {
+                Grass | Ice | Bug => MoveEffectiveness::Double,
+                Fire | Water | Rock | Dragon => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Water => match defending {
+                Fire | Ground | Rock => MoveEffectiveness::Double,
+                Water | Grass | Dragon => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Grass => match defending {
+                Water | Ground | Rock => MoveEffectiveness::Double,
+                Fire | Grass | Poison | Flying | Bug | Dragon => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Electric => match defending {
+                Water | Flying => MoveEffectiveness::Double,
+                Electric | Grass | Dragon => MoveEffectiveness::Half,
+                Ground => MoveEffectiveness::None,
+                _ => MoveEffectiveness::Base,
+            }
+            Psychic => match defending {
+                Fighting | Poison => MoveEffectiveness::Double,
+                Psychic => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Ice => match defending {
+                Grass | Ground | Flying | Dragon => MoveEffectiveness::Double,
+                Water | Ice => MoveEffectiveness::Half,
+                _ => MoveEffectiveness::Base,
+            }
+            Dragon => match defending {
+                Dragon => MoveEffectiveness::Double,
+                _ => MoveEffectiveness::Base,
+            }
+        }
+
+    }
 }
