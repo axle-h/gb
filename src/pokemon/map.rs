@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, strum_macros::Display, strum_macros::FromRepr, Default)]
+use strum::IntoEnumIterator;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter, Default)]
 #[repr(u8)]
 pub enum Map {
     #[default]
@@ -250,6 +252,12 @@ pub enum Map {
     LoreleisRoom = 0xF5,
     BrunosRoom = 0xF6,
     AgathasRoom = 0xF7,
+}
+
+impl Map {
+    pub fn all() -> MapIter {
+        Self::iter()
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

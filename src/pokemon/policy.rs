@@ -1,10 +1,15 @@
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver};
+use rand::prelude::StdRng;
 use rand::seq::IteratorRandom;
+use rand::{RngCore, SeedableRng};
 use crate::pokemon::GameState;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::battle::BattleAction;
+use crate::pokemon::battle::{BattleAction, BattleType};
+use crate::pokemon::damage::expected_damage;
 use crate::pokemon::encoding::MetaTile;
+use crate::pokemon::map::Map;
 
 /// Non-blocking policy interface.
 ///
@@ -26,14 +31,7 @@ impl Policy for RandomPolicy {
     }
 
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
-        let available: Vec<u8> = state.battle.as_ref()?.player.moves.iter().enumerate()
-            .filter_map(|(i, m)| m.filter(|m| m.current_pp > 0).map(|_| i as u8))
-            .collect();
-        Some(if let Some(&slot) = available.iter().choose(&mut rand::rng()) {
-            BattleAction::Fight(slot)
-        } else {
-            BattleAction::Run
-        })
+        battle_options(state)?.into_iter().choose(&mut rand::rng())
     }
 }
 
@@ -117,20 +115,22 @@ impl Policy for ConsolePolicy {
         if !self.btl_menu_shown || self.battle_rx.is_none() {
             let battle_state = state.battle.as_ref()?;
 
-            let opts = battle_options(state)?;
             println!("\n═══ BATTLE ═══");
             println!("Enemy:  {:?} Lv.{}  HP {}/{}  {}",
                 battle_state.enemy.species, battle_state.enemy.level,
-                battle_state.enemy.current_hp, battle_state.enemy.max_hp,
+                battle_state.enemy.current_hp, battle_state.enemy.stats.hp,
                 battle_state.enemy.status);
             println!("Player: {:?} Lv.{}  HP {}/{}  {}",
                 battle_state.player.species, battle_state.player.level,
-                battle_state.player.current_hp, battle_state.player.max_hp,
+                battle_state.player.current_hp, battle_state.player.stats.hp,
                 battle_state.player.status);
             println!("\nBattle actions:");
-            for (i, (label, _)) in opts.iter().enumerate() {
-                println!("  {}. {}", i + 1, label);
+
+            let opts = battle_options(state)?;
+            for (i, battle_action) in opts.iter().enumerate() {
+                println!("  {}. {}", i + 1, battle_action);
             }
+
             let max = opts.len();
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
@@ -153,34 +153,104 @@ impl Policy for ConsolePolicy {
             self.battle_rx     = None;
             self.btl_menu_shown = false;
             let mut opts = battle_options(state)?;
-            return Some(opts.remove(n - 1).1);
+            return Some(opts.remove(n - 1));
         }
         None
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn battle_options(state: &GameState) -> Option<Vec<(String, BattleAction)>> {
+fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     let battle_state = state.battle.as_ref()?;
-    let mut opts: Vec<(String, BattleAction)> = vec![];
-    for (i, m) in battle_state.player.moves.iter().enumerate() {
-        if let Some(m) = m {
-            opts.push((format!("FIGHT  {:?}  PP {}", m.name, m.current_pp),
-                       BattleAction::Fight(i as u8)));
+
+    let mut opts = battle_state.player.available_battle_moves();
+
+    for (i, item) in state.bag.iter().enumerate() {
+        opts.push(BattleAction::UseItem { slot: i as u8, item: item.clone() });
+    }
+
+    for (i, pokemon) in state.pokemon.iter().enumerate() {
+        if i == battle_state.active_party_slot as usize { continue; }
+        if pokemon.stats.hp == 0 { continue; }
+        opts.push(BattleAction::SwitchPokemon { slot: i as u8, pokemon: pokemon.summary() });
+    }
+
+    if battle_state.battle_type == BattleType::Wild {
+        opts.push(BattleAction::Run);
+    }
+
+    Some(opts)
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PolicyStep {
+    Navigate(Map),
+    Interact(String),
+}
+
+impl PolicyStep {
+
+    pub const COMPLETE_GAME: &[Self] = &[
+        Self::Navigate(Map::PalletTown),
+        Self::Navigate(Map::Route1),
+    ];
+}
+
+pub struct DeterministicPolicy {
+    rng: StdRng,
+    queue: VecDeque<PolicyStep>,
+}
+
+impl DeterministicPolicy {
+    fn new(seed: u64) -> Self {
+        Self {
+            rng: StdRng::seed_from_u64(seed),
+            queue: VecDeque::new(),
         }
     }
-    for (i, item) in state.bag.iter().enumerate() {
-        opts.push((format!("ITEM   {} ×{}", item.id, item.quantity), BattleAction::UseItem(i as u8)));
+}
+
+impl Default for DeterministicPolicy {
+    fn default() -> Self {
+        Self::new(rand::rng().next_u64())
+    }
+}
+
+impl Policy for DeterministicPolicy {
+    fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+        todo!()
     }
 
-    for (slot, pokemon) in state.pokemon.iter().enumerate() {
-        if slot == battle_state.active_party_slot as usize { continue; }
-        if pokemon.stats.hp == 0 { continue; }
-        opts.push((format!("PKMN   {:?} Lv.{} HP {}/{}", pokemon.species, pokemon.level,
-                           pokemon.current_hp, pokemon.stats.hp),
-                   BattleAction::SwitchPokemon(slot as u8)));
+    fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+        let battle_state = state.battle.as_ref()?;
+        let actions = battle_options(state)?;
+        let mut result: Option<BattleAction> = None;
+        let mut most_damage = 0;
+
+        // 1. pick the battle move that does the most damage
+        for action in actions.iter() {
+            if let BattleAction::Fight { battle_move, ..} = action {
+                if let Some(damage) = expected_damage(&battle_state.player, battle_move.name, &battle_state.enemy) {
+                    if damage > most_damage {
+                        result = Some(*action);
+                        most_damage = damage;
+                    }
+                }
+            }
+        }
+        if result.is_some() {
+            return result;
+        }
+
+        // 2. pick a random battle action
+        let random_battle = actions.iter()
+            .filter(|a| matches!(a, BattleAction::Fight { .. }))
+            .choose(&mut self.rng);
+        if random_battle.is_some() {
+            return random_battle.cloned();
+        }
+
+        // 3. pick any random action
+        actions.into_iter().choose(&mut self.rng)
     }
-    opts.push(("RUN".to_string(), BattleAction::Run));
-    Some(opts)
 }

@@ -45,6 +45,8 @@ mod item;
 mod bag;
 mod menu;
 pub mod delay;
+pub mod damage;
+pub mod world_graph;
 
 #[cfg(test)]
 mod integration_tests;

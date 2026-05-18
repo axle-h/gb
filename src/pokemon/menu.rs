@@ -46,9 +46,9 @@ pub enum BattleMenuState {
 impl BattleMenuState {
     pub fn from_action(action: BattleAction) -> Self {
         match action {
-            BattleAction::Fight(index) => Self::MoveList { index },
-            BattleAction::UseItem(index) => Self::ItemList { index },
-            BattleAction::SwitchPokemon(index) => Self::PokemonList { index },
+            BattleAction::Fight { slot, .. } => Self::MoveList { index: slot },
+            BattleAction::UseItem { slot, .. } => Self::ItemList { index: slot },
+            BattleAction::SwitchPokemon { slot, .. } => Self::PokemonList { index: slot },
             BattleAction::Run => Self::Run,
         }
     }

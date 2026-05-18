@@ -286,7 +286,6 @@ impl PokemonEncoding for MMU {
     fn read_current_map(&self) -> Result<CurrentMap, String> {
         // any rom data we read must be directly from the rom banks as the game is not guaranteed to have the correct bank loaded
         let map = Map::from_repr(self.read_pointer(&pokered_symbols::wCurMap)).ok_or_else(|| "Invalid map number".to_string())?;
-        let map_bank = self.rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT)[map as usize] as usize;
         let tileset_bank = self.read_pointer(&pokered_symbols::wTilesetBank) as usize;
 
         // collision data is always in bank 0
@@ -296,14 +295,17 @@ impl PokemonEncoding for MMU {
         let map_header_pointer = map.header_pointer().ok_or_else(|| format!("Map has no header pointer: {}", map))?;
         let map_header = self.read_map_header(map_header_pointer).ok_or_else(|| "Invalid map header".to_string())?;
 
-        let map_data_address = self.read_pointer_u16_le(&pokered_symbols::wCurMapDataPtr);
-        let map_data = self.rom_data_from_pointer(map_bank, map_data_address, map_header.height as usize * map_header.width as usize).to_vec();
+        let map_data_address = DmgPointer {
+            bank: map_header_pointer.bank,
+            address: self.read_pointer_u16_le(&pokered_symbols::wCurMapDataPtr),
+        };
+        let map_data = self.rom_data_from_rom_pointer(&map_data_address, map_header.height as usize * map_header.width as usize).to_vec();
 
         let max_block_id = *map_data.iter().max().unwrap() as usize;
         let tileset_data_address = self.read_pointer_u16_le(&pokered_symbols::wTilesetBlocksPtr);
         let tileset_data = self.rom_data_from_pointer(tileset_bank, tileset_data_address, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
 
-        let warp_events = self.read_warp_events(map, map_bank, map_header.objects_address)?;
+        let warp_events = self.read_warp_events(map, map_header_pointer.bank.id() as usize, map_header.objects_address)?;
 
         let sprites = self.read_sprites()?;
 

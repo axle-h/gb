@@ -8,7 +8,7 @@ pub struct PokemonMove {
 }
 
 impl PokemonMove {
-    pub fn new(name: PokemonMoveName) -> Self {
+    pub fn with_max_pp(name: PokemonMoveName) -> Self {
         Self {
             name,
             pp: name.metadata().pp
@@ -362,11 +362,11 @@ impl PokemonMoveName {
 #[repr(u8)]
 pub enum PokemonMoveEffect {
     #[strum(serialize = "No Additional Effect")] NoAdditionalEffect = 0x00,
-    #[strum(serialize = "Poison Side 1")] PoisonSide1 = 0x02,
+    #[strum(serialize = "Poison Side Effect 1")] PoisonSideEffect1 = 0x02,
     #[strum(serialize = "Drain Hp")] DrainHp = 0x03,
-    #[strum(serialize = "Burn Side 1")] BurnSide1 = 0x04,
-    #[strum(serialize = "Freeze Side 1")] FreezeSide1 = 0x05,
-    #[strum(serialize = "Paralyze Side 1")] ParalyzeSide1 = 0x06,
+    #[strum(serialize = "Burn Side Effect 1")] BurnSideEffect1 = 0x04,
+    #[strum(serialize = "Freeze Side Effect 1")] FreezeSideEffect1 = 0x05,
+    #[strum(serialize = "Paralyze Side Effect 1")] ParalyzeSideEffect1 = 0x06,
     Explode = 0x07,
     #[strum(serialize = "Dream Eater")] DreamEater = 0x08,
     #[strum(serialize = "Mirror Move")] MirrorMove = 0x09,
@@ -390,12 +390,12 @@ pub enum PokemonMoveEffect {
     #[strum(serialize = "Thrash Petal Dance")] ThrashPetalDance = 0x1B,
     #[strum(serialize = "Switch And Teleport")] SwitchAndTeleport = 0x1C,
     #[strum(serialize = "Two To Five Attacks")] TwoToFiveAttacks = 0x1D,
-    #[strum(serialize = "Flinch Side 1")] FlinchSide1 = 0x1F,
+    #[strum(serialize = "Flinch Side Effect 1")] FlinchSideEffect1 = 0x1F,
     Sleep = 0x20,
-    #[strum(serialize = "Poison Side 2")] PoisonSide2 = 0x21,
-    #[strum(serialize = "Burn Side 2")] BurnSide2 = 0x22,
-    #[strum(serialize = "Paralyze Side 2")] ParalyzeSide2 = 0x24,
-    #[strum(serialize = "Flinch Side 2")] FlinchSide2 = 0x25,
+    #[strum(serialize = "Poison Side Effect 2")] PoisonSideEffect2 = 0x21,
+    #[strum(serialize = "Burn Side Effect 2")] BurnSideEffect2 = 0x22,
+    #[strum(serialize = "Paralyze Side Effect 2")] ParalyzeSideEffect2 = 0x24,
+    #[strum(serialize = "Flinch Side Effect 2")] FlinchSideEffect2 = 0x25,
     #[strum(serialize = "One Hit KO")] OneHitKO = 0x26,
     Charge = 0x27,
     #[strum(serialize = "Super Fang")] SuperFang = 0x28,
@@ -407,6 +407,7 @@ pub enum PokemonMoveEffect {
     Mist = 0x2E,
     #[strum(serialize = "Focus Energy")] FocusEnergy = 0x2F,
     Recoil = 0x30,
+    /// Confuse Ray, Supersonic (not the move Confusion)
     Confusion = 0x31,
     #[strum(serialize = "Attack Up 2")] AttackUp2 = 0x32,
     #[strum(serialize = "Defense Up 2")] DefenseUp2 = 0x33,
@@ -426,11 +427,11 @@ pub enum PokemonMoveEffect {
     Reflect = 0x41,
     Poison = 0x42,
     Paralyze = 0x43,
-    #[strum(serialize = "Attack Down Side")] AttackDownSide = 0x44,
-    #[strum(serialize = "Defense Down Side")] DefenseDownSide = 0x45,
-    #[strum(serialize = "Speed Down Side")] SpeedDownSide = 0x46,
-    #[strum(serialize = "Special Down Side")] SpecialDownSide = 0x47,
-    #[strum(serialize = "Confusion Side")] ConfusionSide = 0x4C,
+    #[strum(serialize = "Attack Down Side Effect")] AttackDownSideEffect = 0x44,
+    #[strum(serialize = "Defense Down Side Effect")] DefenseDownSideEffect = 0x45,
+    #[strum(serialize = "Speed Down Side Effect")] SpeedDownSideEffect = 0x46,
+    #[strum(serialize = "Special Down Side Effect")] SpecialDownSideEffect = 0x47,
+    #[strum(serialize = "Confusion")] ConfusionSideEffect = 0x4C,
     Twineedle = 0x4D,
     Substitute = 0x4F,
     #[strum(serialize = "Hyper Beam")] HyperBeam = 0x50,
@@ -440,6 +441,92 @@ pub enum PokemonMoveEffect {
     #[strum(serialize = "Leech Seed")] LeechSeed = 0x54,
     Splash = 0x55,
     Disable = 0x56,
+}
+
+impl PokemonMoveEffect {
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::NoAdditionalEffect    => "No additional effect.",
+            Self::PoisonSideEffect1     => "20% chance of poisoning the opponent. Cannot poison Poison-types, already-statused Pokémon, or those behind a substitute.",
+            Self::DrainHp               => "Recovers HP equal to half the damage dealt (minimum 1).",
+            Self::BurnSideEffect1       => "10% chance of burning the opponent. Cannot burn a Pokémon whose type matches the move type, or an already-statused Pokémon behind a substitute.",
+            Self::FreezeSideEffect1     => "10% chance of freezing the opponent. Cannot freeze Ice-types. A Fire-type move thaws a frozen target instead.",
+            Self::ParalyzeSideEffect1   => "10% chance of paralyzing the opponent. Cannot paralyze a Pokémon whose type matches the move type.",
+            Self::Explode               => "User faints immediately; its HP and status are set to zero.",
+            Self::DreamEater            => "Only works on sleeping targets; recovers HP equal to half the damage dealt.",
+            Self::MirrorMove            => "Uses the last move the opponent used.",
+            Self::AttackUp1             => "Raises the user's Attack by 1 stage (max +6).",
+            Self::DefenseUp1            => "Raises the user's Defense by 1 stage (max +6).",
+            Self::SpeedUp1              => "Raises the user's Speed by 1 stage (max +6).",
+            Self::SpecialUp1            => "Raises the user's Special by 1 stage (max +6).",
+            Self::AccuracyUp1           => "Raises the user's Accuracy by 1 stage (max +6).",
+            Self::EvasionUp1            => "Raises the user's Evasion by 1 stage (max +6).",
+            Self::PayDay                => "Scatters coins worth 2× the user's level.",
+            Self::Swift                 => "Always hits; bypasses accuracy and evasion.",
+            Self::AttackDown1           => "Lowers the opponent's Attack by 1 stage. In single-player, has an extra ~25% miss chance.",
+            Self::DefenseDown1          => "Lowers the opponent's Defense by 1 stage. In single-player, has an extra ~25% miss chance.",
+            Self::SpeedDown1            => "Lowers the opponent's Speed by 1 stage. In single-player, has an extra ~25% miss chance.",
+            Self::SpecialDown1          => "Lowers the opponent's Special by 1 stage. In single-player, has an extra ~25% miss chance.",
+            Self::AccuracyDown1         => "Lowers the opponent's Accuracy by 1 stage. In single-player, has an extra ~25% miss chance.",
+            Self::EvasionDown1          => "Lowers the opponent's Evasion by 1 stage. In single-player, has an extra ~25% miss chance.",
+            Self::Conversion            => "Changes the user's types to match the opponent's current types.",
+            Self::Haze                  => "Resets all stat stages for both Pokémon; cures all volatile statuses and the opponent's non-volatile status.",
+            Self::Bide                  => "User stores energy for 2–3 turns, then deals double the total damage received during that time.",
+            Self::ThrashPetalDance      => "User attacks for 2–3 turns at random, then becomes confused.",
+            Self::SwitchAndTeleport     => "Whirlwind/Roar force the wild opponent to flee; Teleport lets the user escape. Both fail in trainer battles. Success chance scales with the level difference.",
+            Self::TwoToFiveAttacks      => "Hits 2–5 times: 3/8 chance each for 2 or 3 hits, 1/8 chance each for 4 or 5 hits.",
+            Self::FlinchSideEffect1     => "10% chance of making the opponent flinch and lose its turn. Cannot affect Pokémon behind a substitute.",
+            Self::Sleep                 => "Inflicts sleep for a random 1–7 turns. Fails if the target already has a status condition.",
+            Self::PoisonSideEffect2     => "40% chance of poisoning the opponent.",
+            Self::BurnSideEffect2       => "30% chance of burning the opponent.",
+            Self::ParalyzeSideEffect2   => "30% chance of paralyzing the opponent.",
+            Self::FlinchSideEffect2     => "30% chance of making the opponent flinch and lose its turn.",
+            Self::OneHitKO              => "Instantly KOs the opponent if the user's current Speed ≥ the opponent's current Speed; otherwise fails.",
+            Self::Charge                => "User charges for one turn (invulnerable if Fly or Dig), then attacks on the following turn.",
+            Self::SuperFang             => "Deals damage equal to half the opponent's current HP.",
+            Self::SpecialDamage         => "Deals a fixed amount of damage regardless of stats (Seismic Toss/Night Shade: user's level; Sonic Boom: 20; Dragon Rage: 40; Psywave: random 1–1.5× user's level).",
+            Self::Trapping              => "Traps and damages the opponent for 2–5 turns (same distribution as TwoToFiveAttacks). The opponent cannot act while trapped.",
+            Self::Fly                   => "User flies up (invulnerable) for one turn, then strikes on the following turn.",
+            Self::AttackTwice           => "Always hits exactly 2 times.",
+            Self::JumpKick              => "If the move misses, the user takes recoil damage instead.",
+            Self::Mist                  => "Protects the user's stats from being lowered by the opponent for the rest of the battle.",
+            Self::FocusEnergy           => "Bug: quarters the critical-hit rate instead of raising it as intended.",
+            Self::Recoil                => "User takes recoil damage equal to 1/4 of the damage dealt (Struggle: 1/2); minimum 1 HP.",
+            Self::Confusion             => "Confuses the opponent for 2–5 turns. Cannot affect Pokémon behind a substitute.",
+            Self::AttackUp2             => "Raises the user's Attack by 2 stages (capped at +6).",
+            Self::DefenseUp2            => "Raises the user's Defense by 2 stages (capped at +6).",
+            Self::SpeedUp2              => "Raises the user's Speed by 2 stages (capped at +6).",
+            Self::SpecialUp2            => "Raises the user's Special by 2 stages (capped at +6).",
+            Self::AccuracyUp2           => "Raises the user's Accuracy by 2 stages (capped at +6).",
+            Self::EvasionUp2            => "Raises the user's Evasion by 2 stages (capped at +6).",
+            Self::Heal                  => "Recover/Softboiled: restores up to half of the user's max HP; fails if already full. Rest: restores full HP, cures all status conditions, then sleeps for 2 turns.",
+            Self::Transform             => "User transforms into the opponent, copying its types, stats, and moves for the rest of the battle.",
+            Self::AttackDown2           => "Lowers the opponent's Attack by 2 stages.",
+            Self::DefenseDown2          => "Lowers the opponent's Defense by 2 stages.",
+            Self::SpeedDown2            => "Lowers the opponent's Speed by 2 stages.",
+            Self::SpecialDown2          => "Lowers the opponent's Special by 2 stages.",
+            Self::AccuracyDown2         => "Lowers the opponent's Accuracy by 2 stages.",
+            Self::EvasionDown2          => "Lowers the opponent's Evasion by 2 stages.",
+            Self::LightScreen           => "Halves Special damage taken by the user's side for the rest of the battle.",
+            Self::Reflect               => "Halves Physical damage taken by the user's side for the rest of the battle.",
+            Self::Poison                => "100% chance of poisoning the opponent (Toxic inflicts bad poison that worsens each turn). Cannot poison Poison-types.",
+            Self::Paralyze              => "100% chance of paralyzing the opponent. Electric moves cannot paralyze Ground-types.",
+            Self::AttackDownSideEffect  => "33% chance of lowering the opponent's Attack by 1 stage.",
+            Self::DefenseDownSideEffect => "33% chance of lowering the opponent's Defense by 1 stage.",
+            Self::SpeedDownSideEffect   => "33% chance of lowering the opponent's Speed by 1 stage.",
+            Self::SpecialDownSideEffect => "33% chance of lowering the opponent's Special by 1 stage.",
+            Self::ConfusionSideEffect   => "10% chance of confusing the opponent.",
+            Self::Twineedle             => "Hits exactly twice; each hit has a 20% chance to poison the opponent.",
+            Self::Substitute            => "User sacrifices 1/4 of its max HP to create a substitute with that much HP that absorbs attacks. Fails if the user's HP is too low.",
+            Self::HyperBeam             => "User must skip its next turn to recharge, unless the opponent faints.",
+            Self::Rage                  => "User enters rage; its Attack rises by 1 stage each time it is hit while raging.",
+            Self::Mimic                 => "Copies a random move from the opponent for the rest of the battle.",
+            Self::Metronome             => "Randomly selects and uses any move.",
+            Self::LeechSeed             => "Seeds the opponent; drains 1/16 of its max HP each turn and transfers it to the user. Fails against Grass-types.",
+            Self::Splash                => "Does nothing.",
+            Self::Disable               => "Randomly disables one of the opponent's moves that still has PP for 1–8 turns.",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,9 +554,9 @@ impl PokemonMoveMetadata {
     pub const COMET_PUNCH: Self = Self::new("Comet Punch", Normal, PokemonMoveEffect::TwoToFiveAttacks, Some(18), 85, 15);
     pub const MEGA_PUNCH: Self = Self::new("Mega Punch", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(80), 85, 20);
     pub const PAY_DAY: Self = Self::new("Pay Day", Normal, PokemonMoveEffect::PayDay, Some(40), 100, 20);
-    pub const FIRE_PUNCH: Self = Self::new("Fire Punch", Fire, PokemonMoveEffect::BurnSide1, Some(75), 100, 15);
-    pub const ICE_PUNCH: Self = Self::new("Ice Punch", Ice, PokemonMoveEffect::FreezeSide1, Some(75), 100, 15);
-    pub const THUNDERPUNCH: Self = Self::new("Thunderpunch", Electric, PokemonMoveEffect::ParalyzeSide1, Some(75), 100, 15);
+    pub const FIRE_PUNCH: Self = Self::new("Fire Punch", Fire, PokemonMoveEffect::BurnSideEffect1, Some(75), 100, 15);
+    pub const ICE_PUNCH: Self = Self::new("Ice Punch", Ice, PokemonMoveEffect::FreezeSideEffect1, Some(75), 100, 15);
+    pub const THUNDERPUNCH: Self = Self::new("Thunderpunch", Electric, PokemonMoveEffect::ParalyzeSideEffect1, Some(75), 100, 15);
     pub const SCRATCH: Self = Self::new("Scratch", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(40), 100, 35);
     pub const VICEGRIP: Self = Self::new("Vicegrip", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(55), 100, 30);
     pub const GUILLOTINE: Self = Self::new("Guillotine", Normal, PokemonMoveEffect::OneHitKO, None, 30, 5);
@@ -483,51 +570,51 @@ impl PokemonMoveMetadata {
     pub const BIND: Self = Self::new("Bind", Normal, PokemonMoveEffect::Trapping, Some(15), 75, 20);
     pub const SLAM: Self = Self::new("Slam", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(80), 75, 20);
     pub const VINE_WHIP: Self = Self::new("Vine Whip", Grass, PokemonMoveEffect::NoAdditionalEffect, Some(35), 100, 10);
-    pub const STOMP: Self = Self::new("Stomp", Normal, PokemonMoveEffect::FlinchSide2, Some(65), 100, 20);
+    pub const STOMP: Self = Self::new("Stomp", Normal, PokemonMoveEffect::FlinchSideEffect2, Some(65), 100, 20);
     pub const DOUBLE_KICK: Self = Self::new("Double Kick", Fighting, PokemonMoveEffect::AttackTwice, Some(30), 100, 30);
     pub const MEGA_KICK: Self = Self::new("Mega Kick", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(120), 75, 5);
     pub const JUMP_KICK: Self = Self::new("Jump Kick", Fighting, PokemonMoveEffect::JumpKick, Some(70), 95, 25);
-    pub const ROLLING_KICK: Self = Self::new("Rolling Kick", Fighting, PokemonMoveEffect::FlinchSide2, Some(60), 85, 15);
+    pub const ROLLING_KICK: Self = Self::new("Rolling Kick", Fighting, PokemonMoveEffect::FlinchSideEffect2, Some(60), 85, 15);
     pub const SAND_ATTACK: Self = Self::new("Sand Attack", Normal, PokemonMoveEffect::AccuracyDown1, None, 100, 15);
-    pub const HEADBUTT: Self = Self::new("Headbutt", Normal, PokemonMoveEffect::FlinchSide2, Some(70), 100, 15);
+    pub const HEADBUTT: Self = Self::new("Headbutt", Normal, PokemonMoveEffect::FlinchSideEffect2, Some(70), 100, 15);
     pub const HORN_ATTACK: Self = Self::new("Horn Attack", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(65), 100, 25);
     pub const FURY_ATTACK: Self = Self::new("Fury Attack", Normal, PokemonMoveEffect::TwoToFiveAttacks, Some(15), 85, 20);
     pub const HORN_DRILL: Self = Self::new("Horn Drill", Normal, PokemonMoveEffect::OneHitKO, None, 30, 5);
     pub const TACKLE: Self = Self::new("Tackle", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(35), 95, 35);
-    pub const BODY_SLAM: Self = Self::new("Body Slam", Normal, PokemonMoveEffect::ParalyzeSide2, Some(85), 100, 15);
+    pub const BODY_SLAM: Self = Self::new("Body Slam", Normal, PokemonMoveEffect::ParalyzeSideEffect2, Some(85), 100, 15);
     pub const WRAP: Self = Self::new("Wrap", Normal, PokemonMoveEffect::Trapping, Some(15), 85, 20);
     pub const TAKE_DOWN: Self = Self::new("Take Down", Normal, PokemonMoveEffect::Recoil, Some(90), 85, 20);
     pub const THRASH: Self = Self::new("Thrash", Normal, PokemonMoveEffect::ThrashPetalDance, Some(90), 100, 20);
     pub const DOUBLE_EDGE: Self = Self::new("Double Edge", Normal, PokemonMoveEffect::Recoil, Some(100), 100, 15);
     pub const TAIL_WHIP: Self = Self::new("Tail Whip", Normal, PokemonMoveEffect::DefenseDown1, None, 100, 30);
-    pub const POISON_STING: Self = Self::new("Poison Sting", Poison, PokemonMoveEffect::PoisonSide1, Some(15), 100, 35);
+    pub const POISON_STING: Self = Self::new("Poison Sting", Poison, PokemonMoveEffect::PoisonSideEffect1, Some(15), 100, 35);
     pub const TWINEEDLE: Self = Self::new("Twineedle", Bug, PokemonMoveEffect::Twineedle, Some(25), 100, 20);
     pub const PIN_MISSILE: Self = Self::new("Pin Missile", Bug, PokemonMoveEffect::TwoToFiveAttacks, Some(14), 85, 20);
     pub const LEER: Self = Self::new("Leer", Normal, PokemonMoveEffect::DefenseDown1, None, 100, 30);
-    pub const BITE: Self = Self::new("Bite", Normal, PokemonMoveEffect::FlinchSide1, Some(60), 100, 25);
+    pub const BITE: Self = Self::new("Bite", Normal, PokemonMoveEffect::FlinchSideEffect1, Some(60), 100, 25);
     pub const GROWL: Self = Self::new("Growl", Normal, PokemonMoveEffect::AttackDown1, None, 100, 40);
     pub const ROAR: Self = Self::new("Roar", Normal, PokemonMoveEffect::SwitchAndTeleport, None, 100, 20);
     pub const SING: Self = Self::new("Sing", Normal, PokemonMoveEffect::Sleep, None, 55, 15);
     pub const SUPERSONIC: Self = Self::new("Supersonic", Normal, PokemonMoveEffect::Confusion, None, 55, 20);
     pub const SONICBOOM: Self = Self::new("Sonicboom", Normal, PokemonMoveEffect::SpecialDamage, None, 90, 20);
     pub const DISABLE: Self = Self::new("Disable", Normal, PokemonMoveEffect::Disable, None, 55, 20);
-    pub const ACID: Self = Self::new("Acid", Poison, PokemonMoveEffect::DefenseDownSide, Some(40), 100, 30);
-    pub const EMBER: Self = Self::new("Ember", Fire, PokemonMoveEffect::BurnSide1, Some(40), 100, 25);
-    pub const FLAMETHROWER: Self = Self::new("Flamethrower", Fire, PokemonMoveEffect::BurnSide1, Some(95), 100, 15);
+    pub const ACID: Self = Self::new("Acid", Poison, PokemonMoveEffect::DefenseDownSideEffect, Some(40), 100, 30);
+    pub const EMBER: Self = Self::new("Ember", Fire, PokemonMoveEffect::BurnSideEffect1, Some(40), 100, 25);
+    pub const FLAMETHROWER: Self = Self::new("Flamethrower", Fire, PokemonMoveEffect::BurnSideEffect1, Some(95), 100, 15);
     pub const MIST: Self = Self::new("Mist", Ice, PokemonMoveEffect::Mist, None, 100, 30);
     pub const WATER_GUN: Self = Self::new("Water Gun", Water, PokemonMoveEffect::NoAdditionalEffect, Some(40), 100, 25);
     pub const HYDRO_PUMP: Self = Self::new("Hydro Pump", Water, PokemonMoveEffect::NoAdditionalEffect, Some(120), 80, 5);
     pub const SURF: Self = Self::new("Surf", Water, PokemonMoveEffect::NoAdditionalEffect, Some(95), 100, 15);
-    pub const ICE_BEAM: Self = Self::new("Ice Beam", Ice, PokemonMoveEffect::FreezeSide1, Some(95), 100, 10);
-    pub const BLIZZARD: Self = Self::new("Blizzard", Ice, PokemonMoveEffect::FreezeSide1, Some(120), 90, 5);
-    pub const PSYBEAM: Self = Self::new("Psybeam", Psychic, PokemonMoveEffect::ConfusionSide, Some(65), 100, 20);
-    pub const BUBBLEBEAM: Self = Self::new("Bubblebeam", Water, PokemonMoveEffect::SpeedDownSide, Some(65), 100, 20);
-    pub const AURORA_BEAM: Self = Self::new("Aurora Beam", Ice, PokemonMoveEffect::AttackDownSide, Some(65), 100, 20);
+    pub const ICE_BEAM: Self = Self::new("Ice Beam", Ice, PokemonMoveEffect::FreezeSideEffect1, Some(95), 100, 10);
+    pub const BLIZZARD: Self = Self::new("Blizzard", Ice, PokemonMoveEffect::FreezeSideEffect1, Some(120), 90, 5);
+    pub const PSYBEAM: Self = Self::new("Psybeam", Psychic, PokemonMoveEffect::ConfusionSideEffect, Some(65), 100, 20);
+    pub const BUBBLEBEAM: Self = Self::new("Bubblebeam", Water, PokemonMoveEffect::SpeedDownSideEffect, Some(65), 100, 20);
+    pub const AURORA_BEAM: Self = Self::new("Aurora Beam", Ice, PokemonMoveEffect::AttackDownSideEffect, Some(65), 100, 20);
     pub const HYPER_BEAM: Self = Self::new("Hyper Beam", Normal, PokemonMoveEffect::HyperBeam, Some(150), 90, 5);
     pub const PECK: Self = Self::new("Peck", Flying, PokemonMoveEffect::NoAdditionalEffect, Some(35), 100, 35);
     pub const DRILL_PECK: Self = Self::new("Drill Peck", Flying, PokemonMoveEffect::NoAdditionalEffect, Some(80), 100, 20);
     pub const SUBMISSION: Self = Self::new("Submission", Fighting, PokemonMoveEffect::Recoil, Some(80), 80, 25);
-    pub const LOW_KICK: Self = Self::new("Low Kick", Fighting, PokemonMoveEffect::FlinchSide2, Some(50), 90, 20);
+    pub const LOW_KICK: Self = Self::new("Low Kick", Fighting, PokemonMoveEffect::FlinchSideEffect2, Some(50), 90, 20);
     pub const COUNTER: Self = Self::new("Counter", Fighting, PokemonMoveEffect::NoAdditionalEffect, None, 100, 20);
     pub const SEISMIC_TOSS: Self = Self::new("Seismic Toss", Fighting, PokemonMoveEffect::SpecialDamage, None, 100, 20);
     pub const STRENGTH: Self = Self::new("Strength", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(80), 100, 15);
@@ -544,17 +631,17 @@ impl PokemonMoveMetadata {
     pub const STRING_SHOT: Self = Self::new("String Shot", Bug, PokemonMoveEffect::SpeedDown1, None, 95, 40);
     pub const DRAGON_RAGE: Self = Self::new("Dragon Rage", Dragon, PokemonMoveEffect::SpecialDamage, None, 100, 10);
     pub const FIRE_SPIN: Self = Self::new("Fire Spin", Fire, PokemonMoveEffect::Trapping, Some(15), 70, 15);
-    pub const THUNDERSHOCK: Self = Self::new("Thundershock", Electric, PokemonMoveEffect::ParalyzeSide1, Some(40), 100, 30);
-    pub const THUNDERBOLT: Self = Self::new("Thunderbolt", Electric, PokemonMoveEffect::ParalyzeSide1, Some(95), 100, 15);
+    pub const THUNDERSHOCK: Self = Self::new("Thundershock", Electric, PokemonMoveEffect::ParalyzeSideEffect1, Some(40), 100, 30);
+    pub const THUNDERBOLT: Self = Self::new("Thunderbolt", Electric, PokemonMoveEffect::ParalyzeSideEffect1, Some(95), 100, 15);
     pub const THUNDER_WAVE: Self = Self::new("Thunder Wave", Electric, PokemonMoveEffect::Paralyze, None, 100, 20);
-    pub const THUNDER: Self = Self::new("Thunder", Electric, PokemonMoveEffect::ParalyzeSide1, Some(120), 70, 10);
+    pub const THUNDER: Self = Self::new("Thunder", Electric, PokemonMoveEffect::ParalyzeSideEffect1, Some(120), 70, 10);
     pub const ROCK_THROW: Self = Self::new("Rock Throw", Rock, PokemonMoveEffect::NoAdditionalEffect, Some(50), 65, 15);
     pub const EARTHQUAKE: Self = Self::new("Earthquake", Ground, PokemonMoveEffect::NoAdditionalEffect, Some(100), 100, 10);
     pub const FISSURE: Self = Self::new("Fissure", Ground, PokemonMoveEffect::OneHitKO, None, 30, 5);
     pub const DIG: Self = Self::new("Dig", Ground, PokemonMoveEffect::Charge, Some(100), 100, 10);
     pub const TOXIC: Self = Self::new("Toxic", Poison, PokemonMoveEffect::Poison, None, 85, 10);
-    pub const CONFUSION: Self = Self::new("Confusion", Psychic, PokemonMoveEffect::ConfusionSide, Some(50), 100, 25);
-    pub const PSYCHIC_M: Self = Self::new("Psychic M", Psychic, PokemonMoveEffect::SpecialDownSide, Some(90), 100, 10);
+    pub const CONFUSION: Self = Self::new("Confusion", Psychic, PokemonMoveEffect::ConfusionSideEffect, Some(50), 100, 25);
+    pub const PSYCHIC_M: Self = Self::new("Psychic M", Psychic, PokemonMoveEffect::SpecialDownSideEffect, Some(90), 100, 10);
     pub const HYPNOSIS: Self = Self::new("Hypnosis", Psychic, PokemonMoveEffect::Sleep, None, 60, 20);
     pub const MEDITATE: Self = Self::new("Meditate", Psychic, PokemonMoveEffect::AttackUp1, None, 100, 40);
     pub const AGILITY: Self = Self::new("Agility", Psychic, PokemonMoveEffect::SpeedUp2, None, 100, 30);
@@ -582,17 +669,17 @@ impl PokemonMoveMetadata {
     pub const MIRROR_MOVE: Self = Self::new("Mirror Move", Flying, PokemonMoveEffect::MirrorMove, None, 100, 20);
     pub const SELFDESTRUCT: Self = Self::new("Selfdestruct", Normal, PokemonMoveEffect::Explode, Some(130), 100, 5);
     pub const EGG_BOMB: Self = Self::new("Egg Bomb", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(100), 75, 10);
-    pub const LICK: Self = Self::new("Lick", Ghost, PokemonMoveEffect::ParalyzeSide2, Some(20), 100, 30);
-    pub const SMOG: Self = Self::new("Smog", Poison, PokemonMoveEffect::PoisonSide2, Some(20), 70, 20);
-    pub const SLUDGE: Self = Self::new("Sludge", Poison, PokemonMoveEffect::PoisonSide2, Some(65), 100, 20);
-    pub const BONE_CLUB: Self = Self::new("Bone Club", Ground, PokemonMoveEffect::FlinchSide1, Some(65), 85, 20);
-    pub const FIRE_BLAST: Self = Self::new("Fire Blast", Fire, PokemonMoveEffect::BurnSide2, Some(120), 85, 5);
+    pub const LICK: Self = Self::new("Lick", Ghost, PokemonMoveEffect::ParalyzeSideEffect2, Some(20), 100, 30);
+    pub const SMOG: Self = Self::new("Smog", Poison, PokemonMoveEffect::PoisonSideEffect2, Some(20), 70, 20);
+    pub const SLUDGE: Self = Self::new("Sludge", Poison, PokemonMoveEffect::PoisonSideEffect2, Some(65), 100, 20);
+    pub const BONE_CLUB: Self = Self::new("Bone Club", Ground, PokemonMoveEffect::FlinchSideEffect1, Some(65), 85, 20);
+    pub const FIRE_BLAST: Self = Self::new("Fire Blast", Fire, PokemonMoveEffect::BurnSideEffect2, Some(120), 85, 5);
     pub const WATERFALL: Self = Self::new("Waterfall", Water, PokemonMoveEffect::NoAdditionalEffect, Some(80), 100, 15);
     pub const CLAMP: Self = Self::new("Clamp", Water, PokemonMoveEffect::Trapping, Some(35), 75, 10);
     pub const SWIFT: Self = Self::new("Swift", Normal, PokemonMoveEffect::Swift, Some(60), 100, 20);
     pub const SKULL_BASH: Self = Self::new("Skull Bash", Normal, PokemonMoveEffect::Charge, Some(100), 100, 15);
     pub const SPIKE_CANNON: Self = Self::new("Spike Cannon", Normal, PokemonMoveEffect::TwoToFiveAttacks, Some(20), 100, 15);
-    pub const CONSTRICT: Self = Self::new("Constrict", Normal, PokemonMoveEffect::SpeedDownSide, Some(10), 100, 35);
+    pub const CONSTRICT: Self = Self::new("Constrict", Normal, PokemonMoveEffect::SpeedDownSideEffect, Some(10), 100, 35);
     pub const AMNESIA: Self = Self::new("Amnesia", Psychic, PokemonMoveEffect::SpecialUp2, None, 100, 20);
     pub const KINESIS: Self = Self::new("Kinesis", Psychic, PokemonMoveEffect::AccuracyDown1, None, 80, 15);
     pub const SOFTBOILED: Self = Self::new("Softboiled", Normal, PokemonMoveEffect::Heal, None, 100, 10);
@@ -605,7 +692,7 @@ impl PokemonMoveMetadata {
     pub const LOVELY_KISS: Self = Self::new("Lovely Kiss", Normal, PokemonMoveEffect::Sleep, None, 75, 10);
     pub const SKY_ATTACK: Self = Self::new("Sky Attack", Flying, PokemonMoveEffect::Charge, Some(140), 90, 5);
     pub const TRANSFORM: Self = Self::new("Transform", Normal, PokemonMoveEffect::Transform, None, 100, 10);
-    pub const BUBBLE: Self = Self::new("Bubble", Water, PokemonMoveEffect::SpeedDownSide, Some(20), 100, 30);
+    pub const BUBBLE: Self = Self::new("Bubble", Water, PokemonMoveEffect::SpeedDownSideEffect, Some(20), 100, 30);
     pub const DIZZY_PUNCH: Self = Self::new("Dizzy Punch", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(70), 100, 10);
     pub const SPORE: Self = Self::new("Spore", Grass, PokemonMoveEffect::Sleep, None, 100, 15);
     pub const FLASH: Self = Self::new("Flash", Normal, PokemonMoveEffect::AccuracyDown1, None, 70, 20);
@@ -618,7 +705,7 @@ impl PokemonMoveMetadata {
     pub const BONEMERANG: Self = Self::new("Bonemerang", Ground, PokemonMoveEffect::AttackTwice, Some(50), 90, 10);
     pub const REST: Self = Self::new("Rest", Psychic, PokemonMoveEffect::Heal, None, 100, 10);
     pub const ROCK_SLIDE: Self = Self::new("Rock Slide", Rock, PokemonMoveEffect::NoAdditionalEffect, Some(75), 90, 10);
-    pub const HYPER_FANG: Self = Self::new("Hyper Fang", Normal, PokemonMoveEffect::FlinchSide1, Some(80), 90, 15);
+    pub const HYPER_FANG: Self = Self::new("Hyper Fang", Normal, PokemonMoveEffect::FlinchSideEffect1, Some(80), 90, 15);
     pub const SHARPEN: Self = Self::new("Sharpen", Normal, PokemonMoveEffect::AttackUp1, None, 100, 30);
     pub const CONVERSION: Self = Self::new("Conversion", Normal, PokemonMoveEffect::Conversion, None, 100, 30);
     pub const TRI_ATTACK: Self = Self::new("Tri Attack", Normal, PokemonMoveEffect::NoAdditionalEffect, Some(80), 100, 10);
