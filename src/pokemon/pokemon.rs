@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter};
+use crate::pokemon::battle::{BattleAction};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
@@ -29,7 +31,7 @@ impl Pokemon {
             current_hp: u16::MAX, // temporary, will be recalculated
             status: PokemonStatus::default(),
             types: [metadata.type1, metadata.type2.unwrap_or(metadata.type1)],
-            moves: moves.map(|move_name| Some(PokemonMove::new(move_name))),
+            moves: moves.map(|move_name| Some(PokemonMove::with_max_pp(move_name))),
             trainer_name: trainer_name.into(),
             trainer_id,
             experience: metadata.experience_group.experience_for_level(100),
@@ -84,6 +86,53 @@ impl Pokemon {
         self.stat0(base_stat, iv, ev) + 5
     }
 
+    pub fn summary(&self) -> PokemonSummary {
+        PokemonSummary {
+            species: self.species,
+            current_hp: self.current_hp,
+            status: self.status,
+            types: self.types,
+            level: self.level,
+            moves: self.moves,
+            stats: self.stats,
+        }
+    }
+
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PokemonSummary {
+    pub species: PokemonSpecies,
+    pub current_hp: u16,
+    pub status: PokemonStatus,
+    pub types: [PokemonType; 2],
+    pub level: u8,
+    pub moves: [Option<PokemonMove>; 4],
+    pub stats: PokemonStats,
+}
+
+impl PokemonSummary {
+    pub fn available_battle_moves(&self) -> Vec<BattleAction> {
+        self.moves.iter().enumerate()
+            .filter_map(|(i, m)|
+                m.filter(|m| m.pp > 0)
+                    .map(|m| BattleAction::Fight {
+                        slot: i as u8,
+                        battle_move: m
+                    })
+            )
+            .collect()
+    }
+}
+
+impl Display for PokemonSummary {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} Lv.{} HP {}/{}", self.species, self.level, self.current_hp, self.stats.hp)?;
+        if self.status != PokemonStatus::None {
+            write!(f, "{}", self.status)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

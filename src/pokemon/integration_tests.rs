@@ -95,8 +95,8 @@ fn test_battle_state_reading() {
     // Basic battle validity
     assert_eq!(battle.battle_type, BattleType::Wild);
     assert!(battle.enemy.level > 0, "enemy level should be non-zero");
-    assert!(battle.enemy.max_hp > 0, "enemy max HP should be non-zero");
-    assert!(battle.enemy.current_hp <= battle.enemy.max_hp);
+    assert!(battle.enemy.stats.hp > 0, "enemy max HP should be non-zero");
+    assert!(battle.enemy.current_hp <= battle.enemy.stats.hp);
     assert!(battle.player.moves.iter().any(|m| m.is_some()), "player needs at least one move");
 
     // Bag — we wrote exactly 2 items, so expect exactly those 2.
@@ -197,10 +197,9 @@ fn test_battle_fight_to_victory_returns_to_route1() {
                 self.event_tx.send(FightEvent::BattleStarted).ok();
             }
             let battle = state.battle.as_ref()?;
-            let slot = battle.player.moves.iter()
-                .position(|m| m.map_or(false, |m| m.current_pp > 0))
-                .unwrap_or(0) as u8;
-            Some(BattleAction::Fight(slot))
+            battle.player.moves.iter()
+                .enumerate()
+                .find_map(|(i, m)| m.filter(|m| m.pp > 0).map(|m| BattleAction::Fight { slot: i as u8, battle_move: m }))
         }
     }
 
