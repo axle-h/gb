@@ -113,6 +113,11 @@ impl PokemonAgent {
         self.policy.is_exhausted()
     }
 
+    /// Drains all buffered events and returns them.
+    pub fn drain_events(&mut self) -> Vec<AgentEvent> {
+        self.event_buffer.drain(..).collect()
+    }
+
     fn event(&mut self, event: AgentEvent) {
         println!("{:?}", event);
         self.event_buffer.push_back(event);
@@ -489,10 +494,10 @@ fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
 /// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.
 fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<Point8> {
     let neighbors = [
-        Point8 { x: pos.x,                   y: pos.y.wrapping_sub(1) },
-        Point8 { x: pos.x,                   y: pos.y + 1             },
-        Point8 { x: pos.x.wrapping_sub(1),   y: pos.y                 },
-        Point8 { x: pos.x + 1,               y: pos.y                 },
+        Point8 { x: pos.x,                  y: pos.y.wrapping_sub(1) },
+        Point8 { x: pos.x,                  y: pos.y.wrapping_add(1) },
+        Point8 { x: pos.x.wrapping_sub(1),  y: pos.y                 },
+        Point8 { x: pos.x.wrapping_add(1),  y: pos.y                 },
     ];
     neighbors.into_iter().find(|&p| {
         (p.x as usize) < map.width

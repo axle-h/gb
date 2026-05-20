@@ -306,8 +306,12 @@ impl PokemonEncoding for MMU {
                     // animations. It cycles 8→1 and never resets to 0, so we require
                     // BIT_SCRIPTED_MOVEMENT_STATE to be set to avoid false positives from its
                     // leftover non-zero value after the movement has finished.
+                    // We also require BIT_SCRIPTED_NPC_MOVEMENT (bit 0) to be actively set:
+                    // StartSimulatingJoypadStates (used for ledge jumps) sets bit 7 but NOT bit 0,
+                    // so a ledge jump with a residual counter would otherwise fire this condition.
                     if self.read_pointer(&pokered_symbols::wScriptedNPCWalkCounter) != 0
                         && scripted_movement_active
+                        && flags5 & 0x01 != 0
                     {
                         return GameMode::Script;
                     }

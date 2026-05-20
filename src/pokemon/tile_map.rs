@@ -25,8 +25,8 @@ impl MetaTileMap {
         let west_extra  = map.west_extra();
         Self {
             player_position: Point8 {
-                x: map.player_position.x + west_extra as u8,
-                y: map.player_position.y + north_extra as u8,
+                x: map.player_position.x.saturating_add(west_extra as u8),
+                y: map.player_position.y.saturating_add(north_extra as u8),
             },
             player_direction: map.player_direction,
             map: map.map,
@@ -70,10 +70,10 @@ impl MetaTileMap {
         while let Some(pos) = queue.pop_front() {
             let d = dist[&pos];
             let neighbors = [
-                (JoypadButton::Up,    Point8 { x: pos.x,                   y: pos.y.saturating_sub(1) }),
-                (JoypadButton::Down,  Point8 { x: pos.x,                   y: pos.y + 1               }),
-                (JoypadButton::Left,  Point8 { x: pos.x.saturating_sub(1), y: pos.y                   }),
-                (JoypadButton::Right, Point8 { x: pos.x + 1,               y: pos.y                   }),
+                (JoypadButton::Up,    Point8 { x: pos.x,                    y: pos.y.wrapping_sub(1) }),
+                (JoypadButton::Down,  Point8 { x: pos.x,                    y: pos.y.wrapping_add(1) }),
+                (JoypadButton::Left,  Point8 { x: pos.x.wrapping_sub(1),    y: pos.y                 }),
+                (JoypadButton::Right, Point8 { x: pos.x.wrapping_add(1),    y: pos.y                 }),
             ];
             for (dir, nb) in neighbors {
                 if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }

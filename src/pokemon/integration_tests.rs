@@ -248,6 +248,99 @@ fn test_route_1() {
     println!("{}", state.map);
 }
 
+/// When the player jumps over a south-facing ledge, pokered briefly runs
+/// `StartSimulatingJoypadStates` to animate the jump. This sets BIT_SCRIPTED_MOVEMENT_STATE
+/// (wStatusFlags5 bit 7) while the simulated input is active. If wScriptedNPCWalkCounter
+/// still holds a residual non-zero value from a previous NPC walk (Oak's intro, etc.), the
+/// first Script condition fires and the agent incorrectly aborts its overworld movement.
+///
+/// This test reproduces the false positive by seeding wScriptedNPCWalkCounter with a
+/// non-zero value (as left by Oak's walk sequence) and then navigating south through Route 1
+/// to Pallet Town, crossing ledges on the way.  The agent must reach Pallet Town without
+/// any "map script started" abort.
+#[test]
+fn test_ledge_jump_does_not_abort_overworld_movement() {
+    use crate::pokemon::agent::{AgentEvent, PokemonAgent};
+    use crate::pokemon::symbols::pokered_symbols;
+    use crate::ram::RAM;
+    use encoding::MetaTile;
+
+    let mut gb = GameBoy::dmg(roms::POKERED);
+    gb.load_state(ROUTE1_STATE).unwrap();
+    gb.run(MachineCycles::from_m(1000));
+
+    // wScriptedNPCWalkCounter cycles 8→1 and never resets to 0 after NPC walks.
+    // Seed it to simulate the residual state left by Oak's intro walk sequence.
+    gb.core_mut().mmu_mut().write(pokered_symbols::wScriptedNPCWalkCounter.address, 4);
+
+    // Give the player a strong party so any wild battles can be fought through.
+    PokemonApi::new(&mut gb).pimp_out_pokemon().unwrap();
+
+    // Phase 0 – go north to Viridian City (no ledges northward).
+    // Phase 1 – re-enter Route 1 from the north; player now stands above all ledges.
+    // Phase 2 – navigate south to Pallet Town, crossing every ledge on the way.
+    struct CrossLedgesPolicy { phase: u8 }
+    impl Policy for CrossLedgesPolicy {
+        fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+            let target = match (self.phase, state.map.map) {
+                (0, Map::Route1)     => MetaTile::Connection(Map::ViridianCity),
+                (0, Map::ViridianCity) => { self.phase = 1; MetaTile::Connection(Map::Route1) }
+                (1, Map::ViridianCity) => MetaTile::Connection(Map::Route1),
+                (1, Map::Route1)     => { self.phase = 2; MetaTile::Connection(Map::PalletTown) }
+                (2, Map::Route1)     => MetaTile::Connection(Map::PalletTown),
+                _ => return None,
+            };
+            state.map.actions().into_iter().find(|a| a.tile == target)
+        }
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            let battle = state.battle.as_ref()?;
+            battle.player.moves.iter().enumerate()
+                .find_map(|(i, m)| m.filter(|m| m.pp > 0)
+                    .map(|m| BattleAction::Fight { slot: i as u8, battle_move: m }))
+        }
+    }
+
+    let mut agent = PokemonAgent::new(Box::new(CrossLedgesPolicy { phase: 0 }));
+    let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16));
+
+    let mut reached_pallet = false;
+    let mut prev_pos: Option<crate::geometry::Point8> = None;
+    let mut ledge_crossed = false;
+
+    for _ in 0..30_000u32 {
+        gb.run(frame_cycles);
+        agent.update(&mut gb, frame_cycles).ok();
+
+        for event in agent.drain_events() {
+            if let AgentEvent::OverworldActionAborted { reason, .. } = &event {
+                if reason.contains("script") {
+                    panic!("agent aborted overworld movement due to ledge being mistaken for script: {reason}");
+                }
+            }
+        }
+
+        let api = PokemonApi::new(&mut gb);
+        let Ok(state) = api.game_state() else { continue };
+
+        if state.mode == GameMode::Overworld {
+            // Detect a ledge jump: player's y-coordinate advances by >1 in a single tick.
+            if let Some(prev) = prev_pos {
+                let dy = state.map.player_position.y as i16 - prev.y as i16;
+                if dy > 1 { ledge_crossed = true; }
+            }
+            prev_pos = Some(state.map.player_position);
+        }
+
+        if state.map.map == Map::PalletTown {
+            reached_pallet = true;
+            break;
+        }
+    }
+
+    assert!(ledge_crossed, "player never jumped a ledge — test did not exercise the scenario");
+    assert!(reached_pallet, "agent did not reach Pallet Town within allotted frames");
+}
+
 /// Route 1 has tall grass — a WalkInGrass action must be present and route to a Grass tile.
 /// Indoor maps (no wGrassTile) must produce no WalkInGrass action.
 #[test]
