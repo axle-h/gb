@@ -133,6 +133,19 @@ impl MMU {
         }
     }
 
+    pub fn read_wram_slice<L : Into<Option<usize>>>(&self, address: u16, length: L) -> Result<&[u8], String> {
+        if address >= 0xC000 && address <= 0xDFFF {
+            let offset = (address - 0xC000) as usize;
+            if let Some(length) = length.into() {
+                Ok(&self.work_ram[offset..(offset + length)])
+            } else {
+                Ok(&self.work_ram[offset..])
+            }
+        } else {
+            Err(format!("Address {:04X} is invalid for WRAM", address))
+        }
+    }
+
     pub fn dump_sram(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(self.ram_banks.len() * RAM_BANK_SIZE);
         for bank in &self.ram_banks {

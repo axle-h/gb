@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+use strum::IntoEnumIterator;
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter)]
 #[repr(u8)]
 pub enum PokemonSpecies {
     Rhydon = 0x1,
@@ -512,4 +514,56 @@ impl PokemonMetadata {
     pub const BELLSPROUT: Self = Self::new("Bellsprout",69, 50, 75, 35, 40, 70, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
     pub const WEEPINBELL: Self = Self::new("Weepinbell",70, 65, 90, 50, 55, 85, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
     pub const VICTREEBEL: Self = Self::new("Victreebel",71, 80, 105, 65, 70, 100, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Pokedex {
+    bytes: [u8; Self::BYTES_LENGTH],
+}
+
+impl Pokedex {
+    pub const BYTES_LENGTH: usize = 19;
+
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, String> {
+        Ok(Self { bytes: bytes.try_into().map_err(|_| "invalid bytes length")? })
+    }
+
+    pub fn contains(&self, species: &PokemonSpecies) -> bool {
+        let bit = species.metadata().pokedex_number - 1;
+        let flag_byte = bit / 8;
+        let flag_bit = bit % 8;
+        self.bytes[flag_byte as usize] & (1 << flag_bit) != 0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.iter().all(|byte| *byte == 0)
+    }
+
+    pub fn species(&self) -> Vec<PokemonSpecies> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+
+        let pokedex_to_species: BTreeMap<u8, PokemonSpecies> = PokemonSpecies::iter()
+            .map(|species| (species.metadata().pokedex_number, species))
+            .collect();
+
+        let mut result = vec!();
+        for byte_id in 0..Self::BYTES_LENGTH {
+            let byte = self.bytes[byte_id];
+
+            if byte == 0 {
+                continue;
+            }
+            for bit in 0..8 {
+                if byte & (1 << bit) != 0 {
+                    let pokedex_number = byte_id as u8 * 8 + bit + 1;
+                    let species = pokedex_to_species.get(&pokedex_number).unwrap();
+                    result.push(*species);
+                }
+            }
+        }
+        result
+    }
+
 }
