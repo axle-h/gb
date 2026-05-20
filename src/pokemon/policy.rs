@@ -243,7 +243,7 @@ impl PolicyStep {
     pub const COMPLETE_GAME: &[Self] = &[
         Self::navigate(Map::PalletTown),
         Self::navigate_until_interrupted(Map::Route1),      // triggers Oak's script → lands in OaksLab
-        Self::Interact(MapSprite::OAKSLAB_BULBASAUR_POKE_BALL),
+        Self::Interact(MapSprite::OAKSLAB_CHARMANDER_POKE_BALL),
         Self::navigate(Map::Route1),      // navigate for real now that Oak is done
     ];
 }

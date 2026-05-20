@@ -286,7 +286,6 @@ impl PokemonAgent {
                 api.toggle_button(JoypadButton::A);
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
-                api.release_all_buttons();
                 let game_state = api.game_state()?;
                 if game_state.mode != GameMode::Overworld {
                     self.abort_overworld(destination,
@@ -309,17 +308,23 @@ impl PokemonAgent {
                     match action {
                         None => self.abort_overworld(destination,
                                                      format!("no route to {:?}", destination)),
-                        Some(a) => {
-                            if let Some(&btn) = a.route.first() {
+                        Some(a) => match a.route.first() {
+                            // Pulse A via toggle so hJoyPressed fires every other tick —
+                            // press_button (after release_all) would only fire once since A
+                            // stays held and hJoyPressed goes dark on the next frame.
+                            Some(&JoypadButton::A) => api.toggle_button(JoypadButton::A),
+                            // Hold direction buttons for continuous walking.
+                            Some(&btn) => {
+                                api.release_all_buttons();
                                 api.press_button(btn);
-                            } else {
+                            }
+                            None => {
                                 new_events.push(AgentEvent::OverworldActionCompleted { destination });
                                 self.set_state(AgentState::Idle);
                             }
                         }
                     }
                 }
-
             }
             AgentState::ReadingTextBox { ref mut reader } => {
                 reader.update(&mut api);
