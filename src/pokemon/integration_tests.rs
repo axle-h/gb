@@ -10,10 +10,11 @@ use crate::pokemon::policy::Policy;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use crate::pokemon::*;
+use crate::pokemon::agent::AGENT_RESOLUTION;
 
-pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("./test_data/pallet-town-state.bin");
-pub const ROUTE1_STATE: &[u8] = include_bytes!("./test_data/route1-state.bin");
-pub const BATTLE_STATE: &[u8] = include_bytes!("./test_data/battle-state.bin");
+pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("data/pallet-town-state.bin");
+pub const ROUTE1_STATE: &[u8] = include_bytes!("data/route1-state.bin");
+pub const BATTLE_STATE: &[u8] = include_bytes!("data/battle-state.bin");
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum PolicyEvent {
@@ -368,7 +369,7 @@ fn test_viridian_pokemart_script_advances_dialogue() {
     use std::time::Duration;
     use crate::pokemon::agent::PokemonAgent;
 
-    const POKEMART_STATE: &[u8] = include_bytes!("./test_data/viridian-city-pokemart-during-script.bin");
+    const POKEMART_STATE: &[u8] = include_bytes!("data/viridian-city-pokemart-during-script.bin");
 
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(POKEMART_STATE).unwrap();
@@ -415,7 +416,7 @@ fn test_viridian_pokemart_script_advances_dialogue() {
 fn test_cut_bush_blocks_fisher_without_cut() {
     use encoding::MetaTile;
 
-    const BUSH_STATE: &[u8] = include_bytes!("./test_data/viridian-city-north-of-bush.bin");
+    const BUSH_STATE: &[u8] = include_bytes!("data/viridian-city-north-of-bush.bin");
 
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(BUSH_STATE).unwrap();
@@ -441,7 +442,7 @@ fn test_cut_bush_blocks_fisher_without_cut() {
 fn test_viridian_pokecenter_nurse_action() {
     use encoding::MetaTile;
 
-    const POKECENTER_STATE: &[u8] = include_bytes!("./test_data/viridian-city-pokemon-center.bin");
+    const POKECENTER_STATE: &[u8] = include_bytes!("data/viridian-city-pokemon-center.bin");
 
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(POKECENTER_STATE).unwrap();
@@ -466,7 +467,7 @@ fn test_viridian_pokecenter_nurse_action() {
 fn test_reds_house_1f_actions_from_save_state() {
     use encoding::MetaTile;
 
-    const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("./test_data/reds-house-1f-state.bin");
+    const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("data/reds-house-1f-state.bin");
 
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(REDS_HOUSE_1F_STATE).unwrap();
@@ -564,4 +565,57 @@ fn test_reds_house_1f_exit_warp() {
     }
 
     panic!("never reached RedsHouse1F in overworld mode within 15000 frames");
+}
+
+
+#[test]
+fn can_start_game() {
+    use crate::pokemon::agent::PokemonAgent;
+    use crate::pokemon::policy::{DeterministicPolicy};
+
+    const START_OF_GAME: &[u8] =
+        include_bytes!("data/start-of-game-state.bin");
+
+    let mut gb = GameBoy::dmg(roms::POKERED);
+    gb.load_state(START_OF_GAME).unwrap();
+    gb.run(MachineCycles::from_m(1000));
+
+    {
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+        assert_eq!(state.map.map, Map::RedsHouse2F, "save state should be in RedsHouse2F");
+        assert_eq!(state.pokemon.len(), 0, "player should have no pokemon before Oak's script");
+    }
+
+    let policy = DeterministicPolicy::complete_game(42, gb.core().mmu());
+    let mut agent = PokemonAgent::new(Box::new(policy));
+
+    const MAX_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_secs(180));
+    let mut total_cycles = MachineCycles::ZERO;
+
+    let mut got_pokemon = false;
+
+    loop {
+        let cycles = gb.run(AGENT_RESOLUTION);
+        agent.update(&mut gb, cycles).ok();
+
+        total_cycles += cycles;
+        if total_cycles >= MAX_CYCLES {
+            break;
+        }
+
+        let api = PokemonApi::new(&mut gb);
+        if let Ok(state) = api.game_state() {
+            if state.mode == GameMode::Overworld && state.pokemon.len() > 0 {
+                got_pokemon = true;
+                break;
+            }
+        }
+    }
+
+    assert!(got_pokemon, "player should have a starter pokemon after Oak's script");
+
+    let api = PokemonApi::new(&mut gb);
+    let state = api.game_state().unwrap();
+    println!("Starter: {:?}", state.pokemon.iter().next().map(|p| p.species));
 }

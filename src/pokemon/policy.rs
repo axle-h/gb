@@ -4,20 +4,33 @@ use std::sync::mpsc::{self, Receiver};
 use rand::prelude::StdRng;
 use rand::seq::IteratorRandom;
 use rand::{RngCore, SeedableRng};
+use crate::mmu::MMU;
 use crate::pokemon::GameState;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::damage::expected_damage;
+use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::encoding::MetaTile;
-use crate::pokemon::map::Map;
+use crate::pokemon::map::{Map, MapSprite};
+use crate::pokemon::species::PokemonSpecies;
+use crate::pokemon::world_graph::WorldGraph;
 
 /// Non-blocking policy interface.
 ///
-/// Both methods return `Option<_>`. `None` means "not ready yet — ask again next frame".
+/// All methods return `Option<_>`. `None` means "not ready yet — ask again next frame".
 /// This keeps the game loop running while the policy waits for input.
 pub trait Policy {
     fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction>;
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction>;
+
+    /// Called when the nickname-entry screen opens for `species`.
+    ///
+    /// - `None`          → not ready yet; will be called again next frame.
+    /// - `Some(None)`    → decline a nickname; the game keeps the default species name.
+    /// - `Some(Some(s))` → give this nickname (up to 10 characters, A-Z / a-z / 0-9 / common punctuation).
+    fn pick_nickname(&mut self, _species: PokemonSpecies) -> Option<Option<String>> {
+        Some(None) // default: keep the default species name
+    }
 }
 
 // ── Random (always-ready) ─────────────────────────────────────────────────────
@@ -42,6 +55,7 @@ impl Policy for RandomPolicy {
 pub struct ConsolePolicy {
     overworld_rx:   Option<Receiver<usize>>,
     battle_rx:      Option<Receiver<usize>>,
+    nickname_rx:    Option<Receiver<Option<String>>>,
     ow_menu_shown:  bool,
     btl_menu_shown: bool,
     /// Tiles shown when the last overworld menu was displayed; used to match
@@ -55,6 +69,7 @@ impl Default for ConsolePolicy {
         Self {
             overworld_rx:   None,
             battle_rx:      None,
+            nickname_rx:    None,
             ow_menu_shown:  false,
             btl_menu_shown: false,
             ow_shown_tiles: vec![],
@@ -157,6 +172,33 @@ impl Policy for ConsolePolicy {
         }
         None
     }
+
+    fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
+        if self.nickname_rx.is_none() {
+            println!("\nGive a nickname to {}?", species);
+            println!("  Enter a nickname (up to 10 chars), or press Enter to keep the default.");
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                print!("> ");
+                io::stdout().flush().ok();
+                let mut line = String::new();
+                if io::stdin().read_line(&mut line).is_err() { return; }
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    tx.send(None).ok();
+                } else {
+                    tx.send(Some(trimmed.to_string())).ok();
+                }
+            });
+            self.nickname_rx = Some(rx);
+        }
+
+        if let Ok(decision) = self.nickname_rx.as_ref().unwrap().try_recv() {
+            self.nickname_rx = None;
+            return Some(decision);
+        }
+        None
+    }
 }
 
 
@@ -184,41 +226,89 @@ fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PolicyStep {
-    Navigate(Map),
-    Interact(String),
+    Navigate { map: Map, strict: bool },
+    /// Walk to and interact with a visible sprite by name.
+    Interact(MapSprite),
 }
 
 impl PolicyStep {
+    pub const fn navigate(map: Map) -> Self {
+        Self::Navigate { map, strict: true }
+    }
+
+    pub const fn navigate_until_interrupted(map: Map) -> Self {
+        Self::Navigate { map, strict: false }
+    }
 
     pub const COMPLETE_GAME: &[Self] = &[
-        Self::Navigate(Map::PalletTown),
-        Self::Navigate(Map::Route1),
+        Self::navigate(Map::PalletTown),
+        Self::navigate_until_interrupted(Map::Route1),      // triggers Oak's script → lands in OaksLab
+        Self::Interact(MapSprite::OAKSLAB_BULBASAUR_POKE_BALL),
+        Self::navigate(Map::Route1),      // navigate for real now that Oak is done
     ];
 }
 
 pub struct DeterministicPolicy {
     rng: StdRng,
     queue: VecDeque<PolicyStep>,
+    world_graph: WorldGraph,
+    name_picker: PokemonNamePicker,
 }
 
 impl DeterministicPolicy {
-    fn new(seed: u64) -> Self {
+    pub fn new(seed: u64, steps: &[PolicyStep], world_graph: WorldGraph) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
-            queue: VecDeque::new(),
+            queue: steps.iter().cloned().collect(),
+            world_graph,
+            name_picker: PokemonNamePicker::seed_from_u64(seed),
         }
     }
-}
 
-impl Default for DeterministicPolicy {
-    fn default() -> Self {
-        Self::new(rand::rng().next_u64())
+    pub fn complete_game(seed: u64, mmu: &MMU) -> Self {
+        Self::new(seed, PolicyStep::COMPLETE_GAME, WorldGraph::build(mmu))
     }
 }
 
 impl Policy for DeterministicPolicy {
+
     fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
-        todo!()
+        let actions = state.map.actions();
+        let action_tiles: Vec<_> = actions.iter().map(|a| format!("{:?}", a.tile)).collect();
+        println!("[policy] map={} actions=[{}]", state.map.map, action_tiles.join(", "));
+        loop {
+            let step = self.queue.front()?.clone();
+            return match step {
+                PolicyStep::Navigate { map: target, strict } => {
+                    if state.map.map == target {
+                        self.queue.pop_front();
+                        continue;
+                    }
+                    let path = self.world_graph.shortest_path(state.map.map, target)?;
+                    let next_map = path.get(1)?.map;
+                    let action = actions.into_iter().find(|a| match a.tile {
+                        MetaTile::Connection(m) | MetaTile::Warp(m) => m == next_map,
+                        _ => false,
+                    });
+
+                    if !strict && action.is_some() {
+                        // non-struct navigations are triggered only once
+                        self.queue.pop_front();
+                    }
+
+                    action
+                }
+                PolicyStep::Interact(sprite) => {
+                    let action = actions.into_iter()
+                        .find(|a| a.tile == MetaTile::Sprite(sprite.name));
+                    println!("[policy] Interact({}): found={}", sprite.name, action.is_some());
+                    if action.is_some() {
+                        self.queue.pop_front();
+                    }
+                    action
+                }
+            }
+        }
     }
 
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
@@ -252,5 +342,11 @@ impl Policy for DeterministicPolicy {
 
         // 3. pick any random action
         actions.into_iter().choose(&mut self.rng)
+    }
+
+    fn pick_nickname(&mut self, _species: PokemonSpecies) -> Option<Option<String>> {
+        let name = self.name_picker.pick().to_string();
+        println!("[policy] pick name={}", name);
+        Some(Some(name))
     }
 }

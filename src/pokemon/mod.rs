@@ -50,6 +50,7 @@ pub mod world_graph;
 
 #[cfg(test)]
 mod integration_tests;
+mod data;
 
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
@@ -61,6 +62,11 @@ pub trait PokemonApiTrait {
     fn game_state(&self) -> Result<GameState, String>;
     fn on_screen_text(&self, only_message_box: bool) -> Option<String>;
     fn menu_state(&self) -> Option<MenuState>;
+    /// Returns the species currently being named on the nickname-entry screen.
+    fn naming_screen_species(&self) -> Result<PokemonSpecies, String>;
+    /// Writes `nickname` (or an empty terminator for `None`) directly into the
+    /// naming screen's string buffer so pressing START submits it immediately.
+    fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String>;
 }
 
 #[derive(Debug)]
@@ -327,6 +333,29 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
     fn menu_state(&self) -> Option<MenuState> {
         self.mmu().read_menu_state()
+    }
+
+    fn naming_screen_species(&self) -> Result<PokemonSpecies, String> {
+        let byte = self.mmu().read_pointer(&pokered_symbols::wCurPartySpecies);
+        PokemonSpecies::from_repr(byte)
+            .ok_or_else(|| format!("Invalid species byte {byte:#04x} on naming screen"))
+    }
+
+    fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String> {
+        let bytes: Vec<u8> = match nickname {
+            None | Some("") => vec![PokemonString::TERMINATOR],
+            Some(name) => {
+                let mut ps = PokemonString::from_string(name).0;
+                // Clamp to 10 encoded chars + terminator.
+                if let Some(pos) = ps.iter().position(|&b| b == PokemonString::TERMINATOR) {
+                    if pos > 10 { ps[10] = PokemonString::TERMINATOR; ps.truncate(11); }
+                } else {
+                    ps.truncate(10); ps.push(PokemonString::TERMINATOR);
+                }
+                ps
+            }
+        };
+        self.mmu_mut().write_pointer_slice(&pokered_symbols::wStringBuffer, &bytes)
     }
 }
 
