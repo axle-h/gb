@@ -105,6 +105,10 @@ impl PokemonAgent {
         }
     }
 
+    pub fn policy_exhausted(&self) -> bool {
+        self.policy.is_exhausted()
+    }
+
     fn event(&mut self, event: AgentEvent) {
         println!("{:?}", event);
         self.event_buffer.push_back(event);
