@@ -568,6 +568,113 @@ fn test_reds_house_1f_exit_warp() {
 }
 
 
+/// Before the player receives the Pokédex from Oak, `has_pokedex` must be false
+/// and both seen/owned sets must be empty.
+#[test]
+fn test_pokedex_empty_before_receiving_pokedex() {
+    let mut gb = GameBoy::dmg(roms::POKERED);
+    gb.load_state(include_bytes!("data/start-of-game-state.bin")).unwrap();
+    gb.run(MachineCycles::from_m(1000));
+
+    let api = PokemonApi::new(&mut gb);
+    let state = api.game_state().unwrap();
+
+    assert!(!state.has_pokedex, "player should not have the Pokédex before Oak's script");
+    assert!(state.pokedex_owned.is_empty(), "wPokedexOwned should be all-zero at game start");
+    assert!(state.pokedex_seen.is_empty(), "wPokedexSeen should be all-zero at game start");
+}
+
+/// Directly writes the EVENT_GOT_POKEDEX bit (bit 37 of wEventFlags) and checks
+/// that `has_pokedex` flips accordingly — tests the bit-address logic independently
+/// of any particular save state's history.
+#[test]
+fn test_has_pokedex_bit_toggling() {
+    use crate::pokemon::symbols::pokered_symbols;
+    use crate::ram::{RAM, ROM};
+
+    let mut gb = GameBoy::dmg(roms::POKERED);
+    gb.load_state(ROUTE1_STATE).unwrap();
+    gb.run(MachineCycles::from_m(1000));
+
+    // EVENT_GOT_POKEDEX = bit 37 → byte 4, bit 5, mask 0x20 of wEventFlags
+    let flag_addr = pokered_symbols::wEventFlags.address + 4;
+
+    {
+        let mmu = gb.core_mut().mmu_mut();
+        let current = mmu.read(flag_addr);
+        mmu.write(flag_addr, current & !0x20); // clear the bit
+    }
+    {
+        let api = PokemonApi::new(&mut gb);
+        assert!(!api.game_state().unwrap().has_pokedex, "should be false when bit 5 is clear");
+    }
+
+    {
+        let mmu = gb.core_mut().mmu_mut();
+        let current = mmu.read(flag_addr);
+        mmu.write(flag_addr, current | 0x20); // set the bit
+    }
+    {
+        let api = PokemonApi::new(&mut gb);
+        assert!(api.game_state().unwrap().has_pokedex, "should be true when bit 5 is set");
+    }
+}
+
+/// Directly writes known species bits into wPokedexOwned/wPokedexSeen and verifies
+/// `read_pokedex_flags` decodes them to the correct `PokemonSpecies` values.
+/// Bulbasaur=dex#1 (byte 0, bit 0), Charmander=dex#4 (byte 0, bit 3),
+/// Squirtle=dex#7 (byte 0, bit 6).
+#[test]
+fn test_pokedex_flag_bit_decoding() {
+    use crate::pokemon::symbols::pokered_symbols;
+    use crate::ram::{RAM, ROM};
+
+    let mut gb = GameBoy::dmg(roms::POKERED);
+    gb.load_state(ROUTE1_STATE).unwrap();
+    gb.run(MachineCycles::from_m(1000));
+
+    let owned_base = pokered_symbols::wPokedexOwned.address;
+    // Write byte 0 with bits for Bulbasaur (#1=bit0), Charmander (#4=bit3), Squirtle (#7=bit6)
+    // Bit index = dex_number - 1, LSB first.
+    // Bulbasaur: bit 0 → mask 0x01
+    // Charmander: bit 3 → mask 0x08
+    // Squirtle: bit 6 → mask 0x40
+    let test_byte: u8 = 0x01 | 0x08 | 0x40; // = 0x49
+
+    gb.core_mut().mmu_mut().write(owned_base, test_byte);
+
+    let api = PokemonApi::new(&mut gb);
+    let state = api.game_state().unwrap();
+
+    assert!(state.pokedex_owned.contains(&PokemonSpecies::Bulbasaur), "Bulbasaur should be owned");
+    assert!(state.pokedex_owned.contains(&PokemonSpecies::Charmander), "Charmander should be owned");
+    assert!(state.pokedex_owned.contains(&PokemonSpecies::Squirtle), "Squirtle should be owned");
+    assert_eq!(state.pokedex_owned.species().len(), 3, "exactly 3 species should be owned");
+}
+
+/// When a wild battle is in progress, the enemy species must appear in `pokedex_seen`.
+/// The game sets the seen flag when the wild encounter begins.
+#[test]
+fn test_pokedex_seen_contains_battle_enemy() {
+    use battle::BattleType;
+
+    let mut gb = GameBoy::dmg(roms::POKERED);
+    gb.load_state(BATTLE_STATE).unwrap();
+    gb.run(MachineCycles::from_m(500));
+
+    let api = PokemonApi::new(&mut gb);
+    let state = api.game_state().unwrap();
+
+    let battle = state.battle.expect("save state should be in a wild battle");
+    assert_eq!(battle.battle_type, BattleType::Wild);
+
+    assert!(
+        state.pokedex_seen.contains(&battle.enemy.species),
+        "wPokedexSeen should contain {:?} (the current battle enemy)",
+        battle.enemy.species
+    );
+}
+
 #[test]
 fn can_start_game() {
     use crate::pokemon::agent::PokemonAgent;

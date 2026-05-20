@@ -19,6 +19,7 @@ use crate::pokemon::menu::{MenuState, MenuStateReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::pokemon::Pokemon;
+use crate::pokemon::species::Pokedex;
 use crate::pokemon::strings::PokemonString;
 
 pub mod badge;
@@ -260,6 +261,9 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             map: MetaTileMap::new(&mmu.read_current_map()?),
             battle: mmu.read_battle_state(),
             bag: mmu.read_bag(),
+            has_pokedex: mmu.read_has_pokedex(),
+            pokedex_owned: mmu.read_pokedex(&pokered_symbols::wPokedexOwned)?,
+            pokedex_seen: mmu.read_pokedex(&pokered_symbols::wPokedexSeen)?,
         })
     }
 
@@ -376,5 +380,11 @@ pub struct GameState {
     /// knows HM Cut — the two requirements to use Cut outside of battle in pokémon Red.
     /// Currently always false until the player has earned these.
     pub can_use_cut: bool,
+    /// True once EVENT_GOT_POKEDEX is set (Oak gives the player the Pokédex).
+    pub has_pokedex: bool,
+    /// Species the player owns (caught or received) — set bit in `wPokedexOwned`.
+    pub pokedex_owned: Pokedex,
+    /// Species the player has seen (encountered in battle) — set bit in `wPokedexSeen`.
+    pub pokedex_seen: Pokedex,
 }
 

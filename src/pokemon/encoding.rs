@@ -9,10 +9,11 @@ use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::party::PokemonParty;
 use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
-use crate::pokemon::species::PokemonSpecies;
+use crate::pokemon::species::{Pokedex, PokemonSpecies};
 use crate::pokemon::sprite::{PictureId, Sprite};
 use crate::pokemon::symbols::{pokered_symbols};
 use crate::ram::{RAM, ROM};
+use strum::IntoEnumIterator;
 
 pub trait PokemonEncoding {
 
@@ -39,6 +40,11 @@ pub trait PokemonEncoding {
     fn read_game_mode(&self) -> GameMode;
 
     fn read_current_map(&self) -> Result<CurrentMap, String>;
+
+    /// True when EVENT_GOT_POKEDEX (bit 37 of `wEventFlags`) is set.
+    fn read_has_pokedex(&self) -> bool;
+
+    fn read_pokedex(&self, base_pointer: &DmgPointer) -> Result<Pokedex, String>;
 }
 
 impl PokemonEncoding for MMU {
@@ -397,6 +403,16 @@ impl PokemonEncoding for MMU {
             connected_strips,
             ledge_tiles,
         })
+    }
+
+    fn read_has_pokedex(&self) -> bool {
+        // EVENT_GOT_POKEDEX = event bit 37 (counted from pokedex_constants.asm).
+        // byte = 37 / 8 = 4,  bit = 37 % 8 = 5,  mask = 0x20
+        self.read(pokered_symbols::wEventFlags.address + 4) & 0x20 != 0
+    }
+
+    fn read_pokedex(&self, base_pointer: &DmgPointer) -> Result<Pokedex, String> {
+        Pokedex::try_from_slice(self.read_wram_slice(base_pointer.address, Pokedex::BYTES_LENGTH)?)
     }
 }
 
