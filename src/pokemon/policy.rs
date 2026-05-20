@@ -31,6 +31,10 @@ pub trait Policy {
     fn pick_nickname(&mut self, _species: PokemonSpecies) -> Option<Option<String>> {
         Some(None) // default: keep the default species name
     }
+
+    fn is_exhausted(&self) -> bool {
+        false
+    }
 }
 
 // ── Random (always-ready) ─────────────────────────────────────────────────────
@@ -244,7 +248,23 @@ impl PolicyStep {
         Self::navigate(Map::PalletTown),
         Self::navigate_until_interrupted(Map::Route1),      // triggers Oak's script → lands in OaksLab
         Self::Interact(MapSprite::OAKSLAB_CHARMANDER_POKE_BALL),
-        Self::navigate(Map::Route1),      // navigate for real now that Oak is done
+        Self::navigate(Map::RedsHouse1F),      // go see mom to heal up after the battle with Gary
+        Self::Interact(MapSprite::REDSHOUSE1F_MOM),
+        Self::navigate(Map::ViridianPokecenter),
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE), // heal up
+        Self::navigate(Map::ViridianMart), // get parcel
+        Self::navigate(Map::OaksLab),
+        Self::Interact(MapSprite::OAKSLAB_OAK1), // give parcel to oak
+
+        Self::navigate(Map::BluesHouse),
+        Self::Interact(MapSprite::BLUESHOUSE_DAISY1), // get the town map
+
+        // TODO catch a pokemon
+
+        Self::navigate(Map::ViridianPokecenter),
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE), // heal up
+
+
     ];
 }
 
@@ -348,5 +368,9 @@ impl Policy for DeterministicPolicy {
         let name = self.name_picker.pick().to_string();
         println!("[policy] pick name={}", name);
         Some(Some(name))
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.queue.is_empty()
     }
 }
