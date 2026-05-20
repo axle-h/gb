@@ -1,4 +1,4 @@
-use std::collections::{VecDeque};
+use std::collections::VecDeque;
 use std::time::Duration;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
@@ -11,10 +11,11 @@ use crate::pokemon::encoding::{GameMode, MetaTile};
 use crate::pokemon::map::Map;
 use crate::pokemon::menu::BattleMenuState;
 use crate::pokemon::policy::{Policy, RandomPolicy};
+use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::text::PokemonTextReader;
 
 // too long and player veers off course on the overworld, too short and the game doesn't get chance to update values between turns
-const RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
+pub const AGENT_RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
 
 pub struct PokemonAgent {
     state: AgentState,
@@ -31,9 +32,16 @@ pub enum AgentEvent {
     BattleStarted,
     BattleActionStarted { action: BattleAction },
     BattleEnded,
+    TextBox { message: String }
 }
 
-#[derive(Debug, Clone)]
+impl AgentEvent {
+    pub fn text_box_from_reader(reader: &PokemonTextReader) -> Self {
+        Self::TextBox { message: reader.to_string() }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
     WaitingForMenu { reader: PokemonTextReader, delay: DelayContext },
@@ -54,7 +62,7 @@ impl Default for BattleState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 enum AgentState {
     #[default]
     Idle,
@@ -65,6 +73,10 @@ enum AgentState {
     /// A map script or NPC scripted walk is running.  The player is frozen; the agent
     /// toggles A each tick to advance the script and any subsequent dialogue.
     RunningScript,
+    /// The Pokémon nickname entry screen is active.
+    /// `decided` is false while waiting for the policy; once true the name has been
+    /// written to the naming buffer and START is toggled each tick until the screen exits.
+    NamingPokemon { species: PokemonSpecies, decided: bool },
 
     Battle(BattleState),
 }
@@ -101,120 +113,170 @@ impl PokemonAgent {
         }
     }
 
+    fn set_state(&mut self, state: AgentState) {
+        if self.state != state {
+            self.state = state;
+
+            if self.state != AgentState::Idle {
+                println!("{:?}", &self.state);
+            }
+        }
+    }
+
+    fn set_battle_state(&mut self, state: BattleState) {
+        self.set_state(AgentState::Battle(state));
+    }
+
     fn abort_overworld(&mut self, destination: MetaTile, reason: String) {
         self.event(AgentEvent::OverworldActionAborted { destination, reason });
-        self.state = AgentState::Idle;
+        self.set_state(AgentState::Idle);
     }
 
     pub fn take_overworld_action(&mut self, action: OverworldAction) {
         self.event(AgentEvent::StartedOverworldAction { destination: action.tile.clone() });
-        self.state = AgentState::OverworldMovement { destination: action.tile, map: action.map };
+        self.set_state(AgentState::OverworldMovement { destination: action.tile, map: action.map });
     }
 
-    pub fn update(&mut self, gb: &mut GameBoy, delta_cycles: MachineCycles) -> Result<(), String> {
-        // ── Throttled decision-making ─────────────────────────────────────────────
-        self.cycles += delta_cycles;
-        if self.cycles < RESOLUTION { return Ok(()); }
-
-        let mut buffered_delta = MachineCycles::ZERO;
-        while self.cycles >= RESOLUTION {
-            buffered_delta += RESOLUTION;
-            self.cycles -= RESOLUTION;
-        }
-
-        let api = PokemonApi::new(gb);
-
-        let game_mode = api.game_mode()
-            .ok_or_else(|| "Not in game".to_string())?;
-
-        // If a map script triggers while navigating, abort and let RunningScript handle it.
-        if game_mode == GameMode::Script {
-            if let AgentState::OverworldMovement { destination, .. } = self.state {
-                self.abort_overworld(destination, "map script started".into());
-            }
-        }
-
-        if  matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle) {
-            // entering battle
+    /// Checks if a battle has just started or finished
+    fn assert_battle_state(&mut self, game_mode: GameMode) {
+        if matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle) {
             match self.state {
                 AgentState::Battle(_) => {}
                 AgentState::OverworldMovement { destination, .. } => {
+                    // entering battle from the overworld
                     let d = destination;
                     self.abort_overworld(d, "battle started".into());
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
                 _ => {
+                    // entering battle from somewhere else, maybe a textbox
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
             }
-            return self.update_battle(gb, buffered_delta);
-        }
-
-        // Leaving battle.
-        if let AgentState::Battle(battle_state) = &self.state {
+        } else if let AgentState::Battle(battle_state) = &self.state {
+            // Leaving battle.
             if let BattleState::WaitingForMenu { reader, .. } = battle_state {
                 // dump remaining text
-                println!("Battle text: {}", reader);
+                self.event(AgentEvent::text_box_from_reader(reader));
             }
 
             self.event(AgentEvent::BattleEnded);
-            self.state = AgentState::Idle;
+            self.set_state(AgentState::Idle);
         }
-        self.update_overworld(gb, game_mode, buffered_delta)
     }
 
-    // ── Overworld ──────────────────────────────────────────────────────────────
+    /// Checks if the naming screen has just opened or closed
+    fn assert_naming_screen(&mut self, game_mode: GameMode, api: &mut PokemonApi) -> Result<(), String> {
+        if game_mode == GameMode::NamingScreen {
+            if !matches!(self.state, AgentState::NamingPokemon { .. }) {
+                // the naming screen has just opened
+                let species = api.naming_screen_species()?;
+                api.release_all_buttons();
+                self.set_state(AgentState::NamingPokemon { species, decided: false });
+            }
+        } else if matches!(self.state, AgentState::NamingPokemon { .. }) {
+            // the naming screen has just closed
+            self.set_state(AgentState::Idle);
+        }
 
-    fn update_overworld(&mut self, gb: &mut GameBoy, game_mode: GameMode, delta_cycles: MachineCycles) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// If a map script triggers while navigating, abort and let RunningScript handle it.
+    fn assert_script_state(&mut self, game_mode: GameMode) {
+        if game_mode == GameMode::Script {
+            if self.state != AgentState::RunningScript {
+                if let AgentState::OverworldMovement { destination, .. } = self.state {
+                    self.abort_overworld(destination, "map script started".into());
+                }
+                self.set_state(AgentState::RunningScript);
+            }
+        } else if self.state == AgentState::RunningScript {
+            self.set_state(AgentState::Idle);
+        }
+    }
+
+    /// If a map script triggers while navigating, abort and let RunningScript handle it.
+    fn assert_text_box_state(&mut self, game_mode: GameMode) {
+        if game_mode == GameMode::TextBox {
+            if !matches!(self.state, AgentState::ReadingTextBox { .. }) {
+                // text box opened
+                if let AgentState::OverworldMovement { destination, .. } = self.state {
+                    self.abort_overworld(destination, "text box opened".into());
+                }
+                let reader = if matches!(self.state, AgentState::Battle(_)) {
+                    PokemonTextReader::message_box_only()
+                } else {
+                    PokemonTextReader::default()
+                };
+                self.set_state(AgentState::ReadingTextBox { reader });
+            }
+        } else if let AgentState::ReadingTextBox { reader } = &self.state {
+            // text box closed
+            self.event(AgentEvent::text_box_from_reader(&reader));
+            self.set_state(AgentState::Idle);
+        }
+    }
+
+    pub fn update(&mut self, gb: &mut GameBoy, delta_cycles: MachineCycles) -> Result<(), String> {
+        // ── Throttled decision-making ─────────────────────────────────────────────
+        self.cycles += delta_cycles;
+        if self.cycles < AGENT_RESOLUTION { return Ok(()); }
+
+        let mut delta_cycles = MachineCycles::ZERO;
+        while self.cycles >= AGENT_RESOLUTION {
+            delta_cycles += AGENT_RESOLUTION;
+            self.cycles -= AGENT_RESOLUTION;
+        }
+
         let mut api = PokemonApi::new(gb);
+
+        let game_mode = api.game_mode()
+            .ok_or_else(|| "Not in game".to_string())?;
+
+        self.assert_naming_screen(game_mode, &mut api)?;
+        self.assert_script_state(game_mode);
+        self.assert_battle_state(game_mode);
+        self.assert_text_box_state(game_mode);
+
+        let mut new_events: Vec<AgentEvent> = vec!();
+
         match self.state {
             AgentState::Idle => {
+                api.release_all_buttons();
                 match game_mode {
                     GameMode::TextBox => {
-                        self.state = AgentState::ReadingTextBox { reader: PokemonTextReader::default() };
+                        self.set_state(AgentState::ReadingTextBox { reader: PokemonTextReader::default() });
                     }
                     GameMode::Script => {
-                        self.state = AgentState::RunningScript;
+                        self.set_state(AgentState::RunningScript);
                     }
-                    _ => {
-                        self.state = AgentState::AwaitingOverworldAction { delay: DelayContext::long() }
+                    GameMode::NamingScreen => {
+                        self.set_state(AgentState::NamingPokemon {
+                            species: api.naming_screen_species()?,
+                            decided: false,
+                        });
+                    }
+                    GameMode::WildBattle | GameMode::TrainerBattle => {
+                        self.set_state(AgentState::Battle(BattleState::default()));
+                    }
+                    GameMode::Overworld => {
+                        self.set_state(AgentState::AwaitingOverworldAction { delay: DelayContext::long() });
                     }
                 }
             }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
-                // Re-check mode before acting: game_mode may have transitioned to TextBox or Script
-                // while the delay was counting down (e.g. a map script triggered mid-wait).
-                match game_mode {
-                    GameMode::TextBox => {
-                        self.state = AgentState::ReadingTextBox { reader: PokemonTextReader::default() };
-                        return Ok(());
+                if delay.tick(delta_cycles) {
+                    let game_state = api.game_state()?;
+                    if let Some(action) = self.policy.pick_overworld_action(&game_state) {
+                        self.take_overworld_action(action);
                     }
-                    GameMode::Script => {
-                        self.state = AgentState::RunningScript;
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-                if !delay.tick(delta_cycles) { return Ok(()); }
-                let game_state = api.game_state()?;
-                if let Some(action) = self.policy.pick_overworld_action(&game_state) {
-                    self.take_overworld_action(action);
                 }
             }
             AgentState::RunningScript => {
-                match game_mode {
-                    GameMode::Script => api.toggle_button(JoypadButton::A),
-                    GameMode::TextBox => {
-                        api.release_all_buttons();
-                        self.state = AgentState::ReadingTextBox { reader: PokemonTextReader::default() };
-                    }
-                    _ => {
-                        api.release_all_buttons();
-                        self.state = AgentState::Idle;
-                    }
-                }
+                api.toggle_button(JoypadButton::A);
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
                 api.release_all_buttons();
@@ -222,152 +284,141 @@ impl PokemonAgent {
                 if game_state.mode != GameMode::Overworld {
                     self.abort_overworld(destination,
                         format!("game state: {}", game_state.mode));
-                    return Ok(());
-                }
-                if game_state.map.map != expected_map {
+                } else if game_state.map.map != expected_map {
                     // Map changed — success for warps and connections (both take you off the map).
                     if matches!(destination, MetaTile::Warp(_) | MetaTile::Connection(_)) {
-                        self.event(AgentEvent::OverworldActionCompleted { destination });
-                        self.state = AgentState::Idle;
+                        new_events.push(AgentEvent::OverworldActionCompleted { destination });
+                        self.set_state(AgentState::Idle);
                     } else {
                         self.abort_overworld(destination,
                             format!("on map {:?}, expected {:?}", game_state.map.map, expected_map));
                     }
-                    return Ok(());
-                }
-                if game_state.map.player_tile() == destination
-                    && !matches!(destination, MetaTile::Warp(_))
-                {
-                    self.event(AgentEvent::OverworldActionCompleted { destination });
-                    self.state = AgentState::Idle;
-                    return Ok(());
-                }
-                let action = game_state.map.actions().into_iter()
-                    .find(|a| a.tile == destination);
-                match action {
-                    None => self.abort_overworld(destination,
-                                format!("no route to {:?}", destination)),
-                    Some(a) => {
-                        if let Some(&btn) = a.route.first() {
-                            api.press_button(btn);
-                        } else {
-                            self.event(AgentEvent::OverworldActionCompleted { destination });
-                            self.state = AgentState::Idle;
+                } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp(_)) {
+                    new_events.push(AgentEvent::OverworldActionCompleted { destination });
+                    self.set_state(AgentState::Idle);
+                } else {
+                    let action = game_state.map.actions().into_iter()
+                        .find(|a| a.tile == destination);
+                    match action {
+                        None => self.abort_overworld(destination,
+                                                     format!("no route to {:?}", destination)),
+                        Some(a) => {
+                            if let Some(&btn) = a.route.first() {
+                                api.press_button(btn);
+                            } else {
+                                new_events.push(AgentEvent::OverworldActionCompleted { destination });
+                                self.set_state(AgentState::Idle);
+                            }
                         }
                     }
                 }
-            }
-            AgentState::ReadingTextBox { ref reader } if game_mode != GameMode::TextBox => {
-                println!("TextBox: {}", reader);
-                api.release_all_buttons();
-                self.state = AgentState::Idle;
+
             }
             AgentState::ReadingTextBox { ref mut reader } => {
                 reader.update(&mut api);
             }
-            _ => {}
-        }
-        Ok(())
-    }
+            AgentState::Battle(ref mut battle_state) => {
+                match battle_state {
+                    BattleState::WaitingForMenu { reader, delay } => {
+                        if let Some(menu_state) = api.menu_state() {
+                            match menu_state.battle_menu_state() {
+                                Some(BattleMenuState::Fight) => {
+                                    new_events.push(AgentEvent::text_box_from_reader(reader));
 
-    // ── Battle ─────────────────────────────────────────────────────────────────
-
-    fn set_battle_state(&mut self, state: BattleState) {
-        // TODO emit an event
-        println!("Battle state: {:?}", state);
-        self.state = AgentState::Battle(state);
-    }
-
-    fn update_battle(&mut self, gb: &mut GameBoy, delta: MachineCycles) -> Result<(), String> {
-        let battle_state = self.state.battle_state_mut()?;
-
-        let mut api = PokemonApi::new(gb);
-
-        match battle_state {
-            BattleState::WaitingForMenu { reader, delay } => {
-                if let Some(menu_state) = api.menu_state() {
-                    match menu_state.battle_menu_state() {
-                        Some(BattleMenuState::Fight) => {
-                            println!("Battle text: {}", reader);
-
-                            api.release_all_buttons();
-                            self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
-                        }
-                        Some(_) => {
-                            // battle menu is showing, do not read the text
+                                    api.release_all_buttons();
+                                    self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
+                                }
+                                Some(_) => {
+                                    // battle menu is showing, do not read the text
+                                    api.toggle_button(JoypadButton::A);
+                                },
+                                None => {
+                                    // something other than the battle menu is showing — wait for
+                                    // the text box to render before reading it
+                                    if delay.tick(delta_cycles) {
+                                        reader.update(&mut api);
+                                    }
+                                }
+                            }
+                        } else {
+                            // no menu is showing, click mashing the A button
                             api.toggle_button(JoypadButton::A);
-                        },
-                        None => {
-                            // something other than the battle menu is showing — wait for
-                            // the text box to render before reading it
-                            if delay.tick(delta) {
-                                reader.update(&mut api);
+                        }
+                    }
+
+                    BattleState::AwaitingPolicy { delay } => {
+                        if delay.tick(delta_cycles) {
+                            let game_state = api.game_state()?;
+                            if let Some(action) = self.policy.pick_battle_action(&game_state) {
+                                new_events.push(AgentEvent::BattleActionStarted { action });
+                                self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default() });
                             }
                         }
                     }
-                } else {
-                    // no menu is showing, click mashing the A button
-                    api.toggle_button(JoypadButton::A);
-                }
-            }
 
-            BattleState::AwaitingPolicy { delay } => {
-                if !delay.tick(delta) { return Ok(()); }
-                let game_state = api.game_state()?;
-                if let Some(action) = self.policy.pick_battle_action(&game_state) {
-                    self.event(AgentEvent::BattleActionStarted { action });
-                    self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default() });
-                }
-            }
+                    BattleState::Navigating { action, delay } => {
+                        if delay.tick(delta_cycles) {
+                            if let Some(menu_state) = api.menu_state().map(|s| s.battle_menu_state()).flatten() {
+                                let menu_target = BattleMenuState::from_action(*action);
 
-            BattleState::Navigating { action, delay } => {
-                if !delay.tick(delta) { return Ok(()); }
-                let menu_state = api.menu_state().map(|s| s.battle_menu_state()).flatten();
-                if menu_state.is_none() {
-                    // wait for menu state
-                    return Ok(());
-                }
-                let menu_state = menu_state.unwrap();
+                                if menu_state == menu_target {
+                                    api.release_all_buttons();
+                                    self.set_battle_state(BattleState::default());
+                                } else {
+                                    let resolved_target = if let Some(target_parent) = menu_target.parent() {
+                                        if menu_state.parent() == Some(target_parent) {
+                                            menu_target
+                                        } else {
+                                            target_parent
+                                        }
+                                    } else {
+                                        menu_target
+                                    };
 
-                let menu_target = BattleMenuState::from_action(*action);
+                                    let target_location = resolved_target.location();
+                                    let current_location = menu_state.location();
 
-                if menu_state == menu_target {
-                    api.release_all_buttons();
-                    self.set_battle_state(BattleState::default());
-                    return Ok(());
-                }
 
-                let resolved_target = if let Some(target_parent) = menu_target.parent() {
-                    if menu_state.parent() == Some(target_parent) {
-                        menu_target
-                    } else {
-                        target_parent
+                                    let btn = if target_location == current_location {
+                                        JoypadButton::A
+                                    } else if target_location.x > current_location.x {
+                                        JoypadButton::Right
+                                    } else if target_location.x < current_location.x {
+                                        JoypadButton::Left
+                                    } else if target_location.y > current_location.y {
+                                        JoypadButton::Down
+                                    } else {
+                                        JoypadButton::Up
+                                    };
+
+                                    api.toggle_button(btn);
+                                }
+                            }
+                        }
                     }
-                } else {
-                    menu_target
-                };
-
-                let target_location = resolved_target.location();
-                let current_location = menu_state.location();
-
-
-                let btn = if target_location == current_location {
-                    JoypadButton::A
-                } else if target_location.x > current_location.x {
-                    JoypadButton::Right
-                } else if target_location.x < current_location.x {
-                    JoypadButton::Left
-                } else if target_location.y > current_location.y {
-                    JoypadButton::Down
-                } else {
-                    JoypadButton::Up
-                };
-
-                api.toggle_button(btn);
+                }
             }
-
-            _ => {}
+            AgentState::NamingPokemon { species, decided } => {
+                if decided {
+                    api.toggle_button(JoypadButton::Start);
+                } else if let Some(decision) = self.policy.pick_nickname(species) {
+                    // Write the nickname directly into the naming screen's string buffer,
+                    // bypassing character-grid navigation.  The screen copies this buffer
+                    // when START is pressed.  An empty/None nickname causes AskName to
+                    // fall back to the default species name.
+                    api.write_naming_screen_buffer(decision.as_deref())?;
+                    self.set_state(AgentState::NamingPokemon { species, decided: true });
+                } else {
+                    api.release_all_buttons();
+                }
+            }
         }
+
+        for x in new_events.into_iter() {
+            self.event(x);
+        }
+
         Ok(())
     }
+
 }

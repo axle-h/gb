@@ -261,6 +261,21 @@ impl PokemonEncoding for MMU {
             1 => GameMode::WildBattle,
             2 => GameMode::TrainerBattle,
             _ => {
+                // Naming screen detection must come before the wFontLoaded check because the
+                // naming screen inherits wFontLoaded=1 from the YES/NO text that precedes it.
+                // Three conditions together uniquely identify an active naming screen:
+                //   1. wNamingScreenType > 0  (1=rival, 2=pokemon; player=0 is excluded)
+                //   2. wNamingScreenSubmitName == 0  (reset at screen open, set to 1 on submit)
+                //   3. wFontLoaded == 1  (set by the text box that led to the YES/NO choice)
+                // The font check prevents false positives in save states where conditions 1 & 2
+                // happen to hold but the game is in normal overworld mode (wFontLoaded=0).
+                let font_loaded_byte = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01;
+                if self.read_pointer(&pokered_symbols::wNamingScreenType) > 0
+                    && self.read_pointer(&pokered_symbols::wNamingScreenSubmitName) == 0
+                    && font_loaded_byte == 1
+                {
+                    return GameMode::NamingScreen;
+                }
                 // wFontLoaded infers a text box is open
                 // it is set in DisplayTextIDInit and reset in ReloadMapSpriteTilePatterns
                 let font_loaded = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01 == 1;
@@ -271,12 +286,31 @@ impl PokemonEncoding for MMU {
                     // 	ld [wTextBoxID], a
                     // see TextBoxFunctionTable:
                     GameMode::TextBox
-                } else if self.read_pointer(&pokered_symbols::wScriptedNPCWalkCounter) != 0 {
-                    // wScriptedNPCWalkCounter is non-zero while an NPC scripted walk is in
-                    // progress (e.g. clerk NPC approaching the player in a PokéMART).
-                    // The player is frozen; the agent should press A to advance the script.
-                    GameMode::Script
                 } else {
+                    let flags5 = self.read_pointer(&pokered_symbols::wStatusFlags5);
+                    // BIT_SCRIPTED_MOVEMENT_STATE (bit 7): set by StartSimulatingJoypadStates
+                    // when the player is being moved by a script (e.g. following Oak to lab),
+                    // cleared by player_animations when the movement finishes.
+                    let scripted_movement_active = flags5 & 0x80 != 0;
+                    // wScriptedNPCWalkCounter is used by DoScriptedNPCMovement to pace NPC walk
+                    // animations. It cycles 8→1 and never resets to 0, so we require
+                    // BIT_SCRIPTED_MOVEMENT_STATE to be set to avoid false positives from its
+                    // leftover non-zero value after the movement has finished.
+                    if self.read_pointer(&pokered_symbols::wScriptedNPCWalkCounter) != 0
+                        && scripted_movement_active
+                    {
+                        return GameMode::Script;
+                    }
+                    // BIT_SCRIPTED_NPC_MOVEMENT (bit 0) is set by MoveSprite for scripted NPC
+                    // walks (e.g. Oak running toward the player in Pallet Town). It can remain
+                    // stuck after the player warps away mid-walk, so we also require that the
+                    // D-pad bits of wJoyIgnore (PAD_CTRL_PAD = 0xF0) are set — true when the
+                    // player is frozen by an active script, but 0 once they are free.
+                    if flags5 & 0x01 != 0
+                        && self.read_pointer(&pokered_symbols::wJoyIgnore) & 0xF0 != 0
+                    {
+                        return GameMode::Script;
+                    }
                     GameMode::Overworld
                 }
             }
@@ -553,11 +587,15 @@ pub enum GameMode {
     WildBattle,
     #[strum(serialize = "Trainer Battle")]
     TrainerBattle,
-    Menu,
+    #[strum(serialize = "Text Box")]
     TextBox,
     /// A map script or NPC scripted walk is running (`wCurrentMapScriptFlags` is non-zero).
     /// The player is frozen; the agent should advance the script by pressing A.
     Script,
+    /// The Pokémon nickname entry screen (`DisplayNamingScreen`) is active.
+    /// Detected when `wNamingScreenType > 0` and `wNamingScreenSubmitName == 0`.
+    #[strum(serialize = "Naming Screen")]
+    NamingScreen,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

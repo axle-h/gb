@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 use crate::joypad::JoypadButton;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct PokemonTextReader {
     buffer: String,
     had_text: bool,
@@ -116,11 +116,19 @@ mod tests {
         fn menu_state(&self) -> Option<MenuState> {
             None
         }
+
+        fn naming_screen_species(&self) -> Result<crate::pokemon::species::PokemonSpecies, String> {
+            Err("not available in stub".to_string())
+        }
+
+        fn write_naming_screen_buffer(&mut self, _nickname: Option<&str>) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[test]
     fn test_reads_text() {
-        const RAW_TEXT: &'static str = include_str!("test_data/text_box_stream_example.txt");
+        const RAW_TEXT: &'static str = include_str!("data/text_box_stream_example.txt");
 
         let mut reader: PokemonTextReader = Default::default();
         let mut api: StubPokemonApi = Default::default();
