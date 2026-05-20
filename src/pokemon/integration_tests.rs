@@ -590,10 +590,14 @@ fn can_start_game() {
     let policy = DeterministicPolicy::complete_game(42, gb.core().mmu());
     let mut agent = PokemonAgent::new(Box::new(policy));
 
-    const MAX_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_secs(180));
+    // Gary battles the player inside Oak's Lab after the starter is chosen; the
+    // DeterministicPolicy handles the battle and the policy retries navigation
+    // until the player actually reaches Route 1.  Generous budget because debug
+    // builds are slow — use `--release` for a sensible wall-clock time.
+    const MAX_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_secs(600));
     let mut total_cycles = MachineCycles::ZERO;
 
-    let mut got_pokemon = false;
+    let mut reached_route1 = false;
 
     loop {
         let cycles = gb.run(AGENT_RESOLUTION);
@@ -606,16 +610,22 @@ fn can_start_game() {
 
         let api = PokemonApi::new(&mut gb);
         if let Ok(state) = api.game_state() {
-            if state.mode == GameMode::Overworld && state.pokemon.len() > 0 {
-                got_pokemon = true;
+            if state.mode == GameMode::Overworld && state.map.map == Map::Route1 {
+                reached_route1 = true;
                 break;
             }
         }
     }
 
-    assert!(got_pokemon, "player should have a starter pokemon after Oak's script");
+    assert!(reached_route1, "player should reach Route 1 after Oak's script and Gary's battle");
 
     let api = PokemonApi::new(&mut gb);
     let state = api.game_state().unwrap();
-    println!("Starter: {:?}", state.pokemon.iter().next().map(|p| p.species));
+    let starter = state.pokemon.iter().next().expect("should have a starter");
+    println!("Starter: {:?}  Nickname: {}  on map: {:?}", starter.species, starter.nickname, state.map.map);
+    assert_eq!(
+        format!("{}", starter.nickname), "Celina",
+        "DeterministicPolicy with seed 42 should name the starter Celina"
+    );
+    assert_eq!(state.map.map, Map::Route1, "player should be on Route 1");
 }

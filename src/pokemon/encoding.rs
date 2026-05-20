@@ -263,16 +263,20 @@ impl PokemonEncoding for MMU {
             _ => {
                 // Naming screen detection must come before the wFontLoaded check because the
                 // naming screen inherits wFontLoaded=1 from the YES/NO text that precedes it.
-                // Three conditions together uniquely identify an active naming screen:
-                //   1. wNamingScreenType > 0  (1=rival, 2=pokemon; player=0 is excluded)
+                // wNamingScreenType ($D07D) is aliased as wPartyMenuTypeOrMessageID and
+                // wTempTilesetNumTiles, so it can hold arbitrary values during battle/menu code.
+                // Four conditions together uniquely identify a freshly opened naming screen:
+                //   1. wNamingScreenType == 2  (NAME_MON_SCREEN exactly; rules out aliased junk)
                 //   2. wNamingScreenSubmitName == 0  (reset at screen open, set to 1 on submit)
                 //   3. wFontLoaded == 1  (set by the text box that led to the YES/NO choice)
-                // The font check prevents false positives in save states where conditions 1 & 2
-                // happen to hold but the game is in normal overworld mode (wFontLoaded=0).
+                //   4. wStringBuffer[0] == "@" (0x50)  (DisplayNamingScreen inits buffer empty)
+                //      — rules out the false positive when the agent has already written a name
+                //      into the buffer before the naming screen has been submitted.
                 let font_loaded_byte = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01;
-                if self.read_pointer(&pokered_symbols::wNamingScreenType) > 0
+                if self.read_pointer(&pokered_symbols::wNamingScreenType) == 2
                     && self.read_pointer(&pokered_symbols::wNamingScreenSubmitName) == 0
                     && font_loaded_byte == 1
+                    && self.read_pointer(&pokered_symbols::wStringBuffer) == 0x50
                 {
                     return GameMode::NamingScreen;
                 }

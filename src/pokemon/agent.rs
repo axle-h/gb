@@ -176,10 +176,13 @@ impl PokemonAgent {
                 api.release_all_buttons();
                 self.set_state(AgentState::NamingPokemon { species, decided: false });
             }
-        } else if matches!(self.state, AgentState::NamingPokemon { .. }) {
-            // the naming screen has just closed
+        } else if matches!(self.state, AgentState::NamingPokemon { decided: false, .. }) {
+            // The naming screen closed before the policy reached a decision (unexpected).
             self.set_state(AgentState::Idle);
         }
+        // If decided=true the strict NamingScreen detection no longer fires (buf0 is no
+        // longer 0x50 after the name is written), so game_mode is TextBox.  The
+        // NamingPokemon match branch handles its own exit once the font unloads.
 
         Ok(())
     }
@@ -198,8 +201,12 @@ impl PokemonAgent {
         }
     }
 
-    /// If a map script triggers while navigating, abort and let RunningScript handle it.
     fn assert_text_box_state(&mut self, game_mode: GameMode) {
+        // wFontLoaded=1 while the naming screen is active too; NamingPokemon{decided:true}
+        // handles its own exit, so don't interfere.
+        if matches!(self.state, AgentState::NamingPokemon { decided: true, .. }) {
+            return;
+        }
         if game_mode == GameMode::TextBox {
             if !matches!(self.state, AgentState::ReadingTextBox { .. }) {
                 // text box opened
@@ -400,7 +407,13 @@ impl PokemonAgent {
             }
             AgentState::NamingPokemon { species, decided } => {
                 if decided {
+                    // Buffer already written; keep pulsing START until DisplayNamingScreen
+                    // exits (wFontLoaded → 0, so game_mode leaves TextBox/NamingScreen).
                     api.toggle_button(JoypadButton::Start);
+                    if game_mode != GameMode::TextBox && game_mode != GameMode::NamingScreen {
+                        api.release_all_buttons();
+                        self.set_state(AgentState::Idle);
+                    }
                 } else if let Some(decision) = self.policy.pick_nickname(species) {
                     // Write the nickname directly into the naming screen's string buffer,
                     // bypassing character-grid navigation.  The screen copies this buffer
