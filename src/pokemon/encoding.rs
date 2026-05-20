@@ -388,6 +388,8 @@ impl PokemonEncoding for MMU {
             HashMap::new()
         };
 
+        let grass_tile_id = self.read_pointer(&pokered_symbols::wGrassTile);
+
         Ok(CurrentMap {
             map,
             map_header,
@@ -400,6 +402,7 @@ impl PokemonEncoding for MMU {
             warp_events,
             sprites,
             is_water_tileset,
+            grass_tile_id,
             connected_strips,
             ledge_tiles,
         })
@@ -646,6 +649,9 @@ pub enum MetaTile {
     /// A shrub that blocks passage until the player uses HM Cut.
     /// Treated as impassable until `can_use_cut` is true.
     CutTree,
+    /// Tall-grass tile (tile ID matches `wGrassTile` for the current tileset).
+    /// Walkable; stepping on it can trigger a wild Pokémon encounter.
+    Grass,
 }
 
 /// The direction a ledge can be jumped over.
@@ -788,6 +794,9 @@ pub struct CurrentMap {
     /// True if the current tileset is listed in the WaterTilesets table,
     /// meaning tile $14/$32/$48 should be treated as water/shore.
     pub is_water_tileset: bool,
+    /// Tile ID for tall grass in the current tileset (from `wGrassTile`).
+    /// Zero means this map has no grass tile.
+    pub grass_tile_id: u8,
     connected_strips: Vec<ConnectedMapStrip>,
     /// Maps ledge tile IDs to their jump direction. Only populated for the Overworld tileset,
     /// which is the only tileset where HandleLedges fires.
@@ -869,6 +878,11 @@ impl CurrentMap {
                         // The bottom graphical row of a ledge block is non-walkable (not in
                         // collision_tiles) but must still override the walkable rows above it.
                         result[index] = MetaTile::Jump(dir);
+                    } else if self.grass_tile_id != 0 && tile_id == self.grass_tile_id
+                        && self.is_empty(tile_x, tile_y)
+                        && matches!(result[index], MetaTile::Obstacle | MetaTile::Empty)
+                    {
+                        result[index] = MetaTile::Grass;
                     } else if result[index] == MetaTile::Obstacle && self.is_empty(tile_x, tile_y) {
                         result[index] = MetaTile::Empty;
                     } else if result[index] == MetaTile::Obstacle && self.talking_over_tiles.contains(&tile_id) {

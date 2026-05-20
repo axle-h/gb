@@ -19,6 +19,7 @@ impl Display for OverworldAction {
             MetaTile::Warp(m)       => format!("Warp → {m}"),
             MetaTile::Connection(m) => format!("Go to {m}"),
             MetaTile::Sprite(n)     => format!("Talk to {n}"),
+            MetaTile::Grass         => "Walk in grass".to_string(),
             other                   => format!("{other}"),
         };
         write!(f, "{label} ({} steps)", self.route.len())

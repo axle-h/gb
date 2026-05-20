@@ -248,6 +248,58 @@ fn test_route_1() {
     println!("{}", state.map);
 }
 
+/// Route 1 has tall grass — a WalkInGrass action must be present and route to a Grass tile.
+/// Indoor maps (no wGrassTile) must produce no WalkInGrass action.
+#[test]
+fn test_walk_in_grass_action() {
+    use encoding::MetaTile;
+
+    // Route 1: expect a WalkInGrass action
+    {
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(ROUTE1_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+
+        assert!(
+            state.map.meta_tiles.iter().any(|t| *t == MetaTile::Grass),
+            "Route 1 map should contain Grass tiles"
+        );
+
+        let grass_action = state.map.actions().into_iter()
+            .find(|a| a.tile == MetaTile::Grass);
+        assert!(grass_action.is_some(), "Route 1 should have a WalkInGrass action");
+
+        let action = grass_action.unwrap();
+        assert_eq!(
+            state.map.meta_tiles[action.destination.x as usize + action.destination.y as usize * state.map.width],
+            MetaTile::Grass,
+            "WalkInGrass destination tile must be Grass"
+        );
+    }
+
+    // Indoor map (Red's House 1F): different tileset, no grass tile
+    {
+        const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("data/reds-house-1f-state.bin");
+
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(REDS_HOUSE_1F_STATE).unwrap();
+        gb.run(MachineCycles::from_m(1000));
+        let api = PokemonApi::new(&mut gb);
+        let state = api.game_state().unwrap();
+
+        assert!(
+            !state.map.meta_tiles.iter().any(|t| *t == MetaTile::Grass),
+            "Red's House 1F should have no Grass tiles"
+        );
+        assert!(
+            !state.map.actions().iter().any(|a| a.tile == MetaTile::Grass),
+            "Red's House 1F should have no WalkInGrass action"
+        );
+    }
+}
+
 #[test]
 fn test_route_1_ledge_routing() {
     use encoding::{JumpDirection, MetaTile};
