@@ -236,6 +236,13 @@ impl MetaTileMap {
             routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Connection(to_map), route });
         }
 
+        // 4. Walk-in-grass (nearest reachable grass tile via BFS).
+        //    Route ends standing on the grass tile — wild encounters trigger naturally from there.
+        if let Some(dest) = nearest(&|t| *t == MetaTile::Grass) {
+            let route = reconstruct(dest);
+            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
+        }
+
         routes
     }
 }
@@ -257,6 +264,7 @@ impl Display for MetaTileMap {
                     MetaTile::Jump(JumpDirection::East)  => write!(f, ">")?,
                     MetaTile::Counter => write!(f, "=")?,
                     MetaTile::CutTree => write!(f, "t")?,
+                    MetaTile::Grass   => write!(f, "g")?,
                 }
             }
             writeln!(f)?;

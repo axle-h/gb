@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
+use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::battle::BattleAction;
@@ -77,6 +78,9 @@ enum AgentState {
     /// `decided` is false while waiting for the policy; once true the name has been
     /// written to the naming buffer and START is toggled each tick until the screen exits.
     NamingPokemon { species: PokemonSpecies, decided: bool },
+
+    /// Player alternates between two adjacent grass tiles until a wild battle triggers.
+    WanderingInGrass { tile_a: Point8, tile_b: Point8, heading_to_b: bool },
 
     Battle(BattleState),
 }
@@ -304,8 +308,19 @@ impl PokemonAgent {
                             format!("on map {:?}, expected {:?}", game_state.map.map, expected_map));
                     }
                 } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp(_)) {
-                    new_events.push(AgentEvent::OverworldActionCompleted { destination });
-                    self.set_state(AgentState::Idle);
+                    if destination == MetaTile::Grass {
+                        let tile_a = game_state.map.player_position;
+                        let tile_b = adjacent_grass(&game_state.map, tile_a);
+                        if let Some(tile_b) = tile_b {
+                            self.set_state(AgentState::WanderingInGrass { tile_a, tile_b, heading_to_b: true });
+                        } else {
+                            new_events.push(AgentEvent::OverworldActionCompleted { destination });
+                            self.set_state(AgentState::Idle);
+                        }
+                    } else {
+                        new_events.push(AgentEvent::OverworldActionCompleted { destination });
+                        self.set_state(AgentState::Idle);
+                    }
                 } else {
                     let action = game_state.map.actions().into_iter()
                         .find(|a| a.tile == destination);
@@ -414,6 +429,21 @@ impl PokemonAgent {
                     }
                 }
             }
+            AgentState::WanderingInGrass { tile_a, tile_b, ref mut heading_to_b } => {
+                let game_state = api.game_state()?;
+                if game_state.mode == GameMode::Overworld {
+                    let pos = game_state.map.player_position;
+                    let target = if *heading_to_b { tile_b } else { tile_a };
+                    if pos == target {
+                        *heading_to_b = !*heading_to_b;
+                    }
+                    let next = if *heading_to_b { tile_b } else { tile_a };
+                    if let Some(dir) = dir_to(pos, next) {
+                        api.release_all_buttons();
+                        api.press_button(dir);
+                    }
+                }
+            }
             AgentState::NamingPokemon { species, decided } => {
                 if decided {
                     // Buffer already written; keep pulsing START until DisplayNamingScreen
@@ -443,4 +473,30 @@ impl PokemonAgent {
         Ok(())
     }
 
+}
+
+/// Returns the direction to step from `from` to an orthogonally adjacent `to`.
+fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
+    match (to.x as i16 - from.x as i16, to.y as i16 - from.y as i16) {
+        ( 1,  0) => Some(JoypadButton::Right),
+        (-1,  0) => Some(JoypadButton::Left),
+        ( 0,  1) => Some(JoypadButton::Down),
+        ( 0, -1) => Some(JoypadButton::Up),
+        _        => None,
+    }
+}
+
+/// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.
+fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<Point8> {
+    let neighbors = [
+        Point8 { x: pos.x,                   y: pos.y.wrapping_sub(1) },
+        Point8 { x: pos.x,                   y: pos.y + 1             },
+        Point8 { x: pos.x.wrapping_sub(1),   y: pos.y                 },
+        Point8 { x: pos.x + 1,               y: pos.y                 },
+    ];
+    neighbors.into_iter().find(|&p| {
+        (p.x as usize) < map.width
+            && (p.y as usize) < map.height
+            && map.meta_tiles[p.x as usize + p.y as usize * map.width] == MetaTile::Grass
+    })
 }
