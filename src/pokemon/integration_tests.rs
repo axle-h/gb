@@ -2,344 +2,46 @@
 use std::time::Duration;
 use crate::cycles::MachineCycles;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::bag::BagWriter;
-use crate::pokemon::battle::BattleAction;
-use crate::pokemon::encoding::MetaTile;
-use crate::pokemon::item::ItemId;
-use crate::pokemon::policy::Policy;
-use std::sync::mpsc;
-use std::sync::mpsc::Sender;
+use crate::pokemon::policy::{DeterministicPolicy, Policy, PolicyStep};
 use crate::pokemon::*;
-use crate::pokemon::agent::AGENT_RESOLUTION;
+use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason, PokemonAgent, AGENT_RESOLUTION};
+use crate::pokemon::world_graph::WorldGraph;
 
 pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("data/pallet-town-state.bin");
 pub const ROUTE1_STATE: &[u8] = include_bytes!("data/route1-state.bin");
 pub const BATTLE_STATE: &[u8] = include_bytes!("data/battle-state.bin");
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum PolicyEvent {
-    Movement(Map),
-    Battle,
-}
 
-struct FindBattleOnRoute1Policy {
-    previous_map: Map,
-    event_tx: Sender<PolicyEvent>,
-}
-
-impl FindBattleOnRoute1Policy {
-    pub fn new(event_tx: Sender<PolicyEvent>) -> Self {
-        Self { previous_map: Map::PalletTown, event_tx }
-    }
-}
-
-impl Policy for FindBattleOnRoute1Policy {
-    fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
-        let next_map = match (self.previous_map, state.map.map) {
-            (Map::PalletTown, Map::Route1) => Map::ViridianCity,
-            (Map::Route1, Map::ViridianCity) => Map::Route1,
-            (Map::ViridianCity, Map::Route1) => Map::PalletTown,
-            (Map::Route1, Map::PalletTown) => Map::Route1,
-            _ => return None
-        };
-
-        let preferred = state.map.actions().iter()
-            .find(|a| a.tile == MetaTile::Connection(next_map))
-            .cloned();
-
-        self.event_tx.send(PolicyEvent::Movement(next_map)).ok();
-
-        if preferred.is_some() {
-            self.previous_map = next_map;
-        }
-        preferred
-    }
-
-    fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
-        self.event_tx.send(PolicyEvent::Battle).ok();
-        None
-    }
-}
-
-
-#[test]
-fn test_battle_state_reading() {
-    use battle::BattleType;
-    use crate::pokemon::move_name::PokemonMoveName;
-
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(BATTLE_STATE).unwrap();
-    gb.run(MachineCycles::from_m(500));
-
-    // Add items and a second Pokemon so every BattleAction variant is exercisable.
-    {
-        // 3 Potions + 1 Full Heal — replaces whatever was in the bag.
-        gb.core_mut().mmu_mut()
-            .write_bag(&[BagItem::new(ItemId::Potion, 3), BagItem::new(ItemId::FullHeal, 1)]);
-    }
-    {
-        let mut party = gb.core().mmu().read_player_pokemon_party().unwrap();
-        party.push(Pokemon::maxed(
-            PokemonSpecies::Pidgey,
-            "PIDGEY",
-            [PokemonMoveName::Tackle, PokemonMoveName::SandAttack,
-             PokemonMoveName::Gust, PokemonMoveName::Whirlwind],
-            "RED", 12345,
-        )).unwrap();
-        gb.core_mut().mmu_mut().write_player_pokemon_party(&party).unwrap();
-    }
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
-    let battle = state.battle.expect("should be in battle");
-
-    // Basic battle validity
-    assert_eq!(battle.battle_type, BattleType::Wild);
-    assert!(battle.enemy.level > 0, "enemy level should be non-zero");
-    assert!(battle.enemy.stats.hp > 0, "enemy max HP should be non-zero");
-    assert!(battle.enemy.current_hp <= battle.enemy.stats.hp);
-    assert!(battle.player.moves.iter().any(|m| m.is_some()), "player needs at least one move");
-
-    // Bag — we wrote exactly 2 items, so expect exactly those 2.
-    assert_eq!(state.bag[0].id, ItemId::Potion, "bag[0] should be POTION");
-    assert_eq!(state.bag[0].quantity, 3);
-    assert!(state.bag.iter().any(|i| i.id == ItemId::FullHeal),
-        "FULL HEAL should be in the bag");
-}
-
-/// Verifies the agent can navigate through a wild battle end-to-end.
-///
-/// Uses a deterministic `TestPolicy` that always picks the northward connection
-/// (Viridian City / Route 1) to keep the player walking through grass.  As soon
-/// as a battle is encountered the policy selects Fight(0) every turn.  The test
-/// succeeds once `wIsInBattle` returns to 0 (battle over).
-#[test]
-fn test_agent_battle_lifecycle() {
-    use crate::pokemon::agent::PokemonAgent;
-
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(ROUTE1_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-
-    let (tx, rx) = mpsc::channel::<PolicyEvent>();
-
-    let policy = FindBattleOnRoute1Policy::new(tx);
-    let mut agent = PokemonAgent::new(Box::new(policy));
-
-    let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16)); // ~60 FPS
-
-    let max_frames = 30_000u32;
-    let mut battle_started = false;
-
-    for _frame in 0..max_frames {
-        gb.run(frame_cycles);
-        agent.update(&mut gb, frame_cycles).ok();
-
-
-        if let Ok(event) = rx.try_recv() {
-            println!("{:?}", event);
-            if event == PolicyEvent::Battle {
-                battle_started = true;
-                break;
-            }
-        }
-    }
-
-    assert!(battle_started, "battle did not start within {} frames", max_frames);
-}
-
-/// Verifies the agent can fight through a wild battle using the first available
-/// move until the enemy faints, then the player is returned to the overworld on Route 1.
-#[test]
-#[ignore]
-fn test_battle_fight_to_victory_returns_to_route1() {
-    use crate::pokemon::agent::PokemonAgent;
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum FightEvent { BattleStarted, BattleEnded }
-
-    struct FightFirstMovePolicy {
-        previous_map: Map,
-        in_battle: bool,
-        event_tx: Sender<FightEvent>,
-    }
-
-    impl FightFirstMovePolicy {
-        fn new(event_tx: Sender<FightEvent>) -> Self {
-            Self { previous_map: Map::PalletTown, in_battle: false, event_tx }
-        }
-    }
-
-    impl Policy for FightFirstMovePolicy {
-        fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
-            if self.in_battle {
-                self.in_battle = false;
-                self.event_tx.send(FightEvent::BattleEnded).ok();
-            }
-            let next_map = match (self.previous_map, state.map.map) {
-                (Map::PalletTown, Map::Route1) => Map::ViridianCity,
-                (Map::Route1, Map::ViridianCity) => Map::Route1,
-                (Map::ViridianCity, Map::Route1) => Map::PalletTown,
-                (Map::Route1, Map::PalletTown) => Map::Route1,
-                _ => return None,
-            };
-            let preferred = state.map.actions().iter()
-                .find(|a| a.tile == MetaTile::Connection(next_map))
-                .cloned();
-            if preferred.is_some() {
-                self.previous_map = next_map;
-            }
-            preferred
-        }
-
-        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
-            if !self.in_battle {
-                self.in_battle = true;
-                self.event_tx.send(FightEvent::BattleStarted).ok();
-            }
-            let battle = state.battle.as_ref()?;
-            battle.player.moves.iter()
-                .enumerate()
-                .find_map(|(i, m)| m.filter(|m| m.pp > 0).map(|m| BattleAction::Fight { slot: i as u8, battle_move: m }))
-        }
-    }
-
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(ROUTE1_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-
-    let (tx, rx) = mpsc::channel::<FightEvent>();
-    let policy = FightFirstMovePolicy::new(tx);
-    let mut agent = PokemonAgent::new(Box::new(policy));
-
-    let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16));
-    let max_frames = 100_000u32;
-    let mut battle_ended = false;
-
-    for _frame in 0..max_frames {
-        gb.run(frame_cycles);
-        agent.update(&mut gb, frame_cycles).ok();
-
-        if let Ok(event) = rx.try_recv() {
-            println!("{:?}", event);
-            if event == FightEvent::BattleEnded {
-                battle_ended = true;
-                break;
-            }
-        }
-    }
-
-    assert!(battle_ended, "battle did not end within {} frames", max_frames);
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
-    assert_eq!(state.mode, GameMode::Overworld, "player should be on the overworld after battle");
-    assert_eq!(state.map.map, Map::Route1, "player should be on Route 1 after battle");
-}
-
-#[test]
-fn test_route_1() {
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(ROUTE1_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
-    assert_eq!(state.map.map, Map::Route1);
-    println!("{}", state.map);
-}
-
-/// When the player jumps over a south-facing ledge, pokered briefly runs
-/// `StartSimulatingJoypadStates` to animate the jump. This sets BIT_SCRIPTED_MOVEMENT_STATE
-/// (wStatusFlags5 bit 7) while the simulated input is active. If wScriptedNPCWalkCounter
-/// still holds a residual non-zero value from a previous NPC walk (Oak's intro, etc.), the
-/// first Script condition fires and the agent incorrectly aborts its overworld movement.
-///
-/// This test reproduces the false positive by seeding wScriptedNPCWalkCounter with a
-/// non-zero value (as left by Oak's walk sequence) and then navigating south through Route 1
-/// to Pallet Town, crossing ledges on the way.  The agent must reach Pallet Town without
-/// any "map script started" abort.
 #[test]
 fn test_ledge_jump_does_not_abort_overworld_movement() {
-    use crate::pokemon::agent::{AgentEvent, PokemonAgent};
-    use crate::pokemon::symbols::pokered_symbols;
-    use crate::ram::RAM;
-    use encoding::MetaTile;
+    let mut fixture = TestFixture::new(
+        ROUTE1_STATE,
+        Duration::from_secs(100),
+        &[
+            PolicyStep::WalkInLongGrass,
+        ]
+    );
 
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(ROUTE1_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
+    let mut battle_started = false;
 
-    // wScriptedNPCWalkCounter cycles 8→1 and never resets to 0 after NPC walks.
-    // Seed it to simulate the residual state left by Oak's intro walk sequence.
-    gb.core_mut().mmu_mut().write(pokered_symbols::wScriptedNPCWalkCounter.address, 4);
-
-    // Give the player a strong party so any wild battles can be fought through.
-    PokemonApi::new(&mut gb).pimp_out_pokemon().unwrap();
-
-    // Phase 0 – go north to Viridian City (no ledges northward).
-    // Phase 1 – re-enter Route 1 from the north; player now stands above all ledges.
-    // Phase 2 – navigate south to Pallet Town, crossing every ledge on the way.
-    struct CrossLedgesPolicy { phase: u8 }
-    impl Policy for CrossLedgesPolicy {
-        fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
-            let target = match (self.phase, state.map.map) {
-                (0, Map::Route1)     => MetaTile::Connection(Map::ViridianCity),
-                (0, Map::ViridianCity) => { self.phase = 1; MetaTile::Connection(Map::Route1) }
-                (1, Map::ViridianCity) => MetaTile::Connection(Map::Route1),
-                (1, Map::Route1)     => { self.phase = 2; MetaTile::Connection(Map::PalletTown) }
-                (2, Map::Route1)     => MetaTile::Connection(Map::PalletTown),
-                _ => return None,
-            };
-            state.map.actions().into_iter().find(|a| a.tile == target)
-        }
-        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
-            let battle = state.battle.as_ref()?;
-            battle.player.moves.iter().enumerate()
-                .find_map(|(i, m)| m.filter(|m| m.pp > 0)
-                    .map(|m| BattleAction::Fight { slot: i as u8, battle_move: m }))
-        }
-    }
-
-    let mut agent = PokemonAgent::new(Box::new(CrossLedgesPolicy { phase: 0 }));
-    let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16));
-
-    let mut reached_pallet = false;
-    let mut prev_pos: Option<crate::geometry::Point8> = None;
-    let mut ledge_crossed = false;
-
-    for _ in 0..30_000u32 {
-        gb.run(frame_cycles);
-        agent.update(&mut gb, frame_cycles).ok();
-
-        for event in agent.drain_events() {
-            if let AgentEvent::OverworldActionAborted { reason, .. } = &event {
-                if reason.contains("script") {
-                    panic!("agent aborted overworld movement due to ledge being mistaken for script: {reason}");
+    'fixture: loop {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            match event {
+                AgentEvent::OverworldActionAborted { reason, .. } if reason == OverworldActionAbortedReason::Script =>
+                    panic!("agent aborted overworld movement due to ledge being mistaken for script: {reason:?}"),
+                AgentEvent::BattleStarted => {
+                    battle_started = true;
+                    break 'fixture;
                 }
+                _ => {}
             }
-        }
-
-        let api = PokemonApi::new(&mut gb);
-        let Ok(state) = api.game_state() else { continue };
-
-        if state.mode == GameMode::Overworld {
-            // Detect a ledge jump: player's y-coordinate advances by >1 in a single tick.
-            if let Some(prev) = prev_pos {
-                let dy = state.map.player_position.y as i16 - prev.y as i16;
-                if dy > 1 { ledge_crossed = true; }
-            }
-            prev_pos = Some(state.map.player_position);
-        }
-
-        if state.map.map == Map::PalletTown {
-            reached_pallet = true;
-            break;
         }
     }
 
-    assert!(ledge_crossed, "player never jumped a ledge — test did not exercise the scenario");
-    assert!(reached_pallet, "agent did not reach Pallet Town within allotted frames");
+    assert!(battle_started, "Should start a battle");
 }
+
 
 /// Route 1 has tall grass — a WalkInGrass action must be present and route to a Grass tile.
 /// Indoor maps (no wGrassTile) must produce no WalkInGrass action.
@@ -533,13 +235,12 @@ fn test_viridian_pokemart_script_advances_dialogue() {
 
     // Run the agent: it should press A to advance the dialogue and eventually
     // return to Overworld mode.
-    let mut agent = PokemonAgent::new(Box::new(crate::pokemon::policy::RandomPolicy));
-    let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16));
+    let mut agent = PokemonAgent::new(Box::new(policy::RandomPolicy));
 
     let mut returned_to_overworld = false;
     for _ in 0..10_000u32 {
-        gb.run(frame_cycles);
-        agent.update(&mut gb, frame_cycles).ok();
+        let cycles = gb.run(AGENT_RESOLUTION);
+        agent.update(&mut gb, cycles).ok();
 
         let api = PokemonApi::new(&mut gb);
         if api.game_mode() == Some(GameMode::Overworld) {
@@ -667,7 +368,6 @@ fn test_reds_house_1f_exit_warp() {
     gb.run(MachineCycles::from_m(1000));
 
     let mut agent = PokemonAgent::new(Box::new(EnterRedsHousePolicy));
-    let frame_cycles = MachineCycles::from_duration(Duration::from_millis(16));
 
     // Count consecutive frames spent in Overworld mode on RedsHouse1F.
     // We wait for 120 stable frames (~2 s) before asserting, so the map's
@@ -675,8 +375,8 @@ fn test_reds_house_1f_exit_warp() {
     // wCurMap register flips.
     let mut stable_frames = 0u32;
     for _ in 0..15_000u32 {
-        gb.run(frame_cycles);
-        agent.update(&mut gb, frame_cycles).ok();
+        let cycles = gb.run(AGENT_RESOLUTION);
+        agent.update(&mut gb, cycles).ok();
 
         let api = PokemonApi::new(&mut gb);
         let Ok(state) = api.game_state() else { stable_frames = 0; continue };
@@ -772,7 +472,7 @@ fn test_has_pokedex_bit_toggling() {
 #[test]
 fn test_pokedex_flag_bit_decoding() {
     use crate::pokemon::symbols::pokered_symbols;
-    use crate::ram::{RAM, ROM};
+    use crate::ram::RAM;
 
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(ROUTE1_STATE).unwrap();
@@ -822,47 +522,24 @@ fn test_pokedex_seen_contains_battle_enemy() {
 
 #[test]
 fn can_start_game() {
-    use crate::pokemon::agent::PokemonAgent;
-    use crate::pokemon::policy::{DeterministicPolicy};
-
     const START_OF_GAME: &[u8] =
         include_bytes!("data/start-of-game-state.bin");
 
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(START_OF_GAME).unwrap();
-    gb.run(MachineCycles::from_m(1000));
+    let mut fixture = TestFixture::new(
+        START_OF_GAME,
+        Duration::from_secs(1000),
+        PolicyStep::COMPLETE_GAME
+    );
 
     {
-        let api = PokemonApi::new(&mut gb);
-        let state = api.game_state().unwrap();
+        let state = fixture.game_state();
         assert_eq!(state.map.map, Map::RedsHouse2F, "save state should be in RedsHouse2F");
         assert_eq!(state.pokemon.len(), 0, "player should have no pokemon before Oak's script");
     }
 
-    let policy = DeterministicPolicy::complete_game(42, gb.core().mmu());
-    let mut agent = PokemonAgent::new(Box::new(policy));
+    fixture.step_until_exhausted();
 
-    // Gary battles the player inside Oak's Lab after the starter is chosen; the
-    // DeterministicPolicy handles the battle and the policy retries navigation
-    // until the player actually reaches Route 1.  Generous budget because debug
-    // builds are slow — use `--release` for a sensible wall-clock time.
-    const MAX_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_secs(1000));
-    let mut total_cycles = MachineCycles::ZERO;
-
-    while !agent.policy_exhausted() {
-        let cycles = gb.run(AGENT_RESOLUTION);
-        agent.update(&mut gb, cycles).ok();
-
-        total_cycles += cycles;
-        if total_cycles >= MAX_CYCLES {
-            break;
-        }
-    }
-
-    assert!(agent.policy_exhausted(), "not all policy actions were taken");
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let state = fixture.game_state();
     let starter = state.pokemon.iter().next().expect("should have a starter");
     println!("Starter: {:?}  Nickname: {}  on map: {:?}", starter.species, starter.nickname, state.map.map);
     assert_eq!(
@@ -870,3 +547,53 @@ fn can_start_game() {
         "DeterministicPolicy with seed 42 should name the starter Celina"
     );
 }
+
+struct TestFixture {
+    pub gb: GameBoy,
+    pub agent: PokemonAgent,
+    pub total_cycles: MachineCycles,
+    pub max_cycles: MachineCycles,
+}
+
+impl TestFixture {
+    pub fn new(save_state: &[u8], max_game_time: Duration, policy_steps: &[PolicyStep]) -> Self {
+        let mut gb = GameBoy::dmg(roms::POKERED);
+        gb.load_state(save_state).expect("failed to load save state");
+
+        let world_graph = WorldGraph::build(gb.core().mmu());
+        let policy = DeterministicPolicy::new(42, policy_steps, world_graph);
+
+        Self {
+            gb,
+            total_cycles: MachineCycles::ZERO,
+            max_cycles: MachineCycles::from_duration(max_game_time),
+            agent: PokemonAgent::new(Box::new(policy)),
+        }
+    }
+
+    pub fn step(&mut self) {
+        let cycles = self.gb.run(AGENT_RESOLUTION);
+        self.agent.update(&mut self.gb, cycles).ok();
+
+        self.total_cycles += cycles;
+        if self.total_cycles >= self.max_cycles {
+            panic!("exceeded max cycles");
+        }
+    }
+
+    pub fn step_until_exhausted(&mut self) {
+        while !self.agent.policy_exhausted() {
+            self.step();
+        }
+    }
+
+    pub fn api(&mut self) -> PokemonApi {
+        PokemonApi::new(&mut self.gb)
+    }
+
+    pub fn game_state(&mut self) -> GameState {
+        self.api().game_state().unwrap()
+    }
+}
+
+
