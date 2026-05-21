@@ -302,16 +302,16 @@ impl PokemonEncoding for MMU {
                     // when the player is being moved by a script (e.g. following Oak to lab),
                     // cleared by player_animations when the movement finishes.
                     let scripted_movement_active = flags5 & 0x80 != 0;
-                    // wWalkCounter is non-zero while the player is mid-step (each step takes 8
-                    // animation frames).  A ledge jump drives two forced steps via
-                    // StartSimulatingJoypadStates (bit 7) — so if the player is actively
-                    // stepping AND bit 7 is set, we are in a movement animation, not a
-                    // freeze-the-player script that needs A-button advancement.
-                    let walk_counter = self.read_pointer(&pokered_symbols::wWalkCounter);
-                    if walk_counter != 0 && scripted_movement_active {
-                        return GameMode::Overworld;
-                    }
-
+                    // wScriptedNPCWalkCounter is used by DoScriptedNPCMovement to pace NPC walk
+                    // animations. It cycles 8→1 and never resets to 0, so we require
+                    // BIT_SCRIPTED_MOVEMENT_STATE to be set to avoid false positives from its
+                    // leftover non-zero value after the movement has finished.
+                    //
+                    // We also require the D-pad bits of wJoyIgnore to be set. A freeze-the-player
+                    // script (Oak blocking the exit, etc.) always sets wJoyIgnore to block the
+                    // player's input.  A ledge jump uses StartSimulatingJoypadStates which sets
+                    // bit 7 but does NOT touch wJoyIgnore — so the residual counter + bit 7 from
+                    // a ledge jump no longer triggers this condition.
                     // wScriptedNPCWalkCounter is used by DoScriptedNPCMovement to pace NPC walk
                     // animations. It cycles 8→1 and never resets to 0, so we require
                     // BIT_SCRIPTED_MOVEMENT_STATE to be set to avoid false positives from its

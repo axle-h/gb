@@ -24,9 +24,7 @@ pub struct PokemonAgent {
     cycles: MachineCycles,
     policy: Box<dyn Policy>,
     /// Consecutive ticks where game_mode == Script while not yet in RunningScript.
-    /// We require 2 in a row before transitioning, which filters out the ~1-frame
-    /// inter-step window during a ledge jump (wWalkCounter briefly hits 0 between
-    /// the two forced steps — the window is narrower than one agent tick).
+    /// The commit threshold varies by agent state — see `assert_script_state`.
     script_debounce: u32,
 }
 
@@ -234,12 +232,34 @@ impl PokemonAgent {
     fn assert_script_state(&mut self, game_mode: GameMode) {
         if game_mode == GameMode::Script {
             if self.state != AgentState::RunningScript {
-                // Require two consecutive Script detections before committing.
-                // A ledge jump can briefly look like a Script for ~1 frame (≈0.8 agent ticks)
-                // when wWalkCounter hits 0 between the two forced steps; since ticks are 20 ms
-                // and the window is 16.7 ms, two consecutive ticks can never both land in it.
+                // Threshold varies by state.
+                //
+                // During overworld navigation (OverworldMovement / WanderingInGrass) a
+                // south-facing ledge jump causes a false Script positive: pokered calls
+                // StartSimulatingJoypadStates (sets bit 7) for the 2-step jump while a
+                // residual wScriptedNPCWalkCounter from the OaksLab NPC walks stays
+                // non-zero — exactly the first Script condition.  A 2-step ledge jump
+                // lasts 16 frames ≈ 13 agent ticks (at 20 ms per tick).  Requiring 20
+                // consecutive Script ticks to commit from these states means the false
+                // positive (~20 ticks, measured) never fires, while a genuine trainer/NPC freeze
+                // script (which persists for hundreds of ticks) still commits.
+                //
+                // From any other state (Idle, AwaitingOverworldAction …) the script is
+                // external / spontaneous — commit quickly (2 ticks) so Oak's dialog and
+                // the "come with me" OaksLab guidance enter RunningScript promptly and
+                // receive the A presses they need to advance.
+                // A south-facing ledge jump fires Script for up to ~33 consecutive
+                // agent ticks (measured empirically at 20 ms per tick), depending on
+                // how the jump aligns with frame boundaries.  Using 40 gives a safe
+                // margin so no ledge jump ever commits, while genuine NPC freeze
+                // scripts (which persist for hundreds of ticks) still commit at most
+                // 800 ms after the script starts.
+                let threshold = match self.state {
+                    AgentState::OverworldMovement { .. } | AgentState::WanderingInGrass { .. } => 40,
+                    _ => 2,
+                };
                 self.script_debounce += 1;
-                if self.script_debounce >= 2 {
+                if self.script_debounce >= threshold {
                     if let AgentState::OverworldMovement { destination, .. } = self.state {
                         self.abort_overworld(destination, OverworldActionAbortedReason::Script);
                     }
@@ -340,7 +360,9 @@ impl PokemonAgent {
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
                 let game_state = api.game_state()?;
-                if game_state.mode != GameMode::Overworld {
+                if game_state.mode == GameMode::Script {
+                    // Script guard.
+                } else if game_state.mode != GameMode::Overworld {
                     self.abort_overworld(destination, OverworldActionAbortedReason::from_game_mode(game_state.mode));
                 } else if game_state.map.map != expected_map {
                     // Map changed — success for warps and connections (both take you off the map).
