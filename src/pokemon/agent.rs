@@ -18,16 +18,6 @@ use crate::pokemon::text::PokemonTextReader;
 // too long and player veers off course on the overworld, too short and the game doesn't get chance to update values between turns
 pub const AGENT_RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
 
-pub struct PokemonAgent {
-    state: AgentState,
-    event_buffer: VecDeque<AgentEvent>,
-    cycles: MachineCycles,
-    policy: Box<dyn Policy>,
-    /// Consecutive ticks where game_mode == Script while not yet in RunningScript.
-    /// The commit threshold varies by agent state — see `assert_script_state`.
-    script_debounce: u32,
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OverworldActionAbortedReason {
     Unknown,
@@ -100,7 +90,9 @@ enum AgentState {
     ReadingTextBox { reader: PokemonTextReader },
     /// A map script or NPC scripted walk is running.  The player is frozen; the agent
     /// toggles A each tick to advance the script and any subsequent dialogue.
-    RunningScript,
+    /// To avoid triggering this on ledge jumps, if the delay is not triggerred before the game
+    /// state changes, the agent restores to its previous state instead.
+    RunningScript { rollback_deadline: DelayContext },
     /// The Pokémon nickname entry screen is active.
     /// `decided` is false while waiting for the policy; once true the name has been
     /// written to the naming buffer and START is toggled each tick until the screen exits.
@@ -122,6 +114,14 @@ impl AgentState {
     }
 }
 
+pub struct PokemonAgent {
+    state: AgentState,
+    backup_state: Option<AgentState>,
+    event_buffer: VecDeque<AgentEvent>,
+    cycles: MachineCycles,
+    policy: Box<dyn Policy>,
+}
+
 impl Default for PokemonAgent {
     fn default() -> Self { Self::new(Box::new(RandomPolicy)) }
 }
@@ -130,10 +130,10 @@ impl PokemonAgent {
     pub fn new(policy: Box<dyn Policy>) -> Self {
         Self {
             state: AgentState::default(),
+            backup_state: None,
             event_buffer: VecDeque::new(),
             cycles: MachineCycles::default(),
             policy,
-            script_debounce: 0,
         }
     }
 
@@ -152,6 +152,19 @@ impl PokemonAgent {
         while self.event_buffer.len() > 100 {
             self.event_buffer.pop_front();
         }
+    }
+
+    fn backup_current_state(&mut self, new_state: AgentState) {
+        self.backup_state = Some(self.state.clone());
+        self.state = new_state;
+    }
+
+    fn restore_state_from_backup(&mut self) {
+        if self.backup_state.is_none() {
+            return;
+        }
+        self.state = self.backup_state.clone().unwrap();
+        self.backup_state = None;
     }
 
     fn set_state(&mut self, state: AgentState) {
@@ -228,48 +241,28 @@ impl PokemonAgent {
         Ok(())
     }
 
-    /// If a map script triggers while navigating, abort and let RunningScript handle it.
+    /// If a map script triggers, start a PendingScript countdown before committing to
+    /// RunningScript.  If Script mode ends before the delay fires the agent restores
+    /// its previous state (e.g. OverworldMovement for a ledge jump).
     fn assert_script_state(&mut self, game_mode: GameMode) {
         if game_mode == GameMode::Script {
-            if self.state != AgentState::RunningScript {
-                // Threshold varies by state.
-                //
-                // During overworld navigation (OverworldMovement / WanderingInGrass) a
-                // south-facing ledge jump causes a false Script positive: pokered calls
-                // StartSimulatingJoypadStates (sets bit 7) for the 2-step jump while a
-                // residual wScriptedNPCWalkCounter from the OaksLab NPC walks stays
-                // non-zero — exactly the first Script condition.  A 2-step ledge jump
-                // lasts 16 frames ≈ 13 agent ticks (at 20 ms per tick).  Requiring 20
-                // consecutive Script ticks to commit from these states means the false
-                // positive (~20 ticks, measured) never fires, while a genuine trainer/NPC freeze
-                // script (which persists for hundreds of ticks) still commits.
-                //
-                // From any other state (Idle, AwaitingOverworldAction …) the script is
-                // external / spontaneous — commit quickly (2 ticks) so Oak's dialog and
-                // the "come with me" OaksLab guidance enter RunningScript promptly and
-                // receive the A presses they need to advance.
-                // A south-facing ledge jump fires Script for up to ~33 consecutive
-                // agent ticks (measured empirically at 20 ms per tick), depending on
-                // how the jump aligns with frame boundaries.  Using 40 gives a safe
-                // margin so no ledge jump ever commits, while genuine NPC freeze
-                // scripts (which persist for hundreds of ticks) still commit at most
-                // 800 ms after the script starts.
-                let threshold = match self.state {
-                    AgentState::OverworldMovement { .. } | AgentState::WanderingInGrass { .. } => 40,
-                    _ => 2,
+            if !matches!(self.state, AgentState::RunningScript { .. }) {
+                // A south-facing ledge jump fires Script for up to ~660 ms; use >800 ms when
+                // navigating so no ledge jump ever commits.  From any other state (Idle,
+                // AwaitingOverworldAction…) the script is external — commit in 40 ms.
+                let rollback_delay = match self.state {
+                    AgentState::OverworldMovement { .. } | AgentState::WanderingInGrass { .. } => DelayContext::long(),
+                    _ => DelayContext::short(),
                 };
-                self.script_debounce += 1;
-                if self.script_debounce >= threshold {
-                    if let AgentState::OverworldMovement { destination, .. } = self.state {
-                        self.abort_overworld(destination, OverworldActionAbortedReason::Script);
-                    }
-                    self.set_state(AgentState::RunningScript);
-                }
+
+                self.backup_current_state(AgentState::RunningScript { rollback_deadline: rollback_delay });
             }
-        } else {
-            self.script_debounce = 0;
-            if self.state == AgentState::RunningScript {
+        } else if let AgentState::RunningScript { rollback_deadline: rollback_delay } = self.state {
+            if rollback_delay.is_exhausted() {
                 self.set_state(AgentState::Idle);
+            } else {
+                // Script mode ended before the delay fired — restore the previous state.
+                self.restore_state_from_backup();
             }
         }
     }
@@ -330,9 +323,7 @@ impl PokemonAgent {
                     GameMode::TextBox => {
                         self.set_state(AgentState::ReadingTextBox { reader: PokemonTextReader::default() });
                     }
-                    GameMode::Script => {
-                        self.set_state(AgentState::RunningScript);
-                    }
+                    GameMode::Script => { /* assert_script_state will transition to PendingScript */ }
                     GameMode::NamingScreen => {
                         self.set_state(AgentState::NamingPokemon {
                             species: api.naming_screen_species()?,
@@ -347,8 +338,20 @@ impl PokemonAgent {
                     }
                 }
             }
-            AgentState::RunningScript => {
-                api.toggle_button(JoypadButton::A);
+            AgentState::RunningScript { rollback_deadline: ref mut rollback_delay } => {
+                if rollback_delay.is_exhausted() {
+                    // script already breached rollback deadline, start mashing the A button
+                    api.toggle_button(JoypadButton::A);
+                } else if rollback_delay.tick(delta_cycles) {
+                    api.release_all_buttons();
+                    // script has just breached rollback deadline, commit to RunningScript so we can start mashing next cycle
+                    if let Some(AgentState::OverworldMovement { destination, .. }) = self.backup_state.as_ref() {
+                        self.event(AgentEvent::OverworldActionAborted {
+                            destination: *destination,
+                            reason: OverworldActionAbortedReason::Script,
+                        });
+                    }
+                }
             }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
                 if delay.tick(delta_cycles) {
@@ -360,9 +363,7 @@ impl PokemonAgent {
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
                 let game_state = api.game_state()?;
-                if game_state.mode == GameMode::Script {
-                    // Script guard.
-                } else if game_state.mode != GameMode::Overworld {
+                if game_state.mode != GameMode::Overworld {
                     self.abort_overworld(destination, OverworldActionAbortedReason::from_game_mode(game_state.mode));
                 } else if game_state.map.map != expected_map {
                     // Map changed — success for warps and connections (both take you off the map).

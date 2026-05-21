@@ -6,8 +6,9 @@ pub struct DelayContext {
     cycles: MachineCycles,
 }
 
-const DEFAULT_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(250));
-const LONG_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(750));
+const SHORT_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(50));
+const DEFAULT_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(500));
+const LONG_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(1000));
 
 impl Default for DelayContext {
     fn default() -> Self {
@@ -18,8 +19,14 @@ impl Default for DelayContext {
 }
 
 impl DelayContext {
-    pub fn new(cycles: MachineCycles) -> Self {
+    pub const fn new(cycles: MachineCycles) -> Self {
         Self { cycles }
+    }
+
+    pub const ZERO: Self = Self::new(MachineCycles::ZERO);
+
+    pub fn short() -> Self {
+        Self { cycles: SHORT_DELAY_CYCLES }
     }
 
     pub fn long() -> Self {
@@ -36,6 +43,10 @@ impl DelayContext {
             self.cycles = MachineCycles::ZERO;
             true
         }
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.cycles == MachineCycles::ZERO
     }
 }
 

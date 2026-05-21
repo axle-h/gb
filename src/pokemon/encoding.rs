@@ -637,7 +637,7 @@ pub struct WarpEvent {
     pub map_id: Map,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum_macros::Display, Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, strum_macros::Display, Default)]
 pub enum MetaTile {
     #[default]
     Empty,
@@ -665,7 +665,7 @@ pub enum MetaTile {
 }
 
 /// The direction a ledge can be jumped over.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum_macros::Display)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, strum_macros::Display)]
 pub enum JumpDirection {
     South,
     West,
