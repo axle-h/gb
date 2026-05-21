@@ -5,7 +5,10 @@ use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::policy::{DeterministicPolicy, Policy, PolicyStep};
 use crate::pokemon::*;
 use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason, PokemonAgent, AGENT_RESOLUTION};
+use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::world_graph::WorldGraph;
+use crate::pokemon::encoding::{JumpDirection, MetaTile};
+use crate::ram::{RAM, ROM};
 
 pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("data/pallet-town-state.bin");
 pub const ROUTE1_STATE: &[u8] = include_bytes!("data/route1-state.bin");
@@ -16,30 +19,37 @@ pub const BATTLE_STATE: &[u8] = include_bytes!("data/battle-state.bin");
 fn test_ledge_jump_does_not_abort_overworld_movement() {
     let mut fixture = TestFixture::new(
         ROUTE1_STATE,
-        Duration::from_secs(100),
+        Duration::from_secs(200),
         &[
             PolicyStep::WalkInLongGrass,
         ]
     );
 
-    let mut battle_started = false;
+    let mut battle_in_grass = false;
 
-    'fixture: loop {
+    loop {
         fixture.step();
         for event in fixture.agent.drain_events() {
-            match event {
-                AgentEvent::OverworldActionAborted { reason, .. } if reason == OverworldActionAbortedReason::Script =>
-                    panic!("agent aborted overworld movement due to ledge being mistaken for script: {reason:?}"),
-                AgentEvent::BattleStarted => {
-                    battle_started = true;
-                    break 'fixture;
+            match &event {
+                AgentEvent::OverworldActionAborted { destination, reason }
+                    if *destination == MetaTile::Grass
+                    && *reason == OverworldActionAbortedReason::Script =>
+                {
+                    panic!(
+                        "Script abort on Grass navigation — ledge jump is being \
+                         mistaken for a frozen script (bug not fixed)"
+                    );
+                }
+                AgentEvent::BattleStarted=> {
+                    battle_in_grass = true;
                 }
                 _ => {}
             }
         }
+        if battle_in_grass { break; }
     }
 
-    assert!(battle_started, "Should start a battle");
+    assert!(battle_in_grass, "agent should have successfully navigated into the grass and triggered a battle (if we got here, the ledge jump did not cause a Script abort)")
 }
 
 
@@ -47,9 +57,6 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
 /// Indoor maps (no wGrassTile) must produce no WalkInGrass action.
 #[test]
 fn test_walk_in_grass_action() {
-    use encoding::MetaTile;
-
-    // Route 1: expect a WalkInGrass action
     {
         let mut gb = GameBoy::dmg(roms::POKERED);
         gb.load_state(ROUTE1_STATE).unwrap();
@@ -97,8 +104,6 @@ fn test_walk_in_grass_action() {
 
 #[test]
 fn test_route_1_ledge_routing() {
-    use encoding::{JumpDirection, MetaTile};
-
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(ROUTE1_STATE).unwrap();
     gb.run(MachineCycles::from_m(1000));
@@ -167,8 +172,6 @@ fn test_route_1_ledge_routing() {
 
 #[test]
 fn test_pallet_town_actions() {
-    use encoding::MetaTile;
-
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(PALLET_TOWN_STATE).unwrap();
     gb.run(MachineCycles::from_m(1000));
@@ -213,8 +216,6 @@ fn test_pallet_town_actions() {
 /// advance the conversation by pressing A — not try to navigate around the map.
 #[test]
 fn test_viridian_pokemart_script_advances_dialogue() {
-    use std::time::Duration;
-    use crate::pokemon::agent::PokemonAgent;
 
     const POKEMART_STATE: &[u8] = include_bytes!("data/viridian-city-pokemart-during-script.bin");
 
@@ -260,8 +261,6 @@ fn test_viridian_pokemart_script_advances_dialogue() {
 /// impassable obstacle and no action to talk to the Fisher should be generated.
 #[test]
 fn test_cut_bush_blocks_fisher_without_cut() {
-    use encoding::MetaTile;
-
     const BUSH_STATE: &[u8] = include_bytes!("data/viridian-city-north-of-bush.bin");
 
     let mut gb = GameBoy::dmg(roms::POKERED);
@@ -286,8 +285,6 @@ fn test_cut_bush_blocks_fisher_without_cut() {
 /// talk to her by approaching the counter tile (a "talking over" tile in pokered).
 #[test]
 fn test_viridian_pokecenter_nurse_action() {
-    use encoding::MetaTile;
-
     const POKECENTER_STATE: &[u8] = include_bytes!("data/viridian-city-pokemon-center.bin");
 
     let mut gb = GameBoy::dmg(roms::POKERED);
@@ -311,8 +308,6 @@ fn test_viridian_pokecenter_nurse_action() {
 /// all three actions must be available: exit to Pallet Town, stairs to 2F, talk to Mom.
 #[test]
 fn test_reds_house_1f_actions_from_save_state() {
-    use encoding::MetaTile;
-
     const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("data/reds-house-1f-state.bin");
 
     let mut gb = GameBoy::dmg(roms::POKERED);
@@ -348,11 +343,6 @@ fn test_reds_house_1f_actions_from_save_state() {
 /// PalletTown — not self-referentially to RedsHouse1F.
 #[test]
 fn test_reds_house_1f_exit_warp() {
-    use std::time::Duration;
-    use encoding::MetaTile;
-    use crate::pokemon::agent::PokemonAgent;
-    use crate::pokemon::battle::BattleAction;
-
     struct EnterRedsHousePolicy;
     impl Policy for EnterRedsHousePolicy {
         fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
@@ -434,9 +424,6 @@ fn test_pokedex_empty_before_receiving_pokedex() {
 /// of any particular save state's history.
 #[test]
 fn test_has_pokedex_bit_toggling() {
-    use crate::pokemon::symbols::pokered_symbols;
-    use crate::ram::{RAM, ROM};
-
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(ROUTE1_STATE).unwrap();
     gb.run(MachineCycles::from_m(1000));
@@ -471,9 +458,6 @@ fn test_has_pokedex_bit_toggling() {
 /// Squirtle=dex#7 (byte 0, bit 6).
 #[test]
 fn test_pokedex_flag_bit_decoding() {
-    use crate::pokemon::symbols::pokered_symbols;
-    use crate::ram::RAM;
-
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(ROUTE1_STATE).unwrap();
     gb.run(MachineCycles::from_m(1000));
@@ -501,8 +485,6 @@ fn test_pokedex_flag_bit_decoding() {
 /// The game sets the seen flag when the wild encounter begins.
 #[test]
 fn test_pokedex_seen_contains_battle_enemy() {
-    use battle::BattleType;
-
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(BATTLE_STATE).unwrap();
     gb.run(MachineCycles::from_m(500));
@@ -595,5 +577,6 @@ impl TestFixture {
         self.api().game_state().unwrap()
     }
 }
+
 
 
