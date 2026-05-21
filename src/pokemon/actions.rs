@@ -4,7 +4,7 @@ use crate::joypad::JoypadButton;
 use crate::pokemon::map::Map;
 use crate::pokemon::encoding::MetaTile;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct OverworldAction {
     pub map: Map,
     pub origin: Point8,

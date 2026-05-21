@@ -149,7 +149,7 @@ impl MetaTileMap {
                 .min_by_key(|p| dist[p])
         };
 
-        let mut routes = vec![];
+        let mut actions = vec![];
 
         // 1. Routes to warps
         for &to_map in &self.warp_targets {
@@ -169,7 +169,7 @@ impl MetaTileMap {
             } else {
                 route.push(enter_dir);
             }
-            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Warp(to_map), route });
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Warp(to_map), route });
         }
 
         // 2. Routes to sprites (route to an adjacent empty tile, then face the sprite)
@@ -220,7 +220,7 @@ impl MetaTileMap {
                 route.push(face_button);
             }
             route.push(JoypadButton::A);
-            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
         }
 
         // 3. Routes to map connections (nearest reachable connection tile per adjacent map)
@@ -237,17 +237,18 @@ impl MetaTileMap {
                 else if dest.x == 0 { JoypadButton::Left }
                 else { JoypadButton::Right };
             route.push(enter_dir);
-            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Connection(to_map), route });
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Connection(to_map), route });
         }
 
         // 4. Walk-in-grass (nearest reachable grass tile via BFS).
         //    Route ends standing on the grass tile — wild encounters trigger naturally from there.
         if let Some(dest) = nearest(&|t| *t == MetaTile::Grass) {
             let route = reconstruct(dest);
-            routes.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
-
-        routes
+        
+        actions.sort();
+        actions
     }
 }
 
