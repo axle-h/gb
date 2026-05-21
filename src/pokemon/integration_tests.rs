@@ -52,6 +52,19 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
     assert!(battle_in_grass, "agent should have successfully navigated into the grass and triggered a battle (if we got here, the ledge jump did not cause a Script abort)")
 }
 
+#[test]
+fn test_debouncing() {
+    pub const STATE: &[u8] = include_bytes!("data/oaks-lab-just-got-squirtle.bin");
+
+    let mut fixture = TestFixture::new(
+        STATE,
+        Duration::from_secs(200),
+        &[PolicyStep::goto(Map::PalletTown)]
+    );
+
+    fixture.step_until_exhausted();
+}
+
 
 /// Route 1 has tall grass — a WalkInGrass action must be present and route to a Grass tile.
 /// Indoor maps (no wGrassTile) must produce no WalkInGrass action.

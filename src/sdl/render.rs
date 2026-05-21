@@ -61,6 +61,7 @@ pub fn render() -> Result<(), String> {
     //      1. Increase (resample) the sequence by a factor of 375 (i.e. insert 374 zeros between each sample)
     //      2. Apply a low-pass filter (probably an FFT, not sure what the cut off frequency should be)
     //      3. Decrease (resample) the sequence by a factor of 8192 (i.e. keep every 8192nd sample, simple decimation)
+    //      looks like this library might also work: https://slack.net/~ant/libs/audio.html#Blip_Buffer
     let mut resampler = Async::<f32>::new_sinc(
         audio_spec.freq as usize as f64 / GB_SAMPLE_RATE as f64,
         2.0,  // max_resample_ratio_relative

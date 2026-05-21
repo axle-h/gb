@@ -259,9 +259,14 @@ impl PokemonAgent {
             }
         } else if let AgentState::RunningScript { rollback_deadline: rollback_delay } = self.state {
             if rollback_delay.is_exhausted() {
-                self.set_state(AgentState::Idle);
+                // The script committed (ran long enough to be genuine).
+                self.backup_state = None;
+                self.set_state(AgentState::AwaitingOverworldAction {
+                    delay: DelayContext::default(),
+                });
             } else {
-                // Script mode ended before the delay fired — restore the previous state.
+                // Script mode ended before the deadline — this was transient (e.g. a ledge
+                // jump).  Restore the state the agent was in before the script fired.
                 self.restore_state_from_backup();
             }
         }
