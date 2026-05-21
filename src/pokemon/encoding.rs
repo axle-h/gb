@@ -302,16 +302,8 @@ impl PokemonEncoding for MMU {
                     // when the player is being moved by a script (e.g. following Oak to lab),
                     // cleared by player_animations when the movement finishes.
                     let scripted_movement_active = flags5 & 0x80 != 0;
-                    // wScriptedNPCWalkCounter is used by DoScriptedNPCMovement to pace NPC walk
-                    // animations. It cycles 8→1 and never resets to 0, so we require
-                    // BIT_SCRIPTED_MOVEMENT_STATE to be set to avoid false positives from its
-                    // leftover non-zero value after the movement has finished.
-                    //
-                    // We also require the D-pad bits of wJoyIgnore to be set. A freeze-the-player
-                    // script (Oak blocking the exit, etc.) always sets wJoyIgnore to block the
-                    // player's input.  A ledge jump uses StartSimulatingJoypadStates which sets
-                    // bit 7 but does NOT touch wJoyIgnore — so the residual counter + bit 7 from
-                    // a ledge jump no longer triggers this condition.
+                    let joy_ignore = self.read_pointer(&pokered_symbols::wJoyIgnore);
+
                     // wScriptedNPCWalkCounter is used by DoScriptedNPCMovement to pace NPC walk
                     // animations. It cycles 8→1 and never resets to 0, so we require
                     // BIT_SCRIPTED_MOVEMENT_STATE to be set to avoid false positives from its
@@ -326,9 +318,15 @@ impl PokemonEncoding for MMU {
                     // stuck after the player warps away mid-walk, so we also require that the
                     // D-pad bits of wJoyIgnore (PAD_CTRL_PAD = 0xF0) are set — true when the
                     // player is frozen by an active script, but 0 once they are free.
-                    if flags5 & 0x01 != 0
-                        && self.read_pointer(&pokered_symbols::wJoyIgnore) & 0xF0 != 0
-                    {
+                    if flags5 & 0x01 != 0 && joy_ignore & 0xF0 != 0 {
+                        return GameMode::Script;
+                    }
+                    // wCurOpponent is set by trainer encounter scripts (e.g. rival in Oak's lab)
+                    // before InitBattle is called. For trainer battles wIsInBattle is only set to 2
+                    // *after* the transition animation, so this window would otherwise look like
+                    // Overworld. Treat it as Script so the agent doesn't request an action during
+                    // the animation.
+                    if self.read_pointer(&pokered_symbols::wCurOpponent) != 0 {
                         return GameMode::Script;
                     }
                     GameMode::Overworld
