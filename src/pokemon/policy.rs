@@ -230,38 +230,39 @@ fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PolicyStep {
-    Navigate { map: Map, strict: bool },
+    Goto { map: Map, strict: bool },
+    WalkInLongGrass,
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
 }
 
 impl PolicyStep {
-    pub const fn navigate(map: Map) -> Self {
-        Self::Navigate { map, strict: true }
+    pub const fn goto(map: Map) -> Self {
+        Self::Goto { map, strict: true }
     }
 
-    pub const fn navigate_until_interrupted(map: Map) -> Self {
-        Self::Navigate { map, strict: false }
+    pub const fn soft_goto(map: Map) -> Self {
+        Self::Goto { map, strict: false }
     }
 
     pub const COMPLETE_GAME: &[Self] = &[
-        Self::navigate(Map::PalletTown),
-        Self::navigate_until_interrupted(Map::Route1),      // triggers Oak's script → lands in OaksLab
+        Self::goto(Map::PalletTown),
+        Self::soft_goto(Map::Route1),      // triggers Oak's script → lands in OaksLab
         Self::Interact(MapSprite::OAKSLAB_CHARMANDER_POKE_BALL),
-        Self::navigate(Map::RedsHouse1F),      // go see mom to heal up after the battle with Gary
+        Self::goto(Map::RedsHouse1F),      // go see mom to heal up after the battle with Gary
         Self::Interact(MapSprite::REDSHOUSE1F_MOM),
-        Self::navigate(Map::ViridianPokecenter),
+        Self::goto(Map::ViridianPokecenter),
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE), // heal up
-        Self::navigate(Map::ViridianMart), // get parcel
-        Self::navigate(Map::OaksLab),
+        Self::goto(Map::ViridianMart), // get parcel
+        Self::goto(Map::OaksLab),
         Self::Interact(MapSprite::OAKSLAB_OAK1), // give parcel to oak
 
-        Self::navigate(Map::BluesHouse),
+        Self::goto(Map::BluesHouse),
         Self::Interact(MapSprite::BLUESHOUSE_DAISY1), // get the town map
 
         // TODO catch a pokemon
 
-        Self::navigate(Map::ViridianPokecenter),
+        Self::goto(Map::ViridianPokecenter),
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE), // heal up
 
 
@@ -299,7 +300,7 @@ impl Policy for DeterministicPolicy {
         loop {
             let step = self.queue.front()?.clone();
             return match step {
-                PolicyStep::Navigate { map: target, strict } => {
+                PolicyStep::Goto { map: target, strict } => {
                     if state.map.map == target {
                         self.queue.pop_front();
                         continue;
@@ -318,6 +319,14 @@ impl Policy for DeterministicPolicy {
 
                     action
                 }
+                PolicyStep::WalkInLongGrass => {
+                    let action = actions.into_iter()
+                        .find(|a| a.tile == MetaTile::Grass);
+                    if action.is_some() {
+                        self.queue.pop_front();
+                    }
+                    action
+                },
                 PolicyStep::Interact(sprite) => {
                     let action = actions.into_iter()
                         .find(|a| a.tile == MetaTile::Sprite(sprite.name));

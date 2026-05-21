@@ -23,12 +23,41 @@ pub struct PokemonAgent {
     event_buffer: VecDeque<AgentEvent>,
     cycles: MachineCycles,
     policy: Box<dyn Policy>,
+    /// Consecutive ticks where game_mode == Script while not yet in RunningScript.
+    /// We require 2 in a row before transitioning, which filters out the ~1-frame
+    /// inter-step window during a ledge jump (wWalkCounter briefly hits 0 between
+    /// the two forced steps — the window is narrower than one agent tick).
+    script_debounce: u32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum OverworldActionAbortedReason {
+    Unknown,
+    Script,
+    Battle,
+    Textbox,
+    NamingScreen,
+    WrongMap(Map),
+    NoAdjacentGrass,
+    NoRoute(MetaTile),
+}
+
+impl OverworldActionAbortedReason {
+    pub fn from_game_mode(game_mode: GameMode) -> Self {
+        match game_mode {
+            GameMode::Overworld => Self::Unknown,
+            GameMode::TrainerBattle | GameMode::WildBattle => Self::Battle,
+            GameMode::TextBox => Self::Textbox,
+            GameMode::Script => Self::Script,
+            GameMode::NamingScreen => Self::NamingScreen,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum AgentEvent {
     StartedOverworldAction { destination: MetaTile },
-    OverworldActionAborted { destination: MetaTile, reason: String },
+    OverworldActionAborted { destination: MetaTile, reason: OverworldActionAbortedReason },
     OverworldActionCompleted { destination: MetaTile },
     BattleStarted,
     BattleActionStarted { action: BattleAction },
@@ -106,6 +135,7 @@ impl PokemonAgent {
             event_buffer: VecDeque::new(),
             cycles: MachineCycles::default(),
             policy,
+            script_debounce: 0,
         }
     }
 
@@ -140,7 +170,7 @@ impl PokemonAgent {
         self.set_state(AgentState::Battle(state));
     }
 
-    fn abort_overworld(&mut self, destination: MetaTile, reason: String) {
+    fn abort_overworld(&mut self, destination: MetaTile, reason: OverworldActionAbortedReason) {
         self.event(AgentEvent::OverworldActionAborted { destination, reason });
         self.set_state(AgentState::Idle);
     }
@@ -158,7 +188,7 @@ impl PokemonAgent {
                 AgentState::OverworldMovement { destination, .. } => {
                     // entering battle from the overworld
                     let d = destination;
-                    self.abort_overworld(d, "battle started".into());
+                    self.abort_overworld(d, OverworldActionAbortedReason::Battle);
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
@@ -204,13 +234,23 @@ impl PokemonAgent {
     fn assert_script_state(&mut self, game_mode: GameMode) {
         if game_mode == GameMode::Script {
             if self.state != AgentState::RunningScript {
-                if let AgentState::OverworldMovement { destination, .. } = self.state {
-                    self.abort_overworld(destination, "map script started".into());
+                // Require two consecutive Script detections before committing.
+                // A ledge jump can briefly look like a Script for ~1 frame (≈0.8 agent ticks)
+                // when wWalkCounter hits 0 between the two forced steps; since ticks are 20 ms
+                // and the window is 16.7 ms, two consecutive ticks can never both land in it.
+                self.script_debounce += 1;
+                if self.script_debounce >= 2 {
+                    if let AgentState::OverworldMovement { destination, .. } = self.state {
+                        self.abort_overworld(destination, OverworldActionAbortedReason::Script);
+                    }
+                    self.set_state(AgentState::RunningScript);
                 }
-                self.set_state(AgentState::RunningScript);
             }
-        } else if self.state == AgentState::RunningScript {
-            self.set_state(AgentState::Idle);
+        } else {
+            self.script_debounce = 0;
+            if self.state == AgentState::RunningScript {
+                self.set_state(AgentState::Idle);
+            }
         }
     }
 
@@ -224,7 +264,7 @@ impl PokemonAgent {
             if !matches!(self.state, AgentState::ReadingTextBox { .. }) {
                 // text box opened
                 if let AgentState::OverworldMovement { destination, .. } = self.state {
-                    self.abort_overworld(destination, "text box opened".into());
+                    self.abort_overworld(destination, OverworldActionAbortedReason::Textbox);
                 }
                 let reader = if matches!(self.state, AgentState::Battle(_)) {
                     PokemonTextReader::message_box_only()
@@ -287,6 +327,9 @@ impl PokemonAgent {
                     }
                 }
             }
+            AgentState::RunningScript => {
+                api.toggle_button(JoypadButton::A);
+            }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
                 if delay.tick(delta_cycles) {
                     let game_state = api.game_state()?;
@@ -295,22 +338,17 @@ impl PokemonAgent {
                     }
                 }
             }
-            AgentState::RunningScript => {
-                api.toggle_button(JoypadButton::A);
-            }
             AgentState::OverworldMovement { destination, map: expected_map } => {
                 let game_state = api.game_state()?;
                 if game_state.mode != GameMode::Overworld {
-                    self.abort_overworld(destination,
-                        format!("game state: {}", game_state.mode));
+                    self.abort_overworld(destination, OverworldActionAbortedReason::from_game_mode(game_state.mode));
                 } else if game_state.map.map != expected_map {
                     // Map changed — success for warps and connections (both take you off the map).
-                    if matches!(destination, MetaTile::Warp(_) | MetaTile::Connection(_)) {
+                    if matches!(destination, MetaTile::Warp(_) | MetaTile::Connection(_) | MetaTile::ConnectionWater(_)) {
                         new_events.push(AgentEvent::OverworldActionCompleted { destination });
                         self.set_state(AgentState::Idle);
                     } else {
-                        self.abort_overworld(destination,
-                            format!("on map {:?}, expected {:?}", game_state.map.map, expected_map));
+                        self.abort_overworld(destination, OverworldActionAbortedReason::WrongMap(game_state.map.map));
                     }
                 } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp(_)) {
                     if destination == MetaTile::Grass {
@@ -319,7 +357,9 @@ impl PokemonAgent {
                         if let Some(tile_b) = tile_b {
                             self.set_state(AgentState::WanderingInGrass { tile_a, tile_b, heading_to_b: true });
                         } else {
-                            new_events.push(AgentEvent::OverworldActionCompleted { destination });
+                            // TODO this should not happen, we shouldn't generate an action if this is true
+                            //      the adjacent grass tile should be in the action
+                            self.abort_overworld(destination, OverworldActionAbortedReason::NoAdjacentGrass);
                             self.set_state(AgentState::Idle);
                         }
                     } else {
@@ -330,8 +370,7 @@ impl PokemonAgent {
                     let action = game_state.map.actions().into_iter()
                         .find(|a| a.tile == destination);
                     match action {
-                        None => self.abort_overworld(destination,
-                                                     format!("no route to {:?}", destination)),
+                        None => self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination)),
                         Some(a) => match a.route.first() {
                             // Pulse A via toggle so hJoyPressed fires every other tick —
                             // press_button (after release_all) would only fire once since A
@@ -494,10 +533,10 @@ fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
 /// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.
 fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<Point8> {
     let neighbors = [
-        Point8 { x: pos.x,                  y: pos.y.wrapping_sub(1) },
-        Point8 { x: pos.x,                  y: pos.y.wrapping_add(1) },
-        Point8 { x: pos.x.wrapping_sub(1),  y: pos.y                 },
-        Point8 { x: pos.x.wrapping_add(1),  y: pos.y                 },
+        Point8 { x: pos.x,                  y: pos.y.saturating_sub(1) },
+        Point8 { x: pos.x,                  y: pos.y.saturating_add(1) },
+        Point8 { x: pos.x.saturating_sub(1),  y: pos.y                 },
+        Point8 { x: pos.x.saturating_add(1),  y: pos.y                 },
     ];
     neighbors.into_iter().find(|&p| {
         (p.x as usize) < map.width

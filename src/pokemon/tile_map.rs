@@ -23,15 +23,19 @@ impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
         let north_extra = map.north_extra();
         let west_extra  = map.west_extra();
+        let width  = map.meta_width()  + west_extra + map.east_extra();
+        let height = map.meta_height() + north_extra + map.south_extra();
+        // Clamp to valid tile coordinates. During map transitions wXCoord/wYCoord can
+        // briefly hold values outside the new map's bounds; adding connection-strip
+        // offsets can make them worse. Clamping prevents out-of-bounds tile accesses.
+        let px = (map.player_position.x as usize + west_extra).min(width.saturating_sub(1)) as u8;
+        let py = (map.player_position.y as usize + north_extra).min(height.saturating_sub(1)) as u8;
         Self {
-            player_position: Point8 {
-                x: map.player_position.x.saturating_add(west_extra as u8),
-                y: map.player_position.y.saturating_add(north_extra as u8),
-            },
+            player_position: Point8 { x: px, y: py },
             player_direction: map.player_direction,
             map: map.map,
-            width:  map.meta_width()  + west_extra + map.east_extra(),
-            height: map.meta_height() + north_extra + map.south_extra(),
+            width,
+            height,
             meta_tiles: map.meta_tiles(),
             sprites: map.sprites.iter().map(|s| {
                 let mut s = *s;
