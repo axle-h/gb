@@ -378,6 +378,21 @@ impl PokemonAgent {
                     } else {
                         self.abort_overworld(destination, OverworldActionAbortedReason::WrongMap(game_state.map.map));
                     }
+                } else if matches!(destination, MetaTile::Warp(_)) && game_state.map.player_tile() == destination {
+                    // Player is standing on the warp tile.  For edge warps (tile at y=0, y=max,
+                    // x=0, or x=max) the connection only fires when the player presses the
+                    // outward direction from the edge — not just by stepping on the tile.
+                    // Pressing the outward direction here walks the player off the map and
+                    // triggers the connection.  Interior warps (stairs, etc.) fire automatically
+                    // when stepped on, so the map change is detected before this branch runs.
+                    let pos = game_state.map.player_position;
+                    let h = game_state.map.height.saturating_sub(1) as u8;
+                    let exit_dir = if pos.y == 0 { JoypadButton::Up }
+                        else if pos.y == h { JoypadButton::Down }
+                        else if pos.x == 0 { JoypadButton::Left }
+                        else { JoypadButton::Right };
+                    api.release_all_buttons();
+                    api.press_button(exit_dir);
                 } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp(_)) {
                     if destination == MetaTile::Grass {
                         let tile_a = game_state.map.player_position;

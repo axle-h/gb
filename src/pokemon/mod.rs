@@ -11,8 +11,8 @@ use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::{JoypadButton, JoypadButtonState};
 use crate::mmu::MMU;
-use crate::pokemon::bag::{BagReader, BagWriter};
-use crate::pokemon::battle::BagItem;
+use crate::pokemon::bag::{Bag, BagReader, BagWriter};
+use bag::BagItem;
 use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::menu::{MenuState, MenuStateReader};
@@ -91,7 +91,7 @@ impl<'a> PokemonApi<'a> {
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {
         let player_state = self.game_state()?;
 
-        let bag_items = [
+        const EPIC_BAG: [BagItem; 20] = [
             BagItem::new(ItemId::Revive, 99),
             BagItem::new(ItemId::FullHeal, 99),
             BagItem::new(ItemId::Potion, 99),
@@ -201,7 +201,7 @@ impl<'a> PokemonApi<'a> {
         party.push(tauros)?;
 
         let mmu = self.mmu_mut();
-        mmu.write_bag(&bag_items);
+        mmu.write_bag(&Bag::from_slice(&EPIC_BAG));
         mmu.write_player_pokemon_party(&party)
     }
 }
@@ -373,7 +373,7 @@ pub struct GameState {
     pub pokemon: PokemonParty,
     pub mode: GameMode,
     pub map: MetaTileMap,
-    pub bag: Vec<BagItem>,
+    pub bag: Bag,
     /// Populated whenever `mode` is `WildBattle` or `TrainerBattle`.
     pub battle: Option<BattleState>,
     /// True when the player has the Cascade Badge and at least one party Pokémon
