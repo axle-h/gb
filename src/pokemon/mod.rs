@@ -11,6 +11,7 @@ use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::{JoypadButton, JoypadButtonState};
 use crate::mmu::MMU;
+use crate::ram::{RAM, ROM};
 use crate::pokemon::bag::{Bag, BagReader, BagWriter};
 use bag::BagItem;
 use crate::pokemon::font::{render_font_string, FontAware, FONT_BYTES};
@@ -65,6 +66,15 @@ pub trait PokemonApiTrait {
     fn menu_state(&self) -> Option<MenuState>;
     /// Returns the species currently being named on the nickname-entry screen.
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String>;
+    /// Reads the mart's current item list from `wItemList` (up to 16 entries, FF-terminated).
+    fn mart_item_list(&self) -> Vec<ItemId>;
+
+    /// Reads `wItemQuantity` — the quantity currently shown on the buy-quantity selector.
+    fn mart_item_quantity(&self) -> u8;
+
+    /// True when the pokemart buy-quantity selector is active (wMaxItemQuantity == 99).
+    fn mart_in_quantity_selector(&self) -> bool;
+
     /// Writes `nickname` (or an empty terminator for `None`) directly into the
     /// naming screen's string buffer so pressing START submits it immediately.
     fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String>;
@@ -343,6 +353,24 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         let byte = self.mmu().read_pointer(&pokered_symbols::wCurPartySpecies);
         PokemonSpecies::from_repr(byte)
             .ok_or_else(|| format!("Invalid species byte {byte:#04x} on naming screen"))
+    }
+
+    fn mart_item_list(&self) -> Vec<ItemId> {
+        let mmu = self.mmu();
+        (0..16u16)
+            .map(|i| mmu.read(pokered_symbols::wItemList.address + i))
+            .take_while(|&b| b != 0xFF)
+            .filter_map(ItemId::from_repr)
+            .collect()
+    }
+
+    fn mart_item_quantity(&self) -> u8 {
+        self.mmu().read(pokered_symbols::wItemQuantity.address)
+    }
+
+    /// True when the buy-quantity selector is active (pokemart sets wMaxItemQuantity=99).
+    fn mart_in_quantity_selector(&self) -> bool {
+        self.mmu().read(pokered_symbols::wMaxItemQuantity.address) == 99
     }
 
     fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String> {

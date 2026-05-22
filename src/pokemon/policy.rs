@@ -11,7 +11,7 @@ use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::damage::expected_damage;
 use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::encoding::MetaTile;
-use crate::pokemon::item::ItemId;
+pub use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::world_graph::WorldGraph;
@@ -32,6 +32,17 @@ pub trait Policy {
     fn pick_nickname(&mut self, _species: PokemonSpecies) -> Option<Option<String>> {
         Some(None) // default: keep the default species name
     }
+
+    /// Called when the mart's Buy/Sell/Quit menu first appears.
+    ///
+    /// - `None`       → not ready yet; will be called again next frame.
+    /// - `Some(list)` → buy these items in order; an empty list quits immediately.
+    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Vec<(ItemId, u8)>> {
+        Some(vec![]) // default: open the mart but buy nothing
+    }
+
+    /// Called by the agent when the mart interaction is complete (game returned to Overworld).
+    fn notify_mart_complete(&mut self) {}
 
     fn is_exhausted(&self) -> bool {
         false
@@ -239,6 +250,8 @@ pub enum PolicyStep {
     CatchPokemon(PokemonSpecies),
     /// Walk in grass until the leading party member reaches at least this level.
     GrindUntilLevel(u8),
+    /// Buy items from the currently open Pokémart (must follow an Interact with the clerk).
+    BuyFromMart(Vec<(ItemId, u8)>),
 }
 
 impl PolicyStep {
@@ -250,7 +263,7 @@ impl PolicyStep {
         Self::Goto { map, strict: false }
     }
 
-    pub const COMPLETE_GAME: &[Self] = &[
+    pub fn complete_game_steps() -> Vec<Self> { vec![
         // Try to leave Pallet Town, Oak stops you and gives you a starter Pokémon
         Self::goto(Map::PalletTown),
         Self::soft_goto(Map::Route1),
@@ -278,6 +291,7 @@ impl PolicyStep {
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
         Self::goto(Map::ViridianMart),
         Self::Interact(MapSprite::VIRIDIANMART_CLERK),
+        Self::BuyFromMart(vec![(ItemId::PokeBall, 5)]),
 
 
 
@@ -312,7 +326,7 @@ impl PolicyStep {
         // Self::Interact(MapSprite::CERULEANGYM_MISTY),
         // Self::goto(Map::CeruleanPokecenter),
         // Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-    ];
+    ] }
 }
 
 pub struct DeterministicPolicy {
@@ -323,17 +337,17 @@ pub struct DeterministicPolicy {
 }
 
 impl DeterministicPolicy {
-    pub fn new(seed: u64, steps: &[PolicyStep], world_graph: WorldGraph) -> Self {
+    pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>, world_graph: WorldGraph) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
-            queue: steps.iter().cloned().collect(),
+            queue: steps.into_iter().collect(),
             world_graph,
             name_picker: PokemonNamePicker::seed_from_u64(seed),
         }
     }
 
     pub fn complete_game(seed: u64, mmu: &MMU) -> Self {
-        Self::new(seed, PolicyStep::COMPLETE_GAME, WorldGraph::build(mmu))
+        Self::new(seed, PolicyStep::complete_game_steps(), WorldGraph::build(mmu))
     }
 }
 
@@ -428,6 +442,14 @@ impl Policy for DeterministicPolicy {
                     }
                     action
                 }
+                PolicyStep::BuyFromMart(_) => {
+                    // The agent handles mart navigation; this step is consumed by pick_mart_purchase.
+                    // If we're somehow still on the overworld with a BuyFromMart step at the front,
+                    // just skip it (shouldn't normally happen).
+                    println!("[policy] BuyFromMart step encountered in pick_overworld_action — skipping");
+                    self.queue.pop_front();
+                    continue;
+                }
             }
         }
     }
@@ -488,6 +510,24 @@ impl Policy for DeterministicPolicy {
         let name = self.name_picker.pick().to_string();
         println!("[policy] pick name={}", name);
         Some(Some(name))
+    }
+
+    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Vec<(ItemId, u8)>> {
+        match self.queue.front() {
+            Some(PolicyStep::BuyFromMart(items)) => {
+                let items = items.clone();
+                println!("[policy] BuyFromMart: {:?}", items);
+                Some(items)
+            }
+            _ => Some(vec![]), // no purchase step queued — quit immediately
+        }
+    }
+
+    fn notify_mart_complete(&mut self) {
+        if matches!(self.queue.front(), Some(PolicyStep::BuyFromMart(_))) {
+            self.queue.pop_front();
+            println!("[policy] BuyFromMart step complete");
+        }
     }
 
     fn is_exhausted(&self) -> bool {

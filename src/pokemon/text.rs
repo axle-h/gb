@@ -124,6 +124,10 @@ mod tests {
         fn write_naming_screen_buffer(&mut self, _nickname: Option<&str>) -> Result<(), String> {
             Ok(())
         }
+
+        fn mart_item_list(&self) -> Vec<crate::pokemon::item::ItemId> { vec![] }
+        fn mart_item_quantity(&self) -> u8 { 0 }
+        fn mart_in_quantity_selector(&self) -> bool { false }
     }
 
     #[test]
