@@ -481,7 +481,7 @@ impl MMU {
     /// Reads an FF-terminated list of walkable tile IDs from a bank-0 ROM address.
     fn read_collision_tiles(&self, ptr: u16) -> HashSet<u8> {
         let mut tiles = HashSet::new();
-        for index in 0..20u16 {
+        for index in 0..256u16 {
             let byte = self.read(ptr + index);
             if byte == 0xFF { break; }
             tiles.insert(byte);
@@ -912,7 +912,14 @@ impl CurrentMap {
             let mx = warp.position.x as usize + x_off;
             let my = warp.position.y as usize + y_off;
             if mx < exp_width && my < exp_height {
-                result[mx + my * exp_width] = MetaTile::Warp(warp.map_id);
+                // Only register the warp if the position is physically accessible
+                // (has at least one walkable raw sub-tile).  Warp positions with no
+                // walkable sub-tiles are impassable in the game (e.g. the duplicate
+                // exit tile at x=4 in ViridianForestSouthGate) and must stay as
+                // Obstacle so the BFS does not route to them.
+                if result[mx + my * exp_width] != MetaTile::Obstacle {
+                    result[mx + my * exp_width] = MetaTile::Warp(warp.map_id);
+                }
             }
         }
 

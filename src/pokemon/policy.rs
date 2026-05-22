@@ -11,6 +11,7 @@ use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::damage::expected_damage;
 use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::encoding::MetaTile;
+use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::world_graph::WorldGraph;
@@ -234,6 +235,10 @@ pub enum PolicyStep {
     WalkInLongGrass,
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
+    /// Walk in grass and throw Pokéballs until a Pokémon is caught.
+    CatchPokemon(PokemonSpecies),
+    /// Walk in grass until the leading party member reaches at least this level.
+    GrindUntilLevel(u8),
 }
 
 impl PolicyStep {
@@ -246,26 +251,67 @@ impl PolicyStep {
     }
 
     pub const COMPLETE_GAME: &[Self] = &[
+        // Try to leave Pallet Town, Oak stops you and gives you a starter Pokémon
         Self::goto(Map::PalletTown),
-        Self::soft_goto(Map::Route1),      // triggers Oak's script → lands in OaksLab
-        Self::Interact(MapSprite::OAKSLAB_CHARMANDER_POKE_BALL),
-        Self::goto(Map::RedsHouse1F),      // go see mom to heal up after the battle with Gary
-        Self::Interact(MapSprite::REDSHOUSE1F_MOM),
+        Self::soft_goto(Map::Route1),
+        Self::Interact(MapSprite::OAKSLAB_SQUIRTLE_POKE_BALL),
+
+        // Pick up Oak's parcel from Viridian Pokémart
         Self::goto(Map::ViridianPokecenter),
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE), // heal up
-        Self::goto(Map::ViridianMart), // get parcel
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+        Self::goto(Map::ViridianMart),
+
+        // Deliver parcel to get the Pokédex
         Self::goto(Map::OaksLab),
-        Self::Interact(MapSprite::OAKSLAB_OAK1), // give parcel to oak
+        Self::Interact(MapSprite::OAKSLAB_OAK1),
 
+        // Heal at Mom's
+        Self::goto(Map::RedsHouse1F),
+        Self::Interact(MapSprite::REDSHOUSE1F_MOM),
+
+        // Get the town map from Daisy
         Self::goto(Map::BluesHouse),
-        Self::Interact(MapSprite::BLUESHOUSE_DAISY1), // get the town map
+        Self::Interact(MapSprite::BLUESHOUSE_DAISY1),
 
-        // TODO catch a pokemon
-
+        // Walk back through Route 1, heal up and buy Pokéballs
         Self::goto(Map::ViridianPokecenter),
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE), // heal up
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+        Self::goto(Map::ViridianMart),
+        Self::Interact(MapSprite::VIRIDIANMART_CLERK),
 
 
+
+        // // Catch a Pokémon on Route 1 before heading north (uses the 5 Pokéballs from Oak)
+        // Self::goto(Map::Route1),
+        // Self::CatchPokemon,
+        //
+        // Self::goto(Map::ViridianPokecenter),
+        // Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+        //
+        // // ── Single forest traversal south→north then defeat Brock ──
+        // // Route2 connects PewterCity only from the north end; explicit waypoints
+        // // through the gate buildings ensure the physically correct path.
+        // Self::goto(Map::ViridianForest),
+        // Self::goto(Map::ViridianForestNorthGate),
+        // Self::goto(Map::PewterPokecenter),
+        // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+        // Self::goto(Map::PewterGym),
+        // Self::Interact(MapSprite::PEWTERGYM_BROCK),
+        // Self::goto(Map::PewterPokecenter),
+        // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+        //
+        // // ── Route 3 → Mt. Moon Pokécenter → Route 4 → Cerulean City ──
+        // Self::goto(Map::MtMoonPokecenter),
+        // Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
+        // Self::goto(Map::CeruleanCity),
+        //
+        // // ── Defeat Misty ──
+        // Self::goto(Map::CeruleanPokecenter),
+        // Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+        // Self::goto(Map::CeruleanGym),
+        // Self::Interact(MapSprite::CERULEANGYM_MISTY),
+        // Self::goto(Map::CeruleanPokecenter),
+        // Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
     ];
 }
 
@@ -305,27 +351,73 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     }
-                    let path = self.world_graph.shortest_path(state.map.map, target)?;
-                    let next_map = path.get(1)?.map;
-                    let action = actions.into_iter().find(|a| match a.tile {
-                        MetaTile::Connection(m) | MetaTile::Warp(m) => m == next_map,
-                        _ => false,
-                    });
+
+                    // The world graph path may go via a map section that is physically
+                    // unreachable from the current position (e.g. Route2 north gate is in the
+                    // computed path but only the south gate is reachable from Route2 south).
+                    // Pick the accessible connection/warp with the shortest world-graph distance
+                    // to the target.
+                    let action = actions.iter()
+                        .filter_map(|a| {
+                            match a.tile {
+                                MetaTile::Connection(m) | MetaTile::Warp(m) => {
+                                    let d = self.world_graph.shortest_path(m, target)?.len();
+                                    Some((d, a.clone()))
+                                },
+                                _ => None,
+                            }
+                        })
+                        .min_by_key(|(d, _)| *d)
+                        .map(|(_, a)| a);
 
                     if !strict && action.is_some() {
-                        // non-struct navigations are triggered only once
                         self.queue.pop_front();
                     }
 
                     action
                 }
                 PolicyStep::WalkInLongGrass => {
-                    let action = actions.into_iter()
+                    let action = actions.iter()
                         .find(|a| a.tile == MetaTile::Grass);
                     if action.is_some() {
                         self.queue.pop_front();
                     }
-                    action
+                    action.cloned()
+                },
+                PolicyStep::CatchPokemon(species) => {
+                    if state.pokedex_owned.contains(&species) {
+                        // caught the pokemon (note this only works once for each species)
+                        self.queue.pop_front();
+                        continue;
+                    } else if let Some(action) = actions.iter()
+                        .find(|a| a.tile == MetaTile::Grass) {
+                        if state.bag.best_pokeball().is_some() {
+                            // walk in grass
+                            Some(action.clone())
+                        } else {
+                            println!("[policy] want to catch a {}, but no Pokéballs left!", species);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                    } else {
+                        println!("[policy] want to catch a {}, but no grass nearby!", species);
+                        self.queue.pop_front();
+                        continue;
+                    }
+                },
+                PolicyStep::GrindUntilLevel(target) => {
+                    if state.pokemon[0].level >= target {
+                        self.queue.pop_front();
+                        continue;
+                    } else if let Some(action) = actions.iter()
+                        .find(|a| a.tile == MetaTile::Grass) {
+                        // walk in grass
+                        Some(action.clone())
+                    } else {
+                        println!("[policy] cannot level up a Pokemon, no grass nearby!");
+                        self.queue.pop_front();
+                        continue;
+                    }
                 },
                 PolicyStep::Interact(sprite) => {
                     let action = actions.into_iter()
@@ -343,6 +435,25 @@ impl Policy for DeterministicPolicy {
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
         let battle_state = state.battle.as_ref()?;
         let actions = battle_options(state)?;
+
+        // When catching, throw a Pokéball immediately if one is available.
+        if let Some(PolicyStep::CatchPokemon(species)) = self.queue.front() {
+            if battle_state.battle_type == BattleType::Wild && battle_state.enemy.species == *species {
+                // TODO check if the enemy pokemon health <50% and there's a move that can do damage without knocking it out
+
+                if let Some(best_pokeball) = state.bag.best_pokeball() {
+                    if let Some(use_pokeball_action) = actions.iter()
+                        .find(|a| matches!(a, BattleAction::UseItem { item, .. } if item.id == best_pokeball.id )) {
+                        return Some(use_pokeball_action.clone());
+                    } else {
+                        println!("[policy] want to catch a {}, but no use Pokéball actions were provided!", species);
+                    }
+                } else {
+                    println!("[policy] want to catch a {}, but no Pokéballs left!", species);
+                }
+            }
+        }
+
         let mut result: Option<BattleAction> = None;
         let mut most_damage = 0;
 

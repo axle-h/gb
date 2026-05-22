@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, strum_macros::Display, strum_macros::FromRepr)]
 #[repr(u8)]
 pub enum ItemId {
     MasterBall = 0x01,

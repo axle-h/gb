@@ -25,9 +25,9 @@ impl MachineCycles {
     }
 
     pub const fn from_duration(duration: Duration) -> Self {
-        let nanos = duration.as_nanos() as usize;
-        let t_cycles = (nanos * Self::CPU_FREQ) / 1_000_000_000;
-        let m_cycles = t_cycles / 4; // 1 machine cycle = 4 clock cycles
+        let nanos = duration.as_nanos(); // u128 — avoids overflow for durations up to ~years
+        let t_cycles = (nanos * Self::CPU_FREQ as u128) / 1_000_000_000;
+        let m_cycles = (t_cycles / 4) as usize;
         Self(m_cycles)
     }
 

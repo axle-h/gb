@@ -1,14 +1,14 @@
 use std::fmt::{Display, Formatter};
 use crate::mmu::MMU;
+use crate::pokemon::bag::BagItem;
 use crate::ram::ROM;
-use crate::pokemon::item::ItemId;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::pokemon::{PokemonStats, PokemonSummary, PokemonType};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointer, DmgPointerRead};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display)]
 pub enum BattleType { Wild, Trainer }
 
 #[derive(Debug, Copy, Clone)]
@@ -18,18 +18,6 @@ pub struct BattleState {
     pub enemy:             PokemonSummary,
     /// 0-based index into the pokemon party for the currently-active Pokemon.
     pub active_party_slot: u8,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct BagItem {
-    pub id:       ItemId,
-    pub quantity: u8,
-}
-
-impl BagItem {
-    pub fn new(id: ItemId, quantity: u8) -> Self {
-        Self { id, quantity }
-    }
 }
 
 /// Action the player can take on their turn.

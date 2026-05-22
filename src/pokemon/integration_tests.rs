@@ -522,7 +522,7 @@ fn can_start_game() {
 
     let mut fixture = TestFixture::new(
         START_OF_GAME,
-        Duration::from_secs(1000),
+        Duration::from_secs(6000),
         PolicyStep::COMPLETE_GAME
     );
 

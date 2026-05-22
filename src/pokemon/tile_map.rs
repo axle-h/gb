@@ -58,10 +58,11 @@ impl MetaTileMap {
     /// Returns `(dist, came_from)` where `dist[p]` is the minimum step-count to reach `p`
     /// and `came_from[p]` is the `(previous_position, direction)` on the shortest path.
     ///
-    /// Passable tiles (Empty, Warp, Connection) are expanded. Impassable tiles
-    /// (Obstacle, Sprite, Water, ConnectionWater) are recorded as reachable destinations
-    /// but not expanded — they are dead ends for traversal.
-    fn bfs_from_player(&self) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
+    /// When `traverse_grass` is false, Grass tiles are recorded as reachable destinations
+    /// but are not expanded — routes to non-grass targets will avoid walking through grass.
+    /// This is used to compute grass-free navigation paths; the grass action itself still uses
+    /// the full BFS so it can find the nearest grass tile.
+    fn bfs_from_player(&self, traverse_grass: bool) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
         use std::collections::{HashMap, VecDeque};
 
         let mut dist: HashMap<Point8, u32> = HashMap::new();
@@ -112,7 +113,10 @@ impl MetaTileMap {
                 } else {
                     dist.insert(nb, d + 1);
                     came_from.insert(nb, (pos, dir));
-                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree) {
+                    let is_grass = matches!(tile, MetaTile::Grass);
+                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree)
+                        && (traverse_grass || !is_grass)
+                    {
                         queue.push_back(nb);
                     }
                 }
@@ -122,12 +126,15 @@ impl MetaTileMap {
     }
 
     pub fn actions(&self) -> Vec<OverworldAction> {
-        // Single BFS from player_position computes shortest distances to every reachable tile.
-        // All per-action lookups then become O(candidates) instead of O(candidates × map_size).
-        let (dist, came_from) = self.bfs_from_player();
+        // Two BFS passes from player_position:
+        //   no_grass: grass tiles are recorded but not traversed — gives grass-free routes.
+        //   full:     grass tiles are traversable — fallback for destinations only reachable via grass.
+        // Warp/connection/sprite actions prefer the grass-free route; grass action uses full BFS.
+        let (no_grass_dist, no_grass_from) = self.bfs_from_player(false);
+        let (full_dist,     full_from)     = self.bfs_from_player(true);
 
-        // Reconstruct the step sequence from came_from back-pointers.
-        let reconstruct = |dest: Point8| -> Vec<JoypadButton> {
+        // Reconstruct the step sequence from the given came_from back-pointers.
+        let reconstruct = |dest: Point8, came_from: &HashMap<Point8, (Point8, JoypadButton)>| -> Vec<JoypadButton> {
             let mut route = vec![];
             let mut pos = dest;
             while pos != self.player_position {
@@ -139,14 +146,35 @@ impl MetaTileMap {
             route
         };
 
-        // Find the nearest tile matching `pred` that BFS reached.
+        // Choose the grass-free result if the dest is reachable without grass; otherwise full BFS.
+        let best_dist_from = |p: &Point8| -> Option<(&HashMap<Point8, u32>, &HashMap<Point8, (Point8, JoypadButton)>)> {
+            if no_grass_dist.contains_key(p) {
+                Some((&no_grass_dist, &no_grass_from))
+            } else if full_dist.contains_key(p) {
+                Some((&full_dist, &full_from))
+            } else {
+                None
+            }
+        };
+
+        // Find the nearest tile matching `pred` using the grass-free BFS (fallback to full).
         let nearest = |pred: &dyn Fn(&MetaTile) -> bool| -> Option<Point8> {
             self.meta_tiles.iter()
                 .enumerate()
                 .filter(|(_, t)| pred(t))
                 .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
-                .filter(|p| dist.contains_key(p))
-                .min_by_key(|p| dist[p])
+                .filter(|p| best_dist_from(p).is_some())
+                .min_by_key(|p| best_dist_from(p).unwrap().0[p])
+        };
+
+        // Find the nearest tile matching `pred` using the full BFS (for grass targets).
+        let nearest_full = |pred: &dyn Fn(&MetaTile) -> bool| -> Option<Point8> {
+            self.meta_tiles.iter()
+                .enumerate()
+                .filter(|(_, t)| pred(t))
+                .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
+                .filter(|p| full_dist.contains_key(p))
+                .min_by_key(|p| full_dist[p])
         };
 
         let mut actions = vec![];
@@ -154,7 +182,8 @@ impl MetaTileMap {
         // 1. Routes to warps
         for &to_map in &self.warp_targets {
             let Some(dest) = nearest(&|t| t == &MetaTile::Warp(to_map)) else { continue };
-            let mut route = reconstruct(dest);
+            let (_, came_from) = best_dist_from(&dest).unwrap();
+            let mut route = reconstruct(dest, came_from);
 
             let enter_dir = if dest.x == 0 { JoypadButton::Left }
                 else if dest.x == (self.width - 1) as u8 { JoypadButton::Right }
@@ -206,13 +235,14 @@ impl MetaTileMap {
                 .filter(|(_, p)| {
                     (p.x as usize) < self.width && (p.y as usize) < self.height
                     && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
-                    && dist.contains_key(p)
+                    && best_dist_from(p).is_some()
                 })
-                .min_by_key(|(_, p)| dist[p])
+                .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
                 .copied()
             else { continue };
 
-            let mut route = reconstruct(dest);
+            let (_, came_from) = best_dist_from(&dest).unwrap();
+            let mut route = reconstruct(dest, came_from);
             let face_button: JoypadButton = face_dir.into();
             if route.is_empty() {
                 if face_dir != self.player_direction { route.push(face_button); }
@@ -230,7 +260,8 @@ impl MetaTileMap {
 
         for to_map in connection_maps {
             let Some(dest) = nearest(&|t| t == &MetaTile::Connection(to_map)) else { continue };
-            let mut route = reconstruct(dest);
+            let (_, came_from) = best_dist_from(&dest).unwrap();
+            let mut route = reconstruct(dest, came_from);
 
             let enter_dir = if dest.y == 0 { JoypadButton::Up }
                 else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
@@ -240,10 +271,9 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Connection(to_map), route });
         }
 
-        // 4. Walk-in-grass (nearest reachable grass tile via BFS).
-        //    Route ends standing on the grass tile — wild encounters trigger naturally from there.
-        if let Some(dest) = nearest(&|t| *t == MetaTile::Grass) {
-            let route = reconstruct(dest);
+        // 4. Walk-in-grass (nearest reachable grass tile via full BFS — grass is the destination).
+        if let Some(dest) = nearest_full(&|t| *t == MetaTile::Grass) {
+            let route = reconstruct(dest, &full_from);
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
         
