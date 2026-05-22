@@ -20,7 +20,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
     let mut fixture = TestFixture::new(
         ROUTE1_STATE,
         Duration::from_secs(200),
-        &[
+        vec![
             PolicyStep::WalkInLongGrass,
         ]
     );
@@ -59,7 +59,7 @@ fn test_debouncing() {
     let mut fixture = TestFixture::new(
         STATE,
         Duration::from_secs(200),
-        &[PolicyStep::goto(Map::PalletTown)]
+        vec![PolicyStep::goto(Map::PalletTown)]
     );
 
     fixture.step_until_exhausted();
@@ -523,7 +523,7 @@ fn can_start_game() {
     let mut fixture = TestFixture::new(
         START_OF_GAME,
         Duration::from_secs(6000),
-        PolicyStep::COMPLETE_GAME
+        PolicyStep::complete_game_steps(),
     );
 
     {
@@ -541,6 +541,14 @@ fn can_start_game() {
         format!("{}", starter.nickname), "Celina",
         "DeterministicPolicy with seed 42 should name the starter Celina"
     );
+
+    let pokeballs = state.bag.iter()
+        .find(|item| item.id == crate::pokemon::item::ItemId::PokeBall);
+    assert!(
+        pokeballs.is_some() && pokeballs.unwrap().quantity >= 5,
+        "should have bought at least 5 Poké Balls from Viridian Mart; bag={:?}",
+        state.bag.iter().collect::<Vec<_>>()
+    );
 }
 
 struct TestFixture {
@@ -551,7 +559,7 @@ struct TestFixture {
 }
 
 impl TestFixture {
-    pub fn new(save_state: &[u8], max_game_time: Duration, policy_steps: &[PolicyStep]) -> Self {
+    pub fn new(save_state: &[u8], max_game_time: Duration, policy_steps: Vec<PolicyStep>) -> Self {
         let mut gb = GameBoy::dmg(roms::POKERED);
         gb.load_state(save_state).expect("failed to load save state");
 

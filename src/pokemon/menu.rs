@@ -113,6 +113,27 @@ impl MenuState {
         }
     }
 
+    pub fn is_mart_buy_sell_menu(&self) -> bool {
+        matches!(self.text_box_id, TextBoxId::BuySellQuitMenu | TextBoxId::BuySellQuitMenuTemplate)
+    }
+
+    /// True when the mart's item-purchase list (PRICEDITEMLISTMENU) is visible.
+    /// Distinct from the battle item list by topMenuItemY == 3 vs 4.
+    pub fn is_mart_item_list(&self) -> bool {
+        self.text_box_id == TextBoxId::ListMenuBox
+            && self.top_menu_item_x == 5
+            && self.top_menu_item_y == 4
+    }
+
+    pub fn is_yes_no_menu(&self) -> bool {
+        self.text_box_id == TextBoxId::TwoOptionMenu
+    }
+
+    /// Absolute item index in the list (current_item + scroll_offset).
+    pub fn list_absolute_index(&self) -> u8 {
+        self.current_item.saturating_add(self.scroll_offset)
+    }
+
     pub fn battle_menu_state(&self) -> Option<BattleMenuState> {
         if self.text_box_id.is_battle_menu() {
             if self.is_main_battle_menu() {
