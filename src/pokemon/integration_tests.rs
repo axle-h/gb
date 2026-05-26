@@ -1,11 +1,10 @@
 
 use std::time::Duration;
 use crate::cycles::MachineCycles;
-use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::policy::{DeterministicPolicy, Policy, PolicyStep};
+use crate::pokemon::policy::{DeterministicPolicy, PolicyStep};
 use crate::pokemon::*;
 use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason, PokemonAgent, AGENT_RESOLUTION};
-use crate::pokemon::battle::{BattleAction, BattleType};
+use crate::pokemon::battle::BattleType;
 use crate::pokemon::world_graph::WorldGraph;
 use crate::pokemon::encoding::{JumpDirection, MetaTile};
 use crate::ram::{RAM, ROM};
@@ -21,7 +20,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
         ROUTE1_STATE,
         Duration::from_secs(200),
         vec![
-            PolicyStep::WalkInLongGrass,
+            PolicyStep::GrindUntilLevel { target_level: 100, on_map: Map::Route1 },
         ]
     );
 
@@ -71,11 +70,8 @@ fn test_debouncing() {
 #[test]
 fn test_walk_in_grass_action() {
     {
-        let mut gb = GameBoy::dmg(roms::POKERED);
-        gb.load_state(ROUTE1_STATE).unwrap();
-        gb.run(MachineCycles::from_m(1000));
-        let api = PokemonApi::new(&mut gb);
-        let state = api.game_state().unwrap();
+        let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
 
         assert!(
             state.map.meta_tiles.iter().any(|t| *t == MetaTile::Grass),
@@ -97,12 +93,8 @@ fn test_walk_in_grass_action() {
     // Indoor map (Red's House 1F): different tileset, no grass tile
     {
         const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("data/reds-house-1f-state.bin");
-
-        let mut gb = GameBoy::dmg(roms::POKERED);
-        gb.load_state(REDS_HOUSE_1F_STATE).unwrap();
-        gb.run(MachineCycles::from_m(1000));
-        let api = PokemonApi::new(&mut gb);
-        let state = api.game_state().unwrap();
+        let mut fixture = TestFixture::new(REDS_HOUSE_1F_STATE, Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
 
         assert!(
             !state.map.meta_tiles.iter().any(|t| *t == MetaTile::Grass),
@@ -117,11 +109,8 @@ fn test_walk_in_grass_action() {
 
 #[test]
 fn test_route_1_ledge_routing() {
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(ROUTE1_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
     let map = state.map;
     assert_eq!(map.map, Map::Route1);
 
@@ -185,11 +174,8 @@ fn test_route_1_ledge_routing() {
 
 #[test]
 fn test_pallet_town_actions() {
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(PALLET_TOWN_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
     let map = &state.map;
 
     let actions = map.actions();
@@ -229,18 +215,18 @@ fn test_pallet_town_actions() {
 /// advance the conversation by pressing A — not try to navigate around the map.
 #[test]
 fn test_viridian_pokemart_script_advances_dialogue() {
-
     const POKEMART_STATE: &[u8] = include_bytes!("data/viridian-city-pokemart-during-script.bin");
 
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(POKEMART_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
+    let mut fixture = TestFixture::new(
+        POKEMART_STATE,
+        Duration::from_secs(60),
+        vec![PolicyStep::goto(Map::ViridianCity)],
+    );
 
     // The save state has the clerk's text box already open.
     // The game mode must be TextBox or Script — never plain Overworld.
     {
-        let api = PokemonApi::new(&mut gb);
-        let mode = api.game_mode().unwrap();
+        let mode = fixture.game_state().mode;
         assert!(
             matches!(mode, GameMode::TextBox | GameMode::Script),
             "Expected TextBox or Script mode in PokeMART save state, got {:?}", mode
@@ -249,24 +235,34 @@ fn test_viridian_pokemart_script_advances_dialogue() {
 
     // Run the agent: it should press A to advance the dialogue and eventually
     // return to Overworld mode.
-    let mut agent = PokemonAgent::new(Box::new(policy::RandomPolicy));
+    fixture.step_until_exhausted();
 
-    let mut returned_to_overworld = false;
-    for _ in 0..10_000u32 {
-        let cycles = gb.run(AGENT_RESOLUTION);
-        agent.update(&mut gb, cycles).ok();
-
-        let api = PokemonApi::new(&mut gb);
-        if api.game_mode() == Some(GameMode::Overworld) {
-            returned_to_overworld = true;
-            break;
-        }
-    }
-
-    assert!(
-        returned_to_overworld,
-        "agent should advance the PokeMART dialogue and return to Overworld within 10000 frames"
+    assert_eq!(
+        fixture.game_state().mode,
+        GameMode::Overworld,
+        "agent should advance the PokeMART dialogue and return to Overworld"
     );
+}
+
+#[test]
+fn test_pokemart_shopping() {
+    const STATE: &[u8] = include_bytes!("data/viridian-city-pokemart-shopping.bin");
+    let mut fixture = TestFixture::new(
+        STATE,
+        Duration::from_secs(60),
+        vec![
+            PolicyStep::BuyFromMart(BagItem::new(ItemId::PokeBall, 5)),
+            PolicyStep::goto(Map::ViridianCity),
+        ]
+    );
+
+    fixture.step_until_exhausted();
+
+    let state = fixture.game_state();
+    let pokeballs = state.bag.iter()
+        .find(|i| i.id == ItemId::PokeBall)
+        .expect("expected pokeballs to be in bag");
+    assert_eq!(*pokeballs, BagItem::new(ItemId::PokeBall, 5), "expected to have bought 5 Poké Balls from the Mart");
 }
 
 /// A Cut bush on the path north of Viridian City blocks access to the Fisher.
@@ -276,12 +272,8 @@ fn test_viridian_pokemart_script_advances_dialogue() {
 fn test_cut_bush_blocks_fisher_without_cut() {
     const BUSH_STATE: &[u8] = include_bytes!("data/viridian-city-north-of-bush.bin");
 
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(BUSH_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let mut fixture = TestFixture::new(BUSH_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
 
     assert!(!state.can_use_cut, "player should not have Cut available at this point");
 
@@ -300,12 +292,8 @@ fn test_cut_bush_blocks_fisher_without_cut() {
 fn test_viridian_pokecenter_nurse_action() {
     const POKECENTER_STATE: &[u8] = include_bytes!("data/viridian-city-pokemon-center.bin");
 
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(POKECENTER_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let mut fixture = TestFixture::new(POKECENTER_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
     assert_eq!(state.map.map, Map::ViridianPokecenter);
 
     let actions = state.map.actions();
@@ -323,12 +311,8 @@ fn test_viridian_pokecenter_nurse_action() {
 fn test_reds_house_1f_actions_from_save_state() {
     const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("data/reds-house-1f-state.bin");
 
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(REDS_HOUSE_1F_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let mut fixture = TestFixture::new(REDS_HOUSE_1F_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
     assert_eq!(state.map.map, Map::RedsHouse1F, "save state should start in RedsHouse1F");
 
     let actions = state.map.actions();
@@ -356,63 +340,34 @@ fn test_reds_house_1f_actions_from_save_state() {
 /// PalletTown — not self-referentially to RedsHouse1F.
 #[test]
 fn test_reds_house_1f_exit_warp() {
-    struct EnterRedsHousePolicy;
-    impl Policy for EnterRedsHousePolicy {
-        fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
-            if state.map.map != Map::PalletTown { return None; }
-            state.map.actions().into_iter()
-                .find(|a| a.tile == MetaTile::Warp(Map::RedsHouse1F))
-        }
-        fn pick_battle_action(&mut self, _: &GameState) -> Option<BattleAction> { None }
-    }
+    let mut fixture = TestFixture::new(
+        PALLET_TOWN_STATE,
+        Duration::from_secs(60),
+        vec![PolicyStep::goto(Map::RedsHouse1F)],
+    );
 
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(PALLET_TOWN_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
+    fixture.step_until_exhausted();
 
-    let mut agent = PokemonAgent::new(Box::new(EnterRedsHousePolicy));
+    let state = fixture.game_state();
+    let actions = state.map.actions();
+    let tiles: Vec<_> = actions.iter().map(|a| &a.tile).collect();
 
-    // Count consecutive frames spent in Overworld mode on RedsHouse1F.
-    // We wait for 120 stable frames (~2 s) before asserting, so the map's
-    // object data (warps, sprites) has time to fully initialise after the
-    // wCurMap register flips.
-    let mut stable_frames = 0u32;
-    for _ in 0..15_000u32 {
-        let cycles = gb.run(AGENT_RESOLUTION);
-        agent.update(&mut gb, cycles).ok();
-
-        let api = PokemonApi::new(&mut gb);
-        let Ok(state) = api.game_state() else { stable_frames = 0; continue };
-        if state.mode != GameMode::Overworld || state.map.map != Map::RedsHouse1F {
-            stable_frames = 0;
-            continue;
-        }
-        stable_frames += 1;
-        if stable_frames < 120 { continue; }
-
-        let actions = state.map.actions();
-        let tiles: Vec<_> = actions.iter().map(|a| &a.tile).collect();
-
-        assert!(
-            !actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse1F)),
-            "self-referential Warp → RedsHouse1F inside Red's House 1F; actions: {tiles:?}"
-        );
-        assert!(
-            actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse2F)),
-            "expected exit Warp → RedsHouse2F inside Red's House 1F; actions: {tiles:?}"
-        );
-        assert!(
-            actions.iter().any(|a| a.tile == MetaTile::Warp(Map::PalletTown)),
-            "expected exit Warp → PalletTown inside Red's House 1F; actions: {tiles:?}"
-        );
-        assert!(
-            actions.iter().any(|a| a.tile == MetaTile::Sprite("Mom")),
-            "expected to be able to talk to 'Mom' inside Red's House 1F; actions: {tiles:?}"
-        );
-        return;
-    }
-
-    panic!("never reached RedsHouse1F in overworld mode within 15000 frames");
+    assert!(
+        !actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse1F)),
+        "self-referential Warp → RedsHouse1F inside Red's House 1F; actions: {tiles:?}"
+    );
+    assert!(
+        actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse2F)),
+        "expected exit Warp → RedsHouse2F inside Red's House 1F; actions: {tiles:?}"
+    );
+    assert!(
+        actions.iter().any(|a| a.tile == MetaTile::Warp(Map::PalletTown)),
+        "expected exit Warp → PalletTown inside Red's House 1F; actions: {tiles:?}"
+    );
+    assert!(
+        actions.iter().any(|a| a.tile == MetaTile::Sprite("Mom")),
+        "expected to be able to talk to 'Mom' inside Red's House 1F; actions: {tiles:?}"
+    );
 }
 
 
@@ -420,12 +375,12 @@ fn test_reds_house_1f_exit_warp() {
 /// and both seen/owned sets must be empty.
 #[test]
 fn test_pokedex_empty_before_receiving_pokedex() {
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(include_bytes!("data/start-of-game-state.bin")).unwrap();
-    gb.run(MachineCycles::from_m(1000));
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/start-of-game-state.bin"),
+        Duration::from_secs(10),
+        vec![],
+    );
+    let state = fixture.game_state();
 
     assert!(!state.has_pokedex, "player should not have the Pokédex before Oak's script");
     assert!(state.pokedex_owned.is_empty(), "wPokedexOwned should be all-zero at game start");
@@ -437,32 +392,24 @@ fn test_pokedex_empty_before_receiving_pokedex() {
 /// of any particular save state's history.
 #[test]
 fn test_has_pokedex_bit_toggling() {
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(ROUTE1_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
+    let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
 
     // EVENT_GOT_POKEDEX = bit 37 → byte 4, bit 5, mask 0x20 of wEventFlags
     let flag_addr = pokered_symbols::wEventFlags.address + 4;
 
     {
-        let mmu = gb.core_mut().mmu_mut();
+        let mmu = fixture.gb.core_mut().mmu_mut();
         let current = mmu.read(flag_addr);
         mmu.write(flag_addr, current & !0x20); // clear the bit
     }
-    {
-        let api = PokemonApi::new(&mut gb);
-        assert!(!api.game_state().unwrap().has_pokedex, "should be false when bit 5 is clear");
-    }
+    assert!(!fixture.game_state().has_pokedex, "should be false when bit 5 is clear");
 
     {
-        let mmu = gb.core_mut().mmu_mut();
+        let mmu = fixture.gb.core_mut().mmu_mut();
         let current = mmu.read(flag_addr);
         mmu.write(flag_addr, current | 0x20); // set the bit
     }
-    {
-        let api = PokemonApi::new(&mut gb);
-        assert!(api.game_state().unwrap().has_pokedex, "should be true when bit 5 is set");
-    }
+    assert!(fixture.game_state().has_pokedex, "should be true when bit 5 is set");
 }
 
 /// Directly writes known species bits into wPokedexOwned/wPokedexSeen and verifies
@@ -471,9 +418,7 @@ fn test_has_pokedex_bit_toggling() {
 /// Squirtle=dex#7 (byte 0, bit 6).
 #[test]
 fn test_pokedex_flag_bit_decoding() {
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(ROUTE1_STATE).unwrap();
-    gb.run(MachineCycles::from_m(1000));
+    let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
 
     let owned_base = pokered_symbols::wPokedexOwned.address;
     // Write byte 0 with bits for Bulbasaur (#1=bit0), Charmander (#4=bit3), Squirtle (#7=bit6)
@@ -483,10 +428,9 @@ fn test_pokedex_flag_bit_decoding() {
     // Squirtle: bit 6 → mask 0x40
     let test_byte: u8 = 0x01 | 0x08 | 0x40; // = 0x49
 
-    gb.core_mut().mmu_mut().write(owned_base, test_byte);
+    fixture.gb.core_mut().mmu_mut().write(owned_base, test_byte);
 
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let state = fixture.game_state();
 
     assert!(state.pokedex_owned.contains(&PokemonSpecies::Bulbasaur), "Bulbasaur should be owned");
     assert!(state.pokedex_owned.contains(&PokemonSpecies::Charmander), "Charmander should be owned");
@@ -498,12 +442,8 @@ fn test_pokedex_flag_bit_decoding() {
 /// The game sets the seen flag when the wild encounter begins.
 #[test]
 fn test_pokedex_seen_contains_battle_enemy() {
-    let mut gb = GameBoy::dmg(roms::POKERED);
-    gb.load_state(BATTLE_STATE).unwrap();
-    gb.run(MachineCycles::from_m(500));
-
-    let api = PokemonApi::new(&mut gb);
-    let state = api.game_state().unwrap();
+    let mut fixture = TestFixture::new(BATTLE_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
 
     let battle = state.battle.expect("save state should be in a wild battle");
     assert_eq!(battle.battle_type, BattleType::Wild);
@@ -516,13 +456,27 @@ fn test_pokedex_seen_contains_battle_enemy() {
 }
 
 #[test]
-fn can_start_game() {
-    const START_OF_GAME: &[u8] =
-        include_bytes!("data/start-of-game-state.bin");
-
+fn test_caught_pokemon_nickname() {
     let mut fixture = TestFixture::new(
-        START_OF_GAME,
-        Duration::from_secs(6000),
+        include_bytes!("data/viridian-forest.bin"),
+        Duration::from_mins(10),
+        vec![
+            PolicyStep::CatchPokemon { species: PokemonSpecies::Weedle, on_map: Map::ViridianForest },
+            PolicyStep::goto(Map::ViridianForest),
+        ]
+    );
+    fixture.step_until_exhausted();
+    let state = fixture.game_state();
+    let weedle = &state.pokemon[2];
+    assert_eq!(weedle.species, PokemonSpecies::Weedle);
+    assert_ne!(weedle.nickname.to_default_string(), "AAAAAAAAAA");
+}
+
+#[test]
+fn can_start_game() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/start-of-game-state.bin"),
+        Duration::from_hours(1),
         PolicyStep::complete_game_steps(),
     );
 
@@ -535,20 +489,20 @@ fn can_start_game() {
     fixture.step_until_exhausted();
 
     let state = fixture.game_state();
-    let starter = state.pokemon.iter().next().expect("should have a starter");
-    println!("Starter: {:?}  Nickname: {}  on map: {:?}", starter.species, starter.nickname, state.map.map);
-    assert_eq!(
-        format!("{}", starter.nickname), "Celina",
-        "DeterministicPolicy with seed 42 should name the starter Celina"
-    );
+    for pokemon in state.pokemon.iter() {
+        println!("{}: {}", pokemon.species, pokemon.nickname);
+    }
 
-    let pokeballs = state.bag.iter()
-        .find(|item| item.id == crate::pokemon::item::ItemId::PokeBall);
-    assert!(
-        pokeballs.is_some() && pokeballs.unwrap().quantity >= 5,
-        "should have bought at least 5 Poké Balls from Viridian Mart; bag={:?}",
-        state.bag.iter().collect::<Vec<_>>()
-    );
+    state.pokemon.iter()
+        .find(|p| p.species == PokemonSpecies::Squirtle && p.nickname.to_default_string() == "Celina")
+        .expect("should have chosen Squirtle as starter");
+
+    state.pokemon.iter()
+        .find(|p| p.species == PokemonSpecies::Pidgey && p.nickname.to_default_string() == "Leslee")
+        .expect("should have caught a Pidgey");
+
+    fixture.save_state_to_file().unwrap();
+
 }
 
 struct TestFixture {
@@ -566,6 +520,10 @@ impl TestFixture {
         let world_graph = WorldGraph::build(gb.core().mmu());
         let policy = DeterministicPolicy::new(42, policy_steps, world_graph);
 
+        PokemonApi::new(&mut gb)
+            .write_game_options(&GameOptions::default())
+            .expect("failed to write game options");
+
         Self {
             gb,
             total_cycles: MachineCycles::ZERO,
@@ -580,6 +538,7 @@ impl TestFixture {
 
         self.total_cycles += cycles;
         if self.total_cycles >= self.max_cycles {
+            self.gb.save_state_to_file("test_failure_state.bin").ok();
             panic!("exceeded max cycles");
         }
     }
@@ -596,6 +555,10 @@ impl TestFixture {
 
     pub fn game_state(&mut self) -> GameState {
         self.api().game_state().unwrap()
+    }
+
+    pub fn save_state_to_file(&mut self) -> Result<(), String> {
+        self.gb.save_state_to_file("pokemon-red.bin")
     }
 }
 

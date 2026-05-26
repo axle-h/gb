@@ -35,9 +35,11 @@ pub trait PokemonEncoding {
 
     fn read_sprites(&self) -> Result<Vec<Sprite>, String>;
 
-    fn read_warp_events(&self, cur_map: Map, map_bank: usize, objects_address: u16) -> Result<Vec<WarpEvent>, String>;
+    fn read_warp_events(&self, cur_map: Map, map_header: &MapHeader) -> Result<Vec<WarpEvent>, String>;
 
     fn read_game_mode(&self) -> GameMode;
+
+    fn read_map(&self, map: Map, player_position: Point8, player_direction: PlayerFacingDirection) -> Result<CurrentMap, String>;
 
     fn read_current_map(&self) -> Result<CurrentMap, String>;
 
@@ -227,17 +229,18 @@ impl PokemonEncoding for MMU {
         Ok(sprites)
     }
 
-    fn read_warp_events(&self, cur_map: Map, map_bank: usize, objects_address: u16) -> Result<Vec<WarpEvent>, String> {
+    fn read_warp_events(&self, cur_map: Map, map_header: &MapHeader) -> Result<Vec<WarpEvent>, String> {
         // Read directly from ROM so we get the raw destination byte (including 0xFF / self-ref)
         // before pokémon Red's runtime wLastMap resolution, which becomes stale when
         // navigating between indoor floors (e.g. Red's House 1F → 2F → 1F).
         //
         // Object-data layout: [border_block(1), warp_count(1), warp_entries(4 each), ...]
-        let warp_count = self.rom_data_from_pointer(map_bank, objects_address + 1, 1)[0] as u16;
+        let objects_pointer = map_header.objects_pointer();
+        let warp_count = self.read_pointer(&(objects_pointer + 1)) as u16;
         let mut result = vec![];
         for index in 0..warp_count {
-            let base = objects_address + 2 + index * 4;
-            let entry = self.rom_data_from_pointer(map_bank, base, 4);
+            let base = objects_pointer + (2 + index * 4);
+            let entry = self.rom_data_from_rom_pointer(&base, 4);
             let raw_map_id = entry[3];
             // 0xFF = LAST_MAP sentinel; self-referential (raw_map_id == cur_map) is
             // pokémon Red's building-exit convention meaning the same thing.
@@ -259,33 +262,47 @@ impl PokemonEncoding for MMU {
     }
 
     fn read_game_mode(&self) -> GameMode {
+        // Naming screen detection must come before the wIsInBattle check: in Pokémon Red the
+        // nickname prompt is shown inside the catch routine while wIsInBattle is still 1.
+        // wNamingScreenType ($D07D) is aliased as wPartyMenuTypeOrMessageID and
+        // wTempTilesetNumTiles, so it can hold arbitrary values during battle/menu code.
+        // Four conditions together uniquely identify a freshly opened naming screen:
+        //   1. wNamingScreenType == 2  (NAME_MON_SCREEN exactly; rules out aliased junk)
+        //   2. wNamingScreenSubmitName == 0  (reset at screen open, set to 1 on submit)
+        //   3. wFontLoaded == 1  (set by the text box that led to the YES/NO choice)
+        //   4. wStringBuffer[0] == "@" (0x50)  (DisplayNamingScreen inits buffer empty)
+        //      — rules out the false positive when the agent has already written a name
+        //      into the buffer before the naming screen has been submitted.
+        let font_loaded_byte = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01;
+        if self.read_pointer(&pokered_symbols::wNamingScreenType) == 2
+            && self.read_pointer(&pokered_symbols::wNamingScreenSubmitName) == 0
+            && font_loaded_byte == 1
+            && self.read_pointer(&pokered_symbols::wStringBuffer) == 0x50
+        {
+            return GameMode::NamingScreen;
+        }
+
         // ; lost battle, this is -1
         // ; no battle, this is 0
         // ; wild battle, this is 1
         // ; trainer battle, this is 2
         match self.read_pointer(&pokered_symbols::wIsInBattle) {
-            1 => GameMode::WildBattle,
-            2 => GameMode::TrainerBattle,
-            _ => {
-                // Naming screen detection must come before the wFontLoaded check because the
-                // naming screen inherits wFontLoaded=1 from the YES/NO text that precedes it.
-                // wNamingScreenType ($D07D) is aliased as wPartyMenuTypeOrMessageID and
-                // wTempTilesetNumTiles, so it can hold arbitrary values during battle/menu code.
-                // Four conditions together uniquely identify a freshly opened naming screen:
-                //   1. wNamingScreenType == 2  (NAME_MON_SCREEN exactly; rules out aliased junk)
-                //   2. wNamingScreenSubmitName == 0  (reset at screen open, set to 1 on submit)
-                //   3. wFontLoaded == 1  (set by the text box that led to the YES/NO choice)
-                //   4. wStringBuffer[0] == "@" (0x50)  (DisplayNamingScreen inits buffer empty)
-                //      — rules out the false positive when the agent has already written a name
-                //      into the buffer before the naming screen has been submitted.
-                let font_loaded_byte = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01;
+            1 => {
+                // The nickname screen appears inside the catch routine while wIsInBattle is
+                // still 1.  Conditions 3 (wFontLoaded) and 4 (wStringBuffer) are dropped:
+                // the naming screen's own render loop may reset wFontLoaded, and A-mashing
+                // from the battle state may have already changed wStringBuffer[0] before this
+                // tick runs.  Conditions 1+2 are specific enough in the battle context
+                // (wNamingScreenSubmitName stays 0 until START is pressed on the grid).
                 if self.read_pointer(&pokered_symbols::wNamingScreenType) == 2
                     && self.read_pointer(&pokered_symbols::wNamingScreenSubmitName) == 0
-                    && font_loaded_byte == 1
-                    && self.read_pointer(&pokered_symbols::wStringBuffer) == 0x50
                 {
                     return GameMode::NamingScreen;
                 }
+                GameMode::WildBattle
+            },
+            2 => GameMode::TrainerBattle,
+            _ => {
                 // wFontLoaded infers a text box is open
                 // it is set in DisplayTextIDInit and reset in ReloadMapSpriteTilePatterns
                 let font_loaded = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01 == 1;
@@ -335,57 +352,25 @@ impl PokemonEncoding for MMU {
         }
     }
 
-    fn read_current_map(&self) -> Result<CurrentMap, String> {
-        // any rom data we read must be directly from the rom banks as the game is not guaranteed to have the correct bank loaded
-        let map = Map::from_repr(self.read_pointer(&pokered_symbols::wCurMap)).ok_or_else(|| "Invalid map number".to_string())?;
-        let tileset_bank = self.read_pointer(&pokered_symbols::wTilesetBank) as usize;
-
-        // collision data is always in bank 0
-        let collision_address = self.read_pointer_u16_le(&pokered_symbols::wTilesetCollisionPtr);
-        let collision_tiles = self.read_collision_tiles(collision_address);
-
+    fn read_map(&self, map: Map, player_position: Point8, player_direction: PlayerFacingDirection) -> Result<CurrentMap, String> {
         let map_header_pointer = map.header_pointer().ok_or_else(|| format!("Map has no header pointer: {}", map))?;
         let map_header = self.read_map_header(map_header_pointer).ok_or_else(|| "Invalid map header".to_string())?;
 
-        let map_data_address = DmgPointer {
-            bank: map_header_pointer.bank,
-            address: self.read_pointer_u16_le(&pokered_symbols::wCurMapDataPtr),
-        };
-        let map_data = self.rom_data_from_rom_pointer(&map_data_address, map_header.height as usize * map_header.width as usize).to_vec();
+        let ts = self.read_tileset_header(map_header.tileset);
+        let collision_tiles = self.read_collision_tiles(ts.coll_ptr);
+
+        let map_data = self.rom_data_from_rom_pointer(&map_header.blocks_pointer(), map_header.height as usize * map_header.width as usize).to_vec();
 
         let max_block_id = *map_data.iter().max().unwrap() as usize;
-        let tileset_data_address = self.read_pointer_u16_le(&pokered_symbols::wTilesetBlocksPtr);
-        let tileset_data = self.rom_data_from_pointer(tileset_bank, tileset_data_address, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
+        let tileset_data = self.rom_data_from_pointer(ts.bank, ts.blocks_ptr, (max_block_id + 1) * CurrentMap::BLOCK_TILES).to_vec();
 
-        let warp_events = self.read_warp_events(map, map_header_pointer.bank.id() as usize, map_header.objects_address)?;
+        let warp_events = self.read_warp_events(map, &map_header)?;
 
-        let sprites = self.read_sprites()?;
-
-        // Check if the current tileset is in the WaterTilesets table (FF-terminated ROM list).
-        // Mirrors the `IsNextTileShoreOrWater` logic in item_effects.asm.
         let tileset_id = map_header.tileset as u8;
         let water_tilesets = self.rom_data_from_rom_pointer(&pokered_symbols::WaterTilesets, 16);
         let is_water_tileset = water_tilesets.iter()
             .take_while(|&&b| b != 0xFF)
             .any(|&b| b == tileset_id);
-
-        // wTilesetTalkingOverTiles: 3 inline bytes in RAM holding tile IDs for counter/desk
-        // tiles that the player can interact through (pokered "talking over" mechanic).
-        // 0xFF = unused slot (no tile).
-        let talking_over_tiles: HashSet<u8> = {
-            let base = pokered_symbols::wTilesetTalkingOverTiles.address;
-            (0u16..3).map(|i| self.read(base + i))
-                     .filter(|&b| b != 0xFF)
-                     .collect()
-        };
-        let player_position = Point8 {
-            x: self.read_pointer(&pokered_symbols::wXCoord),
-            y: self.read_pointer(&pokered_symbols::wYCoord),
-        };
-
-        let player_direction_raw = self.read_pointer(&pokered_symbols::wPlayerDirection);
-        let player_direction = PlayerFacingDirection::from_repr(player_direction_raw)
-            .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?;
 
         let connected_strips = self.load_connected_strips(&map_header);
 
@@ -396,8 +381,6 @@ impl PokemonEncoding for MMU {
             HashMap::new()
         };
 
-        let grass_tile_id = self.read_pointer(&pokered_symbols::wGrassTile);
-
         Ok(CurrentMap {
             map,
             map_header,
@@ -406,14 +389,32 @@ impl PokemonEncoding for MMU {
             map_data,
             tileset_data,
             collision_tiles,
-            talking_over_tiles,
+            talking_over_tiles: ts.talking_over_tiles,
             warp_events,
-            sprites,
+            sprites: vec![],
             is_water_tileset,
-            grass_tile_id,
+            grass_tile_id: ts.grass_tile,
             connected_strips,
             ledge_tiles,
         })
+    }
+
+    fn read_current_map(&self) -> Result<CurrentMap, String> {
+        let map = Map::from_repr(self.read_pointer(&pokered_symbols::wCurMap))
+            .ok_or_else(|| "Invalid map number".to_string())?;
+
+        let player_position = Point8 {
+            x: self.read_pointer(&pokered_symbols::wXCoord),
+            y: self.read_pointer(&pokered_symbols::wYCoord),
+        };
+
+        let player_direction_raw = self.read_pointer(&pokered_symbols::wPlayerDirection);
+        let player_direction = PlayerFacingDirection::from_repr(player_direction_raw)
+            .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?;
+
+        let mut current_map = self.read_map(map, player_position, player_direction)?;
+        current_map.sprites = self.read_sprites()?;
+        Ok(current_map)
     }
 
     fn read_has_pokedex(&self) -> bool {
@@ -427,7 +428,39 @@ impl PokemonEncoding for MMU {
     }
 }
 
+struct TilesetHeader {
+    bank: usize,
+    blocks_ptr: u16,
+    coll_ptr: u16,
+    talking_over_tiles: HashSet<u8>,
+    grass_tile: u8,
+}
+
 impl MMU {
+    /// Reads the ROM `Tilesets` table entry for `tileset` and returns the derived header fields.
+    ///
+    /// Tilesets entry layout (12 bytes each):
+    ///   [0]     bank
+    ///   [1..2]  blocks_ptr (LE)
+    ///   [3..4]  gfx_ptr    (LE, unused)
+    ///   [5..6]  coll_ptr   (LE)
+    ///   [7..9]  3 counter/talking-over tile IDs (0xFF = unused)
+    ///   [10]    grass tile ID (0xFF = no grass)
+    ///   [11]    animation type (unused here)
+    fn read_tileset_header(&self, tileset: TileSetId) -> TilesetHeader {
+        const TILESET_ENTRY_SIZE: u16 = 12;
+        let entry = pokered_symbols::Tilesets + tileset as u16 * TILESET_ENTRY_SIZE;
+        let bank       = self.read_pointer(&entry) as usize;
+        let blocks_ptr = self.read_pointer_u16_le(&(entry + 1));
+        let coll_ptr   = self.read_pointer_u16_le(&(entry + 5));
+        let talking_over_tiles = (0u16..3)
+            .map(|i| self.read_pointer(&(entry + 7 + i)))
+            .filter(|&b| b != 0xFF)
+            .collect();
+        let grass_tile = self.read_pointer(&(entry + 10));
+        TilesetHeader { bank, blocks_ptr, coll_ptr, talking_over_tiles, grass_tile }
+    }
+
     /// Scans every Overworld-tileset map in ROM for a warp tile whose destination map
     /// equals `indoor_map`.  Returns the first match — this is the outdoor map the
     /// player should be returned to when they step on a self-referential / LAST_MAP exit warp.
@@ -491,14 +524,6 @@ impl MMU {
 
     fn load_connected_strips(&self, map_header: &MapHeader) -> Vec<ConnectedMapStrip> {
         // Each entry in the Tilesets ROM table is 12 bytes:
-        //   [0]     bank
-        //   [1..2]  blocks_ptr (LE)
-        //   [3..4]  gfx_ptr    (LE, unused here)
-        //   [5..6]  coll_ptr   (LE)
-        //   [7..]   remaining fields (unused here)
-        // 24 tilesets × 12 bytes = 288 bytes matches the gap to the next symbol.
-        const TILESET_ENTRY_SIZE: u16 = 12;
-
         let all_map_banks: Vec<u8> = self
             .rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT)
             .to_vec();
@@ -568,18 +593,15 @@ impl MMU {
                 let max_block_id = *border_blocks.iter().max().unwrap() as usize;
 
                 let tileset = connected_header.tileset;
-                let entry   = pokered_symbols::Tilesets + tileset as u16 * TILESET_ENTRY_SIZE;
-                let tileset_bank       = self.read_pointer(&entry) as usize;
-                let tileset_blocks_ptr = self.read_pointer_u16_le(&(entry + 1));
-                let tileset_coll_ptr   = self.read_pointer_u16_le(&(entry + 5));
+                let ts = self.read_tileset_header(tileset);
 
                 let tileset_data = self.rom_data_from_pointer(
-                    tileset_bank,
-                    tileset_blocks_ptr,
+                    ts.bank,
+                    ts.blocks_ptr,
                     (max_block_id + 1) * CurrentMap::BLOCK_TILES,
                 ).to_vec();
 
-                let collision_tiles = self.read_collision_tiles(tileset_coll_ptr);
+                let collision_tiles = self.read_collision_tiles(ts.coll_ptr);
 
                 let tileset_id_byte = tileset as u8;
                 let is_water_tileset = water_tilesets.iter()
@@ -863,11 +885,14 @@ impl CurrentMap {
         let mut result = vec![MetaTile::Obstacle; exp_width * exp_height];
 
         // Fill current map tiles, shifted by the connection offsets.
-        // Priority: Water > Empty > Counter > Obstacle (default).
-        // Water beats walkable: if any sub-tile of a 2×2 meta-tile is water/shore, the whole
-        // meta-tile is Water, even if other sub-tiles are walkable (e.g. north-shore + water).
-        // Counter: non-walkable tile listed in wTilesetTalkingOverTiles; marks desks/counters
-        // that sprites can be talked to through.
+        //
+        // pokered collision checking reads the bottom-left raw tile of the destination 2×2
+        // meta-tile in all four movement directions (GetTileAndCoordsInFrontOfPlayer uses
+        // lda_coord(8,11), (8,7), (6,9), (10,9) — always the bottom-left of the target
+        // meta-tile).  All classification checks therefore use only that sub-tile.
+        //
+        // Exception: water detection scans all four sub-tiles so that shore-transition blocks
+        // (which mix passable and water tile IDs) are conservatively treated as Water.
         let width_tiles  = self.map_header.width  as usize * Self::BLOCK_TILE_WIDTH;
         let height_tiles = self.map_header.height as usize * Self::BLOCK_TILE_WIDTH;
         for tile_y in 0..height_tiles {
@@ -876,25 +901,25 @@ impl CurrentMap {
                 let mx    = tile_x / Self::TILES_PER_META + x_off;
                 let index = mx + my * exp_width;
                 if result[index] != MetaTile::Water {
-                    let tile_id = self.tile_id(tile_x, tile_y);
                     if self.is_water(tile_x, tile_y) {
                         result[index] = MetaTile::Water;
-                    } else if self.map_header.tileset.cut_tree_tile_id() == Some(tile_id) {
-                        result[index] = MetaTile::CutTree;
-                    } else if let Some(&dir) = self.ledge_tiles.get(&tile_id) {
-                        // Ledge tiles are detected by tile ID alone (not walkability).
-                        // The bottom graphical row of a ledge block is non-walkable (not in
-                        // collision_tiles) but must still override the walkable rows above it.
-                        result[index] = MetaTile::Jump(dir);
-                    } else if self.grass_tile_id != 0 && tile_id == self.grass_tile_id
-                        && self.is_empty(tile_x, tile_y)
-                        && matches!(result[index], MetaTile::Obstacle | MetaTile::Empty)
-                    {
-                        result[index] = MetaTile::Grass;
-                    } else if result[index] == MetaTile::Obstacle && self.is_empty(tile_x, tile_y) {
-                        result[index] = MetaTile::Empty;
-                    } else if result[index] == MetaTile::Obstacle && self.talking_over_tiles.contains(&tile_id) {
-                        result[index] = MetaTile::Counter;
+                    } else if tile_x % Self::TILES_PER_META == 0 && tile_y % Self::TILES_PER_META == 1 {
+                        // Bottom-left sub-tile: the one pokered actually checks.
+                        let tile_id = self.tile_id(tile_x, tile_y);
+                        if self.map_header.tileset.cut_tree_tile_id() == Some(tile_id) {
+                            result[index] = MetaTile::CutTree;
+                        } else if let Some(&dir) = self.ledge_tiles.get(&tile_id) {
+                            result[index] = MetaTile::Jump(dir);
+                        } else if self.grass_tile_id != 0 && tile_id == self.grass_tile_id
+                            && self.is_empty(tile_x, tile_y)
+                            && matches!(result[index], MetaTile::Obstacle | MetaTile::Empty)
+                        {
+                            result[index] = MetaTile::Grass;
+                        } else if result[index] == MetaTile::Obstacle && self.is_empty(tile_x, tile_y) {
+                            result[index] = MetaTile::Empty;
+                        } else if result[index] == MetaTile::Obstacle && self.talking_over_tiles.contains(&tile_id) {
+                            result[index] = MetaTile::Counter;
+                        }
                     }
                 }
             }

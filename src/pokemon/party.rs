@@ -26,6 +26,14 @@ impl PokemonParty {
     pub fn iter(&self) -> std::slice::Iter<'_, Pokemon> {
         self.0.iter()
     }
+
+    pub fn get(&self, index: usize) -> Option<&Pokemon> {
+        self.0.get(index)
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut Pokemon> {
+        self.0.get_mut(index)
+    }
 }
 
 impl Index<usize> for PokemonParty {

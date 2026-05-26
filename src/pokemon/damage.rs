@@ -1,3 +1,4 @@
+use crate::pokemon::battle::{BattleAction, BattleState};
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::pokemon::{MoveEffectiveness, Pokemon, PokemonSummary, PokemonTypeCategory};
 
@@ -93,6 +94,23 @@ pub fn expected_damage(attacker: &PokemonSummary, move_name: PokemonMoveName, de
     // If damage rounded down to 0, the move misses.
     if damage == 0 { return None; }
     Some(damage as u16)
+}
+
+pub fn pick_best_move(battle_state: &BattleState, actions: &[BattleAction], catching_pokemon: bool) -> Option<BattleAction> {
+    actions.iter()
+        .filter_map(|a| match a {
+            BattleAction::Fight { battle_move, .. } => {
+                let dmg = expected_damage(&battle_state.player, battle_move.name, &battle_state.enemy)?;
+                if dmg > 0 && (!catching_pokemon || dmg < battle_state.enemy.current_hp) {
+                    Some((dmg, *a))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .max_by_key(|(dmg, _)| *dmg)
+        .map(|(_, a)| a)
 }
 
 #[cfg(test)]

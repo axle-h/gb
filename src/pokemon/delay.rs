@@ -80,16 +80,16 @@ mod tests {
 
     #[test]
     fn default_delay_fires_after_exact_duration() {
-        let mut d = DelayContext::default(); // 250 ms
-        assert!(d.tick(ms(250)));
+        let mut d = DelayContext::default(); // 500 ms
+        assert!(d.tick(ms(500)));
     }
 
     #[test]
     fn default_delay_fires_after_accumulated_ticks() {
-        let mut d = DelayContext::default(); // 250 ms
-        assert!(!d.tick(ms(100)));
-        assert!(!d.tick(ms(100)));
-        assert!(d.tick(ms(100))); // 50 ms over — still fires
+        let mut d = DelayContext::default(); // 500 ms
+        assert!(!d.tick(ms(200)));
+        assert!(!d.tick(ms(200)));
+        assert!(d.tick(ms(200))); // 100 ms over — still fires
     }
 
     #[test]
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn delay_keeps_firing_after_completion() {
         let mut d = DelayContext::default();
-        assert!(d.tick(ms(250)));
+        assert!(d.tick(ms(500)));
         assert!(d.tick(ms(16)));
         assert!(d.tick(ms(16)));
     }

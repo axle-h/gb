@@ -123,6 +123,10 @@ impl PokemonSummary {
             )
             .collect()
     }
+
+    pub fn remaining_hp(&self) -> f64 {
+        self.current_hp as f64 / self.stats.hp as f64
+    }
 }
 
 impl Display for PokemonSummary {
