@@ -44,7 +44,7 @@ impl MetaTileMap {
                 s
             }).collect(),
             warp_targets: map.warp_events.iter()
-                .map(|warp_event| warp_event.map_id)
+                .map(|warp_event| warp_event.destination_map)
                 .collect()
         }
     }

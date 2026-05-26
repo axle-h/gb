@@ -235,6 +235,9 @@ impl PokemonEncoding for MMU {
         // navigating between indoor floors (e.g. Red's House 1F → 2F → 1F).
         //
         // Object-data layout: [border_block(1), warp_count(1), warp_entries(4 each), ...]
+        // Each warp entry is: [Y, X, dest_warp_id, dest_map_id]
+        //   dest_warp_id is stored 0-indexed (the ASM source uses 1-based but subtracts 1 via
+        //   the `warp_event` macro: `db \4 - 1`).
         let objects_pointer = map_header.objects_pointer();
         let warp_count = self.read_pointer(&(objects_pointer + 1)) as u16;
         let mut result = vec![];
@@ -242,6 +245,7 @@ impl PokemonEncoding for MMU {
             let base = objects_pointer + (2 + index * 4);
             let entry = self.rom_data_from_rom_pointer(&base, 4);
             let raw_map_id = entry[3];
+            let dest_warp_id = entry[2] as u16; // 0-indexed into destination map's warp table
             // 0xFF = LAST_MAP sentinel; self-referential (raw_map_id == cur_map) is
             // pokémon Red's building-exit convention meaning the same thing.
             // In both cases the true destination is the outdoor map whose warp table
@@ -253,9 +257,11 @@ impl PokemonEncoding for MMU {
                 Map::from_repr(raw_map_id)
                     .ok_or_else(|| format!("Invalid map number {raw_map_id}"))?
             };
+            let destination_position = self.read_destination_warp_position(map_id, dest_warp_id)?;
             result.push(WarpEvent {
                 position: Point8 { y: entry[0], x: entry[1] },
-                map_id,
+                destination_map: map_id,
+                destination_position,
             });
         }
         Ok(result)
@@ -353,8 +359,7 @@ impl PokemonEncoding for MMU {
     }
 
     fn read_map(&self, map: Map, player_position: Point8, player_direction: PlayerFacingDirection) -> Result<CurrentMap, String> {
-        let map_header_pointer = map.header_pointer().ok_or_else(|| format!("Map has no header pointer: {}", map))?;
-        let map_header = self.read_map_header(map_header_pointer).ok_or_else(|| "Invalid map header".to_string())?;
+        let map_header = self.read_map_header(map)?;
 
         let ts = self.read_tileset_header(map_header.tileset);
         let collision_tiles = self.read_collision_tiles(ts.coll_ptr);
@@ -461,6 +466,29 @@ impl MMU {
         TilesetHeader { bank, blocks_ptr, coll_ptr, talking_over_tiles, grass_tile }
     }
 
+    /// Returns the tile position (`Point8 { y, x }`) that the player lands on after taking a warp
+    /// that targets `dest_map` at warp-table index `dest_warp_id` (0-indexed).
+    ///
+    /// The destination position is simply the `[Y, X]` of the `dest_warp_id`-th entry in
+    /// `dest_map`'s object data warp table — the same value the game engine reads via
+    /// `LoadDestinationWarpPosition` (home/overworld.asm) indexed by `wDestinationWarpID`.
+    ///
+    /// The `warp_event` ASM macro emits `\4 - 1` for the dest-warp field, so the raw ROM byte
+    /// is already 0-indexed.  This function accepts it as-is.
+    fn read_destination_warp_position(&self, dest_map: Map, dest_warp_id: u16) -> Result<Point8, String> {
+        let header = self.read_map_header(dest_map)?;
+        let objects_pointer = header.objects_pointer();
+        let warp_count = self.read_pointer(&(objects_pointer + 1)) as u16;
+        if dest_warp_id >= warp_count {
+            return Err(format!(
+                "dest_warp_id {dest_warp_id} out of range (map {dest_map} has {warp_count} warps)"
+            ));
+        }
+        let base = objects_pointer + (2 + dest_warp_id * 4);
+        let dest_entry = self.rom_data_from_rom_pointer(&base, 4);
+        Ok(Point8 { y: dest_entry[0], x: dest_entry[1] })
+    }
+
     /// Scans every Overworld-tileset map in ROM for a warp tile whose destination map
     /// equals `indoor_map`.  Returns the first match — this is the outdoor map the
     /// player should be returned to when they step on a self-referential / LAST_MAP exit warp.
@@ -469,8 +497,7 @@ impl MMU {
         (0..Map::COUNT)
             .filter_map(|id| {
                 let outdoor_map = Map::from_repr(id as u8)?;
-                let header_ptr  = outdoor_map.header_pointer()?;
-                let header      = self.read_map_header(header_ptr)?;
+                let header      = self.read_map_header(outdoor_map).ok()?;
                 if header.tileset != TileSetId::Overworld { return None; }
                 let bank        = map_banks[id] as usize;
                 let warp_count  = self.rom_data_from_pointer(bank, header.objects_address + 1, 1)[0] as u16;
@@ -535,7 +562,7 @@ impl MMU {
             .into_iter()
             .filter_map(|connection| {
                 let connected_map_bank = all_map_banks[connection.map as usize] as usize;
-                let connected_header = self.read_map_header(connection.map.header_pointer()?)?;
+                let connected_header = self.read_map_header(connection.map).ok()?;
 
                 // Read the single block row/column that borders the current map.
                 let (border_blocks, block_sub_offset): (Vec<u8>, u8) = match connection.direction {
@@ -654,7 +681,8 @@ pub enum GameMode {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct WarpEvent {
     pub position: Point8,
-    pub map_id: Map,
+    pub destination_map: Map,
+    pub destination_position: Point8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, strum_macros::Display, Default)]
@@ -943,7 +971,7 @@ impl CurrentMap {
                 // exit tile at x=4 in ViridianForestSouthGate) and must stay as
                 // Obstacle so the BFS does not route to them.
                 if result[mx + my * exp_width] != MetaTile::Obstacle {
-                    result[mx + my * exp_width] = MetaTile::Warp(warp.map_id);
+                    result[mx + my * exp_width] = MetaTile::Warp(warp.destination_map);
                 }
             }
         }
@@ -1150,5 +1178,91 @@ mod tests {
 
         assert_eq!(party, result);
         Ok(())
+    }
+
+    /// Verifies that `WarpEvent::destination_position` is resolved correctly from ROM data by
+    /// cross-checking with known map objects in the pokered disassembly.
+    ///
+    /// Key: the `warp_event` ASM macro takes args `(x, y, map, warp_id)` and emits `db y, x, …`,
+    /// so the ROM byte order is [Y, X, dest_warp_id, dest_map].  All expected values are derived
+    /// directly from pokered/data/maps/objects/*.asm.
+    ///
+    /// Data sources:
+    ///   PalletTown.asm:
+    ///     warp_event  5,  5, REDS_HOUSE_1F, 1  →  x=5,  y=5  → ROM [Y=5,  X=5,  dest_warp=0]
+    ///     warp_event 13,  5, BLUES_HOUSE,   1  →  x=13, y=5  → ROM [Y=5,  X=13, dest_warp=0]
+    ///     warp_event 12, 11, OAKS_LAB,      2  →  x=12, y=11 → ROM [Y=11, X=12, dest_warp=1]
+    ///   RedsHouse1F.asm:
+    ///     warp_event  2,  7, LAST_MAP,       1  → x=2, y=7 → ROM [Y=7, X=2, dest_warp=0]
+    ///     warp_event  3,  7, LAST_MAP,       1  → x=3, y=7 → ROM [Y=7, X=3, dest_warp=0]
+    ///     warp_event  7,  1, REDS_HOUSE_2F,  1  → x=7, y=1 → ROM [Y=1, X=7, dest_warp=0]
+    ///   RedsHouse2F.asm:
+    ///     warp_event  7,  1, REDS_HOUSE_1F,  3  → x=7, y=1 → ROM [Y=1, X=7, dest_warp=2]
+    ///   OaksLab.asm:
+    ///     warp_event  4, 11, LAST_MAP, 3  → x=4,  y=11 → ROM [Y=11, X=4, dest_warp=2]
+    ///     warp_event  5, 11, LAST_MAP, 3  → x=5,  y=11 → ROM [Y=11, X=5, dest_warp=2]  ← index 1
+    #[test]
+    fn test_warp_event_destination_position() {
+        use crate::mmu::MMU;
+        use crate::pokemon::roms::POKERED;
+        use crate::pokemon::map::Map;
+        use crate::pokemon::map_header::MapHeaderReader;
+        use crate::geometry::Point8;
+        use crate::pokemon::encoding::PokemonEncoding;
+
+        let mmu = MMU::from_rom(POKERED).unwrap();
+
+        // ── Pallet Town ──────────────────────────────────────────────────────────
+        use crate::pokemon::symbols::pokered_symbols;
+        let pt_header = mmu.read_map_header(Map::PalletTown).unwrap();
+        let pt_warps  = mmu.read_warp_events(Map::PalletTown, &pt_header).unwrap();
+        assert_eq!(pt_warps.len(), 3);
+
+        // warp 0: x=5, y=5 → source tile (y=5, x=5); dest=RedsHouse1F[0]
+        // RedsHouse1F warp[0] = warp_event 2, 7, … → ROM [Y=7, X=2] → {y:7, x:2}
+        assert_eq!(pt_warps[0].position,             Point8 { y: 5, x: 5  });
+        assert_eq!(pt_warps[0].destination_map,      Map::RedsHouse1F);
+        assert_eq!(pt_warps[0].destination_position, Point8 { y: 7, x: 2  });
+
+        // warp 1: x=13, y=5 → source tile (y=5, x=13); dest=BluesHouse[0]
+        assert_eq!(pt_warps[1].position,        Point8 { y: 5,  x: 13 });
+        assert_eq!(pt_warps[1].destination_map, Map::BluesHouse);
+
+        // warp 2: x=12, y=11 → source tile (y=11, x=12); dest=OaksLab[1]
+        // OaksLab warp[1] = warp_event 5, 11, … → ROM [Y=11, X=5] → {y:11, x:5}
+        assert_eq!(pt_warps[2].position,             Point8 { y: 11, x: 12 });
+        assert_eq!(pt_warps[2].destination_map,      Map::OaksLab);
+        assert_eq!(pt_warps[2].destination_position, Point8 { y: 11, x: 5  });
+
+        // ── Red's House 1F ────────────────────────────────────────────────────────
+        let rh1_header = mmu.read_map_header(Map::RedsHouse1F).unwrap();
+        let rh1_warps  = mmu.read_warp_events(Map::RedsHouse1F, &rh1_header).unwrap();
+        assert_eq!(rh1_warps.len(), 3);
+
+        // warps 0 & 1: LAST_MAP exits → PalletTown[0]
+        // PalletTown warp[0] = warp_event 5, 5, … → ROM [Y=5, X=5] → {y:5, x:5}
+        assert_eq!(rh1_warps[0].position,             Point8 { y: 7, x: 2 });
+        assert_eq!(rh1_warps[0].destination_map,      Map::PalletTown);
+        assert_eq!(rh1_warps[0].destination_position, Point8 { y: 5, x: 5 });
+
+        assert_eq!(rh1_warps[1].position,             Point8 { y: 7, x: 3 });
+        assert_eq!(rh1_warps[1].destination_map,      Map::PalletTown);
+        assert_eq!(rh1_warps[1].destination_position, Point8 { y: 5, x: 5 });
+
+        // warp 2: x=7, y=1 → source tile (y=1, x=7); dest=RedsHouse2F[0]
+        // RedsHouse2F warp[0] = warp_event 7, 1, … → ROM [Y=1, X=7] → {y:1, x:7}
+        assert_eq!(rh1_warps[2].position,             Point8 { y: 1, x: 7 });
+        assert_eq!(rh1_warps[2].destination_map,      Map::RedsHouse2F);
+        assert_eq!(rh1_warps[2].destination_position, Point8 { y: 1, x: 7 });
+
+        // ── Red's House 2F ────────────────────────────────────────────────────────
+        // warp_event 7, 1, REDS_HOUSE_1F, 3 → stored dest_warp_id=2
+        // RedsHouse1F[2] = warp_event 7, 1, REDS_HOUSE_2F, 1 → ROM [Y=1, X=7] → {y:1, x:7}
+        let rh2_header = mmu.read_map_header(Map::RedsHouse2F).unwrap();
+        let rh2_warps  = mmu.read_warp_events(Map::RedsHouse2F, &rh2_header).unwrap();
+        assert_eq!(rh2_warps.len(), 1);
+        assert_eq!(rh2_warps[0].position,             Point8 { y: 1, x: 7 });
+        assert_eq!(rh2_warps[0].destination_map,      Map::RedsHouse1F);
+        assert_eq!(rh2_warps[0].destination_position, Point8 { y: 1, x: 7 });
     }
 }

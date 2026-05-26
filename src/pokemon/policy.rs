@@ -301,14 +301,14 @@ impl PolicyStep {
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
 
         // Walk through Viridian Forest to Pewter City
-        Self::goto(Map::Route2),
-        Self::goto(Map::ViridianForest),
-        Self::goto(Map::PewterPokecenter),
-        Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
-
-        // ── Defeat Brock ──
-        Self::goto(Map::PewterGym),
-        Self::Interact(MapSprite::PEWTERGYM_BROCK),
+        // Self::goto(Map::Route2),
+        // Self::goto(Map::ViridianForest),
+        // Self::goto(Map::PewterPokecenter),
+        // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+        //
+        // // ── Defeat Brock ──
+        // Self::goto(Map::PewterGym),
+        // Self::Interact(MapSprite::PEWTERGYM_BROCK),
         // Self::goto(Map::PewterPokecenter),
         // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
         //

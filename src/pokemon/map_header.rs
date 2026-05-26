@@ -174,15 +174,18 @@ pub struct MapConnection {
 }
 
 pub trait MapHeaderReader {
-    fn read_map_header(&self, pointer: DmgPointer) -> Option<MapHeader>;
+    fn read_map_header(&self, map: Map) -> Result<MapHeader, String>;
 }
 
 impl MapHeaderReader for MMU {
-    fn read_map_header(&self, pointer: DmgPointer) -> Option<MapHeader> {
+    fn read_map_header(&self, map: Map) -> Result<MapHeader, String> {
         // see `MACRO map_header`
+        let pointer = map.header_pointer()
+            .ok_or("Map header pointer was null".to_string())?;
 
         let connections_byte = self.read_pointer(&(pointer + 9));
-        let connections = MapConnectionDirectionFlags::from_bits(connections_byte)?;
+        let connections = MapConnectionDirectionFlags::from_bits(connections_byte)
+            .ok_or("Map connection flags contained unknown bits".to_string())?;
         let connection_count = connections.iter().count();
         let mut north_connection = None;
         let mut east_connection = None;
@@ -197,7 +200,8 @@ impl MapHeaderReader for MMU {
 
             let map_connection_pointer = pointer + 10 + i as u16 * CONNECTION_LENGTH_BYTES;
             // Byte 0: connected map ID
-            let map = Map::from_repr(self.read_pointer(&map_connection_pointer))?;
+            let map = Map::from_repr(self.read_pointer(&map_connection_pointer))
+                .ok_or("Unknown map in map connection".to_string())?;
             // Bytes 1-2: pointer into connected map's block data (strip source)
             let strip_src = self.read_pointer_u16_le(&(map_connection_pointer + 1));
             // Bytes 3-4: pointer into overworld buffer (strip destination)
@@ -215,7 +219,7 @@ impl MapHeaderReader for MMU {
 
             let connection = MapConnection {
                 map,
-                direction: dir_flag.try_into().ok()?,
+                direction: dir_flag.try_into()?,
                 strip_src,
                 strip_dest,
                 strip_length,
@@ -233,10 +237,11 @@ impl MapHeaderReader for MMU {
         }
 
         let objects_address_pointer = pointer + 10 + connection_count as u16 * CONNECTION_LENGTH_BYTES;
-        Some(
+        Ok(
             MapHeader {
                 header_bank: pointer.bank.id(),
-                tileset: TileSetId::from_repr(self.read_pointer(&pointer))?,
+                tileset: TileSetId::from_repr(self.read_pointer(&pointer))
+                    .ok_or("Unknown map header bank".to_string())?,
                 height: self.read_pointer(&(pointer + 1)),
                 width: self.read_pointer(&(pointer + 2)),
                 blocks_address: self.read_pointer_u16_le(&(pointer + 3)),
@@ -260,7 +265,7 @@ mod tests {
     #[test]
     fn test_read_oaks_lab() {
         let mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
-        let oaks_lab = mmu.read_map_header(pokered_symbols::OaksLab_h).unwrap();
+        let oaks_lab = mmu.read_map_header(Map::OaksLab).unwrap();
         assert_eq!(oaks_lab.tileset, TileSetId::Dojo);
         assert_eq!(oaks_lab.height, 6);
         assert_eq!(oaks_lab.width, 5);
@@ -274,7 +279,7 @@ mod tests {
     #[test]
     fn test_read_pallet_town() {
         let mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
-        let pallet_town = mmu.read_map_header(pokered_symbols::PalletTown_h).unwrap();
+        let pallet_town = mmu.read_map_header(Map::PalletTown).unwrap();
         assert_eq!(pallet_town.tileset, TileSetId::Overworld);
         assert_eq!(pallet_town.height, 9);
         assert_eq!(pallet_town.width, 10);
@@ -308,7 +313,7 @@ mod tests {
     #[test]
     fn test_read_celadon_city() {
         let mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
-        let celadon_city = mmu.read_map_header(pokered_symbols::CeladonCity_h).unwrap();
+        let celadon_city = mmu.read_map_header(Map::CeladonCity).unwrap();
         assert_eq!(celadon_city.tileset, TileSetId::Overworld);
         assert_eq!(celadon_city.height, 18);
         assert_eq!(celadon_city.width, 25);
@@ -342,7 +347,7 @@ mod tests {
     #[test]
     fn test_read_cerulean_city() {
         let mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
-        let celadon_city = mmu.read_map_header(pokered_symbols::CeruleanCity_h).unwrap();
+        let celadon_city = mmu.read_map_header(Map::CeladonCity).unwrap();
         assert_eq!(celadon_city.tileset, TileSetId::Overworld);
         assert_eq!(celadon_city.height, 18);
         assert_eq!(celadon_city.width, 20);

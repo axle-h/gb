@@ -46,8 +46,7 @@ impl WorldGraph {
         let mut adjacency: HashMap<Map, Vec<Edge>> = HashMap::new();
 
         for map in Map::all() {
-            let Some(header_ptr) = map.header_pointer() else { continue };
-            let Some(header) = mmu.read_map_header(header_ptr) else { continue };
+            let Ok(header) = mmu.read_map_header(map) else { continue };
 
             let edges = adjacency.entry(map).or_default();
 
@@ -57,7 +56,7 @@ impl WorldGraph {
 
             if let Ok(warps) = mmu.read_warp_events(map, &header) {
                 for warp in warps {
-                    edges.push(Edge { to: warp.map_id, kind: EdgeKind::Warp });
+                    edges.push(Edge { to: warp.destination_map, kind: EdgeKind::Warp });
                 }
             }
         }
