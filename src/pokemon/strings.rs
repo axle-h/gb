@@ -68,6 +68,10 @@ impl PokemonString {
         vec.push(Self::TERMINATOR);
         PokemonString(vec)
     }
+    
+    pub fn to_default_string(&self) -> String {
+        self.to_string("Ash", "Gary").unwrap()
+    }
 
     pub fn to_string(&self, trainer_name: &str, rival_name: &str) -> Result<String, String> {
         // https://bulbapedia.bulbagarden.net/wiki/Character_encoding_(Generation_I)
@@ -140,13 +144,13 @@ impl PokemonString {
 
 impl Display for PokemonString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string("Ash", "Gary").unwrap())
+        write!(f, "{}", self.to_default_string())
     }
 }
 
 impl Debug for PokemonString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string("Ash", "Gary").unwrap())
+        write!(f, "{}", self.to_default_string())
     }
 }
 

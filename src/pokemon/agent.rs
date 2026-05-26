@@ -7,10 +7,10 @@ use crate::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::battle::BattleAction;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
+use crate::pokemon::bag::BagItem;
 use crate::pokemon::delay::DelayContext;
 use crate::pokemon::encoding::{GameMode, MetaTile};
 use crate::pokemon::map::Map;
-use crate::pokemon::item::ItemId;
 use crate::pokemon::menu::BattleMenuState;
 use crate::pokemon::policy::{Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
@@ -84,16 +84,14 @@ impl Default for BattleState {
 /// State machine for navigating a Pokémart purchase sequence.
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum PokemartState {
-    /// Mash A through dialogue/post-purchase text until the Buy/Sell/Quit menu appears.
-    AwaitingMenu { items: Vec<(ItemId, u8)> },
     /// Buy/Sell/Quit menu visible. Keep pressing A on "Buy" (position 0) until item list appears.
-    ChoosingBuyOption { items: Vec<(ItemId, u8)> },
+    ChoosingBuyOption(BagItem),
     /// Item list visible. Navigate to the target item.
-    ChoosingItem { item: ItemId, quantity: u8, remaining: Vec<(ItemId, u8)> },
+    ChoosingItem(BagItem),
     /// Quantity selector active (wItemQuantity > 0). Adjust then press A.
-    ChoosingQuantity { target_quantity: u8, remaining: Vec<(ItemId, u8)> },
+    ChoosingQuantity(BagItem),
     /// Yes/No confirmation visible. Press A on "Yes".
-    ConfirmingPurchase { remaining: Vec<(ItemId, u8)> },
+    ConfirmingPurchase,
     /// All items bought. Navigate cursor to "Quit" and press A.
     Quitting,
 }
@@ -202,6 +200,10 @@ impl PokemonAgent {
         self.set_state(AgentState::Battle(state));
     }
 
+    fn set_pokemart_state(&mut self, state: PokemartState) {
+        self.set_state(AgentState::PokemartShopping(state));
+    }
+
     fn abort_overworld(&mut self, destination: MetaTile, reason: OverworldActionAbortedReason) {
         self.event(AgentEvent::OverworldActionAborted { destination, reason });
         self.set_state(AgentState::Idle);
@@ -217,6 +219,9 @@ impl PokemonAgent {
         if matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle) {
             match self.state {
                 AgentState::Battle(_) => {}
+                // The nickname screen after a catch runs while wIsInBattle is still 1, so
+                // game_mode stays WildBattle even though we're already in the naming flow.
+                AgentState::NamingPokemon { .. } => {}
                 AgentState::OverworldMovement { destination, .. } => {
                     // entering battle from the overworld
                     let d = destination;
@@ -300,7 +305,6 @@ impl PokemonAgent {
             // Mart interaction ended (returned to Overworld/Script after purchase).
             if matches!(self.state, AgentState::PokemartShopping(_)) {
                 api.release_all_buttons();
-                self.policy.notify_mart_complete();
                 self.set_state(AgentState::Idle);
             }
             return Ok(());
@@ -310,180 +314,14 @@ impl PokemonAgent {
         if let Some(menu) = api.menu_state() {
             if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_)) {
                 let game_state = api.game_state()?;
-                if let Some(items) = self.policy.pick_mart_purchase(&game_state) {
+                if let Some(item) = self.policy.pick_mart_purchase(&game_state) {
                     api.release_all_buttons();
-                    self.set_state(AgentState::PokemartShopping(PokemartState::ChoosingBuyOption {
-                        items,
-                    }));
-                }
-            }
-        }
 
-        // Drive the mart state machine.
-        if let AgentState::PokemartShopping(ref mut mart_state) = self.state {
-            Self::drive_mart_state(mart_state, api)?;
-        }
-
-        Ok(())
-    }
-
-    fn drive_mart_state(state: &mut PokemartState, api: &mut PokemonApi) -> Result<(), String> {
-        let menu = api.menu_state();
-
-        match state {
-            // Mash A through dialogue until the Buy/Sell/Quit menu appears.
-            PokemartState::AwaitingMenu { items, .. } => {
-                if menu.as_ref().map_or(false, |m| m.is_mart_buy_sell_menu()) {
-                    let items = std::mem::take(items);
-                    if items.is_empty() {
-                        *state = PokemartState::Quitting;
+                    if let Some(item) = item {
+                        self.set_state(AgentState::PokemartShopping(PokemartState::ChoosingBuyOption(item)));
                     } else {
-                        *state = PokemartState::ChoosingBuyOption { items };
+                        self.set_state(AgentState::PokemartShopping(PokemartState::Quitting));
                     }
-                } else {
-                    api.toggle_button(JoypadButton::A);
-                }
-            }
-
-            // Keep navigating/pressing A on the Buy/Sell/Quit menu until the item list appears.
-            PokemartState::ChoosingBuyOption { items } => {
-                if menu.as_ref().map_or(false, |m| m.is_mart_item_list()) {
-                    // Item list is now showing — get the first item to buy.
-                    let items_clone = items.clone();
-                    if let Some((item, qty)) = items_clone.first() {
-                        *state = PokemartState::ChoosingItem {
-                            item: *item,
-                            quantity: *qty,
-                            remaining: items_clone[1..].to_vec(),
-                        };
-                    } else {
-                        *state = PokemartState::Quitting;
-                    }
-                } else if let Some(menu) = &menu {
-                    if menu.is_mart_buy_sell_menu() {
-                        if menu.current_item == 0 {
-                            api.toggle_button(JoypadButton::A);
-                        } else {
-                            api.toggle_button(JoypadButton::Up);
-                        }
-                    } else {
-                        // Some other text box (e.g., greeting) — mash A.
-                        api.toggle_button(JoypadButton::A);
-                    }
-                } else {
-                    api.toggle_button(JoypadButton::A);
-                }
-            }
-
-            // Navigate item list to target item, then press A to select it.
-            // The quantity selector is detected by wMaxItemQuantity == 99 (set by pokemart.asm).
-            PokemartState::ChoosingItem { item, quantity, remaining } => {
-                if api.mart_in_quantity_selector() {
-                    *state = PokemartState::ChoosingQuantity {
-                        target_quantity: *quantity,
-                        remaining: std::mem::take(remaining),
-                    };
-                    return Ok(());
-                }
-
-                if let Some(menu) = &menu {
-                    if menu.is_mart_item_list() {
-                        let shop_items = api.mart_item_list();
-                        let target_pos = shop_items.iter().position(|&id| id == *item);
-                        match target_pos {
-                            None => {
-                                let remaining = std::mem::take(remaining);
-                                if let Some((next_item, next_qty)) = remaining.first() {
-                                    *state = PokemartState::ChoosingItem {
-                                        item: *next_item,
-                                        quantity: *next_qty,
-                                        remaining: remaining[1..].to_vec(),
-                                    };
-                                } else {
-                                    *state = PokemartState::AwaitingMenu { items: vec![] };
-                                }
-                            }
-                            Some(target_idx) => {
-                                let current = menu.list_absolute_index() as usize;
-                                if current == target_idx {
-                                    api.toggle_button(JoypadButton::A);
-                                } else if current < target_idx {
-                                    api.toggle_button(JoypadButton::Down);
-                                } else {
-                                    api.toggle_button(JoypadButton::Up);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Adjust quantity with Up/Down then confirm with A.
-            // Detect Yes/No menu by checking for is_yes_no_menu().
-            PokemartState::ChoosingQuantity { target_quantity, remaining } => {
-                if let Some(menu) = &menu {
-                    if menu.is_yes_no_menu() {
-                        *state = PokemartState::ConfirmingPurchase {
-                            remaining: std::mem::take(remaining),
-                        };
-                        return Ok(());
-                    }
-                }
-
-                // If wMaxItemQuantity is no longer 99 (quantity selector exited), fall back.
-                if !api.mart_in_quantity_selector() {
-                    return Ok(());
-                }
-
-                let current_qty = api.mart_item_quantity();
-                if current_qty == 0 {
-                    return Ok(());
-                }
-                let target = *target_quantity;
-                if current_qty == target {
-                    api.toggle_button(JoypadButton::A);
-                } else if current_qty < target {
-                    api.toggle_button(JoypadButton::Up);
-                } else {
-                    api.toggle_button(JoypadButton::Down);
-                }
-            }
-
-            // Select Yes on the Yes/No confirmation.
-            PokemartState::ConfirmingPurchase { remaining } => {
-                if let Some(menu) = &menu {
-                    if menu.is_yes_no_menu() {
-                        if menu.current_item == 0 {
-                            api.toggle_button(JoypadButton::A);
-                        } else {
-                            api.toggle_button(JoypadButton::Up);
-                        }
-                    } else if menu.is_mart_buy_sell_menu() {
-                        // BuySellQuit menu returned — purchase was completed.
-                        let remaining = std::mem::take(remaining);
-                        *state = PokemartState::ChoosingBuyOption { items: remaining };
-                    } else {
-                        // Post-purchase text ("OK! Here you are!") — mash A.
-                        api.toggle_button(JoypadButton::A);
-                    }
-                } else {
-                    api.toggle_button(JoypadButton::A);
-                }
-            }
-
-            PokemartState::Quitting => {
-                if let Some(menu) = &menu {
-                    if menu.is_mart_buy_sell_menu() {
-                        match menu.current_item {
-                            2 => api.toggle_button(JoypadButton::A),
-                            n if n < 2 => api.toggle_button(JoypadButton::Down),
-                            _ => api.toggle_button(JoypadButton::Up),
-                        }
-                    } else {
-                        api.toggle_button(JoypadButton::A);
-                    }
-                } else {
-                    api.toggle_button(JoypadButton::A);
                 }
             }
         }
@@ -754,15 +592,146 @@ impl PokemonAgent {
                     }
                 }
             }
-            AgentState::PokemartShopping(_) => {
-                // Driven entirely by assert_pokemart_state above.
+            AgentState::PokemartShopping(ref pokemart_state) => {
+                let menu = api.menu_state();
+
+                match pokemart_state {
+                    // Keep navigating/pressing A on the Buy/Sell/Quit menu until the item list appears.
+                    PokemartState::ChoosingBuyOption(item) => {
+                        if let Some(menu) = menu {
+                            if menu.is_mart_item_list() {
+                                self.set_pokemart_state(PokemartState::ChoosingItem(*item));
+                            } else if menu.is_mart_buy_sell_menu() {
+                                if menu.current_item == 0 {
+                                    api.toggle_button(JoypadButton::A);
+                                } else {
+                                    api.toggle_button(JoypadButton::Up);
+                                }
+                            } else {
+                                // Some other text box (e.g., greeting) — mash A.
+                                api.toggle_button(JoypadButton::A);
+                            }
+                        } else {
+                            api.toggle_button(JoypadButton::A);
+                        }
+                    }
+
+                    // Navigate item list to target item, then press A to select it.
+                    // The quantity selector is detected by wMaxItemQuantity == 99 (set by pokemart.asm).
+                    PokemartState::ChoosingItem(item) => {
+                        if api.mart_in_quantity_selector() {
+                            self.set_pokemart_state(PokemartState::ChoosingQuantity(*item));
+                            return Ok(());
+                        }
+
+                        if let Some(menu) = menu {
+                            if menu.is_mart_item_list() {
+                                let shop_items = api.mart_item_list();
+                                let target_pos = shop_items.iter().position(|&id| id == item.id);
+                                match target_pos {
+                                    None => {
+                                        // TODO emit event "no items to buy"
+                                        self.set_pokemart_state(PokemartState::Quitting);
+                                    }
+                                    Some(target_idx) => {
+                                        let current = menu.list_absolute_index() as usize;
+                                        if current == target_idx {
+                                            api.toggle_button(JoypadButton::A);
+                                        } else if current < target_idx {
+                                            api.toggle_button(JoypadButton::Down);
+                                        } else {
+                                            api.toggle_button(JoypadButton::Up);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Adjust quantity with Up/Down then confirm with A.
+                    // Detect Yes/No menu by checking for is_yes_no_menu().
+                    PokemartState::ChoosingQuantity(item) => {
+                        if let Some(menu) = &menu {
+                            if menu.is_yes_no_menu() {
+                                self.set_pokemart_state(PokemartState::ConfirmingPurchase);
+                                return Ok(());
+                            }
+                        }
+
+                        // If wMaxItemQuantity is no longer 99 (quantity selector exited), fall back.
+                        if !api.mart_in_quantity_selector() {
+                            return Ok(());
+                        }
+
+                        let current_qty = api.mart_item_quantity();
+                        if current_qty == 0 {
+                            return Ok(());
+                        }
+                        let target = item.quantity;
+                        if current_qty == target {
+                            api.toggle_button(JoypadButton::A);
+                        } else if current_qty < target {
+                            api.toggle_button(JoypadButton::Up);
+                        } else {
+                            api.toggle_button(JoypadButton::Down);
+                        }
+                    }
+
+                    // Select Yes on the Yes/No confirmation.
+                    PokemartState::ConfirmingPurchase => {
+                        if let Some(menu) = &menu {
+                            if menu.is_yes_no_menu() {
+                                if menu.current_item == 0 {
+                                    api.toggle_button(JoypadButton::A);
+                                } else {
+                                    api.toggle_button(JoypadButton::Up);
+                                }
+                            } else if menu.is_mart_buy_sell_menu() {
+                                // BuySellQuit menu returned — purchase was completed.
+                                self.set_pokemart_state(PokemartState::Quitting);
+                            } else if menu.is_mart_item_list() {
+                                // Item list reappeared after purchase — press B to return to
+                                // BuySellQuit rather than accidentally re-selecting an item.
+                                api.toggle_button(JoypadButton::B);
+                            } else {
+                                // Post-purchase text ("OK! Here you are!") — mash A.
+                                api.toggle_button(JoypadButton::A);
+                            }
+                        } else {
+                            api.toggle_button(JoypadButton::A);
+                        }
+                    }
+
+                    PokemartState::Quitting => {
+                        if let Some(menu) = &menu {
+                            if menu.is_mart_buy_sell_menu() {
+                                match menu.current_item {
+                                    2 => api.toggle_button(JoypadButton::A),
+                                    n if n < 2 => api.toggle_button(JoypadButton::Down),
+                                    _ => api.toggle_button(JoypadButton::Up),
+                                }
+                            } else {
+                                api.toggle_button(JoypadButton::A);
+                            }
+                        } else {
+                            api.toggle_button(JoypadButton::A);
+                        }
+                    }
+                }
             }
             AgentState::NamingPokemon { species, decided } => {
                 if decided {
                     // Buffer already written; keep pulsing START until DisplayNamingScreen
                     // exits (wFontLoaded → 0, so game_mode leaves TextBox/NamingScreen).
+                    // Also stay while wIsInBattle is still 1 after a catch (game_mode stays
+                    // WildBattle after the name is written but before EndOfBattle runs).
                     api.toggle_button(JoypadButton::Start);
-                    if game_mode != GameMode::TextBox && game_mode != GameMode::NamingScreen {
+                    let still_in_naming = matches!(
+                        game_mode,
+                        GameMode::TextBox | GameMode::NamingScreen
+                            | GameMode::WildBattle | GameMode::TrainerBattle
+                    );
+                    if !still_in_naming {
                         api.release_all_buttons();
                         self.set_state(AgentState::Idle);
                     }

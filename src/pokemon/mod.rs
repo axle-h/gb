@@ -19,6 +19,7 @@ use crate::pokemon::item::ItemId;
 use crate::pokemon::menu::{MenuState, MenuStateReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::move_name::PokemonMoveName;
+use crate::pokemon::options::{GameOptions, GameOptionsReader, GameOptionsWriter};
 use crate::pokemon::pokemon::Pokemon;
 use crate::pokemon::species::Pokedex;
 use crate::pokemon::strings::PokemonString;
@@ -53,6 +54,7 @@ pub mod world_graph;
 #[cfg(test)]
 mod integration_tests;
 mod data;
+mod options;
 
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
@@ -78,6 +80,9 @@ pub trait PokemonApiTrait {
     /// Writes `nickname` (or an empty terminator for `None`) directly into the
     /// naming screen's string buffer so pressing START submits it immediately.
     fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String>;
+
+    fn read_game_options(&self) -> Result<GameOptions, String>;
+    fn write_game_options(&mut self, options: &GameOptions) -> Result<(), String>;
 }
 
 #[derive(Debug)]
@@ -388,6 +393,14 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             }
         };
         self.mmu_mut().write_pointer_slice(&pokered_symbols::wStringBuffer, &bytes)
+    }
+
+    fn read_game_options(&self) -> Result<GameOptions, String> {
+        self.mmu().read_game_options()
+    }
+
+    fn write_game_options(&mut self, options: &GameOptions) -> Result<(), String> {
+        self.mmu_mut().write_game_options(options)
     }
 }
 

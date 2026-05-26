@@ -71,6 +71,7 @@ mod tests {
     use crate::pokemon::encoding::GameMode;
     use crate::pokemon::GameState;
     use crate::pokemon::menu::MenuState;
+    use crate::pokemon::options::GameOptions;
     use super::*;
 
     #[derive(Default)]
@@ -128,6 +129,14 @@ mod tests {
         fn mart_item_list(&self) -> Vec<crate::pokemon::item::ItemId> { vec![] }
         fn mart_item_quantity(&self) -> u8 { 0 }
         fn mart_in_quantity_selector(&self) -> bool { false }
+
+        fn read_game_options(&self) -> Result<GameOptions, String> {
+            Err("not available in stub".to_string())
+        }
+
+        fn write_game_options(&mut self, options: &GameOptions) -> Result<(), String> {
+            Err("not available in stub".to_string())
+        }
     }
 
     #[test]

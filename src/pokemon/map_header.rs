@@ -3,7 +3,7 @@ use crate::pokemon::map::Map;
 use crate::ram::ROM;
 use bitflags::{bitflags, Flags};
 use itertools::Itertools;
-use crate::pokemon::symbols::{DmgPointer, DmgPointerRead};
+use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr)]
 #[repr(u8)]
@@ -49,6 +49,7 @@ impl TileSetId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapHeader {
+    pub header_bank: u8,
     pub tileset: TileSetId,
     pub height: u8,
     pub width: u8,
@@ -71,6 +72,20 @@ impl MapHeader {
             }
         }
         connections
+    }
+
+    pub fn blocks_pointer(&self) -> DmgPointer {
+        DmgPointer {
+            bank: DmgBank::ROM { bank: self.header_bank },
+            address: self.blocks_address,
+        }
+    }
+
+    pub fn objects_pointer(&self) -> DmgPointer {
+        DmgPointer {
+            bank: DmgBank::ROM { bank: self.header_bank },
+            address: self.objects_address,
+        }
     }
 }
 
@@ -220,6 +235,7 @@ impl MapHeaderReader for MMU {
         let objects_address_pointer = pointer + 10 + connection_count as u16 * CONNECTION_LENGTH_BYTES;
         Some(
             MapHeader {
+                header_bank: pointer.bank.id(),
                 tileset: TileSetId::from_repr(self.read_pointer(&pointer))?,
                 height: self.read_pointer(&(pointer + 1)),
                 width: self.read_pointer(&(pointer + 2)),

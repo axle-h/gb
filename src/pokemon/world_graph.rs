@@ -2,7 +2,8 @@ use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
 
 use crate::mmu::MMU;
-use crate::pokemon::encoding::PokemonEncoding;
+use crate::pokemon::actions::OverworldAction;
+use crate::pokemon::encoding::{MetaTile, PokemonEncoding};
 use crate::pokemon::map::Map;
 use crate::pokemon::map_header::{MapConnectionDirection, MapHeaderReader};
 
@@ -54,7 +55,7 @@ impl WorldGraph {
                 edges.push(Edge { to: conn.map, kind: EdgeKind::Connection(conn.direction) });
             }
 
-            if let Ok(warps) = mmu.read_warp_events(map, header_ptr.bank.id() as usize, header.objects_address) {
+            if let Ok(warps) = mmu.read_warp_events(map, &header) {
                 for warp in warps {
                     edges.push(Edge { to: warp.map_id, kind: EdgeKind::Warp });
                 }
@@ -136,6 +137,26 @@ impl WorldGraph {
         path.reverse();
 
         Some(path)
+    }
+
+    pub fn pick_shortest_path_action(&self, actions: &[OverworldAction], target: Map) -> Option<OverworldAction> {
+        // The world graph path may go via a map section that is physically
+        // unreachable from the current position (e.g. Route2 north gate is in the
+        // computed path but only the south gate is reachable from Route2 south).
+        // Pick the accessible connection/warp with the shortest world-graph distance
+        // to the target.
+        actions.into_iter()
+            .filter_map(|a| {
+                match a.tile {
+                    MetaTile::Connection(m) | MetaTile::Warp(m) => {
+                        let d = self.shortest_path(m, target)?.len();
+                        Some((d, a.clone()))
+                    },
+                    _ => None,
+                }
+            })
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, a)| a)
     }
 }
 

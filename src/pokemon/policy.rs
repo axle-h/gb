@@ -3,12 +3,13 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver};
 use rand::prelude::StdRng;
 use rand::seq::IteratorRandom;
-use rand::{RngCore, SeedableRng};
+use rand::SeedableRng;
 use crate::mmu::MMU;
 use crate::pokemon::GameState;
 use crate::pokemon::actions::OverworldAction;
+use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{BattleAction, BattleType};
-use crate::pokemon::damage::expected_damage;
+use crate::pokemon::damage::pick_best_move;
 use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::encoding::MetaTile;
 pub use crate::pokemon::item::ItemId;
@@ -36,13 +37,11 @@ pub trait Policy {
     /// Called when the mart's Buy/Sell/Quit menu first appears.
     ///
     /// - `None`       → not ready yet; will be called again next frame.
-    /// - `Some(list)` → buy these items in order; an empty list quits immediately.
-    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Vec<(ItemId, u8)>> {
-        Some(vec![]) // default: open the mart but buy nothing
+    /// - `Some(None)` → do not buy anything.
+    /// - `Some(Some(item))` → buy the item.
+    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
+        Some(None) // default: open the mart but buy nothing
     }
-
-    /// Called by the agent when the mart interaction is complete (game returned to Overworld).
-    fn notify_mart_complete(&mut self) {}
 
     fn is_exhausted(&self) -> bool {
         false
@@ -243,15 +242,14 @@ fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PolicyStep {
     Goto { map: Map, strict: bool },
-    WalkInLongGrass,
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
-    /// Walk in grass and throw Pokéballs until a Pokémon is caught.
-    CatchPokemon(PokemonSpecies),
-    /// Walk in grass until the leading party member reaches at least this level.
-    GrindUntilLevel(u8),
-    /// Buy items from the currently open Pokémart (must follow an Interact with the clerk).
-    BuyFromMart(Vec<(ItemId, u8)>),
+    /// Walk in grass and throw Pokéballs until a Pokémon is caught. TODO add location in case we blackout
+    CatchPokemon { species: PokemonSpecies, on_map: Map },
+    /// Walk in grass until the leading party member reaches at least this level. TODO add location in case we blackout
+    GrindUntilLevel { target_level: u8, on_map: Map },
+    /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
+    BuyFromMart(BagItem),
 }
 
 impl PolicyStep {
@@ -290,31 +288,31 @@ impl PolicyStep {
         Self::goto(Map::ViridianPokecenter),
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
         Self::goto(Map::ViridianMart),
-        Self::Interact(MapSprite::VIRIDIANMART_CLERK),
-        Self::BuyFromMart(vec![(ItemId::PokeBall, 5)]),
+        Self::BuyFromMart(BagItem::new(ItemId::PokeBall, 5)),
 
+        // Catch a Pidgey
+        Self::CatchPokemon { species: PokemonSpecies::Pidgey, on_map: Map::Route1 },
+        Self::goto(Map::ViridianPokecenter),
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
 
+        // Grind until Squirtle is level 8 -> learns Bubble
+        Self::GrindUntilLevel { target_level: 8, on_map: Map::Route1 },
+        Self::goto(Map::ViridianPokecenter),
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
 
-        // // Catch a Pokémon on Route 1 before heading north (uses the 5 Pokéballs from Oak)
-        // Self::goto(Map::Route1),
-        // Self::CatchPokemon,
-        //
-        // Self::goto(Map::ViridianPokecenter),
-        // Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-        //
-        // // ── Single forest traversal south→north then defeat Brock ──
-        // // Route2 connects PewterCity only from the north end; explicit waypoints
-        // // through the gate buildings ensure the physically correct path.
-        // Self::goto(Map::ViridianForest),
-        // Self::goto(Map::ViridianForestNorthGate),
+        // Walk through Viridian Forest to Pewter City
+        Self::goto(Map::Route2),
+        Self::goto(Map::ViridianForest),
+        Self::goto(Map::PewterPokecenter),
+        Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+
+        // ── Defeat Brock ──
+        Self::goto(Map::PewterGym),
+        Self::Interact(MapSprite::PEWTERGYM_BROCK),
         // Self::goto(Map::PewterPokecenter),
         // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
-        // Self::goto(Map::PewterGym),
-        // Self::Interact(MapSprite::PEWTERGYM_BROCK),
-        // Self::goto(Map::PewterPokecenter),
-        // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
         //
-        // // ── Route 3 → Mt. Moon Pokécenter → Route 4 → Cerulean City ──
+        // // ── Walk through Mt Moon to Cerulean City ──
         // Self::goto(Map::MtMoonPokecenter),
         // Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
         // Self::goto(Map::CeruleanCity),
@@ -365,41 +363,23 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     }
-
-                    // The world graph path may go via a map section that is physically
-                    // unreachable from the current position (e.g. Route2 north gate is in the
-                    // computed path but only the south gate is reachable from Route2 south).
-                    // Pick the accessible connection/warp with the shortest world-graph distance
-                    // to the target.
-                    let action = actions.iter()
-                        .filter_map(|a| {
-                            match a.tile {
-                                MetaTile::Connection(m) | MetaTile::Warp(m) => {
-                                    let d = self.world_graph.shortest_path(m, target)?.len();
-                                    Some((d, a.clone()))
-                                },
-                                _ => None,
-                            }
-                        })
-                        .min_by_key(|(d, _)| *d)
-                        .map(|(_, a)| a);
-
+                    let action = self.world_graph.pick_shortest_path_action(&actions, target);
                     if !strict && action.is_some() {
+                        // a non-strict goto action can be interrupted
                         self.queue.pop_front();
                     }
-
                     action
-                }
-                PolicyStep::WalkInLongGrass => {
-                    let action = actions.iter()
-                        .find(|a| a.tile == MetaTile::Grass);
-                    if action.is_some() {
-                        self.queue.pop_front();
-                    }
-                    action.cloned()
                 },
-                PolicyStep::CatchPokemon(species) => {
-                    if state.pokedex_owned.contains(&species) {
+                PolicyStep::CatchPokemon { species, on_map } => {
+                    if state.map.map != on_map {
+                        let action = self.world_graph.pick_shortest_path_action(&actions, on_map);
+                        if action.is_none() {
+                            println!("[policy] want to catch pokemon {} in {}, but no path there!", species, on_map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else if state.pokedex_owned.contains(&species) {
                         // caught the pokemon (note this only works once for each species)
                         self.queue.pop_front();
                         continue;
@@ -419,36 +399,55 @@ impl Policy for DeterministicPolicy {
                         continue;
                     }
                 },
-                PolicyStep::GrindUntilLevel(target) => {
-                    if state.pokemon[0].level >= target {
-                        self.queue.pop_front();
-                        continue;
-                    } else if let Some(action) = actions.iter()
-                        .find(|a| a.tile == MetaTile::Grass) {
-                        // walk in grass
-                        Some(action.clone())
+                PolicyStep::GrindUntilLevel { target_level, on_map } => {
+                    if state.map.map != on_map {
+                        let action = self.world_graph.pick_shortest_path_action(&actions, on_map);
+                        if action.is_none() {
+                            println!("[policy] want to grind until level {} in {}, but no path there!", target_level, on_map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else if let Some(pokemon) = state.pokemon.get(0) {
+                        if pokemon.level >= target_level {
+                            self.queue.pop_front();
+                            continue;
+                        } else if let Some(action) = actions.iter()
+                            .find(|a| a.tile == MetaTile::Grass) {
+                            // walk in grass
+                            Some(action.clone())
+                        } else {
+                            println!("[policy] cannot level up a Pokemon, no grass nearby!");
+                            self.queue.pop_front();
+                            continue;
+                        }
                     } else {
-                        println!("[policy] cannot level up a Pokemon, no grass nearby!");
+                        println!("[policy] no Pokemon in party to level up");
                         self.queue.pop_front();
                         continue;
                     }
                 },
                 PolicyStep::Interact(sprite) => {
-                    let action = actions.into_iter()
+                    let action = actions.iter()
                         .find(|a| a.tile == MetaTile::Sprite(sprite.name));
                     println!("[policy] Interact({}): found={}", sprite.name, action.is_some());
                     if action.is_some() {
                         self.queue.pop_front();
                     }
-                    action
+                    action.cloned()
                 }
                 PolicyStep::BuyFromMart(_) => {
-                    // The agent handles mart navigation; this step is consumed by pick_mart_purchase.
-                    // If we're somehow still on the overworld with a BuyFromMart step at the front,
-                    // just skip it (shouldn't normally happen).
-                    println!("[policy] BuyFromMart step encountered in pick_overworld_action — skipping");
-                    self.queue.pop_front();
-                    continue;
+                    // If triggered in the overworld, talk to the "Clerk" sprite to initiate the pokemart agent
+                    let action = actions.iter()
+                        .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk"));
+
+                    if action.is_none() {
+                        println!("[policy] BuyFromMart step encountered in pick_overworld_action and no clerk available — skipping");
+                        self.queue.pop_front();
+                        continue;
+                    }
+
+                    action.cloned()
                 }
             }
         }
@@ -459,13 +458,21 @@ impl Policy for DeterministicPolicy {
         let actions = battle_options(state)?;
 
         // When catching, throw a Pokéball immediately if one is available.
-        if let Some(PolicyStep::CatchPokemon(species)) = self.queue.front() {
+        if let Some(PolicyStep::CatchPokemon { species, .. }) = self.queue.front() {
             if battle_state.battle_type == BattleType::Wild && battle_state.enemy.species == *species {
-                // TODO check if the enemy pokemon health <50% and there's a move that can do damage without knocking it out
-
                 if let Some(best_pokeball) = state.bag.best_pokeball() {
                     if let Some(use_pokeball_action) = actions.iter()
                         .find(|a| matches!(a, BattleAction::UseItem { item, .. } if item.id == best_pokeball.id )) {
+
+                        // If enemy HP > 50%, try to weaken it first with the move that does
+                        // the most damage without knocking the Pokémon out.
+                        if battle_state.enemy.remaining_hp() > 0.5 {
+                            if let Some(mv) = pick_best_move(&battle_state, &actions, true) {
+                                println!("[policy] enemy HP > 50% — weakening before throwing ball");
+                                return Some(mv);
+                            }
+                        }
+
                         return Some(use_pokeball_action.clone());
                     } else {
                         println!("[policy] want to catch a {}, but no use Pokéball actions were provided!", species);
@@ -476,25 +483,13 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        let mut result: Option<BattleAction> = None;
-        let mut most_damage = 0;
-
-        // 1. pick the battle move that does the most damage
-        for action in actions.iter() {
-            if let BattleAction::Fight { battle_move, ..} = action {
-                if let Some(damage) = expected_damage(&battle_state.player, battle_move.name, &battle_state.enemy) {
-                    if damage > most_damage {
-                        result = Some(*action);
-                        most_damage = damage;
-                    }
-                }
-            }
-        }
+        // 1. pick the strongest move
+        let result = pick_best_move(&battle_state, &actions, false);
         if result.is_some() {
             return result;
         }
 
-        // 2. pick a random battle action
+        // 2. pick a random fight action
         let random_battle = actions.iter()
             .filter(|a| matches!(a, BattleAction::Fight { .. }))
             .choose(&mut self.rng);
@@ -512,22 +507,23 @@ impl Policy for DeterministicPolicy {
         Some(Some(name))
     }
 
-    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Vec<(ItemId, u8)>> {
-        match self.queue.front() {
-            Some(PolicyStep::BuyFromMart(items)) => {
-                let items = items.clone();
-                println!("[policy] BuyFromMart: {:?}", items);
-                Some(items)
+    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
+        let result = match self.queue.front() {
+            Some(PolicyStep::BuyFromMart(item)) => {
+                println!("[policy] BuyFromMart: {:?}", item);
+                Some(*item)
             }
-            _ => Some(vec![]), // no purchase step queued — quit immediately
-        }
-    }
+            _ => {
+                println!("[policy] pick_mart_purchase called but no BuyFromMart step queued — returning None");
+                None
+            },
+        };
 
-    fn notify_mart_complete(&mut self) {
-        if matches!(self.queue.front(), Some(PolicyStep::BuyFromMart(_))) {
+        if result.is_some() {
             self.queue.pop_front();
-            println!("[policy] BuyFromMart step complete");
         }
+
+        Some(result)
     }
 
     fn is_exhausted(&self) -> bool {
