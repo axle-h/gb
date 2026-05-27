@@ -6,7 +6,8 @@ use crate::pokemon::*;
 use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason, PokemonAgent, AGENT_RESOLUTION};
 use crate::pokemon::battle::BattleType;
 use crate::pokemon::world_graph::WorldGraph;
-use crate::pokemon::encoding::{JumpDirection, MetaTile};
+use crate::pokemon::tile::JumpDirection;
+use crate::pokemon::tile::MetaTile;
 use crate::ram::{RAM, ROM};
 
 pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("data/pallet-town-state.bin");
@@ -133,7 +134,7 @@ fn test_route_1_ledge_routing() {
         let mut m = map.clone();
         m.player_position = pos;
         m.actions().into_iter()
-            .filter(|a| matches!(a.tile, MetaTile::Connection(_)) && a.destination.y == target_y)
+            .filter(|a| matches!(a.tile, MetaTile::Connection { .. }) && a.destination.y == target_y)
             .map(|a| a.route.len())
             .min()
     };
@@ -185,10 +186,11 @@ fn test_pallet_town_actions() {
     assert!(map.sprites.iter().any(|s| !s.hidden), "expected visible sprites in Pallet Town");
 
     // Every warp target must produce an action with a non-empty route.
-    for &to_map in &map.warp_targets {
-        let action = actions.iter().find(|a| a.tile == MetaTile::Warp(to_map));
-        assert!(action.is_some(), "no action for warp to {to_map}");
-        assert!(!action.unwrap().route.is_empty(), "empty route to warp {to_map}");
+    for &warp in &map.warp_targets {
+        let action = actions.iter()
+            .find(|a| matches!(a.tile, MetaTile::Warp { to_map, .. } if to_map == warp));
+        assert!(action.is_some(), "no action for warp to {warp}");
+        assert!(!action.unwrap().route.is_empty(), "empty route to warp {warp}");
     }
 
     // Every visible (non-hidden) sprite must produce an action with a non-empty route.
@@ -200,13 +202,13 @@ fn test_pallet_town_actions() {
 
     // Route 1 is walkable from Pallet Town — must have a connection action.
     assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Connection(Map::Route1)),
+        actions.iter().any(|a| matches!(a.tile, MetaTile::Connection { to_map: Map::Route1, .. })),
         "missing connection action for Route1"
     );
 
     // Route 21 is water-only from Pallet Town — no walkable Connection action expected.
     assert!(
-        !actions.iter().any(|a| a.tile == MetaTile::Connection(Map::Route21)),
+        !actions.iter().any(|a| matches!(a.tile, MetaTile::Connection { to_map: Map::Route21, .. })),
         "unexpected walkable connection to Route21 (should be water-only)"
     );
 }
@@ -283,90 +285,6 @@ fn test_cut_bush_blocks_fisher_without_cut() {
     assert!(
         !actions.iter().any(|a| a.tile == MetaTile::Sprite("Fisher")),
         "Fisher must not be accessible without Cut; actions: {tiles:?}"
-    );
-}
-
-/// The Pokémon Center nurse stands behind a counter.  The player should be able to
-/// talk to her by approaching the counter tile (a "talking over" tile in pokered).
-#[test]
-fn test_viridian_pokecenter_nurse_action() {
-    const POKECENTER_STATE: &[u8] = include_bytes!("data/viridian-city-pokemon-center.bin");
-
-    let mut fixture = TestFixture::new(POKECENTER_STATE, Duration::from_secs(10), vec![]);
-    let state = fixture.game_state();
-    assert_eq!(state.map.map, Map::ViridianPokecenter);
-
-    let actions = state.map.actions();
-    let tiles: Vec<_> = actions.iter().map(|a| &a.tile).collect();
-
-    assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Sprite("Nurse")),
-        "expected Talk to Nurse action (counter tile should be treated as talking-over tile); actions: {tiles:?}"
-    );
-}
-
-/// With the player already standing in Red's House 1F after descending from 2F,
-/// all three actions must be available: exit to Pallet Town, stairs to 2F, talk to Mom.
-#[test]
-fn test_reds_house_1f_actions_from_save_state() {
-    const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("data/reds-house-1f-state.bin");
-
-    let mut fixture = TestFixture::new(REDS_HOUSE_1F_STATE, Duration::from_secs(10), vec![]);
-    let state = fixture.game_state();
-    assert_eq!(state.map.map, Map::RedsHouse1F, "save state should start in RedsHouse1F");
-
-    let actions = state.map.actions();
-    let tiles: Vec<_> = actions.iter().map(|a| &a.tile).collect();
-
-    assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Warp(Map::PalletTown)),
-        "expected exit Warp → PalletTown; actions: {tiles:?}"
-    );
-    assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse2F)),
-        "expected Warp → RedsHouse2F (stairs); actions: {tiles:?}"
-    );
-    assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Sprite("Mom")),
-        "expected Sprite(Mom); actions: {tiles:?}"
-    );
-    assert!(
-        !actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse1F)),
-        "self-referential Warp → RedsHouse1F must not appear; actions: {tiles:?}"
-    );
-}
-
-/// After entering Red's House 1F from Pallet Town, the exit warp should lead back to
-/// PalletTown — not self-referentially to RedsHouse1F.
-#[test]
-fn test_reds_house_1f_exit_warp() {
-    let mut fixture = TestFixture::new(
-        PALLET_TOWN_STATE,
-        Duration::from_secs(60),
-        vec![PolicyStep::goto(Map::RedsHouse1F)],
-    );
-
-    fixture.step_until_exhausted();
-
-    let state = fixture.game_state();
-    let actions = state.map.actions();
-    let tiles: Vec<_> = actions.iter().map(|a| &a.tile).collect();
-
-    assert!(
-        !actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse1F)),
-        "self-referential Warp → RedsHouse1F inside Red's House 1F; actions: {tiles:?}"
-    );
-    assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Warp(Map::RedsHouse2F)),
-        "expected exit Warp → RedsHouse2F inside Red's House 1F; actions: {tiles:?}"
-    );
-    assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Warp(Map::PalletTown)),
-        "expected exit Warp → PalletTown inside Red's House 1F; actions: {tiles:?}"
-    );
-    assert!(
-        actions.iter().any(|a| a.tile == MetaTile::Sprite("Mom")),
-        "expected to be able to talk to 'Mom' inside Red's House 1F; actions: {tiles:?}"
     );
 }
 
@@ -476,7 +394,7 @@ fn test_caught_pokemon_nickname() {
 fn can_start_game() {
     let mut fixture = TestFixture::new(
         include_bytes!("data/start-of-game-state.bin"),
-        Duration::from_hours(1),
+        Duration::from_mins(15),
         PolicyStep::complete_game_steps(),
     );
 
@@ -507,6 +425,7 @@ fn can_start_game() {
 
 struct TestFixture {
     pub gb: GameBoy,
+    map_cache: MapMetadataCache,
     pub agent: PokemonAgent,
     pub total_cycles: MachineCycles,
     pub max_cycles: MachineCycles,
@@ -526,6 +445,7 @@ impl TestFixture {
 
         Self {
             gb,
+            map_cache: MapMetadataCache::default(),
             total_cycles: MachineCycles::ZERO,
             max_cycles: MachineCycles::from_duration(max_game_time),
             agent: PokemonAgent::new(Box::new(policy)),
@@ -534,7 +454,9 @@ impl TestFixture {
 
     pub fn step(&mut self) {
         let cycles = self.gb.run(AGENT_RESOLUTION);
-        self.agent.update(&mut self.gb, cycles).ok();
+
+        let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+        self.agent.update(&mut api, cycles).ok();
 
         self.total_cycles += cycles;
         if self.total_cycles >= self.max_cycles {

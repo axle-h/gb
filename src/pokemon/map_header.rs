@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_read_cerulean_city() {
         let mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
-        let celadon_city = mmu.read_map_header(Map::CeladonCity).unwrap();
+        let celadon_city = mmu.read_map_header(Map::CeruleanCity).unwrap();
         assert_eq!(celadon_city.tileset, TileSetId::Overworld);
         assert_eq!(celadon_city.height, 18);
         assert_eq!(celadon_city.width, 20);

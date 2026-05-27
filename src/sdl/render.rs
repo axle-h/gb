@@ -15,6 +15,7 @@ use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
 use crate::pokemon::agent::PokemonAgent;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
+use crate::pokemon::map_metadata::MapMetadataCache;
 use crate::pokemon::policy::ConsolePolicy;
 use crate::sdl::frame_rate::FrameRate;
 use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
@@ -27,6 +28,7 @@ const REALTIME_CYCLE_DURATION: Duration = MachineCycles::from_m(1).to_duration()
 
 pub fn render() -> Result<(), String> {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+    let mut map_cache = MapMetadataCache::default();
     let mut pokemon_agent = PokemonAgent::new(Box::new(ConsolePolicy::default()));
 
     if let Err(e) = gb.restore_sram_from_file("pokemon-red.sav") {
@@ -187,6 +189,8 @@ pub fn render() -> Result<(), String> {
                             let pokemon_api = PokemonApi::new(&mut gb);
                             let map = pokemon_api.game_state()?.map;
                             println!("{}", map);
+                            println!("{:?}", map.player_position);
+                            println!("{:?}", map.player_direction);
                         },
                         Keycode::A => {
                             let pokemon_api = PokemonApi::new(&mut gb);
@@ -247,7 +251,8 @@ pub fn render() -> Result<(), String> {
         }
 
         if agent_running {
-            if let Err(agent_error) = pokemon_agent.update(&mut gb, actual_cycles) {
+            let mut api = PokemonApi::with_cache(&mut gb, &mut map_cache);
+            if let Err(agent_error) = pokemon_agent.update(&mut api, actual_cycles) {
                 println!("agent failed: {:?}", agent_error);
             }
         }

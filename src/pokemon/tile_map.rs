@@ -1,11 +1,14 @@
+use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::pokemon::map::Map;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::encoding::{CurrentMap, JumpDirection, MetaTile, PlayerFacingDirection};
+use crate::pokemon::map_metadata::{CurrentMap, PlayerFacingDirection};
+use crate::pokemon::tile::{JumpDirection, WarpEvent};
 use crate::pokemon::sprite::Sprite;
+use crate::pokemon::tile::MetaTile;
 
 #[derive(Debug, Clone, Default)]
 pub struct MetaTileMap {
@@ -17,52 +20,57 @@ pub struct MetaTileMap {
     pub meta_tiles: Vec<MetaTile>,
     pub sprites: Vec<Sprite>,
     pub warp_targets: HashSet<Map>,
+    pub connection_targets: HashSet<Map>,
 }
+
 
 impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
-        let north_extra = map.north_extra();
-        let west_extra  = map.west_extra();
-        let width  = map.meta_width()  + west_extra + map.east_extra();
-        let height = map.meta_height() + north_extra + map.south_extra();
+        let dimensions = map.metadata.dimensions();
+        let width  = dimensions.full_width();
+        let height = dimensions.full_height();
         // Clamp to valid tile coordinates. During map transitions wXCoord/wYCoord can
         // briefly hold values outside the new map's bounds; adding connection-strip
         // offsets can make them worse. Clamping prevents out-of-bounds tile accesses.
-        let px = (map.player_position.x as usize + west_extra).min(width.saturating_sub(1)) as u8;
-        let py = (map.player_position.y as usize + north_extra).min(height.saturating_sub(1)) as u8;
+        let px = (map.player_position.x as usize + dimensions.west_extra).min(width.saturating_sub(1)) as u8;
+        let py = (map.player_position.y as usize + dimensions.north_extra).min(height.saturating_sub(1)) as u8;
+        let meta_tiles = map.meta_tiles();
         Self {
             player_position: Point8 { x: px, y: py },
             player_direction: map.player_direction,
-            map: map.map,
+            map: map.metadata.map,
             width,
             height,
-            meta_tiles: map.meta_tiles(),
             sprites: map.sprites.iter().map(|s| {
                 let mut s = *s;
-                s.position.x += west_extra as u8;
-                s.position.y += north_extra as u8;
+                s.position.x += dimensions.west_extra as u8;
+                s.position.y += dimensions.north_extra as u8;
                 s
             }).collect(),
-            warp_targets: map.warp_events.iter()
-                .map(|warp_event| warp_event.destination_map)
-                .collect()
+            warp_targets: meta_tiles.iter()
+                .filter_map(|t| if let MetaTile::Warp { to_map, .. } = t { Some(*to_map) } else { None })
+                .collect(),
+            connection_targets: meta_tiles.iter()
+                .filter_map(|t| if let MetaTile::Connection { to_map, .. } = t { Some(*to_map) } else { None })
+                .collect(),
+            meta_tiles,
         }
     }
 
+    fn tile_at(&self, point: Point8) -> MetaTile {
+        self.meta_tiles[point.x as usize + point.y as usize * self.width]
+    }
+
+
     pub fn player_tile(&self) -> MetaTile {
-        self.meta_tiles[self.player_position.x as usize + self.player_position.y as usize * self.width]
+        self.tile_at(self.player_position)
     }
 
     /// BFS from `player_position` outward.
     ///
     /// Returns `(dist, came_from)` where `dist[p]` is the minimum step-count to reach `p`
     /// and `came_from[p]` is the `(previous_position, direction)` on the shortest path.
-    ///
-    /// When `traverse_grass` is false, Grass tiles are recorded as reachable destinations
-    /// but are not expanded — routes to non-grass targets will avoid walking through grass.
-    /// This is used to compute grass-free navigation paths; the grass action itself still uses
-    /// the full BFS so it can find the nearest grass tile.
-    fn bfs_from_player(&self, traverse_grass: bool) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
+    fn bfs_from_player(&self) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
         use std::collections::{HashMap, VecDeque};
 
         let mut dist: HashMap<Point8, u32> = HashMap::new();
@@ -113,9 +121,7 @@ impl MetaTileMap {
                 } else {
                     dist.insert(nb, d + 1);
                     came_from.insert(nb, (pos, dir));
-                    let is_grass = matches!(tile, MetaTile::Grass);
                     if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree)
-                        && (traverse_grass || !is_grass)
                     {
                         queue.push_back(nb);
                     }
@@ -126,12 +132,7 @@ impl MetaTileMap {
     }
 
     pub fn actions(&self) -> Vec<OverworldAction> {
-        // Two BFS passes from player_position:
-        //   no_grass: grass tiles are recorded but not traversed — gives grass-free routes.
-        //   full:     grass tiles are traversable — fallback for destinations only reachable via grass.
-        // Warp/connection/sprite actions prefer the grass-free route; grass action uses full BFS.
-        let (no_grass_dist, no_grass_from) = self.bfs_from_player(false);
-        let (full_dist,     full_from)     = self.bfs_from_player(true);
+        let (full_dist,     full_from)     = self.bfs_from_player();
 
         // Reconstruct the step sequence from the given came_from back-pointers.
         let reconstruct = |dest: Point8, came_from: &HashMap<Point8, (Point8, JoypadButton)>| -> Vec<JoypadButton> {
@@ -146,50 +147,36 @@ impl MetaTileMap {
             route
         };
 
-        // Choose the grass-free result if the dest is reachable without grass; otherwise full BFS.
         let best_dist_from = |p: &Point8| -> Option<(&HashMap<Point8, u32>, &HashMap<Point8, (Point8, JoypadButton)>)> {
-            if no_grass_dist.contains_key(p) {
-                Some((&no_grass_dist, &no_grass_from))
-            } else if full_dist.contains_key(p) {
+            if full_dist.contains_key(p) {
                 Some((&full_dist, &full_from))
             } else {
                 None
             }
         };
 
-        // Find the nearest tile matching `pred` using the grass-free BFS (fallback to full).
-        let nearest = |pred: &dyn Fn(&MetaTile) -> bool| -> Option<Point8> {
+        // Find the nearest tile matching `pred`
+        let nearest = |pred: &dyn Fn(&MetaTile) -> bool| -> Option<(MetaTile, Point8)> {
             self.meta_tiles.iter()
                 .enumerate()
                 .filter(|(_, t)| pred(t))
-                .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
-                .filter(|p| best_dist_from(p).is_some())
-                .min_by_key(|p| best_dist_from(p).unwrap().0[p])
-        };
-
-        // Find the nearest tile matching `pred` using the full BFS (for grass targets).
-        let nearest_full = |pred: &dyn Fn(&MetaTile) -> bool| -> Option<Point8> {
-            self.meta_tiles.iter()
-                .enumerate()
-                .filter(|(_, t)| pred(t))
-                .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
-                .filter(|p| full_dist.contains_key(p))
-                .min_by_key(|p| full_dist[p])
+                .map(|(i, t)| (*t, Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 }))
+                .filter(|(_, p)| best_dist_from(p).is_some())
+                .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
         };
 
         let mut actions = vec![];
 
-        // 1. Routes to warps
-        for &to_map in &self.warp_targets {
-            let Some(dest) = nearest(&|t| t == &MetaTile::Warp(to_map)) else { continue };
+        for warp_to_map in &self.warp_targets {
+            let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Warp { to_map, .. } if to_map == warp_to_map)) else { continue };
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
 
             let enter_dir = if dest.x == 0 { JoypadButton::Left }
-                else if dest.x == (self.width - 1) as u8 { JoypadButton::Right }
-                else if dest.y == 0 { JoypadButton::Up }
-                else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
-                else { *route.last().unwrap_or(&JoypadButton::Up) };
+            else if dest.x == (self.width - 1) as u8 { JoypadButton::Right }
+            else if dest.y == 0 { JoypadButton::Up }
+            else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
+            else { *route.last().unwrap_or(&JoypadButton::Up) };
 
             if route.is_empty() {
                 // Already on the warp tile: step off then back on to trigger it.
@@ -198,8 +185,9 @@ impl MetaTileMap {
             } else {
                 route.push(enter_dir);
             }
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Warp(to_map), route });
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route });
         }
+
 
         // 2. Routes to sprites (route to an adjacent empty tile, then face the sprite)
         for sprite in self.sprites.iter().filter(|s| !s.hidden) {
@@ -254,12 +242,8 @@ impl MetaTileMap {
         }
 
         // 3. Routes to map connections (nearest reachable connection tile per adjacent map)
-        let connection_maps: HashSet<Map> = self.meta_tiles.iter()
-            .filter_map(|t| if let MetaTile::Connection(m) = t { Some(*m) } else { None })
-            .collect();
-
-        for to_map in connection_maps {
-            let Some(dest) = nearest(&|t| t == &MetaTile::Connection(to_map)) else { continue };
+        for to_map in &self.connection_targets {
+            let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Connection { to_map: connected_map, .. } if connected_map == to_map)) else { continue };
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
 
@@ -268,11 +252,17 @@ impl MetaTileMap {
                 else if dest.x == 0 { JoypadButton::Left }
                 else { JoypadButton::Right };
             route.push(enter_dir);
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Connection(to_map), route });
+            actions.push(OverworldAction {
+                map: self.map,
+                origin: self.player_position,
+                destination: dest,
+                tile,
+                route
+            });
         }
 
-        // 4. Walk-in-grass (nearest reachable grass tile via full BFS — grass is the destination).
-        if let Some(dest) = nearest_full(&|t| *t == MetaTile::Grass) {
+        // 4. Walk-in-grass (nearest reachable grass tile).
+        if let Some((_, dest)) = nearest(&|t| *t == MetaTile::Grass) {
             let route = reconstruct(dest, &full_from);
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
@@ -291,8 +281,8 @@ impl Display for MetaTileMap {
                     MetaTile::Obstacle => write!(f, "O")?,
                     MetaTile::Water => write!(f, "X")?,
                     MetaTile::Sprite(_) => write!(f, "S")?,
-                    MetaTile::Warp(_) => write!(f, "W")?,
-                    MetaTile::Connection(_) => write!(f, "C")?,
+                    MetaTile::Warp { .. } => write!(f, "W")?,
+                    MetaTile::Connection { .. } => write!(f, "C")?,
                     MetaTile::ConnectionWater(_) => write!(f, "~")?,
                     MetaTile::Jump(JumpDirection::South) => write!(f, "v")?,
                     MetaTile::Jump(JumpDirection::West)  => write!(f, "<")?,
