@@ -7,6 +7,7 @@ use battle::{BattleState, BattleStateReader};
 use encoding::{GameMode, PokemonEncoding};
 use party::PokemonParty;
 use tile_map::MetaTileMap;
+use std::rc::Rc;
 use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::{JoypadButton, JoypadButtonState};
@@ -20,8 +21,10 @@ use crate::pokemon::menu::{MenuState, MenuStateReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::options::{GameOptions, GameOptionsReader, GameOptionsWriter};
+use crate::pokemon::pokedex::PokedexReader;
 use crate::pokemon::pokemon::Pokemon;
-use crate::pokemon::species::Pokedex;
+use pokedex::Pokedex;
+use crate::pokemon::map_metadata::{MapMetadataCache, MapMetadataReader};
 use crate::pokemon::strings::PokemonString;
 
 pub mod badge;
@@ -55,6 +58,10 @@ pub mod world_graph;
 mod integration_tests;
 mod data;
 mod options;
+pub mod map_metadata;
+mod tile;
+mod pokedex;
+mod world_graph2;
 
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
@@ -87,12 +94,17 @@ pub trait PokemonApiTrait {
 
 #[derive(Debug)]
 pub struct PokemonApi<'a> {
-    game_boy: &'a mut GameBoy
+    game_boy: &'a mut GameBoy,
+    map_cache: Option<&'a mut MapMetadataCache>,
 }
 
 impl<'a> PokemonApi<'a> {
     pub fn new(game_boy: &'a mut GameBoy) -> Self {
-        Self { game_boy }
+        Self { game_boy, map_cache: None }
+    }
+
+    pub fn with_cache(game_boy: &'a mut GameBoy, cache: &'a mut MapMetadataCache) -> Self {
+        Self { game_boy, map_cache: Some(cache) }
     }
 
     fn mmu(&self) -> &MMU {
@@ -273,7 +285,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),
             mode: mmu.read_game_mode(),
             pokemon,
-            map: MetaTileMap::new(&mmu.read_current_map()?),
+            map: MetaTileMap::new(&match &self.map_cache {
+                Some(c) => c.read_current_map(mmu)?,
+                None    => mmu.read_current_map()?,
+            }),
             battle: mmu.read_battle_state(),
             bag: mmu.read_bag(),
             has_pokedex: mmu.read_has_pokedex(),

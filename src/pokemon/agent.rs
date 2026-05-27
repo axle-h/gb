@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
+use std::rc::Rc;
 use crate::cycles::MachineCycles;
-use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
@@ -9,8 +9,9 @@ use crate::pokemon::battle::BattleAction;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::delay::DelayContext;
-use crate::pokemon::encoding::{GameMode, MetaTile};
+use crate::pokemon::encoding::GameMode;
 use crate::pokemon::map::Map;
+use crate::pokemon::tile::MetaTile;
 use crate::pokemon::menu::BattleMenuState;
 use crate::pokemon::policy::{Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
@@ -355,7 +356,7 @@ impl PokemonAgent {
         }
     }
 
-    pub fn update(&mut self, gb: &mut GameBoy, delta_cycles: MachineCycles) -> Result<(), String> {
+    pub fn update(&mut self, api: &mut PokemonApi, delta_cycles: MachineCycles) -> Result<(), String> {
         // ── Throttled decision-making ─────────────────────────────────────────────
         self.cycles += delta_cycles;
         if self.cycles < AGENT_RESOLUTION { return Ok(()); }
@@ -366,15 +367,13 @@ impl PokemonAgent {
             self.cycles -= AGENT_RESOLUTION;
         }
 
-        let mut api = PokemonApi::new(gb);
-
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
 
-        self.assert_naming_screen(game_mode, &mut api)?;
+        self.assert_naming_screen(game_mode, api)?;
         self.assert_script_state(game_mode);
         self.assert_battle_state(game_mode);
-        self.assert_pokemart_state(game_mode, &mut api)?;
+        self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping — the mart state machine handles input.
         if !matches!(self.state, AgentState::PokemartShopping(_)) {
             self.assert_text_box_state(game_mode);
@@ -433,13 +432,13 @@ impl PokemonAgent {
                     self.abort_overworld(destination, OverworldActionAbortedReason::from_game_mode(game_state.mode));
                 } else if game_state.map.map != expected_map {
                     // Map changed — success for warps and connections (both take you off the map).
-                    if matches!(destination, MetaTile::Warp(_) | MetaTile::Connection(_) | MetaTile::ConnectionWater(_)) {
+                    if matches!(destination, MetaTile::Warp { .. } | MetaTile::Connection { .. } | MetaTile::ConnectionWater(_)) {
                         new_events.push(AgentEvent::OverworldActionCompleted { destination });
                         self.set_state(AgentState::Idle);
                     } else {
                         self.abort_overworld(destination, OverworldActionAbortedReason::WrongMap(game_state.map.map));
                     }
-                } else if matches!(destination, MetaTile::Warp(_)) && game_state.map.player_tile() == destination {
+                } else if matches!(destination, MetaTile::Warp { .. }) && game_state.map.player_tile() == destination {
                     // Player is standing on the warp tile.  For edge warps (tile at y=0, y=max,
                     // x=0, or x=max) the connection only fires when the player presses the
                     // outward direction from the edge — not just by stepping on the tile.
@@ -454,7 +453,7 @@ impl PokemonAgent {
                         else { JoypadButton::Right };
                     api.release_all_buttons();
                     api.press_button(exit_dir);
-                } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp(_)) {
+                } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp { .. }) {
                     if destination == MetaTile::Grass {
                         let tile_a = game_state.map.player_position;
                         let tile_b = adjacent_grass(&game_state.map, tile_a);
@@ -494,7 +493,7 @@ impl PokemonAgent {
                 }
             }
             AgentState::ReadingTextBox { ref mut reader } => {
-                reader.update(&mut api);
+                reader.update(api);
             }
             AgentState::Battle(ref mut battle_state) => {
                 match battle_state {
@@ -515,7 +514,7 @@ impl PokemonAgent {
                                     // something other than the battle menu is showing — wait for
                                     // the text box to render before reading it
                                     if delay.tick(delta_cycles) {
-                                        reader.update(&mut api);
+                                        reader.update(api);
                                     }
                                 }
                             }

@@ -11,7 +11,7 @@ use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::damage::pick_best_move;
 use crate::pokemon::data::PokemonNamePicker;
-use crate::pokemon::encoding::MetaTile;
+use crate::pokemon::tile::MetaTile;
 pub use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::species::PokemonSpecies;
@@ -98,15 +98,9 @@ impl Policy for ConsolePolicy {
         if actions.is_empty() { return None; }
 
         if !self.ow_menu_shown || self.overworld_rx.is_none() {
-            println!("\nAvailable actions:");
+            println!("\nYou are on {} at {}. Available actions:", state.map.map, state.map.player_position);
             for (i, a) in actions.iter().enumerate() {
-                let label = match &a.tile {
-                    MetaTile::Warp(m)       => format!("Warp → {m}"),
-                    MetaTile::Connection(m) => format!("Go to {m}"),
-                    MetaTile::Sprite(n)     => format!("Talk to {n}"),
-                    other                   => format!("{other}"),
-                };
-                println!("  {}. {}", i + 1, label);
+                println!("  {}. {}", i + 1, a);
             }
             let max = actions.len();
             // Cache the destinations so we can match by tile, not index.
@@ -303,8 +297,8 @@ impl PolicyStep {
         // Walk through Viridian Forest to Pewter City
         // Self::goto(Map::Route2),
         // Self::goto(Map::ViridianForest),
-        // Self::goto(Map::PewterPokecenter),
-        // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+        Self::goto(Map::PewterPokecenter),
+        Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
         //
         // // ── Defeat Brock ──
         // Self::goto(Map::PewterGym),

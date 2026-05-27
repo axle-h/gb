@@ -1,11 +1,13 @@
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
-
+use crate::geometry::Point8;
 use crate::mmu::MMU;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::encoding::{MetaTile, PokemonEncoding};
+use crate::pokemon::encoding::PokemonEncoding;
 use crate::pokemon::map::Map;
 use crate::pokemon::map_header::{MapConnectionDirection, MapHeaderReader};
+use crate::pokemon::map_metadata::MapMetadataReader;
+use crate::pokemon::tile::MetaTile;
 
 /// How the player moves from one map to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,10 +18,23 @@ pub enum EdgeKind {
     Warp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapCoordinates {
+    map: Map,
+    location: Point8,
+}
+
+impl MapCoordinates {
+    pub fn new(map: Map, location: Point8) -> Self {
+        Self { map, location }
+    }
+}
+
 /// A directed edge in the world graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Edge {
-    pub to: Map,
+    pub from: MapCoordinates,
+    pub to: MapCoordinates,
     pub kind: EdgeKind,
 }
 
@@ -46,18 +61,93 @@ impl WorldGraph {
         let mut adjacency: HashMap<Map, Vec<Edge>> = HashMap::new();
 
         for map in Map::all() {
-            let Ok(header) = mmu.read_map_header(map) else { continue };
+            let Ok(map_metadata) = mmu.read_map_metadata(map) else { continue };
 
             let edges = adjacency.entry(map).or_default();
 
-            for conn in header.connections() {
-                edges.push(Edge { to: conn.map, kind: EdgeKind::Connection(conn.direction) });
+            for conn in map_metadata.map_header.connections() {
+                // Compute representative entry/exit positions for this connection.
+                //
+                // The connection strip covers a row (N/S) or column (E/W) of the shared
+                // border. We pick the midpoint of the strip as the representative tile.
+                //
+                // `meta_align_offset` is the offset (in meta-tiles) of the strip's start
+                // along the perpendicular axis, measured from the current map's left/top
+                // edge. Mirrors the `meta_align_offset` calculation in `load_connected_strips`.
+                //
+                // The alignment fields give the exact border row/column in the connected
+                // map's coordinate space:
+                //   North: y_alignment = connected_height*2-1  (bottom row of connected map)
+                //   South: y_alignment = 0                     (top row)
+                //   East:  x_alignment = 0                     (left column)
+                //   West:  x_alignment = connected_width*2-1   (right column)
+                //
+                // Coordinate conversion (meta-tile units, same as wXCoord/wYCoord):
+                //   connected_x = current_x + x_alignment  (N/S connections)
+                //   connected_y = current_y + y_alignment  (E/W connections)
+                let h = map_metadata.map_header.height; // blocks
+                let w = map_metadata.map_header.width;  // blocks
+
+                let (from_pos, to_pos) = match conn.direction {
+                    MapConnectionDirection::North => {
+                        // Strip runs along the top edge (y=0), in the x direction.
+                        let meta_align_x = (-(conn.x_alignment as i32)).max(0) as u8;
+                        let mid_x_current   = meta_align_x.saturating_add(conn.strip_length);
+                        let mid_x_connected = ((mid_x_current as i16) + (conn.x_alignment as i16))
+                            .max(0) as u8;
+                        (
+                            Point8 { x: mid_x_current,   y: 0 },
+                            Point8 { x: mid_x_connected, y: conn.y_alignment as u8 },
+                        )
+                    }
+                    MapConnectionDirection::South => {
+                        // Strip runs along the bottom edge (y = h*2-1), in the x direction.
+                        let meta_align_x = (-(conn.x_alignment as i32)).max(0) as u8;
+                        let mid_x_current   = meta_align_x.saturating_add(conn.strip_length);
+                        let mid_x_connected = ((mid_x_current as i16) + (conn.x_alignment as i16))
+                            .max(0) as u8;
+                        (
+                            Point8 { x: mid_x_current,   y: h.saturating_mul(2).saturating_sub(1) },
+                            Point8 { x: mid_x_connected, y: 0 },
+                        )
+                    }
+                    MapConnectionDirection::East => {
+                        // Strip runs along the right edge (x = w*2-1), in the y direction.
+                        let meta_align_y = (-(conn.y_alignment as i32)).max(0) as u8;
+                        let mid_y_current   = meta_align_y.saturating_add(conn.strip_length);
+                        let mid_y_connected = ((mid_y_current as i16) + (conn.y_alignment as i16))
+                            .max(0) as u8;
+                        (
+                            Point8 { x: w.saturating_mul(2).saturating_sub(1), y: mid_y_current   },
+                            Point8 { x: 0,                                      y: mid_y_connected },
+                        )
+                    }
+                    MapConnectionDirection::West => {
+                        // Strip runs along the left edge (x=0), in the y direction.
+                        let meta_align_y = (-(conn.y_alignment as i32)).max(0) as u8;
+                        let mid_y_current   = meta_align_y.saturating_add(conn.strip_length);
+                        let mid_y_connected = ((mid_y_current as i16) + (conn.y_alignment as i16))
+                            .max(0) as u8;
+                        (
+                            Point8 { x: 0,                        y: mid_y_current   },
+                            Point8 { x: conn.x_alignment as u8,   y: mid_y_connected },
+                        )
+                    }
+                };
+
+                edges.push(Edge {
+                    from: MapCoordinates::new(map, from_pos),
+                    to: MapCoordinates::new(conn.map, to_pos),
+                    kind: EdgeKind::Connection(conn.direction)
+                });
             }
 
-            if let Ok(warps) = mmu.read_warp_events(map, &header) {
-                for warp in warps {
-                    edges.push(Edge { to: warp.destination_map, kind: EdgeKind::Warp });
-                }
+            for warp in map_metadata.warp_events {
+                edges.push(Edge {
+                    from: MapCoordinates::new(map, warp.position),
+                    to: MapCoordinates::new(warp.destination_map, warp.destination_position),
+                    kind: EdgeKind::Warp
+                });
             }
         }
 
@@ -112,10 +202,10 @@ impl WorldGraph {
 
             for &edge in self.neighbors(map) {
                 let new_cost = cost + 1;
-                if new_cost < dist.get(&edge.to).copied().unwrap_or(u32::MAX) {
-                    dist.insert(edge.to, new_cost);
-                    came_from.insert(edge.to, (map, edge.kind));
-                    heap.push(Reverse((new_cost, edge.to as u8)));
+                if new_cost < dist.get(&edge.to.map).copied().unwrap_or(u32::MAX) {
+                    dist.insert(edge.to.map, new_cost);
+                    came_from.insert(edge.to.map, (map, edge.kind));
+                    heap.push(Reverse((new_cost, edge.to.map as u8)));
                 }
             }
         }
@@ -147,8 +237,8 @@ impl WorldGraph {
         actions.into_iter()
             .filter_map(|a| {
                 match a.tile {
-                    MetaTile::Connection(m) | MetaTile::Warp(m) => {
-                        let d = self.shortest_path(m, target)?.len();
+                    MetaTile::Connection { to_map, .. } | MetaTile::Warp { to_map, .. } => {
+                        let d = self.shortest_path(to_map, target)?.len();
                         Some((d, a.clone()))
                     },
                     _ => None,
@@ -162,6 +252,9 @@ impl WorldGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mmu::MMU;
+    use crate::pokemon::map_header::MapConnectionDirection;
+    use crate::pokemon::map_metadata::MapMetadataReader;
     use crate::pokemon::roms::POKERED;
 
     fn graph() -> WorldGraph {
@@ -186,7 +279,7 @@ mod tests {
         let g = graph();
         let neighbors = g.neighbors(Map::PalletTown);
         let has_route1 = neighbors.iter().any(|e| {
-            e.to == Map::Route1 && e.kind == EdgeKind::Connection(MapConnectionDirection::North)
+            e.to.map == Map::Route1 && e.kind == EdgeKind::Connection(MapConnectionDirection::North)
         });
         assert!(has_route1, "PalletTown should have a north connection to Route1; got {neighbors:?}");
     }
@@ -195,8 +288,8 @@ mod tests {
     fn multiple_connections_pallet_town() {
         let g = graph();
         let neighbors = g.neighbors(Map::PalletTown);
-        let has_north = neighbors.iter().any(|e| e.to == Map::Route1);
-        let has_south = neighbors.iter().any(|e| e.to == Map::Route21);
+        let has_north = neighbors.iter().any(|e| e.to.map == Map::Route1);
+        let has_south = neighbors.iter().any(|e| e.to.map == Map::Route21);
         assert!(has_north, "PalletTown missing north connection to Route1");
         assert!(has_south, "PalletTown missing south connection to Route21");
     }
@@ -215,7 +308,7 @@ mod tests {
     fn single_warp_oaks_lab_to_pallet_town() {
         let g = graph();
         let neighbors = g.neighbors(Map::OaksLab);
-        let exits_to_pallet = neighbors.iter().any(|e| e.to == Map::PalletTown);
+        let exits_to_pallet = neighbors.iter().any(|e| e.to.map == Map::PalletTown);
         assert!(exits_to_pallet, "OaksLab should warp back to PalletTown; got {neighbors:?}");
     }
 
@@ -316,8 +409,116 @@ mod tests {
         for window in path.windows(2) {
             let from = window[0].map;
             let to_step = window[1];
-            let edge_exists = g.neighbors(from).iter().any(|e| e.to == to_step.map);
+            let edge_exists = g.neighbors(from).iter().any(|e| e.to.map == to_step.map);
             assert!(edge_exists, "no edge from {from} to {} in graph", to_step.map);
+        }
+    }
+
+    // ── connection positions ──────────────────────────────────────────────────
+
+    #[test]
+    fn north_connection_pallet_to_route1_positions() {
+        // PalletTown (10×9 blocks) north → Route1 (10×18 blocks).
+        // x_alignment=0, y_alignment=35 (=18*2-1), strip_length=10 blocks.
+        //
+        // from: top row of PalletTown (y=0), midpoint x = 0 + 10 = 10.
+        // to:   bottom row of Route1  (y=35), midpoint x = 10 + 0 = 10.
+        let g = graph();
+        let edge = g.neighbors(Map::PalletTown)
+            .iter()
+            .find(|e| e.to.map == Map::Route1)
+            .expect("PalletTown→Route1 edge");
+        assert_eq!(edge.from.location, Point8 { x: 10, y: 0  }, "from should be top-row midpoint");
+        assert_eq!(edge.to.location,   Point8 { x: 10, y: 35 }, "to should be bottom-row midpoint of Route1");
+    }
+
+    #[test]
+    fn south_connection_pallet_to_route21_positions() {
+        // PalletTown (10×9 blocks) south → Route21 (10×45 blocks).
+        // x_alignment=0, y_alignment=0, strip_length=10 blocks.
+        //
+        // from: bottom row of PalletTown (y=9*2-1=17), midpoint x=10.
+        // to:   top row of Route21 (y=0), midpoint x=10.
+        let g = graph();
+        let edge = g.neighbors(Map::PalletTown)
+            .iter()
+            .find(|e| e.to.map == Map::Route21)
+            .expect("PalletTown→Route21 edge");
+        assert_eq!(edge.from.location, Point8 { x: 10, y: 17 }, "from should be bottom-row midpoint");
+        assert_eq!(edge.to.location,   Point8 { x: 10, y: 0  }, "to should be top-row midpoint of Route21");
+    }
+
+    #[test]
+    fn north_connection_cerulean_to_route24_positions() {
+        // CeruleanCity (20×18 blocks) north → Route24 (10×18 blocks).
+        // x_alignment=-10, y_alignment=35, strip_length=10 blocks.
+        // meta_align_x = -(-10) = 10.
+        //
+        // from: top row (y=0), mid_x_current = 10 + 10 = 20.
+        // to:   y=35 (bottom of Route24), mid_x_connected = 20 + (-10) = 10.
+        let g = graph();
+        let edge = g.neighbors(Map::CeruleanCity)
+            .iter()
+            .find(|e| e.to.map == Map::Route24)
+            .expect("CeruleanCity→Route24 edge");
+        assert_eq!(edge.from.location, Point8 { x: 20, y: 0  }, "from: center of top border of CeruleanCity");
+        assert_eq!(edge.to.location,   Point8 { x: 10, y: 35 }, "to: center of bottom border of Route24");
+    }
+
+    #[test]
+    fn east_connection_celadon_to_route7_positions() {
+        // CeladonCity (25×18 blocks) east → Route7 (10×9 blocks).
+        // y_alignment=-8, x_alignment=0, strip_length=9 blocks.
+        // meta_align_y = -(-8) = 8.
+        //
+        // from: right col (x=25*2-1=49), mid_y_current = 8 + 9 = 17.
+        // to:   left col (x=0), mid_y_connected = 17 + (-8) = 9.
+        let g = graph();
+        let edge = g.neighbors(Map::CeladonCity)
+            .iter()
+            .find(|e| e.to.map == Map::Route7)
+            .expect("CeladonCity→Route7 edge");
+        assert_eq!(edge.from.location, Point8 { x: 49, y: 17 }, "from: right border midpoint of CeladonCity");
+        assert_eq!(edge.to.location,   Point8 { x: 0,  y: 9  }, "to: left border midpoint of Route7");
+    }
+
+    #[test]
+    fn west_connection_celadon_to_route16_positions() {
+        // CeladonCity (25×18 blocks) west → Route16 (20×9 blocks).
+        // y_alignment=-8, x_alignment=39 (=20*2-1), strip_length=9 blocks.
+        // meta_align_y = -(-8) = 8.
+        //
+        // from: left col (x=0), mid_y_current = 8 + 9 = 17.
+        // to:   right col (x=39), mid_y_connected = 17 + (-8) = 9.
+        let g = graph();
+        let edge = g.neighbors(Map::CeladonCity)
+            .iter()
+            .find(|e| e.to.map == Map::Route16)
+            .expect("CeladonCity→Route16 edge");
+        assert_eq!(edge.from.location, Point8 { x: 0,  y: 17 }, "from: left border midpoint of CeladonCity");
+        assert_eq!(edge.to.location,   Point8 { x: 39, y: 9  }, "to: right border midpoint of Route16");
+    }
+
+    #[test]
+    fn connection_from_position_is_on_correct_border() {
+        // For each connection edge in the graph, verify the 'from' position lies on
+        // the correct border of the source map.
+        let mmu = MMU::from_rom(POKERED).unwrap();
+        let g = graph();
+        for map in Map::all() {
+            let Ok(meta) = mmu.read_map_metadata(map) else { continue };
+            let max_x = meta.map_header.width.saturating_mul(2).saturating_sub(1);
+            let max_y = meta.map_header.height.saturating_mul(2).saturating_sub(1);
+            for edge in g.neighbors(map) {
+                let EdgeKind::Connection(dir) = edge.kind else { continue };
+                let loc = edge.from.location;
+                match dir {
+                    MapConnectionDirection::North => assert_eq!(loc.y, 0, "{map} north from.y"),
+                    MapConnectionDirection::South => assert_eq!(loc.y, max_y, "{map} south from.y"),
+                    MapConnectionDirection::East  => assert_eq!(loc.x, max_x, "{map} east from.x"),
+                    MapConnectionDirection::West  => assert_eq!(loc.x, 0, "{map} west from.x"),
+                }
+            }
         }
     }
 }
