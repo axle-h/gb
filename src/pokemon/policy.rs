@@ -7,6 +7,7 @@ use rand::SeedableRng;
 use crate::mmu::MMU;
 use crate::pokemon::GameState;
 use crate::pokemon::actions::OverworldAction;
+use crate::pokemon::badge::Badge;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::damage::pick_best_move;
@@ -238,12 +239,13 @@ pub enum PolicyStep {
     Goto { map: Map, strict: bool },
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
+    DefeatGymLeader { leader: MapSprite, badge: Badge },
     /// Walk in grass and throw Pokéballs until a Pokémon is caught. TODO add location in case we blackout
     CatchPokemon { species: PokemonSpecies, on_map: Map },
     /// Walk in grass until the leading party member reaches at least this level. TODO add location in case we blackout
     GrindUntilLevel { target_level: u8, on_map: Map },
     /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
-    BuyFromMart(BagItem),
+    BuyFromMart { map: Map, item: BagItem },
 }
 
 impl PolicyStep {
@@ -262,50 +264,41 @@ impl PolicyStep {
         Self::Interact(MapSprite::OAKSLAB_SQUIRTLE_POKE_BALL),
 
         // Pick up Oak's parcel from Viridian Pokémart
-        Self::goto(Map::ViridianPokecenter),
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
         Self::goto(Map::ViridianMart),
 
         // Deliver parcel to get the Pokédex
-        Self::goto(Map::OaksLab),
         Self::Interact(MapSprite::OAKSLAB_OAK1),
 
         // Heal at Mom's
-        Self::goto(Map::RedsHouse1F),
         Self::Interact(MapSprite::REDSHOUSE1F_MOM),
 
         // Get the town map from Daisy
-        Self::goto(Map::BluesHouse),
         Self::Interact(MapSprite::BLUESHOUSE_DAISY1),
 
         // Walk back through Route 1, heal up and buy Pokéballs
-        Self::goto(Map::ViridianPokecenter),
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-        Self::goto(Map::ViridianMart),
-        Self::BuyFromMart(BagItem::new(ItemId::PokeBall, 5)),
+        Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 5), map: Map::ViridianMart },
 
         // Catch a Pidgey
         Self::CatchPokemon { species: PokemonSpecies::Pidgey, on_map: Map::Route1 },
-        Self::goto(Map::ViridianPokecenter),
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
 
-        // Grind until Squirtle is level 8 -> learns Bubble
+        // Grind until Squirtle is level 10
         Self::GrindUntilLevel { target_level: 8, on_map: Map::Route1 },
-        Self::goto(Map::ViridianPokecenter),
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+        Self::GrindUntilLevel { target_level: 9, on_map: Map::Route1 },
+        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+        Self::GrindUntilLevel { target_level: 10, on_map: Map::Route1 },
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
 
         // Walk through Viridian Forest to Pewter City
-        // Self::goto(Map::Route2),
-        // Self::goto(Map::ViridianForest),
-        Self::goto(Map::PewterPokecenter),
         Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
-        //
-        // // ── Defeat Brock ──
-        // Self::goto(Map::PewterGym),
-        // Self::Interact(MapSprite::PEWTERGYM_BROCK),
-        // Self::goto(Map::PewterPokecenter),
-        // Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
-        //
+
+        // ── Defeat Brock ──
+        Self::DefeatGymLeader { leader: MapSprite::PEWTERGYM_BROCK, badge: Badge::BoulderBadge },
+        Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+
         // // ── Walk through Mt Moon to Cerulean City ──
         // Self::goto(Map::MtMoonPokecenter),
         // Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
@@ -421,27 +414,68 @@ impl Policy for DeterministicPolicy {
                         continue;
                     }
                 },
-                PolicyStep::Interact(sprite) => {
-                    let action = actions.iter()
-                        .find(|a| a.tile == MetaTile::Sprite(sprite.name));
-                    println!("[policy] Interact({}): found={}", sprite.name, action.is_some());
-                    if action.is_some() {
-                        self.queue.pop_front();
-                    }
-                    action.cloned()
-                }
-                PolicyStep::BuyFromMart(_) => {
-                    // If triggered in the overworld, talk to the "Clerk" sprite to initiate the pokemart agent
-                    let action = actions.iter()
-                        .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk"));
-
-                    if action.is_none() {
-                        println!("[policy] BuyFromMart step encountered in pick_overworld_action and no clerk available — skipping");
+                PolicyStep::DefeatGymLeader { leader, badge } => {
+                    if state.badges.contains(Badge::BoulderBadge) {
                         self.queue.pop_front();
                         continue;
+                    } else if state.map.map != leader.map() {
+                        let action = self.world_graph.pick_shortest_path_action(&actions, leader.map());
+                        if action.is_none() {
+                            println!("[policy] want to defeat {} to obtain the {}, but no path there!", leader, badge);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        let action = actions.iter()
+                            .find(|a| a.tile == MetaTile::Sprite(leader.name));
+                        if action.is_some() {
+                            self.queue.pop_front();
+                        }
+                        action.cloned()
                     }
+                },
+                PolicyStep::Interact(sprite) => {
+                    let map = sprite.map();
+                    if state.map.map != map {
+                        let action = self.world_graph.pick_shortest_path_action(&actions, map);
+                        if action.is_none() {
+                            println!("[policy] want to interact with {} on {}, but no path there!", sprite, map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        let action = actions.iter()
+                            .find(|a| a.tile == MetaTile::Sprite(sprite.name));
+                        if action.is_some() {
+                            self.queue.pop_front();
+                        }
+                        action.cloned()
+                    }
+                }
+                PolicyStep::BuyFromMart { item, map } => {
+                    if state.map.map != map {
+                        let action = self.world_graph.pick_shortest_path_action(&actions, map);
+                        if action.is_none() {
+                            println!("[policy] want to buy {} from {} but no path there!", item, map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        // If triggered in the overworld, talk to the "Clerk" sprite to initiate the pokemart agent
+                        let action = actions.iter()
+                            .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk"));
 
-                    action.cloned()
+                        if action.is_none() {
+                            println!("[policy] BuyFromMart step encountered in pick_overworld_action and no clerk available — skipping");
+                            self.queue.pop_front();
+                            continue;
+                        }
+
+                        action.cloned()
+                    }
                 }
             }
         }
@@ -503,7 +537,7 @@ impl Policy for DeterministicPolicy {
 
     fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
         let result = match self.queue.front() {
-            Some(PolicyStep::BuyFromMart(item)) => {
+            Some(PolicyStep::BuyFromMart { item, .. }) => {
                 println!("[policy] BuyFromMart: {:?}", item);
                 Some(*item)
             }

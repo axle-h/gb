@@ -186,11 +186,11 @@ fn test_pallet_town_actions() {
     assert!(map.sprites.iter().any(|s| !s.hidden), "expected visible sprites in Pallet Town");
 
     // Every warp target must produce an action with a non-empty route.
-    for &warp in &map.warp_targets {
+    for &(warp_map, warp_pos) in &map.warp_targets {
         let action = actions.iter()
-            .find(|a| matches!(a.tile, MetaTile::Warp { to_map, .. } if to_map == warp));
-        assert!(action.is_some(), "no action for warp to {warp}");
-        assert!(!action.unwrap().route.is_empty(), "empty route to warp {warp}");
+            .find(|a| matches!(a.tile, MetaTile::Warp { to_map, to_position } if to_map == warp_map && to_position == warp_pos));
+        assert!(action.is_some(), "no action for warp to {warp_map} at {warp_pos:?}");
+        assert!(!action.unwrap().route.is_empty(), "empty route to warp {warp_map} at {warp_pos:?}");
     }
 
     // Every visible (non-hidden) sprite must produce an action with a non-empty route.
@@ -253,7 +253,7 @@ fn test_pokemart_shopping() {
         STATE,
         Duration::from_secs(60),
         vec![
-            PolicyStep::BuyFromMart(BagItem::new(ItemId::PokeBall, 5)),
+            PolicyStep::BuyFromMart { map: Map::ViridianMart, item: BagItem::new(ItemId::PokeBall, 5) },
             PolicyStep::goto(Map::ViridianCity),
         ]
     );
@@ -390,11 +390,29 @@ fn test_caught_pokemon_nickname() {
     assert_ne!(weedle.nickname.to_default_string(), "AAAAAAAAAA");
 }
 
+
+#[test]
+fn can_navigate_to_pewter_city() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/viridian-city-pokemart-shopping.bin"),
+        Duration::from_mins(10),
+        vec![
+            PolicyStep::goto(Map::ViridianCity),
+            PolicyStep::goto(Map::PewterCity),
+        ]
+    );
+
+    fixture.step_until_exhausted();
+
+    let state = fixture.game_state();
+    assert_eq!(state.map.map, Map::PewterCity, "agent should have navigated to Pewter City");
+}
+
 #[test]
 fn can_start_game() {
     let mut fixture = TestFixture::new(
         include_bytes!("data/start-of-game-state.bin"),
-        Duration::from_mins(15),
+        Duration::from_mins(90),
         PolicyStep::complete_game_steps(),
     );
 
@@ -411,16 +429,9 @@ fn can_start_game() {
         println!("{}: {}", pokemon.species, pokemon.nickname);
     }
 
-    state.pokemon.iter()
-        .find(|p| p.species == PokemonSpecies::Squirtle && p.nickname.to_default_string() == "Celina")
-        .expect("should have chosen Squirtle as starter");
-
-    state.pokemon.iter()
-        .find(|p| p.species == PokemonSpecies::Pidgey && p.nickname.to_default_string() == "Leslee")
-        .expect("should have caught a Pidgey");
+    assert!(state.badges.contains(Badge::BoulderBadge), "should have the Boulder Badge");
 
     fixture.save_state_to_file().unwrap();
-
 }
 
 struct TestFixture {

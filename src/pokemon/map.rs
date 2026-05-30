@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use strum::IntoEnumIterator;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter, Default)]
@@ -273,6 +274,11 @@ impl MapSprite {
 
     pub const fn hidden(id: usize, name: &'static str, hidden_object_id: u8) -> Self {
         Self { name, hidden_object_id: Some(hidden_object_id) }
+    }
+
+    /// Returns the `Map` that this sprite belongs to.
+    pub fn map(&self) -> Map {
+        Map::iter().find(|m| m.sprites().contains(self)).expect("sprite missing from the sprites table")
     }
 
     pub const AGATHASROOM_AGATHA: MapSprite = MapSprite::new(1, "Agatha");
@@ -1194,6 +1200,12 @@ impl MapSprite {
     pub const WARDENSHOUSE_WARDEN: MapSprite = MapSprite::new(1, "Warden");
     pub const WARDENSHOUSE_RARE_CANDY: MapSprite = MapSprite::hidden(2, "Rare Candy", 71);
     pub const WARDENSHOUSE_BOULDER: MapSprite = MapSprite::new(3, "Boulder");
+}
+
+impl Display for MapSprite {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
 }
 
 impl Map {

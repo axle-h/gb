@@ -61,7 +61,6 @@ mod options;
 pub mod map_metadata;
 mod tile;
 mod pokedex;
-mod world_graph2;
 
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);

@@ -19,7 +19,11 @@ pub struct MetaTileMap {
     pub height: usize,
     pub meta_tiles: Vec<MetaTile>,
     pub sprites: Vec<Sprite>,
-    pub warp_targets: HashSet<Map>,
+    /// Unique `(destination_map, destination_position)` pairs reachable via warp tiles.
+    /// Keyed on destination position so that two staircase/door warps that lead to
+    /// *different* positions within the same destination map (e.g. Mt Moon B1F) each
+    /// produce a separate `OverworldAction`.
+    pub warp_targets: HashSet<(Map, Point8)>,
     pub connection_targets: HashSet<Map>,
 }
 
@@ -48,7 +52,7 @@ impl MetaTileMap {
                 s
             }).collect(),
             warp_targets: meta_tiles.iter()
-                .filter_map(|t| if let MetaTile::Warp { to_map, .. } = t { Some(*to_map) } else { None })
+                .filter_map(|t| if let MetaTile::Warp { to_map, to_position } = t { Some((*to_map, *to_position)) } else { None })
                 .collect(),
             connection_targets: meta_tiles.iter()
                 .filter_map(|t| if let MetaTile::Connection { to_map, .. } = t { Some(*to_map) } else { None })
@@ -64,6 +68,29 @@ impl MetaTileMap {
 
     pub fn player_tile(&self) -> MetaTile {
         self.tile_at(self.player_position)
+    }
+
+    /// Returns every warp and connection tile that is reachable by BFS from the player
+    /// position, together with its expanded-coordinate position in the map.
+    ///
+    /// Unlike [`actions`], this does **not** deduplicate by destination map — multiple
+    /// warp tiles leading to different entry points of the same destination map are all
+    /// returned.  This is required by the world-graph builder, which must discover every
+    /// reachable (source_tile, destination) pair so it does not miss cave sections that
+    /// are only accessible via "non-nearest" warps.
+    pub fn all_reachable_warps_and_connections(&self) -> Vec<(Point8, MetaTile)> {
+        let (dist, _) = self.bfs_from_player();
+        self.meta_tiles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                if !matches!(t, MetaTile::Warp { .. } | MetaTile::Connection { .. }) {
+                    return None;
+                }
+                let pos = Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
+                dist.contains_key(&pos).then_some((pos, *t))
+            })
+            .collect()
     }
 
     /// BFS from `player_position` outward.
@@ -167,8 +194,8 @@ impl MetaTileMap {
 
         let mut actions = vec![];
 
-        for warp_to_map in &self.warp_targets {
-            let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Warp { to_map, .. } if to_map == warp_to_map)) else { continue };
+        for (warp_to_map, warp_to_pos) in &self.warp_targets {
+            let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Warp { to_map, to_position } if to_map == warp_to_map && to_position == warp_to_pos)) else { continue };
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
 

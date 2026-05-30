@@ -714,39 +714,31 @@ impl MMU {
                         (connection.y_alignment as i32 / 2).max(0).min(3) as usize,
                 };
 
-                // After a connection transition the game engine sets wYCoord/wXCoord to the raw
-                // alignment values.  However, `MetaTileMap::new()` converts raw wXCoord/wYCoord
-                // into **expanded** meta-tile coordinates by adding `north_extra` and `west_extra`
-                // of the destination map (one extra row/column per connection strip).  To make
-                // `to_position` match the expanded coordinate that `MetaTileMap.player_position`
-                // reports after landing, we must add the connected map's extras here.
-                //
-                // `to_border_coord` is the fixed-axis coordinate in the connected map's **expanded**
-                // coordinate space where the player lands:
-                //   North → y = y_alignment + connected_north_extra
-                //   South → y = connected_north_extra   (= 0 if no north connection, else 1)
-                //   East  → x = connected_west_extra    (= 0 if no west connection, else 1)
-                //   West  → x = x_alignment + connected_west_extra
+                // `to_border_coord` is the fixed-axis coordinate in the connected map's **raw**
+                // meta-tile space (wXCoord/wYCoord values set by the game engine after the
+                // connection transition) where the player lands:
+                //   North → y = y_alignment  (bottom row of the connected map)
+                //   South → y = 0            (top row of the connected map)
+                //   East  → x = 0            (left column of the connected map)
+                //   West  → x = x_alignment  (right column of the connected map)
                 //
                 // `to_strip_start` is where the strip begins along the perpendicular axis in the
-                // connected map's expanded coordinate space (raw start + connected extra offset):
-                //   N/S   → x_start = max(0, x_alignment) + connected_west_extra
-                //   E/W   → y_start = max(0, y_alignment) + connected_north_extra
-                let connected_north_extra = if connected_header.north_connection.is_some() { 1u8 } else { 0u8 };
-                let connected_west_extra  = if connected_header.west_connection.is_some()  { 1u8 } else { 0u8 };
+                // connected map's raw coordinate space:
+                //   N/S   → x_start = max(0, x_alignment)
+                //   E/W   → y_start = max(0, y_alignment)
                 let (to_border_coord, to_strip_start) = match connection.direction {
                     MapConnectionDirection::North =>
-                        (connection.y_alignment as u8 + connected_north_extra,
-                         connection.x_alignment.max(0) as u8 + connected_west_extra),
+                        (connection.y_alignment as u8,
+                         connection.x_alignment.max(0) as u8),
                     MapConnectionDirection::South =>
-                        (connected_north_extra,
-                         connection.x_alignment.max(0) as u8 + connected_west_extra),
+                        (0u8,
+                         connection.x_alignment.max(0) as u8),
                     MapConnectionDirection::East =>
-                        (connected_west_extra,
-                         connection.y_alignment.max(0) as u8 + connected_north_extra),
+                        (0u8,
+                         connection.y_alignment.max(0) as u8),
                     MapConnectionDirection::West =>
-                        (connection.x_alignment as u8 + connected_west_extra,
-                         connection.y_alignment.max(0) as u8 + connected_north_extra),
+                        (connection.x_alignment as u8,
+                         connection.y_alignment.max(0) as u8),
                 };
 
                 Some(ConnectedMapStrip {
@@ -946,39 +938,29 @@ mod test {
     }
 
     /// Verifies that every `MetaTile::Connection` tile in a strip carries the correct
-    /// `to_position` — i.e. the **expanded** tile coordinate in the connected map the player
-    /// lands on (matching what `MetaTileMap.player_position` reports after the transition).
-    ///
-    /// The expanded coordinate = raw wXCoord/wYCoord + connected_north_extra/west_extra.
-    ///
-    /// After a map transition `CheckMapConnections` sets `wYCoord`/`wXCoord` to the raw
-    /// alignment values.  `MetaTileMap::new()` then adds `north_extra`/`west_extra` for the
-    /// destination map (one extra row/column per connected direction) to obtain the expanded
-    /// player position.  `to_position` must match that expanded coordinate.
+    /// `to_position` — i.e. the **raw** wXCoord/wYCoord value the game engine writes
+    /// after the connection transition (before `MetaTileMap::new()` adds any extras).
     ///
     /// PalletTown north → Route1 (10×18 blocks, x_alignment=0, y_alignment=35):
-    ///   Route1 has north_extra=1 (connects north to ViridianCity), west_extra=0
-    ///   raw wYCoord after transition = 35; expanded y = 35 + 1 = 36
-    ///   strip_idx 0 → connected x=0, y=36  (expanded bottom row of Route1)
-    ///   strip_idx 19 → connected x=19, y=36
+    ///   raw wYCoord after transition = 35  (bottom row of Route1)
+    ///   strip_idx 0 → connected x=0, y=35
+    ///   strip_idx 19 → connected x=19, y=35
     ///
     /// CeladonCity east → Route7 (10×9 blocks, y_alignment=-8, x_alignment=0):
-    ///   Route7 has west_extra=1 (west connection to CeladonCity), north_extra=0
-    ///   raw wXCoord after transition = 0; expanded x = 0 + 1 = 1
-    ///   strip_idx 0 → connected x=1, y=0  (expanded left column of Route7)
-    ///   strip_idx 17 → connected x=1, y=17
+    ///   raw wXCoord after transition = 0  (left column of Route7)
+    ///   strip_idx 0 → connected x=0, y=0
+    ///   strip_idx 17 → connected x=0, y=17
     ///
     /// CeladonCity west → Route16 (20×9 blocks, y_alignment=-8, x_alignment=39):
-    ///   Route16 has west_extra=0 (no west connection), north_extra=0
-    ///   raw wXCoord after transition = 39; expanded x = 39 + 0 = 39
-    ///   strip_idx 0 → connected x=39, y=0  (unchanged — no extras)
+    ///   raw wXCoord after transition = 39  (right column of Route16)
+    ///   strip_idx 0 → connected x=39, y=0
     #[test]
     fn test_connection_tile_to_position() {
         let mmu = MMU::from_rom(POKERED).unwrap();
 
         // ── PalletTown north → Route1 ─────────────────────────────────────────
-        // y_alignment=35; Route1 has north_extra=1 → expanded y = 36.
-        // x_alignment=0; Route1 has west_extra=0 → x = strip_idx.
+        // y_alignment=35 → raw y = 35 (bottom row of Route1 in wYCoord space).
+        // x_alignment=0; no extras → x = strip_idx.
         let pt_meta = mmu.read_map_metadata(Map::PalletTown).unwrap();
         let north_strip = pt_meta.connected_strips.iter()
             .find(|s| s.map == Map::Route1)
@@ -988,14 +970,14 @@ mod test {
             let tile = north_strip.meta_tile_at(i);
             if let MetaTile::Connection { to_map, to_position } = tile {
                 assert_eq!(to_map, Map::Route1, "strip idx {i}: wrong map");
-                assert_eq!(to_position.y, 36, "strip idx {i}: should land on expanded bottom row of Route1 (y_align=35 + north_extra=1)");
+                assert_eq!(to_position.y, 35, "strip idx {i}: should land on raw bottom row of Route1 (y_align=35)");
                 assert_eq!(to_position.x, i as u8, "strip idx {i}: x should equal strip index");
             }
         }
 
         // ── CeladonCity east → Route7 ─────────────────────────────────────────
-        // x_alignment=0; Route7 has west_extra=1 → expanded x = 1.
-        // y_alignment=-8 (.max(0)=0); Route7 north_extra=0 → y = strip_idx.
+        // x_alignment=0 → raw x = 0 (left column of Route7 in wXCoord space).
+        // y_alignment=-8 (.max(0)=0) → y = strip_idx.
         let celadon_meta = mmu.read_map_metadata(Map::CeladonCity).unwrap();
         let east_strip = celadon_meta.connected_strips.iter()
             .find(|s| s.map == Map::Route7)
@@ -1005,12 +987,14 @@ mod test {
             let tile = east_strip.meta_tile_at(i);
             if let MetaTile::Connection { to_map, to_position } = tile {
                 assert_eq!(to_map, Map::Route7, "strip idx {i}: wrong map");
-                assert_eq!(to_position.x, 1, "strip idx {i}: should land on expanded left column of Route7 (x_align=0 + west_extra=1)");
+                assert_eq!(to_position.x, 0, "strip idx {i}: should land on raw left column of Route7 (x_align=0)");
                 assert_eq!(to_position.y, i as u8, "strip idx {i}: y should equal strip index");
             }
         }
 
         // ── CeladonCity west → Route16 ────────────────────────────────────────
+        // x_alignment=39 → raw x = 39 (right column of Route16 in wXCoord space).
+        // Route16 has no west connection so west_extra=0; value unchanged.
         let west_strip = celadon_meta.connected_strips.iter()
             .find(|s| s.map == Map::Route16)
             .expect("CeladonCity should have a west strip to Route16");
