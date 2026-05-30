@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use crate::mmu::MMU;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
@@ -13,6 +14,12 @@ pub struct BagItem {
 impl BagItem {
     pub const fn new(id: ItemId, quantity: u8) -> Self {
         Self { id, quantity }
+    }
+}
+
+impl Display for BagItem {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} x{}", self.id, self.quantity)
     }
 }
 
