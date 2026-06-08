@@ -83,6 +83,10 @@ pub trait PokemonApiTrait {
     /// True when the pokemart buy-quantity selector is active (wMaxItemQuantity == 99).
     fn mart_in_quantity_selector(&self) -> bool;
 
+    /// Writes `value` to `wMaxItemQuantity` (used to clear the stale 99 before waiting for the
+    /// quantity selector to open, so we can detect the fresh write reliably).
+    fn write_max_item_quantity(&mut self, value: u8);
+
     /// Writes `nickname` (or an empty terminator for `None`) directly into the
     /// naming screen's string buffer so pressing START submits it immediately.
     fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String>;
@@ -106,7 +110,7 @@ impl<'a> PokemonApi<'a> {
         Self { game_boy, map_cache: Some(cache) }
     }
 
-    fn mmu(&self) -> &MMU {
+    pub fn mmu(&self) -> &MMU {
         self.game_boy.core().mmu()
     }
 
@@ -376,7 +380,8 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
     fn mart_item_list(&self) -> Vec<ItemId> {
         let mmu = self.mmu();
-        (0..16u16)
+        // wItemList format: [count, item1, item2, ..., 0xFF] — skip the count byte at index 0
+        (1..16u16)
             .map(|i| mmu.read(pokered_symbols::wItemList.address + i))
             .take_while(|&b| b != 0xFF)
             .filter_map(ItemId::from_repr)
@@ -390,6 +395,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     /// True when the buy-quantity selector is active (pokemart sets wMaxItemQuantity=99).
     fn mart_in_quantity_selector(&self) -> bool {
         self.mmu().read(pokered_symbols::wMaxItemQuantity.address) == 99
+    }
+
+    fn write_max_item_quantity(&mut self, value: u8) {
+        self.mmu_mut().write(pokered_symbols::wMaxItemQuantity.address, value);
     }
 
     fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String> {

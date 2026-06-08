@@ -129,6 +129,7 @@ mod tests {
         fn mart_item_list(&self) -> Vec<crate::pokemon::item::ItemId> { vec![] }
         fn mart_item_quantity(&self) -> u8 { 0 }
         fn mart_in_quantity_selector(&self) -> bool { false }
+        fn write_max_item_quantity(&mut self, _value: u8) {}
 
         fn read_game_options(&self) -> Result<GameOptions, String> {
             Err("not available in stub".to_string())

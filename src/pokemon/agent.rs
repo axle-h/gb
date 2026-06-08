@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::time::Duration;
-use std::rc::Rc;
 use crate::cycles::MachineCycles;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
@@ -61,6 +61,27 @@ impl AgentEvent {
     }
 }
 
+impl Display for AgentEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentEvent::StartedOverworldAction { destination } =>
+                write!(f, "→ {destination}"),
+            AgentEvent::OverworldActionAborted { destination, reason } =>
+                write!(f, "✗ {destination} ({reason:?})"),
+            AgentEvent::OverworldActionCompleted { destination } =>
+                write!(f, "✓ {destination}"),
+            AgentEvent::BattleStarted =>
+                write!(f, "battle started"),
+            AgentEvent::BattleActionStarted { action } =>
+                write!(f, "battle: {action:?}"),
+            AgentEvent::BattleEnded =>
+                write!(f, "battle ended"),
+            AgentEvent::TextBox { message } =>
+                write!(f, "📖 {message}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
@@ -89,10 +110,19 @@ enum PokemartState {
     ChoosingBuyOption(BagItem),
     /// Item list visible. Navigate to the target item.
     ChoosingItem(BagItem),
+    /// A pressed on the target item; waiting for wMaxItemQuantity==99 (qty selector opening).
+    /// Buttons are released here to avoid the qty selector auto-confirming a spurious A press.
+    AwaitingQtySelector(BagItem),
     /// Quantity selector active (wItemQuantity > 0). Adjust then press A.
-    ChoosingQuantity(BagItem),
-    /// Yes/No confirmation visible. Press A on "Yes".
-    ConfirmingPurchase,
+    /// `qty_last` / `stall_ticks` track consecutive ticks where wItemQuantity didn't change,
+    /// detecting the post-confirm price-text box that appears before the Yes/No prompt.
+    ChoosingQuantity { item: BagItem, qty_last: u8, stall_ticks: u32 },
+    /// Yes/No confirmation visible. Press A on "Yes" if wItemQuantity matches the target,
+    /// otherwise press B to cancel and retry from the item list.
+    ConfirmingPurchase(BagItem),
+    /// YES was selected — purchase is being processed.  Pulse B (via `ticks` flip-flop) to
+    /// advance post-purchase text and close the item list that buyMenuLoop re-opens.
+    PurchasedItem { ticks: u32 },
     /// All items bought. Navigate cursor to "Quit" and press A.
     Quitting,
 }
@@ -116,7 +146,7 @@ enum AgentState {
     NamingPokemon { species: PokemonSpecies, decided: bool },
 
     /// Player alternates between two adjacent grass tiles until a wild battle triggers.
-    WanderingInGrass { tile_a: Point8, tile_b: Point8, heading_to_b: bool },
+    WanderingInGrass { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool },
 
     Battle(BattleState),
 
@@ -130,6 +160,40 @@ impl AgentState {
             Ok(s)
         } else {
             Err("Not in battle".to_string())
+        }
+    }
+}
+
+impl Display for PokemartState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PokemartState::ChoosingBuyOption(i)   => write!(f, "mart:buy({:?}×{})", i.id, i.quantity),
+            PokemartState::ChoosingItem(i)         => write!(f, "mart:item({:?}×{})", i.id, i.quantity),
+            PokemartState::AwaitingQtySelector(i)  => write!(f, "mart:await({:?}×{})", i.id, i.quantity),
+            PokemartState::ChoosingQuantity { item, .. } => write!(f, "mart:qty({:?}×{})", item.id, item.quantity),
+            PokemartState::ConfirmingPurchase(i)   => write!(f, "mart:confirm({:?}×{})", i.id, i.quantity),
+            PokemartState::PurchasedItem { .. }    => write!(f, "mart:purchased"),
+            PokemartState::Quitting                => write!(f, "mart:quit"),
+        }
+    }
+}
+
+impl Display for AgentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentState::Idle                          => write!(f, "idle"),
+            AgentState::AwaitingOverworldAction { .. } => write!(f, "wait"),
+            AgentState::OverworldMovement { destination, map } => write!(f, "move→{destination}@{map:?}"),
+            AgentState::ReadingTextBox { .. }         => write!(f, "text"),
+            AgentState::RunningScript { .. }          => write!(f, "script"),
+            AgentState::NamingPokemon { species, .. } => write!(f, "name:{:?}", species),
+            AgentState::WanderingInGrass { .. }       => write!(f, "wander"),
+            AgentState::Battle(s) => match s {
+                BattleState::WaitingForMenu { .. } => write!(f, "battle:wait"),
+                BattleState::AwaitingPolicy { .. } => write!(f, "battle:policy"),
+                BattleState::Navigating { action, .. } => write!(f, "battle:{:?}", action),
+            },
+            AgentState::PokemartShopping(s)           => write!(f, "{s}"),
         }
     }
 }
@@ -159,6 +223,14 @@ impl PokemonAgent {
 
     pub fn policy_exhausted(&self) -> bool {
         self.policy.is_exhausted()
+    }
+
+    pub fn policy_steps_remaining(&self) -> Option<usize> {
+        self.policy.steps_remaining()
+    }
+
+    pub fn policy_current_step_is_long_running(&self) -> bool {
+        self.policy.current_step_is_long_running()
     }
 
     /// Drains all buffered events and returns them.
@@ -192,7 +264,7 @@ impl PokemonAgent {
             self.state = state;
 
             if self.state != AgentState::Idle {
-                println!("{:?}", &self.state);
+                println!("{}", &self.state);
             }
         }
     }
@@ -458,7 +530,7 @@ impl PokemonAgent {
                         let tile_a = game_state.map.player_position;
                         let tile_b = adjacent_grass(&game_state.map, tile_a);
                         if let Some(tile_b) = tile_b {
-                            self.set_state(AgentState::WanderingInGrass { tile_a, tile_b, heading_to_b: true });
+                            self.set_state(AgentState::WanderingInGrass { map: game_state.map.map, tile_a, tile_b, heading_to_b: true });
                         } else {
                             // TODO this should not happen, we shouldn't generate an action if this is true
                             //      the adjacent grass tile should be in the action
@@ -505,6 +577,30 @@ impl PokemonAgent {
 
                                     api.release_all_buttons();
                                     self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
+                                }
+                                Some(BattleMenuState::PokemonList { index }) => {
+                                    // Party list is showing — either a forced switch (active
+                                    // fainted) or a voluntary switch (Navigating placed cursor
+                                    // here). If the cursor is already on an alive member, confirm
+                                    // it; otherwise navigate to the first alive member (forced
+                                    // switch case where cursor starts on the fainted slot).
+                                    let game_state = api.game_state()?;
+                                    let cursor_hp = game_state.pokemon
+                                        .get(index as usize)
+                                        .map_or(0, |p| p.current_hp);
+                                    if cursor_hp > 0 {
+                                        api.toggle_button(JoypadButton::A);
+                                    } else {
+                                        let target = game_state.pokemon.iter().enumerate()
+                                            .find(|(_, p)| p.current_hp > 0)
+                                            .map(|(i, _)| i as u8)
+                                            .unwrap_or(0);
+                                        if index < target {
+                                            api.toggle_button(JoypadButton::Down);
+                                        } else {
+                                            api.toggle_button(JoypadButton::Up);
+                                        }
+                                    }
                                 }
                                 Some(_) => {
                                     // battle menu is showing, do not read the text
@@ -576,9 +672,14 @@ impl PokemonAgent {
                     }
                 }
             }
-            AgentState::WanderingInGrass { tile_a, tile_b, ref mut heading_to_b } => {
+            AgentState::WanderingInGrass { map, tile_a, tile_b, ref mut heading_to_b } => {
                 let game_state = api.game_state()?;
                 if game_state.mode == GameMode::Overworld {
+                    if game_state.map.map != map {
+                        // Blackout or other warp moved us off the grass map — let policy re-route.
+                        self.set_state(AgentState::Idle);
+                        return Ok(());
+                    }
                     let pos = game_state.map.player_position;
                     let target = if *heading_to_b { tile_b } else { tile_a };
                     if pos == target {
@@ -616,26 +717,23 @@ impl PokemonAgent {
                     }
 
                     // Navigate item list to target item, then press A to select it.
-                    // The quantity selector is detected by wMaxItemQuantity == 99 (set by pokemart.asm).
                     PokemartState::ChoosingItem(item) => {
-                        if api.mart_in_quantity_selector() {
-                            self.set_pokemart_state(PokemartState::ChoosingQuantity(*item));
-                            return Ok(());
-                        }
-
                         if let Some(menu) = menu {
                             if menu.is_mart_item_list() {
                                 let shop_items = api.mart_item_list();
                                 let target_pos = shop_items.iter().position(|&id| id == item.id);
+                                let current = menu.list_absolute_index() as usize;
                                 match target_pos {
                                     None => {
-                                        // TODO emit event "no items to buy"
                                         self.set_pokemart_state(PokemartState::Quitting);
                                     }
                                     Some(target_idx) => {
-                                        let current = menu.list_absolute_index() as usize;
                                         if current == target_idx {
+                                            // Clear stale wMaxItemQuantity==99 so AwaitingQtySelector
+                                            // can detect the fresh write from pokemart.asm reliably.
+                                            api.write_max_item_quantity(0);
                                             api.toggle_button(JoypadButton::A);
+                                            self.set_pokemart_state(PokemartState::AwaitingQtySelector(*item));
                                         } else if current < target_idx {
                                             api.toggle_button(JoypadButton::Down);
                                         } else {
@@ -647,57 +745,135 @@ impl PokemonAgent {
                         }
                     }
 
-                    // Adjust quantity with Up/Down then confirm with A.
-                    // Detect Yes/No menu by checking for is_yes_no_menu().
-                    PokemartState::ChoosingQuantity(item) => {
-                        if let Some(menu) = &menu {
-                            if menu.is_yes_no_menu() {
-                                self.set_pokemart_state(PokemartState::ConfirmingPurchase);
-                                return Ok(());
-                            }
+                    // A was pressed on the target item; keep pressing A each tick until
+                    // wMaxItemQuantity==99 (set by pokemart.asm right after item selection).
+                    // DisplayListMenuID may still be initializing when the first A is sent, so we
+                    // retry. As soon as we detect 99 we release all buttons in the same agent tick,
+                    // so the qty selector's halt-based wait loop sees hJoyPressed=0 on its next
+                    // VBlank (no rising edge while A is still held), preventing an auto-confirm.
+                    PokemartState::AwaitingQtySelector(item) => {
+                        if api.mart_in_quantity_selector() {
+                            api.release_all_buttons();
+                            self.set_pokemart_state(PokemartState::ChoosingQuantity { item: *item, qty_last: 0, stall_ticks: 0 });
+                        } else {
+                            api.toggle_button(JoypadButton::A);
                         }
+                    }
 
-                        // If wMaxItemQuantity is no longer 99 (quantity selector exited), fall back.
-                        if !api.mart_in_quantity_selector() {
+                    // Adjust quantity with Up/Down then confirm with A.
+                    // is_mart_item_list() is NOT used here because wTextBoxID stays ListMenuBox
+                    // throughout the qty-selector phase; is_yes_no_menu() is the real signal.
+                    PokemartState::ChoosingQuantity { item, qty_last, stall_ticks } => {
+                        let item = *item;
+                        let qty_last = *qty_last;
+                        let stall_ticks = *stall_ticks;
+                        // NLL: borrow of self.state via pokemart_state ends here (values copied)
+
+                        let yes_no = menu.map_or(false, |m| m.is_yes_no_menu());
+                        let cur_qty = api.mart_item_quantity();
+
+                        if yes_no {
+                            // Release all buttons before entering ConfirmingPurchase so the
+                            // next gb.run has joypad=0, guaranteeing a fresh A rising edge
+                            // for the YES confirmation (avoids a held-A false-no-edge).
+                            api.release_all_buttons();
+                            self.set_pokemart_state(PokemartState::ConfirmingPurchase(item));
                             return Ok(());
                         }
 
-                        let current_qty = api.mart_item_quantity();
-                        if current_qty == 0 {
+                        if cur_qty == 0 {
+                            // Qty selector not yet initialized — wait.
                             return Ok(());
                         }
                         let target = item.quantity;
-                        if current_qty == target {
+
+                        // Track consecutive ticks where wItemQuantity didn't change.
+                        let (new_qty_last, new_stall_ticks) = if cur_qty == qty_last {
+                            (qty_last, stall_ticks + 1)
+                        } else {
+                            (cur_qty, 0)
+                        };
+                        if let AgentState::PokemartShopping(PokemartState::ChoosingQuantity { qty_last: ref mut ql, stall_ticks: ref mut st, .. }) = self.state {
+                            *ql = new_qty_last;
+                            *st = new_stall_ticks;
+                        }
+
+                        // Stall AND at target → stuck in post-confirm price-text before Yes/No.
+                        // Only mash A here; when qty != target we keep pressing Up/Down below.
+                        if new_stall_ticks >= 8 && cur_qty == target {
                             api.toggle_button(JoypadButton::A);
-                        } else if current_qty < target {
+                            return Ok(());
+                        }
+
+                        if cur_qty == target {
+                            api.toggle_button(JoypadButton::A);
+                        } else if cur_qty < target {
                             api.toggle_button(JoypadButton::Up);
                         } else {
                             api.toggle_button(JoypadButton::Down);
                         }
                     }
 
-                    // Select Yes on the Yes/No confirmation.
-                    PokemartState::ConfirmingPurchase => {
+                    // Select Yes on the Yes/No confirmation, navigate to YES and press A.
+                    // On YES confirmed, transition to PurchasedItem to exit the post-purchase
+                    // item list that .buyMenuLoop re-opens.
+                    // Wrong qty (edge case): press B to cancel back to the item list.
+                    PokemartState::ConfirmingPurchase(item) => {
+                        if menu.map_or(false, |m| m.is_mart_item_list()) {
+                            // B-cancel from Yes/No (wrong qty) sent us back to the item list.
+                            api.release_all_buttons();
+                            self.set_pokemart_state(PokemartState::ChoosingItem(*item));
+                            return Ok(());
+                        }
                         if let Some(menu) = &menu {
                             if menu.is_yes_no_menu() {
-                                if menu.current_item == 0 {
-                                    api.toggle_button(JoypadButton::A);
+                                let confirmed_qty = api.mart_item_quantity();
+                                if confirmed_qty == item.quantity {
+                                    if menu.current_item == 0 {
+                                        api.release_all_buttons();
+                                        api.toggle_button(JoypadButton::A);
+                                        self.set_pokemart_state(PokemartState::PurchasedItem { ticks: 0 });
+                                    } else {
+                                        api.toggle_button(JoypadButton::Up);
+                                    }
                                 } else {
-                                    api.toggle_button(JoypadButton::Up);
+                                    api.toggle_button(JoypadButton::B);
                                 }
                             } else if menu.is_mart_buy_sell_menu() {
-                                // BuySellQuit menu returned — purchase was completed.
                                 self.set_pokemart_state(PokemartState::Quitting);
-                            } else if menu.is_mart_item_list() {
-                                // Item list reappeared after purchase — press B to return to
-                                // BuySellQuit rather than accidentally re-selecting an item.
-                                api.toggle_button(JoypadButton::B);
                             } else {
-                                // Post-purchase text ("OK! Here you are!") — mash A.
                                 api.toggle_button(JoypadButton::A);
                             }
                         } else {
                             api.toggle_button(JoypadButton::A);
+                        }
+                    }
+
+                    // Purchase was confirmed; advance post-purchase text with B, then cancel
+                    // the item list that .buyMenuLoop re-opens. If the yes/no box is still
+                    // visible (HandleMenuInput.Delay3 hasn't read A yet), toggle A so the
+                    // rising edge is detected correctly on the next joypad poll.
+                    PokemartState::PurchasedItem { ticks } => {
+                        let ticks = *ticks;
+                        // NLL: borrow of self.state via pokemart_state ends here (value copied)
+                        if menu.map_or(false, |m| m.is_mart_buy_sell_menu()) {
+                            api.release_all_buttons();
+                            self.set_pokemart_state(PokemartState::Quitting);
+                        } else if menu.map_or(false, |m| m.is_yes_no_menu()) {
+                            // HandleMenuInput runs Delay3 (3 VBlanks ≈ 50ms) before reading
+                            // joypad. Toggle A so hJoyLast[A] resets to 0 on one tick and
+                            // produces a rising edge (hJoyPressed[A]=1 → YES) on the next.
+                            api.toggle_button(JoypadButton::A);
+                        } else {
+                            // Post-purchase text or transitional state — pulse B to advance.
+                            let new_ticks = ticks + 1;
+                            if let AgentState::PokemartShopping(PokemartState::PurchasedItem { ticks: ref mut t }) = self.state {
+                                *t = new_ticks;
+                            }
+                            api.release_all_buttons();
+                            if new_ticks % 2 == 1 {
+                                api.press_button(JoypadButton::B);
+                            }
                         }
                     }
 
@@ -710,10 +886,11 @@ impl PokemonAgent {
                                     _ => api.toggle_button(JoypadButton::Up),
                                 }
                             } else {
-                                api.toggle_button(JoypadButton::A);
+                                // Still in post-purchase text or a transition menu — press B.
+                                api.toggle_button(JoypadButton::B);
                             }
                         } else {
-                            api.toggle_button(JoypadButton::A);
+                            api.toggle_button(JoypadButton::B);
                         }
                     }
                 }

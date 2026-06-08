@@ -303,6 +303,14 @@ impl Display for MetaTileMap {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         for y in 0..self.height {
             for x in 0..self.width {
+
+                if y as u8 == self.player_position.y
+                    && x as u8 == self.player_position.x {
+                    // the player
+                    write!(f, "P")?;
+                    continue;
+                }
+
                 match self.meta_tiles[x + y * self.width] {
                     MetaTile::Empty => write!(f, "_")?,
                     MetaTile::Obstacle => write!(f, "O")?,
@@ -317,7 +325,7 @@ impl Display for MetaTileMap {
                     MetaTile::Counter => write!(f, "=")?,
                     MetaTile::CutTree => write!(f, "t")?,
                     MetaTile::Grass   => write!(f, "g")?,
-                }
+                };
             }
             writeln!(f)?;
         }
