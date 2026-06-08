@@ -90,6 +90,11 @@ impl GameBoy {
             .map_err(|e| e.to_string())?;
         self.load_state(&data)
     }
+
+    pub fn save_screenshot_to_file(&self, path: &str) -> Result<(), String> {
+        let image = self.core().mmu().ppu().screenshot();
+        image.save(path).map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]

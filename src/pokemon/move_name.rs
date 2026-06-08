@@ -539,8 +539,6 @@ pub struct PokemonMoveMetadata {
     pub pp: u8,
 }
 
-
-
 impl PokemonMoveMetadata {
     pub const fn new(name: &'static str, move_type: PokemonType, effect: PokemonMoveEffect, power: Option<u8>, accuracy: u8, pp: u8) -> Self {
         assert!(accuracy <= 100);

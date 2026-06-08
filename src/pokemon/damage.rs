@@ -9,6 +9,20 @@ fn expected_psywave_damage(level: u8) -> u16 {
     ((n + 1) as f64 / 2.0).round() as u16
 }
 
+/// Returns `true` if `name` is a move that deals direct damage.
+/// Mirrors the special cases at the top of `expected_damage` in `damage.rs` as well as
+/// ordinary moves that have a positive base power.
+pub fn is_damaging_move(name: PokemonMoveName) -> bool {
+    matches!(
+        name,
+        PokemonMoveName::SeismicToss
+            | PokemonMoveName::NightShade
+            | PokemonMoveName::Sonicboom
+            | PokemonMoveName::DragonRage
+            | PokemonMoveName::Psywave
+    ) || name.metadata().power.is_some()
+}
+
 /// Returns approximate damage dealt by `move_name` used by `attacker` against `defender`,
 /// or `None` if the move cannot deal damage (zero power, or the defender is immune).
 ///

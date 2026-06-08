@@ -10,7 +10,7 @@ use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::badge::Badge;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{BattleAction, BattleType};
-use crate::pokemon::damage::pick_best_move;
+use crate::pokemon::damage::{is_damaging_move, pick_best_move};
 use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::tile::MetaTile;
 pub use crate::pokemon::item::ItemId;
@@ -45,6 +45,18 @@ pub trait Policy {
     }
 
     fn is_exhausted(&self) -> bool {
+        false
+    }
+
+    /// Returns the number of steps remaining in the policy queue, if known.
+    fn steps_remaining(&self) -> Option<usize> {
+        None
+    }
+
+    /// Returns true if the current step is expected to run for a long time without
+    /// advancing the queue (e.g. grinding levels or catching a Pokémon). Used by the
+    /// test fixture to exempt these steps from the short stall-detection threshold.
+    fn current_step_is_long_running(&self) -> bool {
         false
     }
 }
@@ -223,7 +235,7 @@ fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
 
     for (i, pokemon) in state.pokemon.iter().enumerate() {
         if i == battle_state.active_party_slot as usize { continue; }
-        if pokemon.stats.hp == 0 { continue; }
+        if pokemon.current_hp == 0 { continue; }
         opts.push(BattleAction::SwitchPokemon { slot: i as u8, pokemon: pokemon.summary() });
     }
 
@@ -234,15 +246,40 @@ fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     Some(opts)
 }
 
+/// Returns `true` total PP remaining across all damaging moves dips below ≤20% of its maximum PP remaining.
+fn all_damaging_moves_low_pp(actions: &[BattleAction]) -> bool {
+    const MIN_PP_PCT: f32 = 0.2;
+
+    let mut total_damaging_pp = 0;
+    let mut total_max_pp = 0;
+
+    for action in actions.iter() {
+        if let BattleAction::Fight { battle_move, .. } = action {
+            if is_damaging_move(battle_move.name) {
+                total_damaging_pp += battle_move.pp as usize;
+                total_max_pp += battle_move.name.metadata().pp as usize;
+            }
+        }
+    }
+
+    if total_max_pp == 0 {
+        // No damaging moves, so we can't say they're all low on PP.
+        return false;
+    }
+
+    (total_damaging_pp as f32 / total_max_pp as f32) < MIN_PP_PCT
+}
+
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PolicyStep {
     Goto { map: Map, strict: bool },
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
     DefeatGymLeader { leader: MapSprite, badge: Badge },
-    /// Walk in grass and throw Pokéballs until a Pokémon is caught. TODO add location in case we blackout
+    /// Walk in grass and throw Pokéballs until a Pokémon is caught.
     CatchPokemon { species: PokemonSpecies, on_map: Map },
-    /// Walk in grass until the leading party member reaches at least this level. TODO add location in case we blackout
+    /// Walk in grass until the leading party member reaches at least this level.
     GrindUntilLevel { target_level: u8, on_map: Map },
     /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
     BuyFromMart { map: Map, item: BagItem },
@@ -276,41 +313,45 @@ impl PolicyStep {
         // Get the town map from Daisy
         Self::Interact(MapSprite::BLUESHOUSE_DAISY1),
 
-        // Walk back through Route 1, heal up and buy Pokéballs
+        // Heal and stock up on supplies in Viridian City
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-        Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 5), map: Map::ViridianMart },
+        Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 10), map: Map::ViridianMart },
+        Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 2), map: Map::ViridianMart },
 
-        // Catch a Pidgey
+        // Catch a Pidgey for a second party member
         Self::CatchPokemon { species: PokemonSpecies::Pidgey, on_map: Map::Route1 },
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
 
-        // Grind until Squirtle is level 10
-        Self::GrindUntilLevel { target_level: 8, on_map: Map::Route1 },
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-        Self::GrindUntilLevel { target_level: 9, on_map: Map::Route1 },
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-        Self::GrindUntilLevel { target_level: 10, on_map: Map::Route1 },
+        // Grind until Squirtle is level 13 (learns Water Gun — key move vs Brock)
+        Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1 },
         Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
 
-        // Walk through Viridian Forest to Pewter City
+        // Walk through Viridian Forest to Pewter City and heal
         Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
 
         // ── Defeat Brock ──
         Self::DefeatGymLeader { leader: MapSprite::PEWTERGYM_BROCK, badge: Badge::BoulderBadge },
         Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
 
-        // // ── Walk through Mt Moon to Cerulean City ──
-        // Self::goto(Map::MtMoonPokecenter),
-        // Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
-        // Self::goto(Map::CeruleanCity),
-        //
-        // // ── Defeat Misty ──
-        // Self::goto(Map::CeruleanPokecenter),
-        // Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-        // Self::goto(Map::CeruleanGym),
-        // Self::Interact(MapSprite::CERULEANGYM_MISTY),
-        // Self::goto(Map::CeruleanPokecenter),
-        // Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+        // Restock in Pewter City for Mt Moon
+        Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 5), map: Map::PewterMart },
+
+        // Grind on Route 3 before entering Mt Moon
+        Self::GrindUntilLevel { target_level: 16, on_map: Map::Route3 },
+        Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
+
+        // ── Walk through Mt Moon to Cerulean City ──
+        // Navigate via Mt Moon 1F → B1F → B2F → Route 4 → Cerulean
+        Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+
+        // Extra grind near Cerulean if needed
+        Self::GrindUntilLevel { target_level: 18, on_map: Map::Route4 },
+        Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+
+        // ── Defeat Misty ──
+        Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 5), map: Map::CeruleanMart },
+        Self::DefeatGymLeader { leader: MapSprite::CERULEANGYM_MISTY, badge: Badge::CascadeBadge },
+        Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
     ] }
 }
 
@@ -319,6 +360,12 @@ pub struct DeterministicPolicy {
     queue: VecDeque<PolicyStep>,
     world_graph: WorldGraph,
     name_picker: PokemonNamePicker,
+    /// The last Pokémon Center where the player was healed.
+    pub last_pokemon_center: Option<Map>,
+    /// Set to `Some(pokecenter)` when the active Pokémon's damaging moves are all at ≤10% PP
+    /// and the policy decided to flee the current wild battle. The policy will navigate to that
+    /// Pokémon Center and heal before resuming the main queue.
+    heal_return: Option<Map>,
 }
 
 impl DeterministicPolicy {
@@ -328,6 +375,8 @@ impl DeterministicPolicy {
             queue: steps.into_iter().collect(),
             world_graph,
             name_picker: PokemonNamePicker::seed_from_u64(seed),
+            last_pokemon_center: None,
+            heal_return: None,
         }
     }
 
@@ -339,7 +388,32 @@ impl DeterministicPolicy {
 impl Policy for DeterministicPolicy {
 
     fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+        if state.map.map.is_pokemon_center() {
+            self.last_pokemon_center = Some(state.map.map);
+        }
+
         let actions = state.map.actions();
+
+        // ── Heal-return detour ────────────────────────────────────────────────
+        // When the active Pokémon ran low on PP in a wild battle we fled and
+        // stored the target Pokémon Center in `heal_return`.  Route there and
+        // talk to the Nurse before resuming the main queue.
+        if let Some(pokecenter) = self.heal_return {
+            return if state.map.map == pokecenter {
+                // Arrived — find and interact with the Nurse.
+                if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Sprite("Nurse")) {
+                    self.heal_return = None;
+                    Some(action.clone())
+                } else {
+                    // Pokecenter map but Nurse tile not visible yet — wait.
+                    None
+                }
+            } else {
+                // Still travelling — pick next step toward the pokecenter.
+                self.world_graph.pick_shortest_path_action(&actions, pokecenter)
+            };
+        }
+
         let action_tiles: Vec<_> = actions.iter().map(|a| format!("{:?}", a.tile)).collect();
         println!("[policy] map={} actions=[{}]", state.map.map, action_tiles.join(", "));
         loop {
@@ -415,7 +489,7 @@ impl Policy for DeterministicPolicy {
                     }
                 },
                 PolicyStep::DefeatGymLeader { leader, badge } => {
-                    if state.badges.contains(Badge::BoulderBadge) {
+                    if state.badges.contains(badge) {
                         self.queue.pop_front();
                         continue;
                     } else if state.map.map != leader.map() {
@@ -427,12 +501,12 @@ impl Policy for DeterministicPolicy {
                         }
                         action
                     } else {
-                        let action = actions.iter()
-                            .find(|a| a.tile == MetaTile::Sprite(leader.name));
-                        if action.is_some() {
-                            self.queue.pop_front();
-                        }
-                        action.cloned()
+                        // Stay on this step until the badge is obtained — do not pop here.
+                        // If the player loses and blacks out, the step remains and the agent
+                        // navigates back to try again.
+                        actions.iter()
+                            .find(|a| a.tile == MetaTile::Sprite(leader.name))
+                            .cloned()
                     }
                 },
                 PolicyStep::Interact(sprite) => {
@@ -485,6 +559,42 @@ impl Policy for DeterministicPolicy {
         let battle_state = state.battle.as_ref()?;
         let actions = battle_options(state)?;
 
+        if self.heal_return.is_some() && battle_state.battle_type == BattleType::Wild {
+            // returning to the pokemon center, run from battles.
+            if let Some(center) = self.last_pokemon_center {
+                println!("[policy] PP critically low — fleeing and routing to {center} to heal");
+            }
+            return Some(BattleAction::Run);
+        }
+
+        // ── Low-PP flee ──────────────────────────────────────────────────────
+        // If every damaging move the active Pokémon has is at ≤10% of its max PP,
+        // run from wild battles and queue a detour to the last visited Pokémon Center.
+        if battle_state.battle_type == BattleType::Wild
+            && self.heal_return.is_none()
+            && all_damaging_moves_low_pp(&actions)
+        {
+            if let Some(center) = self.last_pokemon_center {
+                println!("[policy] PP critically low — fleeing and routing to {center} to heal");
+                self.heal_return = Some(center);
+                return Some(BattleAction::Run);
+            } else {
+                println!("[policy] PP critically low but no known Pokémon Center to return to — fighting on");
+            }
+        }
+
+        // If the active Pokémon is fainted (forced switch screen), send the
+        // healthiest available party member.
+        if battle_state.player.current_hp == 0 {
+            return actions.iter()
+                .filter(|a| matches!(a, BattleAction::SwitchPokemon { .. }))
+                .max_by_key(|a| match a {
+                    BattleAction::SwitchPokemon { pokemon, .. } => pokemon.current_hp,
+                    _ => 0,
+                })
+                .cloned();
+        }
+
         // When catching, throw a Pokéball immediately if one is available.
         if let Some(PolicyStep::CatchPokemon { species, .. }) = self.queue.front() {
             if battle_state.battle_type == BattleType::Wild && battle_state.enemy.species == *species {
@@ -507,6 +617,36 @@ impl Policy for DeterministicPolicy {
                     }
                 } else {
                     println!("[policy] want to catch a {}, but no Pokéballs left!", species);
+                }
+            }
+        }
+
+        // Use a healing item if HP is below 25% — prioritise max-heal items.
+        if battle_state.player.remaining_hp() < 0.25 {
+            let heal = actions.iter().find(|a| matches!(a,
+                BattleAction::UseItem { item, .. }
+                if matches!(item.id, ItemId::MaxPotion | ItemId::HyperPotion | ItemId::SuperPotion | ItemId::Potion)
+            ));
+            if let Some(heal_action) = heal {
+                println!("[policy] HP critical ({:.0}%) — using healing item", battle_state.player.remaining_hp() * 100.0);
+                return Some(*heal_action);
+            }
+        }
+
+        // Switch to the healthiest party member if below 15% HP and a better option exists.
+        if battle_state.player.remaining_hp() < 0.15 {
+            if let Some(switch) = actions.iter()
+                .filter(|a| matches!(a, BattleAction::SwitchPokemon { .. }))
+                .max_by_key(|a| match a {
+                    BattleAction::SwitchPokemon { pokemon, .. } => pokemon.current_hp,
+                    _ => 0,
+                })
+            {
+                if let BattleAction::SwitchPokemon { pokemon, .. } = switch {
+                    if pokemon.current_hp > battle_state.player.current_hp {
+                        println!("[policy] HP critical — switching to {} ({}hp)", pokemon.species, pokemon.current_hp);
+                        return Some(*switch);
+                    }
                 }
             }
         }
@@ -556,5 +696,16 @@ impl Policy for DeterministicPolicy {
 
     fn is_exhausted(&self) -> bool {
         self.queue.is_empty()
+    }
+
+    fn steps_remaining(&self) -> Option<usize> {
+        Some(self.queue.len())
+    }
+
+    fn current_step_is_long_running(&self) -> bool {
+        matches!(
+            self.queue.front(),
+            Some(PolicyStep::GrindUntilLevel { .. }) | Some(PolicyStep::CatchPokemon { .. })
+        )
     }
 }

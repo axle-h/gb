@@ -409,6 +409,23 @@ fn can_navigate_to_pewter_city() {
 }
 
 #[test]
+fn can_navigate_mt_moon() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/mt-moon.bin"),
+        Duration::from_mins(10),
+        vec![
+            PolicyStep::goto(Map::CeruleanCity),
+        ]
+    );
+
+    fixture.pimp_pokemon();
+    fixture.step_until_exhausted();
+
+    let state = fixture.game_state();
+    assert_eq!(state.map.map, Map::CeruleanCity, "agent should have navigated to Cerulean City");
+}
+
+#[test]
 fn can_start_game() {
     let mut fixture = TestFixture::new(
         include_bytes!("data/start-of-game-state.bin"),
@@ -426,10 +443,13 @@ fn can_start_game() {
 
     let state = fixture.game_state();
     for pokemon in state.pokemon.iter() {
-        println!("{}: {}", pokemon.species, pokemon.nickname);
+        println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);
     }
+    println!("badges: {:?}", state.badges);
+    println!("map: {:?}", state.map.map);
 
     assert!(state.badges.contains(Badge::BoulderBadge), "should have the Boulder Badge");
+    assert!(state.badges.contains(Badge::CascadeBadge), "should have the Cascade Badge");
 
     fixture.save_state_to_file().unwrap();
 }
@@ -440,6 +460,11 @@ struct TestFixture {
     pub agent: PokemonAgent,
     pub total_cycles: MachineCycles,
     pub max_cycles: MachineCycles,
+    /// Cycles since the policy queue length last changed (stall detection).
+    stall_cycles: MachineCycles,
+    last_steps_remaining: Option<usize>,
+    /// How long without queue progress before we declare a stall.
+    stall_threshold: MachineCycles,
 }
 
 impl TestFixture {
@@ -459,6 +484,10 @@ impl TestFixture {
             map_cache: MapMetadataCache::default(),
             total_cycles: MachineCycles::ZERO,
             max_cycles: MachineCycles::from_duration(max_game_time),
+            stall_cycles: MachineCycles::ZERO,
+            last_steps_remaining: None,
+            // 10 minutes of game time without a queue step change → stall
+            stall_threshold: MachineCycles::from_duration(Duration::from_secs(10 * 60)),
             agent: PokemonAgent::new(Box::new(policy)),
         }
     }
@@ -470,10 +499,32 @@ impl TestFixture {
         self.agent.update(&mut api, cycles).ok();
 
         self.total_cycles += cycles;
-        if self.total_cycles >= self.max_cycles {
-            self.gb.save_state_to_file("test_failure_state.bin").ok();
-            panic!("exceeded max cycles");
+
+        // Stall detection: GrindUntilLevel and CatchPokemon legitimately sit on the
+        // same step for long stretches — exempt them regardless of queue length.
+        let steps = self.agent.policy_steps_remaining();
+        let long_running = self.agent.policy_current_step_is_long_running();
+        if steps != self.last_steps_remaining {
+            self.last_steps_remaining = steps;
+            self.stall_cycles = MachineCycles::ZERO;
+        } else if !long_running && steps.map_or(false, |n| n > 1) {
+            self.stall_cycles += cycles;
+            if self.stall_cycles >= self.stall_threshold {
+                self.save_failure_artifacts("test_stall");
+                panic!("policy stalled — queue unchanged for {:?} of game time", self.stall_threshold);
+            }
         }
+
+        if self.total_cycles >= self.max_cycles {
+            self.save_failure_artifacts("test_timeout");
+            panic!("exceeded max cycles ({:?} game time)", self.max_cycles);
+        }
+    }
+
+    fn save_failure_artifacts(&self, name: &str) {
+        self.gb.save_state_to_file(&format!("{name}_state.bin")).ok();
+        self.gb.save_screenshot_to_file(&format!("{name}_screenshot.png")).ok();
+        println!("saved failure artifacts: {name}_state.bin, {name}_screenshot.png");
     }
 
     pub fn step_until_exhausted(&mut self) {
@@ -482,7 +533,12 @@ impl TestFixture {
         }
     }
 
-    pub fn api(&mut self) -> PokemonApi {
+    pub fn pimp_pokemon(&mut self) {
+        let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+        api.pimp_out_pokemon().expect("cannot pimp pokemon");
+    }
+
+    pub fn api(&mut self) -> PokemonApi<'_> {
         PokemonApi::new(&mut self.gb)
     }
 

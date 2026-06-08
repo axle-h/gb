@@ -259,6 +259,24 @@ impl Map {
     pub fn all() -> MapIter {
         Self::iter()
     }
+
+    /// Returns `true` if this map is a Pokémon Center.
+    pub fn is_pokemon_center(self) -> bool {
+        matches!(
+            self,
+            Map::ViridianPokecenter
+                | Map::PewterPokecenter
+                | Map::CeruleanPokecenter
+                | Map::MtMoonPokecenter
+                | Map::RockTunnelPokecenter
+                | Map::VermilionPokecenter
+                | Map::CeladonPokecenter
+                | Map::LavenderPokecenter
+                | Map::FuchsiaPokecenter
+                | Map::CinnabarPokecenter
+                | Map::SaffronPokecenter
+        )
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
