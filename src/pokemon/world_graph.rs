@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use crate::geometry::Point8;
-use crate::mmu::MMU;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::map::Map;
-use crate::pokemon::map_metadata::{CurrentMap, MapMetadataCache, PlayerFacingDirection};
 use crate::pokemon::tile::MetaTile;
 use crate::pokemon::tile_map::MetaTileMap;
 
@@ -73,103 +71,66 @@ pub struct MapStep {
 /// maps that are physically split into disconnected sections (e.g. Route 2 is cut in
 /// two by Viridian Forest): the south-section edges and north-section edges live under
 /// separate keys and are never conflated during pathfinding.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WorldGraph {
     adjacency: HashMap<(Map, Point8), Vec<Edge>>,
 }
 
 impl WorldGraph {
-    /// Build the world graph by BFS from Pallet Town.
+    /// A new, empty world graph.
     ///
-    /// Uses `MetaTileMap::all_reachable_warps_and_connections()` from each map's entry
-    /// position to discover which warps and connections are physically reachable, then
-    /// follows those edges to new maps until the reachable world is fully explored.
-    ///
-    /// Unlike the agent's `actions()` helper (which returns only the *nearest* warp per
-    /// destination map), this builder records **every** reachable warp tile so that cave
-    /// maps with multiple disconnected sections — each accessible from a different warp
-    /// exit — are fully explored.  For example, Mt Moon B1F/B2F contain four physically
-    /// isolated room-pairs whose inter-section links are only discoverable if all reachable
-    /// warps (not just the nearest) are followed.
-    pub fn build(mmu: &MMU) -> Self {
-        let mut cache = MapMetadataCache::default();
-        Self::build_with_cache(mmu, &mut cache)
+    /// The graph is built **incrementally** as the agent physically traverses the world:
+    /// each time the player lands in a map section, [`observe`] records that section's
+    /// *live, sprite-resolved* reachable warps/connections. This avoids the phantom edges of
+    /// an exhaustively pre-resolved graph (which, lacking runtime sprite state, routes through
+    /// NPC-blocked cave paths). The trade-off is that deterministic navigation cannot rely on
+    /// routing to a not-yet-visited map — forward map transitions must be specified explicitly.
+    pub fn new() -> Self {
+        Self { adjacency: HashMap::new() }
     }
 
-    /// Same as [`build`] but reuses an existing [`MapMetadataCache`].
-    pub fn build_with_cache(mmu: &MMU, cache: &mut MapMetadataCache) -> Self {
-        let mut adjacency: HashMap<(Map, Point8), Vec<Edge>> = HashMap::new();
-        // explored: (map, raw_entry_position) pairs already processed.
-        //
-        // We key on (Map, Point8) rather than just Map because some maps are physically
-        // split into disconnected sections by indoor gates or cave paths (e.g. Route2 is
-        // split by Viridian Forest). If we stopped re-exploring a map the moment we first
-        // saw it, we'd miss the sections reachable only from a second entry point.
-        //
-        // Termination is guaranteed: each unique (Map, Point8) is inserted at most once,
-        // and warp/connection destinations are fixed ROM values, so the set is finite.
-        let mut explored: HashSet<(Map, Point8)> = HashSet::new();
-        // queue: (map, raw_player_position) where raw = the value wXCoord/wYCoord holds
-        // (before MetaTileMap::new() adds connection-strip offsets).
-        let mut queue: VecDeque<(Map, Point8)> = VecDeque::new();
-
-        // Start in the middle of Pallet Town (10×9 blocks → 20×18 meta-tiles).
-        // No connection extras on west/south, so raw (9, 7) == expanded (9, 7).
-        let start = (Map::PalletTown, Point8 { x: 9, y: 7 });
-        queue.push_back(start);
-        explored.insert(start);
-
-        while let Some((map, raw_pos)) = queue.pop_front() {
-            let metadata = match cache.read_map(mmu, map) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let current_map = CurrentMap {
-                player_position: raw_pos,
-                player_direction: PlayerFacingDirection::Down,
-                sprites: vec![],
-                metadata,
-            };
-
-            let tile_map = MetaTileMap::new(&current_map);
-
-            // Use all_reachable_warps_and_connections() instead of actions() so that
-            // every reachable warp/connection tile is discovered, not just the nearest
-            // one per destination map.  This is critical for cave maps (Mt Moon, etc.)
-            // where multiple isolated sections each have warps to different positions in
-            // the same destination map.
-            for (src_pos, tile) in tile_map.all_reachable_warps_and_connections() {
+    /// Derive the warp/connection edges reachable by BFS from the player position in `tile_map`.
+    ///
+    /// This is the single source of truth for edge construction, used by [`observe`], which
+    /// records a node from the agent's *live* map — whose sprite overlay reflects the truly
+    /// visible NPCs and so excludes phantom connections through NPC-blocked paths.
+    fn edges_from_reachable(tile_map: &MetaTileMap, map: Map) -> Vec<Edge> {
+        tile_map
+            .all_reachable_warps_and_connections()
+            .into_iter()
+            .filter_map(|(src_pos, tile)| {
+                // Both warp and connection `to_position` are already in raw
+                // (wXCoord/wYCoord) space — no conversion needed.
                 let (to_map, raw_entry, kind) = match tile {
-                    MetaTile::Warp { to_map, to_position } => {
-                        // Warp destinations are already raw (same space as wXCoord/wYCoord).
-                        (to_map, to_position, EdgeKind::Warp)
-                    }
-                    MetaTile::Connection { to_map, to_position } => {
-                        // Connection `to_position` is raw (wXCoord/wYCoord space); no
-                        // conversion needed.  See ConnectedMapStrip::meta_tile_at().
-                        (to_map, to_position, EdgeKind::Connection)
-                    }
-                    _ => continue,
+                    MetaTile::Warp { to_map, to_position } => (to_map, to_position, EdgeKind::Warp),
+                    MetaTile::Connection { to_map, to_position } => (to_map, to_position, EdgeKind::Connection),
+                    _ => return None,
                 };
-
-                // `src_pos` is the warp/connection tile in the source map's expanded
-                // coordinate space — the tile the player steps on.
-                // Key by (map, raw_pos) so that disconnected sections of the same map
-                // (e.g. Route 2 south vs. north) are stored under separate keys and
-                // their edges are never conflated during pathfinding.
-                adjacency.entry((map, raw_pos)).or_default().push(Edge {
+                Some(Edge {
                     from: MapCoordinates::new(map, src_pos),
                     to: MapCoordinates::new(to_map, raw_entry),
                     kind,
-                });
+                })
+            })
+            .collect()
+    }
 
-                if explored.insert((to_map, raw_entry)) {
-                    queue.push_back((to_map, raw_entry));
-                }
-            }
-        }
 
-        Self { adjacency }
+    /// Refine the graph node `(map, entry)` from the agent's *live* map view.
+    ///
+    /// The initial graph is built without sprites, so it can contain phantom warp/connection
+    /// edges through paths that are actually blocked by NPCs at runtime (e.g. the Rocket
+    /// trainers on Mt Moon B2F). When the agent is physically standing in a map section, its
+    /// `MetaTileMap` includes the real visible-sprite overlay, so the reachable warps/connections
+    /// it observes are the ground truth. Overwriting the node with those edges lets the systematic
+    /// maze solver score visited sections accurately (and recognise dead-ends). Unvisited nodes
+    /// keep their optimistic edges, so connectivity toward the goal is never lost.
+    ///
+    /// `entry` must be the raw landing position the section is keyed under (equal to the agent's
+    /// coordinates on maps without connection strips, e.g. all cave maps).
+    pub fn observe(&mut self, map: Map, entry: Point8, tile_map: &MetaTileMap) {
+        let edges = Self::edges_from_reachable(tile_map, map);
+        self.adjacency.insert((map, entry), edges);
     }
 
     /// All outgoing edges from `map`, across all entry-point sections.
@@ -182,11 +143,13 @@ impl WorldGraph {
     }
 
     /// Number of distinct maps in the graph.
+    #[allow(dead_code)]
     pub fn map_count(&self) -> usize {
         self.adjacency.keys().map(|(m, _)| *m).collect::<HashSet<_>>().len()
     }
 
     /// Total directed-edge count.
+    #[allow(dead_code)]
     pub fn edge_count(&self) -> usize {
         self.adjacency.values().map(Vec::len).sum()
     }
@@ -199,6 +162,14 @@ impl WorldGraph {
     /// disconnected sections (e.g. Route 2 south then Route 2 north); consecutive
     /// occurrences are never the same section because no map has a self-edge.
     fn bfs_to_map(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<MapStep>> {
+        self.bfs_nodes(starts, to)
+            .map(|nodes| nodes.into_iter().map(|((m, _), via)| MapStep { map: m, via }).collect())
+    }
+
+    /// Like [`bfs_to_map`] but keeps the full `(map, raw_entry)` node per step (with the
+    /// `EdgeKind` used to enter it). The entry positions are exactly the raw `to_position`s
+    /// needed to encode explicit [`PolicyStep::EnterMap`] transitions.
+    fn bfs_nodes(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<((Map, Point8), Option<EdgeKind>)>> {
         type Node = (Map, Point8);
         let mut dist: HashMap<Node, u32> = HashMap::new();
         let mut came_from: HashMap<Node, (Node, EdgeKind)> = HashMap::new();
@@ -244,7 +215,28 @@ impl WorldGraph {
         }
         path_rev.reverse();
 
-        Some(path_rev.into_iter().map(|((m, _), via)| MapStep { map: m, via }).collect())
+        Some(path_rev)
+    }
+
+    /// The `(map, raw_entry)` node sequence of the shortest path from the **specific** section
+    /// `(from, from_entry)` to `to`, or `None` if unreachable in the currently-observed graph.
+    /// Used to derive explicit `EnterMap` steps: each node after the first is
+    /// `EnterMap { to_map: node.0, to_position: Some(node.1) }`.
+    pub fn shortest_node_path_from(&self, from: Map, from_entry: Point8, to: Map) -> Option<Vec<(Map, Point8)>> {
+        if from == to {
+            return None;
+        }
+        self.bfs_nodes(&[(from, from_entry)], to).map(|nodes| nodes.into_iter().map(|(n, _)| n).collect())
+    }
+
+    /// True if the section landed at `(map, entry)` has already been observed.
+    pub fn has_node(&self, map: Map, entry: Point8) -> bool {
+        self.adjacency.contains_key(&(map, entry))
+    }
+
+    /// All observed `(map, entry)` section nodes with their outgoing edges.
+    pub fn nodes(&self) -> Vec<((Map, Point8), Vec<Edge>)> {
+        self.adjacency.iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
     /// Shortest path from `from` to `to`, considering all entry sections of `from`.
@@ -269,7 +261,7 @@ impl WorldGraph {
     /// so edges belonging to a different disconnected section of the same map are never
     /// considered.  Used by `pick_shortest_path_action` to avoid false short-cuts through
     /// map sections that are not physically reachable from the current player position.
-    fn shortest_path_from_entry(&self, from: Map, from_entry: Point8, to: Map) -> Option<usize> {
+    pub fn shortest_path_from_entry(&self, from: Map, from_entry: Point8, to: Map) -> Option<usize> {
         if from == to {
             return Some(1);
         }
@@ -299,95 +291,88 @@ impl WorldGraph {
 }
 
 #[cfg(test)]
+impl WorldGraph {
+    /// Test-only: record a section `(map, entry)` with a fixed set of outgoing edges,
+    /// mimicking what `observe` derives from a live map. `edges` is
+    /// `(from_tile, to_map, to_landing, kind)`.
+    fn observe_edges(&mut self, map: Map, entry: Point8, edges: &[(Point8, Map, Point8, EdgeKind)]) {
+        let edges = edges
+            .iter()
+            .map(|&(from, to_map, to, kind)| Edge {
+                from: MapCoordinates::new(map, from),
+                to: MapCoordinates::new(to_map, to),
+                kind,
+            })
+            .collect();
+        self.adjacency.insert((map, entry), edges);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmu::MMU;
-    use crate::pokemon::map_metadata::MapMetadataCache;
-    use crate::pokemon::roms::POKERED;
 
-    fn graph() -> WorldGraph {
-        let mmu = MMU::from_rom(POKERED).unwrap();
-        WorldGraph::build(&mmu)
+    fn p(x: u8, y: u8) -> Point8 { Point8 { x, y } }
+
+    /// A small synthetic world observed incrementally, mirroring how the agent would build it
+    /// as it walks:  PalletTown ⇄ Route1 ⇄ ViridianCity, PalletTown ⇄ OaksLab (warp),
+    /// RedsHouse1F ⇄ RedsHouse2F (warp-only), and PalletTown → Route21 (dead-end).
+    fn small_world() -> WorldGraph {
+        use EdgeKind::*;
+        let mut g = WorldGraph::new();
+        g.observe_edges(Map::PalletTown, p(9, 7), &[
+            (p(9, 0),  Map::Route1,      p(9, 8),  Connection),
+            (p(12, 11), Map::OaksLab,    p(4, 11), Warp),
+            (p(5, 5),  Map::RedsHouse1F, p(3, 7),  Warp),
+            (p(9, 17), Map::Route21,     p(9, 0),  Connection),
+        ]);
+        g.observe_edges(Map::Route1, p(9, 8), &[
+            (p(9, 17), Map::PalletTown,  p(9, 0),  Connection),
+            (p(9, 0),  Map::ViridianCity, p(9, 17), Connection),
+        ]);
+        g.observe_edges(Map::ViridianCity, p(9, 17), &[
+            (p(9, 17), Map::Route1,      p(9, 0),  Connection),
+        ]);
+        g.observe_edges(Map::OaksLab, p(4, 11), &[
+            (p(4, 11), Map::PalletTown,  p(12, 11), Warp),
+        ]);
+        g.observe_edges(Map::RedsHouse1F, p(3, 7), &[
+            (p(7, 1),  Map::RedsHouse2F, p(7, 1),  Warp),
+        ]);
+        g.observe_edges(Map::RedsHouse2F, p(7, 1), &[
+            (p(7, 1),  Map::RedsHouse1F, p(3, 7),  Warp),
+        ]);
+        g.observe_edges(Map::Route21, p(9, 0), &[]); // dead-end (nothing observed onward)
+        g
     }
 
-    // ── graph construction ────────────────────────────────────────────────────
-
     #[test]
-    fn builds_without_crash() {
-        let g = graph();
-        // The tile-based graph is smaller than the header-based one (HM-blocked paths
-        // and impassable routes are excluded), but should still cover the core world.
-        assert!(g.map_count() > 50, "expected a large reachable world, got {}", g.map_count());
-        assert!(g.edge_count() > 100, "expected many edges, got {}", g.edge_count());
-    }
-
-    // ── neighbor queries ──────────────────────────────────────────────────────
-
-    #[test]
-    fn route2() {
-        let g = graph();
-        let neighbors = g.neighbors(Map::Route2);
-
-        for edge in neighbors {
-            println!("{}", edge);
-        }
+    fn empty_graph_has_no_paths() {
+        let g = WorldGraph::new();
+        assert!(g.shortest_path(Map::PalletTown, Map::Route1).is_none());
+        // trivial same-map path is always available
+        assert_eq!(g.shortest_path(Map::Route1, Map::Route1).unwrap().len(), 1);
     }
 
     #[test]
-    fn single_connection_pallet_to_route1() {
-        let g = graph();
+    fn observe_records_edges() {
+        let g = small_world();
         let neighbors = g.neighbors(Map::PalletTown);
-        let has_route1 = neighbors.iter().any(|e| {
-            e.to.map == Map::Route1 && e.kind == EdgeKind::Connection
-        });
-        assert!(has_route1, "PalletTown should have a connection edge to Route1; got {neighbors:?}");
+        assert!(neighbors.iter().any(|e| e.to.map == Map::Route1 && e.kind == EdgeKind::Connection));
+        assert!(neighbors.iter().any(|e| e.to.map == Map::OaksLab && e.kind == EdgeKind::Warp));
     }
-
-    #[test]
-    fn multiple_connections_pallet_town() {
-        let g = graph();
-        let neighbors = g.neighbors(Map::PalletTown);
-        let has_north = neighbors.iter().any(|e| e.to.map == Map::Route1);
-        // Route21 is a water-only route — its south connection strip is all
-        // ConnectionWater tiles (impassable without Surf).  PalletTown has no
-        // walkable connection to Route21 and is therefore not expected to appear
-        // as a graph neighbour.
-        assert!(has_north, "PalletTown missing connection to Route1");
-    }
-
-    #[test]
-    fn connections_and_warps_pallet_town() {
-        let g = graph();
-        let neighbors = g.neighbors(Map::PalletTown);
-        let has_connection = neighbors.iter().any(|e| e.kind == EdgeKind::Connection);
-        let has_warp = neighbors.iter().any(|e| e.kind == EdgeKind::Warp);
-        assert!(has_connection, "PalletTown should have walking connections");
-        assert!(has_warp, "PalletTown should have warp edges (OaksLab, Red's house, …)");
-    }
-
-    #[test]
-    fn single_warp_oaks_lab_to_pallet_town() {
-        let g = graph();
-        let neighbors = g.neighbors(Map::OaksLab);
-        let exits_to_pallet = neighbors.iter().any(|e| e.to.map == Map::PalletTown);
-        assert!(exits_to_pallet, "OaksLab should warp back to PalletTown; got {neighbors:?}");
-    }
-
-    // ── pathfinding ───────────────────────────────────────────────────────────
 
     #[test]
     fn trivial_path_same_map() {
-        let g = graph();
+        let g = small_world();
         let path = g.shortest_path(Map::PalletTown, Map::PalletTown).unwrap();
-        assert_eq!(path.len(), 1);
-        assert_eq!(path[0], MapStep { map: Map::PalletTown, via: None });
+        assert_eq!(path, vec![MapStep { map: Map::PalletTown, via: None }]);
     }
 
     #[test]
     fn path_single_connection() {
-        let g = graph();
+        let g = small_world();
         let path = g.shortest_path(Map::PalletTown, Map::Route1).unwrap();
-        // PalletTown → Route1 is one hop via a walking connection.
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].map, Map::PalletTown);
         assert_eq!(path[0].via, None);
@@ -396,135 +381,83 @@ mod tests {
     }
 
     #[test]
-    fn path_single_warp_pallet_to_oaks_lab() {
-        let g = graph();
+    fn path_single_warp() {
+        let g = small_world();
         let path = g.shortest_path(Map::PalletTown, Map::OaksLab).unwrap();
-        assert_eq!(path.first().unwrap().map, Map::PalletTown);
         assert_eq!(path.last().unwrap().map, Map::OaksLab);
-        // No map should appear consecutively.
-        for window in path.windows(2) {
-            assert_ne!(window[0].map, window[1].map, "path should not revisit the same map consecutively");
-        }
-        let uses_warp = path.iter().any(|s| s.via == Some(EdgeKind::Warp));
-        assert!(uses_warp, "path to OaksLab should include at least one warp");
+        assert!(path.iter().any(|s| s.via == Some(EdgeKind::Warp)));
     }
 
     #[test]
-    fn long_route_pallet_to_cerulean() {
-        // PalletTown → Route1 → ViridianCity → Route2 → … → CeruleanCity (multi-hop)
-        let g = graph();
-        let path = g.shortest_path(Map::PalletTown, Map::CeruleanCity).unwrap();
-        assert!(path.len() > 2, "expected a multi-hop path, got {path:?}");
-        assert!(path.iter().any(|s| s.map == Map::ViridianForest), "must go through viridian forest");
-        assert_eq!(path.first().unwrap().map, Map::PalletTown);
-        assert_eq!(path.last().unwrap().map, Map::CeruleanCity);
+    fn multi_hop_path() {
+        let g = small_world();
+        let path = g.shortest_path(Map::PalletTown, Map::ViridianCity).unwrap();
+        let maps: Vec<_> = path.iter().map(|s| s.map).collect();
+        assert_eq!(maps, vec![Map::PalletTown, Map::Route1, Map::ViridianCity]);
     }
 
     #[test]
-    fn path_with_multiple_warps() {
-        // RedsHouse1F → RedsHouse2F is a pure warp-only indoor path.
-        let g = graph();
+    fn indoor_warp_only_path() {
+        let g = small_world();
         let path = g.shortest_path(Map::RedsHouse1F, Map::RedsHouse2F).unwrap();
-        assert_eq!(path.first().unwrap().map, Map::RedsHouse1F);
-        assert_eq!(path.last().unwrap().map, Map::RedsHouse2F);
         for step in path.iter().skip(1) {
-            assert_eq!(step.via, Some(EdgeKind::Warp), "indoor→indoor should be warp-only");
+            assert_eq!(step.via, Some(EdgeKind::Warp));
         }
     }
 
     #[test]
     fn cyclic_graph_no_infinite_loop() {
-        // Route1 ↔ PalletTown ↔ Route21 forms a cycle. Pathfinding must terminate.
-        let g = graph();
-        let _ = g.shortest_path(Map::Route21, Map::Route1);
-        // If we reach here without hanging, cycles are handled correctly.
+        // PalletTown ⇄ Route1 ⇄ ViridianCity forms cycles; pathfinding must terminate.
+        let g = small_world();
+        let _ = g.shortest_path(Map::ViridianCity, Map::OaksLab);
     }
 
     #[test]
-    fn path_is_optimal_length() {
-        // ViridianCity → Route1 → PalletTown = at least 2 hops.
-        let g = graph();
-        let path = g.shortest_path(Map::ViridianCity, Map::PalletTown).unwrap();
-        assert!(path.len() >= 2, "path should be at least 2 hops");
+    fn no_path_to_unobserved_map() {
+        let g = small_world();
+        // We never observed anything reaching CeruleanCity — so it is unreachable, the
+        // "hard fail" signal that a deterministic policy is under-specified.
+        assert!(g.shortest_path(Map::PalletTown, Map::CeruleanCity).is_none());
+        // Route21 is observed but a dead-end; still no path onward.
+        assert!(g.shortest_path(Map::Route21, Map::Route1).is_none());
     }
 
     #[test]
-    fn no_path_to_disconnected_map() {
-        // UnusedMap0B is a placeholder; no reachable map has a warp or connection to it.
-        let g = graph();
-        let result = g.shortest_path(Map::PalletTown, Map::UnusedMap0B);
-        assert!(result.is_none(), "should return None for unreachable map");
+    fn disconnected_sections_keyed_separately() {
+        // The same map reached at two different landing positions must not conflate edges:
+        // section A only reaches X, section B only reaches Y.
+        use EdgeKind::Warp;
+        let mut g = WorldGraph::new();
+        g.observe_edges(Map::Route2, p(3, 5), &[(p(3, 5), Map::ViridianForest, p(5, 0), Warp)]);
+        g.observe_edges(Map::Route2, p(3, 60), &[(p(3, 60), Map::PewterCity, p(14, 35), Warp)]);
+        // From the south section we can reach ViridianForest but not PewterCity...
+        assert!(g.shortest_path_from_entry(Map::Route2, p(3, 5), Map::ViridianForest).is_some());
+        assert!(g.shortest_path_from_entry(Map::Route2, p(3, 5), Map::PewterCity).is_none());
+        // ...and vice versa from the north section.
+        assert!(g.shortest_path_from_entry(Map::Route2, p(3, 60), Map::PewterCity).is_some());
     }
 
     #[test]
-    fn path_nodes_are_connected_by_graph_edges() {
-        // For a long path, every consecutive pair must be a valid edge in the graph.
-        let g = graph();
-        let path = g.shortest_path(Map::PalletTown, Map::CeruleanCity).unwrap();
-        for window in path.windows(2) {
-            let from = window[0].map;
-            let to_step = window[1];
-            let edge_exists = g.neighbors(from).iter().any(|e| e.to.map == to_step.map);
-            assert!(edge_exists, "no edge from {from} to {} in graph", to_step.map);
-        }
-    }
-
-    // ── connection tile border sanity ─────────────────────────────────────────
-    //
-    // In the expanded tile map, connection strips always occupy the single extra
-    // row/column at the map boundary. The tile the player steps on to enter the
-    // next map must therefore lie on one of the four map edges.
-
-    #[test]
-    fn north_connection_pallet_to_route1_on_top_border() {
-        // The north connection strip sits at expanded y=0.
-        let g = graph();
-        let edge = g.neighbors(Map::PalletTown)
-            .into_iter()
-            .find(|e| e.to.map == Map::Route1 && e.kind == EdgeKind::Connection)
-            .expect("PalletTown should have a connection edge to Route1");
-        assert_eq!(edge.from.location.y, 0,
-            "PalletTown→Route1 connection tile should be on the top row (y=0)");
-    }
-
-    #[test]
-    fn south_connection_pallet_to_route21_on_bottom_border() {
-        // Route21 is an ocean route accessible only via Surf.  The south connection
-        // strip of PalletTown is entirely ConnectionWater tiles — the graph correctly
-        // omits this edge.  This test verifies there is NO walkable connection edge
-        // to Route21, consistent with the water-only barrier.
-        let g = graph();
-        let edge_to_route21 = g.neighbors(Map::PalletTown)
-            .into_iter()
-            .find(|e| e.to.map == Map::Route21 && e.kind == EdgeKind::Connection);
-        assert!(edge_to_route21.is_none(),
-            "PalletTown should NOT have a walkable connection to the water-only Route21; \
-             got {:?}", edge_to_route21);
-    }
-
-    /// Every Connection edge's `from` position must lie on at least one map border.
-    /// Connection strips are always placed in the single extra row/column at the boundary.
-    #[test]
-    fn connection_tiles_lie_on_a_map_border() {
-        let mmu = MMU::from_rom(POKERED).unwrap();
-        let mut cache = MapMetadataCache::default();
-        let g = WorldGraph::build_with_cache(&mmu, &mut cache);
-        for map in Map::all() {
-            for edge in g.neighbors(map) {
-                if edge.kind != EdgeKind::Connection { continue; }
-                let Ok(meta) = cache.read_map(&mmu, map) else { continue };
-                let dims = meta.dimensions();
-                let max_x = dims.full_width().saturating_sub(1) as u8;
-                let max_y = dims.full_height().saturating_sub(1) as u8;
-                let loc = edge.from.location;
-                let on_border = loc.x == 0 || loc.y == 0 || loc.x == max_x || loc.y == max_y;
-                assert!(
-                    on_border,
-                    "{map}: connection edge to {:?} at {loc:?} is not on any border \
-                     (max_x={max_x}, max_y={max_y})",
-                    edge.to.map,
-                );
-            }
-        }
+    fn pick_shortest_path_action_routes_toward_target() {
+        use crate::pokemon::tile::MetaTile;
+        let g = small_world();
+        // On PalletTown, two candidate warps/connections: toward Route1 (leads to Viridian)
+        // and toward OaksLab (dead-endish). Target ViridianCity → should pick the Route1 one.
+        let mk = |to_map: Map, to: Point8| OverworldAction {
+            map: Map::PalletTown,
+            origin: p(9, 7),
+            destination: to,
+            tile: MetaTile::Warp { to_map, to_position: to },
+            route: vec![],
+        };
+        let actions = vec![
+            mk(Map::OaksLab, p(4, 11)),
+            OverworldAction {
+                tile: MetaTile::Connection { to_map: Map::Route1, to_position: p(9, 8) },
+                ..mk(Map::Route1, p(9, 8))
+            },
+        ];
+        let chosen = g.pick_shortest_path_action(&actions, Map::ViridianCity).unwrap();
+        assert_eq!(chosen.tile, MetaTile::Connection { to_map: Map::Route1, to_position: p(9, 8) });
     }
 }

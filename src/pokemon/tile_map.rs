@@ -18,6 +18,12 @@ pub struct MetaTileMap {
     pub width: usize,
     pub height: usize,
     pub meta_tiles: Vec<MetaTile>,
+    /// Bottom-left raw tile ID of each meta-tile (parallel to `meta_tiles`). Used to evaluate
+    /// `tile_pair_collisions` during BFS. `0xFF` for border/connection cells.
+    pub raw_tile_ids: Vec<u8>,
+    /// Unordered raw-tile-ID pairs the player may not walk between in this tileset (elevation
+    /// boundaries from pokered `TilePairCollisionsLand`). Empty for most tilesets.
+    pub tile_pair_collisions: Vec<(u8, u8)>,
     pub sprites: Vec<Sprite>,
     /// Unique `(destination_map, destination_position)` pairs reachable via warp tiles.
     /// Keyed on destination position so that two staircase/door warps that lead to
@@ -57,8 +63,41 @@ impl MetaTileMap {
             connection_targets: meta_tiles.iter()
                 .filter_map(|t| if let MetaTile::Connection { to_map, .. } = t { Some(*to_map) } else { None })
                 .collect(),
+            raw_tile_ids: map.metadata.raw_tile_ids.clone(),
+            tile_pair_collisions: map.metadata.tile_pair_collisions.clone(),
             meta_tiles,
         }
+    }
+
+    /// A direction to an `Empty` (freely walkable, not pair-blocked) neighbour of `pos`, if any.
+    /// Used to step off a warp tile the player is standing on so it can be re-triggered by
+    /// stepping back on.
+    fn walkable_neighbor_dir(&self, pos: Point8) -> Option<JoypadButton> {
+        let neighbors = [
+            (JoypadButton::Down,  Point8 { x: pos.x,                 y: pos.y.wrapping_add(1) }),
+            (JoypadButton::Up,    Point8 { x: pos.x,                 y: pos.y.wrapping_sub(1) }),
+            (JoypadButton::Left,  Point8 { x: pos.x.wrapping_sub(1), y: pos.y                 }),
+            (JoypadButton::Right, Point8 { x: pos.x.wrapping_add(1), y: pos.y                 }),
+        ];
+        neighbors.into_iter().find_map(|(dir, nb)| {
+            let inb = (nb.x as usize) < self.width && (nb.y as usize) < self.height;
+            (inb
+                && !self.pair_blocked(pos, nb)
+                && self.meta_tiles[nb.x as usize + nb.y as usize * self.width] == MetaTile::Empty)
+                .then_some(dir)
+        })
+    }
+
+    /// True if the player may not step between meta-tiles `a` and `b` because their bottom-left
+    /// raw tile IDs form a forbidden pair in this tileset (pokered `TilePairCollisionsLand`).
+    /// The check is symmetric, matching `CheckForTilePairCollisions`.
+    fn pair_blocked(&self, a: Point8, b: Point8) -> bool {
+        if self.tile_pair_collisions.is_empty() { return false; }
+        let ta = self.raw_tile_ids[a.x as usize + a.y as usize * self.width];
+        let tb = self.raw_tile_ids[b.x as usize + b.y as usize * self.width];
+        self.tile_pair_collisions.iter().any(|&(t1, t2)| {
+            (ta == t1 && tb == t2) || (ta == t2 && tb == t1)
+        })
     }
 
     fn tile_at(&self, point: Point8) -> MetaTile {
@@ -146,9 +185,20 @@ impl MetaTileMap {
                         }
                     }
                 } else {
+                    // Elevation boundary: the player cannot step between certain tile pairs
+                    // even though both are passable (e.g. Cavern $20↔$05). Skip this edge so
+                    // `nb` may still be reached from a non-blocked neighbour.
+                    if self.pair_blocked(pos, nb) { continue; }
                     dist.insert(nb, d + 1);
                     came_from.insert(nb, (pos, dir));
-                    if !matches!(tile, MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree)
+                    // Warp and Connection tiles are terminal: the player can reach one but cannot
+                    // walk *through* it, because stepping onto it fires the transition. Not
+                    // queueing them keeps routes to a specific warp from crossing (and triggering)
+                    // a different warp/connection en route.
+                    if !matches!(tile,
+                        MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water
+                        | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree
+                        | MetaTile::Warp { .. } | MetaTile::Connection { .. })
                     {
                         queue.push_back(nb);
                     }
@@ -206,9 +256,12 @@ impl MetaTileMap {
             else { *route.last().unwrap_or(&JoypadButton::Up) };
 
             if route.is_empty() {
-                // Already on the warp tile: step off then back on to trigger it.
-                route.push(opposite_dir(enter_dir));
-                route.push(enter_dir);
+                // Already standing on the warp tile: a warp fires on the step ONTO it, not while
+                // standing still, so step off to a genuinely walkable neighbour then step back on.
+                // Use a real Empty neighbour (defaulting Down can walk into a wall and jam).
+                let step_off = self.walkable_neighbor_dir(dest).unwrap_or_else(|| opposite_dir(enter_dir));
+                route.push(step_off);
+                route.push(opposite_dir(step_off));
             } else {
                 route.push(enter_dir);
             }

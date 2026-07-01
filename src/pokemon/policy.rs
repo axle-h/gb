@@ -4,9 +4,9 @@ use std::sync::mpsc::{self, Receiver};
 use rand::prelude::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use crate::mmu::MMU;
 use crate::pokemon::GameState;
 use crate::pokemon::actions::OverworldAction;
+use crate::geometry::Point8;
 use crate::pokemon::badge::Badge;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{BattleAction, BattleType};
@@ -23,7 +23,13 @@ use crate::pokemon::world_graph::WorldGraph;
 /// All methods return `Option<_>`. `None` means "not ready yet — ask again next frame".
 /// This keeps the game loop running while the policy waits for input.
 pub trait Policy {
-    fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction>;
+    /// Choose the next overworld action.
+    ///
+    /// `world_graph` is the agent's **incrementally-built** map graph — it only contains
+    /// sections the player has already physically visited (accurate, sprite-resolved). Use it
+    /// for backtracking to known places (e.g. heal-return to a Pokémon Center); forward travel
+    /// into not-yet-visited maps must be scripted with explicit [`PolicyStep::EnterMap`] steps.
+    fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction>;
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction>;
 
     /// Called when the nickname-entry screen opens for `species`.
@@ -67,7 +73,7 @@ pub trait Policy {
 pub struct RandomPolicy;
 
 impl Policy for RandomPolicy {
-    fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+    fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         state.map.actions().into_iter().choose(&mut rand::rng())
     }
 
@@ -106,7 +112,7 @@ impl Default for ConsolePolicy {
 }
 
 impl Policy for ConsolePolicy {
-    fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+    fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         let actions = state.map.actions();
         if actions.is_empty() { return None; }
 
@@ -224,7 +230,7 @@ impl Policy for ConsolePolicy {
 }
 
 
-fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
+pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     let battle_state = state.battle.as_ref()?;
 
     let mut opts = battle_state.player.available_battle_moves();
@@ -274,8 +280,22 @@ fn all_damaging_moves_low_pp(actions: &[BattleAction]) -> bool {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PolicyStep {
     Goto { map: Map, strict: bool },
+    /// Take exactly one explicit map transition: walk to and use the warp/connection on the
+    /// current map that leads to `to_map` (matching the raw landing `to_position` when given, to
+    /// disambiguate maps with several warps to the same target — e.g. Mt Moon). This is how the
+    /// deterministic policy crosses not-yet-explored mazes; it is a **hard requirement** — if the
+    /// transition is not reachable on the current map the agent stalls (proving under-specification)
+    /// rather than silently rerouting over an inaccurate pre-resolved graph.
+    EnterMap { to_map: Map, to_position: Option<Point8> },
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
+    /// Walk to and pick up an item sprite (a Poké Ball on the ground), staying on this step until
+    /// the sprite is gone. Unlike [`Interact`], this does **not** pop after issuing a single walk:
+    /// picking up an item can be interrupted (e.g. the Mt Moon fossil area triggers the Super Nerd
+    /// battle at the only approach tile), so the step persists and re-issues the walk after each
+    /// interruption until the item sprite disappears from the map. Also used to clear item-sprite
+    /// blockers that plug a corridor (collecting one Mt Moon fossil opens the exit passage).
+    CollectItem(MapSprite),
     DefeatGymLeader { leader: MapSprite, badge: Badge },
     /// Walk in grass and throw Pokéballs until a Pokémon is caught.
     CatchPokemon { species: PokemonSpecies, on_map: Map },
@@ -358,7 +378,6 @@ impl PolicyStep {
 pub struct DeterministicPolicy {
     rng: StdRng,
     queue: VecDeque<PolicyStep>,
-    world_graph: WorldGraph,
     name_picker: PokemonNamePicker,
     /// The last Pokémon Center where the player was healed.
     pub last_pokemon_center: Option<Map>,
@@ -369,25 +388,46 @@ pub struct DeterministicPolicy {
 }
 
 impl DeterministicPolicy {
-    pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>, world_graph: WorldGraph) -> Self {
+    pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
             queue: steps.into_iter().collect(),
-            world_graph,
             name_picker: PokemonNamePicker::seed_from_u64(seed),
             last_pokemon_center: None,
             heal_return: None,
         }
     }
 
-    pub fn complete_game(seed: u64, mmu: &MMU) -> Self {
-        Self::new(seed, PolicyStep::complete_game_steps(), WorldGraph::build(mmu))
+    /// Route one hop toward `target` over the **incremental** world graph.
+    ///
+    /// The graph only contains sections the agent has already visited (accurate, sprite-resolved),
+    /// so this succeeds for backtracking / already-explored territory (heal-return, reaching a map
+    /// the explicit `EnterMap` steps have already led through) and returns `None` for a not-yet-
+    /// visited target — the signal that the deterministic policy is under-specified.
+    fn route_toward(world_graph: &WorldGraph, actions: &[OverworldAction], target: Map) -> Option<OverworldAction> {
+        world_graph.pick_shortest_path_action(actions, target)
+    }
+
+    /// The action that takes the warp/connection to `to_map` (matching raw `to_position` when
+    /// given) from the current map, or `None` if no such transition is reachable here.
+    fn enter_map_action(actions: &[OverworldAction], to_map: Map, to_position: Option<Point8>) -> Option<OverworldAction> {
+        actions.iter().find(|a| match a.tile {
+            MetaTile::Warp { to_map: m, to_position: p }
+            | MetaTile::Connection { to_map: m, to_position: p } => {
+                m == to_map && to_position.map_or(true, |want| want == p)
+            }
+            _ => false,
+        }).cloned()
+    }
+
+    pub fn complete_game(seed: u64) -> Self {
+        Self::new(seed, PolicyStep::complete_game_steps())
     }
 }
 
 impl Policy for DeterministicPolicy {
 
-    fn pick_overworld_action(&mut self, state: &GameState) -> Option<OverworldAction> {
+    fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction> {
         if state.map.map.is_pokemon_center() {
             self.last_pokemon_center = Some(state.map.map);
         }
@@ -396,8 +436,9 @@ impl Policy for DeterministicPolicy {
 
         // ── Heal-return detour ────────────────────────────────────────────────
         // When the active Pokémon ran low on PP in a wild battle we fled and
-        // stored the target Pokémon Center in `heal_return`.  Route there and
-        // talk to the Nurse before resuming the main queue.
+        // stored the target Pokémon Center in `heal_return`.  Route there over the
+        // incrementally-built graph (the pokecenter and the way back are already known,
+        // since we walked here) and talk to the Nurse before resuming the main queue.
         if let Some(pokecenter) = self.heal_return {
             return if state.map.map == pokecenter {
                 // Arrived — find and interact with the Nurse.
@@ -410,21 +451,31 @@ impl Policy for DeterministicPolicy {
                 }
             } else {
                 // Still travelling — pick next step toward the pokecenter.
-                self.world_graph.pick_shortest_path_action(&actions, pokecenter)
+                Self::route_toward(world_graph, &actions, pokecenter)
             };
         }
 
         let action_tiles: Vec<_> = actions.iter().map(|a| format!("{:?}", a.tile)).collect();
-        println!("[policy] map={} actions=[{}]", state.map.map, action_tiles.join(", "));
+        println!("[policy] map={} pos={} actions=[{}]", state.map.map, state.map.player_position, action_tiles.join(", "));
         loop {
             let step = self.queue.front()?.clone();
             return match step {
+                PolicyStep::EnterMap { to_map, to_position } => {
+                    if state.map.map == to_map {
+                        self.queue.pop_front();
+                        continue;
+                    }
+                    // Explicit single map transition: take exactly this warp/connection.
+                    // If it isn't reachable on the current map the policy is under-specified —
+                    // return None and let the agent stall/hard-fail.
+                    Self::enter_map_action(&actions, to_map, to_position)
+                },
                 PolicyStep::Goto { map: target, strict } => {
                     if state.map.map == target {
                         self.queue.pop_front();
                         continue;
                     }
-                    let action = self.world_graph.pick_shortest_path_action(&actions, target);
+                    let action = Self::route_toward(world_graph, &actions, target);
                     if !strict && action.is_some() {
                         // a non-strict goto action can be interrupted
                         self.queue.pop_front();
@@ -433,7 +484,7 @@ impl Policy for DeterministicPolicy {
                 },
                 PolicyStep::CatchPokemon { species, on_map } => {
                     if state.map.map != on_map {
-                        let action = self.world_graph.pick_shortest_path_action(&actions, on_map);
+                        let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
                             println!("[policy] want to catch pokemon {} in {}, but no path there!", species, on_map);
                             self.queue.pop_front();
@@ -462,7 +513,7 @@ impl Policy for DeterministicPolicy {
                 },
                 PolicyStep::GrindUntilLevel { target_level, on_map } => {
                     if state.map.map != on_map {
-                        let action = self.world_graph.pick_shortest_path_action(&actions, on_map);
+                        let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
                             println!("[policy] want to grind until level {} in {}, but no path there!", target_level, on_map);
                             self.queue.pop_front();
@@ -493,7 +544,7 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     } else if state.map.map != leader.map() {
-                        let action = self.world_graph.pick_shortest_path_action(&actions, leader.map());
+                        let action = Self::route_toward(world_graph, &actions, leader.map());
                         if action.is_none() {
                             println!("[policy] want to defeat {} to obtain the {}, but no path there!", leader, badge);
                             self.queue.pop_front();
@@ -512,7 +563,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::Interact(sprite) => {
                     let map = sprite.map();
                     if state.map.map != map {
-                        let action = self.world_graph.pick_shortest_path_action(&actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to interact with {} on {}, but no path there!", sprite, map);
                             self.queue.pop_front();
@@ -528,9 +579,32 @@ impl Policy for DeterministicPolicy {
                         action.cloned()
                     }
                 }
+                PolicyStep::CollectItem(sprite) => {
+                    let map = sprite.map();
+                    if state.map.map != map {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            println!("[policy] want to collect {} on {}, but no path there!", sprite, map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else if !state.map.sprites.iter().any(|s| !s.hidden && s.name == sprite.name) {
+                        // Item picked up (or removed by a script) — its sprite is gone. Done.
+                        self.queue.pop_front();
+                        continue;
+                    } else {
+                        // Keep walking to and pressing A on the item until it disappears; do NOT
+                        // pop on issue, so a battle/script interruption (Mt Moon Super Nerd) mid-walk
+                        // doesn't abandon the pickup.
+                        actions.iter()
+                            .find(|a| a.tile == MetaTile::Sprite(sprite.name))
+                            .cloned()
+                    }
+                }
                 PolicyStep::BuyFromMart { item, map } => {
                     if state.map.map != map {
-                        let action = self.world_graph.pick_shortest_path_action(&actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to buy {} from {} but no path there!", item, map);
                             self.queue.pop_front();

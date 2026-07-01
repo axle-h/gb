@@ -32,10 +32,22 @@ pub struct MapMetadata {
     /// Maps ledge tile IDs to their jump direction. Only populated for the Overworld tileset,
     /// which is the only tileset where HandleLedges fires.
     pub ledge_tiles: HashMap<u8, JumpDirection>,
+    /// Pairs of raw tile IDs that the player may not walk *between* in this tileset, even
+    /// though both tiles are individually passable (pokered `TilePairCollisionsLand` filtered
+    /// to the current tileset). Used to simulate elevation boundaries — e.g. in the Cavern
+    /// tileset you cannot step between tile $20 and tile $05. The pair is unordered: a move is
+    /// blocked if either (standing, front) or (front, standing) matches an entry.
+    pub tile_pair_collisions: Vec<(u8, u8)>,
     /// Pre-computed tile grid without sprites. Tiles, warps, and connection strips are all
     /// ROM-derived and never change, so this is computed once at construction and cloned
     /// in `meta_tiles` before the sprite overlay is applied.
     pub meta_tiles_base: Vec<MetaTile>,
+    /// Bottom-left raw tile ID of each expanded meta-tile (parallel to `meta_tiles_base`).
+    /// This is the sub-tile pokered's collision check reads (`lda_coord 8,9` for the player's
+    /// standing tile, and the bottom-left of the meta-tile in front for the destination).
+    /// `0xFF` marks border/connection-strip cells that have no source-map tile. Needed to
+    /// evaluate `tile_pair_collisions` during pathfinding.
+    pub raw_tile_ids: Vec<u8>,
 }
 
 impl MapMetadata {
@@ -187,6 +199,29 @@ impl MapMetadata {
         }
 
         result
+    }
+
+    /// Build the bottom-left raw tile ID grid parallel to `meta_tiles_base`.
+    ///
+    /// For each in-map meta-tile this is `tile_id(mx*2, my*2 + 1)` — the bottom-left sub-tile,
+    /// the one pokered's collision and tile-pair checks read. Border/connection-strip cells are
+    /// left as `0xFF` (they belong to an adjacent map and are never the player's standing tile).
+    pub fn build_raw_tile_ids(&self) -> Vec<u8> {
+        let dimensions = self.dimensions();
+        let exp_width  = dimensions.full_width();
+        let exp_height = dimensions.full_height();
+        let mut ids = vec![0xFFu8; exp_width * exp_height];
+
+        let width_tiles  = self.map_header.width  as usize * Self::BLOCK_TILE_WIDTH;
+        let height_tiles = self.map_header.height as usize * Self::BLOCK_TILE_WIDTH;
+        for tile_y in (1..height_tiles).step_by(Self::TILES_PER_META) {
+            let my = tile_y / Self::TILES_PER_META + dimensions.north_extra;
+            for tile_x in (0..width_tiles).step_by(Self::TILES_PER_META) {
+                let mx = tile_x / Self::TILES_PER_META + dimensions.west_extra;
+                ids[mx + my * exp_width] = self.tile_id(tile_x, tile_y);
+            }
+        }
+        ids
     }
 }
 
@@ -414,6 +449,8 @@ impl MapMetadataReader for MMU {
             HashMap::new()
         };
 
+        let tile_pair_collisions = self.read_tile_pair_collisions(tileset_id);
+
         let mut metadata = MapMetadata {
             map,
             map_header,
@@ -426,9 +463,12 @@ impl MapMetadataReader for MMU {
             grass_tile_id: ts.grass_tile,
             connected_strips,
             ledge_tiles,
+            tile_pair_collisions,
             meta_tiles_base: Vec::new(),
+            raw_tile_ids: Vec::new(),
         };
         metadata.meta_tiles_base = metadata.build_meta_tiles_base();
+        metadata.raw_tile_ids = metadata.build_raw_tile_ids();
         Ok(metadata)
     }
 
@@ -593,6 +633,25 @@ impl MMU {
             i += 4;
         }
         result
+    }
+
+    /// Reads `TilePairCollisionsLand` and returns the `(tile1, tile2)` pairs that apply to
+    /// `tileset`. The table is 3-byte entries `[tileset, tile1, tile2]` terminated by `0xFF`.
+    ///
+    /// Only the Land table is used: the Water table applies exclusively while surfing, which
+    /// the agent never does. Mirrors `CheckForTilePairCollisions` in home/overworld.asm.
+    fn read_tile_pair_collisions(&self, tileset: u8) -> Vec<(u8, u8)> {
+        let data = self.rom_data_from_rom_pointer(&pokered_symbols::TilePairCollisionsLand, 64);
+        let mut pairs = vec![];
+        let mut i = 0;
+        while i + 2 < data.len() {
+            if data[i] == 0xFF { break; }
+            if data[i] == tileset {
+                pairs.push((data[i + 1], data[i + 2]));
+            }
+            i += 3;
+        }
+        pairs
     }
 
     /// Reads an FF-terminated list of walkable tile IDs from a bank-0 ROM address.
