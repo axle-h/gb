@@ -106,6 +106,14 @@ mod tests {
             Some(self.game_state.mode)
         }
 
+        fn trainer_battle_pending(&self) -> bool {
+            false
+        }
+
+        fn raw_player_coords(&self) -> crate::geometry::Point8 {
+            self.game_state.map.player_position
+        }
+
         fn game_state(&self) -> Result<GameState, String> {
             Ok(self.game_state.clone())
         }

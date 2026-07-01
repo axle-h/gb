@@ -69,6 +69,16 @@ pub trait PokemonApiTrait {
     fn toggle_button(&mut self, button: JoypadButton);
     fn read_joypad_state(&self) -> JoypadButtonState;
     fn game_mode(&self) -> Option<GameMode>;
+    /// True when a trainer has engaged the player (e.g. via line of sight) and the battle is
+    /// about to start, but `wIsInBattle` has not yet flipped to its trainer-battle value.
+    /// In this window the game initialises the battle on its own — the agent must NOT press
+    /// any button (a held direction wedges the engagement and a battle never starts).
+    fn trainer_battle_pending(&self) -> bool;
+    /// The player's **raw** map coordinates (`wXCoord`/`wYCoord`) — i.e. before the
+    /// connection-strip offsets that `MetaTileMap` adds to produce "expanded" coordinates.
+    /// These are the coordinate space warp `to_position`s and world-graph node keys use, so the
+    /// agent keys the incremental world graph by these when it lands on a new map.
+    fn raw_player_coords(&self) -> Point8;
     fn game_state(&self) -> Result<GameState, String>;
     fn on_screen_text(&self, only_message_box: bool) -> Option<String>;
     fn menu_state(&self) -> Option<MenuState>;
@@ -121,7 +131,9 @@ impl<'a> PokemonApi<'a> {
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {
         let player_state = self.game_state()?;
 
-        const EPIC_BAG: [BagItem; 20] = [
+        // 19 items — deliberately one slot short of Bag::MAX_ITEMS (20) so the agent can still pick
+        // up ground items (e.g. the Mt Moon fossil, whose pickup fails with "no room" on a full bag).
+        const EPIC_BAG: [BagItem; 19] = [
             BagItem::new(ItemId::Revive, 99),
             BagItem::new(ItemId::FullHeal, 99),
             BagItem::new(ItemId::Potion, 99),
@@ -141,7 +153,6 @@ impl<'a> PokemonApi<'a> {
             BagItem::new(ItemId::UltraBall, 99),
             BagItem::new(ItemId::MasterBall, 99),
             BagItem::new(ItemId::RareCandy, 99),
-            BagItem::new(ItemId::SuperRod, 1),
         ];
 
         let mut party = PokemonParty::default();
@@ -366,6 +377,22 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             return None;
         }
         Some(mmu.read_game_mode())
+    }
+
+    fn trainer_battle_pending(&self) -> bool {
+        let mmu = self.mmu();
+        // wCurOpponent is set by the trainer encounter script before InitBattle runs; for a
+        // trainer battle wIsInBattle only becomes 2 after the engage/transition completes.
+        mmu.read_pointer(&pokered_symbols::wCurOpponent) != 0
+            && mmu.read_pointer(&pokered_symbols::wIsInBattle) == 0
+    }
+
+    fn raw_player_coords(&self) -> Point8 {
+        let mmu = self.mmu();
+        Point8 {
+            x: mmu.read_pointer(&pokered_symbols::wXCoord),
+            y: mmu.read_pointer(&pokered_symbols::wYCoord),
+        }
     }
 
     fn menu_state(&self) -> Option<MenuState> {

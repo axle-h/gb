@@ -16,6 +16,7 @@ use crate::pokemon::menu::BattleMenuState;
 use crate::pokemon::policy::{Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::text::PokemonTextReader;
+use crate::pokemon::world_graph::WorldGraph;
 
 // too long and player veers off course on the overworld, too short and the game doesn't get chance to update values between turns
 pub const AGENT_RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
@@ -204,6 +205,13 @@ pub struct PokemonAgent {
     event_buffer: VecDeque<AgentEvent>,
     cycles: MachineCycles,
     policy: Box<dyn Policy>,
+    /// Map graph built **incrementally** as the player traverses. Each time the agent lands on a
+    /// new map it records that section's live, sprite-resolved reachable warps/connections
+    /// (`WorldGraph::observe`). Provided to the policy each overworld decision for backtracking
+    /// (e.g. heal-return); forward travel is scripted with explicit `EnterMap` steps.
+    world_graph: WorldGraph,
+    /// The map the agent was last on, to detect map changes (warp/connection landings).
+    last_map: Option<Map>,
 }
 
 impl Default for PokemonAgent {
@@ -218,7 +226,14 @@ impl PokemonAgent {
             event_buffer: VecDeque::new(),
             cycles: MachineCycles::default(),
             policy,
+            world_graph: WorldGraph::new(),
+            last_map: None,
         }
+    }
+
+    /// The incrementally-built world graph (exposed for tests/inspection).
+    pub fn world_graph(&self) -> &WorldGraph {
+        &self.world_graph
     }
 
     pub fn policy_exhausted(&self) -> bool {
@@ -236,6 +251,11 @@ impl PokemonAgent {
     /// Drains all buffered events and returns them.
     pub fn drain_events(&mut self) -> Vec<AgentEvent> {
         self.event_buffer.drain(..).collect()
+    }
+
+    /// Human-readable description of the agent's current state (for debugging/tests).
+    pub fn state_debug(&self) -> String {
+        format!("{}", self.state)
     }
 
     fn event(&mut self, event: AgentEvent) {
@@ -442,6 +462,22 @@ impl PokemonAgent {
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
 
+        // A trainer has engaged (line of sight) and the battle is initialising on its own.
+        // The agent must neither hold a direction (which wedges the trainer's walk-up) nor
+        // mash A (which keeps re-triggering the pre-battle interaction and prevents InitBattle
+        // from running).  Release everything and simply wait: once wIsInBattle flips,
+        // trainer_battle_pending() goes false and assert_battle_state takes over.
+        //
+        // Exception: a *script*-triggered trainer (e.g. the Mt Moon Super Nerd, engaged by stepping
+        // on a coord trigger rather than by line of sight) displays its challenge text in a text box
+        // with `wCurOpponent` already set, and the battle only starts once that text is advanced.
+        // In that case do NOT suppress input — fall through so the text-box handler mashes A and the
+        // battle begins. There is no walk-up to wedge because the trainer is stationary.
+        if api.trainer_battle_pending() && game_mode != GameMode::TextBox {
+            api.release_all_buttons();
+            return Ok(());
+        }
+
         self.assert_naming_screen(game_mode, api)?;
         self.assert_script_state(game_mode);
         self.assert_battle_state(game_mode);
@@ -479,21 +515,37 @@ impl PokemonAgent {
                 if rollback_delay.is_exhausted() {
                     // script already breached rollback deadline, start mashing the A button
                     api.toggle_button(JoypadButton::A);
-                } else if rollback_delay.tick(delta_cycles) {
+                } else {
+                    // Still inside the rollback window (might be a transient ledge jump).
+                    // Whatever the cause, release any movement button the agent was holding:
+                    // a held direction during a trainer's scripted walk-up wedges the
+                    // engagement so the battle never starts. A is not needed yet — genuine
+                    // scripts are advanced by the A-mashing branch once the deadline passes.
+                    let crossed = rollback_delay.tick(delta_cycles);
                     api.release_all_buttons();
-                    // script has just breached rollback deadline, commit to RunningScript so we can start mashing next cycle
-                    if let Some(AgentState::OverworldMovement { destination, .. }) = self.backup_state.as_ref() {
-                        self.event(AgentEvent::OverworldActionAborted {
-                            destination: *destination,
-                            reason: OverworldActionAbortedReason::Script,
-                        });
+                    if crossed {
+                        // script has just breached rollback deadline, commit to RunningScript so we can start mashing next cycle
+                        if let Some(AgentState::OverworldMovement { destination, .. }) = self.backup_state.as_ref() {
+                            self.event(AgentEvent::OverworldActionAborted {
+                                destination: *destination,
+                                reason: OverworldActionAbortedReason::Script,
+                            });
+                        }
                     }
                 }
             }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
                 if delay.tick(delta_cycles) {
                     let game_state = api.game_state()?;
-                    if let Some(action) = self.policy.pick_overworld_action(&game_state) {
+                    // Incrementally build the world graph: the first time we settle on a new map,
+                    // record that section's live (sprite-resolved) reachable warps/connections,
+                    // keyed by the raw landing coords (the space warp `to_position`s use). The
+                    // player is stationary here so the raw coords are the landing position.
+                    if self.last_map != Some(game_state.map.map) {
+                        self.last_map = Some(game_state.map.map);
+                        self.world_graph.observe(game_state.map.map, api.raw_player_coords(), &game_state.map);
+                    }
+                    if let Some(action) = self.policy.pick_overworld_action(&game_state, &self.world_graph) {
                         self.take_overworld_action(action);
                     }
                 }
@@ -510,13 +562,18 @@ impl PokemonAgent {
                     } else {
                         self.abort_overworld(destination, OverworldActionAbortedReason::WrongMap(game_state.map.map));
                     }
-                } else if matches!(destination, MetaTile::Warp { .. }) && game_state.map.player_tile() == destination {
-                    // Player is standing on the warp tile.  For edge warps (tile at y=0, y=max,
-                    // x=0, or x=max) the connection only fires when the player presses the
-                    // outward direction from the edge — not just by stepping on the tile.
-                    // Pressing the outward direction here walks the player off the map and
-                    // triggers the connection.  Interior warps (stairs, etc.) fire automatically
-                    // when stepped on, so the map change is detected before this branch runs.
+                } else if matches!(destination, MetaTile::Warp { .. })
+                    && game_state.map.player_tile() == destination
+                    && is_on_map_border(&game_state.map)
+                {
+                    // Player is standing on an EDGE warp tile (at y=0, y=max, x=0, or x=max).
+                    // These only fire when the player presses the outward direction off the map
+                    // edge — not just by standing on the tile.  Press that direction.
+                    //
+                    // Interior warps are handled by the route-execution branch below: a player
+                    // already on an interior warp gets a [step-off, step-on] route, and stepping
+                    // back onto the warp tile fires it (CheckWarpsNoCollision). Pressing a fixed
+                    // geometric direction here would jam the player against a wall instead.
                     let pos = game_state.map.player_position;
                     let h = game_state.map.height.saturating_sub(1) as u8;
                     let exit_dir = if pos.y == 0 { JoypadButton::Up }
@@ -957,4 +1014,14 @@ fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> O
             && (p.y as usize) < map.height
             && map.meta_tiles[p.x as usize + p.y as usize * map.width] == MetaTile::Grass
     })
+}
+
+/// True if the player is on the outermost row/column of the (expanded) map — i.e. an edge
+/// warp/connection tile that fires by stepping off the map edge rather than by stepping on.
+fn is_on_map_border(map: &crate::pokemon::tile_map::MetaTileMap) -> bool {
+    let pos = map.player_position;
+    pos.x == 0
+        || pos.y == 0
+        || pos.x as usize == map.width.saturating_sub(1)
+        || pos.y as usize == map.height.saturating_sub(1)
 }
