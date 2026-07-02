@@ -175,9 +175,37 @@ impl WorldGraph {
         let mut came_from: HashMap<Node, (Node, EdgeKind)> = HashMap::new();
         let mut queue: VecDeque<Node> = VecDeque::new();
 
-        let start_set: HashSet<Node> = starts.iter().copied().collect();
+        // Resolve a (map, position) reference to an actually-observed node. A map *connection*
+        // edge records its destination as the geometric border `to_position`, which differs by a
+        // tile or two from the raw coordinate the game actually settles the player on (the value
+        // the node is keyed under). Snap such references to the nearest observed node of the same
+        // map so intermediate connection hops don't dead-end on a dangling target. The snap
+        // threshold is deliberately small so distinct, far-apart sections of one map (e.g. Route 2's
+        // northern and southern halves, joined only through Viridian Forest) are never conflated.
+        let resolve = |map: Map, pos: Point8| -> Point8 {
+            if self.adjacency.contains_key(&(map, pos)) {
+                return pos;
+            }
+            const SNAP_THRESHOLD: i32 = 8;
+            self.adjacency.keys()
+                .filter(|(m, _)| *m == map)
+                .map(|(_, p)| *p)
+                .map(|p| (p, (p.x as i32 - pos.x as i32).abs() + (p.y as i32 - pos.y as i32).abs()))
+                .filter(|(_, d)| *d <= SNAP_THRESHOLD)
+                .min_by_key(|(_, d)| *d)
+                .map(|(p, _)| p)
+                // No nearby observed node: keep the raw position. It carries no outgoing edges
+                // (so it can't be routed *through* — a dangling intermediate correctly dead-ends),
+                // but it stays discoverable as a goal (dead-end destination maps observed only as an
+                // edge target, never entered, must still be found by the goal search below).
+                .unwrap_or(pos)
+        };
 
-        for &s in starts {
+        let start_set: HashSet<Node> = starts.iter()
+            .map(|&(m, p)| (m, resolve(m, p)))
+            .collect();
+
+        for &s in &start_set {
             if dist.insert(s, 0).is_none() {
                 queue.push_back(s);
             }
@@ -186,7 +214,10 @@ impl WorldGraph {
         while let Some((m, p)) = queue.pop_front() {
             let cost = dist[&(m, p)];
             for edge in self.adjacency.get(&(m, p)).map(Vec::as_slice).unwrap_or(&[]) {
-                let next = (edge.to.map, edge.to.location);
+                // Snap the edge target to the nearest observed node so intermediate connection hops
+                // (whose geometric `to_position` is a tile or two off the keyed raw landing) don't
+                // dead-end; falls back to the raw position when nothing is near (see `resolve`).
+                let next = (edge.to.map, resolve(edge.to.map, edge.to.location));
                 if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(next) {
                     e.insert(cost + 1);
                     came_from.insert(next, ((m, p), edge.kind));
@@ -282,6 +313,11 @@ impl WorldGraph {
                     MetaTile::Warp      { to_map, to_position } => (to_map, to_position),
                     _ => return None,
                 };
+                // Entry-aware routing: start the BFS from the exact raw landing section so
+                // disconnected sections of `to_map` (e.g. Route 2 north vs south, or a maze) are
+                // never falsely short-cut. The BFS snaps connection landings (whose geometric
+                // `to_position` is a tile or two off from the keyed raw coordinate) to the nearest
+                // observed node, so this resolves correctly for connections too.
                 let d = self.shortest_path_from_entry(to_map, to_position, target)?;
                 Some((d, a.clone()))
             })

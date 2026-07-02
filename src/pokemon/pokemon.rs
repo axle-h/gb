@@ -95,6 +95,7 @@ impl Pokemon {
             level: self.level,
             moves: self.moves,
             stats: self.stats,
+            disabled_move_slot: None,
         }
     }
 
@@ -109,11 +110,16 @@ pub struct PokemonSummary {
     pub level: u8,
     pub moves: [Option<PokemonMove>; 4],
     pub stats: PokemonStats,
+    /// 0-based slot of a move disabled by the Disable effect this battle, if any. A disabled move
+    /// cannot be selected — the game bounces back to the move menu ("… is disabled!"), so it must
+    /// be excluded from the available moves or the policy loops forever re-picking it.
+    pub disabled_move_slot: Option<u8>,
 }
 
 impl PokemonSummary {
     pub fn available_battle_moves(&self) -> Vec<BattleAction> {
         self.moves.iter().enumerate()
+            .filter(|(i, _)| self.disabled_move_slot != Some(*i as u8))
             .filter_map(|(i, m)|
                 m.filter(|m| m.pp > 0)
                     .map(|m| BattleAction::Fight {

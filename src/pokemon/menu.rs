@@ -160,6 +160,15 @@ impl MenuState {
             });
         }
 
+        // The FIGHT move list can linger with text_box_id == MessageBox rather than
+        // BattleMenuTemplate — e.g. while a "… is disabled!" / "no PP left" message from a bounced
+        // move selection is still on screen. Recognize it by its distinctive geometry (top-left
+        // corner at 5,12, unique among battle menus) so the agent can navigate to a usable move
+        // instead of hanging on an unrecognized menu.
+        if self.top_menu_item_x == 5 && self.top_menu_item_y == 12 {
+            return Some(BattleMenuState::MoveList { index: self.current_item.saturating_sub(1) });
+        }
+
         None
     }
 }

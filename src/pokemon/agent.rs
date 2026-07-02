@@ -659,6 +659,23 @@ impl PokemonAgent {
                                         }
                                     }
                                 }
+                                Some(BattleMenuState::MoveList { index }) => {
+                                    // A move list is showing. Normally this is the move Navigating
+                                    // highlighted, so confirm it with A. But if the highlighted move
+                                    // is Disabled, confirming bounces back with "… is disabled!"
+                                    // forever — press B to back out to the main menu so the policy
+                                    // re-picks a usable move (the disabled slot is excluded from the
+                                    // available moves).
+                                    let disabled = api.game_state().ok()
+                                        .and_then(|g| g.battle)
+                                        .and_then(|b| b.player.disabled_move_slot)
+                                        == Some(index);
+                                    if disabled {
+                                        api.toggle_button(JoypadButton::B);
+                                    } else {
+                                        api.toggle_button(JoypadButton::A);
+                                    }
+                                },
                                 Some(_) => {
                                     // battle menu is showing, do not read the text
                                     api.toggle_button(JoypadButton::A);
@@ -689,7 +706,18 @@ impl PokemonAgent {
 
                     BattleState::Navigating { action, delay } => {
                         if delay.tick(delta_cycles) {
-                            if let Some(menu_state) = api.menu_state().map(|s| s.battle_menu_state()).flatten() {
+                            let Some(menu_state) = api.menu_state().and_then(|s| s.battle_menu_state()) else {
+                                // No battle menu is recognized — the turn is resolving (result text
+                                // or animation), e.g. the "… is fast asleep!" message shown after a
+                                // sleeping Pokémon's move is committed. Hand back to WaitingForMenu,
+                                // which advances the text (pressing A) and re-detects the menu.
+                                // Staying here would hang forever: Navigating issues no input while
+                                // no battle menu is on screen, which deadlocks a sleep-locked battle.
+                                api.release_all_buttons();
+                                self.set_battle_state(BattleState::default());
+                                return Ok(());
+                            };
+                            {
                                 let menu_target = BattleMenuState::from_action(*action);
 
                                 if menu_state == menu_target {

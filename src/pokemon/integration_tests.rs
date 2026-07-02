@@ -393,12 +393,20 @@ fn test_caught_pokemon_nickname() {
 
 #[test]
 fn can_navigate_to_pewter_city() {
+    // Explicit forward navigation (Viridian City → Viridian Forest → Pewter City), the same
+    // single-hop `EnterMap` chain `complete_game_steps` uses. The abstract `goto` form this test
+    // used previously needed the deleted pre-built world graph.
     let mut fixture = TestFixture::new(
         include_bytes!("data/viridian-city-pokemart-shopping.bin"),
         Duration::from_mins(10),
         vec![
-            PolicyStep::goto(Map::ViridianCity),
-            PolicyStep::goto(Map::PewterCity),
+            PolicyStep::enter(Map::ViridianCity),   // exit the Mart (the save state is inside it)
+            PolicyStep::enter(Map::Route2),
+            PolicyStep::enter(Map::ViridianForestSouthGate),
+            PolicyStep::enter(Map::ViridianForest),
+            PolicyStep::enter(Map::ViridianForestNorthGate),
+            PolicyStep::enter(Map::Route2),
+            PolicyStep::enter(Map::PewterCity),
         ]
     );
 
@@ -550,14 +558,7 @@ fn can_navigate_mt_moon() {
 ///     → collect Helix Fossil (beat Super Nerd, corridor opens)
 ///     → walk → B2F(5,7)→B1F(23,3) [comp D] → walk → B1F(27,3)→Route4 → Cerulean
 fn mt_moon_traversal_steps() -> Vec<PolicyStep> {
-    vec![
-        PolicyStep::EnterMap { to_map: Map::MtMoonB1F, to_position: Some(Point8 { x: 5, y: 5 }) },
-        PolicyStep::EnterMap { to_map: Map::MtMoonB2F, to_position: Some(Point8 { x: 21, y: 17 }) },
-        PolicyStep::CollectItem(crate::pokemon::map::MapSprite::MTMOONB2F_HELIX_FOSSIL),
-        PolicyStep::EnterMap { to_map: Map::MtMoonB1F, to_position: Some(Point8 { x: 23, y: 3 }) },
-        PolicyStep::EnterMap { to_map: Map::Route4, to_position: None },
-        PolicyStep::EnterMap { to_map: Map::CeruleanCity, to_position: None },
-    ]
+    PolicyStep::mt_moon_traversal()
 }
 
 #[test]

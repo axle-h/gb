@@ -314,65 +314,129 @@ impl PolicyStep {
         Self::Goto { map, strict: false }
     }
 
-    pub fn complete_game_steps() -> Vec<Self> { vec![
-        // Try to leave Pallet Town, Oak stops you and gives you a starter Pokémon
-        Self::goto(Map::PalletTown),
-        Self::soft_goto(Map::Route1),
-        Self::Interact(MapSprite::OAKSLAB_SQUIRTLE_POKE_BALL),
+    /// Explicit single forward map transition (any warp/connection to `map`).
+    pub const fn enter(map: Map) -> Self {
+        Self::EnterMap { to_map: map, to_position: None }
+    }
 
-        // Pick up Oak's parcel from Viridian Pokémart
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-        Self::goto(Map::ViridianMart),
+    /// Explicit forward transition to `map`, disambiguated by the raw landing `to_position`.
+    pub const fn enter_at(map: Map, x: u8, y: u8) -> Self {
+        Self::EnterMap { to_map: map, to_position: Some(Point8 { x, y }) }
+    }
 
-        // Deliver parcel to get the Pokédex
-        Self::Interact(MapSprite::OAKSLAB_OAK1),
-
-        // Heal at Mom's
-        Self::Interact(MapSprite::REDSHOUSE1F_MOM),
-
-        // Get the town map from Daisy
-        Self::Interact(MapSprite::BLUESHOUSE_DAISY1),
-
-        // Heal and stock up on supplies in Viridian City
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-        Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 10), map: Map::ViridianMart },
-        Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 2), map: Map::ViridianMart },
-
-        // Catch a Pidgey for a second party member
-        Self::CatchPokemon { species: PokemonSpecies::Pidgey, on_map: Map::Route1 },
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-
-        // Grind until Squirtle is level 13 (learns Water Gun — key move vs Brock)
-        Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1 },
-        Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-
-        // Walk through Viridian Forest to Pewter City and heal
-        Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
-
-        // ── Defeat Brock ──
-        Self::DefeatGymLeader { leader: MapSprite::PEWTERGYM_BROCK, badge: Badge::BoulderBadge },
-        Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
-
-        // Restock in Pewter City for Mt Moon
-        Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 5), map: Map::PewterMart },
-
-        // Grind on Route 3 before entering Mt Moon
-        Self::GrindUntilLevel { target_level: 16, on_map: Map::Route3 },
-        Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
-
-        // ── Walk through Mt Moon to Cerulean City ──
-        // Navigate via Mt Moon 1F → B1F → B2F → Route 4 → Cerulean
-        Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-
-        // Extra grind near Cerulean if needed
-        Self::GrindUntilLevel { target_level: 18, on_map: Map::Route4 },
-        Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-
-        // ── Defeat Misty ──
-        Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 5), map: Map::CeruleanMart },
-        Self::DefeatGymLeader { leader: MapSprite::CERULEANGYM_MISTY, badge: Badge::CascadeBadge },
-        Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+    /// The explicit Mt Moon crossing (1F west entrance → Route 4 east exit), including the fossil
+    /// chokepoint. Requires standing in Mt Moon 1F. See `mt_moon_traversal` doc in the tests.
+    pub fn mt_moon_traversal() -> Vec<Self> { vec![
+        Self::enter_at(Map::MtMoonB1F, 5, 5),
+        Self::enter_at(Map::MtMoonB2F, 21, 17),
+        Self::CollectItem(MapSprite::MTMOONB2F_HELIX_FOSSIL),
+        Self::enter_at(Map::MtMoonB1F, 23, 3),
+        Self::enter(Map::Route4),
+        Self::enter(Map::CeruleanCity),
     ] }
+
+    /// The full deterministic playthrough. Every forward map transition is an explicit `EnterMap`;
+    /// on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the incrementally-observed
+    /// graph. Starter is **Bulbasaur** — its Grass typing is super-effective against both Brock
+    /// (Rock/Ground) and Misty (Water), the two badges this run proves.
+    pub fn complete_game_steps() -> Vec<Self> {
+        let mut steps = vec![
+            // ── Pallet Town: fetch a starter ──
+            Self::enter(Map::RedsHouse1F),
+            Self::enter(Map::PalletTown),
+            Self::soft_goto(Map::Route1),                        // Oak stops you → OaksLab
+            Self::Interact(MapSprite::OAKSLAB_BULBASAUR_POKE_BALL), // pick Bulbasaur (+ rival battle)
+
+            // ── Viridian Mart: pick up Oak's Parcel ──
+            Self::enter(Map::PalletTown),
+            Self::enter(Map::Route1),
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::ViridianMart),
+            Self::Interact(MapSprite::VIRIDIANMART_CLERK),       // clerk hands over Oak's Parcel
+
+            // ── Deliver the Parcel to Oak → Pokédex ──
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::Route1),
+            Self::enter(Map::PalletTown),
+            Self::enter(Map::OaksLab),
+            Self::Interact(MapSprite::OAKSLAB_OAK1),
+
+            // ── Town Map from Daisy ──
+            Self::enter(Map::PalletTown),
+            Self::enter(Map::BluesHouse),
+            Self::Interact(MapSprite::BLUESHOUSE_DAISY1),
+
+            // ── Stock up + heal in Viridian City ──
+            Self::enter(Map::PalletTown),
+            Self::enter(Map::Route1),
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::ViridianPokecenter),
+            Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::ViridianMart),
+            Self::Interact(MapSprite::VIRIDIANMART_CLERK),       // open the shop menu
+            Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 10), map: Map::ViridianMart },
+            Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 5), map: Map::ViridianMart },
+            Self::enter(Map::ViridianCity),
+
+            // ── Catch a Pidgey + grind the starter on Route 1 ──
+            Self::enter(Map::Route1),
+            Self::CatchPokemon { species: PokemonSpecies::Pidgey, on_map: Map::Route1 },
+            Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1 },
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::ViridianPokecenter),
+            Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+            Self::enter(Map::ViridianCity),
+
+            // ── Viridian Forest → Pewter City ──
+            Self::enter(Map::Route2),
+            Self::enter(Map::ViridianForestSouthGate),
+            Self::enter(Map::ViridianForest),
+            Self::enter(Map::ViridianForestNorthGate),
+            Self::enter(Map::Route2),
+            Self::enter(Map::PewterCity),
+            Self::enter(Map::PewterPokecenter),
+            Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+            Self::enter(Map::PewterCity),
+
+            // ── Defeat Brock (Boulder Badge) ──
+            Self::DefeatGymLeader { leader: MapSprite::PEWTERGYM_BROCK, badge: Badge::BoulderBadge },
+            // Exit the gym to the city first (a single warp): every forward `enter` must be one
+            // direct transition. Jumping straight to the Pokécenter from inside the gym is a 2-hop
+            // path that would rely on routing through a never-before-observed gym-exit landing.
+            Self::enter(Map::PewterCity),
+            Self::enter(Map::PewterPokecenter),
+            Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
+            Self::enter(Map::PewterCity),
+
+            // ── Route 3 grind → heal at the Mt Moon Pokécenter ──
+            Self::enter(Map::Route3),
+            Self::GrindUntilLevel { target_level: 18, on_map: Map::Route3 },
+            Self::enter(Map::Route4),
+            Self::enter(Map::MtMoonPokecenter),
+            Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
+            Self::enter(Map::Route4),
+            Self::enter(Map::MtMoon1F),
+        ];
+
+        // ── Cross Mt Moon → Cerulean City ──
+        steps.extend(Self::mt_moon_traversal());
+
+        steps.extend([
+            // ── Heal in Cerulean, then beat Misty (Cascade Badge) ──
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+            Self::enter(Map::CeruleanCity),
+            Self::DefeatGymLeader { leader: MapSprite::CERULEANGYM_MISTY, badge: Badge::CascadeBadge },
+            // Exit the gym to the city (single warp) before entering the Pokécenter — see the
+            // Pewter gym note above.
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+        ]);
+
+        steps
+    }
 }
 
 pub struct DeterministicPolicy {
@@ -455,8 +519,8 @@ impl Policy for DeterministicPolicy {
             };
         }
 
-        let action_tiles: Vec<_> = actions.iter().map(|a| format!("{:?}", a.tile)).collect();
-        println!("[policy] map={} pos={} actions=[{}]", state.map.map, state.map.player_position, action_tiles.join(", "));
+        println!("[policy] map={} pos={} front={:?} queue_len={}",
+            state.map.map, state.map.player_position, self.queue.front(), self.queue.len());
         loop {
             let step = self.queue.front()?.clone();
             return match step {
@@ -466,9 +530,17 @@ impl Policy for DeterministicPolicy {
                         continue;
                     }
                     // Explicit single map transition: take exactly this warp/connection.
-                    // If it isn't reachable on the current map the policy is under-specified —
-                    // return None and let the agent stall/hard-fail.
-                    Self::enter_map_action(&actions, to_map, to_position)
+                    if let Some(action) = Self::enter_map_action(&actions, to_map, to_position) {
+                        return Some(action);
+                    }
+                    // Recovery: the direct transition isn't on the current map. This happens when a
+                    // teleport back into already-explored territory desyncs the linear EnterMap
+                    // script — a blackout (fainting) sends the player home, and the heal-flee detour
+                    // moves them to a Pokémon Center. If the target map has already been observed,
+                    // route back toward it over the incremental world graph (visited territory only).
+                    // If it has NOT been observed this returns None and the agent stalls — the
+                    // intended hard-fail for genuinely under-specified forward travel.
+                    Self::route_toward(world_graph, &actions, to_map)
                 },
                 PolicyStep::Goto { map: target, strict } => {
                     if state.map.map == target {
@@ -561,8 +633,22 @@ impl Policy for DeterministicPolicy {
                     }
                 },
                 PolicyStep::Interact(sprite) => {
+                    // Prefer the sprite visible on the CURRENT map. Sprite identity is by name only,
+                    // so sprites that recur across maps (Nurse, Clerk) cannot be disambiguated by
+                    // `sprite.map()` — it returns the first map in enum order, misrouting every
+                    // pokecenter heal but the first. The scripted `enter(map)` step preceding each
+                    // `Interact` already places the agent on the intended map, so matching the
+                    // visible sprite here by name is both correct and robust.
+                    if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Sprite(sprite.name)) {
+                        self.queue.pop_front();
+                        return Some(action.clone());
+                    }
                     let map = sprite.map();
-                    if state.map.map != map {
+                    if state.map.map == map {
+                        // On the sprite's map but it isn't actionable yet (e.g. still walking on, or
+                        // the sprite is briefly hidden by a script) — wait for it.
+                        None
+                    } else {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to interact with {} on {}, but no path there!", sprite, map);
@@ -570,13 +656,6 @@ impl Policy for DeterministicPolicy {
                             continue;
                         }
                         action
-                    } else {
-                        let action = actions.iter()
-                            .find(|a| a.tile == MetaTile::Sprite(sprite.name));
-                        if action.is_some() {
-                            self.queue.pop_front();
-                        }
-                        action.cloned()
                     }
                 }
                 PolicyStep::CollectItem(sprite) => {

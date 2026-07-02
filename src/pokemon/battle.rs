@@ -58,6 +58,16 @@ impl BattleStateReader for MMU {
 
         let active_party_slot = self.read_pointer(&pokered_symbols::wBattleMonPartyPos);
 
+        // wPlayer/EnemyDisabledMove: high nibble = disabled move slot (1-based), low = turn counter.
+        // Zero means no move is disabled. Convert to a 0-based slot so the disabled move is excluded
+        // from selectable moves (otherwise the policy re-picks it forever against a "disabled!" wall).
+        let disabled_slot = |raw: u8| -> Option<u8> {
+            let slot = raw >> 4;
+            (slot >= 1).then(|| slot - 1)
+        };
+        let player_disabled = disabled_slot(self.read_pointer(&pokered_symbols::wPlayerDisabledMove));
+        let enemy_disabled = disabled_slot(self.read_pointer(&pokered_symbols::wEnemyDisabledMove));
+
         fn read_battle_moves(mmu: &MMU, move_base: DmgPointer, pp_base: DmgPointer) -> [Option<PokemonMove>; 4] {
             std::array::from_fn(|i| {
                 let id = mmu.read(move_base.address + i as u16);
@@ -80,6 +90,7 @@ impl BattleStateReader for MMU {
                     PokemonType::from_repr(self.read_pointer(&pokered_symbols::wBattleMonType2))?,
                 ],
                 moves: read_battle_moves(self, pokered_symbols::wBattleMonMoves, pokered_symbols::wBattleMonPP),
+                disabled_move_slot: player_disabled,
                 stats: PokemonStats {
                     hp: self.read_pointer_u16_be(&pokered_symbols::wBattleMonMaxHP),
                     attack: self.read_pointer_u16_be(&pokered_symbols::wBattleMonAttack),
@@ -98,6 +109,7 @@ impl BattleStateReader for MMU {
                     PokemonType::from_repr(self.read_pointer(&pokered_symbols::wEnemyMonType2))?,
                 ],
                 moves: read_battle_moves(self, pokered_symbols::wEnemyMonMoves, pokered_symbols::wEnemyMonPP),
+                disabled_move_slot: enemy_disabled,
                 stats: PokemonStats {
                     hp: self.read_pointer_u16_be(&pokered_symbols::wEnemyMonMaxHP),
                     attack: self.read_pointer_u16_be(&pokered_symbols::wEnemyMonAttack),
