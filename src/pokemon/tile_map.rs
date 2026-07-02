@@ -171,16 +171,20 @@ impl MetaTileMap {
                     );
                     if can_jump {
                         if let Some(landing) = step_one(nb, dir, self.width, self.height) {
-                            if !dist.contains_key(&landing) {
+                            let landing_tile = &self.meta_tiles[landing.x as usize + landing.y as usize * self.width];
+                            // Only record the landing if the player can actually stand on it. A
+                            // blocked landing means the ledge is not traversable from here — recording
+                            // it anyway would both invent a phantom route step (the agent presses the
+                            // jump direction into an immovable ledge forever) and mark the tile as
+                            // visited, hiding any genuine path that reaches it another way.
+                            let landing_blocked = matches!(landing_tile,
+                                MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water |
+                                MetaTile::ConnectionWater(_) | MetaTile::Jump(_)
+                            );
+                            if !landing_blocked && !dist.contains_key(&landing) {
                                 dist.insert(landing, d + 1);
                                 came_from.insert(landing, (pos, dir));
-                                let landing_tile = &self.meta_tiles[landing.x as usize + landing.y as usize * self.width];
-                                if !matches!(landing_tile,
-                                    MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water |
-                                    MetaTile::ConnectionWater(_) | MetaTile::Jump(_)
-                                ) {
-                                    queue.push_back(landing);
-                                }
+                                queue.push_back(landing);
                             }
                         }
                     }
