@@ -4,6 +4,71 @@ The `DeterministicPolicy` exists to **prove an agent can finish the game** end-t
 (a fixed `Vec<PolicyStep>`), but it must play **legitimately** — the same way the live LLM policy
 will have to. The live policy is separate and reasons per-map with runtime sprite resolution.
 
+## For a future agent — START HERE
+
+**Read this section first — it captures facts that cost a very long session to establish. Do not
+re-derive them.**
+
+### Reference material (provided by the user)
+- **`docs/walkthrough.txt`** — tile-level detail for **Pallet Town → Vermilion City** (chapters 8–10:
+  routes, gym trainers, Mt Moon path, item locations). Use for the near-term Vermilion push.
+- **`docs/walkthrough2.txt`** — full-game strategic FAQ: the **whole main-quest order** and every
+  badge/gym through the Elite Four (Boulder → Cascade → **Thunder** (Lt. Surge, Vermilion) → Rainbow
+  (Erika, Celadon) → Marsh (Sabrina, Saffron) → Soul (Koga, Fuchsia) → Volcano (Blaine, Cinnabar) →
+  Earth (Giovanni, Viridian) → Victory Road → Elite Four). Use to plan every stage past Vermilion:
+  which HMs are needed where, gym leader teams, and key items (SS Ticket, Bike, HMs).
+- **`docs/map.png`** — full Kanto atlas (zoomed-out; good for orientation, not tile-level collision).
+- **Memory** `cerulean-route5-terraces`, `deterministic-policy-navigation`, `mt-moon-navigation-debug`.
+
+### Hard-won facts (do NOT re-investigate)
+1. **The collision/ledge model is 100% ROM-faithful.** Verified 3 independent ways (Python re-decode
+   of `pokered/maps/*.blk` + `overworld.bst` + `Overworld_Coll`; PNG render; and a **real-engine
+   save-state flood-fill** that reaches the exact same tiles the running game does). If the agent
+   "can't reach" somewhere, it is almost never a collision bug — suspect **one-way ledges splitting a
+   map into terraces**, a **sprite/event gate**, or a **missing multi-map/warp hop**.
+2. **Cerulean → Route 5 is a terrace puzzle, solved.** The Pokécenter's terrace can't walk to Route 5
+   directly (south hedge tile `0x50` is solid; not a ledge). The path is the **trashed-house bridge**:
+   after Bill, `GUARD2` (raw (27,12)) clears, then `enter(CeruleanTrashedHouse)` at (27,11) → its back
+   door → land Cerulean **(27,9)**, which is in the Route-5 terrace. `bfs(27,9)` reaches Route 5;
+   `bfs(27,11)` does not.
+3. **Cerulean rival** is a coord trigger at (20,6)/(21,6); the rival sprite is HIDE-until-trigger.
+   Beating it sets `EVENT_BEAT_CERULEAN_RIVAL` (part of the guard-clear chain). `can_reach_bill`
+   already triggers + wins it.
+4. **Bill's SS Ticket is a multi-step interaction** (`pokered/scripts/BillsHouse.asm`): talk to Bill's
+   Pokémon (SUPER_NERD at (4,4)) → it walks into the cell-separator → **use the PC** → Bill exits →
+   talk to Bill → SS Ticket. A single `Interact` will NOT do it; needs a scripted sub-sequence.
+5. **Level-up move-learning** (`pokered/engine/pokemon/learn_move.asm`): the "which move to forget?"
+   menu has unique geometry **top-left (5,8)** (vs battle move-list (5,12)); the move being learned is
+   `wMoveNum`, the mon is `wWhichPokemon`. This is now handled (Stage 2 IMPLEMENTED below).
+6. **Fixture-party weakness is the current blocker**, not navigation. `post-cascade.bin` is a lone
+   Ivysaur that had forgotten Tackle (only Vine Whip, 10 PP, damaging). Regenerate it (see NEXT).
+
+### Reusable techniques (worth the tokens once, cheap to reuse)
+- **Real-engine save-state flood-fill / BFS**: `GameBoy::save_state()`/`load_state()` + real joypad
+  physics to ground-truth map connectivity and settle "can the game actually do X?" questions. Beats
+  static analysis when sprites/events/ledges are involved. (Was used as a temp `#[ignore]` test.)
+- **Python map decode/render**: `blk[bx+by*W]` → `bst[block*16 + (tx%4)+(ty%4)*4]`; collision =
+  `Overworld_Coll` list; bottom-left sub-tile `tile(mx*2, my*2+1)` is what pokered's collision checks.
+- **`ExplorerPolicy`** (in `integration_tests.rs`) drives the real agent to discover warp/connection
+  graphs — but it only takes the *nearest* connection, so it can't discover terrace re-entries that
+  need walking *within* a map. Good for warp mazes (Mt Moon), not terrace splits.
+
+### NEXT STEPS (in order)
+1. **Regenerate `post-cascade.bin` with a viable party.** Upgrade `complete_game_steps` to grind the
+   starter higher (move-learning now keeps Tackle + gains Razor Leaf @lv30) and to **reliably catch +
+   keep a 2nd Pokémon**; heal; re-run `can_start_game` (~90 min) to write the new fixture. This also
+   end-to-end-verifies the Stage 2 move-learning menu driving (unit-tested only so far).
+2. **Finish the Bill leg** (extend `can_reach_bill` → `complete_game_steps`): Route 24 → Route 25 →
+   Bill's House → **SS-Ticket sub-sequence (fact 4)** → return → trashed-house bridge (fact 2) →
+   `enter(Route5)` → Underground Path → Route 6 → Vermilion. Un-ignore `can_reach_vermilion`.
+3. **Stage 3 proper** (walkthrough.txt ch. 10 + walkthrough2 Vermilion): S.S. Anne → **HM01 Cut** →
+   new `TeachMove` step + actionable `MetaTile::CutTree` → **Lt. Surge (Thunder Badge)** incl. the
+   trash-can switch puzzle.
+4. **Stage 4+** (walkthrough2, per badge): introduce each field HM where first required (Cut, then
+   Strength/Surf/Fly/Flash), one badge at a time, folding each into `can_start_game`.
+
+---
+
 ## Guiding principles
 
 1. **No cheating.** No injecting items, levels, badges, HMs, or Pokémon. Everything is obtained by
