@@ -84,6 +84,11 @@ pub trait PokemonApiTrait {
     fn menu_state(&self) -> Option<MenuState>;
     /// Returns the species currently being named on the nickname-entry screen.
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String>;
+
+    /// The move currently being learned on the level-up move-forget prompt (`wMoveNum`).
+    fn move_to_learn(&self) -> Option<crate::pokemon::move_name::PokemonMoveName>;
+    /// Party index of the Pokémon learning a move on the move-forget prompt (`wWhichPokemon`).
+    fn learning_pokemon_index(&self) -> usize;
     /// Reads the mart's current item list from `wItemList` (up to 16 entries, FF-terminated).
     fn mart_item_list(&self) -> Vec<ItemId>;
 
@@ -403,6 +408,14 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         let byte = self.mmu().read_pointer(&pokered_symbols::wCurPartySpecies);
         PokemonSpecies::from_repr(byte)
             .ok_or_else(|| format!("Invalid species byte {byte:#04x} on naming screen"))
+    }
+
+    fn move_to_learn(&self) -> Option<crate::pokemon::move_name::PokemonMoveName> {
+        crate::pokemon::move_name::PokemonMoveName::from_repr(self.mmu().read_pointer(&pokered_symbols::wMoveNum))
+    }
+
+    fn learning_pokemon_index(&self) -> usize {
+        self.mmu().read_pointer(&pokered_symbols::wWhichPokemon) as usize
     }
 
     fn mart_item_list(&self) -> Vec<ItemId> {

@@ -130,6 +130,9 @@ mod tests {
             Err("not available in stub".to_string())
         }
 
+        fn move_to_learn(&self) -> Option<crate::pokemon::move_name::PokemonMoveName> { None }
+        fn learning_pokemon_index(&self) -> usize { 0 }
+
         fn write_naming_screen_buffer(&mut self, _nickname: Option<&str>) -> Result<(), String> {
             Ok(())
         }
