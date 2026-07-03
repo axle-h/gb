@@ -1,0 +1,923 @@
+----------------------------------------
+---- 8 > PALLET TOWN TO PEWTER CITY ----
+----------------------------------------
+
+Sections in this chapter:
+
+Pallet Town
+
+Route 1
+
+Viridian City
+
+Route 22
+
+Route 2
+
+Viridian Forest
+
+Pewter City
+
+Pewter Gym
+
+Gym Leader Brock
+
+-----------
+Pallet Town
+-----------
+
+- Begin the adventure in Pallet Town and head to Professor Oak’s Lab.
+- Choose your starter Pokémon: Bulbasaur (Grass), Charmander (Fire), or Squirtle
+(Water).
+- Your rival Blue automatically chooses the starter with type advantage.
+- The first rival battle begins immediately after selecting your Pokémon.
+- Recommended setup: open the Options menu and set Text Speed to Fast.
+- Battle Style can remain on Shift for convenience or be switched to Set for
+challenge play.
+- Trainers:
+
+  * RIVAL BLUE
+    - Pokémon: Starter Pokémon (Lv 5)
+    - Tips: Use your attack move repeatedly. Growl can reduce incoming damage.
+
+-------
+Route 1
+-------
+
+- Route 1 connects Pallet Town and Viridian City.
+- Wild encounters include Pidgey and Rattata.
+- A man near the start of the route gives you a free Potion.
+- Ledges along the route allow quick return south toward Pallet Town.
+- Lowering a Pokémon’s HP increases capture success when using Poké Balls.
+- Available Pokemon
+
+  * Pidgey
+
+  * Rattata
+
+----------------
+Viridian City
+----------------
+
+- Heal your team at the Pokémon Center. Healing is free.
+- The PC system stores Pokémon beyond your six-member party.
+- Visit the Poké Mart to collect Oak’s Parcel for Professor Oak.
+- Return the parcel to Professor Oak in Pallet Town.
+- Oak rewards you with the Pokédex and five Poké Balls.
+- Daisy gives you the Town Map afterward.
+- After the Pokédex is obtained, the Viridian City old man demonstrates how to
+catch Pokémon.
+- Viridian Gym is locked and cannot be entered yet.
+- Items
+
+  * Oak’s Parcel
+
+  * Pokédex
+
+  * Poké Balls (x5)
+
+  * Town Map
+
+--------
+Route 22
+--------
+
+- Route 22 lies west of Viridian City.
+- This area introduces the first optional rival battle.
+- Battling wild Pokémon here can provide useful early experience.
+
+- Available Pokemon
+
+  * Rattata
+
+- Trainers:
+
+  * RIVAL BLUE
+    - Pokémon: Pidgey (Lv 9), Starter Pokémon
+    - Tips: Sand Attack may lower accuracy. Heal if necessary during the battle.
+
+-------
+Route 2
+-------
+
+- Route 2 connects Viridian City with Pewter City.
+- The eastern side path is blocked by a tree that requires Cut.
+- The northern entrance leads directly into Viridian Forest.
+- NPCs warn that Viridian Forest functions as a maze.
+- Available Pokemon
+
+  * Rattata
+
+---------------
+Viridian Forest
+---------------
+
+- Viridian Forest is an early maze filled with Bug-type trainers.
+- Charmander performs very well here because Ember is super effective against
+Bug-types.
+- Weedle may inflict poison with Poison Sting, so carrying Antidotes is helpful.
+- Trainer battles trigger if you enter a trainer’s line of sight.
+- Pikachu can be captured here early in the game.
+- Available Pokemon
+
+  * Caterpie
+
+  * Weedle
+
+  * Pikachu
+
+- Items
+
+  * Potion
+
+  * Antidote
+
+- Trainers:
+
+  * BUG CATCHER
+    - Pokémon: Weedle (Lv 6), Caterpie (Lv 6)
+    - Tips: Fire-type moves defeat Bug Pokémon quickly.
+
+* BUG CATCHER
+
+    - Pokémon: Weedle (Lv 7), Weedle (Lv 7), Kakuna (Lv 7)
+    - Tips: Focus on leveling your starter early rather than spreading EXP
+widely.
+
+* BUG CATCHER
+
+    - Pokémon: Caterpie (Lv 7), Caterpie (Lv 8)
+    - Tips: Fire-type moves remain the most efficient strategy.
+
+* BUG CATCHER
+
+    - Pokémon: Metapod (Lv 7), Caterpie (Lv 7), Metapod (Lv 7)
+    - Tips: Metapod has high defense but weak offense.
+
+* BUG CATCHER
+
+    - Pokémon: Weedle (Lv 9)
+    - Tips: Continue using Fire attacks to end battles quickly.
+
+-----------
+Pewter City
+-----------
+
+- Pewter City hosts the first Gym challenge.
+- Status effects such as Sleep or Paralysis make Pokémon easier to capture.
+- The Pewter Museum of Science is optional and contains fossil displays.
+- Entry costs 50G for a child ticket.
+- Traded Pokémon gain experience faster but may disobey inexperienced trainers.
+- Pewter Mart sells useful items for upcoming dungeon exploration.
+- Items (Mart)
+
+  * Awakening — 250G
+
+  * Burn Heal — 250G
+
+  * Escape Rope — 550G
+
+  * Repel
+
+----------
+Pewter Gym
+----------
+
+- The Gym guide recommends adjusting party order before battles.
+- Charmander faces difficulty against Rock-types.
+- Bulbasaur and Squirtle have an easier matchup thanks to Grass and Water moves.
+- Healing at the Pokémon Center before challenging Brock is recommended.
+- Trainers:
+
+  * JR. TRAINER♂
+    - Pokémon: Geodude (Lv 10), Sandshrew (Lv 11)
+    - Tips: Grass and Water attacks defeat both Pokémon quickly.
+
+----------------
+Gym Leader Brock
+----------------
+
+- Brock specializes in Rock-type Pokémon.
+- Charmander users may need extra levels or support Pokémon to win.
+- Losing the battle only costs a small amount of money, so retrying is safe.
+- Trainers:
+
+  * GYM LEADER BROCK
+    - Pokémon: Geodude (Lv 12), Onix (Lv 14)
+    - Tips: Grass and Water attacks defeat Brock easily. Charmander may require
+extra levels or support Pokémon.
+After the Battle
+
+- Defeating Brock grants the Boulder Badge.
+- The Boulder Badge allows the HM move Flash to be used outside battle.
+- Brock awards TM34 (Bide).
+- TMs in Red and Blue are single-use.
+- Charmander evolves into Charmeleon at Lv 16.
+- Heal your team before continuing the journey toward Mt. Moon.
+
+==============================================================================
+==============================================================================
+==============================================================================
+
+------------------------------------------
+---- 9 > PEWTER CITY TO CERULEAN CITY ----
+------------------------------------------
+
+Sections in this chapter:
+
+Route 3
+
+Mt. Moon
+
+Route 4 (East)
+
+Cerulean City
+
+Route 24 / Nugget Bridge
+
+Route 25
+
+Sea Cottage (Bill)
+
+Cerulean Gym
+
+Gym Leader Misty
+
+-------
+Route 3
+-------
+
+- Route 3 begins east of Pewter City.
+- This route is packed with early trainers and gives good experience before Mt.
+Moon.
+- If you have been leaning heavily on one starter, healing PP at the Pewter
+Pokémon Center before pushing farther east is a safe option.
+- The Pokémon Center near Mt. Moon can also be used as a nearby heal point
+before entering the cave.
+- Available Pokemon
+
+  * Spearow
+
+  * Nidoran♂
+
+  * Nidoran♀
+
+  * Jigglypuff
+
+- Trainers:
+
+  * LASS
+    - Pokémon: Pidgey (Lv 9), Pidgey (Lv 9)
+    - Tips: Rock, Electric, or strong same-type attacks work fine here.
+
+* BUG CATCHER
+
+    - Pokémon: Caterpie (Lv 10), Weedle (Lv 10), Caterpie (Lv 10)
+    - Tips: Fire-type moves quickly clear this battle.
+
+* YOUNGSTER
+
+    - Pokémon: Rattata (Lv 11), Ekans (Lv 11)
+    - Tips: Fighting moves are strong against Rattata. Ekans may use Wrap.
+
+* BUG CATCHER
+
+    - Pokémon: Weedle (Lv 9), Kakuna (Lv 9), Caterpie (Lv 9), Metapod (Lv 9)
+    - Tips: Fire moves remain the easiest solution.
+
+* LASS
+
+    - Pokémon: Rattata (Lv 10), Nidoran♀ (Lv 10)
+    - Tips: This battle is optional if you avoid her line of sight.
+
+* BUG CATCHER
+
+    - Pokémon: Caterpie (Lv 11), Metapod (Lv 11)
+    - Tips: Another easy Fire-type matchup.
+
+* YOUNGSTER
+
+    - Pokémon: Spearow (Lv 14)
+    - Tips: Optional trainer. A solid extra source of EXP before Mt. Moon.
+
+* LASS
+
+    - Pokémon: Jigglypuff (Lv 14)
+    - Tips: Jigglypuff may try to inflict sleep.
+
+--------
+Mt. Moon
+--------
+
+- Mt. Moon lies east of the Route 3 Pokémon Center.
+- It is a good place to save before entering.
+- Geodude, Zubat, and Paras are common encounters here.
+- Mankey is a useful weakening option when trying to catch Geodude.
+- Zubat is a decent backup party member at this stage, especially around Lv 10.
+- Paras is useful because Stun Spore can help with catches and future support
+roles.
+- Repels can be useful if repeated encounters become annoying.
+- Clearing optional trainers in Mt. Moon often gives enough EXP to avoid
+separate grinding later.
+- After clearing optional paths, you can safely return to the Pokémon Center
+outside the western entrance before taking the required route through the cave.
+- Available Pokemon
+
+  * Geodude
+
+  * Zubat
+
+  * Paras
+
+  * Clefairy
+
+- Items
+
+  * Paralyze Heal
+
+  * Potion
+
+  * Rare Candy
+
+  * Escape Rope
+
+  * Moon Stone
+
+  * Antidote
+
+Navigation / Route Notes
+
+- Upon entering Mt. Moon from the west side, go up and then left early to begin
+optional exploration.
+- If you continue left from the early section, you can fight an optional Bug
+Catcher.
+- After that, going up and to the left leads to a Paralyze Heal.
+- You can leave Mt. Moon entirely after early catches and optional exploration
+to heal at the Pokémon Center and update your team.
+- Re-entering, the actual forward route begins by going right from the entrance
+instead of left.
+- Continue north and then up-right.
+- In the large room with a visible ladder, the ladder itself is not the main
+route yet if you want to clear optional content first.
+- From that large room:
+
+  * Going down-left leads to an optional Super Nerd.
+
+  * Potion is next to him.
+
+  * Going back down-right leads to a Rare Candy.
+
+  * Going up leads to an optional Bug Catcher.
+
+  * Continuing up-right gives an Escape Rope.
+
+  * Going farther up-left leads to an optional Lass.
+
+  * Continuing left through the loop area leads to a ladder where Paras can be
+found.
+
+- If you take that ladder down, you reach an optional lower area:
+
+  * Paras can be encountered there.
+
+  * Going left/up through that area leads to an optional Team Rocket Grunt.
+
+  * Continuing right from that grunt leads to a Moon Stone.
+
+- That whole lower Rocket section is optional.
+- After finishing the optional western-side content, it is efficient to
+backtrack completely to the Pokémon Center outside Mt. Moon, heal, save, and
+then re-enter to take the required path cleanly.
+- On the second pass through Mt. Moon:
+
+  * Enter from the west side again.
+
+  * Go up.
+
+  * Pass the trainer area to the right.
+
+  * Continue up.
+
+  * Go left.
+
+  * Go down to reach an optional Youngster.
+
+  * Continue upward from there to an optional Hiker.
+
+  * Going up-left past him leads to a Moon Stone.
+
+- Back near the large room, the second ladder down leads to another optional
+Team Rocket Grunt.
+- After clearing those optional sections, take the path past the Hiker and
+continue toward the northwest side.
+- Go down the next ladder.
+- In the new area:
+
+  * Going up leads to a Revive.
+
+  * Going right is the required route.
+
+- Take the required route to the right, then go down the stairs to the Rocket
+section.
+- After the first required Team Rocket Grunt:
+
+  * Go up the stairs.
+
+  * Go right.
+
+  * Go down.
+
+  * Follow the path downward, then left as it loops around.
+
+  * Continue up to the second required Team Rocket Grunt.
+
+- After the second required Team Rocket Grunt, continue upward to the Super Nerd
+and the fossil room.
+- After choosing a fossil, go up and left past him.
+- Continue along the path to pick up an Antidote.
+- Then go up the ladder, and up another ladder, to exit Mt. Moon onto Route 4.
+- Trainers:
+
+  * BUG CATCHER
+    - Pokémon: Caterpie (Lv 10), Weedle (Lv 10)
+    - Tips: Fire-type moves are effective.
+
+* SUPER NERD
+
+    - Pokémon: Magnemite (Lv 11), Voltorb (Lv 11)
+    - Tips: Ground-type moves are very effective.
+
+* BUG CATCHER
+
+    - Pokémon: Weedle (Lv 10), Kakuna (Lv 10)
+    - Tips: Fire-type moves remain effective.
+
+* LASS
+
+    - Pokémon: Clefairy (Lv 14)
+    - Tips: Clefairy has good bulk for this stage.
+
+* TEAM ROCKET GRUNT
+
+    - Pokémon: Rattata (Lv 13), Zubat (Lv 13)
+    - Tips: Straightforward battle.
+
+* YOUNGSTER
+
+    - Pokémon: Rattata (Lv 13), Rattata (Lv 13)
+    - Tips: Fast but fragile opponents.
+
+* HIKER
+
+    - Pokémon: Geodude (Lv 11), Geodude (Lv 11), Onix (Lv 11)
+    - Tips: Water and Grass moves are very effective.
+
+* TEAM ROCKET GRUNT
+
+    - Pokémon: Rattata (Lv 14), Ekans (Lv 14)
+    - Tips: Straightforward battle.
+
+* TEAM ROCKET GRUNT
+
+    - Pokémon: Sandshrew (Lv 15), Zubat (Lv 15)
+    - Tips: Mixed matchup.
+
+* SUPER NERD
+
+    - Pokémon: Grimer (Lv 12), Voltorb (Lv 12), Koffing (Lv 12)
+    - Tips: Ground or Psychic moves are effective.
+
+--------------
+Route 4 (East)
+--------------
+
+- After leaving Mt. Moon on the eastern side, you re-emerge on Route 4.
+- There is a small grass patch here with catches similar to the western side.
+- TM05 Roar can be picked up here.
+- Mega Punch and Mega Kick move tutors are also nearby.
+- Spearow remains one of the useful catches here and can later help with Fly
+utility.
+- An NPC reminds you that Brock is respected, not just feared.
+- Another NPC mentions tripping over a Geodude.
+- The nearby Pokémon Center is a good place to recover from Mt. Moon and
+reorganize the team.
+- Available Pokemon
+
+  * Spearow
+
+  * Nidoran♂
+
+- Items
+
+  * TM05 Roar
+
+-------------
+Cerulean City
+-------------
+
+- Cerulean City is the next major stop after Mt. Moon.
+- Heal at the Pokémon Center and reorganize your team after the cave.
+- The Bike Shop is located on the southwest side of town.
+- The Bicycle costs 1,000,000G and cannot be bought yet.
+- A trade house west of the Pokémon Center offers a trade later.
+- Several NPCs discuss Bill and his reputation as a Pokémaniac.
+- Traded Pokémon grow faster, though their obedience can depend on badges.
+- The northeast route is blocked by an officer due to a robbery, with implied
+Team Rocket involvement.
+- An NPC explains that Repel works better when your strongest Pokémon is first
+in the party.
+- Rare Candy is explained as an item that raises a Pokémon by one level
+instantly.
+- Suggested restock before continuing:
+
+  * at least 10 Poké Balls
+
+  * Potions
+
+  * Repels
+- Blue appears immediately north of Cerulean City before Nugget Bridge.
+- After the rival battle, Blue mentions Bill.
+- Trainers:
+
+  * RIVAL BLUE
+    - Pokémon: Pidgeotto (Lv 17), Starter Pokémon (Lv 18), Abra (Lv 15), Rattata
+(Lv 15)
+    - Tips: Pidgeotto falls quickly to strong attacks. The starter is usually
+the toughest matchup. Abra is fragile. Winning here also points you toward Bill.
+
+------------------------
+Route 24 / Nugget Bridge
+------------------------
+
+- Route 24 is better known as Nugget Bridge.
+- Defeat five bridge trainers in a row to receive a Nugget.
+- After those five battles, a Team Rocket Grunt tries to recruit you and
+attacks.
+- There is also west-side grass and an optional extra trainer off the bridge
+area.
+- If your starter is carrying most fights, this is a reasonable place to return
+to Cerulean and heal PP before continuing east.
+- Available Pokemon
+
+  * Caterpie
+
+  * Weedle
+
+  * Kakuna
+
+  * Metapod
+
+  * Oddish
+
+  * Bellsprout
+
+  * Sandshrew
+
+  * Ekans
+
+  * Mankey
+
+- Items
+
+  * Nugget
+
+- Trainers:
+
+  * BUG CATCHER
+    - Pokémon: Caterpie (Lv 14), Weedle (Lv 14), Kakuna (Lv 14), Metapod (Lv 14)
+    - Tips: Fire-type moves shred this team.
+
+* LASS
+
+    - Pokémon: Pidgey (Lv 13), Oddish (Lv 13), Bellsprout (Lv 13)
+    - Tips: Fire is excellent here; Flying also helps against the Grass-types.
+
+* YOUNGSTER
+
+    - Pokémon: Sandshrew (Lv 14), Ekans (Lv 14)
+    - Tips: Water or Grass is best for Sandshrew.
+
+* LASS
+
+    - Pokémon: Nidoran♀ (Lv 14), Nidorina (Lv 14)
+    - Tips: Strong neutral damage is usually enough if your starter is ahead of
+curve.
+
+* JR. TRAINER
+
+    - Pokémon: Mankey (Lv 18)
+    - Tips: The last bridge trainer before the Nugget reward.
+
+* TEAM ROCKET GRUNT
+
+    - Pokémon: Ekans (Lv 17), Zubat (Lv 17)
+    - Tips: Defeating him earns the Nugget reward from the previous sequence.
+
+* JR. TRAINER
+
+    - Pokémon: Rattata (Lv 14), Ekans (Lv 14)
+    - Tips: Optional west-side trainer off the bridge area.
+
+--------
+Route 25
+--------
+
+- Route 25 continues east from Nugget Bridge toward Bill’s house.
+- Some trainers here can be skipped, but battling all of them gives strong
+early-game EXP.
+- Caterpie can be caught here if you missed it earlier.
+- A lower trail later functions as a shortcut back toward Cerulean City.
+- Available Pokemon
+
+  * Caterpie
+
+- Trainers:
+
+  * HIKER
+    - Pokémon: Machop (Lv 15), Geodude (Lv 15)
+    - Tips: Water and Grass are very effective here.
+
+* YOUNGSTER
+
+    - Pokémon: Rattata (Lv 14), Spearow (Lv 14)
+    - Tips: Straightforward battle with a strong lead Pokémon.
+
+* HIKER
+
+    - Pokémon: Onix (Lv 17)
+    - Tips: Water or Grass moves handle this easily. Optional battle.
+
+* YOUNGSTER
+
+    - Pokémon: Slowpoke (Lv 17)
+    - Tips: Slowpoke can take hits well. Use strong neutral attacks if needed.
+
+* LASS
+
+    - Pokémon: Nidoran♂ (Lv 14), Nidoran♀ (Lv 14)
+    - Tips: Another straightforward route battle.
+
+* HIKER
+
+    - Pokémon: Geodude (Lv 13), Geodude (Lv 13), Geodude (Lv 13), Machop (Lv 13)
+    - Tips: A longer optional battle with good EXP.
+
+* JR. TRAINER
+
+    - Pokémon: Rattata (Lv 14), Ekans (Lv 14)
+    - Tips: Optional trainer near the end of the route.
+
+* YOUNGSTER
+
+    - Pokémon: Ekans (Lv 15), Sandshrew (Lv 15)
+    - Tips: Switching out can help if confusion becomes a problem.
+
+* LASS
+
+    - Pokémon: Oddish (Lv 13), Pidgey (Lv 13), Oddish (Lv 13)
+    - Tips: Fire handles the Grass-types easily.
+
+------------------
+Sea Cottage (Bill)
+------------------
+
+- Sea Cottage is the house at the end of Route 25.
+- NPCs nearby describe the cape as a famous date spot.
+- Inside, Bill has accidentally fused himself with a Pokémon.
+- Use the PC to activate the Cell Separation System and restore him.
+- Bill rewards you with the SS Ticket.
+- The SS Ticket is needed later to board the S.S. Anne in Vermilion City.
+- Bill also mentions that the S.S. Anne has many trainers on board.
+- After meeting Bill, use the shortcut route back toward Cerulean City.
+- Items
+
+  * SS Ticket
+
+------------
+Cerulean Gym
+------------
+
+- Misty’s Gym is in Cerulean City.
+- The Gym guide recommends Grass-types such as Ivysaur or Paras, and
+Electric-types such as Pikachu, against Misty.
+- If you are using Charmeleon, you can still win by overleveling, using support
+Pokémon, or brute-forcing with repeated attempts.
+- Saving before and after Gym Leader battles is strongly recommended.
+- Trainers:
+
+  * SWIMMER
+    - Pokémon: Horsea (Lv 16), Shellder (Lv 16)
+    - Tips: Shellder is Water-type. Charmeleon can still win here through level
+advantage.
+
+* JR. TRAINER♀
+
+    - Pokémon: Goldeen (Lv 19)
+    - Tips: Optional extra EXP before Misty.
+
+----------------
+Gym Leader Misty
+----------------
+
+- Misty specializes in Water-type Pokémon.
+- Staryu and Starmie are her main threats.
+- Starmie is the real challenge because it hits hard and can outspeed many
+Pokémon at this stage.
+- Paras can support with Stun Spore.
+- Revive and switch tactics are valid if you want to brute-force the battle.
+- Losses only cost a small amount of money, so repeated attempts are acceptable.
+- Trainers:
+
+  * GYM LEADER MISTY
+    - Pokémon: Staryu (Lv 18), Starmie (Lv 21)
+    - Tips: Grass and Electric are ideal. Charmeleon can still win through level
+advantage and persistence.
+After the Battle
+
+- Defeating Misty grants the Cascade Badge.
+- The Cascade Badge allows higher-level Pokémon to obey you.
+- This also applies to traded Pokémon up to that level.
+- Cut can now be used outside of battle.
+- Misty awards TM11 (BubbleBeam).
+- Heal and save after the battle before continuing north.
+
+==============================================================================
+==============================================================================
+==============================================================================
+
+----------------------------------------------
+---- 10 > CERULEAN CITY TO VERMILION CITY ----
+----------------------------------------------
+
+Sections in this chapter:
+
+Cerulean City / Team Rocket Backyard
+
+Route 5
+
+Underground Path
+
+Route 6
+
+Vermilion City
+
+Route 11
+
+Diglett's Cave
+
+S.S. Anne
+
+Vermilion Gym
+
+Gym Leader Lt. Surge
+
+------------------------------------
+Cerulean City / Team Rocket Backyard
+------------------------------------
+
+- After defeating Misty, head to the previously blocked house on the northeast
+side of Cerulean City.
+- The house has been trashed by Team Rocket.
+- An NPC explains that Team Rocket stole TM28 Dig.
+- The Rocket Grunt in the backyard must be defeated to recover it.
+- TM28 Dig is both a useful Ground-type move and a functional dungeon escape
+tool outside battle.
+- Items
+
+  * TM28 Dig
+
+- Trainers:
+
+  * TEAM ROCKET GRUNT
+    - Pokémon: Machop (Lv 17), Drowzee (Lv 17)
+    - Tips: Strong direct attacks work fine here.
+TM28 Dig Notes
+
+- Dig has 60 power.
+- Dig attacks on the second turn.
+- Outside battle, Dig can function like an Escape Rope in many dungeons.
+
+-------
+Route 5
+-------
+
+- Route 5 lies south of Cerulean City.
+- The Day Care is located here, though it is optional and skipped in this run.
+- Wild Pidgey here are noticeably higher level than early-game Route 1 catches.
+- Available Pokemon
+
+  * Pidgey
+
+----------------
+Underground Path
+----------------
+
+- The direct route into Saffron City is still blocked by the thirsty guard.
+- The Underground Path is the intended route from Cerulean City to Vermilion
+City at this point.
+- A little girl near the entrance offers a Nidoran♂ for Nidoran♀ trade.
+- Trainers:
+
+  * None
+
+-------
+Route 6
+-------
+
+- Route 6 connects the Underground Path exit to Vermilion City.
+- The route contains several straightforward trainer battles and some useful
+wild encounters.
+- If using an overleveled starter, most battles here are simple.
+- Available Pokemon
+
+  * Pidgey
+
+- Trainers:
+
+  * BUG CATCHER
+    - Pokémon: Weedle (Lv 16), Weedle (Lv 16), Caterpie (Lv 16)
+    - Tips: Fire moves clear this fight very quickly.
+
+* JR. TRAINER
+
+    - Pokémon: Squirtle (Lv 20)
+    - Tips: This matchup can be more dangerous due to Water-type advantage.
+
+* PICNICKER
+
+    - Pokémon: Rattata (Lv 16), Pikachu (Lv 16)
+    - Tips: Strong neutral attacks work well.
+
+* BUG CATCHER
+
+    - Pokémon: Butterfree (Lv 20)
+    - Tips: An easy Fire-type matchup.
+
+* PICNICKER
+
+    - Pokémon: Pidgey (Lv 16), Pidgey (Lv 16), Pidgey (Lv 16)
+    - Tips: Straightforward Flying-type fight.
+
+* JR. TRAINER
+
+    - Pokémon: Spearow (Lv 16), Raticate (Lv 16)
+    - Tips: A strong lead Pokémon handles this easily.
+
+--------------
+Vermilion City
+--------------
+
+- Vermilion City is your next major stop after Route 6.
+- Heal at the Pokémon Center and save periodically.
+- The Fishing Guru in the northwest U-shaped house gives you the Old Rod.
+- The Old Rod mainly catches Magikarp here.
+- Magikarp evolves into Gyarados at Lv. 20 and can become a useful Water/Flying
+addition later.
+- The Pokémon Fan Club chairman gives you the Bike Voucher after listening to
+him talk about Rapidash.
+- The Bike Voucher can be exchanged in Cerulean City for a Bicycle.
+- A nearby trade house offers Spearow for Farfetch’d.
+- In this run, that trade is completed and the player receives Farfetch’d named
+CH’DING.
+- Lt. Surge’s Gym is still blocked by a small tree until Cut is obtained.
+- NPCs mention mail exchange, Pidgey delivering letters, and Route 12 being
+blocked by a sleeping Snorlax.
+- Route 12’s current detour eventually leads toward Rock Tunnel and Lavender
+Town.
+- An Awakening can be picked up on the eastern side approach near Route 12.
+- The Bike Shop sells a Bicycle for 1,000,000G, which you cannot afford
+normally.
+- NPCs also mention pollution, Grimer, Machop flattening land for construction,
+and Bill’s reputation.
+- Available Pokemon
+
+  * Magikarp
+
+- Items
+
+  * Old Rod
+
+  * Bike Voucher
+
+  * Awakening
+
+Trade Notes
+
+- Spearow → Farfetch’d trade available
+- Poliwhirl → Jynx trade is mentioned later elsewhere, not completed here
+- Trainers:
+
+  * None
+
+Old Rod Notes
+
+- Usually catches Magikarp here
+- Magikarp often appears around Lv. 5
+- Magikarp uses Splash and is very weak early, but evolves into Gyarados at Lv.
+20
+
+--------
+Route 11
+--------
+
+- Route 11 lies east of Vermilion City.

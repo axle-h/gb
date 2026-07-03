@@ -590,6 +590,59 @@ fn can_start_game() {
     fixture.save_state_to_file().unwrap();
 }
 
+/// From a post-Cascade save state, navigate Cerulean → Vermilion City via the Underground Path
+/// (bypassing the still-blocked Saffron gates). Navigation-only extension beyond `can_start_game`.
+///
+/// **Ignored — blocked, but NOT a navigation bug.** Verified 3 ways (ROM re-decode, map render, and
+/// a real-engine save-state flood-fill) that our collision/ledge model is faithful: from the Cerulean
+/// Pokécenter the *real game itself* cannot walk to Route 5. Cerulean is split by one-way south
+/// ledges into terraces; the Pokécenter's terrace (whole main city) reaches Route 4 (west) + Route 24
+/// (north) but not Route 5. Route 5 needs a multi-map detour into a lower/east terrace, and the
+/// post-Cascade save also lacks the SS Ticket (Bill/Nugget-Bridge never done). See the plan doc
+/// (`docs/game-completion-plan.md`, Stage 3) and memory `cerulean-route5-terraces`.
+#[test]
+#[ignore]
+fn can_reach_vermilion() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-cascade.bin"),
+        Duration::from_mins(20),
+        vec![
+            PolicyStep::enter(Map::CeruleanCity),
+            PolicyStep::enter(Map::Route5),
+            PolicyStep::enter(Map::UndergroundPathRoute5),
+            PolicyStep::enter(Map::UndergroundPathNorthSouth),
+            PolicyStep::enter(Map::UndergroundPathRoute6),
+            PolicyStep::enter(Map::Route6),
+            PolicyStep::enter(Map::VermilionCity),
+        ],
+    );
+
+    fixture.step_until_exhausted();
+    assert_eq!(fixture.game_state().map.map, Map::VermilionCity, "agent should reach Vermilion City");
+}
+
+/// Navigate from the post-Cascade Cerulean Pokécenter to Bill's House (Sea Cottage), via the
+/// Nugget Bridge (Route 24 — the Cerulean rival battle triggers en route) and Route 25.
+/// First leg of the SS-Ticket detour that unlocks Route 5 (the trashed-house terrace bridge).
+#[test]
+#[ignore]
+fn can_reach_bill() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-cascade.bin"),
+        Duration::from_mins(30),
+        vec![
+            PolicyStep::enter(Map::CeruleanCity),
+            PolicyStep::enter(Map::Route24),
+            PolicyStep::enter(Map::Route25),
+            PolicyStep::enter(Map::BillsHouse),
+        ],
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("ended on {} @ {}", s.map.map, s.map.player_position);
+    assert_eq!(s.map.map, Map::BillsHouse, "agent should reach Bill's House");
+}
+
 struct TestFixture {
     pub gb: GameBoy,
     map_cache: MapMetadataCache,

@@ -10,7 +10,8 @@ use crate::geometry::Point8;
 use crate::pokemon::badge::Badge;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{BattleAction, BattleType};
-use crate::pokemon::damage::{is_damaging_move, pick_best_move};
+use crate::pokemon::damage::{expected_damage, is_damaging_move, pick_best_move};
+use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::tile::MetaTile;
 pub use crate::pokemon::item::ItemId;
@@ -48,6 +49,18 @@ pub trait Policy {
     /// - `Some(Some(item))` → buy the item.
     fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
         Some(None) // default: open the mart but buy nothing
+    }
+
+    /// Called on the level-up "Which move should be forgotten?" prompt, when a Pokémon that already
+    /// knows 4 moves would learn `new_move`. `current_moves` are the 4 known moves (slot order).
+    ///
+    /// - `None`             → not ready yet; asked again next frame.
+    /// - `Some(None)`       → decline learning; keep the current four moves.
+    /// - `Some(Some(slot))` → forget the move in `slot` (0-3) and learn `new_move`.
+    fn pick_move_to_forget(&mut self, _current_moves: &[PokemonMove], _new_move: PokemonMoveName)
+        -> Option<Option<usize>>
+    {
+        Some(None) // default: never drop an existing move
     }
 
     fn is_exhausted(&self) -> bool {
@@ -810,22 +823,72 @@ impl Policy for DeterministicPolicy {
             return result;
         }
 
-        // 2. pick a random fight action
-        let random_battle = actions.iter()
-            .filter(|a| matches!(a, BattleAction::Fight { .. }))
-            .choose(&mut self.rng);
-        if random_battle.is_some() {
-            return random_battle.cloned();
+        // No damaging move on the active Pokémon (out of PP, or all resisted to 0 damage).
+        // Prefer switching to a party member that CAN damage the enemy, rather than spamming a
+        // status move — especially Leech Seed, whose HP drain keeps the active Pokémon alive
+        // indefinitely and deadlocks the whole battle (observed Nugget-Bridge stall).
+        if let Some(switch) = actions.iter()
+            .filter_map(|a| match a {
+                BattleAction::SwitchPokemon { pokemon, .. } => {
+                    let best = pokemon.moves.iter().flatten()
+                        .filter(|m| m.pp > 0)
+                        .filter_map(|m| expected_damage(pokemon, m.name, &battle_state.enemy))
+                        .max().unwrap_or(0);
+                    (best > 0).then_some((best, a))
+                }
+                _ => None,
+            })
+            .max_by_key(|(dmg, _)| *dmg)
+            .map(|(_, a)| a)
+        {
+            println!("[policy] no damaging move available — switching to an attacker");
+            return Some(switch.clone());
         }
 
-        // 3. pick any random action
-        actions.into_iter().choose(&mut self.rng)
+        // No party member can damage the enemy. Avoid self-healing moves (Leech Seed) so the
+        // battle actually resolves (faint → black-out recovery) instead of stalling forever.
+        if let Some(a) = actions.iter()
+            .filter(|a| matches!(a,
+                BattleAction::Fight { battle_move, .. } if battle_move.name != PokemonMoveName::LeechSeed))
+            .choose(&mut self.rng)
+        {
+            return Some(a.clone());
+        }
+
+        // Last resort: any fight action, else any action.
+        actions.iter().find(|a| matches!(a, BattleAction::Fight { .. }))
+            .or_else(|| actions.iter().next())
+            .cloned()
     }
 
     fn pick_nickname(&mut self, _species: PokemonSpecies) -> Option<Option<String>> {
         let name = self.name_picker.pick().to_string();
         println!("[policy] pick name={}", name);
         Some(Some(name))
+    }
+
+    fn pick_move_to_forget(&mut self, current_moves: &[PokemonMove], new_move: PokemonMoveName)
+        -> Option<Option<usize>>
+    {
+        // Forget the *weakest* move rather than the default slot-0 (which was silently discarding
+        // Tackle). Value = base power, with any damaging move ranked above every status move (the +1
+        // tie-break also covers fixed-damage moves like Seismic Toss that list no power); HM moves are
+        // given max value so they are never forgotten (needed for field use). Because status moves
+        // rank lowest, a mixed moveset keeps its damaging moves — e.g. Ivysaur learning Poisonpowder
+        // forgets Growl/Leech Seed, not Tackle or Vine Whip. We always learn into the weakest slot
+        // (never decline) to avoid the fragile "abandon learning?" YES/NO flow; the only mild loss is
+        // a Pokémon that already knows four damaging moves learning a weak one, which is rare.
+        let is_hm = |m: PokemonMoveName| matches!(m, PokemonMoveName::Cut | PokemonMoveName::Fly
+            | PokemonMoveName::Surf | PokemonMoveName::Strength | PokemonMoveName::Flash);
+        let value = |m: PokemonMoveName| if is_hm(m) { u16::MAX }
+            else { m.metadata().power.unwrap_or(0) as u16 + if is_damaging_move(m) { 1 } else { 0 } };
+
+        let slot = current_moves.iter().enumerate()
+            .min_by_key(|(_, m)| value(m.name))
+            .map(|(i, _)| i)?;
+        println!("[policy] learning {new_move:?} — forgetting slot {slot} ({:?})",
+            current_moves.get(slot).map(|m| m.name));
+        Some(Some(slot))
     }
 
     fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
@@ -860,5 +923,41 @@ impl Policy for DeterministicPolicy {
             self.queue.front(),
             Some(PolicyStep::GrindUntilLevel { .. }) | Some(PolicyStep::CatchPokemon { .. })
         )
+    }
+}
+#[cfg(test)]
+mod move_learn_tests {
+    use super::*;
+    use crate::pokemon::move_name::PokemonMoveName::*;
+
+    fn mv(name: crate::pokemon::move_name::PokemonMoveName) -> PokemonMove {
+        PokemonMove::with_max_pp(name)
+    }
+
+    #[test]
+    fn keeps_damaging_moves_when_learning_status() {
+        let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
+        // Ivysaur: [Tackle(dmg), Growl(status), LeechSeed(status), VineWhip(dmg)] learning Poisonpowder.
+        let moves = [mv(Tackle), mv(Growl), mv(LeechSeed), mv(VineWhip)];
+        let slot = p.pick_move_to_forget(&moves, Poisonpowder).flatten().expect("should pick a slot");
+        assert!(slot == 1 || slot == 2,
+            "forgot slot {slot} ({:?}) — must forget a status move, not Tackle/Vine Whip", moves[slot].name);
+    }
+
+    #[test]
+    fn learns_strong_move_over_status() {
+        let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
+        let moves = [mv(Tackle), mv(Growl), mv(LeechSeed), mv(VineWhip)];
+        // Learning Razor Leaf (strong) should still forget a status slot, keeping both damaging moves.
+        let slot = p.pick_move_to_forget(&moves, RazorLeaf).flatten().unwrap();
+        assert!(slot == 1 || slot == 2, "should forget a status move to learn Razor Leaf");
+    }
+
+    #[test]
+    fn never_forgets_hm() {
+        let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
+        let moves = [mv(Cut), mv(Growl), mv(LeechSeed), mv(Poisonpowder)];
+        let slot = p.pick_move_to_forget(&moves, Poisonpowder).flatten().unwrap();
+        assert_ne!(moves[slot].name, Cut, "must never forget an HM move (Cut)");
     }
 }

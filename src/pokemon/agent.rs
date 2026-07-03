@@ -676,6 +676,30 @@ impl PokemonAgent {
                                         api.toggle_button(JoypadButton::A);
                                     }
                                 },
+                                Some(BattleMenuState::ForgetMoveList { index }) => {
+                                    // Level-up "Which move should be forgotten?" menu. Ask the policy
+                                    // which slot to forget (it keeps the strongest moves), navigate
+                                    // the cursor there and confirm. Without this the agent A-mashes
+                                    // and forgets slot 0 — silently discarding a good move (Tackle).
+                                    let game_state = api.game_state()?;
+                                    let which = api.learning_pokemon_index();
+                                    let current_moves: Vec<_> = game_state.pokemon.get(which)
+                                        .map(|p| p.moves.iter().flatten().copied().collect())
+                                        .unwrap_or_default();
+                                    match api.move_to_learn() {
+                                        Some(new_move) => match self.policy.pick_move_to_forget(&current_moves, new_move) {
+                                            None => {} // still deciding — wait
+                                            Some(Some(slot)) => {
+                                                let slot = slot as u8;
+                                                if index < slot { api.toggle_button(JoypadButton::Down); }
+                                                else if index > slot { api.toggle_button(JoypadButton::Up); }
+                                                else { api.toggle_button(JoypadButton::A); }
+                                            }
+                                            Some(None) => api.toggle_button(JoypadButton::B), // decline (best effort)
+                                        },
+                                        None => api.toggle_button(JoypadButton::A),
+                                    }
+                                },
                                 Some(_) => {
                                     // battle menu is showing, do not read the text
                                     api.toggle_button(JoypadButton::A);

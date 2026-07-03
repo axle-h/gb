@@ -41,6 +41,9 @@ pub enum BattleMenuState {
     Pokemon,
     PokemonList { index: u8 }, // 0-based
     Run,
+    /// The level-up "Which move should be forgotten?" menu (a 4-move list opened by
+    /// `LearnMove`/`TryingToLearn`). Distinct geometry from the battle move list.
+    ForgetMoveList { index: u8 }, // 0-based move slot the cursor is on
 }
 
 impl BattleMenuState {
@@ -70,7 +73,8 @@ impl BattleMenuState {
             BattleMenuState::Run => Point8 { x: 1, y: 1 },
             BattleMenuState::MoveList { index }
                 | BattleMenuState::ItemList { index }
-                | BattleMenuState::PokemonList { index } =>
+                | BattleMenuState::PokemonList { index }
+                | BattleMenuState::ForgetMoveList { index } =>
                 Point8 { x: 0, y: *index },
         }
     }
@@ -135,6 +139,14 @@ impl MenuState {
     }
 
     pub fn battle_menu_state(&self) -> Option<BattleMenuState> {
+        // The level-up move-forget menu ("Which move should be forgotten?") is opened by
+        // `LearnMove`/`TryingToLearn` with a unique top-left of (5,8) and a 0-indexed move cursor
+        // (`wCurrentMenuItem`). This is distinct from the battle move list (top-left 5,12) and the
+        // disabled-move list (5,12), so match it by geometry before anything else. Without this the
+        // agent A-mashes through and forgets slot 0 (losing a good move like Tackle).
+        if self.top_menu_item_x == 5 && self.top_menu_item_y == 8 {
+            return Some(BattleMenuState::ForgetMoveList { index: self.current_item });
+        }
         if self.text_box_id.is_battle_menu() {
             if self.is_main_battle_menu() {
                 return Some(match self.battle_menu_item() {
@@ -210,6 +222,24 @@ mod tests {
                 Some(BattleMenuState::MoveList { index })
             );
         }
+    }
+
+    #[test]
+    fn forget_move_menu() {
+        // The level-up move-forget menu (top-left 5,8) is recognized with a 0-indexed cursor,
+        // distinct from the battle move list (5,12). wTextBoxID is TwoOptionMenu (leftover from the
+        // "delete a move?" YES/NO), which must NOT be mistaken for the move-forget menu by geometry.
+        for index in 0..4 {
+            assert_eq!(
+                MenuState::new(TwoOptionMenu, index, 0, 100, 5, 8).battle_menu_state(),
+                Some(BattleMenuState::ForgetMoveList { index })
+            );
+        }
+        // The battle move list (5,12) is still a normal MoveList, not a forget menu.
+        assert_eq!(
+            MenuState::new(BattleMenuTemplate, 1, 0, 169, 5, 12).battle_menu_state(),
+            Some(BattleMenuState::MoveList { index: 0 })
+        );
     }
 
     #[test]
