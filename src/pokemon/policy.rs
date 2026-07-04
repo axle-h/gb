@@ -302,6 +302,10 @@ pub enum PolicyStep {
     EnterMap { to_map: Map, to_position: Option<Point8> },
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
+    /// Walk to the map's PC tile, face it, and press A (e.g. Bill's cell-separator PC). The PC is a
+    /// hidden-object tile, not a sprite; `MetaTileMap::pc_locations` supplies its coordinate. Should
+    /// be scripted only when using the PC is valid (e.g. after Bill's Pokémon enters the machine).
+    UsePc { map: Map },
     /// Walk to and pick up an item sprite (a Poké Ball on the ground), staying on this step until
     /// the sprite is gone. Unlike [`Interact`], this does **not** pop after issuing a single walk:
     /// picking up an item can be interrupted (e.g. the Mt Moon fossil area triggers the Super Nerd
@@ -348,6 +352,98 @@ impl PolicyStep {
         Self::enter(Map::CeruleanCity),
     ] }
 
+    /// The Bill's-House SS-Ticket sub-sequence (pokered `scripts/BillsHouse.asm`), assuming the
+    /// agent is already inside `BillsHouse`: talk to Bill's Pokémon (A-mash picks the default YES →
+    /// it walks into the cell separator) → use the PC (runs the Cell Separation System, Bill exits
+    /// the machine) → talk to Bill for the SS Ticket. Bill's exit is a ~1-2s scripted walk, so an
+    /// `Interact` issued mid-script aborts (reason `Script`); retry a few times so one lands after he
+    /// settles (extra talks after the ticket is received are harmless — same text, no re-give).
+    pub fn bill_ss_ticket_steps() -> Vec<Self> {
+        let mut steps = vec![
+            Self::Interact(MapSprite::BILLSHOUSE_BILL_POKEMON),
+            Self::UsePc { map: Map::BillsHouse },
+        ];
+        steps.extend(std::iter::repeat(Self::Interact(MapSprite::BILLSHOUSE_BILL1)).take(8));
+        steps
+    }
+
+    /// Heal the party at the Vermilion Pokémon Center and return to Vermilion City.
+    fn heal_at_vermilion() -> Vec<Self> {
+        vec![
+            Self::enter(Map::VermilionPokecenter),
+            Self::Interact(MapSprite::VERMILIONPOKECENTER_NURSE),
+            Self::enter(Map::VermilionCity),
+        ]
+    }
+
+    /// Board the S.S. Anne (from Vermilion City, SS Ticket in the bag), defeat every trainer in the
+    /// ship's cabins to level the party, beat the rival guarding the captain's door, and receive
+    /// **HM01 Cut** from the captain.
+    ///
+    /// Cabins are disconnected rooms within the `*Rooms` maps, each reached by a distinct warp
+    /// landing (`enter_at` disambiguates); we visit them one by one and `Interact` each trainer
+    /// (walking up + A starts a trainer battle). There is **no Pokémon Center on the ship**, so each
+    /// floor is a self-contained heal → board → sweep → disembark cycle that returns to Vermilion —
+    /// the lone starter would otherwise be worn down by attrition. Coordinates are decoded from
+    /// pokered `data/maps/objects/SSAnne*Rooms.asm`. Floors are ordered to level the party as high as
+    /// possible before the rival (a single 6-Pokémon battle with no mid-battle healing).
+    pub fn ss_anne_steps() -> Vec<Self> {
+        let mut s = vec![];
+
+        // ── 1F cabins (4 trainers) ──
+        s.extend(Self::heal_at_vermilion());
+        s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::SSAnne1F)]);
+        s.extend([
+            Self::enter_at(Map::SSAnne1FRooms, 0, 0),   Self::Interact(MapSprite::SSANNE1FROOMS_GENTLEMAN1), Self::enter(Map::SSAnne1F),
+            Self::enter_at(Map::SSAnne1FRooms, 10, 0),  Self::Interact(MapSprite::SSANNE1FROOMS_GENTLEMAN2), Self::enter(Map::SSAnne1F),
+            Self::enter_at(Map::SSAnne1FRooms, 10, 10), Self::Interact(MapSprite::SSANNE1FROOMS_YOUNGSTER),
+                                                        Self::Interact(MapSprite::SSANNE1FROOMS_COOLTRAINER_F), Self::enter(Map::SSAnne1F),
+        ]);
+        s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity)]); // disembark
+
+        // ── B1F cabins (6 trainers) ──
+        s.extend(Self::heal_at_vermilion());
+        s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::SSAnne1F), Self::enter(Map::SSAnneB1F)]);
+        s.extend([
+            Self::enter_at(Map::SSAnneB1FRooms, 2, 5),  Self::Interact(MapSprite::SSANNEB1FROOMS_SAILOR5),
+                                                        Self::Interact(MapSprite::SSANNEB1FROOMS_FISHER), Self::enter(Map::SSAnneB1F),
+            Self::enter_at(Map::SSAnneB1FRooms, 12, 5), Self::Interact(MapSprite::SSANNEB1FROOMS_SAILOR3), Self::enter(Map::SSAnneB1F),
+            Self::enter_at(Map::SSAnneB1FRooms, 22, 5), Self::Interact(MapSprite::SSANNEB1FROOMS_SAILOR4), Self::enter(Map::SSAnneB1F),
+            Self::enter_at(Map::SSAnneB1FRooms, 2, 15), Self::Interact(MapSprite::SSANNEB1FROOMS_SAILOR1),
+                                                        Self::Interact(MapSprite::SSANNEB1FROOMS_SAILOR2), Self::enter(Map::SSAnneB1F),
+        ]);
+        s.extend([Self::enter(Map::SSAnne1F), Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity)]); // disembark
+
+        // ── 2F cabins (4 trainers) + Bow (2 trainers, via 3F) ──
+        s.extend(Self::heal_at_vermilion());
+        s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::SSAnne1F), Self::enter(Map::SSAnne2F)]);
+        s.extend([
+            Self::enter_at(Map::SSAnne2FRooms, 12, 5), Self::Interact(MapSprite::SSANNE2FROOMS_GENTLEMAN1),
+                                                       Self::Interact(MapSprite::SSANNE2FROOMS_FISHER), Self::enter(Map::SSAnne2F),
+            Self::enter_at(Map::SSAnne2FRooms, 2, 15), Self::Interact(MapSprite::SSANNE2FROOMS_GENTLEMAN2),
+                                                       Self::Interact(MapSprite::SSANNE2FROOMS_COOLTRAINER_F), Self::enter(Map::SSAnne2F),
+        ]);
+        // Bow: SSAnne2F → SSAnne3F → SSAnneBow (one open room, two sailors). Party is strong by now.
+        s.extend([
+            Self::enter(Map::SSAnne3F), Self::enter(Map::SSAnneBow),
+            Self::Interact(MapSprite::SSANNEBOW_SAILOR2), Self::Interact(MapSprite::SSANNEBOW_SAILOR3),
+            Self::enter(Map::SSAnne3F), Self::enter(Map::SSAnne2F),
+        ]);
+        s.extend([Self::enter(Map::SSAnne1F), Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity)]); // disembark
+
+        // ── Rival + Captain (HM01) ── (heal first — the rival is 6 Pokémon in one battle)
+        s.extend(Self::heal_at_vermilion());
+        s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::SSAnne1F), Self::enter(Map::SSAnne2F)]);
+        s.push(Self::enter(Map::SSAnneCaptainsRoom)); // rival battle triggers on approach to the (36,4) warp
+        s.extend(std::iter::repeat(Self::Interact(MapSprite::SSANNECAPTAINSROOM_CAPTAIN)).take(4));
+        // ── Disembark back to Vermilion (after HM01 the ship departs on the way out of the dock) ──
+        s.extend([
+            Self::enter(Map::SSAnne2F), Self::enter(Map::SSAnne1F),
+            Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity),
+        ]);
+        s
+    }
+
     /// The full deterministic playthrough. Every forward map transition is an explicit `EnterMap`;
     /// on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the incrementally-observed
     /// graph. Starter is **Bulbasaur** — its Grass typing is super-effective against both Brock
@@ -388,13 +484,22 @@ impl PolicyStep {
             Self::enter(Map::ViridianCity),
             Self::enter(Map::ViridianMart),
             Self::Interact(MapSprite::VIRIDIANMART_CLERK),       // open the shop menu
-            Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 10), map: Map::ViridianMart },
-            Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 5), map: Map::ViridianMart },
+            // Only ₽1500 is available here and the game silently rejects an unaffordable order, so buy
+            // 7 Poké Balls (₽1400) — enough to catch a Pidgey. Viridian's Mart does not sell Potions.
+            Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 7), map: Map::ViridianMart },
             Self::enter(Map::ViridianCity),
 
-            // ── Catch a Pidgey + grind the starter on Route 1 ──
+            // ── Catch a Pidgey on Route 1 ──
             Self::enter(Map::Route1),
             Self::CatchPokemon { species: PokemonSpecies::Pidgey, on_map: Map::Route1 },
+            // Heal after the catch: the catch battles leave the starter (and the just-caught,
+            // low-HP Pidgey) badly hurt; grinding straight away death-spirals. Full-heal first.
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::ViridianPokecenter),
+            Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+            Self::enter(Map::ViridianCity),
+            // ── Grind the starter on Route 1 ──
+            Self::enter(Map::Route1),
             Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1 },
             Self::enter(Map::ViridianCity),
             Self::enter(Map::ViridianPokecenter),
@@ -462,9 +567,17 @@ pub struct DeterministicPolicy {
     /// and the policy decided to flee the current wild battle. The policy will navigate to that
     /// Pokémon Center and heal before resuming the main queue.
     heal_return: Option<Map>,
+    /// Number of times the current `BuyFromMart` step has re-opened the shop without the purchase
+    /// registering in the bag. The clerk-entry path occasionally drops the YES-confirm (no clean
+    /// joypad rising edge), so the step verifies the bag and retries a few times before giving up
+    /// (e.g. for an item the mart doesn't actually sell).
+    mart_attempts: u32,
 }
 
 impl DeterministicPolicy {
+    /// How many times to re-open the shop for one `BuyFromMart` step before giving up.
+    const MAX_MART_ATTEMPTS: u32 = 4;
+
     pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
@@ -472,6 +585,7 @@ impl DeterministicPolicy {
             name_picker: PokemonNamePicker::seed_from_u64(seed),
             last_pokemon_center: None,
             heal_return: None,
+            mart_attempts: 0,
         }
     }
 
@@ -671,6 +785,25 @@ impl Policy for DeterministicPolicy {
                         action
                     }
                 }
+                PolicyStep::UsePc { map } => {
+                    if state.map.map != map {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            println!("[policy] want to use the PC on {}, but no path there!", map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Pc) {
+                        // On the PC's map and the PC is reachable — face it and press A, then advance.
+                        self.queue.pop_front();
+                        return Some(action.clone());
+                    } else {
+                        // On the map but the PC isn't reachable yet (e.g. a script is still running) —
+                        // wait for it to become actionable.
+                        None
+                    }
+                }
                 PolicyStep::CollectItem(sprite) => {
                     let map = sprite.map();
                     if state.map.map != map {
@@ -703,13 +836,28 @@ impl Policy for DeterministicPolicy {
                             continue;
                         }
                         action
+                    } else if state.bag.iter().any(|i| i.id == item.id && i.quantity >= item.quantity) {
+                        // Purchase registered (bag now holds ≥ the target quantity) — done.
+                        self.mart_attempts = 0;
+                        self.queue.pop_front();
+                        continue;
+                    } else if self.mart_attempts >= Self::MAX_MART_ATTEMPTS {
+                        // The shop re-opened this many times without the item appearing — the mart
+                        // probably doesn't sell it (e.g. Potion in Viridian). Give up on this step.
+                        println!("[policy] gave up buying {} from {} after {} attempts", item, map, self.mart_attempts);
+                        self.mart_attempts = 0;
+                        self.queue.pop_front();
+                        continue;
                     } else {
-                        // If triggered in the overworld, talk to the "Clerk" sprite to initiate the pokemart agent
+                        // If triggered in the overworld, talk to the "Clerk" sprite to (re)open the
+                        // pokemart menu. `pick_mart_purchase` will drive the actual buy; we re-verify
+                        // the bag on the next overworld tick and retry if the confirm was dropped.
                         let action = actions.iter()
                             .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk"));
 
                         if action.is_none() {
                             println!("[policy] BuyFromMart step encountered in pick_overworld_action and no clerk available — skipping");
+                            self.mart_attempts = 0;
                             self.queue.pop_front();
                             continue;
                         }
@@ -800,7 +948,12 @@ impl Policy for DeterministicPolicy {
         }
 
         // Switch to the healthiest party member if below 15% HP and a better option exists.
-        if battle_state.player.remaining_hp() < 0.15 {
+        // Exception: while grinding we deliberately want the lead (slot 0) to take the wild-battle
+        // XP, so switching a healthy bench mon in would starve the lead of levels and the grind
+        // would never finish. During a `GrindUntilLevel` step, keep the lead in (blackout recovery
+        // heals and resumes if it faints).
+        let grinding = matches!(self.queue.front(), Some(PolicyStep::GrindUntilLevel { .. }));
+        if !grinding && battle_state.player.remaining_hp() < 0.15 {
             if let Some(switch) = actions.iter()
                 .filter(|a| matches!(a, BattleAction::SwitchPokemon { .. }))
                 .max_by_key(|a| match a {
@@ -809,8 +962,20 @@ impl Policy for DeterministicPolicy {
                 })
             {
                 if let BattleAction::SwitchPokemon { pokemon, .. } = switch {
-                    if pokemon.current_hp > battle_state.player.current_hp {
-                        println!("[policy] HP critical — switching to {} ({}hp)", pokemon.species, pokemon.current_hp);
+                    // Only switch to a member that is a *genuine* alternative: meaningfully healthy
+                    // (>50% of its own max HP) AND at least the active mon's level. A low-level bench
+                    // mon (e.g. a lv4 Pidgey behind a lv18 Ivysaur) is a sacrificial weakling — even
+                    // at full HP it faints immediately, so swapping it into a trainer battle just
+                    // hands over a Pokémon and stalls the run (observed: the Mt Moon Super Nerd fight
+                    // never cleared, so the fossil was never collected). This mirrors the original
+                    // lone-Ivysaur behaviour: fight on and rely on blackout recovery when there is no
+                    // real switch, but take a strong, healthy team-mate when one exists.
+                    let healthy_enough = pokemon.stats.hp > 0
+                        && pokemon.current_hp as u32 * 2 > pokemon.stats.hp as u32;
+                    let strong_enough = pokemon.level >= battle_state.player.level;
+                    if healthy_enough && strong_enough && pokemon.current_hp > battle_state.player.current_hp {
+                        println!("[policy] HP critical — switching to {} (lv{} {}/{}hp)",
+                            pokemon.species, pokemon.level, pokemon.current_hp, pokemon.stats.hp);
                         return Some(*switch);
                     }
                 }
@@ -894,7 +1059,11 @@ impl Policy for DeterministicPolicy {
     fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
         let result = match self.queue.front() {
             Some(PolicyStep::BuyFromMart { item, .. }) => {
-                println!("[policy] BuyFromMart: {:?}", item);
+                // Count this shop-open as an attempt. The `BuyFromMart` overworld arm pops the step
+                // once the bag reflects the purchase (or after MAX_MART_ATTEMPTS), so we do NOT pop
+                // here — a dropped YES-confirm re-opens the shop and retries.
+                self.mart_attempts += 1;
+                println!("[policy] BuyFromMart: {:?} (attempt {})", item, self.mart_attempts);
                 Some(*item)
             }
             _ => {
@@ -902,10 +1071,6 @@ impl Policy for DeterministicPolicy {
                 None
             },
         };
-
-        if result.is_some() {
-            self.queue.pop_front();
-        }
 
         Some(result)
     }
@@ -921,7 +1086,12 @@ impl Policy for DeterministicPolicy {
     fn current_step_is_long_running(&self) -> bool {
         matches!(
             self.queue.front(),
-            Some(PolicyStep::GrindUntilLevel { .. }) | Some(PolicyStep::CatchPokemon { .. })
+            Some(PolicyStep::GrindUntilLevel { .. })
+                | Some(PolicyStep::CatchPokemon { .. })
+                // Collecting the Mt Moon fossil means crossing a battle-heavy floor: each wild
+                // encounter interrupts the walk, and with a real (non-pimped) party those battles
+                // are slow, so the single CollectItem step legitimately sits for a long while.
+                | Some(PolicyStep::CollectItem(_))
         )
     }
 }

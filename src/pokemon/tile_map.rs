@@ -212,6 +212,17 @@ impl MetaTileMap {
         (dist, came_from)
     }
 
+    /// Fixed PC-tile coordinates on this map (hidden objects the player faces + A to use). These
+    /// are not derivable from the tileset, so they are hard-coded from pokered
+    /// `data/events/hidden_objects.asm`. `actions()` emits a face-and-A route to each.
+    fn pc_locations(&self) -> &'static [Point8] {
+        match self.map {
+            // Bill's cell-separator PC — used mid-SS-Ticket script (stand at (1,5) facing up + A).
+            Map::BillsHouse => &[Point8 { x: 1, y: 4 }],
+            _ => &[],
+        }
+    }
+
     pub fn actions(&self) -> Vec<OverworldAction> {
         let (full_dist,     full_from)     = self.bfs_from_player();
 
@@ -350,7 +361,38 @@ impl MetaTileMap {
             let route = reconstruct(dest, &full_from);
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
-        
+
+        // 5. PC tiles (hidden-object interactables): route to a walkable tile adjacent to the PC,
+        //    face it, press A. Mirrors the sprite-interaction routing (a PC is not a sprite, so it
+        //    is keyed by fixed coordinate rather than found in the sprite list).
+        for &pc in self.pc_locations() {
+            let adj: [(PlayerFacingDirection, Point8); 4] = [
+                (PlayerFacingDirection::Down,  Point8 { x: pc.x,                   y: pc.y.saturating_sub(1) }),
+                (PlayerFacingDirection::Up,    Point8 { x: pc.x,                   y: pc.y + 1               }),
+                (PlayerFacingDirection::Right, Point8 { x: pc.x.saturating_sub(1), y: pc.y                   }),
+                (PlayerFacingDirection::Left,  Point8 { x: pc.x + 1,               y: pc.y                   }),
+            ];
+            let Some((face_dir, dest)) = adj.iter()
+                .filter(|(_, p)| {
+                    (p.x as usize) < self.width && (p.y as usize) < self.height
+                    && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
+                    && best_dist_from(p).is_some()
+                })
+                .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
+                .copied()
+            else { continue };
+            let (_, came_from) = best_dist_from(&dest).unwrap();
+            let mut route = reconstruct(dest, came_from);
+            let face_button: JoypadButton = face_dir.into();
+            if route.is_empty() {
+                if face_dir != self.player_direction { route.push(face_button); }
+            } else if route.last() != Some(&face_button) {
+                route.push(face_button);
+            }
+            route.push(JoypadButton::A);
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Pc, route });
+        }
+
         actions.sort();
         actions
     }
@@ -381,6 +423,7 @@ impl Display for MetaTileMap {
                     MetaTile::Jump(JumpDirection::East)  => write!(f, ">")?,
                     MetaTile::Counter => write!(f, "=")?,
                     MetaTile::CutTree => write!(f, "t")?,
+                    MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
                 };
             }

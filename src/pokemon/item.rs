@@ -84,5 +84,11 @@ pub enum ItemId {
     MaxEther = 0x51,
     Elixer = 0x52,
     MaxElixer = 0x53,
+    // Field-move HMs (item ids $C4–$C8). Needed to detect/teach Cut, Fly, Surf, etc.
+    Hm01Cut = 0xC4,
+    Hm02Fly = 0xC5,
+    Hm03Surf = 0xC6,
+    Hm04Strength = 0xC7,
+    Hm05Flash = 0xC8,
 
 }

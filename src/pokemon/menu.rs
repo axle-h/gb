@@ -32,6 +32,18 @@ impl TextBoxId {
     }
 }
 
+/// True when `on_screen_text` is the level-up "Which move should be forgotten?" prompt.
+///
+/// The forget-move menu shares the `(5,8)` cursor geometry with whatever menu previously wrote
+/// `wTopMenuItemX/Y`, and those bytes persist in RAM, so geometry alone can misfire on a stale
+/// value. The prompt (`_WhichMoveToForgetText`, pokered `data/text/text_4.asm`) is printed with
+/// `done` (no button wait) and sits in the bottom message box while the move list is drawn above
+/// it, so it stays readable via `on_screen_text(only_message_box=true)` for the whole menu. Match
+/// the distinctive "forgotten" so the agent only drives the forget menu when it is genuinely shown.
+pub fn is_forget_move_prompt(on_screen_text: &str) -> bool {
+    on_screen_text.contains("forgotten")
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BattleMenuState {
     Fight,
@@ -240,6 +252,16 @@ mod tests {
             MenuState::new(BattleMenuTemplate, 1, 0, 169, 5, 12).battle_menu_state(),
             Some(BattleMenuState::MoveList { index: 0 })
         );
+    }
+
+    #[test]
+    fn forget_move_prompt_text() {
+        // The real on-screen text (two lines joined with a space by on_screen_text).
+        assert!(is_forget_move_prompt("Which move should be forgotten?"));
+        // Unrelated battle text must not be mistaken for the forget prompt.
+        assert!(!is_forget_move_prompt("What will PIKACHU do?"));
+        assert!(!is_forget_move_prompt("CELINA is trying to learn RAZOR LEAF!"));
+        assert!(!is_forget_move_prompt(""));
     }
 
     #[test]

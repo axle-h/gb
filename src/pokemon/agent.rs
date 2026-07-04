@@ -12,7 +12,7 @@ use crate::pokemon::delay::DelayContext;
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;
-use crate::pokemon::menu::BattleMenuState;
+use crate::pokemon::menu::{is_forget_move_prompt, BattleMenuState};
 use crate::pokemon::policy::{Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::text::PokemonTextReader;
@@ -676,11 +676,18 @@ impl PokemonAgent {
                                         api.toggle_button(JoypadButton::A);
                                     }
                                 },
-                                Some(BattleMenuState::ForgetMoveList { index }) => {
+                                Some(BattleMenuState::ForgetMoveList { index })
+                                    if api.on_screen_text(true)
+                                        .map_or(false, |t| is_forget_move_prompt(&t)) =>
+                                {
                                     // Level-up "Which move should be forgotten?" menu. Ask the policy
                                     // which slot to forget (it keeps the strongest moves), navigate
                                     // the cursor there and confirm. Without this the agent A-mashes
                                     // and forgets slot 0 — silently discarding a good move (Tackle).
+                                    // The `(5,8)` geometry is confirmed by the on-screen prompt text
+                                    // (guard above) so stale cursor bytes can't misfire this branch —
+                                    // when unconfirmed we fall through to the generic `Some(_)` arm,
+                                    // which just advances the text with A.
                                     let game_state = api.game_state()?;
                                     let which = api.learning_pokemon_index();
                                     let current_moves: Vec<_> = game_state.pokemon.get(which)
