@@ -23,6 +23,10 @@ pub enum MetaTile {
     /// A shrub that blocks passage until the player uses HM Cut.
     /// Treated as impassable until `can_use_cut` is true.
     CutTree,
+    /// A PC (a hidden-object tile the player faces and presses A to use — Someone's PC / Bill's PC).
+    /// Impassable like `Obstacle`, but `actions()` emits a route that faces it and presses A. The
+    /// tile is not classified from the tileset; PC coordinates are looked up per map (`pc_locations`).
+    Pc,
     /// Tall-grass tile (tile ID matches `wGrassTile` for the current tileset).
     /// Walkable; stepping on it can trigger a wild Pokémon encounter.
     Grass,

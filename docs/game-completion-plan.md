@@ -281,21 +281,59 @@ problems surface:
 
 ### Progress log
 - **Stage 1 — DONE** (`can_start_game` green: Boulder + Cascade).
-- **Stage 3 — navigation SOLVED, party blocked.** Route 5 crossing (trashed-house bridge) is
-  understood and scriptable; rival battle works; `can_reach_bill` reaches Route 24 then stalls on the
-  Nugget Bridge due to the weak single-Ivysaur fixture party. **Next (now on the critical path):**
-  Stage 2 move-learning heuristic + battle-deadlock fix + a viable party, then regenerate
-  `post-cascade.bin`, then finish Bill → SS Ticket → trashed-house bridge → Route 5 → Vermilion.
-- **Stage 2 — CODE DONE (2026-07-03), verification pending**: move-learning heuristic (keep damaging
-  moves) + battle-deadlock fix implemented and unit-tested (see "IMPLEMENTED" above). Still needs an
-  end-to-end run to confirm the in-battle menu driving.
-- **NEXT (critical path):** regenerate `post-cascade.bin` with a viable party — upgrade
-  `complete_game_steps` to grind the starter higher (the move-learning now keeps Tackle/adds Razor
-  Leaf @lv30) and reliably catch + keep a 2nd Pokémon, heal, then re-run `can_start_game` to produce
-  the fixture. Then finish the Bill leg: Route 24 → Route 25 → **talk to Bill** (multi-step: talk to
-  Bill's Pokémon → use the PC cell-separator → talk to Bill for the SS Ticket) → return → the
-  trashed-house bridge (`enter(CeruleanTrashedHouse)` → `enter_at(CeruleanCity, 27, 9)`) →
-  `enter(Route5)` → Underground Path → Route 6 → Vermilion. (`can_reach_bill` reaches Route 24 today.)
+- **Stage 2 — DONE & VERIFIED end-to-end (2026-07-03 session 2).** Move-learning detection is now
+  robust: the "Which move should be forgotten?" menu is confirmed by BOTH the `(5,8)` cursor geometry
+  AND the on-screen prompt text (`menu::is_forget_move_prompt`, gated in `agent.rs` — stale geometry
+  can no longer misfire). Verified in a real `can_start_game` run: the lv23 Ivysaur learned
+  Poisonpowder and correctly forgot **Growl** (a status move), **keeping Tackle**.
+- **Party fix — DONE & VERIFIED. `post-cascade.bin` regenerated with a viable 2-mon party**
+  (Ivysaur lv23 "Celina" + Pidgey lv4 "Leslee"). The long-standing lone-Ivysaur fixture was caused by
+  a chain of bugs, all fixed in `policy.rs`/`integration_tests.rs`:
+  1. **Mart affordability**: only ₽1500 is available at the Viridian shop, but it tried to buy 10
+     Poké Balls (₽2000). The game silently rejects an unaffordable order and the mart state machine
+     reported false success → 0 balls → Pidgey never caught. Now buys **7** (₽1400); dropped the
+     Viridian Potion buy (that mart doesn't sell Potions). Added **verify-and-retry** to `BuyFromMart`
+     (pops only once the bag reflects the purchase, else re-opens the shop, capped at 4 tries).
+  2. **Battle death-spiral / XP-starve**: the voluntary low-HP switch sent the weak Pidgey out to die
+     — during the Route 1 grind (starving slot 0 of XP → grind never finished) and during the Mt Moon
+     Super Nerd fight (fossil never collected → stall). Fixed: voluntary switch now requires the bench
+     mon be **healthy (>50% HP) AND at least the active mon's level**, and is **skipped entirely during
+     `GrindUntilLevel`**. This restores the original lone-Ivysaur behaviour (fight on, blackout-recover)
+     while still allowing a genuine switch when a strong team-mate exists.
+  3. **Stall threshold**: `CollectItem` (crossing battle-heavy Mt Moon B2F with a real, non-pimped
+     party) is now exempt from the per-step stall detector, like grinding/catching.
+  4. Added a heal step after the Pidgey catch (catch battles leave both mons hurt).
+- **Stage 3 — Bill leg + SS Ticket DONE & VERIFIED.** `can_reach_bill`→`can_get_ss_ticket` is green:
+  the strong party clears the **Nugget Bridge** + Cerulean rival, and the new **PC-tile interaction**
+  drives the full Bill flow to obtain the **SS Ticket** ("CLAUDE received an S.S.TICKET!").
+  - New capability: **`MetaTile::Pc` + `MetaTileMap::pc_locations()` + `PolicyStep::UsePc`**. PCs are
+    hidden-object tiles (not sprites), so `pc_locations()` supplies the coord per map (Bill's House PC
+    at `(1,4)`) and `actions()` emits a face-and-A route (reusing the sprite-interaction routing). The
+    agent handles it via the normal route-execution branch (A → PC textbox → done).
+  - `PolicyStep::bill_ss_ticket_steps()`: `Interact(BILL_POKEMON)` (A-mash = default YES) → `UsePc` →
+    **8×** `Interact(BILL1)`. The retries matter: Bill's exit-machine is a ~1-2s scripted walk, so an
+    `Interact` issued mid-script aborts (reason `Script`); retrying lands one after he settles.
+- **Stage 3 → Vermilion — DONE & VERIFIED.** `can_reach_vermilion` is **un-ignored and green**: the
+  full leg Nugget Bridge → Bill (SS Ticket) → return → **trashed-house bridge**
+  (`enter(CeruleanTrashedHouse)` → `enter_at(CeruleanCity, 27, 9)` → `enter(Route5)`) → Underground
+  Path → Route 6 → **Vermilion City**. The trashed-house guard clears after meeting Bill, as expected.
+- **S.S. Anne — DONE & VERIFIED (full clear).** `can_clear_ss_anne` is green: board Vermilion →
+  `VermilionDock` → `SSAnne1F`, **defeat all 16 trainers** (1F ×4, B1F ×6, 2F ×4, Bow ×2 via 3F),
+  beat the **rival** (`SPRITE_BLUE` at SSAnne2F (36,4)), talk to the Captain → **HM01 Cut**, and
+  **disembark back to Vermilion City**. The Ivysaur levels **23 → 33** over the sweep. Snapshots
+  **`post-ss-anne.bin`** (HM01 in bag) for the next leg. (`can_board_ss_anne` remains as a fast
+  boarding-only regression; `at-vermilion.bin` is the pre-board fixture.)
+  - **How the combat wall was solved.** The lone starter can't out-attrition the ship (no Pokémon
+    Center aboard) — it fainted mid-sweep. Fix: each floor is a **heal → board → sweep → disembark**
+    cycle returning to Vermilion, so the party is always fresh; floors are ordered so the Ivysaur is
+    ~lv32 before the rival (a single 6-Pokémon battle with no mid-battle healing). Cabins are
+    **disconnected rooms** within the `*Rooms` maps, each reached by a distinct warp landing
+    (`enter_at`, coords decoded from `data/maps/objects/SSAnne*Rooms.asm`); `Interact(trainer)` walks
+    up + A to start each trainer battle. New capability used: **HM01–HM05 in `ItemId`** ($C4–$C8) so
+    `Cut` is detectable; the PC-interaction and `bill_ss_ticket_steps`/`ss_anne_steps` helpers.
+  - **NEXT — Thunder Badge (Lt. Surge).** Teach `Cut` (HM01) to a party mon (new `TeachMove` step),
+    make `MetaTile::CutTree` actionable to cut the tree blocking the Vermilion Gym, then the gym's
+    trash-can switch puzzle + beat Lt. Surge. Start from `post-ss-anne.bin`.
 
 ## Stage 4 — Surf, Strength, and the rest of the badges
 

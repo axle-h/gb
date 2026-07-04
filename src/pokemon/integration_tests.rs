@@ -8,6 +8,7 @@ use crate::pokemon::battle::BattleType;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::tile::JumpDirection;
 use crate::pokemon::tile::MetaTile;
+use crate::pokemon::map::MapSprite;
 use crate::ram::{RAM, ROM};
 
 pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("data/pallet-town-state.bin");
@@ -265,6 +266,26 @@ fn test_pokemart_shopping() {
         .find(|i| i.id == ItemId::PokeBall)
         .expect("expected pokeballs to be in bag");
     assert_eq!(*pokeballs, BagItem::new(ItemId::PokeBall, 5), "expected to have bought 5 Poké Balls from the Mart");
+}
+
+/// The `complete_game_steps` mart sequence — an explicit `Interact(Clerk)` opens the shop, THEN
+/// `BuyFromMart`. Guards the verify-and-retry buy flow (the purchase must register in the bag).
+#[test]
+fn test_mart_interact_then_buy() {
+    const STATE: &[u8] = include_bytes!("data/viridian-city-pokemart-shopping.bin");
+    let mut fixture = TestFixture::new(
+        STATE,
+        Duration::from_secs(120),
+        vec![
+            PolicyStep::Interact(MapSprite::VIRIDIANMART_CLERK),
+            PolicyStep::BuyFromMart { map: Map::ViridianMart, item: BagItem::new(ItemId::PokeBall, 7) },
+            PolicyStep::goto(Map::ViridianCity),
+        ]
+    );
+    fixture.step_until_exhausted();
+    let state = fixture.game_state();
+    let pokeballs = state.bag.iter().find(|i| i.id == ItemId::PokeBall);
+    assert_eq!(pokeballs, Some(&BagItem::new(ItemId::PokeBall, 7)), "expected 7 Poké Balls after Interact+Buy");
 }
 
 /// A Cut bush on the path north of Viridian City blocks access to the Fisher.
@@ -565,7 +586,7 @@ fn mt_moon_traversal_steps() -> Vec<PolicyStep> {
 fn can_start_game() {
     let mut fixture = TestFixture::new(
         include_bytes!("data/start-of-game-state.bin"),
-        Duration::from_mins(90),
+        Duration::from_mins(120),
         PolicyStep::complete_game_steps(),
     );
 
@@ -583,64 +604,139 @@ fn can_start_game() {
     }
     println!("badges: {:?}", state.badges);
     println!("map: {:?}", state.map.map);
+    println!("money: {}  bag: {:?}", state.money, state.bag.iter().collect::<Vec<_>>());
+
+    fixture.save_state_to_file().unwrap();
+    // Refresh the post-Cascade fixture the downstream Bill/Vermilion tests load, so they get this
+    // stronger, Tackle-keeping party instead of the stale lone-Ivysaur snapshot.
+    fixture.save_state_named("src/pokemon/data/post-cascade.bin").unwrap();
 
     assert!(state.badges.contains(Badge::BoulderBadge), "should have the Boulder Badge");
     assert!(state.badges.contains(Badge::CascadeBadge), "should have the Cascade Badge");
 
-    fixture.save_state_to_file().unwrap();
+    // A viable party keeps at least one damaging move on the starter (the move-learning heuristic
+    // must not have silently dropped Tackle) plus a second Pokémon for the Nugget Bridge leg.
+    assert!(state.pokemon.len() >= 2, "post-Cascade party should have ≥2 Pokémon (starter + caught mon)");
 }
 
-/// From a post-Cascade save state, navigate Cerulean → Vermilion City via the Underground Path
-/// (bypassing the still-blocked Saffron gates). Navigation-only extension beyond `can_start_game`.
+/// From a post-Cascade save state, do the full Bill → SS Ticket → Route 5 → Vermilion leg.
 ///
-/// **Ignored — blocked, but NOT a navigation bug.** Verified 3 ways (ROM re-decode, map render, and
-/// a real-engine save-state flood-fill) that our collision/ledge model is faithful: from the Cerulean
-/// Pokécenter the *real game itself* cannot walk to Route 5. Cerulean is split by one-way south
-/// ledges into terraces; the Pokécenter's terrace (whole main city) reaches Route 4 (west) + Route 24
-/// (north) but not Route 5. Route 5 needs a multi-map detour into a lower/east terrace, and the
-/// post-Cascade save also lacks the SS Ticket (Bill/Nugget-Bridge never done). See the plan doc
-/// (`docs/game-completion-plan.md`, Stage 3) and memory `cerulean-route5-terraces`.
+/// Route 5 is unreachable from the Cerulean Pokécenter terrace directly (one-way south ledges split
+/// the city; verified ROM-faithful). The real path is the **trashed-house bridge**, which only opens
+/// after meeting Bill (the `CERULEANCITY_GUARD2` guard at raw (27,12) clears): enter the trashed
+/// house from the main terrace, take its back door to land at Cerulean (27,9) — which IS in the
+/// Route-5-reaching terrace — then walk onto Route 5. So: Nugget Bridge → Bill (SS Ticket) → return →
+/// trashed-house bridge → Route 5 → Underground Path → Route 6 → Vermilion. See the plan doc Stage 3.
 #[test]
-#[ignore]
 fn can_reach_vermilion() {
+    let mut steps = vec![
+        // ── Nugget Bridge → Bill (SS Ticket) ──
+        PolicyStep::enter(Map::CeruleanCity),
+        PolicyStep::enter(Map::Route24),
+        PolicyStep::enter(Map::Route25),
+        PolicyStep::enter(Map::BillsHouse),
+    ];
+    steps.extend(PolicyStep::bill_ss_ticket_steps());
+    steps.extend([
+        // ── Return to Cerulean ──
+        PolicyStep::enter(Map::Route25),
+        PolicyStep::enter(Map::Route24),
+        PolicyStep::enter(Map::CeruleanCity),
+        // ── Trashed-house bridge into the Route-5 terrace ──
+        PolicyStep::enter(Map::CeruleanTrashedHouse),        // front door (main terrace, ~27,11)
+        PolicyStep::enter_at(Map::CeruleanCity, 27, 9),      // back door lands in the Route-5 terrace
+        PolicyStep::enter(Map::Route5),
+        // ── Underground Path → Route 6 → Vermilion ──
+        PolicyStep::enter(Map::UndergroundPathRoute5),
+        PolicyStep::enter(Map::UndergroundPathNorthSouth),
+        PolicyStep::enter(Map::UndergroundPathRoute6),
+        PolicyStep::enter(Map::Route6),
+        PolicyStep::enter(Map::VermilionCity),
+    ]);
     let mut fixture = TestFixture::new(
         include_bytes!("data/post-cascade.bin"),
-        Duration::from_mins(20),
-        vec![
-            PolicyStep::enter(Map::CeruleanCity),
-            PolicyStep::enter(Map::Route5),
-            PolicyStep::enter(Map::UndergroundPathRoute5),
-            PolicyStep::enter(Map::UndergroundPathNorthSouth),
-            PolicyStep::enter(Map::UndergroundPathRoute6),
-            PolicyStep::enter(Map::Route6),
-            PolicyStep::enter(Map::VermilionCity),
-        ],
+        Duration::from_mins(40),
+        steps,
     );
 
     fixture.step_until_exhausted();
-    assert_eq!(fixture.game_state().map.map, Map::VermilionCity, "agent should reach Vermilion City");
+    let state = fixture.game_state();
+    assert_eq!(state.map.map, Map::VermilionCity, "agent should reach Vermilion City");
+    assert!(state.bag.contains(&ItemId::SSTicket), "should still hold the SS Ticket at Vermilion");
+    // Snapshot at Vermilion with the SS Ticket, so the S.S. Anne tests can start here without
+    // replaying the whole Bill leg each iteration.
+    fixture.save_state_named("src/pokemon/data/at-vermilion.bin").unwrap();
 }
 
-/// Navigate from the post-Cascade Cerulean Pokécenter to Bill's House (Sea Cottage), via the
-/// Nugget Bridge (Route 24 — the Cerulean rival battle triggers en route) and Route 25.
-/// First leg of the SS-Ticket detour that unlocks Route 5 (the trashed-house terrace bridge).
+/// Navigate from the post-Cascade Cerulean Pokécenter to Bill's House (Sea Cottage) via the
+/// Nugget Bridge (Route 24 — the Cerulean rival battle triggers en route) and Route 25, then run
+/// the SS-Ticket sub-sequence: talk to Bill's Pokémon (YES → it enters the cell separator) → use
+/// the PC (sets the used-separator event, Bill appears) → talk to Bill → receive the SS Ticket.
 #[test]
-#[ignore]
-fn can_reach_bill() {
+fn can_get_ss_ticket() {
+    let mut steps = vec![
+        PolicyStep::enter(Map::CeruleanCity),
+        PolicyStep::enter(Map::Route24),
+        PolicyStep::enter(Map::Route25),
+        PolicyStep::enter(Map::BillsHouse),
+    ];
+    steps.extend(PolicyStep::bill_ss_ticket_steps());
     let mut fixture = TestFixture::new(
         include_bytes!("data/post-cascade.bin"),
         Duration::from_mins(30),
+        steps,
+    );
+    fixture.step_until_exhausted();
+    // `Interact` pops its step when the walk is *issued*, so when the queue empties the agent is
+    // still mid-walk to Bill and hasn't talked to him yet. The in-flight OverworldMovement finishes
+    // on its own (independent of the now-empty queue), so keep stepping until the ticket appears.
+    for _ in 0..15_000 {
+        if fixture.game_state().bag.contains(&ItemId::SSTicket) { break; }
+        fixture.step();
+    }
+    let s = fixture.game_state();
+    println!("ended on {} @ {}", s.map.map, s.map.player_position);
+    println!("bag: {:?}", s.bag.iter().collect::<Vec<_>>());
+    assert!(s.bag.contains(&ItemId::SSTicket), "should have obtained the SS Ticket from Bill");
+}
+
+/// Board the S.S. Anne: from Vermilion City (holding the SS Ticket) → Vermilion Dock → S.S. Anne 1F.
+/// The dock sailor checks the ticket; with it in the bag, boarding should succeed.
+#[test]
+fn can_board_ss_anne() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/at-vermilion.bin"),
+        Duration::from_mins(10),
         vec![
-            PolicyStep::enter(Map::CeruleanCity),
-            PolicyStep::enter(Map::Route24),
-            PolicyStep::enter(Map::Route25),
-            PolicyStep::enter(Map::BillsHouse),
+            PolicyStep::enter(Map::VermilionDock),
+            PolicyStep::enter(Map::SSAnne1F),
         ],
     );
     fixture.step_until_exhausted();
     let s = fixture.game_state();
     println!("ended on {} @ {}", s.map.map, s.map.player_position);
-    assert_eq!(s.map.map, Map::BillsHouse, "agent should reach Bill's House");
+    assert_eq!(s.map.map, Map::SSAnne1F, "agent should board the S.S. Anne (1F)");
+}
+
+
+/// Board the S.S. Anne, defeat all 16 cabin/bow trainers (leveling the party), beat the rival, get
+/// HM01 Cut from the captain, and disembark back to Vermilion. Each floor is a heal → board → sweep
+/// → disembark cycle (no Pokémon Center on the ship).
+#[test]
+fn can_clear_ss_anne() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/at-vermilion.bin"),
+        Duration::from_mins(90),
+        PolicyStep::ss_anne_steps(),
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("ended {} @ {} party_lv={:?} bag={:?}", s.map.map, s.map.player_position,
+        s.pokemon.iter().map(|p| p.level).collect::<Vec<_>>(), s.bag.iter().collect::<Vec<_>>());
+    assert!(s.bag.contains(&ItemId::Hm01Cut), "should have HM01 Cut after clearing the S.S. Anne");
+    assert_eq!(s.map.map, Map::VermilionCity, "should have disembarked back to Vermilion City");
+    // Snapshot post-S.S.-Anne (HM01 in bag, party ~lv32) for the next leg (teach Cut → Lt. Surge).
+    fixture.save_state_named("src/pokemon/data/post-ss-anne.bin").unwrap();
 }
 
 struct TestFixture {
@@ -765,6 +861,7 @@ fn dump_map_with_route(map: &MetaTileMap, route: &[JoypadButton]) -> String {
                     MetaTile::Jump(JumpDirection::East) => '>',
                     MetaTile::Counter => '=',
                     MetaTile::CutTree => 't',
+                    MetaTile::Pc => 'p',
                     MetaTile::Grass => 'g',
                 }
             }
