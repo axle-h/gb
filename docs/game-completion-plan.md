@@ -245,15 +245,20 @@ Flute**), then **Saffron** opens (Silph Co, Rocket-gated) → **Marsh Badge (Sab
   - Elevator reaches 11F directly, but **Giovanni (6,9) is NOT reachable from the 11F elevator exit even
     with the Card Key doors open** — his room is entered via the **7F (5,7) → 11F (3,2)** pad, i.e.
     another cross-floor chain. Likewise Lapras (Silph Worker M1 @7F (1,5)) needs 7F's own maze.
-  - The agent ends the Card Key leg *in* the 5F pocket, whose only exit is (9,15)→9F(17,15). From
-    9F(17,15) the sole forward pad is (9,3)→3F, ~63 tiles away through 9F's Rocket/Scientist trainers —
-    and the agent **gets stuck at 9F (18,11)** (Overworld, not battling), barely off the landing: a
-    trainer-blocked corridor the BFS can't route around. `probe_silph_post_cardkey` reproduces it.
+  - Routing is NOT the blocker: `WorldGraph` is already a region graph keyed by `(map, entry)`, and
+    forward maze hops work via explicit `enter()` steps (like the Card Key). The real blocker is
+    **within-floor navigation past card-key doors**. On 9F the agent walks to (18,11) then jams forever
+    pressing Up into (18,10): that tile is a **card-key door graphic ($18)** the agent's tile model
+    misses. Crucially the door is **RUNTIME-placed** — `tile_id`/`raw_tile_ids` (ROM block) read 0x01
+    floor there, but the runtime `wTileMap(8,7)=0x18`; Silph closes its doors on load via a script. So
+    a static ROM scan can't see them (I tried scanning all 4 sub-tiles via `tile_id` — no effect,
+    reverted). The fix: build the Silph-floor `MetaTileMap` from the **runtime wTileMap**, classifying
+    $18/$24 as blocked (decorative walls) or openable doors (at `card_key_coords`, opened by face-Up +
+    A → `PrintCardKeyText`). `probe_silph_post_cardkey` reproduces the jam.
   - Party is thin: **Venusaur lv48** (great) + a useless **lv4 Pidgey**. Over Silph's many trainers PP
     drain / a Venusaur faint → blackout is a real risk; likely wants a second real battler.
-  The right fix is a **region/pad graph router** (nodes = per-map walkable sub-regions, edges = pads)
-  so the agent can route to any maze target automatically, rather than hand-tracing each chain. Once at
-  Giovanni: beat him → Saffron Rockets leave → **Sabrina** → Marsh Badge.
+  Once floor nav works: reach Giovanni (via 7F(5,7)→11F(3,2)) → beat him → Saffron Rockets leave →
+  **Sabrina** → Marsh Badge. Lapras (7F Silph Worker M1) along the way.
   2. **Route 15 gate** — like the Route 12 gate, a gate building walls off the Fuchsia (west)
      connection; traverse it (east door → west exit landing (7,8)) before Fuchsia is reachable.
   Also: the Lavender heal (in `snorlax_steps`) was needed here — without it the party heal-fled to
