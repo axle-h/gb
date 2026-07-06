@@ -404,7 +404,10 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
         }
 
-        // 3. Routes to map connections (nearest reachable connection tile per adjacent map)
+        // 3. Routes to map connections (nearest reachable connection tile per adjacent map).
+        //    A *specific* landing (e.g. to avoid a dead-end pocket) is requested via
+        //    `connection_action(to_map, to_position)`, kept out of this hot path so the common
+        //    nearest-crossing behaviour — and the whole-game run's timing — is unchanged.
         for to_map in &self.connection_targets {
             let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Connection { to_map: connected_map, .. } if connected_map == to_map)) else { continue };
             let (_, came_from) = best_dist_from(&dest).unwrap();
@@ -496,6 +499,36 @@ impl MetaTileMap {
 
         actions.sort();
         actions
+    }
+
+    /// Build the action that crosses a connection to `to_map` landing at raw `to_position`, if that
+    /// specific connection tile is reachable. Kept out of `actions()` (which emits only the nearest
+    /// crossing per adjacent map) so `EnterMap { to_position }` can target a particular landing — e.g.
+    /// to avoid a dead-end pocket at the nearest crossing (Route 13→14 row 6) — without bloating the
+    /// per-step action list (which, emitted per-edge, perturbs `route_toward`/grind navigation).
+    pub fn connection_action(&self, to_map: Map, to_position: Point8) -> Option<OverworldAction> {
+        let (full_dist, full_from) = self.bfs_from_player();
+        let (dest, tile) = self.meta_tiles.iter().enumerate()
+            .filter_map(|(i, t)| match t {
+                MetaTile::Connection { to_map: cm, to_position: tp } if *cm == to_map && *tp == to_position => {
+                    let p = Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
+                    full_dist.get(&p).map(|d| (*d, p, *t))
+                }
+                _ => None,
+            })
+            .min_by_key(|(d, _, _)| *d)
+            .map(|(_, p, t)| (p, t))?;
+
+        let mut route = vec![];
+        let mut pos = dest;
+        while let Some(&(prev, dir)) = full_from.get(&pos) { route.push(dir); pos = prev; }
+        route.reverse();
+        let enter_dir = if dest.y == 0 { JoypadButton::Up }
+            else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
+            else if dest.x == 0 { JoypadButton::Left }
+            else { JoypadButton::Right };
+        route.push(enter_dir);
+        Some(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route })
     }
 
     /// The tile directly in front of the player (based on facing), if within bounds.

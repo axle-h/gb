@@ -9,7 +9,7 @@ use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointer, DmgPointerRead};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display)]
-pub enum BattleType { Wild, Trainer }
+pub enum BattleType { Wild, Trainer, Safari }
 
 #[derive(Debug, Copy, Clone)]
 pub struct BattleState {
@@ -31,6 +31,13 @@ pub enum BattleAction {
     SwitchPokemon { slot: u8, pokemon: PokemonSummary },
     /// Attempt to flee (wild battles only).
     Run,
+    // ── Safari Zone battle actions (only offered when `battle_type == Safari`) ──
+    /// Throw a Safari Ball to try to catch the Pokémon.
+    SafariBall,
+    /// Throw bait — makes the Pokémon less likely to flee but harder to catch.
+    SafariBait,
+    /// Throw a rock — makes the Pokémon easier to catch but more likely to flee.
+    SafariRock,
 }
 
 impl Display for BattleAction {
@@ -40,6 +47,9 @@ impl Display for BattleAction {
             BattleAction::UseItem { item, .. } => write!(f, "ITEM   {} ×{}", item.id, item.quantity),
             BattleAction::SwitchPokemon { pokemon, .. } => write!(f, "PKMN   {:?}", pokemon),
             BattleAction::Run => write!(f, "RUN"),
+            BattleAction::SafariBall => write!(f, "BALL"),
+            BattleAction::SafariBait => write!(f, "BAIT"),
+            BattleAction::SafariRock => write!(f, "ROCK"),
         }
     }
 }
@@ -54,7 +64,15 @@ impl BattleStateReader for MMU {
         if is_in_battle == 0 {
             return None;
         }
-        let battle_type = if is_in_battle == 2 { BattleType::Trainer } else { BattleType::Wild };
+        // wBattleType: 0 = normal, 1 = old-man tutorial, 2 = Safari Zone. Safari overrides the
+        // wild/trainer split (the menu is BALL/BAIT/ROCK/RUN, not FIGHT/PKMN/ITEM/RUN).
+        let battle_type = if self.read_pointer(&pokered_symbols::wBattleType) == 2 {
+            BattleType::Safari
+        } else if is_in_battle == 2 {
+            BattleType::Trainer
+        } else {
+            BattleType::Wild
+        };
 
         let active_party_slot = self.read_pointer(&pokered_symbols::wBattleMonPartyPos);
 

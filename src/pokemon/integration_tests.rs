@@ -461,7 +461,7 @@ fn check_mt_moon_warp_classification() {
                 warp.position, warp.destination_map, tile,
                 if matches!(tile, Some(MetaTile::Warp { .. })) { "OK" } else { "DROPPED!" });
             // Pure-maze reachability (no sprites) starting from this warp tile:
-            let cm = CurrentMap { player_position: warp.position, player_direction: PlayerFacingDirection::Down, sprites: vec![], metadata: Arc::clone(&meta), closed_doors: vec![] };
+            let cm = CurrentMap { player_position: warp.position, player_direction: PlayerFacingDirection::Down, sprites: vec![], metadata: Arc::clone(&meta), closed_doors: vec![], card_key_locked: false };
             let mt = crate::pokemon::tile_map::MetaTileMap::new(&cm);
             let reach: Vec<_> = mt.all_reachable_warps_and_connections().into_iter()
                 .filter_map(|(_, t)| match t {
@@ -515,7 +515,7 @@ fn dump_b2f_room() {
         // share its walkable component (WITH live sprites). This reveals the true B2F graph.
         for entry in [Point8{x:25,y:9}, Point8{x:21,y:17}, Point8{x:15,y:27}, Point8{x:5,y:7}] {
             for (lbl, sp) in [("live", live_sprites.clone()), ("nosprite", vec![])] {
-                let cm = CurrentMap { player_position: entry, player_direction: PlayerFacingDirection::Down, sprites: sp, metadata: Arc::clone(&meta), closed_doors: vec![] };
+                let cm = CurrentMap { player_position: entry, player_direction: PlayerFacingDirection::Down, sprites: sp, metadata: Arc::clone(&meta), closed_doors: vec![], card_key_locked: false };
                 let ms = crate::pokemon::tile_map::MetaTileMap::new(&cm);
                 let reach: Vec<_> = ms.all_reachable_warps_and_connections().into_iter()
                     .filter_map(|(p, t)| if matches!(t, MetaTile::Warp { .. }) { Some(format!("{p}")) } else { None }).collect();
@@ -526,7 +526,7 @@ fn dump_b2f_room() {
         // Rockets we can defeat — no-sprite reveals the walkable component structure).
         let b1f_meta = Arc::new(fixture.gb.core().mmu().read_map_metadata(Map::MtMoonB1F).unwrap());
         for entry in [Point8{x:5,y:5}, Point8{x:17,y:11}, Point8{x:25,y:9}, Point8{x:25,y:15}, Point8{x:21,y:17}, Point8{x:13,y:27}, Point8{x:23,y:3}, Point8{x:27,y:3}] {
-            let cm = CurrentMap { player_position: entry, player_direction: PlayerFacingDirection::Down, sprites: vec![], metadata: Arc::clone(&b1f_meta), closed_doors: vec![] };
+            let cm = CurrentMap { player_position: entry, player_direction: PlayerFacingDirection::Down, sprites: vec![], metadata: Arc::clone(&b1f_meta), closed_doors: vec![], card_key_locked: false };
             let ms = crate::pokemon::tile_map::MetaTileMap::new(&cm);
             let reach: Vec<_> = ms.all_reachable_warps_and_connections().into_iter()
                 .filter_map(|(p, t)| if matches!(t, MetaTile::Warp { .. } | MetaTile::Connection { .. }) { Some(format!("{p}")) } else { None }).collect();
@@ -1033,6 +1033,163 @@ fn probe_reach_elevator() {
 
 #[test]
 #[ignore]
+fn probe_route12() {
+    // Enter Route 12 from Lavender and dump the map + reachable warps/connections to see whether the
+    // Route-12 Gate blocks the road down to the Snorlax and how to route through it.
+    let mut fixture = TestFixture::new(include_bytes!("data/post-poke-flute.bin"), Duration::from_mins(10), vec![
+        PolicyStep::enter(Map::LavenderTown),
+        PolicyStep::enter(Map::Route12),
+    ]);
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("on {} @ {}", s.map.map, s.map.player_position);
+    println!("{}", s.map);
+    println!("reachable warps/connections:");
+    for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..} | MetaTile::Connection{..})) {
+        println!("   dest={} tile={:?}", a.destination, a.tile);
+    }
+    println!("snorlax sprite:");
+    for sp in s.map.sprites.iter().filter(|sp| sp.name == "Snorlax") {
+        println!("   Snorlax @ {} hidden={}", sp.position, sp.hidden);
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_6f_rare_candy() {
+    // The 6F stall: the Rare Candy ball at (6,8) blocks the only chokepoint to the 7F-stairs region.
+    // Verify that collecting it opens the path and lets the agent reach 7F (fighting the ghost Marowak).
+    let bytes = std::fs::read("test_stall_state.bin").expect("stall state");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(15), vec![
+        PolicyStep::CollectItem(MapSprite::POKEMONTOWER6F_RARE_CANDY),
+        PolicyStep::enter(Map::PokemonTower7F),
+    ]);
+    let mut last = fixture.game_state().map.map;
+    for _ in 0..600_000 {
+        fixture.step();
+        let m = fixture.game_state().map.map;
+        if m != last { println!("--> {m} @ {}", fixture.game_state().map.player_position); last = m; }
+        if m == Map::PokemonTower7F { println!("REACHED 7F"); break; }
+    }
+    let s = fixture.game_state();
+    println!("ended on {} @ {}", s.map.map, s.map.player_position);
+}
+
+#[test]
+#[ignore]
+fn probe_party() {
+    let mut fixture = TestFixture::new(include_bytes!("data/post-soul-badge.bin"), Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    println!("=== party ({} members), badges={:?} ===", s.pokemon.len(), s.badges);
+    for (i, p) in s.pokemon.iter().enumerate() {
+        let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}({})", m.name, m.pp)).collect();
+        println!("  {i}: {:?} lv{} hp {}/{} types {:?} moves {:?}",
+            p.species, p.level, p.current_hp, p.stats.hp, p.types, moves);
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_silph1f() {
+    let mut fixture = TestFixture::new(include_bytes!("data/at-saffron.bin"), Duration::from_mins(10), vec![
+        PolicyStep::enter(Map::SilphCo1F),
+    ]);
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("on {} @ {}", s.map.map, s.map.player_position);
+    println!("{}", s.map);
+    println!("reachable warps:");
+    for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..})) {
+        println!("   dest={} route_len={} tile={:?}", a.destination, a.route.len(), a.tile);
+    }
+    // Scan for warp-pad tiles ($20 in FACILITY, bottom-left standing sub-tile).
+    let w = s.map.width;
+    print!("$20 warp-pad cells (raw bottom-left):");
+    for (i, &t) in s.map.raw_tile_ids.iter().enumerate() {
+        if t == 0x43 || t == 0x58 || t == 0x20 { print!(" ({},{})=0x{:02x}", i % w, i / w, t); }
+    }
+    println!();
+    // Now drive toward the elevator warp and log positions each step until stuck.
+    let mut fixture = TestFixture::new(include_bytes!("data/at-saffron.bin"), Duration::from_mins(5), vec![
+        PolicyStep::enter(Map::SilphCo1F),
+        PolicyStep::enter(Map::SilphCo3F),
+    ]);
+    let mut last = Point8 { x: 255, y: 255 };
+    let mut stuck = 0;
+    for _ in 0..40_000 {
+        fixture.step();
+        let g = fixture.game_state();
+        if g.map.map == Map::SilphCo3F { println!(">> reached 3F @ {}", g.map.player_position); break; }
+        let p = g.map.player_position;
+        if g.map.map == Map::SilphCo1F && p != last { println!("  1F @ {p} facing {:?} front={:?}", g.map.player_direction, g.map.tile_in_front().map(|(_,t)|t)); last = p; stuck = 0; }
+        else { stuck += 1; if stuck > 8000 {
+            use crate::pokemon::symbols::pokered_symbols as ps;
+            let mmu = fixture.gb.core().mmu();
+            let (rx, ry) = (mmu.read_pointer(&ps::wXCoord), mmu.read_pointer(&ps::wYCoord));
+            println!(">> STUCK on {} @ {} facing {:?}", g.map.map, p, g.map.player_direction);
+            println!("   raw coords=({rx},{ry}) tileset=0x{:02x} standingOnPad=0x{:02x} wCurMap=0x{:02x}",
+                mmu.read(ps::wCurMapTileset.address), mmu.read(ps::wStandingOnWarpPadOrHole.address), mmu.read_pointer(&ps::wCurMap));
+            // raw tile at the player standing tile (coord 8,9 = wTileMap + 9*20 + 8)
+            println!("   wTileMap(8,9)=0x{:02x}  around: {:02x} {:02x} {:02x}", mmu.read(0xc3a0 + 9*20 + 8),
+                mmu.read(0xc3a0 + 9*20 + 7), mmu.read(0xc3a0 + 9*20 + 8), mmu.read(0xc3a0 + 9*20 + 9));
+            break; } }
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_route13_to_14() {
+    // From post-snorlax, cross to Route 13 and dump EVERY reachable Route-14 connection tile (with its
+    // landing to_position), to see whether the agent can cross at an open Route-14 row (8/10) instead of
+    // the row-6 trainer pocket.
+    let mut fixture = TestFixture::new(include_bytes!("data/post-snorlax.bin"), Duration::from_mins(20), vec![
+        PolicyStep::enter(Map::Route13),
+    ]);
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("on {} @ {}", s.map.map, s.map.player_position);
+    println!("reachable Route14 connections:");
+    for (p, t) in s.map.all_reachable_warps_and_connections() {
+        if let MetaTile::Connection { to_map: Map::Route14, to_position } = t {
+            println!("   cross at {p} -> Route14 lands {to_position}");
+        }
+    }
+    // Also show all reachable connection targets for context.
+    println!("all reachable warps/connections:");
+    for (p, t) in s.map.all_reachable_warps_and_connections() {
+        println!("   {p} -> {t:?}");
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_stall_dump() {
+    // Generic: load the last saved stall state and dump map / player / sprites / reachable actions.
+    let bytes = std::fs::read("test_stall_state.bin").expect("stall state");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    println!("map={} player={} facing={:?}", s.map.map, s.map.player_position, s.map.player_direction);
+    println!("{}", s.map);
+    println!("sprites:");
+    for sp in s.map.sprites.iter() {
+        println!("   {} @ {} hidden={} on_screen={}", sp.name, sp.position, sp.hidden, sp.on_screen);
+    }
+    println!("reachable actions:");
+    for a in s.map.actions().iter() {
+        println!("   dest={} route_len={} tile={:?}", a.destination, a.route.len(), a.tile);
+    }
+    let w = s.map.width;
+    let (px, py) = (s.map.player_position.x as usize, s.map.player_position.y as usize);
+    for y in py.saturating_sub(2)..(py+6).min(s.map.height as usize) {
+        for x in px.saturating_sub(6)..(px+3).min(w) {
+            print!("({x},{y})=0x{:02x}:{:?}  ", s.map.raw_tile_ids[x + y*w], s.map.meta_tiles[x + y*w]);
+        }
+        println!();
+    }
+}
+
+#[test]
+#[ignore]
 fn probe_elevator_fresh() {
     // Reproduce the REAL elevator path (fresh entry from B2F) and log wTextBoxID/wCurrentMenuItem +
     // player pos + agent state each step while in the elevator, to see the exact selection sequence.
@@ -1370,6 +1527,160 @@ fn can_get_silph_scope() {
         s.bag.contains(&ItemId::SilphScope));
     assert!(s.bag.contains(&ItemId::SilphScope), "should obtain the Silph Scope from the Rocket Hideout");
     fixture.save_state_named("src/pokemon/data/post-silph-scope.bin").unwrap();
+}
+
+/// Stage 4d: the Poké Flute leg — from the hideout (post-Silph-Scope), leave, travel to Lavender, climb
+/// Pokémon Tower (Channelers + the Scope-revealed ghost Marowak), beat the 7F Rockets and rescue Mr.
+/// Fuji, who hands over the **Poké Flute**. Snapshots `post-poke-flute.bin`.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_get_poke_flute() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-silph-scope.bin"),
+        Duration::from_mins(60),
+        PolicyStep::poke_flute_steps(),
+    );
+    fixture.step_until_exhausted();
+    for _ in 0..20_000 {
+        if fixture.game_state().bag.contains(&ItemId::PokeFlute) { break; }
+        fixture.step();
+    }
+    let s = fixture.game_state();
+    println!("ended on {} @ {} bag has flute={}", s.map.map, s.map.player_position,
+        s.bag.contains(&ItemId::PokeFlute));
+    assert!(s.bag.contains(&ItemId::PokeFlute), "should obtain the Poké Flute from Mr. Fuji");
+    fixture.save_state_named("src/pokemon/data/post-poke-flute.bin").unwrap();
+}
+
+/// Stage 4e: use the Poké Flute to wake the **Route 12 Snorlax** (new field item-use capability),
+/// beating it in the wild battle to clear the road south. Snapshots `post-snorlax.bin`.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_wake_snorlax() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-poke-flute.bin"),
+        Duration::from_mins(30),
+        PolicyStep::snorlax_steps(),
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    // The Snorlax sprite is gone once beaten; the step completes on that. Confirm we're on Route 12
+    // and the blocker is cleared.
+    let snorlax_present = s.map.sprites.iter().any(|sp| !sp.hidden && sp.name == "Snorlax");
+    println!("ended on {} @ {} snorlax_present={}", s.map.map, s.map.player_position, snorlax_present);
+    assert_eq!(s.map.map, Map::Route12, "should be on Route 12 after waking the Snorlax");
+    assert!(!snorlax_present, "the Route 12 Snorlax should be defeated and gone");
+    fixture.save_state_named("src/pokemon/data/post-snorlax.bin").unwrap();
+}
+
+/// Stage 4f: from Route 12 (post-Snorlax), travel Route 13 → 14 → 15 → Fuchsia City and beat Koga for
+/// the **Soul Badge**. Snapshots `post-soul-badge.bin`.
+///
+/// Two navigation fixes made this work: (1) `actions()` now emits *every* reachable connection tile per
+/// adjacent map (not just the nearest), so an `EnterMap { to_position }` can pick a landing — the
+/// nearest Route 13→14 crossing drops into a trainer-sealed dead-end pocket (row 6), so we cross at
+/// (0,9) to land at the open Route 14 (19,8); (2) Route 15 has a gate building walling off the Fuchsia
+/// connection, traversed like the Route 12 gate (east door → west exit (7,8)).
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_get_soul_badge() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-snorlax.bin"),
+        Duration::from_mins(60),
+        PolicyStep::soul_badge_steps(),
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("ended on {} @ {} badges={:?}", s.map.map, s.map.player_position, s.badges);
+    assert!(s.badges.contains(Badge::SoulBadge), "should win the Soul Badge from Koga");
+    fixture.save_state_named("src/pokemon/data/post-soul-badge.bin").unwrap();
+}
+
+/// Stage 4g: Safari Zone run for HM03 Surf + the Gold Teeth (exercises the new Safari battle handling —
+/// the agent RUNs from every encounter). Snapshots `post-safari-surf.bin`.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_get_surf_safari() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-soul-badge.bin"),
+        Duration::from_mins(45),
+        PolicyStep::safari_zone_surf_steps(),
+    );
+    fixture.step_until_exhausted();
+    // The final Interact pops as soon as it issues the walk; keep stepping until the guru hands over Surf.
+    for _ in 0..20_000 {
+        if fixture.game_state().bag.contains(&ItemId::Hm03Surf) { break; }
+        fixture.step();
+    }
+    let s = fixture.game_state();
+    println!("ended on {} @ {} bag has surf={} gold_teeth={}", s.map.map, s.map.player_position,
+        s.bag.contains(&ItemId::Hm03Surf), s.bag.contains(&ItemId::GoldTeeth));
+    assert!(s.bag.contains(&ItemId::Hm03Surf), "should obtain HM03 Surf from the Safari Zone Secret House");
+    fixture.save_state_named("src/pokemon/data/post-safari-surf.bin").unwrap();
+}
+
+/// Stage 4g (cont.): exit the Safari Zone and give the Gold Teeth to the Warden for HM04 Strength.
+/// Snapshots `post-safari.bin`.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_get_strength_warden() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-safari-surf.bin"),
+        Duration::from_mins(30),
+        PolicyStep::safari_zone_strength_steps(),
+    );
+    fixture.step_until_exhausted();
+    for _ in 0..20_000 {
+        if fixture.game_state().bag.contains(&ItemId::Hm04Strength) { break; }
+        fixture.step();
+    }
+    let s = fixture.game_state();
+    println!("ended on {} @ {} strength={}", s.map.map, s.map.player_position, s.bag.contains(&ItemId::Hm04Strength));
+    assert!(s.bag.contains(&ItemId::Hm04Strength), "Warden should give HM04 Strength for the Gold Teeth");
+    fixture.save_state_named("src/pokemon/data/post-safari.bin").unwrap();
+}
+
+/// Stage 4h: from Fuchsia (post-safari), trek to Celadon, buy a Fresh Water from the roof vending
+/// machine (new `UseVendingMachine` step), and pass the Route-7 guard into Saffron. Reverses the
+/// soul-badge gates (Route 15/12 gates west→east/south→north; the Lavender→Route8 and Route-7-gate
+/// crossings use `EnterMap { to_position }`). Snapshots `at-saffron.bin`.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_enter_saffron() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/post-safari.bin"),
+        Duration::from_mins(60),
+        PolicyStep::saffron_entry_steps(),
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("ended on {} @ {} has_water={}", s.map.map, s.map.player_position, s.bag.contains(&ItemId::FreshWater));
+    assert_eq!(s.map.map, Map::SaffronCity, "should enter Saffron City");
+    fixture.save_state_named("src/pokemon/data/at-saffron.bin").unwrap();
+}
+
+/// Stage 4i (part 1, WIP): from Saffron, enter Silph Co and reach the Card Key (5F). **BLOCKED:** the
+/// agent gets into Silph 1F but stalls moving to the elevator warp (20,0) — it's BFS-reachable but the
+/// walk to it jams mid-route (likely the top-border warp firing, or a card-key door sub-tile the
+/// $18/$24 raw-tile check misses). The Card-Key door overlay (`apply_card_key_doors`) is in place;
+/// still needs the teleport-pad graph and this elevator/border-warp fix. See the plan doc.
+#[test]
+#[ignore = "WIP — Silph 1F elevator/teleport navigation; see doc comment"]
+fn can_get_silph_card_key() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("data/at-saffron.bin"),
+        Duration::from_mins(30),
+        PolicyStep::silph_co_card_key_steps(),
+    );
+    fixture.step_until_exhausted();
+    for _ in 0..20_000 {
+        if fixture.game_state().bag.contains(&ItemId::CardKey) { break; }
+        fixture.step();
+    }
+    let s = fixture.game_state();
+    println!("ended on {} @ {} has_card_key={}", s.map.map, s.map.player_position, s.bag.contains(&ItemId::CardKey));
+    assert!(s.bag.contains(&ItemId::CardKey), "should get the Card Key from Silph Co 5F");
+    fixture.save_state_named("src/pokemon/data/silph-card-key.bin").unwrap();
 }
 
 struct TestFixture {

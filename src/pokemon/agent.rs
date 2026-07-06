@@ -179,6 +179,12 @@ enum AgentState {
     /// elevator warp out. `selected` flips once the floor is confirmed; `press` alternates for plain
     /// press/release mashing. Finishes when the map changes (we've left the elevator).
     UsingElevator { panel: Point8, floor: u8, selected: bool, press: bool },
+
+    /// Using a bag item on the field: route to face the sprite at `target`, then drive
+    /// START→ITEM→(bag, navigate to the item)→USE. The item's field effect takes over (e.g. the Poké
+    /// Flute wakes a Snorlax → a battle, which the battle handler wins). `press` alternates for plain
+    /// press/release mashing; `entered_menu` tracks that we left the overworld into the bag menus.
+    UsingFieldItem { item: crate::pokemon::item::ItemId, target: Point8, press: bool, entered_menu: bool },
 }
 
 impl AgentState {
@@ -225,6 +231,7 @@ impl Display for AgentState {
             AgentState::CuttingTree { .. } => write!(f, "cut"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
+            AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
         }
     }
 }
@@ -583,7 +590,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -675,6 +682,11 @@ impl PokemonAgent {
                             self.set_state(AgentState::UsingElevator { panel, floor, selected: false, press: true });
                             return Ok(());
                         }
+                        Some(crate::pokemon::policy::FieldMove::UseFieldItem { item, target }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: false });
+                            return Ok(());
+                        }
                         None => {}
                     }
                     if let Some(action) = self.policy.pick_overworld_action(&game_state, &self.world_graph) {
@@ -732,7 +744,14 @@ impl PokemonAgent {
                     }
                 } else {
                     let action = game_state.map.actions().into_iter()
-                        .find(|a| a.tile == destination);
+                        .find(|a| a.tile == destination)
+                        // A specific connection landing isn't in `actions()` (only the nearest crossing
+                        // is) — re-derive its route each tick so the walk to it can still be tracked.
+                        .or_else(|| match destination {
+                            MetaTile::Connection { to_map, to_position } =>
+                                game_state.map.connection_action(to_map, to_position),
+                            _ => None,
+                        });
                     match action {
                         None => self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination)),
                         Some(a) => match a.route.first() {
@@ -761,7 +780,8 @@ impl PokemonAgent {
                     BattleState::WaitingForMenu { reader, delay } => {
                         if let Some(menu_state) = api.menu_state() {
                             match menu_state.battle_menu_state() {
-                                Some(BattleMenuState::Fight) => {
+                                // Main menu is ready: normal battle opens on FIGHT, Safari on BALL.
+                                Some(BattleMenuState::Fight) | Some(BattleMenuState::SafariBall) => {
                                     new_events.push(AgentEvent::text_box_from_reader(reader));
 
                                     api.release_all_buttons();
@@ -1356,6 +1376,66 @@ impl PokemonAgent {
                         }
                     }
                 }
+            }
+            AgentState::UsingFieldItem { item, target, press, entered_menu } => {
+                use crate::pokemon::menu::TextBoxId;
+                // Back in the overworld after entering the bag menus → this attempt has resolved (the
+                // item's effect ran and, for the Poké Flute, its battle was fought). Bail to Idle so the
+                // policy re-checks: target gone → the step pops; still present → it re-issues.
+                if entered_menu && game_mode == GameMode::Overworld {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // Still in the overworld: route to face the target sprite, then open the bag with START.
+                if game_mode == GameMode::Overworld {
+                    let gs = self.observe_state(api)?;
+                    match gs.map.route_to_face(target).as_deref() {
+                        Some([]) => {
+                            api.release_all_buttons();
+                            if press { api.press_button(JoypadButton::Start); }
+                            self.set_state(AgentState::UsingFieldItem { item, target, press: !press, entered_menu });
+                        }
+                        Some(&[btn, ..]) => {
+                            api.release_all_buttons();
+                            api.press_button(btn);
+                            self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu });
+                        }
+                        _ => {
+                            self.event(AgentEvent::TextBox { message: format!("Can't reach the field-item target at {target}") });
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Idle);
+                        }
+                    }
+                    return Ok(());
+                }
+                // In the bag menus. Plain press/release mashing (fresh rising edge every 2 ticks).
+                if !press {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: true });
+                    return Ok(());
+                }
+                let (top_x, top_y, current, scroll) = api.menu_geometry();
+                let tbid = api.menu_state().map(|m| m.text_box_id);
+                let nav = |cur: u8, tgt: u8| -> JoypadButton {
+                    if cur < tgt { JoypadButton::Down } else if cur > tgt { JoypadButton::Up } else { JoypadButton::A }
+                };
+                // Drive START → ITEM → (bag) item → USE. After USE the item's field effect starts a
+                // battle (Snorlax); assert_battle_state then takes over, so here we just advance any
+                // transitional / wake-up text with A.
+                let button = if top_x == 11 && top_y == 2 {
+                    nav(current, 2) // START menu → ITEM (index 2, Pokédex obtained)
+                } else if tbid == Some(TextBoxId::ListMenuBox) {
+                    let target_idx = api.bag_item_position(item).unwrap_or(0);
+                    nav(current + scroll, target_idx) // bag list → the item's row, then A
+                } else if tbid == Some(TextBoxId::UseTossMenuTemplate) {
+                    nav(current, 0) // USE/TOSS → USE (index 0)
+                } else {
+                    JoypadButton::A // transitional / "woke up" text
+                };
+                api.release_all_buttons();
+                api.press_button(button);
+                self.set_state(AgentState::UsingFieldItem { item, target, press: false, entered_menu: true });
             }
             AgentState::NamingPokemon { species, decided } => {
                 if decided {

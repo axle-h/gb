@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
+use crate::pokemon::bag::BagReader;
 use crate::pokemon::map::Map;
 use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader, TileSetId};
 use crate::pokemon::sprite::{PictureId, Sprite};
@@ -261,6 +262,27 @@ impl MapMetadata {
     }
 }
 
+impl MapMetadata {
+    /// Card Key door tiles in the Facility tileset (pokered `card_key.asm`: `wTileInFrontOfPlayer`
+    /// == $18 or $24). While locked they are walls; once the Card Key is held the game opens them on
+    /// approach, so force them passable then (the static tileset marks them impassable).
+    pub fn apply_card_key_doors(&self, result: &mut [MetaTile], locked: bool) {
+        for (idx, &tile) in self.raw_tile_ids.iter().enumerate() {
+            if tile == 0x18 || tile == 0x24 {
+                result[idx] = if locked { MetaTile::Obstacle } else { MetaTile::Empty };
+            }
+        }
+    }
+}
+
+/// True on the Silph Co floors that have card-key doors.
+pub fn map_has_card_key_doors(map: Map) -> bool {
+    matches!(map,
+        Map::SilphCo1F | Map::SilphCo2F | Map::SilphCo3F | Map::SilphCo4F | Map::SilphCo5F
+        | Map::SilphCo6F | Map::SilphCo7F | Map::SilphCo8F | Map::SilphCo9F | Map::SilphCo10F
+        | Map::SilphCo11F)
+}
+
 /// A runtime door block that is currently *closed* (a wall), to be overlaid on the static map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DoorBlock {
@@ -499,6 +521,7 @@ impl MapMetadataCache {
                 .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
             sprites: mmu.read_sprites()?,
             closed_doors: closed_door_blocks(mmu, map),
+            card_key_locked: map_has_card_key_doors(map) && !mmu.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
         })
     }
 
@@ -583,6 +606,7 @@ impl MapMetadataReader for MMU {
                     .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
                 sprites: self.read_sprites()?,
                 closed_doors: closed_door_blocks(self, map),
+                card_key_locked: map_has_card_key_doors(map) && !self.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
             }
         )
     }
@@ -1001,12 +1025,20 @@ pub struct CurrentMap {
     /// Runtime `ReplaceTileBlock` door blocks that are currently shut (event-gated). Empty for
     /// maps with no such doors. Applied over the static map so BFS avoids closed doorways.
     pub closed_doors: Vec<DoorBlock>,
+    /// True on Silph Co floors while the **Card Key** is not yet in the bag: the card-key door tiles
+    /// ($18/$24) are then impassable walls (the game refuses to open them without the key), so BFS
+    /// must route around them. Once the key is held they open on approach and become passable.
+    pub card_key_locked: bool,
 }
 
 impl CurrentMap {
     pub fn meta_tiles(&self) -> Vec<MetaTile> {
         let mut result = self.metadata.meta_tiles(&self.sprites);
         self.metadata.apply_door_blocks(&mut result, &self.closed_doors);
+        // Only on Silph Co floors: elsewhere tiles $18/$24 are ordinary tiles, not card-key doors.
+        if map_has_card_key_doors(self.metadata.map) {
+            self.metadata.apply_card_key_doors(&mut result, self.card_key_locked);
+        }
         result
     }
 }
@@ -1205,6 +1237,7 @@ mod test {
             sprites: vec![],
             metadata: Arc::new(map),
             closed_doors: vec![],
+            card_key_locked: false,
         };
         let tile_map = MetaTileMap::new(&current_map);
         println!("{}", tile_map);

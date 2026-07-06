@@ -56,6 +56,10 @@ pub enum BattleMenuState {
     /// The level-up "Which move should be forgotten?" menu (a 4-move list opened by
     /// `LearnMove`/`TryingToLearn`). Distinct geometry from the battle move list.
     ForgetMoveList { index: u8 }, // 0-based move slot the cursor is on
+    // ── Safari Zone battle menu (BALL/BAIT/ROCK/RUN 2×2) ──
+    SafariBall,
+    SafariBait,
+    SafariRock,
 }
 
 impl BattleMenuState {
@@ -65,6 +69,9 @@ impl BattleMenuState {
             BattleAction::UseItem { slot, .. } => Self::ItemList { index: slot },
             BattleAction::SwitchPokemon { slot, .. } => Self::PokemonList { index: slot },
             BattleAction::Run => Self::Run,
+            BattleAction::SafariBall => Self::SafariBall,
+            BattleAction::SafariBait => Self::SafariBait,
+            BattleAction::SafariRock => Self::SafariRock,
         }
     }
 
@@ -83,6 +90,10 @@ impl BattleMenuState {
             BattleMenuState::Pokemon => Point8 { x: 1, y: 0 },
             BattleMenuState::Item => Point8 { x: 0, y: 1 },
             BattleMenuState::Run => Point8 { x: 1, y: 1 },
+            // Safari 2×2: BALL(0,0) BAIT(1,0) / ROCK(0,1) RUN(1,1).
+            BattleMenuState::SafariBall => Point8 { x: 0, y: 0 },
+            BattleMenuState::SafariBait => Point8 { x: 1, y: 0 },
+            BattleMenuState::SafariRock => Point8 { x: 0, y: 1 },
             BattleMenuState::MoveList { index }
                 | BattleMenuState::ItemList { index }
                 | BattleMenuState::PokemonList { index }
@@ -161,6 +172,17 @@ impl MenuState {
         }
         if self.text_box_id.is_battle_menu() {
             if self.is_main_battle_menu() {
+                // Safari menu is BALL/BAIT/ROCK/RUN; `battle_menu_item` returns 0=BALL 1=ROCK 2=BAIT
+                // 3=RUN (left column BALL/ROCK, right column BAIT/RUN).
+                if self.text_box_id == TextBoxId::SafariBattleMenuTemplate {
+                    return Some(match self.battle_menu_item() {
+                        0 => BattleMenuState::SafariBall,
+                        1 => BattleMenuState::SafariRock,
+                        2 => BattleMenuState::SafariBait,
+                        3 => BattleMenuState::Run,
+                        _ => return None,
+                    });
+                }
                 return Some(match self.battle_menu_item() {
                     0 => BattleMenuState::Fight,
                     1 => BattleMenuState::Item,
