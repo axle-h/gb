@@ -157,6 +157,82 @@ Flute**), then **Saffron** opens (Silph Co, Rocket-gated) → **Marsh Badge (Sab
   **Not yet folded into `complete_game_steps`** — that's the next increment (append
   `rocket_hideout_entrance_steps` + `silph_scope_steps` after the Rainbow Badge leg; today the full run
   still asserts 4 badges and stops at Celadon).
+- **DONE — Poké Flute leg** (`can_get_poke_flute`, ~48 s, `slow-tests`, snapshots `post-poke-flute.bin`).
+  From `post-silph-scope.bin`: exit the hideout (elevator → B2F → stairs to B1F → Game Corner → Celadon;
+  the B1F elevator warp is behind the shut Rocket-5 door, so ride to **B2F**, not B1F), heal, cross the
+  **Route 7–8 Underground Path** to Lavender (reverse of `lavender_to_celadon_steps`), then climb
+  **Pokémon Tower** 1F→7F. Channelers engage by line of sight while routing to each floor's up-warp.
+  **6F gotcha:** the **Rare Candy ball at (6,8)** blocks the *only* chokepoint into the sub-region
+  holding the ghost-Marowak trigger (10,16) and the 7F stairs (9,16) — `CollectItem(RARE_CANDY)` opens
+  it (found by dumping the stalled 6F map: the 7F warp was simply not in `actions()`). The Silph-Scope
+  makes the scripted lv30 ghost Marowak fightable; on 7F the three Rockets fall and Mr. Fuji warps the
+  player to his house, where a second `Interact` hands over the Poké Flute.
+- **DONE — field item-use capability + Route 12 Snorlax** (`can_wake_snorlax`, ~14 s, `slow-tests`,
+  snapshots `post-snorlax.bin`). New `PolicyStep::UseFieldItem { item, target }` / `FieldMove` /
+  `AgentState::UsingFieldItem`: route to face the target sprite, then drive START→ITEM→(bag)→USE; the
+  item's field effect takes over (the Poké Flute wakes the Snorlax → a wild battle the normal battle
+  handler wins). Completion via the seen-then-gone latch (target sprite removed). `snorlax_steps`:
+  Mr. Fuji's house → Lavender → Route 12; the **Route-12 Gate** building blocks the road, so pass
+  through it (north warp → gate → **south** warp, disambiguated by the south landing (10,21)) before
+  the Snorlax is reachable. The snorlax leg now also **heals at Lavender** first (party had been
+  fighting since before the tower; also makes Lavender the fallback center for a low-PP heal-flee).
+- **DONE — Soul Badge** (`soul_badge_steps`, `can_get_soul_badge`, ~56 s, `slow-tests`, snapshots
+  `post-soul-badge.bin`). Route 12 south → 13 → 14 → 15 → Fuchsia → heal → Koga (Poison; Grass starter
+  resists it). Two navigation fixes:
+  1. **Targeted connection landing** — `MetaTileMap::connection_action(to_map, to_position)` builds the
+     route to a *specific* connection crossing on demand; `EnterMap { to_position }` uses it when the
+     nearest crossing (all `actions()` emits) doesn't match, and `OverworldMovement` re-derives it each
+     tick to keep tracking. The nearest Route 13→14 crossing drops into a **dead-end pocket** (row 6)
+     sealed by a south-facing Bird Keeper; crossing at Route 13 (0,9) lands at the open Route 14 (19,8).
+     (An earlier attempt that emitted *every* connection tile from `actions()` regressed the whole-game
+     run — it perturbed `route_toward`/grind navigation and the early game blew the time budget at Mt
+     Moon — so the specific landing is computed off the hot path instead. `can_start_game` stays green.)
+- **DONE — Safari Zone: Surf (HM03) + Strength (HM04)** (`can_get_surf_safari` + `can_get_strength_warden`,
+  `slow-tests`; fixtures `post-safari-surf.bin`, `post-safari.bin`). New **Safari battle mechanic**:
+  `BattleType::Safari` (wBattleType==2); `battle_options` offers **BALL/BAIT/ROCK/RUN** (new
+  `BattleAction::Safari{Ball,Bait,Rock}` + `BattleMenuState` variants mapping the 2×2 Safari menu) so a
+  future LLM policy can hunt, while the deterministic policy always **RUNs** (never fails, saves
+  balls/steps). Gate entry auto-confirms the "join?" 500 prompt on A-mash. Navigation: the Center is
+  split by water, so both in and out go the long way — **Center → East → North → West** (Gold Teeth
+  @(19,7); Surf from the Secret-House guru) and reverse to exit. Then the **Warden** (Fuchsia) trades the
+  Gold Teeth for HM04 Strength. (HMs are held, not yet taught — Surf will go to the Silph Co Lapras,
+  Strength to whoever, when first needed.) **Reusable for a future hunting policy.**
+- **DONE — Saffron entry** (`saffron_entry_steps`, `can_enter_saffron`, `slow-tests`, `at-saffron.bin`).
+  New **`UseVendingMachine`** step (face the Celadon-roof vending bg-event + A-mash buys the cheapest
+  drink; reuses the trash-can face-and-press mechanism) → Fresh Water. Reverse Fuchsia→Celadon trek:
+  the soul-badge gates mirrored (Route 15 gate west-door→east-exit; Route 12 gate south-door→north-exit)
+  and two connection crossings that jam at the nearest tile taken via `EnterMap { to_position }`
+  (Lavender→Route 8 at (59,8); the Route-7 gate east door at (18,10)). Then the **Route-7 guard** takes
+  the drink (walk east through the gate over the (3,4) trigger, no push-back with a drink in the bag) →
+  **Saffron City**.
+- **WIP — Silph Co → Marsh** (the big one; `silph_co_card_key_steps`, `can_get_silph_card_key`,
+  `#[ignore]`). **DONE:** **Card Key door modeling** — `MapMetadata::apply_card_key_doors` marks tiles
+  **$18/$24** on Silph floors as `Obstacle` while the Card Key is absent (and forces them `Empty` once
+  held, since the game opens them on approach); gated by `map_has_card_key_doors` +
+  `CurrentMap.card_key_locked` (read from the bag in `read_current_map`), inert on every non-Silph map.
+  Agent enters Silph 1F from Saffron. **BLOCKED — root cause found (the hard part):** Silph Co's
+  floor-to-floor warps don't fire through the agent's normal warp handling.
+  - pokered fires a warp only when the player is **standing on a warp/door tile**
+    (`CheckWarpsNoCollision` → `IsPlayerStandingOnDoorTileOrWarpTile`, reading `lda_coord 8,9` — the
+    bottom-left standing sub-tile — against the tileset warp-tile list). FACILITY warp tiles = **$43,
+    $58, $20**.
+  - The **elevator (20,0)=$58** and **2F (26,0)=$43** warp tiles sit on the top wall row; the agent
+    reaches the tile just below (e.g. (20,1)) but can't step onto the warp tile. Its BFS marks the tile
+    a reachable `Warp` (warp_event overlay) while the game's collision treats it as a wall you can only
+    walk *into*. Needs walk-into-warp handling for warp tiles the BFS over-marks reachable.
+  - The **3F teleport (16,10)** isn't a warp tile at all (standing tile $01, no `$20` warp-pad tiles on
+    1F); that warp fires via **`ExtraWarpCheck`** — the Silph teleport special case — a separate
+    mechanic to model.
+  **NEXT (large):** teach the agent to fire (a) walk-into warp tiles it's adjacent to and (b)
+  `ExtraWarpCheck` teleports; navigate the pad graph to the 5F Card Key; then the key opens the doors so
+  the elevator reaches 7F (Lapras + rival) and 11F (Giovanni). Beat Giovanni → Saffron Rockets leave →
+  **Sabrina** → Marsh Badge. The Card-Key door overlay (`apply_card_key_doors`) is already in place.
+  2. **Route 15 gate** — like the Route 12 gate, a gate building walls off the Fuchsia (west)
+     connection; traverse it (east door → west exit landing (7,8)) before Fuchsia is reachable.
+  Also: the Lavender heal (in `snorlax_steps`) was needed here — without it the party heal-fled to
+  Celadon on Route 13 and broke the EnterMap chain.
+  **Next:** Fuchsia (Safari Zone → Surf HM03 + Gold Teeth → Strength HM04); Saffron/Silph Co → Marsh
+  Badge (Sabrina); then Cinnabar/Volcano (Blaine) + Viridian/Earth (Giovanni) → Victory Road → E4.
 
 Then per-badge (walkthrough2): each later badge introduces a new field HM where first
 required — teaching now works via the real menus (`thunder_badge_steps` shows the pattern:

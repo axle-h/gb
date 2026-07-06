@@ -252,6 +252,17 @@ impl Policy for ConsolePolicy {
 pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     let battle_state = state.battle.as_ref()?;
 
+    // Safari Zone battles have their own menu (no FIGHT/PKMN/ITEM). Offer all four Safari options so a
+    // future LLM-driven policy can actually hunt; the deterministic policy just RUNs (below).
+    if battle_state.battle_type == BattleType::Safari {
+        return Some(vec![
+            BattleAction::SafariBall,
+            BattleAction::SafariBait,
+            BattleAction::SafariRock,
+            BattleAction::Run,
+        ]);
+    }
+
     let mut opts = battle_state.player.available_battle_moves();
 
     for (i, item) in state.bag.iter().enumerate() {
@@ -351,6 +362,14 @@ pub enum PolicyStep {
     /// step completes when the resulting warp changes the map. Used for the Rocket Hideout elevator
     /// (needs the Lift Key) to reach Giovanni's split-off B4F room.
     UseElevator { panel: Point8, floor: u8 },
+    /// Face the sprite `target`, then **use** the bag item `item` on it from the field (START → ITEM →
+    /// select → USE). Used for the Poké Flute on a road-blocking Snorlax: the item's effect starts a
+    /// battle, which the normal battle handler wins; the step completes once `target` is gone.
+    UseFieldItem { item: ItemId, target: MapSprite },
+    /// Face the vending-machine bg-event at `at` and press A to buy `drink` (the machine's menu opens
+    /// with the cheapest drink at the cursor, so A-mashing selects it). Persists until `drink` is in the
+    /// bag. Used for the Celadon Mart roof drink needed to pass the Saffron gate guards.
+    UseVendingMachine { at: Point8, drink: ItemId },
 }
 
 /// A non-walking overworld action the agent performs directly (opening menus / using field moves),
@@ -366,6 +385,9 @@ pub enum FieldMove {
     /// Drive the elevator floor menu (panel at `panel`) to select menu index `floor`, then ride the
     /// redirected warp out. Done when the map changes (we've left the elevator room).
     UseElevator { panel: crate::geometry::Point8, floor: u8 },
+    /// Face the sprite at `target`, then use bag `item` on it (START → ITEM → select → USE). The
+    /// item's field effect (e.g. the Poké Flute waking a Snorlax) does the rest.
+    UseFieldItem { item: ItemId, target: crate::geometry::Point8 },
 }
 
 /// The move an HM item teaches (HM01 Cut … HM05 Flash), used to check whether a mon already knows it.
@@ -732,6 +754,218 @@ impl PolicyStep {
         s
     }
 
+    /// From inside the Rocket Hideout (post-Giovanni, holding the Silph Scope), get the **Poké Flute**:
+    /// leave the hideout, travel to Lavender Town, climb **Pokémon Tower** to 7F, and rescue Mr. Fuji.
+    ///
+    /// Exit is via the elevator to **B2F** (Giovanni's B4F room is walled off; the B1F elevator warp
+    /// lands behind the still-shut Rocket-5 door, so ride to B2F and take the stairs up to B1F instead),
+    /// then out to the Game Corner and Celadon. Heal, then cross the **Route 7–8 Underground Path** to
+    /// Lavender (reverse of `lavender_to_celadon_steps`). In the tower the Channelers engage by sight as
+    /// the agent climbs; on 6F stepping toward the 7F stairs triggers the **ghost Marowak** (a scripted
+    /// lv30 battle now visible thanks to the Scope); on 7F the three Rockets fall and then Mr. Fuji warps
+    /// the player to his house, where talking to him hands over the Poké Flute.
+    pub fn poke_flute_steps() -> Vec<Self> {
+        let mut s = vec![
+            // Leave the hideout: elevator (from Giovanni's isolated B4F room) down to B2F, up to B1F,
+            // out to the Game Corner, into Celadon; then heal.
+            Self::enter(Map::RocketHideoutElevator),
+            Self::UseElevator { panel: Point8 { x: 1, y: 1 }, floor: 1 }, // B2F = menu index 1
+            Self::enter(Map::RocketHideoutB1F),
+            Self::enter(Map::GameCorner),
+            Self::enter(Map::CeladonCity),
+            Self::enter(Map::CeladonPokecenter),
+            Self::Interact(MapSprite::CELADONPOKECENTER_NURSE),
+            Self::enter(Map::CeladonCity),
+        ];
+        // Celadon → Lavender via the Route 7–8 Underground Path (reverse of lavender_to_celadon).
+        s.extend([
+            Self::enter(Map::Route7),
+            Self::enter(Map::UndergroundPathRoute7),
+            Self::enter(Map::UndergroundPathWestEast),
+            Self::enter(Map::UndergroundPathRoute8),
+            Self::enter(Map::Route8),
+            Self::enter(Map::LavenderTown),
+        ]);
+        // Climb the tower. Each up-warp is at the same corner on consecutive floors; Channelers engage
+        // by line of sight as the agent routes to each warp. On 6F the walk to the 7F stairs crosses the
+        // ghost-Marowak trigger tile.
+        s.extend([
+            Self::enter(Map::PokemonTower1F),
+            Self::enter(Map::PokemonTower2F),
+            Self::enter(Map::PokemonTower3F),
+            Self::enter(Map::PokemonTower4F),
+            Self::enter(Map::PokemonTower5F),
+            Self::enter(Map::PokemonTower6F),
+            // The Rare Candy ball at (6,8) blocks the *only* chokepoint into the 6F sub-region that
+            // holds the ghost-Marowak trigger and the 7F stairs — collect it to open the path.
+            Self::CollectItem(MapSprite::POKEMONTOWER6F_RARE_CANDY),
+            Self::enter(Map::PokemonTower7F),
+        ]);
+        // 7F: beat the three Rockets (they leave on defeat), then talk to Mr. Fuji — his script warps
+        // the player to Mr. Fuji's house. There, talk to him again to receive the Poké Flute.
+        s.extend([
+            Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET1),
+            Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET2),
+            Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET3),
+            Self::Interact(MapSprite::POKEMONTOWER7F_MR_FUJI),
+            Self::Interact(MapSprite::MRFUJISHOUSE_MR_FUJI),
+        ]);
+        s
+    }
+
+    /// With the Poké Flute, wake the **Snorlax** blocking **Route 12** (south of Lavender), opening the
+    /// road toward Fuchsia. From Mr. Fuji's house: out to Lavender, south onto Route 12, then use the
+    /// Poké Flute while facing the Snorlax — that starts a lv30 wild battle the party fights normally;
+    /// the sprite is gone once it faints, which pops the `UseFieldItem` step.
+    pub fn snorlax_steps() -> Vec<Self> {
+        vec![
+            Self::enter(Map::LavenderTown), // leave Mr. Fuji's house
+            // Heal at Lavender: the party has fought all through the tower with no rest, and the long
+            // Route 12–15 trainer gauntlet ahead will black it out otherwise. Also makes Lavender the
+            // fallback center for any low-PP heal-flee on the way south.
+            Self::enter(Map::LavenderPokecenter),
+            Self::Interact(MapSprite::LAVENDERPOKECENTER_NURSE),
+            Self::enter(Map::LavenderTown),
+            Self::enter(Map::Route12),      // south connection off Lavender (lands at the north tip)
+            // The Route-12 Gate building blocks the road; pass through it (north warp → gate → south
+            // warp). Disambiguate the two gate→Route12 warps by the south exit's raw landing (10,21),
+            // else EnterMap would take the north warp we just came in on and loop.
+            Self::enter(Map::Route12Gate1F),
+            Self::EnterMap { to_map: Map::Route12, to_position: Some(Point8 { x: 10, y: 21 }) },
+            Self::UseFieldItem { item: ItemId::PokeFlute, target: MapSprite::ROUTE12_SNORLAX },
+        ]
+    }
+
+    /// Soul Badge (Koga, Fuchsia). With the Snorlax cleared, continue **Route 12 south → 13 → 14 → 15 →
+    /// Fuchsia City** (all map connections; the Cool-Trainers/Bikers/Beauties on 13–15 engage by line of
+    /// sight and are fought normally). Heal at the Fuchsia Center, then enter Koga's gym and beat him —
+    /// his team is Poison (Koffing/Muk/Weezing ~lv37–43); a Grass starter resists Poison and leans on
+    /// its Normal move + level lead. `DefeatGymLeader` persists through the invisible-wall maze + the six
+    /// rocker junior trainers until the badge is won.
+    pub fn soul_badge_steps() -> Vec<Self> {
+        vec![
+            Self::enter(Map::Route13),
+            // Cross into Route 14 at the OPEN row-8 landing (19,8): the nearest crossing lands at (19,6),
+            // a dead-end pocket sealed by a south-facing Bird Keeper. Route 13 can reach the (0,9) west
+            // edge which lands here.
+            Self::EnterMap { to_map: Map::Route14, to_position: Some(Point8 { x: 19, y: 8 }) },
+            Self::enter(Map::Route15),
+            // Route 15 also has a gate building walling off the Fuchsia (west) connection. Enter its
+            // east door (nearest), cross, and take the west exit (lands Route 15 (7,8), west of the
+            // wall) before the Fuchsia connection is reachable.
+            Self::enter(Map::Route15Gate1F),
+            Self::EnterMap { to_map: Map::Route15, to_position: Some(Point8 { x: 7, y: 8 }) },
+            Self::enter(Map::FuchsiaCity),
+            Self::enter(Map::FuchsiaPokecenter),
+            Self::Interact(MapSprite::FUCHSIAPOKECENTER_NURSE),
+            Self::enter(Map::FuchsiaCity),
+            Self::enter(Map::FuchsiaGym),
+            Self::DefeatGymLeader { leader: MapSprite::FUCHSIAGYM_KOGA, badge: Badge::SoulBadge },
+        ]
+    }
+
+    /// Safari Zone run for **HM03 Surf** + the **Gold Teeth** (→ HM04 Strength from the Warden). From
+    /// Fuchsia: pay at the gate (the "would you like to join?" prompt auto-confirms on A-mash → 500 +
+    /// 30 Safari Balls + a 500-step budget), cross Center → West, grab the Gold Teeth, and get Surf from
+    /// the Secret House fishing guru. The deterministic policy RUNs from every Safari encounter (never
+    /// costs a ball; the BALL/BAIT/ROCK options exist for a future hunting policy).
+    pub fn safari_zone_surf_steps() -> Vec<Self> {
+        vec![
+            Self::enter(Map::FuchsiaCity),       // out of Koga's gym
+            Self::enter(Map::SafariZoneGate),
+            Self::enter(Map::SafariZoneCenter),  // pays 500 via the join prompt, auto-walks in
+            // The Center's West warp is across the central water; the item-bearing West area is reached
+            // the long way round: Center → East → North → West (the only land route).
+            Self::enter(Map::SafariZoneEast),
+            Self::enter(Map::SafariZoneNorth),
+            Self::enter(Map::SafariZoneWest),
+            Self::CollectItem(MapSprite::SAFARIZONEWEST_GOLD_TEETH),
+            Self::enter(Map::SafariZoneSecretHouse),
+            Self::Interact(MapSprite::SAFARIZONESECRETHOUSE_FISHING_GURU), // hands over HM03 Surf
+        ]
+    }
+
+    /// After the Surf run (holding the Gold Teeth): leave the Safari Zone and give the Gold Teeth to the
+    /// **Warden** (Warden's House, Fuchsia) for **HM04 Strength**. Exiting navigates back to the gate;
+    /// if the 500-step timer runs out first the game warps the player to the gate anyway, so either way
+    /// the `enter(SafariZoneGate)` step resolves.
+    pub fn safari_zone_strength_steps() -> Vec<Self> {
+        vec![
+            Self::enter(Map::SafariZoneWest),    // out of the secret house
+            // Center is split by water: the North entrance lands in a top pocket, walled off from the
+            // gate. So retrace the full way in (West → North → East → Center) — East→Center lands at the
+            // bottom region where the gate is.
+            Self::enter(Map::SafariZoneNorth),
+            Self::enter(Map::SafariZoneEast),
+            Self::enter(Map::SafariZoneCenter),
+            Self::enter(Map::SafariZoneGate),
+            Self::enter(Map::FuchsiaCity),
+            Self::enter(Map::WardensHouse),
+            Self::Interact(MapSprite::WARDENSHOUSE_WARDEN), // give Gold Teeth → HM04 Strength
+        ]
+    }
+
+    /// Enter Saffron (for Silph Co / the Marsh Badge): trek Fuchsia → Celadon, buy a Fresh Water from
+    /// the Celadon Mart roof vending machine, then pass the Route-7 gate guard (who takes the drink and
+    /// opens all four Saffron gates). Reverse of the soul-badge trek back to Lavender, then the Route
+    /// 7–8 underground path to Celadon.
+    pub fn saffron_entry_steps() -> Vec<Self> {
+        let mut s = vec![
+            Self::enter(Map::FuchsiaCity), // out of the Warden's house
+            // Fuchsia → Lavender (reverse of the soul-badge routes; Snorlax already cleared).
+            Self::enter(Map::Route15),      // from Fuchsia: lands on the west side of the Route-15 gate
+            // Reverse the Route-15 gate: west door → east exit (lands Route 15 (14,8), east of the wall).
+            Self::enter(Map::Route15Gate1F),
+            Self::EnterMap { to_map: Map::Route15, to_position: Some(Point8 { x: 14, y: 8 }) },
+            Self::enter(Map::Route14),
+            Self::enter(Map::Route13),
+            Self::enter(Map::Route12),      // from Route 13: lands south of the Route-12 gate
+            // Reverse the Route-12 gate: south door → north exit (lands Route 12 (10,15), north of it).
+            Self::enter(Map::Route12Gate1F),
+            Self::EnterMap { to_map: Map::Route12, to_position: Some(Point8 { x: 10, y: 15 }) },
+            Self::enter(Map::LavenderTown),
+            // The nearest Lavender→Route8 crossing (0,11) jams; take the (0,9) one (lands Route8 (59,8)).
+            Self::EnterMap { to_map: Map::Route8, to_position: Some(Point8 { x: 59, y: 8 }) },
+        ];
+        // Lavender → Celadon via the Route 7–8 underground path (existing helper: heals at Celadon too).
+        s.extend(Self::lavender_to_celadon_steps());
+        // Into the Mart, up to the roof, buy a Fresh Water from the vending machine.
+        s.extend([
+            Self::enter(Map::CeladonMart1F),
+            Self::enter(Map::CeladonMart2F),
+            Self::enter(Map::CeladonMart3F),
+            Self::enter(Map::CeladonMart4F),
+            Self::enter(Map::CeladonMart5F),
+            Self::enter(Map::CeladonMartRoof),
+            Self::UseVendingMachine { at: Point8 { x: 10, y: 1 }, drink: ItemId::FreshWater },
+            // Back down and out to Celadon, then east through the Route-7 gate into Saffron.
+            Self::enter(Map::CeladonMart5F),
+            Self::enter(Map::CeladonMart1F),
+            Self::enter(Map::CeladonCity),
+            Self::enter(Map::Route7),
+            Self::enter(Map::Route7Gate),        // west door
+            // Walk east through the gate to the east door (Route 7 (18,10), Saffron side). Crossing the
+            // guard-trigger tile (3,4) hands over the Fresh Water (we have it → no push-back).
+            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 18, y: 10 }) },
+            Self::enter(Map::SaffronCity),
+        ]);
+        s
+    }
+
+    /// Silph Co, part 1: from Saffron, enter Silph Co and ride the elevator to **5F** for the **Card
+    /// Key** (which opens the locked doors throughout the building). The elevator works like the Rocket
+    /// Hideout's (panel bg-event at (3,0), 11-floor menu: 1F=0 … 5F=4 … 11F=10, redirected exit warp).
+    pub fn silph_co_card_key_steps() -> Vec<Self> {
+        vec![
+            Self::enter(Map::SilphCo1F),
+            // The elevator door (20,0) is a wall-embedded warp BFS thinks is reachable but the game
+            // blocks, so use the **teleport pads** instead: 1F pad (16,10) → 3F, then a 3F pad → 5F.
+            Self::enter(Map::SilphCo3F),
+            Self::enter(Map::SilphCo5F),
+            Self::CollectItem(MapSprite::SILPHCO5F_CARD_KEY),
+        ]
+    }
+
     /// The full deterministic playthrough. Every forward map transition is an explicit `EnterMap`;
     /// on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the incrementally-observed
     /// graph. Starter is **Bulbasaur** — its Grass typing is super-effective against both Brock
@@ -966,6 +1200,13 @@ impl Policy for DeterministicPolicy {
                     // Explicit single map transition: take exactly this warp/connection.
                     if let Some(action) = Self::enter_map_action(&actions, to_map, to_position) {
                         return Some(action);
+                    }
+                    // A specific connection landing that isn't the nearest crossing (which is all
+                    // `actions()` emits) — build it directly (e.g. Route 13→14 open row, not the pocket).
+                    if let Some(pos) = to_position {
+                        if let Some(action) = state.map.connection_action(to_map, pos) {
+                            return Some(action);
+                        }
                     }
                     // Recovery: the direct transition isn't on the current map. This happens when a
                     // teleport back into already-explored territory desyncs the linear EnterMap
@@ -1248,6 +1489,13 @@ impl Policy for DeterministicPolicy {
                     }
                     None
                 }
+                PolicyStep::UseFieldItem { .. } => {
+                    // Facing the target and driving the bag menus is handled by `pick_field_move` /
+                    // `UsingFieldItem` once the target sprite is observed on the current map (a preceding
+                    // EnterMap places the agent on its map).
+                    None
+                }
+                PolicyStep::UseVendingMachine { .. } => None, // driven by `pick_field_move`
             }
         }
     }
@@ -1255,6 +1503,13 @@ impl Policy for DeterministicPolicy {
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
         let battle_state = state.battle.as_ref()?;
         let actions = battle_options(state)?;
+
+        // Safari Zone: the deterministic policy never hunts — always RUN (a Safari run never fails), to
+        // preserve steps/balls while it navigates to the items. (The BALL/BAIT/ROCK options are still in
+        // `battle_options` so a future LLM policy can choose to catch.)
+        if battle_state.battle_type == BattleType::Safari {
+            return Some(BattleAction::Run);
+        }
 
         if self.heal_return.is_some() && battle_state.battle_type == BattleType::Wild {
             // returning to the pokemon center, run from battles.
@@ -1495,6 +1750,33 @@ impl Policy for DeterministicPolicy {
                 return None;
             }
             return Some(FieldMove::UseElevator { panel, floor });
+        }
+        if let Some(&PolicyStep::UseFieldItem { item, target }) = self.queue.front() {
+            let present = state.map.sprites.iter().any(|s| !s.hidden && s.name == target.name);
+            if present { self.collect_item_seen = true; }
+            // Done once the target has been seen and is now gone (the item's effect — e.g. waking then
+            // defeating the Snorlax — removed it).
+            if !present && self.collect_item_seen {
+                self.collect_item_seen = false;
+                println!("[policy] UseFieldItem: {} gone — done", target.name);
+                self.queue.pop_front();
+                return None;
+            }
+            if !present { return None; } // target not yet observed on this map — keep walking/waiting
+            let pos = state.map.sprites.iter()
+                .find(|s| !s.hidden && s.name == target.name)
+                .map(|s| s.position)?;
+            return Some(FieldMove::UseFieldItem { item, target: pos });
+        }
+        if let Some(&PolicyStep::UseVendingMachine { at, drink }) = self.queue.front() {
+            if state.bag.contains(&drink) {
+                println!("[policy] UseVendingMachine: bought {drink:?} — done");
+                self.queue.pop_front();
+                return None;
+            }
+            // Reuse the face-a-bg-event-and-press-A mechanism; the vending menu opens with the cheapest
+            // drink at the cursor, so A-mashing buys it. Persists until the drink is in the bag.
+            return Some(FieldMove::CheckTrashCan { target: at });
         }
         None
     }
