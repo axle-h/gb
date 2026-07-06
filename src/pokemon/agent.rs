@@ -1298,8 +1298,11 @@ impl PokemonAgent {
             }
             AgentState::UsingElevator { panel, floor, selected, press } => {
                 let gs = self.observe_state(api)?;
-                // Rode the elevator out — the map changed. Done.
-                if gs.map.map != Map::RocketHideoutElevator {
+                // Rode the elevator out — the map is no longer an elevator room. Done. (Any of the
+                // game's elevators — Rocket Hideout, Silph Co, Celadon Mart — share this handler.)
+                let in_elevator = matches!(gs.map.map,
+                    Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
+                if !in_elevator {
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -1311,7 +1314,10 @@ impl PokemonAgent {
                 // vars linger and re-driving them would trap us instead of walking out to the warp.
                 const SPECIAL_LIST_MENU: u8 = 0x04;
                 if !selected && api.list_menu_id() == SPECIAL_LIST_MENU {
-                    let current = api.menu_state().map(|m| m.current_item).unwrap_or(0);
+                    // The floor menu scrolls (Silph Co has 11 floors), so the cursor position within
+                    // the visible window (`current_item`) caps out — compare the *absolute* index
+                    // (`current_item + scroll_offset`) against the target floor.
+                    let current = api.menu_state().map(|m| m.list_absolute_index()).unwrap_or(0);
                     api.release_all_buttons();
                     let mut selected = selected;
                     if press {
@@ -1325,16 +1331,14 @@ impl PokemonAgent {
                     self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
                     return Ok(());
                 }
-                // Non-overworld and not (yet) the floor list. Two cases:
+                // Non-overworld and not (yet) the floor list. Pulse A in both cases:
                 //  - before selecting: the "Which floor?" message box precedes the SPECIALLISTMENU and
-                //    waits for a button — pulse A to advance into the list (handled above once it's up).
-                //  - after selecting: the elevator shake animation — just wait it out.
+                //    waits for a button — pulse A to advance into the list.
+                //  - after selecting: the pick's A-press can be swallowed if it lands mid-scroll, leaving
+                //    the list menu open with the cursor already on the target floor; pulsing A re-confirms
+                //    it (and is harmless during the subsequent shake / "arriving" text).
                 if game_mode != GameMode::Overworld {
-                    if !selected {
-                        api.toggle_button(JoypadButton::A);
-                    } else {
-                        api.release_all_buttons();
-                    }
+                    api.toggle_button(JoypadButton::A);
                     self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
                     return Ok(());
                 }

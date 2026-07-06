@@ -1088,6 +1088,33 @@ fn probe_party() {
     }
 }
 
+/// Diagnostic: from `silph-card-key.bin` (in the 5F Card Key pocket), step out via the (9,15) pad to
+/// 9F and dump which warps/sprites are walkable-reachable there — to plan the route up to 7F (Lapras)
+/// and 11F (Giovanni) now that the Card Key doors are open.
+#[test]
+#[ignore]
+fn probe_silph_post_cardkey() {
+    let mut fixture = TestFixture::new(include_bytes!("data/silph-card-key.bin"), Duration::from_mins(40),
+        vec![PolicyStep::enter(Map::SilphCo9F), PolicyStep::enter(Map::SilphCo3F)]);
+    let mut last = Point8 { x: 255, y: 255 };
+    let mut same = 0;
+    for i in 0..400_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            let p = s.map.player_position;
+            if p != last { last = p; same = 0; if i % 200 == 0 { println!("  step {i}: {} @ {p} mode={:?}", s.map.map, s.mode); } }
+            else { same += 1; if same == 30_000 { println!(">> STUCK at {} @ {p} mode={:?} step {i}", s.map.map, s.mode); } }
+        }
+    }
+    if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+        println!("ended on {} @ {}", s.map.map, s.map.player_position);
+    }
+}
+
+/// Diagnostic: dumps Silph Co 1F warps, then rides the elevator to 5F and prints which sprites/warps
+/// are walkable-reachable from the exit — used to confirm the Card Key pocket needs teleport-maze
+/// routing (only teleport-pad warps + trainer-guarded entrances are reachable by walking).
 #[test]
 #[ignore]
 fn probe_silph1f() {
@@ -1109,30 +1136,29 @@ fn probe_silph1f() {
         if t == 0x43 || t == 0x58 || t == 0x20 { print!(" ({},{})=0x{:02x}", i % w, i / w, t); }
     }
     println!();
-    // Now drive toward the elevator warp and log positions each step until stuck.
-    let mut fixture = TestFixture::new(include_bytes!("data/at-saffron.bin"), Duration::from_mins(5), vec![
+    // Ride the elevator to 11F and dump whether Giovanni is walkable-reachable from the exit.
+    let mut fixture = TestFixture::new(include_bytes!("data/at-saffron.bin"), Duration::from_mins(8), vec![
         PolicyStep::enter(Map::SilphCo1F),
-        PolicyStep::enter(Map::SilphCo3F),
+        PolicyStep::enter(Map::SilphCoElevator),
+        PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 10 }, // 11F
     ]);
-    let mut last = Point8 { x: 255, y: 255 };
-    let mut stuck = 0;
-    for _ in 0..40_000 {
+    for _ in 0..200_000 {
         fixture.step();
-        let g = fixture.game_state();
-        if g.map.map == Map::SilphCo3F { println!(">> reached 3F @ {}", g.map.player_position); break; }
-        let p = g.map.player_position;
-        if g.map.map == Map::SilphCo1F && p != last { println!("  1F @ {p} facing {:?} front={:?}", g.map.player_direction, g.map.tile_in_front().map(|(_,t)|t)); last = p; stuck = 0; }
-        else { stuck += 1; if stuck > 8000 {
-            use crate::pokemon::symbols::pokered_symbols as ps;
-            let mmu = fixture.gb.core().mmu();
-            let (rx, ry) = (mmu.read_pointer(&ps::wXCoord), mmu.read_pointer(&ps::wYCoord));
-            println!(">> STUCK on {} @ {} facing {:?}", g.map.map, p, g.map.player_direction);
-            println!("   raw coords=({rx},{ry}) tileset=0x{:02x} standingOnPad=0x{:02x} wCurMap=0x{:02x}",
-                mmu.read(ps::wCurMapTileset.address), mmu.read(ps::wStandingOnWarpPadOrHole.address), mmu.read_pointer(&ps::wCurMap));
-            // raw tile at the player standing tile (coord 8,9 = wTileMap + 9*20 + 8)
-            println!("   wTileMap(8,9)=0x{:02x}  around: {:02x} {:02x} {:02x}", mmu.read(0xc3a0 + 9*20 + 8),
-                mmu.read(0xc3a0 + 9*20 + 7), mmu.read(0xc3a0 + 9*20 + 8), mmu.read(0xc3a0 + 9*20 + 9));
-            break; } }
+        let cur = fixture.gb.core().mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wCurMap);
+        if cur == 0xEB { break; } // SilphCo11F
+    }
+    for _ in 0..40 { fixture.step(); } // settle
+    match { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+        Err(e) => println!(">> 11F game_state ERR: {e}"),
+        Ok(s) => {
+            println!("on {} @ {}", s.map.map, s.map.player_position);
+            println!("{}", s.map);
+            println!("sprites: {:?}", s.map.sprites.iter().filter(|sp| !sp.hidden).map(|sp| (sp.name, sp.position)).collect::<Vec<_>>());
+            println!("reachable sprite/warp actions:");
+            for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Sprite(_) | MetaTile::Warp{..})) {
+                println!("   {:?} dest={} route_len={}", a.tile, a.destination, a.route.len());
+            }
+        }
     }
 }
 
@@ -1659,13 +1685,22 @@ fn can_enter_saffron() {
     fixture.save_state_named("src/pokemon/data/at-saffron.bin").unwrap();
 }
 
-/// Stage 4i (part 1, WIP): from Saffron, enter Silph Co and reach the Card Key (5F). **BLOCKED:** the
-/// agent gets into Silph 1F but stalls moving to the elevator warp (20,0) — it's BFS-reachable but the
-/// walk to it jams mid-route (likely the top-border warp firing, or a card-key door sub-tile the
-/// $18/$24 raw-tile check misses). The Card-Key door overlay (`apply_card_key_doors`) is in place;
-/// still needs the teleport-pad graph and this elevator/border-warp fix. See the plan doc.
+/// Stage 4i (part 1): from Saffron, enter Silph Co, ride the elevator to 5F, thread the teleport-pad
+/// maze to the Card Key pocket, and grab the Card Key. Snapshots `silph-card-key.bin`.
+///
+/// Two things had to work. **The elevator** (1F → step into the (20,0) door → ride to any floor)
+/// needed five fixes: (1) `read_warp_events` crashed `game_state()` the moment the player entered any
+/// elevator, because the elevator's exits point at the header-less UNUSED_MAP_ED placeholder;
+/// (2)/(3)/(4) three hard-coded `Map::RocketHideoutElevator` checks (policy ×2, agent ×1)
+/// skipped/aborted the elevator for every non-Rocket elevator; (5) the floor menu scrolls (11 floors)
+/// so the cursor is driven by *absolute* index, and the pick's A-press is re-pulsed until the ride
+/// starts. **The maze**: the Card Key sits in a walled 5F pocket (row 16) reachable only by *arriving*
+/// on the 5F (9,15) pad and stepping down. (9,15)↔9F(17,15) are a teleport pair, so the route is
+/// `enter(9F)` (walk to the reachable (9,15) pad → 9F(17,15)) then `enter(5F)` (step back onto (17,15)
+/// → arrive standing on 5F(9,15), now adjacent to the pocket) — expressed directly as `enter()` steps,
+/// no new maze-routing machinery needed.
 #[test]
-#[ignore = "WIP — Silph 1F elevator/teleport navigation; see doc comment"]
+#[ignore = "slow (release, ~minutes of game time); run with --ignored"]
 fn can_get_silph_card_key() {
     let mut fixture = TestFixture::new(
         include_bytes!("data/at-saffron.bin"),

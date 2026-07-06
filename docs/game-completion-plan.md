@@ -210,23 +210,50 @@ Flute**), then **Saffron** opens (Silph Co, Rocket-gated) → **Marsh Badge (Sab
   **$18/$24** on Silph floors as `Obstacle` while the Card Key is absent (and forces them `Empty` once
   held, since the game opens them on approach); gated by `map_has_card_key_doors` +
   `CurrentMap.card_key_locked` (read from the bag in `read_current_map`), inert on every non-Silph map.
-  Agent enters Silph 1F from Saffron. **BLOCKED — root cause found (the hard part):** Silph Co's
-  floor-to-floor warps don't fire through the agent's normal warp handling.
-  - pokered fires a warp only when the player is **standing on a warp/door tile**
-    (`CheckWarpsNoCollision` → `IsPlayerStandingOnDoorTileOrWarpTile`, reading `lda_coord 8,9` — the
-    bottom-left standing sub-tile — against the tileset warp-tile list). FACILITY warp tiles = **$43,
-    $58, $20**.
-  - The **elevator (20,0)=$58** and **2F (26,0)=$43** warp tiles sit on the top wall row; the agent
-    reaches the tile just below (e.g. (20,1)) but can't step onto the warp tile. Its BFS marks the tile
-    a reachable `Warp` (warp_event overlay) while the game's collision treats it as a wall you can only
-    walk *into*. Needs walk-into-warp handling for warp tiles the BFS over-marks reachable.
-  - The **3F teleport (16,10)** isn't a warp tile at all (standing tile $01, no `$20` warp-pad tiles on
-    1F); that warp fires via **`ExtraWarpCheck`** — the Silph teleport special case — a separate
-    mechanic to model.
-  **NEXT (large):** teach the agent to fire (a) walk-into warp tiles it's adjacent to and (b)
-  `ExtraWarpCheck` teleports; navigate the pad graph to the 5F Card Key; then the key opens the doors so
-  the elevator reaches 7F (Lapras + rival) and 11F (Giovanni). Beat Giovanni → Saffron Rockets leave →
-  **Sabrina** → Marsh Badge. The Card-Key door overlay (`apply_card_key_doors`) is already in place.
+  Agent enters Silph 1F from Saffron. **DONE — the elevator now fully works** (1F → step into the
+  (20,0) door → ride to any floor). Getting there took fixing five real bugs (all landed):
+  1. `read_warp_events` crashed `game_state()` the instant the player entered *any* elevator: the
+     elevator's exit warps target the header-less **UNUSED_MAP_ED** placeholder, and
+     `read_destination_warp_position` propagated a "Map header pointer was null" error. Fix: fall back
+     to `(0,0)` for a warp whose dest map has no header (`map_metadata.rs`).
+  2–4. Three hard-coded `Map::RocketHideoutElevator` checks (policy `pick_field_move` + the
+     `PolicyStep::UseElevator` advance arm, and the `AgentState::UsingElevator` "rode out" check) made
+     every *non-Rocket* elevator either get skipped or immediately think it had already ridden out.
+     Fix: match any elevator room (Rocket Hideout | Silph Co | Celadon Mart).
+  5. The Silph floor menu **scrolls** (11 floors) — the cursor's `current_item` caps at the visible
+     window, so drive it by **absolute index** (`MenuState::list_absolute_index()`); and the pick's
+     A-press can be swallowed mid-scroll, so the post-pick wait now **re-pulses A** until the ride
+     starts. (Rocket Hideout's short menu never scrolled, hiding all of this.)
+  Also confirmed empirically (probe): the elevator door (20,0)=$58 *is* a normal walk-into FACILITY
+  door — holding Up onto it fires the warp; the earlier "can't step onto the warp tile" theory was
+  wrong (the real block was bug #1 freezing the agent the moment it warped in).
+  **DONE — the 5F Card Key** (`can_get_silph_card_key` passes, snapshots `silph-card-key.bin`). The
+  Card Key sits in a walled 5F pocket (row 16) reachable only by *arriving* on the 5F (9,15) pad and
+  stepping down (its walking entrances are trainer-guarded, tiles that stay blocked even once beaten).
+  Solved without any new maze machinery: (9,15)↔9F(17,15) are a teleport pair, so `enter(9F)` (walk to
+  the reachable (9,15) pad → 9F(17,15)) then `enter(5F)` (step back onto (17,15) → *arrive* standing on
+  5F(9,15), now adjacent to the pocket) → `CollectItem`. Key idea: you can't walk *onto* (9,15) without
+  teleporting away, but teleporting *to* it (from 9F) drops you standing on it, free to step into the
+  pocket.
+  **ALSO DONE — a second `game_state()` crash**: `read_warp_events` failed on **11F** (and any
+  interior-only map) resolving a `LAST_MAP`/self-referential exit warp — `find_outdoor_entry_map` finds
+  no outdoor map pointing at 11F, so it errored out. Fix: *skip* the unresolvable exit warp instead of
+  failing the whole read (`map_metadata.rs`). game_state now works on every Silph floor.
+  **NEXT (large) — remaining Silph Co (Lapras 7F, Giovanni 11F, Sabrina):** these need **multi-floor
+  teleport-pad routing**, which the BFS (warps are terminals) can't do, plus **robust
+  trainer-blocked-corridor navigation** and a **thicker party**. Findings from probes:
+  - Elevator reaches 11F directly, but **Giovanni (6,9) is NOT reachable from the 11F elevator exit even
+    with the Card Key doors open** — his room is entered via the **7F (5,7) → 11F (3,2)** pad, i.e.
+    another cross-floor chain. Likewise Lapras (Silph Worker M1 @7F (1,5)) needs 7F's own maze.
+  - The agent ends the Card Key leg *in* the 5F pocket, whose only exit is (9,15)→9F(17,15). From
+    9F(17,15) the sole forward pad is (9,3)→3F, ~63 tiles away through 9F's Rocket/Scientist trainers —
+    and the agent **gets stuck at 9F (18,11)** (Overworld, not battling), barely off the landing: a
+    trainer-blocked corridor the BFS can't route around. `probe_silph_post_cardkey` reproduces it.
+  - Party is thin: **Venusaur lv48** (great) + a useless **lv4 Pidgey**. Over Silph's many trainers PP
+    drain / a Venusaur faint → blackout is a real risk; likely wants a second real battler.
+  The right fix is a **region/pad graph router** (nodes = per-map walkable sub-regions, edges = pads)
+  so the agent can route to any maze target automatically, rather than hand-tracing each chain. Once at
+  Giovanni: beat him → Saffron Rockets leave → **Sabrina** → Marsh Badge.
   2. **Route 15 gate** — like the Route 12 gate, a gate building walls off the Fuchsia (west)
      connection; traverse it (east door → west exit landing (7,8)) before Fuchsia is reachable.
   Also: the Lavender heal (in `snorlax_steps`) was needed here — without it the party heal-fled to
