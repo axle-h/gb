@@ -82,6 +82,18 @@ pub trait PokemonApiTrait {
     fn game_state(&self) -> Result<GameState, String>;
     fn on_screen_text(&self, only_message_box: bool) -> Option<String>;
     fn menu_state(&self) -> Option<MenuState>;
+    /// Currently-active list-menu template (`wListMenuID`). `0x04` (`SPECIALLISTMENU`) is the
+    /// elevator floor list / badge list. Used to drive the elevator floor menu, whose `wTextBoxID`
+    /// reads `MessageBox` (the "Which floor?" print) rather than `ListMenuBox`.
+    fn list_menu_id(&self) -> u8;
+    /// Raw menu geometry `(top_menu_item_x, top_menu_item_y, current_item, scroll_offset)` read
+    /// directly from RAM, regardless of `wTextBoxID` (which the START menu leaves unset). Used to
+    /// detect/drive the START-menu → bag → use-item menus when teaching an HM.
+    fn menu_geometry(&self) -> (u8, u8, u8, u8);
+    /// The list index of `item` in the bag as the game's item menu orders it — read from raw
+    /// `wBagItems` so it matches the on-screen list exactly (unlike `read_bag`, which drops item ids
+    /// not in the `ItemId` enum and so shifts every later index). Used to navigate the bag cursor.
+    fn bag_item_position(&self, item: ItemId) -> Option<u8>;
     /// Returns the species currently being named on the nickname-entry screen.
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String>;
 
@@ -295,6 +307,22 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             })
         }
 
+        let map = MetaTileMap::new(&match &self.map_cache {
+            Some(c) => c.read_current_map(mmu)?,
+            None    => mmu.read_current_map()?,
+        });
+        // Vermilion Gym trash-can puzzle: EVENT_1ST_LOCK_OPENED = 0x161 → wEventFlags[44] bit 1,
+        // EVENT_2ND_LOCK_OPENED = 0x160 → wEventFlags[44] bit 0.
+        let trash_cans = (map.map == Map::VermilionGym).then(|| {
+            let flags = mmu.read(pokered_symbols::wEventFlags.address + 44);
+            TrashCanPuzzle {
+                first_target: trash_can_position(mmu.read_pointer(&pokered_symbols::wFirstLockTrashCanIndex)),
+                second_target: trash_can_position(mmu.read_pointer(&pokered_symbols::wSecondLockTrashCanIndex)),
+                first_opened: flags & 0x02 != 0,
+                second_opened: flags & 0x01 != 0,
+            }
+        });
+
         Ok(GameState {
             player_id: mmu.read_pointer_u16_be(&pokered_symbols::wPlayerID),
             name: mmu.read_pointer_pokemon_string(&pokered_symbols::wPlayerName),
@@ -304,10 +332,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),
             mode: mmu.read_game_mode(),
             pokemon,
-            map: MetaTileMap::new(&match &self.map_cache {
-                Some(c) => c.read_current_map(mmu)?,
-                None    => mmu.read_current_map()?,
-            }),
+            trash_cans,
+            // EVENT_FOUND_ROCKET_HIDEOUT = 0x1b9 → wEventFlags[55] bit 1.
+            found_rocket_hideout: mmu.read(pokered_symbols::wEventFlags.address + 55) & 0x02 != 0,
+            map,
             battle: mmu.read_battle_state(),
             bag: mmu.read_bag(),
             has_pokedex: mmu.read_has_pokedex(),
@@ -404,6 +432,27 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         self.mmu().read_menu_state()
     }
 
+    fn list_menu_id(&self) -> u8 {
+        self.mmu().read_pointer(&pokered_symbols::wListMenuID)
+    }
+
+    fn menu_geometry(&self) -> (u8, u8, u8, u8) {
+        let mmu = self.mmu();
+        (
+            mmu.read_pointer(&pokered_symbols::wTopMenuItemX),
+            mmu.read_pointer(&pokered_symbols::wTopMenuItemY),
+            mmu.read_pointer(&pokered_symbols::wCurrentMenuItem),
+            mmu.read_pointer(&pokered_symbols::wListScrollOffset),
+        )
+    }
+
+    fn bag_item_position(&self, item: ItemId) -> Option<u8> {
+        let mmu = self.mmu();
+        let count = mmu.read_pointer(&pokered_symbols::wNumBagItems) as usize;
+        let base = pokered_symbols::wBagItems.address;
+        (0..count).find(|&i| mmu.read(base + i as u16 * 2) == item as u8).map(|i| i as u8)
+    }
+
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String> {
         let byte = self.mmu().read_pointer(&pokered_symbols::wCurPartySpecies);
         PokemonSpecies::from_repr(byte)
@@ -490,5 +539,33 @@ pub struct GameState {
     pub pokedex_owned: Pokedex,
     /// Species the player has seen (encountered in battle) — set bit in `wPokedexSeen`.
     pub pokedex_seen: Pokedex,
+    /// Vermilion Gym trash-can switch puzzle state — `Some` only when `map` is `VermilionGym`.
+    pub trash_cans: Option<TrashCanPuzzle>,
+    /// True once EVENT_FOUND_ROCKET_HIDEOUT is set — the Celadon Game Corner poster switch has been
+    /// flipped, opening the hidden staircase down to the Rocket Hideout.
+    pub found_rocket_hideout: bool,
+}
+
+/// State of the Vermilion Gym two-switch trash-can puzzle that unlocks the door to Lt. Surge.
+///
+/// The two switches hide in the cans indexed by `wFirstLockTrashCanIndex` /
+/// `wSecondLockTrashCanIndex`; `first_target` / `second_target` are those cans' map coordinates.
+/// Check the first can (opens the 1st lock, which then randomly places the 2nd switch in an adjacent
+/// can), then check the second can (opens the 2nd lock and unlocks the door). Checking a wrong can
+/// for the second switch resets both locks — reading the indices from RAM lets the agent go straight
+/// to the correct cans and never reset.
+#[derive(Debug, Clone)]
+pub struct TrashCanPuzzle {
+    pub first_target: crate::geometry::Point8,
+    pub second_target: crate::geometry::Point8,
+    pub first_opened: bool,
+    pub second_opened: bool,
+}
+
+/// Map coordinate of gym trash-can hidden object `index` (0..=14), from pokered
+/// `data/events/hidden_objects.asm` (`VermilionGymHiddenObjects`): cans laid out in a 5×3 grid at
+/// odd columns 1,3,5,7,9 and rows 7,9,11, indexed column-major.
+pub fn trash_can_position(index: u8) -> crate::geometry::Point8 {
+    crate::geometry::Point8 { x: 1 + 2 * (index / 3), y: 7 + 2 * (index % 3) }
 }
 

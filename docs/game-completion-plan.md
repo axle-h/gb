@@ -37,11 +37,15 @@ re-derive them.**
 4. **Bill's SS Ticket is a multi-step interaction** (`pokered/scripts/BillsHouse.asm`): talk to Bill's
    Pokémon (SUPER_NERD at (4,4)) → it walks into the cell-separator → **use the PC** → Bill exits →
    talk to Bill → SS Ticket. A single `Interact` will NOT do it; needs a scripted sub-sequence.
-5. **Level-up move-learning** (`pokered/engine/pokemon/learn_move.asm`): the "which move to forget?"
-   menu has unique geometry **top-left (5,8)** (vs battle move-list (5,12)); the move being learned is
-   `wMoveNum`, the mon is `wWhichPokemon`. This is now handled (Stage 2 IMPLEMENTED below).
-6. **Fixture-party weakness is the current blocker**, not navigation. `post-cascade.bin` is a lone
-   Ivysaur that had forgotten Tackle (only Vine Whip, 10 PP, damaging). Regenerate it (see NEXT).
+5. **Menu-driving from the agent's tick model WORKS** (this was doubted for a long time and blamed on
+   a "HandleMenuInput input-delay wall" — that was a misdiagnosis). Two rules make it reliable:
+   (a) **mash** — press a button one agent tick, `release_all_buttons` the next, so each nav/confirm is
+   a fresh rising edge every 2 ticks (holding N ticks = ONE edge); (b) **navigate the cursor to the
+   target index using `menu_geometry()`/`menu_state()`, THEN press A** — never press A blind. See
+   `AgentState::TeachingMove`/`CuttingTree`. Bag rows: use `api.bag_item_position()` (raw `wBagItems`),
+   NOT `GameState::bag` (which drops ids outside `ItemId` and shifts indices). The forget-move menu sits
+   at origin **(5,8) in battle but (15,8) in the overworld teach**, so detect it by the on-screen prompt
+   text (`is_forget_move_prompt`) + live cursor, not by geometry x==5.
 
 ### Reusable techniques (worth the tokens once, cheap to reuse)
 - **Real-engine save-state flood-fill / BFS**: `GameBoy::save_state()`/`load_state()` + real joypad
@@ -53,19 +57,111 @@ re-derive them.**
   graphs — but it only takes the *nearest* connection, so it can't discover terrace re-entries that
   need walking *within* a map. Good for warp mazes (Mt Moon), not terrace splits.
 
-### NEXT STEPS (in order)
-1. **Regenerate `post-cascade.bin` with a viable party.** Upgrade `complete_game_steps` to grind the
-   starter higher (move-learning now keeps Tackle + gains Razor Leaf @lv30) and to **reliably catch +
-   keep a 2nd Pokémon**; heal; re-run `can_start_game` (~90 min) to write the new fixture. This also
-   end-to-end-verifies the Stage 2 move-learning menu driving (unit-tested only so far).
-2. **Finish the Bill leg** (extend `can_reach_bill` → `complete_game_steps`): Route 24 → Route 25 →
-   Bill's House → **SS-Ticket sub-sequence (fact 4)** → return → trashed-house bridge (fact 2) →
-   `enter(Route5)` → Underground Path → Route 6 → Vermilion. Un-ignore `can_reach_vermilion`.
-3. **Stage 3 proper** (walkthrough.txt ch. 10 + walkthrough2 Vermilion): S.S. Anne → **HM01 Cut** →
-   new `TeachMove` step + actionable `MetaTile::CutTree` → **Lt. Surge (Thunder Badge)** incl. the
-   trash-can switch puzzle.
-4. **Stage 4+** (walkthrough2, per badge): introduce each field HM where first required (Cut, then
-   Strength/Surf/Fly/Flash), one badge at a time, folding each into `can_start_game`.
+### DONE (all folded into `complete_game_steps`, each with a fast focused test)
+Boulder → Cascade → Bill/SS-Ticket → trashed-house bridge → Vermilion → **S.S. Anne (HM01 Cut)** →
+**teach Cut** → cut the gym tree → **trash-can puzzle** → **Thunder Badge (Lt. Surge)** → leave
+Vermilion (Route 11) → back to Cerulean → **Rock Tunnel** → Lavender → Underground Path → Celadon →
+**Rainbow Badge (Erika)**. Helpers: `cerulean_to_vermilion_steps`, `ss_anne_steps`,
+`thunder_badge_steps`, `back_to_cerulean_steps`, `cerulean_to_lavender_steps` (+ `rock_tunnel_traversal`),
+`lavender_to_celadon_steps`, `celadon_rainbow_steps`. Tests: `can_reach_vermilion`, `can_clear_ss_anne`,
+`can_get_thunder_badge`, `can_return_to_cerulean`, `can_reach_route10`, `can_reach_lavender`,
+`can_reach_celadon`, `can_get_rainbow_badge` (+ the earlier focused Vermilion tests).
+**Everything is button-input only — no RAM-write shortcuts remain in the play path.**
+
+### Rainbow Badge (Erika, Celadon) — DONE ✅ (2026-07-05). Hard-won facts (see memory `rainbow-badge-route`):
+1. **Route 9 (east) is a SEPARATE Cerulean terrace** (like Route 5) — main Pokécenter terrace only
+   reaches Route 4/24. Cross via the **trashed-house bridge**: `enter(CeruleanTrashedHouse)` →
+   `enter_at(CeruleanCity,27,9)` → `enter(Route9)`.
+2. **Route 9 Cut tree at (5,8)** boxes the west-entry pocket — need `CutTree{Route9}` to cross east.
+3. **Rock Tunnel warp maze** (No Flash) — solved chain in `rock_tunnel_traversal`: 1F(15,3) →
+   B1F(33,25) → 1F(5,3) → B1F(23,11) → 1F(37,17) → Route10(8,53) south exit. Found by real-engine
+   probing (`probe_rock_tunnel`); ExplorerPolicy alone got stuck (Route10 warp-landing "unobserved" trap).
+4. **Cross Rock Tunnel in ONE push** — a mid-tunnel flee-to-heal or blackout can't resume the scripted
+   deep enter_at chain. Fix: **heal at `RockTunnelPokecenter`** (tunnel mouth) right before diving.
+   A ~lv34 Venusaur at full HP/PP clears it (emerges ~lv37).
+5. **Celadon Gym has REAL internal cut trees** (GYM tileset tile `$50` is cuttable — pokered
+   `cut.asm`). Erika (top) is unreachable until `CutTree{CeladonGym}` clears the garden chokepoints;
+   junior trainers engage by LOS. Grass moves are resisted but a high-level Venusaur's Normal move
+   (Cut/Tackle) + level lead wins outright — no grind/extra catch needed after all.
+
+### NEXT STEP — Stage 4: Silph Scope (Celadon Game Corner → Rocket Hideout → Giovanni)
+Mainline after the Rainbow Badge (walkthrough2): **Celadon Game Corner → Rocket Hideout** (get the
+Silph Scope / Lift Key), Lavender **Pokémon Tower** (needs Silph Scope; rescues Mr. Fuji → **Poké
+Flute**), then **Saffron** opens (Silph Co, Rocket-gated) → **Marsh Badge (Sabrina)**, and **Fuchsia
+→ Soul Badge (Koga)**. First hard HM gate here is **Surf (HM03)** and **Strength (HM04)**. Start from
+`post-rainbow-badge.bin` (now saved in **Celadon City**, gym exited — see below).
+
+**IN PROGRESS (2026-07-05) — Rocket Hideout, three blockers left:**
+- **BLOCKER 0 — Celadon gym exit is fragile (REVERTED an attempted fix).** To continue past Erika the
+  agent must walk back out of the gym, but (a) cut trees **regrow after any battle** (the battle reloads
+  the map — verified: mashing DOWN into a "cut" tile doesn't move after the Erika fight), and (b) a
+  **blackout during Erika** respawns the player in Celadon City *behind the uncut city trees*, where
+  `DefeatGymLeader` can't re-route to the gym ("no path there"). An attempt to clear `cut_tiles` on
+  battle-end (`saw_battle`) + re-cut/exit in `celadon_rainbow_steps` **passed in isolation but broke the
+  full run**: the extra re-cutting triggered more junior-trainer battles, wore the party down, and Erika
+  (Stun Spore → paralysis) blacked it out → the unrecoverable respawn above. **Reverted** to keep
+  `can_start_game` green (it stops at Erika, Rainbow won). A real fix needs: clear cut memory on
+  battle-end **without** the re-cut thrash, and make `DefeatGymLeader` blackout-recovery cut the city
+  trees to get back into the gym. (`last_map`-change `cut_tiles.clear()` is kept — it fixed Vermilion.)
+- **DONE — Game Corner entrance** (`rocket_hideout_entrance_steps`, `can_reach_rocket_hideout` green).
+  The guarding Rocket **is** shown @(9,5) blocking the poster @(9,4) (an earlier hidden@(14,5) reading
+  was a corrupted state). Fix: **`Interact` now pops when its target sprite is hidden/gone** (a defeated
+  trainer that vanishes, e.g. this Rocket) instead of waiting forever. Then `FlipSwitch(9,4)` opens the
+  staircase (completion via `GameState::found_rocket_hideout`, EVENT_FOUND_ROCKET_HIDEOUT = bit 0x1b9 →
+  `wEventFlags[55]` bit 1; the warp is always in the static map so it must read the event). Event-index
+  parser fix: `const_next $XX` **sets** the index, `const_skip` w/o arg = 1 (verified 0x161).
+  `can_reach_rocket_hideout` runs from `at-celadon.bin` (pre-gym) to decouple from BLOCKER 0.
+- **DONE — spinner-tile navigation** (B2F/B3F, `probe_rocket_hideout_spinners` crosses B1F→B4F). Added
+  `MetaTileMap::spinners` (arrow → slide-destination, decoded from `RocketHideout{2,3}ArrowTilePlayerMovement`
+  RLE, read *backwards*; PAD_DOWN=+y UP=−y LEFT=−x RIGHT=+x) + a BFS edge (stepping onto an arrow lands
+  at its destination; resolve the start if the player is mid-slide; reconstruct stops at the BFS root).
+  The executor re-routes each tick and its inputs are ignored during the forced slide, so no special
+  executor handling was needed. Tables are hardcoded in `tile_map.rs::spinner_table`.
+- **DONE — Lift Key** (`silph_scope_steps`, `can_get_lift_key` green). B4F is **split**: the stairs land
+  in a left room (Rocket 3 + items); Giovanni + the Silph Scope are in a right room reachable **only via
+  the elevator**. Beat Rocket 3 → the Lift Key ball appears @(10,2) (it + the Scope are hidden until
+  their guards fall) → `CollectItem`. Snapshot `rocket-hideout-lift-key.bin`.
+- **DONE — CollectItem waits for hidden-until-revealed item balls** (`collect_item_seen` latch): pop
+  only once the item has been *seen* then vanishes (collected), not on the initial hidden state — the
+  Lift Key (and Silph Scope) balls stay hidden until their guard's after-battle text `ShowObject`s them.
+  NB Rocket 3 (unlike the vanishing Game Corner Rocket) **stays** after defeat and his **second talk**
+  (after-battle text) is what reveals the Lift Key — so `Interact` him a few times, not once.
+- **DONE — elevator floor-menu mechanic** (`PolicyStep::UseElevator` + `AgentState::UsingElevator`):
+  faces the panel bg_event + A → advances the "Which floor?" message → navigates the `SPECIALLISTMENU`
+  cursor (`wCurrentMenuItem`) to the target floor (Rocket Hideout: **B4F = index 2**) + A → steps onto
+  the (runtime-redirected) exit warp and finishes on the map change. Three subtle bugs fixed:
+  1. **Menu detection** — the floor menu's `wTextBoxID` reads `MessageBox` (from the "Which floor?"
+     `PrintText`), NOT `ListMenuBox`; detect it instead via `wListMenuID == SPECIALLISTMENU (0x04)`
+     (new `PokemonApiTrait::list_menu_id`).
+  2. **Pre-menu text** — the "Which floor?" box precedes the list and must be advanced (toggle A while
+     `!selected` and non-overworld); the old handler just waited and hung.
+  3. **Ride-out** — after selecting, `wTextBoxID`/menu vars linger, so the menu branch is guarded by
+     `if !selected` to avoid re-driving a phantom menu instead of walking to the exit warp.
+  (`pimp_pokemon` wipes the bag → drops the Lift Key → the elevator takes the "appears to need a key"
+  path where the menu never opens; navigation probes for this leg must NOT pimp.)
+- **ROOT CAUSE of the B1F "collision" blocker — event-gated `ReplaceTileBlock` door blocks (NOT a
+  sub-tile bug).** The static ROM map has (25,16) as plain floor, but the *live* `wTileMap` there is a
+  wall (`0x18`): `RocketHideoutB1FDoorCallbackScript` swaps map block (y=8,x=12) between a wall block
+  (`$54`) and a floor block (`$0e`) at runtime, gated on `EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_4` (beat
+  Rocket 5). B4F has the same pattern (block (y=5,x=12), `$2d`, gated on beating B4F trainers 0 & 1).
+  The agent read ROM (always "open"), so BFS routed through a shut door. **Fixed** by modelling these
+  doors: `map_metadata::{DoorSpec table, closed_door_blocks, MapMetadata::apply_door_blocks}` overlays
+  the *closed* block's tiles when the gating events are unset (`CurrentMap.closed_doors`, read from
+  `wEventFlags`). Diagnostics that nailed it: `wTileInFrontOfPlayer=0x18` vs. the agent's `0x01`, then a
+  live-`wTileMap`-vs-ROM-block comparison showed the ROM block is all-floor → a runtime edit.
+- **DONE — Silph Scope leg** (`can_get_silph_scope`, ~16 s, gated behind `slow-tests`, snapshots
+  `post-silph-scope.bin`). Route: enter the elevator from **B2F** (its warp is ungated, unlike B1F's
+  Rocket-5 door — BFS reroutes there once the B1F door is modelled shut), ride to B4F, beat the two
+  Rockets to drop the B4F door wall, beat Giovanni (Grass starter 4× on his Ground/Rock team), grab the
+  Scope. Verified end-to-end: "CLAUDE found SILPH SCOPE!", `bag has scope=true`.
+  **Not yet folded into `complete_game_steps`** — that's the next increment (append
+  `rocket_hideout_entrance_steps` + `silph_scope_steps` after the Rainbow Badge leg; today the full run
+  still asserts 4 badges and stops at Celadon).
+
+Then per-badge (walkthrough2): each later badge introduces a new field HM where first
+required — teaching now works via the real menus (`thunder_badge_steps` shows the pattern:
+`TeachMove` → HM-gated `CutTree`-style action). Strength (boulders), Surf (water) and Fly follow the
+same shape: add a `MetaTile` + an `AgentState` that drives its field-move menu, one badge at a time.
 
 ---
 
@@ -85,12 +181,19 @@ re-derive them.**
 4. **Keep the suite green.** After every stage, `cargo test --release --package gb --bin gb` passes
    (modulo tests explicitly rewritten in that stage).
 
-## Current state (start of this effort)
+## Current state (2026-07-05)
 
-- Incremental world graph + `EnterMap` + `CollectItem` landed; `can_navigate_mt_moon` **passes**
-  (proves the hardest early maze, including the fossil chokepoint + Super Nerd battle).
-- **Stage 1 complete: `can_start_game` passes** (Boulder + Cascade), playing legitimately end-to-end
-  from `RedsHouse2F`. See the Stage 1 status section below for the fixes that landed.
+- `complete_game_steps` plays legitimately from a fresh `RedsHouse2F` save through the **Rainbow
+  Badge** (Boulder → Cascade → Bill/SS-Ticket → Vermilion → S.S. Anne/HM01 → teach Cut → gym tree →
+  trash-can puzzle → Lt. Surge → back to Cerulean → Rock Tunnel → Lavender → Underground Path →
+  Celadon → Erika), all button-input only. Each leg has a fast focused test; the full
+  `can_start_game` is the end-to-end source of truth. **It runs in ~6 min in `--release`** (the
+  emulator does ~20× realtime); the "~2 h" seen before was a **debug-mode** run. It is now **opt-in**
+  behind the `slow-tests` cargo feature so it doesn't run on a normal `cargo test`:
+  `cargo test --release --features slow-tests can_start_game`.
+- The Stage 1/2/3 sections below are the historical implementation log for those legs (kept for the
+  hard-won reasoning; the mechanics themselves now live in code + tests). **Next: Stage 4 past
+  Celadon** — see "For a future agent → NEXT STEP" at the top.
 
 ---
 
@@ -331,9 +434,34 @@ problems surface:
     (`enter_at`, coords decoded from `data/maps/objects/SSAnne*Rooms.asm`); `Interact(trainer)` walks
     up + A to start each trainer battle. New capability used: **HM01–HM05 in `ItemId`** ($C4–$C8) so
     `Cut` is detectable; the PC-interaction and `bill_ss_ticket_steps`/`ss_anne_steps` helpers.
-  - **NEXT — Thunder Badge (Lt. Surge).** Teach `Cut` (HM01) to a party mon (new `TeachMove` step),
-    make `MetaTile::CutTree` actionable to cut the tree blocking the Vermilion Gym, then the gym's
-    trash-can switch puzzle + beat Lt. Surge. Start from `post-ss-anne.bin`.
+  - **Thunder Badge (Lt. Surge) — DONE via the real UI (`can_beat_lt_surge` green, 2026-07-05).**
+    Cut tree, Vermilion Gym trash-can puzzle, and Lt. Surge all beaten with button input only.
+    - **KEY CORRECTION to the "HandleMenuInput input-delay wall" below (it was a misdiagnosis).**
+      Driving `HandleMenuInput` menus from the agent's tick model works fine with two fixes: **(a)
+      mash** — press a button on one agent tick and `release_all_buttons` on the next, so each nav/
+      confirm produces a fresh rising edge every 2 ticks (holding for N ticks = ONE edge); **(b)
+      navigate the cursor to the target index using `menu_geometry()`/`menu_state()` THEN press A** —
+      never press A blind (it selects whatever's under the cursor). This is the pattern in
+      `AgentState::CuttingTree`.
+    - **Cut tree — DONE (`can_cut_gym_tree` green).** `AgentState::CuttingTree` routes to face the tree
+      then button-drives START→POKéMON→mon→CUT. The static-ROM map won't show the felled tree, so the
+      agent records cut positions in `PokemonAgent::cut_tiles` and `observe_state()` overrides them to
+      `Empty` for the BFS. Snapshots `in-vermilion-gym.bin`.
+    - **Trash-can puzzle + Lt. Surge — DONE (`can_solve_gym_trash_cans`, `can_beat_lt_surge` green).**
+      `PolicyStep::SolveTrashCans` + `pick_field_move` read which cans hold the switches from RAM
+      (`GameState::trash_cans`: `wFirstLockTrashCanIndex`/`wSecondLockTrashCanIndex` → `trash_can_position`,
+      lock events `EVENT_1ST/2ND_LOCK_OPENED` at `wEventFlags[44]` bits 1/0). `AgentState::CheckingTrashCan`
+      uses new `MetaTileMap::route_to_face(target)` to walk to each can and mash A. Then retry
+      `Interact(VERMILIONGYM_LT_SURGE)` ×8 (junior trainers interrupt the walk by LOS; `Interact` pops
+      per attempt). Fixtures: `gym-trash-solved.bin`, `post-thunder-badge.bin`.
+    - **Teach Cut — redone button-only (`can_teach_cut` green).** `AgentState::TeachingMove` drives the
+      real START→ITEM→bag→USE→"make room?"YES→party menus (see fact 5 for the bag-index + forget-menu
+      gotchas); the `teach_move_direct`/`write_cur_item`/`write_menu_cursor` RAM shortcuts are DELETED.
+      **No RAM-write shortcuts remain in the play path.**
+    - **All folded into `complete_game_steps`** via `cerulean_to_vermilion_steps`, `ss_anne_steps`,
+      `thunder_badge_steps` (teach → cut → `SolveTrashCans` → `DefeatGymLeader` for Surge). Integrated
+      test `can_get_thunder_badge` runs the Thunder leg from `post-ss-anne.bin`; `can_reach_vermilion`
+      now calls the shared helper so test + playthrough stay in lockstep. **Next: Rainbow Badge (top).**
 
 ## Stage 4 — Surf, Strength, and the rest of the badges
 
