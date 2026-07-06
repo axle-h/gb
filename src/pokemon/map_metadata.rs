@@ -643,13 +643,29 @@ impl MMU {
             // In both cases the true destination is the outdoor map whose warp table
             // points back to this indoor map.
             let map_id = if raw_map_id == 0xFF || raw_map_id == cur_map as u8 {
-                self.find_outdoor_entry_map(cur_map)
-                    .ok_or_else(|| format!("No outdoor map found for {cur_map}"))?
+                // LAST_MAP / self-referential exit: the true destination is the outdoor map whose
+                // warp table points back here. Deep-interior maps you can only reach from *inside*
+                // the building (e.g. Silph Co 11F — the elevator/pad-only Giovanni floor) have no
+                // such outdoor map, so this can't be resolved statically. Skip the warp rather than
+                // failing the whole map read (it's the building-exit warp, not needed for routing).
+                match self.find_outdoor_entry_map(cur_map) {
+                    Some(m) => m,
+                    None => continue,
+                }
             } else {
                 Map::from_repr(raw_map_id)
                     .ok_or_else(|| format!("Invalid map number {raw_map_id}"))?
             };
-            let destination_position = self.read_destination_warp_position(map_id, dest_warp_id)?;
+            // A warp can target a header-less placeholder map — e.g. the Silph Co / Rocket Hideout
+            // elevators, whose exits point at UNUSED_MAP_ED and are redirected at runtime once the
+            // player picks a floor. We can't compute a landing tile for those, but the warp itself
+            // is real, so fall back to (0,0) rather than failing the whole map read (which would
+            // freeze the agent the moment it stepped into the elevator).
+            let destination_position = if map_id.header_pointer().is_some() {
+                self.read_destination_warp_position(map_id, dest_warp_id)?
+            } else {
+                Point8 { y: 0, x: 0 }
+            };
             result.push(WarpEvent {
                 position: Point8 { y: entry[0], x: entry[1] },
                 destination_map: map_id,

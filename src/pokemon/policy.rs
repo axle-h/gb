@@ -958,10 +958,14 @@ impl PolicyStep {
     pub fn silph_co_card_key_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::SilphCo1F),
-            // The elevator door (20,0) is a wall-embedded warp BFS thinks is reachable but the game
-            // blocks, so use the **teleport pads** instead: 1F pad (16,10) → 3F, then a 3F pad → 5F.
-            Self::enter(Map::SilphCo3F),
-            Self::enter(Map::SilphCo5F),
+            Self::enter(Map::SilphCoElevator),                          // step onto the (20,0) $58 warp tile
+            Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 4 }, // 5F = menu index 4
+            // The Card Key sits in a walled 5F pocket (row 16) reachable only by *arriving* on the
+            // 5F (9,15) teleport pad and stepping down. (9,15)↔9F(17,15) are a pair: walk to the
+            // reachable (9,15) pad → 9F(17,15); step back onto (17,15) → arrive standing on 5F(9,15),
+            // now adjacent to the pocket. Then collect.
+            Self::enter(Map::SilphCo9F),                                // via 5F (9,15) → 9F (17,15)
+            Self::enter(Map::SilphCo5F),                                // via 9F (17,15) → arrive at 5F (9,15)
             Self::CollectItem(MapSprite::SILPHCO5F_CARD_KEY),
         ]
     }
@@ -1481,8 +1485,10 @@ impl Policy for DeterministicPolicy {
                 }
                 PolicyStep::UseElevator { .. } => {
                     // Handled by `pick_field_move` once on the elevator map (an `enter(...Elevator)` step
-                    // precedes this one). If we're not on it, the elevator can't be used — pop.
-                    if state.map.map != Map::RocketHideoutElevator {
+                    // precedes this one). If we're not on an elevator, the elevator can't be used — pop.
+                    let in_elevator = matches!(state.map.map,
+                        Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
+                    if !in_elevator {
                         println!("[policy] UseElevator but not in the elevator room ({});", state.map.map);
                         self.queue.pop_front();
                         continue;
@@ -1744,8 +1750,12 @@ impl Policy for DeterministicPolicy {
             }
         }
         if let Some(&PolicyStep::UseElevator { panel, floor }) = self.queue.front() {
-            // The step completes once we've ridden the elevator out to another floor.
-            if state.map.map != Map::RocketHideoutElevator {
+            // The step completes once we've ridden the elevator out to another floor — i.e. once we're
+            // no longer standing in an elevator room. (Any of the game's elevators, not just Rocket
+            // Hideout's — Silph Co and Celadon Mart have them too.)
+            let in_elevator = matches!(state.map.map,
+                Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
+            if !in_elevator {
                 self.queue.pop_front();
                 return None;
             }
