@@ -153,6 +153,32 @@ enum AgentState {
 
     /// Navigating the Pokémart buy flow.
     PokemartShopping(PokemartState),
+
+    /// Teaching an HM/TM (a legitimately-obtained bag item) to a party member, via the real menus:
+    /// START→ITEM→(bag, navigate to the HM)→USE→(party, choose the mon). The move-replace menu (if the
+    /// mon knows 4 moves) is handled by the shared global forget-move handler. Uses the same plain
+    /// press/release "mashing" + cursor-navigate pattern as `CuttingTree`. `entered_menu` tracks that
+    /// we left the overworld (so a return to it ends the attempt).
+    TeachingMove { item: crate::pokemon::item::ItemId, target_slot: u8, press: bool, entered_menu: bool, settle: u8 },
+
+    /// Using the Cut field move on the tree the player is facing: driving START→POKéMON→mon→CUT (the
+    /// game's `UsedCut` then removes the tree). `press` alternates each tick — plain press/release
+    /// "mashing", navigating each menu's cursor to its target index and then confirming with A (never
+    /// carrying a held direction into the next menu). `entered_menu` tracks that we left the overworld
+    /// (so returning to it means the cut animation finished). `tree_pos` is the tile being cut.
+    CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8 },
+
+    /// Checking a Vermilion Gym trash can for a hidden switch: route to a tile adjacent to `target`
+    /// and face it (recomputed each tick via `MetaTileMap::route_to_face`), then press A to trigger
+    /// `GymTrashScript`. `press` alternates for plain press/release mashing. `checked` becomes true
+    /// once the check text/menu has appeared, so returning to the overworld means the can was checked.
+    CheckingTrashCan { target: Point8, checked: bool, press: bool },
+
+    /// Using an elevator floor panel: face the panel + A to open the floor list-menu, navigate the
+    /// cursor (`wCurrentMenuItem`) to `floor` + A to pick it, then ride the (runtime-redirected)
+    /// elevator warp out. `selected` flips once the floor is confirmed; `press` alternates for plain
+    /// press/release mashing. Finishes when the map changes (we've left the elevator).
+    UsingElevator { panel: Point8, floor: u8, selected: bool, press: bool },
 }
 
 impl AgentState {
@@ -195,6 +221,10 @@ impl Display for AgentState {
                 BattleState::Navigating { action, .. } => write!(f, "battle:{:?}", action),
             },
             AgentState::PokemartShopping(s)           => write!(f, "{s}"),
+            AgentState::TeachingMove { item, .. } => write!(f, "teach:{item:?}"),
+            AgentState::CuttingTree { .. } => write!(f, "cut"),
+            AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
+            AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
         }
     }
 }
@@ -212,6 +242,10 @@ pub struct PokemonAgent {
     world_graph: WorldGraph,
     /// The map the agent was last on, to detect map changes (warp/connection landings).
     last_map: Option<Map>,
+    /// Trees the agent has cut down, by `(map, expanded tile position)`. The `MetaTileMap` is decoded
+    /// from the static ROM map, so it always shows a `CutTree` there even after the game removed it;
+    /// the agent remembers what it cut and treats those tiles as `Empty` for routing/movement.
+    cut_tiles: std::collections::HashSet<(Map, Point8)>,
 }
 
 impl Default for PokemonAgent {
@@ -228,6 +262,7 @@ impl PokemonAgent {
             policy,
             world_graph: WorldGraph::new(),
             last_map: None,
+            cut_tiles: std::collections::HashSet::new(),
         }
     }
 
@@ -279,6 +314,21 @@ impl PokemonAgent {
         self.backup_state = None;
     }
 
+    /// Read the game state, overriding tiles the agent has cut down to `Empty` (the ROM-decoded map
+    /// still shows them as `CutTree`). Use this wherever the map is used for routing/movement.
+    fn observe_state(&self, api: &PokemonApi) -> Result<crate::pokemon::GameState, String> {
+        let mut state = api.game_state()?;
+        for &(map, pos) in &self.cut_tiles {
+            if state.map.map == map {
+                let idx = pos.x as usize + pos.y as usize * state.map.width;
+                if state.map.meta_tiles.get(idx) == Some(&MetaTile::CutTree) {
+                    state.map.meta_tiles[idx] = MetaTile::Empty;
+                }
+            }
+        }
+        Ok(state)
+    }
+
     fn set_state(&mut self, state: AgentState) {
         if self.state != state {
             self.state = state;
@@ -295,6 +345,31 @@ impl PokemonAgent {
 
     fn set_pokemart_state(&mut self, state: PokemartState) {
         self.set_state(AgentState::PokemartShopping(state));
+    }
+
+    /// Drive the "Which move should be forgotten?" replace-move menu (appears on a level-up learn or
+    /// when teaching an HM to a 4-move mon). `cursor_index` is the current cursor slot. Asks the
+    /// policy which slot to forget (it keeps the strongest moves) and navigates there / presses A.
+    fn drive_forget_menu(&mut self, api: &mut PokemonApi, cursor_index: u8) -> Result<(), String> {
+        let game_state = api.game_state()?;
+        let which = api.learning_pokemon_index();
+        let current_moves: Vec<_> = game_state.pokemon.get(which)
+            .map(|p| p.moves.iter().flatten().copied().collect())
+            .unwrap_or_default();
+        match api.move_to_learn() {
+            Some(new_move) => match self.policy.pick_move_to_forget(&current_moves, new_move) {
+                None => {} // still deciding — wait
+                Some(Some(slot)) => {
+                    let slot = slot as u8;
+                    if cursor_index < slot { api.toggle_button(JoypadButton::Down); }
+                    else if cursor_index > slot { api.toggle_button(JoypadButton::Up); }
+                    else { api.toggle_button(JoypadButton::A); }
+                }
+                Some(None) => api.toggle_button(JoypadButton::B), // decline (best effort)
+            },
+            None => api.toggle_button(JoypadButton::A),
+        }
+        Ok(())
     }
 
     fn abort_overworld(&mut self, destination: MetaTile, reason: OverworldActionAbortedReason) {
@@ -364,6 +439,11 @@ impl PokemonAgent {
     /// RunningScript.  If Script mode ends before the delay fires the agent restores
     /// its previous state (e.g. OverworldMovement for a ledge jump).
     fn assert_script_state(&mut self, game_mode: GameMode) {
+        // Checking a trash can runs GymTrashScript (Script mode); the CheckingTrashCan state drives
+        // and completes it itself, so don't hand it off to the RunningScript machinery.
+        if matches!(self.state, AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }) {
+            return;
+        }
         if game_mode == GameMode::Script {
             if !matches!(self.state, AgentState::RunningScript { .. }) {
                 // A south-facing ledge jump fires Script for up to ~660 ms; use >800 ms when
@@ -478,12 +558,32 @@ impl PokemonAgent {
             return Ok(());
         }
 
+        // ── Global "Which move should be forgotten?" handler ──────────────────────
+        // The replace-move menu appears both in battle (a level-up learn) and in the overworld
+        // (teaching an HM to a 4-move mon), so drive it here — before any state-specific handling,
+        // including during TeachingMove — whenever its unique (5,8) geometry AND on-screen prompt
+        // text are both present.
+        {
+            // Detect the forget menu by its on-screen prompt (robust against stale menu geometry) and
+            // drive it from the live cursor (`wCurrentMenuItem`). This covers both the battle level-up
+            // menu (origin (5,8)) and the overworld HM-teach menu (origin (15,8)), which
+            // `battle_menu_state()` would not classify because it keys on x==5.
+            let forget_showing = api.menu_state().is_some()
+                && api.on_screen_text(true).map_or(false, |t| is_forget_move_prompt(&t));
+            if forget_showing {
+                let cursor = api.menu_geometry().2;
+                self.drive_forget_menu(api, cursor)?;
+                return Ok(());
+            }
+        }
+
         self.assert_naming_screen(game_mode, api)?;
         self.assert_script_state(game_mode);
         self.assert_battle_state(game_mode);
         self.assert_pokemart_state(game_mode, api)?;
-        // Skip generic text-box handling while shopping — the mart state machine handles input.
-        if !matches!(self.state, AgentState::PokemartShopping(_)) {
+        // Skip generic text-box handling while shopping or teaching a move — those state machines
+        // drive their own menu input.
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -504,7 +604,7 @@ impl PokemonAgent {
                         });
                     }
                     GameMode::WildBattle | GameMode::TrainerBattle => {
-                        self.set_state(AgentState::Battle(BattleState::default()));
+                        self.set_battle_state(BattleState::default());
                     }
                     GameMode::Overworld => {
                         self.set_state(AgentState::AwaitingOverworldAction { delay: DelayContext::long() });
@@ -536,7 +636,7 @@ impl PokemonAgent {
             }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
                 if delay.tick(delta_cycles) {
-                    let game_state = api.game_state()?;
+                    let game_state = self.observe_state(api)?;
                     // Incrementally build the world graph: the first time we settle on a new map,
                     // record that section's live (sprite-resolved) reachable warps/connections,
                     // keyed by the raw landing coords (the space warp `to_position`s use). The
@@ -544,6 +644,38 @@ impl PokemonAgent {
                     if self.last_map != Some(game_state.map.map) {
                         self.last_map = Some(game_state.map.map);
                         self.world_graph.observe(game_state.map.map, api.raw_player_coords(), &game_state.map);
+                        // Cut trees regrow when you leave and re-enter a map, so a tree cut on a prior
+                        // visit is standing again — drop the stale "already cut" memory or the agent
+                        // will route through a regrown tree and jam (e.g. re-entering the Vermilion gym
+                        // enclosure after Lt. Surge). `CuttingTree` cuts sequentially without changing
+                        // maps, so this never fires mid-cut.
+                        self.cut_tiles.clear();
+                    }
+                    // A non-walking field action (e.g. teach an HM) takes priority over walking.
+                    match self.policy.pick_field_move(&game_state) {
+                        Some(crate::pokemon::policy::FieldMove::TeachMove { item, target_slot }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu: false, settle: 0 });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::CutTree) => {
+                            api.release_all_buttons();
+                            let tree_pos = game_state.map.tile_in_front().map(|(p, _)| p)
+                                .unwrap_or(game_state.map.player_position);
+                            self.set_state(AgentState::CuttingTree { press: true, entered_menu: false, tree_pos });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::CheckTrashCan { target }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::CheckingTrashCan { target, checked: false, press: true });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::UseElevator { panel, floor }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected: false, press: true });
+                            return Ok(());
+                        }
+                        None => {}
                     }
                     if let Some(action) = self.policy.pick_overworld_action(&game_state, &self.world_graph) {
                         self.take_overworld_action(action);
@@ -551,7 +683,7 @@ impl PokemonAgent {
                 }
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
-                let game_state = api.game_state()?;
+                let game_state = self.observe_state(api)?;
                 if game_state.mode != GameMode::Overworld {
                     self.abort_overworld(destination, OverworldActionAbortedReason::from_game_mode(game_state.mode));
                 } else if game_state.map.map != expected_map {
@@ -674,37 +806,6 @@ impl PokemonAgent {
                                         api.toggle_button(JoypadButton::B);
                                     } else {
                                         api.toggle_button(JoypadButton::A);
-                                    }
-                                },
-                                Some(BattleMenuState::ForgetMoveList { index })
-                                    if api.on_screen_text(true)
-                                        .map_or(false, |t| is_forget_move_prompt(&t)) =>
-                                {
-                                    // Level-up "Which move should be forgotten?" menu. Ask the policy
-                                    // which slot to forget (it keeps the strongest moves), navigate
-                                    // the cursor there and confirm. Without this the agent A-mashes
-                                    // and forgets slot 0 — silently discarding a good move (Tackle).
-                                    // The `(5,8)` geometry is confirmed by the on-screen prompt text
-                                    // (guard above) so stale cursor bytes can't misfire this branch —
-                                    // when unconfirmed we fall through to the generic `Some(_)` arm,
-                                    // which just advances the text with A.
-                                    let game_state = api.game_state()?;
-                                    let which = api.learning_pokemon_index();
-                                    let current_moves: Vec<_> = game_state.pokemon.get(which)
-                                        .map(|p| p.moves.iter().flatten().copied().collect())
-                                        .unwrap_or_default();
-                                    match api.move_to_learn() {
-                                        Some(new_move) => match self.policy.pick_move_to_forget(&current_moves, new_move) {
-                                            None => {} // still deciding — wait
-                                            Some(Some(slot)) => {
-                                                let slot = slot as u8;
-                                                if index < slot { api.toggle_button(JoypadButton::Down); }
-                                                else if index > slot { api.toggle_button(JoypadButton::Up); }
-                                                else { api.toggle_button(JoypadButton::A); }
-                                            }
-                                            Some(None) => api.toggle_button(JoypadButton::B), // decline (best effort)
-                                        },
-                                        None => api.toggle_button(JoypadButton::A),
                                     }
                                 },
                                 Some(_) => {
@@ -1007,6 +1108,251 @@ impl PokemonAgent {
                             }
                         } else {
                             api.toggle_button(JoypadButton::B);
+                        }
+                    }
+                }
+            }
+            AgentState::TeachingMove { item, target_slot, press, entered_menu, settle } => {
+                use crate::pokemon::menu::TextBoxId;
+                let gs = api.game_state()?;
+                // Done once the mon knows the move (the forget/learn text has run and committed).
+                let knows = crate::pokemon::policy::hm_move(item).map_or(false, |mv|
+                    gs.pokemon.get(target_slot as usize)
+                        .map_or(false, |p| p.moves.iter().flatten().any(|m| m.name == mv)));
+                if knows {
+                    // Move learned — but Gen 1 returns to the bag/"teach to another?" party menu after
+                    // teaching, so back out with B until a STABLE overworld. `settle` counts consecutive
+                    // overworld ticks; if a menu re-appears it resets and B-mashing resumes. Requiring a
+                    // sustained overworld avoids finishing on a one-tick flicker between closing menus
+                    // (which would hand a still-open menu to the generic A-mash handler and re-teach).
+                    if game_mode != GameMode::Overworld {
+                        api.release_all_buttons();
+                        if press { api.press_button(JoypadButton::B); }
+                        self.set_state(AgentState::TeachingMove { item, target_slot, press: !press, entered_menu, settle: 0 });
+                        return Ok(());
+                    }
+                    if settle < 15 {
+                        api.release_all_buttons();
+                        self.set_state(AgentState::TeachingMove { item, target_slot, press, entered_menu, settle: settle + 1 });
+                        return Ok(());
+                    }
+                    self.event(AgentEvent::TextBox { message: format!("Taught the HM to party slot {target_slot}") });
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // Returned to the overworld without learning — this attempt fizzled (e.g. a mis-nav);
+                // bail so `pick_field_move` re-issues TeachMove and we start the menu chain fresh.
+                if entered_menu && game_mode == GameMode::Overworld {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let entered_menu = entered_menu || game_mode != GameMode::Overworld;
+
+                // Plain press/release "mashing" — a fresh rising edge every 2 ticks (see CuttingTree).
+                if !press {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu, settle: 0 });
+                    return Ok(());
+                }
+
+                let (top_x, top_y, current, scroll) = api.menu_geometry();
+                let tbid = api.menu_state().map(|m| m.text_box_id);
+                let nav = |cur: u8, target: u8| -> JoypadButton {
+                    if cur < target { JoypadButton::Down }
+                    else if cur > target { JoypadButton::Up }
+                    else { JoypadButton::A }
+                };
+                // Drive each menu of the teach chain to its target index, then confirm with A.
+                let button = if game_mode == GameMode::Overworld {
+                    JoypadButton::Start // no menu yet → open START
+                } else if top_x == 11 && top_y == 2 {
+                    nav(current, 2) // START menu → ITEM (index 2, Pokédex obtained)
+                } else if tbid == Some(TextBoxId::ListMenuBox) {
+                    // Bag list → the HM's row (absolute index = cursor + scroll), then A to select it.
+                    let target_idx = api.bag_item_position(item).unwrap_or(0);
+                    nav(current + scroll, target_idx)
+                } else if tbid == Some(TextBoxId::UseTossMenuTemplate) {
+                    nav(current, 0) // USE/TOSS → USE (index 0)
+                } else if tbid == Some(TextBoxId::TwoOptionMenu) {
+                    nav(current, 0) // "Make room for CUT?" yes/no → YES (index 0)
+                } else if tbid == Some(TextBoxId::MessageBox) && top_x == 0 && (top_y == 1 || top_y == 3) {
+                    nav(current, target_slot) // party menu ("Teach to which POKéMON?") → the target mon
+                } else {
+                    JoypadButton::A // transitional text ("Booted up… / 1, 2, 3… and Poof!")
+                };
+                api.release_all_buttons();
+                api.press_button(button);
+                self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0 });
+            }
+            AgentState::CuttingTree { press, entered_menu, tree_pos } => {
+                use crate::pokemon::menu::TextBoxId;
+                // A successful Cut opens the Pokémon menu, plays a fade/animation, then returns to the
+                // overworld. So once we've entered a menu, the first return to the overworld means the
+                // cut is done: record the tile (the ROM map still shows the tree) and finish. A failed
+                // cut ("nothing to cut") stays in the menu, so it won't false-trigger this — and the
+                // preconditions were verified before entering (facing a 0x3d tree, Cascade Badge).
+                if entered_menu && game_mode == GameMode::Overworld {
+                    self.cut_tiles.insert((api.game_state()?.map.map, tree_pos));
+                    self.event(AgentEvent::TextBox { message: format!("Cut down the tree at {tree_pos}") });
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let entered_menu = entered_menu || game_mode != GameMode::Overworld;
+
+                // Plain press/release "mashing": press a button on a press tick, clear all on a
+                // release tick. Each button therefore gives a fresh rising edge every 2 ticks, and a
+                // held direction never carries into the next menu.
+                if !press {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::CuttingTree { press: true, entered_menu, tree_pos });
+                    return Ok(());
+                }
+
+                let (top_x, top_y, current, _) = api.menu_geometry();
+                let tbid = api.menu_state().map(|m| m.text_box_id);
+                let nav = |cur: u8, target: u8| -> JoypadButton {
+                    if cur < target { JoypadButton::Down }
+                    else if cur > target { JoypadButton::Up }
+                    else { JoypadButton::A }
+                };
+                // Navigate each menu's cursor to its target index, then confirm with A. Only navigate
+                // when a menu is actually open — in the overworld a Down/Up would move the player off
+                // the tree, so there we only open the menu with Start.
+                let button = if game_mode == GameMode::Overworld {
+                    JoypadButton::Start // facing the tree, no menu yet → open START
+                } else if tbid == Some(TextBoxId::FieldMoveMonMenu) || top_y == 10 {
+                    nav(current, 0) // field-move menu → CUT (index 0, the mon's only field move)
+                } else if top_x == 11 && top_y == 2 {
+                    nav(current, 1) // START menu → POKéMON (index 1, Pokédex obtained)
+                } else if top_x == 0 && (top_y == 1 || top_y == 3) {
+                    nav(current, 0) // party menu → the Cut mon (slot 0)
+                } else {
+                    JoypadButton::A // transitional text ("used CUT!")
+                };
+                api.release_all_buttons();
+                api.press_button(button);
+                self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos });
+            }
+            AgentState::CheckingTrashCan { target, checked, press } => {
+                // Checking a can triggers GymTrashScript, which prints a text box (leaving the
+                // overworld). Once that has appeared (`checked`), the return to the overworld means
+                // the check has resolved — finish so `pick_field_move` re-evaluates (advancing to the
+                // second can, or popping the step once both locks are open).
+                if checked && game_mode == GameMode::Overworld {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                if game_mode != GameMode::Overworld {
+                    // The check's text box / script is up — advance it by mashing A.
+                    api.release_all_buttons();
+                    if press { api.press_button(JoypadButton::A); }
+                    self.set_state(AgentState::CheckingTrashCan { target, checked: true, press: !press });
+                    return Ok(());
+                }
+                // In the overworld: route to a tile adjacent to the can and face it, then check it.
+                let gs = self.observe_state(api)?;
+                match gs.map.route_to_face(target).as_deref() {
+                    Some([]) => {
+                        // Adjacent and facing the can — mash A (clean press/release edges) to check it.
+                        api.release_all_buttons();
+                        if press { api.press_button(JoypadButton::A); }
+                        self.set_state(AgentState::CheckingTrashCan { target, checked, press: !press });
+                    }
+                    Some(&[btn, ..]) => {
+                        // Walk/turn toward the can; hold the direction for continuous movement.
+                        api.release_all_buttons();
+                        api.press_button(btn);
+                        self.set_state(AgentState::CheckingTrashCan { target, checked, press: true });
+                    }
+                    _ => {
+                        // No reachable tile adjacent to the can — abort so we don't spin forever.
+                        self.event(AgentEvent::TextBox { message: format!("Can't reach trash can at {target}") });
+                        api.release_all_buttons();
+                        self.set_state(AgentState::Idle);
+                    }
+                }
+            }
+            AgentState::UsingElevator { panel, floor, selected, press } => {
+                let gs = self.observe_state(api)?;
+                // Rode the elevator out — the map changed. Done.
+                if gs.map.map != Map::RocketHideoutElevator {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // Floor list-menu is up: navigate the cursor (wCurrentMenuItem) to `floor`, then A.
+                // The elevator floor menu is a `SPECIALLISTMENU` (wListMenuID == 0x04) whose
+                // `wTextBoxID` reads `MessageBox` (the "Which floor?" print), NOT `ListMenuBox` — so
+                // detect it via the list-menu ID. Only while not yet selected: once picked, the menu
+                // vars linger and re-driving them would trap us instead of walking out to the warp.
+                const SPECIAL_LIST_MENU: u8 = 0x04;
+                if !selected && api.list_menu_id() == SPECIAL_LIST_MENU {
+                    let current = api.menu_state().map(|m| m.current_item).unwrap_or(0);
+                    api.release_all_buttons();
+                    let mut selected = selected;
+                    if press {
+                        use std::cmp::Ordering;
+                        match current.cmp(&floor) {
+                            Ordering::Less    => api.press_button(JoypadButton::Down),
+                            Ordering::Greater => api.press_button(JoypadButton::Up),
+                            Ordering::Equal   => { api.press_button(JoypadButton::A); selected = true; }
+                        }
+                    }
+                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
+                    return Ok(());
+                }
+                // Non-overworld and not (yet) the floor list. Two cases:
+                //  - before selecting: the "Which floor?" message box precedes the SPECIALLISTMENU and
+                //    waits for a button — pulse A to advance into the list (handled above once it's up).
+                //  - after selecting: the elevator shake animation — just wait it out.
+                if game_mode != GameMode::Overworld {
+                    if !selected {
+                        api.toggle_button(JoypadButton::A);
+                    } else {
+                        api.release_all_buttons();
+                    }
+                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                    return Ok(());
+                }
+                if !selected {
+                    // Face the panel and press A to open the floor menu.
+                    match gs.map.route_to_face(panel).as_deref() {
+                        Some([]) => {
+                            api.release_all_buttons();
+                            if press { api.press_button(JoypadButton::A); }
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
+                        }
+                        Some(&[btn, ..]) => {
+                            api.release_all_buttons();
+                            api.press_button(btn);
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                        }
+                        _ => {
+                            self.event(AgentEvent::TextBox { message: format!("Can't reach elevator panel at {panel}") });
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Idle);
+                        }
+                    }
+                } else {
+                    // Floor picked and the menu redirected the exit warp — step onto it to ride out.
+                    // (The static map still shows it leading back up, but stepping on fires the
+                    // redirected warp; we finish on the map change at the top of this arm.)
+                    let warp = gs.map.actions().into_iter()
+                        .find(|a| matches!(a.tile, MetaTile::Warp { .. }));
+                    match warp.as_ref().and_then(|a| a.route.first().copied()) {
+                        Some(btn) => {
+                            api.release_all_buttons();
+                            api.press_button(btn);
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                        }
+                        None => {
+                            self.event(AgentEvent::TextBox { message: "Can't reach the elevator exit warp".into() });
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Idle);
                         }
                     }
                 }

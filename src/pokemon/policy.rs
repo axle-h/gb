@@ -63,6 +63,12 @@ pub trait Policy {
         Some(None) // default: never drop an existing move
     }
 
+    /// Called each idle overworld tick. Returns a non-walking field action to perform (e.g. teach an
+    /// HM), or `None` to fall through to [`pick_overworld_action`].
+    fn pick_field_move(&mut self, _state: &GameState) -> Option<FieldMove> {
+        None
+    }
+
     fn is_exhausted(&self) -> bool {
         false
     }
@@ -320,6 +326,58 @@ pub enum PolicyStep {
     GrindUntilLevel { target_level: u8, on_map: Map },
     /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
     BuyFromMart { map: Map, item: BagItem },
+    /// Teach an HM/TM `item` (e.g. HM01 Cut) to the party member in `target_slot`, from the
+    /// overworld. Drives the START → ITEM → use → choose-Pokémon menus; the move-replace menu (if the
+    /// mon already knows 4 moves) is handled by the global forget-move handler. Persists until the
+    /// target knows the move.
+    TeachMove { item: ItemId, target_slot: u8 },
+    /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge). Routes to face a
+    /// `MetaTile::CutTree`, then uses the Cut field move. Persists until no reachable tree remains.
+    CutTree { map: Map },
+    /// Solve the Vermilion Gym trash-can switch puzzle: check the first switch can, then the second,
+    /// unlocking the door to Lt. Surge. The correct cans are read from RAM (`GameState::trash_cans`)
+    /// so the agent goes straight to them and never triggers a reset. Persists until the 2nd lock is
+    /// open. Only meaningful on `Map::VermilionGym`.
+    SolveTrashCans,
+    /// Walk to face the hidden switch/poster BG-event tile at `at` on `map` and press A, until doing so
+    /// reveals a passage — a reachable warp/connection to `reveals` appears (e.g. the Celadon Game
+    /// Corner poster flips a switch that opens the staircase down to the Rocket Hideout). The tile is a
+    /// `bg_event`, not a sprite, so `Interact` can't target it. Idempotent: re-pressing after the reveal
+    /// is harmless; the step pops once `reveals` is reachable.
+    FlipSwitch { map: Map, at: Point8, reveals: Map },
+    /// Inside an elevator room, use the floor panel to travel to the floor at menu index `floor`.
+    /// Faces the panel bg-event, opens the floor list-menu, navigates the cursor to `floor`, confirms,
+    /// then steps back onto the elevator warp (whose destination the menu redirected at runtime) — the
+    /// step completes when the resulting warp changes the map. Used for the Rocket Hideout elevator
+    /// (needs the Lift Key) to reach Giovanni's split-off B4F room.
+    UseElevator { panel: Point8, floor: u8 },
+}
+
+/// A non-walking overworld action the agent performs directly (opening menus / using field moves),
+/// requested by the policy when the corresponding queue step is at the front.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum FieldMove {
+    /// Teach `item` (an HM/TM) to the party member in `target_slot` via the bag.
+    TeachMove { item: ItemId, target_slot: u8 },
+    /// Use the Cut field move on the tree the player is currently facing.
+    CutTree,
+    /// Walk to the trash can at `target` and press A to check it for a hidden switch.
+    CheckTrashCan { target: crate::geometry::Point8 },
+    /// Drive the elevator floor menu (panel at `panel`) to select menu index `floor`, then ride the
+    /// redirected warp out. Done when the map changes (we've left the elevator room).
+    UseElevator { panel: crate::geometry::Point8, floor: u8 },
+}
+
+/// The move an HM item teaches (HM01 Cut … HM05 Flash), used to check whether a mon already knows it.
+pub fn hm_move(item: ItemId) -> Option<PokemonMoveName> {
+    match item {
+        ItemId::Hm01Cut => Some(PokemonMoveName::Cut),
+        ItemId::Hm02Fly => Some(PokemonMoveName::Fly),
+        ItemId::Hm03Surf => Some(PokemonMoveName::Surf),
+        ItemId::Hm04Strength => Some(PokemonMoveName::Strength),
+        ItemId::Hm05Flash => Some(PokemonMoveName::Flash),
+        _ => None,
+    }
 }
 
 impl PolicyStep {
@@ -444,6 +502,236 @@ impl PolicyStep {
         s
     }
 
+    /// From Cerulean City (post-Cascade): fetch the **SS Ticket** from Bill, then cross to Vermilion
+    /// City via the **trashed-house terrace bridge** + Underground Path (Route 5 → 6). The trashed
+    /// house is the only way between Cerulean's split terraces: its back door lands in the Route-5
+    /// terrace (`enter_at(CeruleanCity, 27, 9)` — front door ~27,11 does not reach it). See
+    /// `can_reach_vermilion`. Bill's guard on Route 25 clears once you meet him, opening the bridge.
+    pub fn cerulean_to_vermilion_steps() -> Vec<Self> {
+        let mut steps = vec![
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::Route24),
+            Self::enter(Map::Route25),
+            Self::enter(Map::BillsHouse),
+        ];
+        steps.extend(Self::bill_ss_ticket_steps());
+        steps.extend([
+            Self::enter(Map::Route25),
+            Self::enter(Map::Route24),
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::CeruleanTrashedHouse),   // front door (main terrace, ~27,11)
+            Self::enter_at(Map::CeruleanCity, 27, 9), // back door lands in the Route-5 terrace
+            Self::enter(Map::Route5),
+            Self::enter(Map::UndergroundPathRoute5),
+            Self::enter(Map::UndergroundPathNorthSouth),
+            Self::enter(Map::UndergroundPathRoute6),
+            Self::enter(Map::Route6),
+            Self::enter(Map::VermilionCity),
+        ]);
+        steps
+    }
+
+    /// Thunder Badge (from Vermilion City after the S.S. Anne, with **HM01 Cut** in the bag): teach Cut
+    /// to the starter, cut the tree sealing the gym enclosure, solve the two-switch **trash-can
+    /// puzzle** (which unlocks the door), then beat Lt. Surge. All via the real UI — see
+    /// `can_get_thunder_badge` (integrated) and `can_teach_cut` / `can_cut_gym_tree` /
+    /// `can_beat_lt_surge` (focused). `SolveTrashCans` must precede `DefeatGymLeader`: the door is
+    /// shut (Surge unreachable) until both switches are hit.
+    pub fn thunder_badge_steps() -> Vec<Self> {
+        let mut s = Self::heal_at_vermilion();
+        s.extend([
+            Self::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 },
+            Self::CutTree { map: Map::VermilionCity },
+            Self::enter(Map::VermilionGym),
+            Self::SolveTrashCans,
+            Self::DefeatGymLeader { leader: MapSprite::VERMILIONGYM_LT_SURGE, badge: Badge::ThunderBadge },
+        ]);
+        s
+    }
+
+    /// Head back from Vermilion (just after the Thunder Badge, standing inside the gym) to Cerulean
+    /// City, reusing the Underground Path in reverse. Saffron's south gate (Route 6) is guard-blocked,
+    /// so the Underground Path (Route 5 ↔ Route 6) is the only legal way north. Exiting the gym drops
+    /// the player into the Cut-tree enclosure (the tree regrows on re-entering the map), so cut it
+    /// again before reaching the rest of the city. Heal at both ends of the trek.
+    pub fn back_to_cerulean_steps() -> Vec<Self> {
+        let mut s = vec![
+            Self::enter(Map::VermilionCity), // exit the gym into the Cut-tree enclosure
+            Self::CutTree { map: Map::VermilionCity },
+        ];
+        s.extend(Self::heal_at_vermilion());
+        s.extend([
+            Self::enter(Map::Route6),
+            Self::enter(Map::UndergroundPathRoute6),
+            Self::enter(Map::UndergroundPathNorthSouth),
+            Self::enter(Map::UndergroundPathRoute5),
+            Self::enter(Map::Route5),
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+            Self::enter(Map::CeruleanCity),
+        ]);
+        s
+    }
+
+    /// The Rock Tunnel warp-maze crossing (Route 10 north entrance → Route 10 south exit), discovered
+    /// offline by `discover_rock_tunnel_path` (ExplorerPolicy). Assumes the agent stands on Route 10
+    /// having just come from Route 9. No Flash needed — the agent routes from RAM tile collision, not
+    /// the darkened screen.
+    pub fn rock_tunnel_traversal() -> Vec<Self> { vec![
+        // North entrance → a 4-hop 1F↔B1F chain → south exit. Warp pairs (from ROM + real-engine
+        // probing): each `enter_at` lands in a region whose only forward (unvisited) warp is the next.
+        Self::enter_at(Map::RockTunnel1F, 15, 3),   // Route 10 north entrance
+        Self::enter_at(Map::RockTunnelB1F, 33, 25),
+        Self::enter_at(Map::RockTunnel1F, 5, 3),
+        Self::enter_at(Map::RockTunnelB1F, 23, 11),
+        Self::enter_at(Map::RockTunnel1F, 37, 17),
+        Self::enter_at(Map::Route10, 8, 53),        // south exit (→ Lavender)
+    ] }
+
+    /// Cerulean City (main terrace, post-Thunder) → Lavender Town. Route 9 (east) is on a separate
+    /// Cerulean terrace reached via the **trashed-house back door** (27,9) — the same bridge used to
+    /// reach Route 5/Vermilion. Route 9's west-entry pocket is sealed by a **Cut tree at (5,8)**; cut
+    /// it to cross east. Then Route 10 → **Rock Tunnel** (warp maze) → Route 10 south → Lavender.
+    pub fn cerulean_to_lavender_steps() -> Vec<Self> {
+        let mut s = vec![
+            Self::enter(Map::CeruleanTrashedHouse),   // main terrace front door
+            Self::enter_at(Map::CeruleanCity, 27, 9), // back door → Route-9 terrace
+            Self::enter(Map::Route9),
+            Self::CutTree { map: Map::Route9 },        // cut the (5,8) tree boxing the west pocket
+            Self::enter(Map::Route10),
+            // Heal at the Rock Tunnel Pokémon Center (Route 10, at the tunnel mouth) before diving in:
+            // the encounter-dense maze must be crossed in one uninterrupted push (a mid-tunnel
+            // flee-to-heal or blackout can't resume the scripted warp chain), so enter at full HP/PP.
+            // This also makes it the nearest heal-return target if PP still runs low mid-crossing.
+            Self::enter(Map::RockTunnelPokecenter),
+            Self::Interact(MapSprite::ROCKTUNNELPOKECENTER_NURSE),
+            Self::enter(Map::Route10),
+        ];
+        s.extend(Self::rock_tunnel_traversal());
+        s.extend([
+            Self::enter(Map::LavenderTown),
+            Self::enter(Map::LavenderPokecenter),
+            Self::Interact(MapSprite::LAVENDERPOKECENTER_NURSE),
+            Self::enter(Map::LavenderTown),
+        ]);
+        s
+    }
+
+    /// Lavender Town → Celadon City via the **Route 7–8 Underground Path** (all four Saffron gates
+    /// demand a drink only sold in Celadon — a chicken/egg — so Saffron is bypassed). Linear tunnel,
+    /// same building-tunnel-building shape as the Route 5–6 path already used: Lavender → Route 8 →
+    /// `UndergroundPathRoute8` → `UndergroundPathWestEast` → `UndergroundPathRoute7` → Route 7 →
+    /// Celadon City, then heal at the Celadon Center.
+    pub fn lavender_to_celadon_steps() -> Vec<Self> {
+        vec![
+            Self::enter(Map::Route8),
+            Self::enter(Map::UndergroundPathRoute8),
+            Self::enter(Map::UndergroundPathWestEast),
+            Self::enter(Map::UndergroundPathRoute7),
+            Self::enter(Map::Route7),
+            Self::enter(Map::CeladonCity),
+            Self::enter(Map::CeladonPokecenter),
+            Self::Interact(MapSprite::CELADONPOKECENTER_NURSE),
+            Self::enter(Map::CeladonCity),
+        ]
+    }
+
+    /// Rainbow Badge (from Celadon City): the gym entrance is sealed by a row of trees, so cut them,
+    /// enter, and beat Erika. `DefeatGymLeader` persists until the badge is won (self-heals on a
+    /// blackout and re-routes through the grass-maze junior trainers). Erika's team is all Grass/Poison
+    /// (Victreebel/Tangela/Vileplume ~lv24–29); Grass moves are resisted, so the starter leans on its
+    /// Normal move (Cut/Body Slam) + level lead — the party is ~lv35+ Venusaur by now.
+    pub fn celadon_rainbow_steps() -> Vec<Self> {
+        vec![
+            Self::CutTree { map: Map::CeladonCity },   // cut the trees sealing the gym entrance
+            Self::enter(Map::CeladonGym),
+            // The gym is a garden maze whose paths are blocked by real cuttable trees (GYM tileset
+            // tile $50 — pokered `cut.asm`). Cut them to weave up to Erika (junior trainers engage by
+            // LOS en route). `CutTree` persists until no reachable tree remains, so it clears each
+            // chokepoint as the previous cut opens access to the next.
+            Self::CutTree { map: Map::CeladonGym },
+            Self::DefeatGymLeader { leader: MapSprite::CELADONGYM_ERIKA, badge: Badge::RainbowBadge },
+        ]
+    }
+
+    /// From Celadon City (post-Erika, inside the gym) to inside the **Rocket Hideout** (B1F). Exit the
+    /// gym — its entrance trees regrew on re-entry, so re-cut them — heal, walk to the **Game Corner**,
+    /// beat the Rocket guarding the poster (he vanishes on defeat), flip the poster switch to open the
+    /// hidden staircase, and descend. Getting the **Silph Scope** (needed for the Poké Flute) means
+    /// crossing the hideout's spinner-tile floors + elevator to Giovanni — handled separately.
+    pub fn rocket_hideout_entrance_steps() -> Vec<Self> {
+        let mut s = vec![
+            Self::enter(Map::CeladonCity),          // exit the gym into the (regrown) tree enclosure
+            Self::CutTree { map: Map::CeladonCity }, // re-cut to reach the rest of the city
+            Self::enter(Map::CeladonPokecenter),
+            Self::Interact(MapSprite::CELADONPOKECENTER_NURSE),
+            Self::enter(Map::CeladonCity),
+            Self::enter(Map::GameCorner),
+        ];
+        // The Rocket stands on (9,5) blocking the poster at (9,4) — beat him (he vanishes on defeat,
+        // freeing (9,5)), then flip the poster switch to open the hidden staircase and descend. A
+        // single `Interact` (not retried): it pops the instant it issues the walk, so it never hangs
+        // after the Rocket vanishes; the ensuing `FlipSwitch` waits out the battle and then flips.
+        s.extend([
+            Self::Interact(MapSprite::GAMECORNER_ROCKET),
+            Self::FlipSwitch { map: Map::GameCorner, at: Point8 { x: 9, y: 4 }, reveals: Map::RocketHideoutB1F },
+            Self::enter(Map::RocketHideoutB1F),
+        ]);
+        s
+    }
+
+    /// From inside the Rocket Hideout (B1F), descend the spinner floors B2F/B3F to B4F and get the
+    /// **Lift Key**. B2F/B3F are **spinner-tile floors** (arrow tiles force a fixed slide, modelled in
+    /// the BFS via `MetaTileMap::spinners`). B4F is split — the stairs land in a left room; beating
+    /// Rocket 3 isn't enough, his **after-battle text** (a second talk) sets EVENT_ROCKET_DROPPED_LIFT_KEY
+    /// and `ShowObject`s the Lift Key ball at (10,2). He stays put after defeat, so Interact him a few
+    /// times (battle, then the reveal talk), then grab the key (`CollectItem` waits for the ball to
+    /// appear — see `collect_item_seen`).
+    pub fn lift_key_steps() -> Vec<Self> {
+        let mut s = vec![
+            Self::enter(Map::RocketHideoutB2F),
+            Self::enter(Map::RocketHideoutB3F),
+            Self::enter(Map::RocketHideoutB4F),
+        ];
+        s.extend(std::iter::repeat(Self::Interact(MapSprite::ROCKETHIDEOUTB4F_ROCKET3)).take(3));
+        s.push(Self::CollectItem(MapSprite::ROCKETHIDEOUTB4F_LIFT_KEY));
+        s
+    }
+
+    /// From inside the Rocket Hideout (B1F), get the **Silph Scope** (needed to see the Pokémon Tower
+    /// ghosts → Poké Flute). First get the Lift Key (`lift_key_steps`), then take the **elevator** to
+    /// Giovanni's split-off B4F room.
+    ///
+    /// Two runtime door blocks gate this (modelled via `MetaTileMap` door overlays so BFS avoids them
+    /// until open): (1) the **B1F elevator door** stays shut until Rocket 5 is beaten — so we enter the
+    /// elevator from **B2F** instead (its own elevator warp is ungated), and the BFS reroutes there
+    /// automatically. (2) On B4F the elevator lands in the lower room, walled off from Giovanni by a
+    /// **door that opens only after both Rockets (trainers 0 & 1) are beaten** — so fight them first,
+    /// which drops the wall on the post-battle map reload. Then beat Giovanni (Grass starter is 4×
+    /// on his Ground/Rock team; he vanishes on defeat and `ShowObject`s the Scope ball at (25,2)).
+    pub fn silph_scope_steps() -> Vec<Self> {
+        let mut s = Self::lift_key_steps();
+        s.extend([
+            // Back up to B2F (spinner nav works both ways) and into the elevator (B2F's warp is not
+            // gated by the Rocket-5 door, unlike B1F's).
+            Self::enter(Map::RocketHideoutB3F),
+            Self::enter(Map::RocketHideoutB2F),
+            Self::enter(Map::RocketHideoutElevator),
+            // Panel bg-event at (1,1); floors are B1F(0)/B2F(1)/B4F(2) — pick B4F. The menu redirects
+            // the exit warp to B4F (25,15) in Giovanni's lower room.
+            Self::UseElevator { panel: Point8 { x: 1, y: 1 }, floor: 2 },
+            // Beat both Rockets to open the door up to Giovanni (single Interact each — trainers stay
+            // put after defeat, so a lone talk suffices and the step pops once it issues the walk).
+            Self::Interact(MapSprite::ROCKETHIDEOUTB4F_ROCKET1),
+            Self::Interact(MapSprite::ROCKETHIDEOUTB4F_ROCKET2),
+            // Beat Giovanni (single Interact — he vanishes on defeat, revealing the Scope), then collect.
+            Self::Interact(MapSprite::ROCKETHIDEOUTB4F_GIOVANNI),
+            Self::CollectItem(MapSprite::ROCKETHIDEOUTB4F_SILPH_SCOPE),
+        ]);
+        s
+    }
+
     /// The full deterministic playthrough. Every forward map transition is an explicit `EnterMap`;
     /// on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the incrementally-observed
     /// graph. Starter is **Bulbasaur** — its Grass typing is super-effective against both Brock
@@ -553,6 +841,19 @@ impl PolicyStep {
             Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
         ]);
 
+        // ── Bill (SS Ticket) → trashed-house bridge → Vermilion City ──
+        steps.extend(Self::cerulean_to_vermilion_steps());
+        // ── S.S. Anne: clear every trainer, beat the rival, get HM01 Cut from the captain ──
+        steps.extend(Self::ss_anne_steps());
+        // ── Thunder Badge: teach Cut → cut the gym tree → trash-can puzzle → Lt. Surge ──
+        steps.extend(Self::thunder_badge_steps());
+        // ── Back to Cerulean (Underground Path in reverse) → Rock Tunnel → Lavender ──
+        steps.extend(Self::back_to_cerulean_steps());
+        steps.extend(Self::cerulean_to_lavender_steps());
+        // ── Lavender → Celadon (Route 7–8 Underground Path) → Rainbow Badge (Erika) ──
+        steps.extend(Self::lavender_to_celadon_steps());
+        steps.extend(Self::celadon_rainbow_steps());
+
         steps
     }
 }
@@ -572,6 +873,11 @@ pub struct DeterministicPolicy {
     /// joypad rising edge), so the step verifies the bag and retries a few times before giving up
     /// (e.g. for an item the mart doesn't actually sell).
     mart_attempts: u32,
+    /// True once the current `CollectItem` step's item sprite has been observed present (not hidden).
+    /// The step then pops only when the item *disappears* (collected). Distinguishes "collected" from
+    /// "not yet revealed" — some item balls stay hidden until their guard is beaten (e.g. the Rocket
+    /// Hideout Lift Key / Silph Scope), and popping on the initial hidden state would skip them.
+    collect_item_seen: bool,
 }
 
 impl DeterministicPolicy {
@@ -586,6 +892,7 @@ impl DeterministicPolicy {
             last_pokemon_center: None,
             heal_return: None,
             mart_attempts: 0,
+            collect_item_seen: false,
         }
     }
 
@@ -773,7 +1080,11 @@ impl Policy for DeterministicPolicy {
                     let map = sprite.map();
                     if state.map.map == map {
                         // On the sprite's map but it isn't actionable yet (e.g. still walking on, or
-                        // the sprite is briefly hidden by a script) — wait for it.
+                        // the sprite is briefly hidden by a script) — wait for it. (Do NOT pop when the
+                        // sprite is hidden: some sprites hide transiently mid-script, e.g. Bill right
+                        // after the PC, and popping would abort the interaction. Sprites that vanish
+                        // permanently on defeat, like the Game Corner Rocket, are handled by a single
+                        // non-retried `Interact` that pops the instant it issues the walk.)
                         None
                     } else {
                         let action = Self::route_toward(world_graph, &actions, map);
@@ -814,17 +1125,26 @@ impl Policy for DeterministicPolicy {
                             continue;
                         }
                         action
-                    } else if !state.map.sprites.iter().any(|s| !s.hidden && s.name == sprite.name) {
-                        // Item picked up (or removed by a script) — its sprite is gone. Done.
-                        self.queue.pop_front();
-                        continue;
                     } else {
-                        // Keep walking to and pressing A on the item until it disappears; do NOT
-                        // pop on issue, so a battle/script interruption (Mt Moon Super Nerd) mid-walk
-                        // doesn't abandon the pickup.
-                        actions.iter()
-                            .find(|a| a.tile == MetaTile::Sprite(sprite.name))
-                            .cloned()
+                        let present = state.map.sprites.iter().any(|s| !s.hidden && s.name == sprite.name);
+                        if present { self.collect_item_seen = true; }
+                        if !present && self.collect_item_seen {
+                            // The item was here and is now gone — picked up (or removed by a script). Done.
+                            self.collect_item_seen = false;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        if !present {
+                            // Not yet revealed (an item ball hidden until its guard is beaten) — wait.
+                            None
+                        } else {
+                            // Keep walking to and pressing A on the item until it disappears; do NOT
+                            // pop on issue, so a battle/script interruption (Mt Moon Super Nerd) mid-walk
+                            // doesn't abandon the pickup.
+                            actions.iter()
+                                .find(|a| a.tile == MetaTile::Sprite(sprite.name))
+                                .cloned()
+                        }
                     }
                 }
                 PolicyStep::BuyFromMart { item, map } => {
@@ -864,6 +1184,69 @@ impl Policy for DeterministicPolicy {
 
                         action.cloned()
                     }
+                }
+                PolicyStep::TeachMove { .. } => {
+                    // Handled by `pick_field_move` (the agent calls it first). If we reach here the
+                    // teach isn't ready yet — wait without advancing the queue.
+                    None
+                }
+                PolicyStep::CutTree { map } => {
+                    if state.map.map != map {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            println!("[policy] want to cut a tree on {map} but no path there!");
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else if matches!(state.map.tile_in_front(), Some((_, MetaTile::CutTree))) {
+                        // Facing a tree — `pick_field_move` performs the cut; just wait.
+                        None
+                    } else {
+                        // Route to face a reachable tree; once none remain, the trees are cut — done.
+                        match actions.iter().find(|a| a.tile == MetaTile::CutTree).cloned() {
+                            Some(action) => Some(action),
+                            None => { self.queue.pop_front(); continue; }
+                        }
+                    }
+                }
+                PolicyStep::SolveTrashCans => {
+                    if state.map.map != Map::VermilionGym {
+                        let action = Self::route_toward(world_graph, &actions, Map::VermilionGym);
+                        if action.is_none() {
+                            println!("[policy] want to solve trash cans but can't reach Vermilion Gym!");
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        // On the gym floor — `pick_field_move` drives checking the switch cans.
+                        None
+                    }
+                }
+                PolicyStep::FlipSwitch { map, .. } => {
+                    if state.map.map != map {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            println!("[policy] want to flip a switch on {map} but can't reach it!");
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        // On the map — `pick_field_move` drives facing + pressing the switch.
+                        None
+                    }
+                }
+                PolicyStep::UseElevator { .. } => {
+                    // Handled by `pick_field_move` once on the elevator map (an `enter(...Elevator)` step
+                    // precedes this one). If we're not on it, the elevator can't be used — pop.
+                    if state.map.map != Map::RocketHideoutElevator {
+                        println!("[policy] UseElevator but not in the elevator room ({});", state.map.map);
+                        self.queue.pop_front();
+                        continue;
+                    }
+                    None
                 }
             }
         }
@@ -1056,6 +1439,66 @@ impl Policy for DeterministicPolicy {
         Some(Some(slot))
     }
 
+    fn pick_field_move(&mut self, state: &GameState) -> Option<FieldMove> {
+        // Cut a tree the player is already facing (routed there by the CutTree overworld action).
+        if let Some(&PolicyStep::CutTree { map }) = self.queue.front() {
+            if state.map.map == map
+                && matches!(state.map.tile_in_front(), Some((_, MetaTile::CutTree)))
+            {
+                return Some(FieldMove::CutTree);
+            }
+        }
+        if let Some(&PolicyStep::TeachMove { item, target_slot }) = self.queue.front() {
+            let already_knows = hm_move(item).map_or(false, |mv| {
+                state.pokemon.get(target_slot as usize)
+                    .map_or(false, |p| p.moves.iter().flatten().any(|m| m.name == mv))
+            });
+            if already_knows {
+                println!("[policy] TeachMove: slot {target_slot} already knows the move — done");
+                self.queue.pop_front();
+                return None;
+            }
+            return Some(FieldMove::TeachMove { item, target_slot });
+        }
+        if let Some(&PolicyStep::SolveTrashCans) = self.queue.front() {
+            if let Some(puzzle) = &state.trash_cans {
+                if puzzle.second_opened {
+                    println!("[policy] SolveTrashCans: both locks open — door unlocked");
+                    self.queue.pop_front();
+                    return None;
+                }
+                let target = if puzzle.first_opened { puzzle.second_target } else { puzzle.first_target };
+                return Some(FieldMove::CheckTrashCan { target });
+            }
+        }
+        if let Some(&PolicyStep::FlipSwitch { map, at, reveals }) = self.queue.front() {
+            if state.map.map == map {
+                // Done once the switch's event fires (the warp itself is always in the static map, so
+                // "is the warp reachable" can't tell flipped from not — check the game event instead).
+                let done = match reveals {
+                    Map::RocketHideoutB1F => state.found_rocket_hideout,
+                    _ => false,
+                };
+                if done {
+                    println!("[policy] FlipSwitch: {reveals} passage revealed — done");
+                    self.queue.pop_front();
+                    return None;
+                }
+                // Reuse the trash-can face-and-press mechanism to press A on the bg-event tile.
+                return Some(FieldMove::CheckTrashCan { target: at });
+            }
+        }
+        if let Some(&PolicyStep::UseElevator { panel, floor }) = self.queue.front() {
+            // The step completes once we've ridden the elevator out to another floor.
+            if state.map.map != Map::RocketHideoutElevator {
+                self.queue.pop_front();
+                return None;
+            }
+            return Some(FieldMove::UseElevator { panel, floor });
+        }
+        None
+    }
+
     fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
         let result = match self.queue.front() {
             Some(PolicyStep::BuyFromMart { item, .. }) => {
@@ -1092,6 +1535,9 @@ impl Policy for DeterministicPolicy {
                 // encounter interrupts the walk, and with a real (non-pimped) party those battles
                 // are slow, so the single CollectItem step legitimately sits for a long while.
                 | Some(PolicyStep::CollectItem(_))
+                // A gym-leader fight sits on one step for the whole battle, and self-heals + re-routes
+                // on a blackout (queue unchanged the whole time) — legitimately long-running.
+                | Some(PolicyStep::DefeatGymLeader { .. })
         )
     }
 }

@@ -223,6 +223,98 @@ impl MapMetadata {
         }
         ids
     }
+
+    /// Overlay runtime `ReplaceTileBlock` door blocks onto an already-built `meta_tiles` grid.
+    ///
+    /// Several maps swap a single 4×4-tile map block between a "wall" block and a "floor" block at
+    /// runtime, gated on event flags (pokered `*DoorCallbackScript`, e.g. RocketHideoutB1F's door
+    /// opens once the guarding Rocket is beaten). The static ROM `map_data` always holds the *open*
+    /// (floor) block, so BFS would route straight through a door that is actually shut. For every
+    /// currently-closed door we reclassify its four meta-tiles from the *closed* block's tiles
+    /// (bottom-left sub-tile, matching the normal collision read) so pathfinding avoids it.
+    pub fn apply_door_blocks(&self, result: &mut [MetaTile], doors: &[DoorBlock]) {
+        let dims = self.dimensions();
+        let exp_width = dims.full_width();
+        for d in doors {
+            for sub_y in 0..Self::TILES_PER_META {
+                for sub_x in 0..Self::TILES_PER_META {
+                    let mx = d.block_x as usize * Self::TILES_PER_META + sub_x + dims.west_extra;
+                    let my = d.block_y as usize * Self::TILES_PER_META + sub_y + dims.north_extra;
+                    if mx >= exp_width { continue; }
+                    let idx = mx + my * exp_width;
+                    if idx >= result.len() { continue; }
+                    // Bottom-left sub-tile of this meta-cell within the closed block.
+                    let tile_off = (sub_x * Self::TILES_PER_META)
+                        + (sub_y * Self::TILES_PER_META + 1) * Self::BLOCK_TILE_WIDTH;
+                    let tile = self.tileset_data
+                        .get(d.block_id as usize * Self::BLOCK_TILES + tile_off)
+                        .copied()
+                        .unwrap_or(0xFF);
+                    result[idx] = if self.collision_tiles.contains(&tile) {
+                        MetaTile::Empty
+                    } else {
+                        MetaTile::Obstacle
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// A runtime door block that is currently *closed* (a wall), to be overlaid on the static map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DoorBlock {
+    /// Block coordinates (in 4×4-tile blocks) passed to pokered `ReplaceTileBlock` as `lb bc, y, x`.
+    pub block_x: u8,
+    pub block_y: u8,
+    /// The tileset block ID drawn when the door is shut (pokered `wNewTileBlockID`).
+    pub block_id: u8,
+}
+
+/// Static description of an event-gated `ReplaceTileBlock` door for one map.
+struct DoorSpec {
+    block_x: u8,
+    block_y: u8,
+    /// Block ID drawn when shut.
+    closed_block_id: u8,
+    /// The door is *open* if ANY clause is fully satisfied; each clause is a set of
+    /// `(wEventFlags byte offset, bit mask)` that must ALL be set.
+    open_clauses: &'static [&'static [(u16, u8)]],
+}
+
+/// Event-gated door blocks per map (pokered `*DoorCallbackScript`).
+fn map_door_specs(map: Map) -> &'static [DoorSpec] {
+    match map {
+        // Elevator door: shut ($54) until Rocket 5 (trainer 4) is beaten (EVENT_677 / TRAINER_4).
+        Map::RocketHideoutB1F => &[DoorSpec {
+            block_x: 12, block_y: 8, closed_block_id: 0x54,
+            open_clauses: &[&[(206, 0x80)], &[(206, 0x20)]],
+        }],
+        // Giovanni-room door: shut ($2d) until both Rockets (trainers 0 & 1) are beaten.
+        Map::RocketHideoutB4F => &[DoorSpec {
+            block_x: 12, block_y: 5, closed_block_id: 0x2d,
+            open_clauses: &[&[(212, 0x20)], &[(212, 0x04), (212, 0x08)]],
+        }],
+        _ => &[],
+    }
+}
+
+/// Read the event flags and return the door blocks on `map` that are currently shut.
+fn closed_door_blocks(mmu: &MMU, map: Map) -> Vec<DoorBlock> {
+    let base = pokered_symbols::wEventFlags.address;
+    map_door_specs(map).iter().filter_map(|spec| {
+        let open = spec.open_clauses.iter().any(|clause| {
+            clause.iter().all(|&(byte, bit)| mmu.read(base + byte) & bit != 0)
+        });
+        (!open).then_some(DoorBlock {
+            block_x: spec.block_x, block_y: spec.block_y, block_id: spec.closed_block_id,
+        })
+    }).collect()
+}
+
+/// Largest block ID referenced by any door spec for `map` (so the tileset load covers it).
+fn max_door_block_id(map: Map) -> usize {
+    map_door_specs(map).iter().map(|d| d.closed_block_id as usize).max().unwrap_or(0)
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -406,6 +498,7 @@ impl MapMetadataCache {
             player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                 .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
             sprites: mmu.read_sprites()?,
+            closed_doors: closed_door_blocks(mmu, map),
         })
     }
 
@@ -429,7 +522,9 @@ impl MapMetadataReader for MMU {
 
         let map_data = self.rom_data_from_rom_pointer(&map_header.blocks_pointer(), map_header.height as usize * map_header.width as usize).to_vec();
 
-        let max_block_id = *map_data.iter().max().unwrap() as usize;
+        // Cover both the map's own blocks and any runtime door block (which is not present in
+        // `map_data` but is drawn at runtime — see `apply_door_blocks`).
+        let max_block_id = (*map_data.iter().max().unwrap() as usize).max(max_door_block_id(map));
         let tileset_data = self.rom_data_from_pointer(ts.bank, ts.blocks_ptr, (max_block_id + 1) * MapMetadata::BLOCK_TILES).to_vec();
 
         let warp_events = self.read_warp_events(map, &map_header)?;
@@ -487,6 +582,7 @@ impl MapMetadataReader for MMU {
                 player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                     .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
                 sprites: self.read_sprites()?,
+                closed_doors: closed_door_blocks(self, map),
             }
         )
     }
@@ -902,11 +998,16 @@ pub struct CurrentMap {
     pub player_direction: PlayerFacingDirection,
     pub sprites: Vec<Sprite>,
     pub metadata: Arc<MapMetadata>,
+    /// Runtime `ReplaceTileBlock` door blocks that are currently shut (event-gated). Empty for
+    /// maps with no such doors. Applied over the static map so BFS avoids closed doorways.
+    pub closed_doors: Vec<DoorBlock>,
 }
 
 impl CurrentMap {
     pub fn meta_tiles(&self) -> Vec<MetaTile> {
-        self.metadata.meta_tiles(&self.sprites)
+        let mut result = self.metadata.meta_tiles(&self.sprites);
+        self.metadata.apply_door_blocks(&mut result, &self.closed_doors);
+        result
     }
 }
 
@@ -1103,6 +1204,7 @@ mod test {
             player_direction: PlayerFacingDirection::Up,
             sprites: vec![],
             metadata: Arc::new(map),
+            closed_doors: vec![],
         };
         let tile_map = MetaTileMap::new(&current_map);
         println!("{}", tile_map);

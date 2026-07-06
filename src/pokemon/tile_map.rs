@@ -31,6 +31,35 @@ pub struct MetaTileMap {
     /// produce a separate `OverworldAction`.
     pub warp_targets: HashSet<(Map, Point8)>,
     pub connection_targets: HashSet<Map>,
+    /// Arrow (spinner) tiles → the tile the forced slide deposits the player on. Stepping onto an
+    /// arrow tile hands control to the game, which slides the player along a fixed path (decoded from
+    /// the ROM `RocketHideout{2,3}ArrowTilePlayerMovement` tables). The BFS treats stepping onto an
+    /// arrow as landing at its destination. Empty for maps without arrow tiles.
+    pub spinners: HashMap<Point8, Point8>,
+}
+
+/// Arrow-tile → slide-destination tables for the spinner-floor maps (raw map coords), decoded from
+/// the ROM movement RLE tables (`RocketHideout{2,3}ArrowTilePlayerMovement`, read backwards;
+/// PAD_DOWN=+y, UP=−y, LEFT=−x, RIGHT=+x). Interior maps have no connection border, so these raw
+/// coords need no west/north offset.
+fn spinner_table(map: Map) -> &'static [(u8, u8, u8, u8)] {
+    match map {
+        Map::RocketHideoutB2F => &[
+            (4,9,2,9),(4,11,8,11),(4,15,8,11),(4,16,8,11),(4,19,2,19),(4,22,2,19),(5,14,9,16),
+            (6,22,6,20),(6,24,6,20),(8,9,2,9),(8,12,8,11),(8,15,8,11),(8,19,2,19),(8,23,2,19),
+            (9,14,9,16),(9,22,9,24),(10,9,2,9),(10,10,2,9),(10,15,2,9),(10,17,14,15),(10,19,14,15),
+            (10,25,14,25),(11,14,15,18),(11,16,15,18),(11,18,11,20),(12,9,2,9),(12,11,2,9),(12,13,2,9),
+            (12,17,14,15),(13,10,14,12),(13,12,14,12),(13,16,15,18),(13,18,11,20),(13,19,14,15),
+            (13,22,9,24),(13,23,2,19),(14,17,14,15),(15,16,15,18),(16,14,16,13),(16,16,16,13),
+            (16,18,16,13),(17,10,14,12),(17,11,2,9),
+        ],
+        Map::RocketHideoutB3F => &[
+            (10,13,14,13),(10,19,18,15),(11,18,15,22),(12,11,10,11),(12,17,18,15),(12,20,18,15),
+            (13,16,17,16),(14,11,16,11),(14,15,18,15),(14,17,18,15),(14,19,18,15),(15,16,17,16),
+            (15,18,15,22),(16,13,16,11),(17,12,17,16),(18,16,18,15),
+        ],
+        _ => &[],
+    }
 }
 
 
@@ -65,6 +94,13 @@ impl MetaTileMap {
                 .collect(),
             raw_tile_ids: map.metadata.raw_tile_ids.clone(),
             tile_pair_collisions: map.metadata.tile_pair_collisions.clone(),
+            spinners: spinner_table(map.metadata.map).iter().map(|&(x, y, tx, ty)| {
+                let off = |px: u8, py: u8| Point8 {
+                    x: px + dimensions.west_extra as u8,
+                    y: py + dimensions.north_extra as u8,
+                };
+                (off(x, y), off(tx, ty))
+            }).collect(),
             meta_tiles,
         }
     }
@@ -102,6 +138,19 @@ impl MetaTileMap {
 
     fn tile_at(&self, point: Point8) -> MetaTile {
         self.meta_tiles[point.x as usize + point.y as usize * self.width]
+    }
+
+    /// Follow the arrow-tile chain from `pos` to the tile the forced slide finally rests on. Returns
+    /// `pos` unchanged if it isn't an arrow tile. Bounded against pathological cycles.
+    fn resolve_spinner(&self, pos: Point8) -> Point8 {
+        let mut cur = pos;
+        for _ in 0..64 {
+            match self.spinners.get(&cur) {
+                Some(&next) => cur = next,
+                None => break,
+            }
+        }
+        cur
     }
 
 
@@ -143,8 +192,11 @@ impl MetaTileMap {
         let mut came_from: HashMap<Point8, (Point8, JoypadButton)> = HashMap::new();
         let mut queue = VecDeque::new();
 
-        dist.insert(self.player_position, 0);
-        queue.push_back(self.player_position);
+        // If the player is standing on an arrow tile (mid-slide), the forced movement will carry them
+        // to its rest destination — start the search from there.
+        let start = self.resolve_spinner(self.player_position);
+        dist.insert(start, 0);
+        queue.push_back(start);
 
         while let Some(pos) = queue.pop_front() {
             let d = dist[&pos];
@@ -157,6 +209,19 @@ impl MetaTileMap {
             for (dir, nb) in neighbors {
                 if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }
                 if dist.contains_key(&nb) { continue; }
+
+                // Arrow (spinner) tile: stepping onto `nb` hands control to the game, which slides the
+                // player to a fixed destination. Record an edge from `pos` (press `dir`) → that
+                // destination; the player never stops on the arrow itself.
+                if self.spinners.contains_key(&nb) {
+                    let dest = self.resolve_spinner(nb);
+                    if !dist.contains_key(&dest) {
+                        dist.insert(dest, d + 1);
+                        came_from.insert(dest, (pos, dir));
+                        queue.push_back(dest);
+                    }
+                    continue;
+                }
 
                 let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
 
@@ -230,8 +295,11 @@ impl MetaTileMap {
         let reconstruct = |dest: Point8, came_from: &HashMap<Point8, (Point8, JoypadButton)>| -> Vec<JoypadButton> {
             let mut route = vec![];
             let mut pos = dest;
-            while pos != self.player_position {
-                let &(prev, dir) = came_from.get(&pos).unwrap();
+            // Walk back to the BFS root (the node with no predecessor). The root is normally the
+            // player's position, but when the player is mid-slide on an arrow tile the BFS is rooted
+            // at the slide's rest destination instead — so stop on the first node without a
+            // `came_from` entry rather than testing against `player_position`.
+            while let Some(&(prev, dir)) = came_from.get(&pos) {
                 route.push(dir);
                 pos = prev;
             }
@@ -393,8 +461,94 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Pc, route });
         }
 
+        // 6. Cut trees: route to a walkable tile adjacent to a CutTree and face it (no A — the cut is
+        //    triggered via the field-move menu once facing). One action per reachable-adjacent tree.
+        let cut_trees: Vec<Point8> = self.meta_tiles.iter().enumerate()
+            .filter(|(_, t)| **t == MetaTile::CutTree)
+            .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
+            .collect();
+        for tree in cut_trees {
+            let adj: [(PlayerFacingDirection, Point8); 4] = [
+                (PlayerFacingDirection::Down,  Point8 { x: tree.x,                   y: tree.y.saturating_sub(1) }),
+                (PlayerFacingDirection::Up,    Point8 { x: tree.x,                   y: tree.y + 1               }),
+                (PlayerFacingDirection::Right, Point8 { x: tree.x.saturating_sub(1), y: tree.y                   }),
+                (PlayerFacingDirection::Left,  Point8 { x: tree.x + 1,               y: tree.y                   }),
+            ];
+            let Some((face_dir, dest)) = adj.iter()
+                .filter(|(_, p)| {
+                    (p.x as usize) < self.width && (p.y as usize) < self.height
+                    && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
+                    && best_dist_from(p).is_some()
+                })
+                .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
+                .copied()
+            else { continue };
+            let (_, came_from) = best_dist_from(&dest).unwrap();
+            let mut route = reconstruct(dest, came_from);
+            let face_button: JoypadButton = face_dir.into();
+            if route.is_empty() {
+                if face_dir != self.player_direction { route.push(face_button); }
+            } else if route.last() != Some(&face_button) {
+                route.push(face_button);
+            }
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::CutTree, route });
+        }
+
         actions.sort();
         actions
+    }
+
+    /// The tile directly in front of the player (based on facing), if within bounds.
+    pub fn tile_in_front(&self) -> Option<(Point8, MetaTile)> {
+        let p = self.player_position;
+        let front = match self.player_direction {
+            PlayerFacingDirection::Up    => Point8 { x: p.x, y: p.y.checked_sub(1)? },
+            PlayerFacingDirection::Down  => Point8 { x: p.x, y: p.y + 1 },
+            PlayerFacingDirection::Left  => Point8 { x: p.x.checked_sub(1)?, y: p.y },
+            PlayerFacingDirection::Right => Point8 { x: p.x + 1, y: p.y },
+        };
+        if (front.x as usize) < self.width && (front.y as usize) < self.height {
+            Some((front, self.meta_tiles[front.x as usize + front.y as usize * self.width]))
+        } else {
+            None
+        }
+    }
+
+    /// Route the player to a walkable (`Empty`) tile adjacent to `target` and turn to face it.
+    /// Returns the button sequence (movement steps + a final turn), which is empty if the player is
+    /// already adjacent and facing. Returns `None` if no walkable tile adjacent to `target` is
+    /// reachable. Unlike `actions()`, this works for a *dynamic* hidden-object tile whose position
+    /// is not known at map-build time (e.g. a gym trash can chosen from RAM).
+    pub fn route_to_face(&self, target: Point8) -> Option<Vec<JoypadButton>> {
+        let (dist, came_from) = self.bfs_from_player();
+        let adj: [(PlayerFacingDirection, Point8); 4] = [
+            (PlayerFacingDirection::Down,  Point8 { x: target.x,                   y: target.y.saturating_sub(1) }),
+            (PlayerFacingDirection::Up,    Point8 { x: target.x,                   y: target.y + 1               }),
+            (PlayerFacingDirection::Right, Point8 { x: target.x.saturating_sub(1), y: target.y                   }),
+            (PlayerFacingDirection::Left,  Point8 { x: target.x + 1,               y: target.y                   }),
+        ];
+        let (face_dir, dest) = adj.into_iter()
+            .filter(|(_, p)| {
+                (p.x as usize) < self.width && (p.y as usize) < self.height
+                && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
+                && dist.contains_key(p)
+            })
+            .min_by_key(|(_, p)| dist[p])?;
+        let mut route = Vec::new();
+        let mut cur = dest;
+        while cur != self.player_position {
+            let (prev, btn) = came_from.get(&cur)?;
+            route.push(*btn);
+            cur = *prev;
+        }
+        route.reverse();
+        let face_button: JoypadButton = face_dir.into();
+        if route.is_empty() {
+            if face_dir != self.player_direction { route.push(face_button); }
+        } else if route.last() != Some(&face_button) {
+            route.push(face_button);
+        }
+        Some(route)
     }
 }
 

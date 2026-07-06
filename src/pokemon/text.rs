@@ -126,6 +126,13 @@ mod tests {
             None
         }
 
+        fn list_menu_id(&self) -> u8 {
+            0
+        }
+
+        fn menu_geometry(&self) -> (u8, u8, u8, u8) { (0, 0, 0, 0) }
+        fn bag_item_position(&self, _item: crate::pokemon::item::ItemId) -> Option<u8> { None }
+
         fn naming_screen_species(&self) -> Result<crate::pokemon::species::PokemonSpecies, String> {
             Err("not available in stub".to_string())
         }

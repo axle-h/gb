@@ -3,6 +3,11 @@ name = "gb"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Opt-in for the full ~2h `can_start_game` end-to-end playthrough. Off by default so it doesn't run
+# on a normal `cargo test`; enable with `cargo test --release --features slow-tests can_start_game`.
+slow-tests = []
+
 [dependencies]
 strum = "0.27"
 strum_macros = "0.27.2"
