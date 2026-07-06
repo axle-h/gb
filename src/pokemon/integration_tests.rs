@@ -1095,16 +1095,21 @@ fn probe_party() {
 #[ignore]
 fn probe_silph_post_cardkey() {
     let mut fixture = TestFixture::new(include_bytes!("data/silph-card-key.bin"), Duration::from_mins(40),
-        vec![PolicyStep::enter(Map::SilphCo9F), PolicyStep::enter(Map::SilphCo3F)]);
+        vec![PolicyStep::enter(Map::SilphCo9F), PolicyStep::enter(Map::SilphCoElevator)]);
     let mut last = Point8 { x: 255, y: 255 };
     let mut same = 0;
     for i in 0..400_000 {
         fixture.step();
         if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
         if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.map == Map::SilphCoElevator { println!(">> REACHED ELEVATOR at step {i}"); break; }
             let p = s.map.player_position;
-            if p != last { last = p; same = 0; if i % 200 == 0 { println!("  step {i}: {} @ {p} mode={:?}", s.map.map, s.mode); } }
-            else { same += 1; if same == 30_000 { println!(">> STUCK at {} @ {p} mode={:?} step {i}", s.map.map, s.mode); } }
+            if p != last { last = p; same = 0; if i % 400 == 0 { println!("  step {i}: {} @ {p}", s.map.map); } }
+            else { same += 1; if same == 40_000 {
+                println!(">> STUCK at {} @ {p} facing {:?} front={:?} state={}",
+                    s.map.map, s.map.player_direction, s.map.tile_in_front().map(|(_,t)|t), fixture.agent.state_debug());
+                break;
+            } }
         }
     }
     if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
