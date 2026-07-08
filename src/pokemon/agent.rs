@@ -12,6 +12,7 @@ use crate::pokemon::delay::DelayContext;
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;
+use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::menu::{is_forget_move_prompt, BattleMenuState};
 use crate::pokemon::policy::{Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
@@ -93,6 +94,15 @@ enum BattleState {
 
     /// Navigating the menus
     Navigating { action: BattleAction, delay: DelayContext },
+
+    /// Dedicated driver for using a healing item on the *active* Pokémon in battle. The generic
+    /// navigator can't handle the "use on which POKéMON?" party menu that follows selecting a potion,
+    /// so this walks the whole flow with clean press/release rising edges: battle grid → ITEM → bag
+    /// list → the potion → the active mon → confirm. `item_index` is the potion's bag position;
+    /// `start_qty` is its count on entry (completion = the count dropped). `confirmed` marks that the
+    /// active mon has been selected, so we don't re-press A during the heal-animation lag and burn the
+    /// whole stack. `press` gives the two-tick press/release cadence.
+    HealingActive { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext },
 }
 
 impl Default for BattleState {
@@ -159,7 +169,10 @@ enum AgentState {
     /// mon knows 4 moves) is handled by the shared global forget-move handler. Uses the same plain
     /// press/release "mashing" + cursor-navigate pattern as `CuttingTree`. `entered_menu` tracks that
     /// we left the overworld (so a return to it ends the attempt).
-    TeachingMove { item: crate::pokemon::item::ItemId, target_slot: u8, press: bool, entered_menu: bool, settle: u8 },
+    /// `evolve_from` set means the bag item is an evolution stone rather than an HM: the same menu
+    /// chain (START→ITEM→bag→USE→party→pick) runs, but completion is "the slot's species changed away
+    /// from `evolve_from`" (e.g. Eevee → Vaporeon) instead of "learned the move".
+    TeachingMove { item: crate::pokemon::item::ItemId, target_slot: u8, press: bool, entered_menu: bool, settle: u8, evolve_from: Option<crate::pokemon::species::PokemonSpecies> },
 
     /// Using the Cut field move on the tree the player is facing: driving START→POKéMON→mon→CUT (the
     /// game's `UsedCut` then removes the tree). `press` alternates each tick — plain press/release
@@ -167,6 +180,13 @@ enum AgentState {
     /// carrying a held direction into the next menu). `entered_menu` tracks that we left the overworld
     /// (so returning to it means the cut animation finished). `tree_pos` is the tile being cut.
     CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8 },
+
+    /// Mounting Surf to cross water: the route is about to step onto a `Water` tile while the player is
+    /// on foot, so drive START→POKéMON→(surf mon at `slot`)→SURF (the game then mounts the player and
+    /// auto-steps onto `water_pos`). Same press/release mashing + cursor-navigate pattern as
+    /// `CuttingTree`; `entered_menu` tracks that we left the overworld, so a return to it with the surf
+    /// state active means the mount finished. `water_pos` is the tile being surfed onto (used to face it).
+    Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8 },
 
     /// Checking a Vermilion Gym trash can for a hidden switch: route to a tile adjacent to `target`
     /// and face it (recomputed each tick via `MetaTileMap::route_to_face`), then press A to trigger
@@ -225,10 +245,12 @@ impl Display for AgentState {
                 BattleState::WaitingForMenu { .. } => write!(f, "battle:wait"),
                 BattleState::AwaitingPolicy { .. } => write!(f, "battle:policy"),
                 BattleState::Navigating { action, .. } => write!(f, "battle:{:?}", action),
+                BattleState::HealingActive { item, confirmed, .. } => write!(f, "battle:heal({item:?},confirmed={confirmed})"),
             },
             AgentState::PokemartShopping(s)           => write!(f, "{s}"),
             AgentState::TeachingMove { item, .. } => write!(f, "teach:{item:?}"),
             AgentState::CuttingTree { .. } => write!(f, "cut"),
+            AgentState::Surfing { .. } => write!(f, "surf"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
@@ -253,6 +275,17 @@ pub struct PokemonAgent {
     /// from the static ROM map, so it always shows a `CutTree` there even after the game removed it;
     /// the agent remembers what it cut and treats those tiles as `Empty` for routing/movement.
     cut_tiles: std::collections::HashSet<(Map, Point8)>,
+    /// Silph Co door-graphic *walls* ($18/$24 that won't open), by `(map, tile position)`. Card-key
+    /// door graphics are placed into the map at *runtime* (a load script `ReplaceTileBlock`s them over
+    /// floor tiles), so they're absent from the static ROM the `MetaTileMap` is decoded from — the
+    /// agent would route straight into them and bump forever. When the agent faces one we first try to
+    /// *open* it with the Card Key (press A); if it won't open after several tries it's a decorative
+    /// wall, so we remember the faced tile and `observe_state` overlays it as an `Obstacle` for routing.
+    blocked_tiles: std::collections::HashSet<(Map, Point8)>,
+    /// Consecutive A-presses spent trying to open the card-key door currently in front of the player
+    /// (reset when the player no longer faces a door). Once it exceeds the open threshold the tile is
+    /// treated as an unopenable wall (added to `blocked_tiles`).
+    door_open_attempts: u32,
 }
 
 impl Default for PokemonAgent {
@@ -270,6 +303,8 @@ impl PokemonAgent {
             world_graph: WorldGraph::new(),
             last_map: None,
             cut_tiles: std::collections::HashSet::new(),
+            blocked_tiles: std::collections::HashSet::new(),
+            door_open_attempts: 0,
         }
     }
 
@@ -333,7 +368,57 @@ impl PokemonAgent {
                 }
             }
         }
+        // Overlay discovered runtime door-graphic walls ($18/$24) as obstacles (see `blocked_tiles`).
+        for &(map, pos) in &self.blocked_tiles {
+            if state.map.map == map {
+                let idx = pos.x as usize + pos.y as usize * state.map.width;
+                if idx < state.map.meta_tiles.len() {
+                    state.map.meta_tiles[idx] = MetaTile::Obstacle;
+                }
+            }
+        }
         Ok(state)
+    }
+
+    /// Number of A-presses to spend trying to open a card-key door before giving up and treating the
+    /// tile as an unopenable wall. Generous: opening plays a short "used the CARD KEY" text.
+    const DOOR_OPEN_ATTEMPTS: u32 = 40;
+
+    /// On Silph Co floors, handle the card-key-door graphic tile ($18/$24) the player is facing — a
+    /// closed door or a decorative wall that the `MetaTileMap` can't see (it's `ReplaceTileBlock`'d in
+    /// at runtime over a floor tile). Try to open it with the Card Key (press A); if it won't open
+    /// after `DOOR_OPEN_ATTEMPTS` it's a wall — remember the faced tile so `observe_state` blocks it and
+    /// the BFS routes around it. Returns `true` while actively trying to open (the caller should then
+    /// skip normal movement so the A-press isn't overridden by a held direction).
+    fn handle_card_key_door(&mut self, api: &mut PokemonApi) -> bool {
+        use crate::pokemon::map_metadata::{map_has_card_key_doors, PlayerFacingDirection};
+        let Ok(state) = api.game_state() else { return false; };
+        if !map_has_card_key_doors(state.map.map) { self.door_open_attempts = 0; return false; }
+        let front = api.mmu().read_pointer(&pokered_symbols::wTileInFrontOfPlayer);
+        // Card-key door tiles are $18/$24, EXCEPT on Silph 11F where the gate blocking the President's
+        // chamber (and the Giovanni trigger tiles inside it) is tile $5e (pokered `PrintCardKeyText`
+        // special-cases SILPH_CO_11F + $5e). Facing it with the Card Key opens it.
+        let is_11f_gate = front == 0x5e && state.map.map == Map::SilphCo11F;
+        if front != 0x18 && front != 0x24 && !is_11f_gate { self.door_open_attempts = 0; return false; }
+        let p = state.map.player_position;
+        let faced = match state.map.player_direction {
+            PlayerFacingDirection::Up    => Point8 { x: p.x, y: p.y.wrapping_sub(1) },
+            PlayerFacingDirection::Down  => Point8 { x: p.x, y: p.y + 1 },
+            PlayerFacingDirection::Left  => Point8 { x: p.x.wrapping_sub(1), y: p.y },
+            PlayerFacingDirection::Right => Point8 { x: p.x + 1, y: p.y },
+        };
+        self.door_open_attempts += 1;
+        if self.door_open_attempts > Self::DOOR_OPEN_ATTEMPTS {
+            // Won't open — it's a decorative wall. Block it and let the caller reroute.
+            self.blocked_tiles.insert((state.map.map, faced));
+            self.door_open_attempts = 0;
+            false
+        } else {
+            // Pulse A facing the door — the game's `PrintCardKeyText` opens any faced $18/$24 while the
+            // Card Key is in the bag (then it becomes floor and normal movement continues).
+            api.toggle_button(JoypadButton::A);
+            true
+        }
     }
 
     fn set_state(&mut self, state: AgentState) {
@@ -549,6 +634,15 @@ impl PokemonAgent {
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
 
+        // Silph Co's card-key doors/walls are placed into the map at runtime and are invisible to the
+        // ROM-decoded `MetaTileMap`, so the agent routes straight into them. When facing one, try to
+        // open it with the Card Key; unopenable ones get blocked so the BFS routes around (see
+        // `handle_card_key_door`). While actively opening, skip normal handling so the A-press isn't
+        // overridden by a held movement direction.
+        if game_mode == GameMode::Overworld && self.handle_card_key_door(api) {
+            return Ok(());
+        }
+
         // A trainer has engaged (line of sight) and the battle is initialising on its own.
         // The agent must neither hold a direction (which wedges the trainer's walk-up) nor
         // mash A (which keeps re-triggering the pre-battle interaction and prevents InitBattle
@@ -590,7 +684,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -660,9 +754,22 @@ impl PokemonAgent {
                     }
                     // A non-walking field action (e.g. teach an HM) takes priority over walking.
                     match self.policy.pick_field_move(&game_state) {
+                        Some(crate::pokemon::policy::FieldMove::ReorderParty { slot }) => {
+                            // Direct RAM reorder — instant, no menus. Make `slot` the lead, then resume.
+                            api.release_all_buttons();
+                            api.move_party_member_to_front(slot as usize)?;
+                            self.event(AgentEvent::TextBox { message: format!("Moved party slot {slot} to the front") });
+                            self.set_state(AgentState::Idle);
+                            return Ok(());
+                        }
                         Some(crate::pokemon::policy::FieldMove::TeachMove { item, target_slot }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu: false, settle: 0 });
+                            self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu: false, settle: 0, evolve_from: None });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::EvolveWithStone { stone, target_slot, evolve_from }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::TeachingMove { item: stone, target_slot, press: true, entered_menu: false, settle: 0, evolve_from: Some(evolve_from) });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::CutTree) => {
@@ -761,6 +868,23 @@ impl PokemonAgent {
                             Some(&JoypadButton::A) => api.toggle_button(JoypadButton::A),
                             // Hold direction buttons for continuous walking.
                             Some(&btn) => {
+                                // If this step would walk onto water while on foot, mount Surf first.
+                                // (The BFS only routes over water when the player can Surf, so a water
+                                // tile here means we intend to cross it.)
+                                let pos = game_state.map.player_position;
+                                let next = step_pos(pos, btn);
+                                let onto_water = matches!(
+                                    next.and_then(|n| game_state.map.tile_at_checked(n)),
+                                    Some(MetaTile::Water) | Some(MetaTile::ConnectionWater(_))
+                                );
+                                let surfing = api.mmu().read_pointer(&pokered_symbols::wWalkBikeSurfState) == 2;
+                                if onto_water && !surfing {
+                                    if let (Some(water_pos), Some(slot)) = (next, surf_slot(&game_state)) {
+                                        api.release_all_buttons();
+                                        self.set_state(AgentState::Surfing { press: true, entered_menu: false, water_pos, slot });
+                                        return Ok(());
+                                    }
+                                }
                                 api.release_all_buttons();
                                 api.press_button(btn);
                             }
@@ -776,9 +900,53 @@ impl PokemonAgent {
                 reader.update(api);
             }
             AgentState::Battle(ref mut battle_state) => {
+                // Global safety net: an unusable-item message ("This isn't the time to use that!") can
+                // appear if a menu transition desyncs and a move/heal drive lands on a key item in the
+                // bag. Dismiss it with B from any battle sub-state and re-sync via WaitingForMenu, rather
+                // than letting whichever driver is active spin on it forever.
+                if api.on_screen_text(false).map_or(false, |t| t.contains("isn't the time") || t.contains("won by using")) {
+                    api.toggle_button(JoypadButton::B);
+                    self.set_battle_state(BattleState::default());
+                    return Ok(());
+                }
                 match battle_state {
                     BattleState::WaitingForMenu { reader, delay } => {
                         if let Some(menu_state) = api.menu_state() {
+                            // A voluntary switch (PKMN → pick mon) pops the SWITCH/STATS/CANCEL
+                            // sub-menu, which isn't a battle_menu_state. Drive its cursor to SWITCH
+                            // (index 0) and confirm, else the reader would wait on it forever.
+                            if menu_state.is_switch_stats_cancel_menu() {
+                                if menu_state.current_item == 0 {
+                                    api.toggle_button(JoypadButton::A);
+                                } else {
+                                    api.toggle_button(JoypadButton::Up);
+                                }
+                                return Ok(());
+                            }
+                            // After an item-use turn the menu geometry/text_box_id are unreliable — the
+                            // leaked battle bag list and the next-turn FIGHT menu can both read as
+                            // (5,4)/ListMenuBox, so battle_menu_state misclassifies them. The on-screen
+                            // text is authoritative, so resolve these two cases from it first:
+                            //   • "FIGHT … RUN" → the main battle menu is up → hand to the policy.
+                            //   • "CANCEL"      → a leaked bag list → back out with B to end the turn
+                            //     (A-mashing it re-opens "use on which?" and burns the whole stack).
+                            let screen = api.on_screen_text(false).unwrap_or_default();
+                            // Bag first: while the leaked bag list is still on screen (its "CANCEL"
+                            // entry visible, or an unusable-item message), back out with B. Checking
+                            // this before the FIGHT test matters during the transition, when the bag and
+                            // the next-turn FIGHT menu briefly render together — handing to the policy
+                            // then would drive the move-select on top of the still-open bag.
+                            if screen.contains("CANCEL")
+                                || screen.contains("isn't the time") || screen.contains("won by using") {
+                                api.toggle_button(JoypadButton::B);
+                                return Ok(());
+                            }
+                            if screen.contains("FIGHT") && screen.contains("RUN") {
+                                new_events.push(AgentEvent::text_box_from_reader(reader));
+                                api.release_all_buttons();
+                                self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
+                                return Ok(());
+                            }
                             match menu_state.battle_menu_state() {
                                 // Main menu is ready: normal battle opens on FIGHT, Safari on BALL.
                                 Some(BattleMenuState::Fight) | Some(BattleMenuState::SafariBall) => {
@@ -788,26 +956,33 @@ impl PokemonAgent {
                                     self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
                                 }
                                 Some(BattleMenuState::PokemonList { index }) => {
-                                    // Party list is showing — either a forced switch (active
-                                    // fainted) or a voluntary switch (Navigating placed cursor
-                                    // here). If the cursor is already on an alive member, confirm
-                                    // it; otherwise navigate to the first alive member (forced
-                                    // switch case where cursor starts on the fainted slot).
+                                    // A party list is only ours to drive here for a FORCED switch — the
+                                    // active mon fainted and the game demands a replacement. Send the
+                                    // first alive member. If instead the active mon is ALIVE, this party
+                                    // list is a leaked voluntary sub-menu (e.g. the "use on which?" menu
+                                    // Gen 1 re-shows after an item heal); blindly confirming it would
+                                    // re-heal/re-switch, so back out with B.
                                     let game_state = api.game_state()?;
-                                    let cursor_hp = game_state.pokemon
-                                        .get(index as usize)
-                                        .map_or(0, |p| p.current_hp);
-                                    if cursor_hp > 0 {
-                                        api.toggle_button(JoypadButton::A);
+                                    let active_fainted = game_state.battle.as_ref()
+                                        .map_or(false, |b| b.player.current_hp == 0);
+                                    if !active_fainted {
+                                        api.toggle_button(JoypadButton::B);
                                     } else {
-                                        let target = game_state.pokemon.iter().enumerate()
-                                            .find(|(_, p)| p.current_hp > 0)
-                                            .map(|(i, _)| i as u8)
-                                            .unwrap_or(0);
-                                        if index < target {
-                                            api.toggle_button(JoypadButton::Down);
+                                        let cursor_hp = game_state.pokemon
+                                            .get(index as usize)
+                                            .map_or(0, |p| p.current_hp);
+                                        if cursor_hp > 0 {
+                                            api.toggle_button(JoypadButton::A);
                                         } else {
-                                            api.toggle_button(JoypadButton::Up);
+                                            let target = game_state.pokemon.iter().enumerate()
+                                                .find(|(_, p)| p.current_hp > 0)
+                                                .map(|(i, _)| i as u8)
+                                                .unwrap_or(0);
+                                            if index < target {
+                                                api.toggle_button(JoypadButton::Down);
+                                            } else {
+                                                api.toggle_button(JoypadButton::Up);
+                                            }
                                         }
                                     }
                                 }
@@ -851,6 +1026,23 @@ impl PokemonAgent {
                             let game_state = api.game_state()?;
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
                                 new_events.push(AgentEvent::BattleActionStarted { action });
+                                // A healing item on the active mon needs the dedicated HealingActive
+                                // driver (the generic navigator can't drive the "use on which?" party
+                                // menu). Other actions use the generic navigator.
+                                if let BattleAction::UseItem { item, .. } = action {
+                                    use crate::pokemon::item::ItemId;
+                                    if matches!(item.id, ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion | ItemId::FullRestore) {
+                                        let start_qty = game_state.bag.iter()
+                                            .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
+                                        let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
+                                        let entry_hp = game_state.pokemon.get(active as usize).map(|p| p.current_hp).unwrap_or(0);
+                                        self.set_battle_state(BattleState::HealingActive {
+                                            item: item.id, start_qty, entry_hp, press: true, confirmed: false,
+                                            delay: DelayContext::default(),
+                                        });
+                                        return Ok(());
+                                    }
+                                }
                                 self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default() });
                             }
                         }
@@ -858,6 +1050,46 @@ impl PokemonAgent {
 
                     BattleState::Navigating { action, delay } => {
                         if delay.tick(delta_cycles) {
+                            // A *voluntary* party switch (chosen from the battle PKMN menu) needs a
+                            // dedicated driver: the in-battle party menu isn't a recognized
+                            // `battle_menu_state` (its top-menu geometry is stale from the PKMN grid),
+                            // so the generic navigator below bails and the party cursor defaults to the
+                            // active mon → "… is already out!" → deadlock. Drive the party cursor by
+                            // `current_item` straight to the target slot, confirm, then confirm the
+                            // SWITCH/STATS/CANCEL sub-menu. Done once the active slot is the target.
+                            if let crate::pokemon::battle::BattleAction::SwitchPokemon { slot: target, .. } = *action {
+                                let active = api.game_state().ok()
+                                    .and_then(|g| g.battle.map(|b| b.active_party_slot));
+                                if active == Some(target) {
+                                    api.release_all_buttons();
+                                    self.set_battle_state(BattleState::default());
+                                    return Ok(());
+                                }
+                                let raw = api.menu_state();
+                                let bms = raw.and_then(|m| m.battle_menu_state());
+                                if raw.map_or(false, |m| m.is_switch_stats_cancel_menu()) {
+                                    // SWITCH(0)/STATS(1)/CANCEL(2) → drive to SWITCH and confirm.
+                                    let cur = raw.map_or(0, |m| m.current_item);
+                                    api.toggle_button(if cur == 0 { JoypadButton::A } else { JoypadButton::Up });
+                                    return Ok(());
+                                }
+                                if bms.is_none() || matches!(bms, Some(BattleMenuState::PokemonList { .. })) {
+                                    // The in-battle party list — whether unrecognized (voluntary switch-in
+                                    // geometry (11,2)) or recognized as PokemonList (low-HP switch geometry
+                                    // (0,1)). Drive the cursor to the target slot; pressing A on it opens
+                                    // SWITCH/STATS/CANCEL (handled above). Handle both here so the switch
+                                    // never leaks to WaitingForMenu, whose leaked-party-menu B-backout
+                                    // would otherwise cancel a legitimate voluntary switch.
+                                    let cur = raw.map_or(0, |m| m.current_item);
+                                    let btn = if cur == target { JoypadButton::A }
+                                        else if cur < target { JoypadButton::Down }
+                                        else { JoypadButton::Up };
+                                    api.toggle_button(btn);
+                                    return Ok(());
+                                }
+                                // else: still at the main battle grid — fall through to the generic
+                                // navigator to open the PKMN menu.
+                            }
                             let Some(menu_state) = api.menu_state().and_then(|s| s.battle_menu_state()) else {
                                 // No battle menu is recognized — the turn is resolving (result text
                                 // or animation), e.g. the "… is fast asleep!" message shown after a
@@ -871,6 +1103,22 @@ impl PokemonAgent {
                             };
                             {
                                 let menu_target = BattleMenuState::from_action(*action);
+
+                                // If a leaked sub-menu is showing that doesn't belong to this action —
+                                // a bag list (ItemList) while we're trying to FIGHT/switch, or a party
+                                // list (PokemonList) while we're trying to FIGHT/use-item — back out
+                                // with B instead of navigating it. Otherwise the generic nav walks the
+                                // wrong menu (e.g. scrolls the bag to index 0 and selects a key item →
+                                // "This isn't the time to use that!").
+                                let wrong_submenu = match (menu_state, *action) {
+                                    (BattleMenuState::ItemList { .. }, a) => !matches!(a, BattleAction::UseItem { .. }),
+                                    (BattleMenuState::PokemonList { .. }, a) => !matches!(a, BattleAction::SwitchPokemon { .. }),
+                                    _ => false,
+                                };
+                                if wrong_submenu {
+                                    api.toggle_button(JoypadButton::B);
+                                    return Ok(());
+                                }
 
                                 if menu_state == menu_target {
                                     api.release_all_buttons();
@@ -906,6 +1154,90 @@ impl PokemonAgent {
                                 }
                             }
                         }
+                    }
+
+                    BattleState::HealingActive { item, start_qty, entry_hp, press, confirmed, delay: _ } => {
+                        let item = *item;
+                        let start_qty = *start_qty;
+                        let entry_hp = *entry_hp;
+                        let press = *press;
+                        let confirmed = *confirmed;
+
+                        let raw = api.menu_state();
+                        let bms = raw.and_then(|m| m.battle_menu_state());
+
+                        // Three phases, keyed on the potion's bag count and the active mon's HP:
+                        //   • consumed (live < start_qty)  → the heal fully applied; back out of the
+                        //     leftover bag/party menus (B) until the main grid reappears (next turn).
+                        //   • animating (HP rose past entry but not yet consumed) → the heal bar is
+                        //     filling; WAIT (don't re-press A, which would start a second potion).
+                        //   • otherwise → navigate the menus to select the potion and confirm the mon.
+                        let gs = api.game_state().ok();
+                        let active = gs.as_ref().and_then(|g| g.battle.as_ref().map(|b| b.active_party_slot)).unwrap_or(0);
+                        let active_hp = gs.as_ref().and_then(|g| g.pokemon.get(active as usize).map(|p| p.current_hp)).unwrap_or(0);
+                        let live = gs.as_ref()
+                            .and_then(|g| g.bag.iter().find(|b| b.id == item).map(|b| b.quantity))
+                            .unwrap_or(0);
+                        if live < start_qty {
+                            // Potion consumed — the heal is committed. Hand back to WaitingForMenu, which
+                            // advances the "recovered HP" / enemy-turn text and safely backs out of any
+                            // leftover bag/party sub-menu (the PokemonList/ItemList B-backout gates) to
+                            // reach the next turn's FIGHT menu.
+                            api.release_all_buttons();
+                            self.set_battle_state(BattleState::default());
+                            return Ok(());
+                        }
+                        if active_hp > entry_hp {
+                            // Heal bar filling — wait, don't touch the (still-open) party menu.
+                            api.release_all_buttons();
+                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default() });
+                            return Ok(());
+                        }
+                        // Two-tick press/release cadence for clean rising edges.
+                        if !press {
+                            api.release_all_buttons();
+                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default() });
+                            return Ok(());
+                        }
+
+                        // "Use on which POKéMON?" party menu — recognized PokemonList (0,1) or party text.
+                        let party_showing = matches!(bms, Some(BattleMenuState::PokemonList { .. }))
+                            || (bms.is_none() && api.on_screen_text(false).map_or(false, |t| t.matches('/').count() >= 2));
+
+                        let next_confirmed = confirmed;
+                        let button: Option<JoypadButton> = if party_showing {
+                            // Drive the cursor to the active mon and press A. Keep pressing until the
+                            // potion is consumed (completion above fires the instant the bag drops);
+                            // one clean press is unreliable, so re-press rather than gate on `confirmed`.
+                            let cur = raw.map_or(0, |m| m.current_item);
+                            if cur == active { Some(JoypadButton::A) }
+                            else if cur < active { Some(JoypadButton::Down) }
+                            else { Some(JoypadButton::Up) }
+                        } else if let Some(BattleMenuState::ItemList { index }) = bms {
+                            // Navigate to the potion by its position in the raw bag (== the battle list
+                            // order). If the read momentarily fails, WAIT rather than pressing A on a
+                            // fallback index 0 — that lands on an unusable key item ("This isn't the
+                            // time to use that!") and deadlocks the bag.
+                            match api.bag_item_position(item) {
+                                Some(target) => Some(if index == target { JoypadButton::A }
+                                    else if index < target { JoypadButton::Down } else { JoypadButton::Up }),
+                                None => None,
+                            }
+                        } else if let Some(grid) = bms.filter(|b| matches!(b,
+                            BattleMenuState::Fight | BattleMenuState::Item | BattleMenuState::Pokemon | BattleMenuState::Run)) {
+                            // Battle grid → ITEM (0,1).
+                            let cur = grid.location();
+                            let tgt = BattleMenuState::Item.location();
+                            Some(if cur.x < tgt.x { JoypadButton::Right } else if cur.x > tgt.x { JoypadButton::Left }
+                                else if cur.y < tgt.y { JoypadButton::Down } else if cur.y > tgt.y { JoypadButton::Up }
+                                else { JoypadButton::A })
+                        } else {
+                            Some(JoypadButton::A) // resolution / heal text — advance
+                        };
+
+                        api.release_all_buttons();
+                        if let Some(b) = button { api.press_button(b); }
+                        self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default() });
                     }
                 }
             }
@@ -1132,31 +1464,39 @@ impl PokemonAgent {
                     }
                 }
             }
-            AgentState::TeachingMove { item, target_slot, press, entered_menu, settle } => {
+            AgentState::TeachingMove { item, target_slot, press, entered_menu, settle, evolve_from } => {
                 use crate::pokemon::menu::TextBoxId;
                 let gs = api.game_state()?;
-                // Done once the mon knows the move (the forget/learn text has run and committed).
-                let knows = crate::pokemon::policy::hm_move(item).map_or(false, |mv|
-                    gs.pokemon.get(target_slot as usize)
-                        .map_or(false, |p| p.moves.iter().flatten().any(|m| m.name == mv)));
-                if knows {
-                    // Move learned — but Gen 1 returns to the bag/"teach to another?" party menu after
-                    // teaching, so back out with B until a STABLE overworld. `settle` counts consecutive
+                // Done once the mon knows the move (teach) — or, for an evolution stone, once the slot's
+                // species has changed away from `evolve_from` (the evolve animation/text has committed).
+                let done = match evolve_from {
+                    Some(from) => gs.pokemon.get(target_slot as usize).map_or(false, |p| p.species != from),
+                    None => crate::pokemon::policy::hm_move(item).map_or(false, |mv|
+                        gs.pokemon.get(target_slot as usize)
+                            .map_or(false, |p| p.moves.iter().flatten().any(|m| m.name == mv))),
+                };
+                if done {
+                    // Move learned / mon evolved — but Gen 1 returns to the bag/"use on which?" party menu
+                    // after, so back out with B until a STABLE overworld. `settle` counts consecutive
                     // overworld ticks; if a menu re-appears it resets and B-mashing resumes. Requiring a
                     // sustained overworld avoids finishing on a one-tick flicker between closing menus
-                    // (which would hand a still-open menu to the generic A-mash handler and re-teach).
+                    // (which would hand a still-open menu to the generic A-mash handler and re-use).
                     if game_mode != GameMode::Overworld {
                         api.release_all_buttons();
                         if press { api.press_button(JoypadButton::B); }
-                        self.set_state(AgentState::TeachingMove { item, target_slot, press: !press, entered_menu, settle: 0 });
+                        self.set_state(AgentState::TeachingMove { item, target_slot, press: !press, entered_menu, settle: 0, evolve_from });
                         return Ok(());
                     }
                     if settle < 15 {
                         api.release_all_buttons();
-                        self.set_state(AgentState::TeachingMove { item, target_slot, press, entered_menu, settle: settle + 1 });
+                        self.set_state(AgentState::TeachingMove { item, target_slot, press, entered_menu, settle: settle + 1, evolve_from });
                         return Ok(());
                     }
-                    self.event(AgentEvent::TextBox { message: format!("Taught the HM to party slot {target_slot}") });
+                    let msg = match evolve_from {
+                        Some(_) => format!("Evolved party slot {target_slot}"),
+                        None => format!("Taught the HM to party slot {target_slot}"),
+                    };
+                    self.event(AgentEvent::TextBox { message: msg });
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -1173,7 +1513,7 @@ impl PokemonAgent {
                 // Plain press/release "mashing" — a fresh rising edge every 2 ticks (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu, settle: 0 });
+                    self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu, settle: 0, evolve_from });
                     return Ok(());
                 }
 
@@ -1204,7 +1544,7 @@ impl PokemonAgent {
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0 });
+                self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0, evolve_from });
             }
             AgentState::CuttingTree { press, entered_menu, tree_pos } => {
                 use crate::pokemon::menu::TextBoxId;
@@ -1255,6 +1595,61 @@ impl PokemonAgent {
                 api.release_all_buttons();
                 api.press_button(button);
                 self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos });
+            }
+            AgentState::Surfing { press, entered_menu, water_pos, slot } => {
+                use crate::pokemon::menu::TextBoxId;
+                // Mounting Surf opens the party menu, plays the field-move menu + a mount animation,
+                // then returns to the overworld now surfing (the game auto-steps onto the water tile).
+                // So once we've entered a menu, the first return to the overworld ends the mount: hand
+                // back to the route follower (which walks the water if surfing, or re-derives/aborts if
+                // the mount didn't take — we never spin in the menu).
+                if entered_menu && game_mode == GameMode::Overworld {
+                    api.release_all_buttons();
+                    if api.mmu().read_pointer(&pokered_symbols::wWalkBikeSurfState) == 2 {
+                        self.event(AgentEvent::TextBox { message: format!("Surfed onto the water at {water_pos}") });
+                    }
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let entered_menu = entered_menu || game_mode != GameMode::Overworld;
+
+                // Plain press/release mashing (see CuttingTree).
+                if !press {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Surfing { press: true, entered_menu, water_pos, slot });
+                    return Ok(());
+                }
+
+                let (top_x, top_y, current, _) = api.menu_geometry();
+                let tbid = api.menu_state().map(|m| m.text_box_id);
+                let nav = |cur: u8, target: u8| -> JoypadButton {
+                    if cur < target { JoypadButton::Down }
+                    else if cur > target { JoypadButton::Up }
+                    else { JoypadButton::A }
+                };
+                let button = if game_mode == GameMode::Overworld {
+                    // No menu yet: face the water tile first (a walk step brought us adjacent but maybe
+                    // facing another way), then open START. Pressing toward water while on foot only
+                    // turns the player (water is impassable on foot), so this never moves us.
+                    let gs = self.observe_state(api)?;
+                    let facing_water = gs.map.tile_in_front().map(|(p, _)| p == water_pos).unwrap_or(false);
+                    if facing_water {
+                        JoypadButton::Start
+                    } else {
+                        dir_to(gs.map.player_position, water_pos).unwrap_or(JoypadButton::Start)
+                    }
+                } else if tbid == Some(TextBoxId::FieldMoveMonMenu) || top_y == 10 {
+                    nav(current, 0) // field-move menu → SURF (the surf mon's only field move)
+                } else if top_x == 11 && top_y == 2 {
+                    nav(current, 1) // START menu → POKéMON (index 1, Pokédex obtained)
+                } else if top_x == 0 && (top_y == 1 || top_y == 3) {
+                    nav(current, slot) // party menu → the Surf mon
+                } else {
+                    JoypadButton::A // transitional text ("used SURF!")
+                };
+                api.release_all_buttons();
+                api.press_button(button);
+                self.set_state(AgentState::Surfing { press: false, entered_menu, water_pos, slot });
             }
             AgentState::CheckingTrashCan { target, checked, press } => {
                 // Checking a can triggers GymTrashScript, which prints a text box (leaving the
@@ -1488,6 +1883,25 @@ fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
         ( 0, -1) => Some(JoypadButton::Up),
         _        => None,
     }
+}
+
+/// The tile one step from `from` in direction `btn` (None for a non-directional button or if the
+/// step would underflow off the top/left edge).
+fn step_pos(from: Point8, btn: JoypadButton) -> Option<Point8> {
+    match btn {
+        JoypadButton::Up    => (from.y > 0).then(|| Point8 { x: from.x, y: from.y - 1 }),
+        JoypadButton::Down  => Some(Point8 { x: from.x, y: from.y + 1 }),
+        JoypadButton::Left  => (from.x > 0).then(|| Point8 { x: from.x - 1, y: from.y }),
+        JoypadButton::Right => Some(Point8 { x: from.x + 1, y: from.y }),
+        _ => None,
+    }
+}
+
+/// The party slot (0-based) of the first Pokémon that knows Surf — the mon the Surf-mount menu picks.
+fn surf_slot(state: &crate::pokemon::GameState) -> Option<u8> {
+    state.pokemon.iter().position(|p| {
+        p.moves.iter().flatten().any(|m| m.name == crate::pokemon::move_name::PokemonMoveName::Surf)
+    }).map(|i| i as u8)
 }
 
 /// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.

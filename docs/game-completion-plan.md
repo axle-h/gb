@@ -246,15 +246,30 @@ Flute**), then **Saffron** opens (Silph Co, Rocket-gated) → **Marsh Badge (Sab
     with the Card Key doors open** — his room is entered via the **7F (5,7) → 11F (3,2)** pad, i.e.
     another cross-floor chain. Likewise Lapras (Silph Worker M1 @7F (1,5)) needs 7F's own maze.
   - Routing is NOT the blocker: `WorldGraph` is already a region graph keyed by `(map, entry)`, and
-    forward maze hops work via explicit `enter()` steps (like the Card Key). The real blocker is
-    **within-floor navigation past card-key doors**. On 9F the agent walks to (18,11) then jams forever
-    pressing Up into (18,10): that tile is a **card-key door graphic ($18)** the agent's tile model
-    misses. Crucially the door is **RUNTIME-placed** — `tile_id`/`raw_tile_ids` (ROM block) read 0x01
-    floor there, but the runtime `wTileMap(8,7)=0x18`; Silph closes its doors on load via a script. So
-    a static ROM scan can't see them (I tried scanning all 4 sub-tiles via `tile_id` — no effect,
-    reverted). The fix: build the Silph-floor `MetaTileMap` from the **runtime wTileMap**, classifying
-    $18/$24 as blocked (decorative walls) or openable doors (at `card_key_coords`, opened by face-Up +
-    A → `PrintCardKeyText`). `probe_silph_post_cardkey` reproduces the jam.
+    forward maze hops work via explicit `enter()` steps (like the Card Key). The blocker was
+    **within-floor navigation past card-key doors**, now **partly solved**. On 9F the agent used to jam
+    at (18,11) pressing into (18,10) — a **card-key door graphic ($18)** the ROM-based tile model
+    missed because the door is **RUNTIME-placed** (`tile_id` reads 0x01 floor, runtime `wTileMap`=0x18;
+    Silph closes doors on load). FIXED via reactive detection (`agent.rs` `blocked_tiles` +
+    `record_runtime_wall`): each overworld frame, if the player faces a $18/$24 tile (game's runtime
+    `wTileInFrontOfPlayer`), block that tile so the BFS routes around it. The agent now goes
+    pocket→9F→elevator and rides to any floor; no regressions.
+  - **Giovanni chain mapped** (all hops reachable-verified with the wall fix):
+    pocket→9F→elevator→**3F→(11,11)→7F(5,3) left region**→(5,7)→**11F(3,2)**→Giovanni(6,9). 7F-left also
+    has Lapras (Silph Worker M1 @1,5) and the rival (Blue @3,7).
+  - **DONE — card-key door-opening → full Silph navigation works.** `agent.rs handle_card_key_door`
+    (each overworld frame): when the player faces a $18/$24 tile, pulse A to open it (`PrintCardKeyText`
+    opens any faced $18/$24 while the Card Key is in the bag — no need for `card_key_coords`); if it
+    won't open after 40 tries it's a decorative wall → block it. The agent now navigates the entire
+    building — pocket→9F→elevator→3F→(open doors)→(11,11)→7F(5,3)→(5,7)→**11F(3,2)** — fighting trainers
+    the whole way. No regressions (card_key, silph_scope pass).
+  - **NEXT — BATTLE SURVIVAL (not navigation).** On the full chain the agent reaches 11F then **blacks
+    out → CeladonCity**. Party is **Venusaur lv48 + a useless lv4 Pidgey** with **zero healing items**
+    (probe_party bag dump), so the lone Venusaur fights the whole Silph gauntlet unhealed and faints.
+    The battle policy *does* heal at <25% HP — but only if Potions exist. Fix: buy **Super Potions at
+    Celadon Dept Store 2F** (`BuyFromMart`) before the Silph push (Saffron↔Celadon adjacent), and/or
+    grind a 2nd real battler. Beaten trainers stay beaten across a blackout. `probe_silph_post_cardkey`
+    runs the full chain; `probe_party` dumps party+bag.
   - Party is thin: **Venusaur lv48** (great) + a useless **lv4 Pidgey**. Over Silph's many trainers PP
     drain / a Venusaur faint → blackout is a real risk; likely wants a second real battler.
   Once floor nav works: reach Giovanni (via 7F(5,7)→11F(3,2)) → beat him → Saffron Rockets leave →

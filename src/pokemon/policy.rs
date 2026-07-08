@@ -319,6 +319,10 @@ pub enum PolicyStep {
     EnterMap { to_map: Map, to_position: Option<Point8> },
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
+    /// Like `Interact`, but if the sprite can't be reached (walled off — e.g. a Silph trainer behind
+    /// the teleport-pad maze) the step gives up and pops instead of waiting forever. For best-effort
+    /// gauntlet training where some trainers on a floor are unreachable from where we entered.
+    InteractIfReachable(MapSprite),
     /// Walk to the map's PC tile, face it, and press A (e.g. Bill's cell-separator PC). The PC is a
     /// hidden-object tile, not a sprite; `MetaTileMap::pc_locations` supplies its coordinate. Should
     /// be scripted only when using the PC is valid (e.g. after Bill's Pokémon enters the machine).
@@ -333,8 +337,18 @@ pub enum PolicyStep {
     DefeatGymLeader { leader: MapSprite, badge: Badge },
     /// Walk in grass and throw Pokéballs until a Pokémon is caught.
     CatchPokemon { species: PokemonSpecies, on_map: Map },
-    /// Walk in grass until the leading party member reaches at least this level.
-    GrindUntilLevel { target_level: u8, on_map: Map },
+    /// Enable/disable "train this slot" mode: while `Some(slot)`, the battle policy switches that party
+    /// member in at the start of each battle so it earns the XP (for levelling a bench mon on the
+    /// trainer gauntlet). `None` turns it off (e.g. before a hard fight where the lead must stay in).
+    SetTrainSlot(Option<u8>),
+    /// Reorder the party so the member in `slot` becomes the lead (slot 0), written straight to RAM
+    /// (no menu navigation). Makes a trained bench mon the battle lead so it fights — and earns XP —
+    /// from the start of every battle, with no in-battle switch-in needed.
+    MovePokemonToFront { slot: u8 },
+    /// Walk in grass until the party member in `slot` reaches at least `target_level`. During grind
+    /// battles the policy switches that slot in so it earns the XP (usually `slot: 0`, the lead; use a
+    /// higher slot to train a bench mon, e.g. a freshly-evolved Vaporeon).
+    GrindUntilLevel { target_level: u8, on_map: Map, slot: u8 },
     /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
     BuyFromMart { map: Map, item: BagItem },
     /// Teach an HM/TM `item` (e.g. HM01 Cut) to the party member in `target_slot`, from the
@@ -342,6 +356,9 @@ pub enum PolicyStep {
     /// mon already knows 4 moves) is handled by the global forget-move handler. Persists until the
     /// target knows the move.
     TeachMove { item: ItemId, target_slot: u8 },
+    /// Use an evolution `stone` (e.g. Water Stone) from the bag on the party member in `target_slot`
+    /// to evolve it (e.g. Eevee → Vaporeon). Persists until that slot's species changes.
+    EvolveWithStone { stone: ItemId, target_slot: u8 },
     /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge). Routes to face a
     /// `MetaTile::CutTree`, then uses the Cut field move. Persists until no reachable tree remains.
     CutTree { map: Map },
@@ -376,8 +393,14 @@ pub enum PolicyStep {
 /// requested by the policy when the corresponding queue step is at the front.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum FieldMove {
+    /// Reorder the party so `slot` becomes the lead (RAM write, no menus). Single-shot.
+    ReorderParty { slot: u8 },
     /// Teach `item` (an HM/TM) to the party member in `target_slot` via the bag.
     TeachMove { item: ItemId, target_slot: u8 },
+    /// Use evolution `stone` on the party member in `target_slot` (bag → stone → USE → pick the mon),
+    /// evolving it. `evolve_from` is the species before evolving, so completion = the slot's species
+    /// changed. Shares the `TeachingMove` menu-driver (same START→ITEM→bag→USE→party chain).
+    EvolveWithStone { stone: ItemId, target_slot: u8, evolve_from: PokemonSpecies },
     /// Use the Cut field move on the tree the player is currently facing.
     CutTree,
     /// Walk to the trash can at `target` and press A to check it for a hidden switch.
@@ -1026,7 +1049,7 @@ impl PolicyStep {
             Self::enter(Map::ViridianCity),
             // ── Grind the starter on Route 1 ──
             Self::enter(Map::Route1),
-            Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1 },
+            Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1, slot: 0 },
             Self::enter(Map::ViridianCity),
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
@@ -1055,7 +1078,7 @@ impl PolicyStep {
 
             // ── Route 3 grind → heal at the Mt Moon Pokécenter ──
             Self::enter(Map::Route3),
-            Self::GrindUntilLevel { target_level: 18, on_map: Map::Route3 },
+            Self::GrindUntilLevel { target_level: 18, on_map: Map::Route3, slot: 0 },
             Self::enter(Map::Route4),
             Self::enter(Map::MtMoonPokecenter),
             Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
@@ -1116,6 +1139,15 @@ pub struct DeterministicPolicy {
     /// "not yet revealed" — some item balls stay hidden until their guard is beaten (e.g. the Rocket
     /// Hideout Lift Key / Silph Scope), and popping on the initial hidden state would skip them.
     collect_item_seen: bool,
+    /// When `Some(slot)`, switch that party slot in at the start of every battle (wild *and* trainer)
+    /// so it — not the lead — earns the XP. Used to train a bench mon (e.g. Vaporeon) on the trainer
+    /// gauntlet. A safety cap skips the switch when the enemy out-levels the trainee by a wide margin,
+    /// so it won't suicide into a much stronger foe (e.g. the rival's ace). Toggle with `SetTrainSlot`.
+    train_slot: Option<u8>,
+    /// Consecutive policy ticks the current `InteractIfReachable` step has waited without the sprite
+    /// becoming reachable. Past a threshold the step gives up and pops (the trainer is walled off by
+    /// the teleport-pad maze) instead of stalling forever like the plain `Interact`.
+    interact_skip_waits: u32,
 }
 
 impl DeterministicPolicy {
@@ -1131,6 +1163,8 @@ impl DeterministicPolicy {
             heal_return: None,
             mart_attempts: 0,
             collect_item_seen: false,
+            train_slot: None,
+            interact_skip_waits: 0,
         }
     }
 
@@ -1147,13 +1181,20 @@ impl DeterministicPolicy {
     /// The action that takes the warp/connection to `to_map` (matching raw `to_position` when
     /// given) from the current map, or `None` if no such transition is reachable here.
     fn enter_map_action(actions: &[OverworldAction], to_map: Map, to_position: Option<Point8>) -> Option<OverworldAction> {
-        actions.iter().find(|a| match a.tile {
+        // Prefer the *nearest* matching warp/connection. A door can span two vertically-adjacent warp
+        // tiles (e.g. a gate's 2-tall door) where only the bottom tile — the one the player actually
+        // stands on — fires; picking the closest reliably lands on it, whereas taking the first in
+        // `actions` order could target the non-firing top tile and jam.
+        actions.iter().filter(|a| match a.tile {
             MetaTile::Warp { to_map: m, to_position: p }
             | MetaTile::Connection { to_map: m, to_position: p } => {
                 m == to_map && to_position.map_or(true, |want| want == p)
             }
+            // Water connection (a surfable map edge): matched by destination map only — it carries no
+            // landing `to_position`. The agent Surfs across to reach it.
+            MetaTile::ConnectionWater(m) => m == to_map,
             _ => false,
-        }).cloned()
+        }).min_by_key(|a| a.route.len()).cloned()
     }
 
     pub fn complete_game(seed: u64) -> Self {
@@ -1262,7 +1303,27 @@ impl Policy for DeterministicPolicy {
                         continue;
                     }
                 },
-                PolicyStep::GrindUntilLevel { target_level, on_map } => {
+                PolicyStep::GrindUntilLevel { target_level, on_map, slot } => {
+                    if let Some(pokemon) = state.pokemon.get(slot as usize) {
+                        if pokemon.level >= target_level {
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        // The grind mon fainted. When training a bench slot the lead (Venusaur) keeps
+                        // the party alive, so there's no black-out to auto-heal it — detour to the last
+                        // Pokémon Center, then the grind resumes with a revived mon.
+                        if pokemon.current_hp == 0 {
+                            if let Some(center) = self.last_pokemon_center {
+                                println!("[policy] grind mon (slot {slot}) fainted — routing to {center} to heal");
+                                self.heal_return = Some(center);
+                                return Self::route_toward(world_graph, &actions, center);
+                            }
+                        }
+                    } else {
+                        println!("[policy] no Pokemon in slot {slot} to level up");
+                        self.queue.pop_front();
+                        continue;
+                    }
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
@@ -1271,21 +1332,10 @@ impl Policy for DeterministicPolicy {
                             continue;
                         }
                         action
-                    } else if let Some(pokemon) = state.pokemon.get(0) {
-                        if pokemon.level >= target_level {
-                            self.queue.pop_front();
-                            continue;
-                        } else if let Some(action) = actions.iter()
-                            .find(|a| a.tile == MetaTile::Grass) {
-                            // walk in grass
-                            Some(action.clone())
-                        } else {
-                            println!("[policy] cannot level up a Pokemon, no grass nearby!");
-                            self.queue.pop_front();
-                            continue;
-                        }
+                    } else if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Grass) {
+                        Some(action.clone()) // walk in grass to trigger encounters
                     } else {
-                        println!("[policy] no Pokemon in party to level up");
+                        println!("[policy] cannot level up a Pokemon, no grass nearby!");
                         self.queue.pop_front();
                         continue;
                     }
@@ -1335,6 +1385,35 @@ impl Policy for DeterministicPolicy {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to interact with {} on {}, but no path there!", sprite, map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    }
+                }
+                PolicyStep::InteractIfReachable(sprite) => {
+                    // Reachable on the current map → walk to it (single-shot, like Interact).
+                    if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Sprite(sprite.name)) {
+                        self.interact_skip_waits = 0;
+                        self.queue.pop_front();
+                        return Some(action.clone());
+                    }
+                    let map = sprite.map();
+                    if state.map.map == map {
+                        // On the sprite's map but it isn't in the reachable set — either still loading,
+                        // or walled off by the maze. Wait a bounded number of ticks, then give up.
+                        self.interact_skip_waits += 1;
+                        if self.interact_skip_waits > 250 {
+                            println!("[policy] {} unreachable after waiting — skipping", sprite);
+                            self.interact_skip_waits = 0;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        None
+                    } else {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            self.interact_skip_waits = 0;
                             self.queue.pop_front();
                             continue;
                         }
@@ -1417,8 +1496,11 @@ impl Policy for DeterministicPolicy {
                         // If triggered in the overworld, talk to the "Clerk" sprite to (re)open the
                         // pokemart menu. `pick_mart_purchase` will drive the actual buy; we re-verify
                         // the bag on the next overworld tick and retry if the confirm was dropped.
+                        // Single-counter marts name the seller "Clerk"; the Celadon Dept Store 2F has
+                        // "Clerk 1" (items — Poké Balls, Super Potions, …) and "Clerk 2" (TMs), so target
+                        // the items clerk by name and never the TM one.
                         let action = actions.iter()
-                            .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk"));
+                            .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk" || sprite == "Clerk 1"));
 
                         if action.is_none() {
                             println!("[policy] BuyFromMart step encountered in pick_overworld_action and no clerk available — skipping");
@@ -1433,6 +1515,20 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::TeachMove { .. } => {
                     // Handled by `pick_field_move` (the agent calls it first). If we reach here the
                     // teach isn't ready yet — wait without advancing the queue.
+                    None
+                }
+                PolicyStep::EvolveWithStone { .. } => {
+                    // Handled by `pick_field_move` (bag menu chain); wait without advancing.
+                    None
+                }
+                PolicyStep::SetTrainSlot(slot) => {
+                    self.train_slot = slot;
+                    println!("[policy] train_slot = {slot:?}");
+                    self.queue.pop_front();
+                    continue;
+                }
+                PolicyStep::MovePokemonToFront { .. } => {
+                    // Handled by `pick_field_move` (a direct RAM reorder); wait without advancing.
                     None
                 }
                 PolicyStep::CutTree { map } => {
@@ -1553,6 +1649,29 @@ impl Policy for DeterministicPolicy {
                 .cloned();
         }
 
+        // Train a bench mon by switching it in so it — not the lead — earns the XP. Two sources:
+        //   • a `GrindUntilLevel` step at the queue front → grind that slot (wild battles only), or
+        //   • `train_slot` mode → that slot in *every* battle (wild + trainer gauntlet).
+        // Only switch to a slot that's alive and not already active; if it has fainted, fight on with
+        // whoever's out (the GrindUntilLevel arm / blackout recovery heals it). A level-safety cap
+        // skips the switch when the enemy out-levels the trainee by >6, so training mode won't suicide
+        // the trainee into a much stronger foe (e.g. the rival's ace) — the lead handles those.
+        let train_slot = match self.queue.front() {
+            Some(&PolicyStep::GrindUntilLevel { slot, .. }) if battle_state.battle_type == BattleType::Wild => Some(slot),
+            _ => self.train_slot,
+        };
+        if let Some(slot) = train_slot {
+            if battle_state.active_party_slot != slot {
+                if let Some(sw) = actions.iter().find(|a| matches!(a,
+                    BattleAction::SwitchPokemon { slot: s, pokemon }
+                        if *s == slot && pokemon.current_hp > 0
+                        && battle_state.enemy.level <= pokemon.level + 6)) {
+                    println!("[policy] training slot {slot} — switching it in to take the XP");
+                    return Some(sw.clone());
+                }
+            }
+        }
+
         // When catching, throw a Pokéball immediately if one is available.
         if let Some(PolicyStep::CatchPokemon { species, .. }) = self.queue.front() {
             if battle_state.battle_type == BattleType::Wild && battle_state.enemy.species == *species {
@@ -1596,7 +1715,9 @@ impl Policy for DeterministicPolicy {
         // XP, so switching a healthy bench mon in would starve the lead of levels and the grind
         // would never finish. During a `GrindUntilLevel` step, keep the lead in (blackout recovery
         // heals and resumes if it faints).
-        let grinding = matches!(self.queue.front(), Some(PolicyStep::GrindUntilLevel { .. }));
+        // (Same for `train_slot` mode: keep the trainee in so it keeps earning XP.)
+        let grinding = self.train_slot.is_some()
+            || matches!(self.queue.front(), Some(PolicyStep::GrindUntilLevel { .. }));
         if !grinding && battle_state.player.remaining_hp() < 0.15 {
             if let Some(switch) = actions.iter()
                 .filter(|a| matches!(a, BattleAction::SwitchPokemon { .. }))
@@ -1664,9 +1785,12 @@ impl Policy for DeterministicPolicy {
             return Some(a.clone());
         }
 
-        // Last resort: any fight action, else any action.
+        // Last resort: a Fight move (Struggle if truly out of PP), else any non-item action such as a
+        // switch to a team-mate or Run. Never fall through to a `UseItem`: the first bag entry is often
+        // an unusable key item, and selecting it deadlocks on "This isn't the time to use that!".
         actions.iter().find(|a| matches!(a, BattleAction::Fight { .. }))
-            .or_else(|| actions.iter().next())
+            .or_else(|| actions.iter().find(|a| !matches!(a, BattleAction::UseItem { .. })))
+            .or_else(|| actions.iter().find(|a| matches!(a, BattleAction::Fight { .. })))
             .cloned()
     }
 
@@ -1709,6 +1833,10 @@ impl Policy for DeterministicPolicy {
                 return Some(FieldMove::CutTree);
             }
         }
+        if let Some(&PolicyStep::MovePokemonToFront { slot }) = self.queue.front() {
+            self.queue.pop_front();
+            return Some(FieldMove::ReorderParty { slot });
+        }
         if let Some(&PolicyStep::TeachMove { item, target_slot }) = self.queue.front() {
             let already_knows = hm_move(item).map_or(false, |mv| {
                 state.pokemon.get(target_slot as usize)
@@ -1720,6 +1848,21 @@ impl Policy for DeterministicPolicy {
                 return None;
             }
             return Some(FieldMove::TeachMove { item, target_slot });
+        }
+        if let Some(&PolicyStep::EvolveWithStone { stone, target_slot }) = self.queue.front() {
+            let current = state.pokemon.get(target_slot as usize).map(|p| p.species);
+            match current {
+                // Already evolved (species differs from the stone's input mon) — done. We detect this by
+                // the slot no longer holding an Eevee (the only stone-evolver we use); generalise if
+                // more stone-evolvers are added.
+                Some(sp) if sp != PokemonSpecies::Eevee => {
+                    println!("[policy] EvolveWithStone: slot {target_slot} is now {sp:?} — done");
+                    self.queue.pop_front();
+                    return None;
+                }
+                Some(evolve_from) => return Some(FieldMove::EvolveWithStone { stone, target_slot, evolve_from }),
+                None => { self.queue.pop_front(); return None; }
+            }
         }
         if let Some(&PolicyStep::SolveTrashCans) = self.queue.front() {
             if let Some(puzzle) = &state.trash_cans {
@@ -1734,11 +1877,14 @@ impl Policy for DeterministicPolicy {
         }
         if let Some(&PolicyStep::FlipSwitch { map, at, reveals }) = self.queue.front() {
             if state.map.map == map {
-                // Done once the switch's event fires (the warp itself is always in the static map, so
-                // "is the warp reachable" can't tell flipped from not — check the game event instead).
+                // Done once the passage to `reveals` opens. Rocket Hideout's staircase isn't a gate the
+                // runtime block map exposes, so use its event flag; for switch-gated maps whose blocks we
+                // read live (e.g. the Pokémon Mansion), the flipped gate genuinely changes reachability,
+                // so a reachable warp/connection to `reveals` means the switch is thrown.
                 let done = match reveals {
                     Map::RocketHideoutB1F => state.found_rocket_hideout,
-                    _ => false,
+                    _ => state.map.actions().iter().any(|a| matches!(a.tile,
+                        MetaTile::Warp { to_map, .. } if to_map == reveals)),
                 };
                 if done {
                     println!("[policy] FlipSwitch: {reveals} passage revealed — done");
