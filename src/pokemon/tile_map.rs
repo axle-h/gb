@@ -36,6 +36,10 @@ pub struct MetaTileMap {
     /// the ROM `RocketHideout{2,3}ArrowTilePlayerMovement` tables). The BFS treats stepping onto an
     /// arrow as landing at its destination. Empty for maps without arrow tiles.
     pub spinners: HashMap<Point8, Point8>,
+    /// True when the player can Surf (Soul Badge + a party mon that knows Surf). When set, the BFS
+    /// treats `Water` tiles as passable so routes cross water; the agent mounts Surf at the land↔water
+    /// boundary. Set by `game_state()` after construction (the map builder has no party access).
+    pub can_surf: bool,
 }
 
 /// Arrow-tile → slide-destination tables for the spinner-floor maps (raw map coords), decoded from
@@ -90,7 +94,13 @@ impl MetaTileMap {
                 .filter_map(|t| if let MetaTile::Warp { to_map, to_position } = t { Some((*to_map, *to_position)) } else { None })
                 .collect(),
             connection_targets: meta_tiles.iter()
-                .filter_map(|t| if let MetaTile::Connection { to_map, .. } = t { Some(*to_map) } else { None })
+                .filter_map(|t| match t {
+                    MetaTile::Connection { to_map, .. } => Some(*to_map),
+                    // Water connections (a surfable map edge) are crossings too — surface them so
+                    // `actions()` produces a route the agent can surf across to the connected map.
+                    MetaTile::ConnectionWater(to_map) => Some(*to_map),
+                    _ => None,
+                })
                 .collect(),
             raw_tile_ids: map.metadata.raw_tile_ids.clone(),
             tile_pair_collisions: map.metadata.tile_pair_collisions.clone(),
@@ -102,6 +112,7 @@ impl MetaTileMap {
                 (off(x, y), off(tx, ty))
             }).collect(),
             meta_tiles,
+            can_surf: false,
         }
     }
 
@@ -136,8 +147,17 @@ impl MetaTileMap {
         })
     }
 
-    fn tile_at(&self, point: Point8) -> MetaTile {
+    pub fn tile_at(&self, point: Point8) -> MetaTile {
         self.meta_tiles[point.x as usize + point.y as usize * self.width]
+    }
+
+    /// Bounds-checked `tile_at` — `None` if `point` is off the map.
+    pub fn tile_at_checked(&self, point: Point8) -> Option<MetaTile> {
+        if (point.x as usize) < self.width && (point.y as usize) < self.height {
+            Some(self.meta_tiles[point.x as usize + point.y as usize * self.width])
+        } else {
+            None
+        }
     }
 
     /// Follow the arrow-tile chain from `pos` to the tile the forced slide finally rests on. Returns
@@ -172,7 +192,7 @@ impl MetaTileMap {
             .iter()
             .enumerate()
             .filter_map(|(i, t)| {
-                if !matches!(t, MetaTile::Warp { .. } | MetaTile::Connection { .. }) {
+                if !matches!(t, MetaTile::Warp { .. } | MetaTile::Connection { .. } | MetaTile::ConnectionWater(_)) {
                     return None;
                 }
                 let pos = Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
@@ -225,6 +245,27 @@ impl MetaTileMap {
 
                 let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
 
+                // Intra-map teleporter (the Saffron Gym warp maze): stepping onto `nb` warps the
+                // player to `to_position` on *this same map*. Like a spinner, the player never stops
+                // on the pad — record an edge from `pos` (press `dir`) → the landing tile and continue
+                // the search from there, so routes cross the maze automatically. Routes are recomputed
+                // each tick, so after the warp the follower simply re-plans from the new room. (Regular
+                // inter-map warps stay terminal — handled in the `else` branch below.)
+                if let MetaTile::Warp { to_map, to_position } = tile {
+                    if *to_map == self.map {
+                        let dest = *to_position;
+                        if (dest.x as usize) < self.width
+                            && (dest.y as usize) < self.height
+                            && !dist.contains_key(&dest)
+                        {
+                            dist.insert(dest, d + 1);
+                            came_from.insert(dest, (pos, dir));
+                            queue.push_back(dest);
+                        }
+                        continue;
+                    }
+                }
+
                 if let MetaTile::Jump(jump_dir) = tile {
                     // The player never stands on a Jump tile — they either jump over it
                     // (one button press, two tiles of movement) or are blocked.
@@ -264,7 +305,13 @@ impl MetaTileMap {
                     // walk *through* it, because stepping onto it fires the transition. Not
                     // queueing them keeps routes to a specific warp from crossing (and triggering)
                     // a different warp/connection en route.
-                    if !matches!(tile,
+                    //
+                    // Water is normally terminal too — but when the player can Surf, plain `Water`
+                    // becomes a pass-through node so routes can cross it (the agent mounts Surf at the
+                    // land→water boundary). `ConnectionWater` stays terminal: stepping onto it while
+                    // surfing crosses to the connected map (a crossing target, like `Connection`).
+                    let surfable_water = self.can_surf && matches!(tile, MetaTile::Water);
+                    if surfable_water || !matches!(tile,
                         MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water
                         | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree
                         | MetaTile::Warp { .. } | MetaTile::Connection { .. })
@@ -409,7 +456,11 @@ impl MetaTileMap {
         //    `connection_action(to_map, to_position)`, kept out of this hot path so the common
         //    nearest-crossing behaviour — and the whole-game run's timing — is unchanged.
         for to_map in &self.connection_targets {
-            let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Connection { to_map: connected_map, .. } if connected_map == to_map)) else { continue };
+            let Some((tile, dest)) = nearest(&|t| match t {
+                MetaTile::Connection { to_map: m, .. } => m == to_map,
+                MetaTile::ConnectionWater(m) => m == to_map,
+                _ => false,
+            }) else { continue };
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
 

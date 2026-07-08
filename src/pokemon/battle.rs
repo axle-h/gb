@@ -74,7 +74,10 @@ impl BattleStateReader for MMU {
             BattleType::Wild
         };
 
-        let active_party_slot = self.read_pointer(&pokered_symbols::wBattleMonPartyPos);
+        // wPlayerMonNumber is the party index of the active Pokémon and is updated on a mid-battle
+        // switch (wBattleMonPartyPos is not — it stays at the battle's starting mon, which made a
+        // trained bench mon look like it never came in and the policy re-switch forever).
+        let active_party_slot = self.read_pointer(&pokered_symbols::wPlayerMonNumber);
 
         // wPlayer/EnemyDisabledMove: high nibble = disabled move slot (1-based), low = turn counter.
         // Zero means no move is disabled. Convert to a 0-based slot so the disabled move is excluded

@@ -22,7 +22,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
         ROUTE1_STATE,
         Duration::from_secs(200),
         vec![
-            PolicyStep::GrindUntilLevel { target_level: 100, on_map: Map::Route1 },
+            PolicyStep::GrindUntilLevel { target_level: 100, on_map: Map::Route1, slot: 0 },
         ]
     );
 
@@ -435,6 +435,38 @@ fn can_navigate_to_pewter_city() {
 
     let state = fixture.game_state();
     assert_eq!(state.map.map, Map::PewterCity, "agent should have navigated to Pewter City");
+}
+
+/// Diagnostic: for water maps (Pallet, Route 21, Cinnabar), dump the tile map and the
+/// warps/connections reachable from a land start with `can_surf` OFF vs ON. Confirms the BFS now
+/// routes across water (a water connection appears only when surf is enabled).
+#[test]
+#[ignore]
+fn probe_surf_reachability() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use std::sync::Arc;
+    let gb = GameBoy::dmg(roms::POKERED);
+    for (map, start) in [
+        (Map::PalletTown,     Point8 { x: 12, y: 11 }), // Oak's Lab doorstep (land, south of town)
+        (Map::Route21,        Point8 { x: 8,  y: 3  }), // top land strip
+        (Map::CinnabarIsland, Point8 { x: 18, y: 3  }), // island land near the gym
+    ] {
+        let meta = Arc::new(gb.core().mmu().read_map_metadata(map).unwrap());
+        for can_surf in [false, true] {
+            let cm = CurrentMap { player_position: start, player_direction: PlayerFacingDirection::Down, sprites: vec![], metadata: Arc::clone(&meta), closed_doors: vec![], card_key_locked: false };
+            let mut mt = crate::pokemon::tile_map::MetaTileMap::new(&cm);
+            mt.can_surf = can_surf;
+            let reach: Vec<_> = mt.all_reachable_warps_and_connections().into_iter()
+                .map(|(p, t)| match t {
+                    MetaTile::Warp { to_map, .. } => format!("W:{to_map}@{p}"),
+                    MetaTile::Connection { to_map, .. } => format!("C:{to_map}@{p}"),
+                    MetaTile::ConnectionWater(to_map) => format!("~C:{to_map}@{p}"),
+                    _ => format!("?@{p}"),
+                }).collect();
+            if !can_surf { println!("\n=== {map} start={start} ===\n{}", mt); }
+            println!("  can_surf={can_surf}: reaches {reach:?}");
+        }
+    }
 }
 
 /// Check every Mt Moon B1F/B2F/1F warp_event against how the tile is classified — a warp whose
@@ -1078,14 +1110,1101 @@ fn probe_6f_rare_candy() {
 #[test]
 #[ignore]
 fn probe_party() {
-    let mut fixture = TestFixture::new(include_bytes!("data/post-soul-badge.bin"), Duration::from_mins(1), vec![]);
+    let mut fixture = TestFixture::new(include_bytes!("data/at-saffron-post-silph.bin"), Duration::from_mins(1), vec![]);
+    for _ in 0..60 { fixture.step(); }
     let s = fixture.game_state();
-    println!("=== party ({} members), badges={:?} ===", s.pokemon.len(), s.badges);
+    println!("=== on {} @ {} — party ({}), badges={:?} money=₽{} ===", s.map.map, s.map.player_position, s.pokemon.len(), s.badges, s.money);
+    let w = s.map.width;
+    println!("ALL warps on this map:");
+    for (i, t) in s.map.meta_tiles.iter().enumerate() {
+        if let MetaTile::Warp { to_map, to_position } = t { println!("   ({},{}) -> {to_map} {to_position}", i % w, i / w); }
+    }
+    println!("sprites: {:?}", s.map.sprites.iter().map(|sp| (sp.name, sp.position, sp.hidden)).collect::<Vec<_>>());
+    println!("map:\n{}", s.map);
     for (i, p) in s.pokemon.iter().enumerate() {
         let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}({})", m.name, m.pp)).collect();
         println!("  {i}: {:?} lv{} hp {}/{} types {:?} moves {:?}",
             p.species, p.level, p.current_hp, p.stats.hp, p.types, moves);
     }
+    println!("=== bag ===");
+    for item in s.bag.iter() { println!("  {} ×{}", item.id, item.quantity); }
+    println!("=== reachable warps on {} ===", s.map.map);
+    for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..} | MetaTile::Connection{..})) {
+        println!("   {:?} dest={} route_len={}", a.tile, a.destination, a.route.len());
+    }
+}
+
+/// From `eevee-and-stone.bin` (Eevee lv25 in slot 2 + one Water Stone): use the stone to evolve Eevee →
+/// Vaporeon, then teach Surf (HM03) to it. Verifies slot 2 becomes Vaporeon and knows Surf, then saves
+/// `vaporeon-ready.bin`.
+#[test]
+#[ignore]
+fn probe_evolve_eevee() {
+    let mut fixture = TestFixture::new(include_bytes!("data/eevee-and-stone.bin"), Duration::from_mins(5),
+        vec![
+            PolicyStep::EvolveWithStone { stone: ItemId::WaterStone, target_slot: 2 },
+            PolicyStep::TeachMove { item: ItemId::Hm03Surf, target_slot: 2 },
+        ]);
+    for i in 0..400_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+    }
+    let s = fixture.game_state();
+    for (i, p) in s.pokemon.iter().enumerate() {
+        let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}", m.name)).collect();
+        println!("   {i}: {:?} lv{} moves {:?}", p.species, p.level, moves);
+    }
+    let slot2 = &s.pokemon[2];
+    let is_vaporeon = format!("{:?}", slot2.species) == "Vaporeon";
+    let knows_surf = slot2.moves.iter().flatten().any(|m| format!("{:?}", m.name) == "Surf");
+    println!("slot2 vaporeon={is_vaporeon} knows_surf={knows_surf}");
+    if is_vaporeon && knows_surf {
+        fixture.save_state_named("src/pokemon/data/vaporeon-ready.bin").unwrap();
+        println!(">> saved vaporeon-ready.bin");
+    }
+    assert!(is_vaporeon, "Eevee did not evolve into Vaporeon");
+    assert!(knows_surf, "Vaporeon did not learn Surf");
+}
+
+/// From `vaporeon-ready.bin` (Vaporeon lv25 slot 2, knows Surf): grind it up on a nearby route,
+/// switching it in each wild battle so it earns the XP. Prints every level-up to measure the rate.
+#[test]
+#[ignore]
+fn probe_grind_vaporeon() {
+    let grind_map = Map::Route6;
+    let target = 30u8;
+    let mut fixture = TestFixture::new(include_bytes!("data/vaporeon-ready.bin"), Duration::from_mins(240),
+        vec![
+            // Register the Celadon Pokémon Center so a fainted grind mon can be routed back to heal.
+            PolicyStep::enter(Map::CeladonPokecenter),
+            PolicyStep::enter(Map::CeladonCity),
+            // Celadon → Saffron via the Route-7 gate (the reverse of the outbound crossing).
+            PolicyStep::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
+            PolicyStep::enter(Map::Route7Gate),
+            PolicyStep::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 19, y: 10 }) },
+            PolicyStep::enter(Map::SaffronCity),
+            // Saffron→Route6 lands in a walled north pocket; the real body (with grass) is through the
+            // Route6 gate, same shape as the Route7 crossing.
+            PolicyStep::enter(grind_map),
+            PolicyStep::enter(Map::Route6Gate),
+            PolicyStep::enter(grind_map),
+            PolicyStep::GrindUntilLevel { target_level: target, on_map: grind_map, slot: 2 },
+        ]);
+    let mut last_dump = Point8 { x: 255, y: 255 };
+    let mut last_lv = 0u8;
+    for i in 0..3_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 500 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if s.map.map == grind_map && s.map.player_position != last_dump {
+                    last_dump = s.map.player_position;
+                    let grass = s.map.actions().iter().filter(|a| a.tile == MetaTile::Grass).count();
+                    println!("  Route6 @ {} grass_reachable={grass}", s.map.player_position);
+                }
+            }
+        }
+        if i % 2000 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if let Some(v) = s.pokemon.get(2) {
+                    if v.level != last_lv {
+                        last_lv = v.level;
+                        println!("  step {i}: slot2 {:?} lv{} hp {}/{} @ {}",
+                            v.species, v.level, v.current_hp, v.stats.hp, s.map.map);
+                    }
+                    if v.level >= target { println!(">> reached target lv{target} at step {i}"); break; }
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    let v = &s.pokemon[2];
+    println!("final: slot2 {:?} lv{} on {}", v.species, v.level, s.map.map);
+    if v.level >= target {
+        fixture.save_state_named("src/pokemon/data/vaporeon-grinded.bin").unwrap();
+        println!(">> saved vaporeon-grinded.bin");
+    }
+}
+
+/// Train Vaporeon on the Silph Co trainer gauntlet: from `vaporeon-ready.bin` (Celadon), cross to
+/// Saffron, enter Silph, turn on train-slot mode (Vaporeon = slot 2 switched into every battle), and
+/// walk up floor-by-floor. Line-of-sight grunts auto-trigger and feed Vaporeon XP. Reports how far the
+/// floor navigation gets and Vaporeon's level, so we can see whether the gauntlet is a viable trainer.
+#[test]
+#[ignore]
+fn probe_silph_train() {
+    use crate::pokemon::map::MapSprite as MS;
+    let train = |s: MS| PolicyStep::InteractIfReachable(s);
+    let mut steps = vec![
+        // Stock Super Potions at Celadon Dept 2F first — the battle policy heals the active mon at
+        // <25% HP if it has them, keeping Vaporeon alive across the gauntlet (₽6728 ≈ 9 Super Potions).
+        PolicyStep::enter(Map::CeladonMart1F),
+        PolicyStep::enter(Map::CeladonMart2F),
+        PolicyStep::BuyFromMart { item: crate::pokemon::bag::BagItem::new(ItemId::SuperPotion, 9), map: Map::CeladonMart2F },
+        PolicyStep::enter(Map::CeladonMart1F),
+        PolicyStep::enter(Map::CeladonCity),
+        // Celadon → Saffron via the Route-7 gate (reverse of the outbound crossing).
+        PolicyStep::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
+        PolicyStep::enter(Map::Route7Gate),
+        PolicyStep::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 19, y: 10 }) },
+        PolicyStep::enter(Map::SaffronCity),
+        PolicyStep::enter(Map::SilphCo1F),
+        // Make Vaporeon (slot 2) the lead so it fights — and levels — from the start of every battle;
+        // the battle policy heals it with the Super Potions when it drops below 25% HP.
+        PolicyStep::MovePokemonToFront { slot: 2 },
+    ];
+    // Train each floor's Rocket/Scientist grunts (Silph Workers are non-battle hostages), with a
+    // Pokémon-Center heal excursion after every floor to top up Vaporeon's HP *and* PP (and revive it
+    // if it fainted mid-floor). InteractIfReachable skips any trainer walled off by the teleport maze.
+    // Floors are reached by climbing the stairs from 1F each time (cleared trainers don't re-battle);
+    // 7F is skipped for now (the rival is there — don't feed Vaporeon in under-levelled).
+    let floors: &[(Map, &[MS])] = &[
+        (Map::SilphCo2F, &[MS::SILPHCO2F_SCIENTIST1, MS::SILPHCO2F_SCIENTIST2, MS::SILPHCO2F_ROCKET1, MS::SILPHCO2F_ROCKET2]),
+        (Map::SilphCo3F, &[MS::SILPHCO3F_ROCKET, MS::SILPHCO3F_SCIENTIST]),
+        (Map::SilphCo4F, &[MS::SILPHCO4F_ROCKET1, MS::SILPHCO4F_SCIENTIST, MS::SILPHCO4F_ROCKET2]),
+        (Map::SilphCo5F, &[MS::SILPHCO5F_ROCKET1, MS::SILPHCO5F_SCIENTIST, MS::SILPHCO5F_ROCKET2]),
+        (Map::SilphCo6F, &[MS::SILPHCO6F_ROCKET1, MS::SILPHCO6F_SCIENTIST, MS::SILPHCO6F_ROCKET2]),
+    ];
+    let climb: &[Map] = &[Map::SilphCo2F, Map::SilphCo3F, Map::SilphCo4F, Map::SilphCo5F, Map::SilphCo6F];
+    for (i, (floor, trainers)) in floors.iter().enumerate() {
+        // Climb the stairs from 1F up to this floor (each `enter` walks one flight).
+        for m in &climb[..=i] { steps.push(PolicyStep::enter(*m)); }
+        for &t in *trainers { steps.push(train(t)); }
+        // Heal excursion: elevator → 1F → Saffron → Pokécenter nurse → back into Silph 1F.
+        steps.push(PolicyStep::enter(Map::SilphCoElevator));
+        steps.push(PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 });
+        steps.push(PolicyStep::enter(Map::SaffronCity));
+        steps.push(PolicyStep::enter(Map::SaffronPokecenter));
+        steps.push(PolicyStep::Interact(MS::SAFFRONPOKECENTER_NURSE));
+        steps.push(PolicyStep::enter(Map::SaffronCity));
+        steps.push(PolicyStep::enter(Map::SilphCo1F));
+    }
+    let mut fixture = TestFixture::new(include_bytes!("data/vaporeon-ready.bin"), Duration::from_mins(240), steps);
+    let mut last_lv = 0u8;
+    let mut last_map = Map::CeladonCity;
+    for i in 0..2_500_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 1000 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if let Some(v) = s.pokemon.iter().find(|p| format!("{:?}", p.species) == "Vaporeon") {
+                    if v.level != last_lv || s.map.map != last_map {
+                        last_lv = v.level; last_map = s.map.map;
+                        println!("  step {i}: Vaporeon lv{} hp {}/{} @ {} pos {}",
+                            v.level, v.current_hp, v.stats.hp, s.map.map, s.map.player_position);
+                    }
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    let v = s.pokemon.iter().find(|p| format!("{:?}", p.species) == "Vaporeon").unwrap();
+    println!("final: Vaporeon lv{} exp{} on {} @ {}", v.level, v.experience, s.map.map, s.map.player_position);
+    if v.level >= 28 {
+        fixture.save_state_named("src/pokemon/data/vaporeon-trained.bin").unwrap();
+        println!(">> saved vaporeon-trained.bin (Vaporeon lv{})", v.level);
+    }
+}
+
+/// Diagnostic: from `post-silph-rival.bin` (on 7F, post-rival) ride the elevator to 11F and dump its
+/// tile map, Giovanni's position, every warp/pad + destination, and reachability from the elevator
+/// exit — to plan the route to Giovanni (walled off) and which guards drop the walls.
+#[test]
+#[ignore]
+fn probe_silph11f_dump() {
+    // Load the post-Giovanni state directly and dump 11F reachability (is the president reachable?).
+    let mut fixture = TestFixture::new(include_bytes!("data/post-silph-giovanni.bin"), Duration::from_mins(30), vec![]);
+    for _ in 0..80 { fixture.step(); }
+    let s = fixture.game_state();
+    println!("on {} @ {}", s.map.map, s.map.player_position);
+    println!("{}", s.map);
+    println!("sprites: {:?}", s.map.sprites.iter().filter(|sp| !sp.hidden).map(|sp| (sp.name, sp.position)).collect::<Vec<_>>());
+    println!("Giovanni pos: {:?}", s.map.sprites.iter().find(|sp| sp.name == "Giovanni").map(|sp| (sp.position, sp.hidden)));
+    println!("reachable warp/sprite actions:");
+    for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..} | MetaTile::Sprite(_))) {
+        println!("   {:?} dest={} route_len={}", a.tile, a.destination, a.route.len());
+    }
+    let w = s.map.width;
+    println!("EVERY warp meta-tile (incl. walled-off pads):");
+    for (i, t) in s.map.meta_tiles.iter().enumerate() {
+        if let MetaTile::Warp { to_map, to_position } = t {
+            println!("   ({},{}) -> {to_map} {to_position}", i % w, i / w);
+        }
+    }
+}
+
+/// Diagnostic: get the agent to 11F(6,14) (via pad + Interact-Giovanni, which stalls there), then take
+/// MANUAL button control and probe which moves the game actually allows around the Giovanni trigger
+/// tiles (6,13)/(7,12) — to find a direction the game permits and whether the trigger (curScr→3) fires.
+#[test]
+#[ignore]
+fn probe_11f_manual() {
+    use crate::pokemon::map::MapSprite as MS;
+    let mut steps = vec![
+        PolicyStep::EnterMap { to_map: Map::SilphCo11F, to_position: Some(Point8 { x: 3, y: 2 }) },
+        PolicyStep::InteractIfReachable(MS::SILPHCO11F_ROCKET1),
+    ];
+    for _ in 0..6 { steps.push(PolicyStep::Interact(MS::SILPHCO11F_GIOVANNI)); }
+    let mut fixture = TestFixture::new(include_bytes!("data/post-silph-rival.bin"), Duration::from_mins(60), steps);
+    let read = |gb: &crate::game_boy::GameBoy, a: u16| gb.core().mmu().read(a);
+    // Run the policy until the agent reaches (6,14) and settles there.
+    let mut at = None;
+    for _ in 0..600_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.player_position == (Point8 { x: 6, y: 14 }) { at = Some(()); }
+        }
+        if at.is_some() {
+            // once it's been at (6,14) for a bit, stop the policy loop
+            for _ in 0..200 { fixture.step(); }
+            break;
+        }
+    }
+    let pos = |gb: &mut crate::game_boy::GameBoy, mc: &mut crate::pokemon::map_metadata::MapMetadataCache| {
+        PokemonApi::with_cache(gb, mc).game_state().map(|s| s.map.player_position).unwrap_or(Point8{x:0,y:0})
+    };
+    println!("start manual @ {}", pos(&mut fixture.gb, &mut fixture.map_cache));
+    // What the GAME reads for collision: standing tile + the four in-front screen tiles.
+    let standing = read(&fixture.gb, 0xCF0E);
+    let up    = read(&fixture.gb, 0xC3A0 + 7*20 + 8);
+    let down  = read(&fixture.gb, 0xC3A0 + 11*20 + 8);
+    let left  = read(&fixture.gb, 0xC3A0 + 9*20 + 6);
+    let right = read(&fixture.gb, 0xC3A0 + 9*20 + 10);
+    println!("GAME tiles: standing=0x{standing:02x} up=0x{up:02x} down=0x{down:02x} left=0x{left:02x} right=0x{right:02x}");
+    if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+        let w = s.map.width;
+        let raw = |x: usize, y: usize| s.map.raw_tile_ids[x + y*w];
+        println!("AGENT raw: (6,13)=0x{:02x} (6,14)=0x{:02x} (7,13)=0x{:02x} (6,12)=0x{:02x}", raw(6,13), raw(6,14), raw(7,13), raw(6,12));
+    }
+    // Dump the GAME's on-screen tile grid (wTileMap) around the player — player standing tile is
+    // screen (8,9); rows above are the chamber/trigger. Shows the true 2×2 sub-tile structure.
+    println!("GAME wTileMap rows 5-13, cols 4-12 (player screen col 8):");
+    for sy in 5..14usize {
+        let row: Vec<String> = (4..13usize).map(|sx| format!("{:02x}", read(&fixture.gb, 0xC3A0 + (sy*20 + sx) as u16))).collect();
+        println!("  sy={sy}: {}", row.join(" "));
+    }
+    // Try a sequence of directions, holding each for ~16 frames, logging pos + Giovanni script var.
+    let dirs = [
+        ("Up", JoypadButton::Up), ("Up", JoypadButton::Up),
+        ("Right", JoypadButton::Right), ("Up", JoypadButton::Up), ("Up", JoypadButton::Up),
+        ("Left", JoypadButton::Left), ("Left", JoypadButton::Left), ("Up", JoypadButton::Up),
+    ];
+    for (name, btn) in dirs {
+        for _ in 0..16 {
+            { let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache); api.release_all_buttons(); api.press_button(btn); }
+            fixture.step();
+        }
+        let p = pos(&mut fixture.gb, &mut fixture.map_cache);
+        println!("  after {name}: @ {p} curScr={}", read(&fixture.gb, 0xD659));
+    }
+}
+
+/// Diagnostic: re-fight Giovanni from `post-silph-rival.bin` and densely trace the IMMEDIATE post-battle
+/// window (mode / pos / on-screen text / Giovanni-present) to see whether his flee dialogue+script plays
+/// and where it breaks — he's supposed to vanish on defeat, which would unblock the president.
+#[test]
+#[ignore]
+fn probe_giovanni_flee() {
+    use crate::pokemon::map::MapSprite as MS;
+    let mut fixture = TestFixture::new(include_bytes!("data/post-silph-rival.bin"), Duration::from_mins(60),
+        vec![
+            PolicyStep::EnterMap { to_map: Map::SilphCo11F, to_position: Some(Point8 { x: 3, y: 2 }) },
+            PolicyStep::Interact(MS::SILPHCO11F_GIOVANNI),
+        ]);
+    let read = |gb: &crate::game_boy::GameBoy, a: u16| gb.core().mmu().read(a);
+    let mut fought = false;
+    let mut post = 0u32;
+    let mut last = String::new();
+    for _ in 0..600_000 {
+        fixture.step();
+        let cur_script = read(&fixture.gb, 0xD659);
+        let is_in_battle = read(&fixture.gb, 0xD057);
+        let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+        let in_batt = api.game_state().map(|g| matches!(g.mode, GameMode::TrainerBattle)).unwrap_or(false);
+        if in_batt { fought = true; }
+        if fought && !in_batt {
+            post += 1;
+            if post % 5 == 0 && post < 8000 {
+                let txt = api.on_screen_text(false).unwrap_or_default();
+                if let Ok(s) = api.game_state() {
+                    let gio = s.map.sprites.iter().any(|sp| sp.name == "Giovanni" && !sp.hidden);
+                    let cur = format!("{:?} @ {} gio={gio} curScr={cur_script} inBatt={is_in_battle} st={} txt={:?}",
+                        s.mode, s.map.player_position, fixture.agent.state_debug(), txt.chars().take(30).collect::<String>());
+                    if cur != last { last = cur.clone(); println!("  post{post}: {cur}"); }
+                }
+            }
+            if post > 8000 { break; }
+        }
+    }
+    let s = fixture.game_state();
+    let gio = s.map.sprites.iter().any(|sp| sp.name == "Giovanni" && !sp.hidden);
+    println!("final: gio_present={gio} @ {}", s.map.player_position);
+}
+
+/// Diagnostic: from `post-silph-giovanni.bin`, talk to the Silph President and trace the liberation
+/// dialogue (position / mode / on-screen text) to see where it gets stuck.
+#[test]
+#[ignore]
+fn probe_silph_president() {
+    use crate::pokemon::map::MapSprite as MS;
+    let mut fixture = TestFixture::new(include_bytes!("data/post-silph-giovanni.bin"), Duration::from_mins(60),
+        vec![
+            // The post-battle position (3,13) can't route past Giovanni to the president, but the pad
+            // entry (3,2) can. Reposition via a pad round-trip (11F→7F pocket→11F lands at (3,2)).
+            PolicyStep::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 7 }) },
+            PolicyStep::EnterMap { to_map: Map::SilphCo11F, to_position: Some(Point8 { x: 3, y: 2 }) },
+            PolicyStep::Interact(MS::SILPHCO11F_SILPH_PRESIDENT),
+        ]);
+    let mut last = String::new();
+    for i in 0..200_000 {
+        fixture.step();
+        if i % 100 == 0 {
+            let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+            let txt = api.on_screen_text(false).unwrap_or_default();
+            if let Ok(s) = api.game_state() {
+                let master = s.bag.iter().any(|it| format!("{:?}", it.id) == "MasterBall");
+                let gio = s.map.sprites.iter().any(|sp| sp.name == "Giovanni" && !sp.hidden);
+                let cur = format!("{:?} @ {} gio={gio} txt={:?} master={master}", s.mode, s.map.player_position, txt.chars().take(36).collect::<String>());
+                if cur != last { last = cur.clone(); println!("  {i}: {cur}"); }
+                if master { println!(">> Master Ball obtained at {i}"); break; }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final @ {} map:\n{}", s.map.player_position, s.map);
+    println!("sprites: {:?}", s.map.sprites.iter().filter(|sp| !sp.hidden).map(|sp| (sp.name, sp.position)).collect::<Vec<_>>());
+}
+
+/// From `at-route2.bin` (Diglett's exit pocket on Route 2, walled by Cut trees): cut the trees, then
+/// dump what warps/connections become reachable — to plan the leg south to Viridian.
+#[test]
+#[ignore]
+fn probe_route2_postcut() {
+    let steps = vec![PolicyStep::CutTree { map: Map::Route2 }];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-route2.bin"), Duration::from_mins(10), steps);
+    let mut last = String::new();
+    for i in 0..300_000 {
+        fixture.step();
+        let line = {
+            let mmu = fixture.gb.core().mmu();
+            use crate::pokemon::symbols::pokered_symbols as ps;
+            format!("raw=({},{}) state={}", mmu.read_pointer(&ps::wXCoord), mmu.read_pointer(&ps::wYCoord), fixture.agent.state_debug())
+        };
+        if line != last { if i < 40000 { println!("  {i}: {line}"); } last = line; }
+        if fixture.agent.policy_exhausted() { println!(">> cut done at {i}"); break; }
+    }
+    fixture.gb.save_state_to_file("src/pokemon/data/at-route2-cut.bin").ok();
+    let s = fixture.game_state();
+    println!("on {} @ {}", s.map.map, s.map.player_position);
+    for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..} | MetaTile::Connection{..} | MetaTile::ConnectionWater(_) | MetaTile::CutTree)) {
+        println!("   dest={} route_len={} tile={:?}", a.destination, a.route.len(), a.tile);
+    }
+}
+
+/// Fast-iteration resume from `at-route11.bin` (agent on Route 11, past Vermilion): Diglett's Cave →
+/// Route 2 → Viridian → Route 1 → Pallet → Surf to Cinnabar. Used to debug the western legs.
+#[test]
+#[ignore]
+fn probe_route11_to_cinnabar() {
+    let steps = vec![
+        PolicyStep::enter(Map::DiglettsCaveRoute11),
+        PolicyStep::enter(Map::DiglettsCave),
+        PolicyStep::enter(Map::DiglettsCaveRoute2),
+        PolicyStep::enter(Map::Route2),
+        PolicyStep::CutTree { map: Map::Route2 },     // open the Cut-gated Diglett's pocket
+        PolicyStep::enter(Map::Route2Gate),           // walk south to the mid-Route-2 gate
+        PolicyStep::EnterMap { to_map: Map::Route2, to_position: Some(Point8 { x: 15, y: 39 }) }, // exit gate south
+        PolicyStep::CutTree { map: Map::Route2 },     // more Cut trees on south Route 2
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::Route1),
+        PolicyStep::enter(Map::PalletTown),
+        PolicyStep::enter(Map::Route21),              // Surf south
+        PolicyStep::enter(Map::CinnabarIsland),       // Surf south
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-route11.bin"), Duration::from_mins(90), steps);
+    let mut last = (Map::SaffronGym, Point8 { x: 255, y: 255 });
+    let mut saved_pallet = false;
+    for i in 0..2_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let surf = fixture.gb.core().mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wWalkBikeSurfState);
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  step {i}: {} @ {} surf={surf}", s.map.map, s.map.player_position); }
+                if s.map.map == Map::PalletTown && !saved_pallet {
+                    saved_pallet = true;
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-pallet.bin").ok();
+                    println!("  *** saved at-pallet.bin ***");
+                }
+                if s.map.map == Map::CinnabarIsland {
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-cinnabar.bin").ok();
+                    println!("  *** reached CINNABAR — saved at-cinnabar.bin ***");
+                    break;
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+}
+
+/// From `at-cinnabar.bin`: get the Secret Key from the Pokémon Mansion B1F (it unlocks the gym door),
+/// then beat Blaine in Cinnabar Gym for the Volcano Badge. Saves `post-volcano-badge.bin`.
+#[test]
+#[ignore]
+fn probe_cinnabar_volcano() {
+    use crate::pokemon::badge::Badge;
+    use crate::pokemon::map::MapSprite as MS;
+    let steps = vec![
+        PolicyStep::enter(Map::PokemonMansion1F),
+        // The 1F switch (hidden object at (2,5), face up) toggles the gate blocking the B1F stairs.
+        PolicyStep::FlipSwitch { map: Map::PokemonMansion1F, at: Point8 { x: 2, y: 5 }, reveals: Map::PokemonMansionB1F },
+        PolicyStep::enter(Map::PokemonMansionB1F),
+        PolicyStep::CollectItem(MS::POKEMONMANSIONB1F_SECRET_KEY),
+        PolicyStep::enter(Map::PokemonMansion1F),
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::CinnabarGym),
+        PolicyStep::DefeatGymLeader { leader: MS::CINNABARGYM_BLAINE, badge: Badge::VolcanoBadge },
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-cinnabar.bin"), Duration::from_mins(60), steps);
+    let mut last = (Map::SaffronGym, Point8 { x: 255, y: 255 });
+    for i in 0..2_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  step {i}: {} @ {} badges={:?}", s.map.map, s.map.player_position, s.badges); }
+                if s.badges.contains(Badge::VolcanoBadge) {
+                    fixture.gb.save_state_to_file("src/pokemon/data/post-volcano-badge.bin").ok();
+                    println!("  *** VOLCANO BADGE at step {i} — saved post-volcano-badge.bin ***");
+                    break;
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {} badges={:?}", s.map.map, s.map.player_position, s.badges);
+}
+
+/// Fast-iteration resume from `at-pallet.bin`: Surf south from Pallet → Route 21 → Cinnabar Island.
+/// The final surf crossings; saves `at-cinnabar.bin`.
+#[test]
+#[ignore]
+fn probe_pallet_to_cinnabar() {
+    let steps = vec![
+        PolicyStep::enter(Map::Route21),
+        PolicyStep::enter(Map::CinnabarIsland),
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-pallet.bin"), Duration::from_mins(30), steps);
+    let mut last = (Map::SaffronGym, Point8 { x: 255, y: 255 });
+    for i in 0..1_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 100 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let surf = fixture.gb.core().mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wWalkBikeSurfState);
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  step {i}: {} @ {} surf={surf}", s.map.map, s.map.player_position); }
+                if s.map.map == Map::CinnabarIsland {
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-cinnabar.bin").ok();
+                    println!("  *** reached CINNABAR — saved at-cinnabar.bin ***");
+                    break;
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+    if s.map.map == Map::CinnabarIsland {
+        fixture.gb.save_state_to_file("src/pokemon/data/at-cinnabar.bin").ok();
+        println!("saved at-cinnabar.bin");
+    }
+    assert_eq!(s.map.map, Map::CinnabarIsland, "should have surfed to Cinnabar");
+}
+
+/// Fast-iteration resume from `at-route2-south.bin` (south of the Route 2 gate): cut the remaining trees,
+/// then Viridian → Route 1 → Pallet → Surf to Cinnabar. Validates the final legs quickly.
+#[test]
+#[ignore]
+fn probe_route2south_to_cinnabar() {
+    let steps = vec![
+        PolicyStep::CutTree { map: Map::Route2 },
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::Route1),
+        PolicyStep::enter(Map::PalletTown),
+        PolicyStep::enter(Map::Route21),
+        PolicyStep::enter(Map::CinnabarIsland),
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-route2-south.bin"), Duration::from_mins(60), steps);
+    let mut last = (Map::SaffronGym, Point8 { x: 255, y: 255 });
+    let mut saved_pallet = false;
+    for i in 0..1_500_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let surf = fixture.gb.core().mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wWalkBikeSurfState);
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  step {i}: {} @ {} surf={surf}", s.map.map, s.map.player_position); }
+                if s.map.map == Map::PalletTown && !saved_pallet {
+                    saved_pallet = true;
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-pallet.bin").ok();
+                    println!("  *** saved at-pallet.bin ***");
+                }
+                if s.map.map == Map::CinnabarIsland {
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-cinnabar.bin").ok();
+                    println!("  *** reached CINNABAR — saved at-cinnabar.bin ***");
+                    break;
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+}
+
+/// Tick-by-tick trace of the Route 6 gate crossing to see why the warp won't fire.
+#[test]
+#[ignore]
+fn probe_route6_gate_trace() {
+    use crate::pokemon::symbols::pokered_symbols as ps;
+    {
+        use crate::pokemon::map_metadata::MapMetadataReader;
+        let gb = GameBoy::dmg(roms::POKERED);
+        for gate in [Map::Route6Gate, Map::Route2Gate] {
+            let meta = gb.core().mmu().read_map_metadata(gate).unwrap();
+            let dims = meta.dimensions();
+            let w = dims.full_width();
+            println!("{gate} {}x{} north_extra={} west_extra={}", w, dims.full_height(), dims.north_extra, dims.west_extra);
+            for (i, t) in meta.meta_tiles_base.iter().enumerate() {
+                if let MetaTile::Warp { to_map, to_position } = t {
+                    println!("   gate warp @({},{}) -> {to_map} {to_position}", i % w, i / w);
+                }
+            }
+        }
+    }
+    let steps = vec![
+        PolicyStep::enter(Map::Route6Gate),
+        PolicyStep::EnterMap { to_map: Map::Route6, to_position: Some(Point8 { x: 10, y: 7 }) },
+        PolicyStep::enter(Map::VermilionCity),
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-route6-apron.bin"), Duration::from_mins(5), steps);
+    let mut last = String::new();
+    for i in 0..8000 {
+        fixture.step();
+        let (map, rx, ry, facing) = {
+            let mmu = fixture.gb.core().mmu();
+            let m = mmu.read_pointer(&ps::wCurMap);
+            let rx = mmu.read_pointer(&ps::wXCoord);
+            let ry = mmu.read_pointer(&ps::wYCoord);
+            let f = mmu.read_pointer(&ps::wPlayerDirection);
+            (m, rx, ry, f)
+        };
+        let st = fixture.agent.state_debug();
+        let line = format!("map={map} raw=({rx},{ry}) facing={facing} state={st}");
+        if line != last {
+            println!("  {i}: {line}");
+            if map == 73 && !last.contains("map=73") {
+                let s = fixture.game_state();
+                println!("     -- Route6Gate actions --");
+                for a in s.map.actions().iter() {
+                    println!("     dest={} route_len={} tile={:?}", a.destination, a.route.len(), a.tile);
+                }
+            }
+            last = line;
+        }
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at {i}"); break; }
+    }
+}
+
+/// Fast-iteration resume from `at-route6-apron.bin` (agent stuck in Route 6's north apron, sealed from
+/// the south by the Route 6 gate building). Threads the gate, then continues to Pallet + Surfs to
+/// Cinnabar. Used to debug the overland gate-crossings without re-running the Saffron→Route6 leg.
+#[test]
+#[ignore]
+fn probe_route6_to_cinnabar() {
+    let steps = vec![
+        // Thread the Route 6 gate: apron → gate building → exit its SOUTH door onto Route 6 proper.
+        // Route6Gate's south door statically resolves to Route6 (17,13), so target that to pick it
+        // (the running game then does the correct runtime LAST_MAP warp to just south of the gate).
+        PolicyStep::enter(Map::Route6Gate),
+        PolicyStep::EnterMap { to_map: Map::Route6, to_position: Some(Point8 { x: 10, y: 7 }) },
+        PolicyStep::enter(Map::VermilionCity),
+        PolicyStep::enter(Map::Route11),
+        PolicyStep::enter(Map::DiglettsCaveRoute11), // Route 11 → cave entrance room
+        PolicyStep::enter(Map::DiglettsCave),        // → main cave
+        PolicyStep::enter(Map::DiglettsCaveRoute2),  // → Route 2 entrance room
+        PolicyStep::enter(Map::Route2),
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::Route1),
+        PolicyStep::enter(Map::PalletTown),
+        PolicyStep::enter(Map::Route21),
+        PolicyStep::enter(Map::CinnabarIsland),
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-route6-apron.bin"), Duration::from_mins(90), steps);
+    let mut last = (Map::SaffronGym, Point8 { x: 255, y: 255 });
+    let mut saved_pallet = false;
+    for i in 0..2_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let surf = fixture.gb.core().mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wWalkBikeSurfState);
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  step {i}: {} @ {} surf={surf}", s.map.map, s.map.player_position); }
+                if s.map.map == Map::PalletTown && !saved_pallet {
+                    saved_pallet = true;
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-pallet.bin").ok();
+                    println!("  *** saved at-pallet.bin ***");
+                }
+                if s.map.map == Map::CinnabarIsland {
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-cinnabar.bin").ok();
+                    println!("  *** reached CINNABAR — saved at-cinnabar.bin ***");
+                    break;
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+}
+
+/// From `post-marsh-badge.bin` (Saffron), trek overland to Pallet Town, then Surf south down Route 21
+/// to Cinnabar Island. Exercises the new Surf pathfinding: Pallet→Route21 and Route21→Cinnabar are
+/// water connections crossed by mounting Surf (Vaporeon knows it). Saves `at-pallet.bin` on the way and
+/// `at-cinnabar.bin` on arrival.
+#[test]
+#[ignore]
+fn probe_saffron_to_cinnabar() {
+    let steps = vec![
+        // The fixture is deep in the gym maze — thread back out to Saffron City first.
+        PolicyStep::enter(Map::SaffronCity),
+        // Saffron → Vermilion: Route 6 is split by a gate building; thread it (exit its south door,
+        // which resolves to Route6 (10,7)).
+        PolicyStep::enter(Map::Route6),
+        PolicyStep::enter(Map::Route6Gate),
+        PolicyStep::EnterMap { to_map: Map::Route6, to_position: Some(Point8 { x: 10, y: 7 }) },
+        PolicyStep::enter(Map::VermilionCity),
+        // Vermilion → Route 2 via Diglett's Cave (3 maps; the shortcut avoids Mt Moon).
+        PolicyStep::enter(Map::Route11),
+        PolicyStep::enter(Map::DiglettsCaveRoute11),
+        PolicyStep::enter(Map::DiglettsCave),
+        PolicyStep::enter(Map::DiglettsCaveRoute2),
+        PolicyStep::enter(Map::Route2),
+        // Route 2 is Cut-gated on both sides of its mid-route gate — cut, thread the gate, cut again.
+        PolicyStep::CutTree { map: Map::Route2 },
+        PolicyStep::enter(Map::Route2Gate),
+        PolicyStep::EnterMap { to_map: Map::Route2, to_position: Some(Point8 { x: 15, y: 39 }) },
+        PolicyStep::CutTree { map: Map::Route2 },
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::Route1),
+        PolicyStep::enter(Map::PalletTown),
+        // Surf south: Pallet → Route 21 → Cinnabar Island (both water connections).
+        PolicyStep::enter(Map::Route21),
+        PolicyStep::enter(Map::CinnabarIsland),
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/post-marsh-badge.bin"), Duration::from_mins(120), steps);
+    let mut last = (Map::SaffronGym, Point8 { x: 255, y: 255 });
+    let mut saved_pallet = false;
+    let mut surfed = false;
+    for i in 0..3_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let surf = fixture.gb.core().mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wWalkBikeSurfState);
+                if surf == 2 { surfed = true; }
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  step {i}: {} @ {} surf={surf}", s.map.map, s.map.player_position); }
+                if s.map.map == Map::PalletTown && !saved_pallet {
+                    saved_pallet = true;
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-pallet.bin").ok();
+                    println!("  *** saved at-pallet.bin ***");
+                }
+                if s.map.map == Map::CinnabarIsland {
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-cinnabar.bin").ok();
+                    println!("  *** reached CINNABAR — saved at-cinnabar.bin ***");
+                    break;
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+    assert_eq!(s.map.map, Map::CinnabarIsland, "should have surfed to Cinnabar Island");
+    assert!(surfed, "should have mounted Surf (surf state 2) at some point");
+}
+
+/// From `at-saffron-post-silph.bin` (Saffron liberated + healed after beating Giovanni), enter the
+/// Saffron Gym and beat Sabrina for the Marsh Badge. The gym is a 3×3 grid of rooms joined only by
+/// teleport pads (intra-map warps); the agent solves the maze automatically because `bfs_from_player`
+/// now routes *through* self-referential warp tiles (like arrow/spinner tiles). Saves
+/// `post-marsh-badge.bin`.
+#[test]
+#[ignore]
+fn probe_saffron_gym_marsh_badge() {
+    use crate::pokemon::badge::Badge;
+    use crate::pokemon::map::MapSprite as MS;
+    let steps = vec![
+        PolicyStep::enter(Map::SaffronGym),
+        PolicyStep::DefeatGymLeader { leader: MS::SAFFRONGYM_SABRINA, badge: Badge::MarshBadge },
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/at-saffron-post-silph.bin"), Duration::from_mins(30), steps);
+    let mut last = (Map::CeladonCity, Point8 { x: 255, y: 255 });
+    for i in 0..600_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> policy exhausted at step {i}"); break; }
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  step {i}: {} @ {}", s.map.map, s.map.player_position); }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("final: map={} @ {} party0 lv{} MarshBadge={}",
+        s.map.map, s.map.player_position,
+        s.pokemon.get(0).map(|p| p.level).unwrap_or(0),
+        s.badges.contains(Badge::MarshBadge));
+    assert!(s.badges.contains(Badge::MarshBadge), "did not obtain the Marsh Badge");
+    fixture.gb.save_state_to_file("src/pokemon/data/post-marsh-badge.bin").ok();
+}
+
+/// From `post-silph-giovanni.bin` (11F), thread the pads back down out of Silph to Saffron, heal at the
+/// Pokécenter, and buy a stack of Super Potions for the Sabrina fight. Saves `at-saffron-post-silph.bin`.
+#[test]
+#[ignore]
+fn probe_exit_silph_to_saffron() {
+    use crate::pokemon::map::MapSprite as MS;
+    let steps = vec![
+        // Talk to the Silph President (11F (7,5)) first — this is what liberates Silph AND makes the
+        // Rockets leave Saffron (and hands over the Master Ball); without it the Saffron Gym door stays
+        // blocked by a Rocket. Then thread the pads back out.
+        PolicyStep::Interact(MS::SILPHCO11F_SILPH_PRESIDENT),
+        // 11F → 7F rival pocket (via the (3,2) pad) → 3F(11,11) (via the pocket's (5,3) pad) → elevator.
+        PolicyStep::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 7 }) },
+        PolicyStep::EnterMap { to_map: Map::SilphCo3F, to_position: Some(Point8 { x: 11, y: 11 }) },
+        PolicyStep::enter(Map::SilphCoElevator),
+        PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 },
+        PolicyStep::enter(Map::SaffronCity),
+        PolicyStep::enter(Map::SaffronPokecenter),
+        PolicyStep::Interact(MS::SAFFRONPOKECENTER_NURSE),
+        PolicyStep::enter(Map::SaffronCity),
+    ];
+    let mut fixture = TestFixture::new(include_bytes!("data/post-silph-giovanni.bin"), Duration::from_mins(90), steps);
+    let mut last = Map::CeladonCity;
+    for i in 0..1_500_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 500 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if s.map.map != last { last = s.map.map; println!("  step {i}: @ {}", s.map.map); }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("=== on {} @ {} money=₽{} ===", s.map.map, s.map.player_position, s.money);
+    for (i, p) in s.pokemon.iter().enumerate() { println!("  {i}: {:?} lv{} hp {}/{}", p.species, p.level, p.current_hp, p.stats.hp); }
+    if s.map.map == Map::SaffronCity && s.pokemon[0].current_hp == s.pokemon[0].stats.hp {
+        fixture.save_state_named("src/pokemon/data/at-saffron-post-silph.bin").unwrap();
+        println!(">> saved at-saffron-post-silph.bin (healed)");
+    }
+}
+
+/// From `post-silph-rival.bin` (7F rival pocket, Venusaur lv50 lead / Vaporeon lv32), ride the pocket's
+/// pad up to 11F(3,2) and fight Giovanni — his Ground/Rock team is 2–4× weak to Venusaur's Grass and
+/// Vaporeon's Surf. Reports the outcome and saves `post-silph-giovanni.bin` on a win.
+#[test]
+#[ignore]
+fn probe_silph_giovanni() {
+    use crate::pokemon::map::MapSprite as MS;
+    // Giovanni's scripted battle only fires when the player STANDS ON 11F(6,13)/(7,12) — talking to him
+    // does nothing, and the after-battle script is what liberates Saffron. Rocket 1 sits in the path and
+    // interrupts the single-shot Interact, so clear it first, then walk into the Giovanni trigger (the
+    // route to his front (6,10) passes through (6,13)), then talk to the freed President for the liberation.
+    // `Interact` is single-shot (pops when it issues the walk), so a battle/route-abort mid-walk leaves
+    // it consumed. Queue MANY Giovanni interacts so one fires while the agent is in position — walking
+    // toward Giovanni's front (6,10) steps through the trigger tile (6,13) and starts his scripted battle
+    // (whose after-script liberates Saffron). Then many President interacts (they WAIT while unreachable,
+    // firing once Giovanni moves aside) to collect the Master Ball.
+    let mut steps = vec![
+        PolicyStep::EnterMap { to_map: Map::SilphCo11F, to_position: Some(Point8 { x: 3, y: 2 }) },
+        PolicyStep::InteractIfReachable(MS::SILPHCO11F_ROCKET1),
+    ];
+    for _ in 0..14 { steps.push(PolicyStep::Interact(MS::SILPHCO11F_GIOVANNI)); }
+    let mut fixture = TestFixture::new(include_bytes!("data/post-silph-rival.bin"), Duration::from_mins(120), steps);
+    let read = |gb: &crate::game_boy::GameBoy, a: u16| gb.core().mmu().read(a);
+    let mut last = String::new();
+    let mut max_script = 0u8;
+    let mut done_at = None;
+    for i in 0..2_000_000 {
+        fixture.step();
+        let cur_script = read(&fixture.gb, 0xD659);
+        max_script = max_script.max(cur_script);
+        // The whole Giovanni fight + liberation is done once his after-battle script (curScr=5) has run
+        // to completion (back to 0) in the overworld — that's when TeamRocketLeavesScript frees Saffron.
+        if max_script >= 5 && cur_script == 0 && done_at.is_none() {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if matches!(s.mode, GameMode::Overworld) { done_at = Some(i); }
+            }
+        }
+        if let Some(d) = done_at { if i > d + 600 { break; } }
+        if i % (if i > 5500 { 30 } else { 300 }) == 0 {
+            let st = fixture.agent.state_debug();
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let cur = format!("{:?} @ {} curScr={cur_script} maxScr={max_script} st={st}", s.mode, s.map.player_position);
+                if cur != last { last = cur.clone(); println!("  step {i}: {cur}"); }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    let beat = read(&fixture.gb, 0xD838); // wEventFlags byte holding EVENT_BEAT_SILPH_CO_GIOVANNI
+    println!("=== on {} @ {} maxScript={max_script} eventByte=0x{beat:02x} ===", s.map.map, s.map.player_position);
+    for (i, p) in s.pokemon.iter().enumerate() { println!("  {i}: {:?} lv{} hp {}/{}", p.species, p.level, p.current_hp, p.stats.hp); }
+    if max_script >= 5 {
+        fixture.save_state_named("src/pokemon/data/post-silph-giovanni.bin").unwrap();
+        println!(">> saved post-silph-giovanni.bin (Giovanni BEATEN + Saffron liberated)");
+    }
+}
+
+/// Diagnostic: climb to 7F and dump its tile map, the Rival's position, every warp/teleport-pad (with
+/// destination + reachability), and the reachable action set from the stairs entry — to plan the
+/// teleport-maze route to the Rival (unreachable by walking from the entry).
+#[test]
+#[ignore]
+fn probe_silph7f_dump() {
+    let mut steps = vec![];
+    for m in [Map::SilphCo2F, Map::SilphCo3F, Map::SilphCo4F, Map::SilphCo5F, Map::SilphCo6F, Map::SilphCo7F] {
+        steps.push(PolicyStep::enter(m));
+    }
+    let mut fixture = TestFixture::new(include_bytes!("data/vaporeon-trained.bin"), Duration::from_mins(30), steps);
+    for _ in 0..400_000 {
+        fixture.step();
+        let cur = fixture.gb.core().mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wCurMap);
+        if cur == 0xE9 && fixture.agent.policy_exhausted() { break; } // SilphCo7F id 0xE9-ish; also stop on exhaust
+        if fixture.agent.policy_exhausted() { break; }
+    }
+    for _ in 0..80 { fixture.step(); }
+    let s = fixture.game_state();
+    println!("on {} @ {}", s.map.map, s.map.player_position);
+    println!("{}", s.map);
+    println!("sprites: {:?}", s.map.sprites.iter().filter(|sp| !sp.hidden).map(|sp| (sp.name, sp.position)).collect::<Vec<_>>());
+    println!("Rival raw pos: {:?}", s.map.sprites.iter().find(|sp| sp.name == "Rival").map(|sp| (sp.position, sp.hidden)));
+    println!("reachable warp/sprite actions:");
+    for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..} | MetaTile::Sprite(_))) {
+        println!("   {:?} dest={} route_len={}", a.tile, a.destination, a.route.len());
+    }
+    println!("ALL warps/connections (reachable or not):");
+    for (p, t) in s.map.all_reachable_warps_and_connections() {
+        println!("   {p} -> {t:?}");
+    }
+    // Teleport-pad tiles ($58/$20/$43) anywhere on the map.
+    let w = s.map.width;
+    print!("teleport-pad cells:");
+    for (i, &t) in s.map.raw_tile_ids.iter().enumerate() {
+        if t == 0x58 || t == 0x20 || t == 0x43 { print!(" ({},{})=0x{:02x}", i % w, i / w, t); }
+    }
+    println!();
+    println!("EVERY warp meta-tile (incl. walled-off pads):");
+    for (i, t) in s.map.meta_tiles.iter().enumerate() {
+        if let MetaTile::Warp { to_map, to_position } = t {
+            println!("   ({},{}) -> {to_map} {to_position}", i % w, i / w);
+        }
+    }
+}
+
+/// From `vaporeon-trained.bin` (Silph 1F, Vaporeon lv32 lead + Venusaur lv48), climb to 7F and fight
+/// the rival. Vaporeon's Surf hard-counters the rival's Charizard ace (Fire/Flying); with Venusaur as
+/// the second body the two-mon team may already clear the fight that lone Venusaur lost. Reports the
+/// party after, and whether the rival was beaten (7F leads to the Card-Key doors / Lapras beyond).
+#[test]
+#[ignore]
+fn probe_silph_7f_rival() {
+    use crate::pokemon::map::MapSprite as MS;
+    // The rival (7F (3,7)) is in a pocket the stairs entry can't reach; it's served by the teleport pad
+    // 7F(5,3), whose partner is 3F(11,11). So climb to 3F, step on the 3F(11,11) pad (EnterMap → 7F
+    // landing at (5,3)), which drops us in the rival's pocket, then walk into the rival.
+    let mut steps = vec![
+        // Lead with Venusaur (lv49, well above the rival's team) so it sweeps; Vaporeon (slot 1 after
+        // this) comes in as the second body / Charizard answer. In vaporeon-trained.bin the party is
+        // [Vaporeon, Venusaur, Pidgey], so Venusaur is slot 1.
+        PolicyStep::MovePokemonToFront { slot: 1 },
+        PolicyStep::enter(Map::SilphCo2F),
+        PolicyStep::enter(Map::SilphCo3F),
+        PolicyStep::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 3 }) },
+        PolicyStep::Interact(MS::SILPHCO7F_RIVAL),
+    ];
+    let _ = &steps;
+    let mut fixture = TestFixture::new(include_bytes!("data/vaporeon-trained.bin"), Duration::from_mins(120), steps);
+    let mut last = (Map::CeladonCity, GameMode::Overworld, 0u8);
+    let mut fought = false;
+    let mut battle_ended_seen = false;
+    // Keep stepping past queue-exhaustion so the rival battle (triggered after Interact pops) fully
+    // resolves. Stop once we've seen a battle and then returned to the overworld (win or black-out).
+    for i in 0..1_500_000 {
+        fixture.step();
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let in_batt = matches!(s.mode, GameMode::TrainerBattle);
+                if in_batt { fought = true; }
+                if fought && !in_batt && s.mode == GameMode::Overworld { battle_ended_seen = true; }
+                let vhp = s.pokemon.get(0).map(|p| p.current_hp).unwrap_or(0) as u8;
+                let key = (s.map.map, s.mode, vhp.min(1));
+                if key != last {
+                    last = key;
+                    println!("  step {i}: @ {} mode={:?} lead_hp={}", s.map.map, s.mode, s.pokemon.get(0).map(|p| p.current_hp).unwrap_or(0));
+                }
+                if battle_ended_seen && s.mode == GameMode::Overworld {
+                    // give it a moment to settle, then stop
+                    println!(">> battle resolved by step {i}");
+                    break;
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("=== after rival attempt (fought={fought}) on {} ===", s.map.map);
+    for (i, p) in s.pokemon.iter().enumerate() {
+        println!("  {i}: {:?} lv{} hp {}/{}", p.species, p.level, p.current_hp, p.stats.hp);
+    }
+    // A win = still on a Silph floor with at least one mon standing (a loss black-outs to a Pokécenter).
+    let won = matches!(s.map.map, Map::SilphCo7F) && s.pokemon.iter().any(|p| p.current_hp > 0);
+    println!("RIVAL BEATEN: {won}");
+    if won {
+        fixture.save_state_named("src/pokemon/data/post-silph-rival.bin").unwrap();
+        println!(">> saved post-silph-rival.bin");
+    }
+}
+
+/// Test whether the Silph Co 9F "Nurse" heals the party (like a Pokémon Center) and is reachable —
+/// if so it's a free in-building heal point for training. Damages Vaporeon on 2F, then routes to 9F
+/// and talks to the nurse; logs HP before/after.
+#[test]
+#[ignore]
+fn probe_silph_9f_nurse() {
+    use crate::pokemon::map::MapSprite as MS;
+    let mut fixture = TestFixture::new(include_bytes!("data/vaporeon-in-silph.bin"), Duration::from_mins(40),
+        vec![
+            PolicyStep::SetTrainSlot(Some(2)),
+            PolicyStep::InteractIfReachable(MS::SILPHCO2F_SCIENTIST1),
+            PolicyStep::InteractIfReachable(MS::SILPHCO2F_ROCKET1),
+            PolicyStep::SetTrainSlot(None),
+            PolicyStep::enter(Map::SilphCo9F),
+            PolicyStep::Interact(MS::SILPHCO9F_NURSE),
+        ]);
+    let mut last = (0u8, 0u16, Map::CeladonCity);
+    for i in 0..800_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 300 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if let Some(v) = s.pokemon.get(2) {
+                    let cur = (v.level, v.current_hp, s.map.map);
+                    if cur != last { last = cur;
+                        println!("  step {i}: Vaporeon lv{} hp {}/{} @ {} pos {}", v.level, v.current_hp, v.stats.hp, s.map.map, s.map.player_position);
+                    }
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    let v = &s.pokemon[2];
+    println!("final: Vaporeon hp {}/{} on {}", v.current_hp, v.stats.hp, s.map.map);
+}
+
+/// Fast iteration of the Silph floor-training from `vaporeon-in-silph.bin` (already on 2F with 9 Super
+/// Potions), skipping the ~3000-step Celadon→Silph prefix. Logs Vaporeon HP + Super Potion count so we
+/// can see whether the battle-heal keeps it alive across floors.
+///
+/// Test a Pokémon-Center heal excursion between floors (restores HP *and* PP, unlike potions): from
+/// `vaporeon-in-silph.bin` train 2F, ride the elevator out to Saffron, heal at the Pokécenter, climb
+/// back up, and train 3F. Verifies the excursion restores Vaporeon and the loop doesn't stall.
+#[test]
+#[ignore]
+fn probe_silph_heal_loop() {
+    use crate::pokemon::map::MapSprite as MS;
+    // Elevator-out → Saffron Pokécenter heal → back into Silph 1F. `panel (3,0)` / `floor 0` = 1F.
+    let heal_excursion = || vec![
+        PolicyStep::enter(Map::SilphCoElevator),
+        PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 },
+        PolicyStep::enter(Map::SaffronCity),
+        PolicyStep::enter(Map::SaffronPokecenter),
+        PolicyStep::Interact(MS::SAFFRONPOKECENTER_NURSE),
+        PolicyStep::enter(Map::SaffronCity),
+        PolicyStep::enter(Map::SilphCo1F),
+    ];
+    let mut steps = vec![PolicyStep::MovePokemonToFront { slot: 2 }];
+    for s in [MS::SILPHCO2F_SCIENTIST1, MS::SILPHCO2F_SCIENTIST2, MS::SILPHCO2F_ROCKET1, MS::SILPHCO2F_ROCKET2] {
+        steps.push(PolicyStep::InteractIfReachable(s));
+    }
+    steps.extend(heal_excursion());
+    steps.push(PolicyStep::enter(Map::SilphCo2F));
+    steps.push(PolicyStep::enter(Map::SilphCo3F));
+    for s in [MS::SILPHCO3F_ROCKET, MS::SILPHCO3F_SCIENTIST] { steps.push(PolicyStep::InteractIfReachable(s)); }
+    steps.extend(heal_excursion());
+    let mut fixture = TestFixture::new(include_bytes!("data/vaporeon-in-silph.bin"), Duration::from_mins(90), steps);
+    let vap = |s: &GameState| s.pokemon.iter().find(|p| format!("{:?}", p.species) == "Vaporeon").cloned();
+    let mut last = (0u8, 0u16, Map::CeladonCity);
+    for i in 0..2_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 500 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if let Some(v) = vap(&s) {
+                    let surf_pp = v.moves.iter().flatten().find(|m| format!("{:?}", m.name) == "Surf").map(|m| m.pp).unwrap_or(0);
+                    let cur = (v.level, v.current_hp, s.map.map);
+                    if cur != last {
+                        last = cur;
+                        println!("  step {i}: Vaporeon lv{} hp {}/{} SurfPP={surf_pp} @ {}", v.level, v.current_hp, v.stats.hp, s.map.map);
+                    }
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    let v = vap(&s).unwrap();
+    let surf_pp = v.moves.iter().flatten().find(|m| format!("{:?}", m.name) == "Surf").map(|m| m.pp).unwrap_or(0);
+    println!("final: Vaporeon lv{} hp {}/{} SurfPP={surf_pp} on {}", v.level, v.current_hp, v.stats.hp, s.map.map);
+}
+
+#[test]
+#[ignore]
+fn probe_silph_train_fast() {
+    use crate::pokemon::map::MapSprite as MS;
+    let train = |s: MS| PolicyStep::InteractIfReachable(s);
+    // Make Vaporeon (slot 2) the lead so it fights — and levels — from the start of every battle;
+    // no in-battle switch-in needed.
+    let mut steps = vec![PolicyStep::MovePokemonToFront { slot: 2 }];
+    for s in [MS::SILPHCO2F_SCIENTIST1, MS::SILPHCO2F_SCIENTIST2, MS::SILPHCO2F_ROCKET1, MS::SILPHCO2F_ROCKET2] { steps.push(train(s)); }
+    steps.push(PolicyStep::enter(Map::SilphCo3F));
+    for s in [MS::SILPHCO3F_ROCKET, MS::SILPHCO3F_SCIENTIST] { steps.push(train(s)); }
+    steps.push(PolicyStep::enter(Map::SilphCo4F));
+    for s in [MS::SILPHCO4F_ROCKET1, MS::SILPHCO4F_SCIENTIST, MS::SILPHCO4F_ROCKET2] { steps.push(train(s)); }
+    let mut fixture = TestFixture::new(include_bytes!("data/vaporeon-in-silph.bin"), Duration::from_mins(60), steps);
+    let vap = |s: &GameState| s.pokemon.iter().find(|p| format!("{:?}", p.species) == "Vaporeon").cloned();
+    let mut last = (0u8, 0u8, 0u16, Map::CeladonCity);
+    for i in 0..1_500_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
+        if i % 300 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let sp = s.bag.iter().find(|it| it.id == ItemId::SuperPotion).map(|it| it.quantity).unwrap_or(0);
+                if let Some(v) = vap(&s) {
+                    let cur = (v.level, sp, v.current_hp, s.map.map);
+                    if cur != last {
+                        last = cur;
+                        println!("  step {i}: Vaporeon lv{} hp {}/{} superpotions={sp} @ {} (party0={:?})",
+                            v.level, v.current_hp, v.stats.hp, s.map.map, s.pokemon.get(0).map(|p| p.species));
+                    }
+                }
+            }
+        }
+    }
+    let s = fixture.game_state();
+    let v = vap(&s).unwrap();
+    println!("final: Vaporeon lv{} exp{} hp {}/{} on {}", v.level, v.experience, v.current_hp, v.stats.hp, s.map.map);
 }
 
 /// Diagnostic: from `silph-card-key.bin` (in the 5F Card Key pocket), step out via the (9,15) pad to
@@ -1094,26 +2213,80 @@ fn probe_party() {
 #[test]
 #[ignore]
 fn probe_silph_post_cardkey() {
-    let mut fixture = TestFixture::new(include_bytes!("data/silph-card-key.bin"), Duration::from_mins(40),
-        vec![PolicyStep::enter(Map::SilphCo9F), PolicyStep::enter(Map::SilphCoElevator)]);
+    let target = Map::SaffronCity;
+    let mut fixture = TestFixture::new(include_bytes!("data/silph-card-key.bin"), Duration::from_mins(90),
+        vec![
+            // Exit Silph → Saffron.
+            PolicyStep::enter(Map::SilphCo9F), PolicyStep::enter(Map::SilphCoElevator),
+            PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 }, // 1F
+            PolicyStep::enter(Map::SaffronCity),
+            // Saffron → Celadon through the Route-7 gate. The plain Saffron→Route7 connection lands in a
+            // lower pocket sealed off from the gate by one-way ledges, so cross next to the east gate
+            // door (ROM (19,10), the tile just east of the gate warp).
+            PolicyStep::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 19, y: 10 }) },
+            PolicyStep::enter(Map::Route7Gate),
+            PolicyStep::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
+            PolicyStep::enter(Map::CeladonCity),
+            // Grab the free Eevee from the Celadon Mansion roof house. Use the BACK entrance (Celadon
+            // (24,3) → 1F (4,0)); the front door (24,9)→(4,11) is the dead-end condos. The back door
+            // reaches the stairwell that climbs to the roof.
+            PolicyStep::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
+            PolicyStep::enter(Map::CeladonMansion2F),
+            PolicyStep::enter(Map::CeladonMansion3F),
+            PolicyStep::enter(Map::CeladonMansionRoof),
+            PolicyStep::enter(Map::CeladonMansionRoofHouse),
+            PolicyStep::CollectItem(crate::pokemon::map::MapSprite::CELADONMANSION_ROOF_HOUSE_EEVEE_POKEBALL),
+            PolicyStep::enter(Map::CeladonMansionRoof),
+            PolicyStep::enter(Map::CeladonMansion3F),
+            PolicyStep::enter(Map::CeladonMansion2F),
+            PolicyStep::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
+            PolicyStep::enter(Map::CeladonCity),
+            // Dept Store 4F: buy a Water Stone (to evolve Eevee → Vaporeon).
+            PolicyStep::enter(Map::CeladonMart1F),
+            PolicyStep::enter(Map::CeladonMart2F),
+            PolicyStep::enter(Map::CeladonMart3F),
+            PolicyStep::enter(Map::CeladonMart4F),
+            PolicyStep::BuyFromMart { item: crate::pokemon::bag::BagItem::new(ItemId::WaterStone, 1), map: Map::CeladonMart4F },
+            PolicyStep::enter(Map::CeladonMart1F),
+            PolicyStep::enter(Map::CeladonCity),
+        ]);
+    let _ = target;
     let mut last = Point8 { x: 255, y: 255 };
     let mut same = 0;
-    for i in 0..400_000 {
+    let mut dumped: std::collections::HashSet<Map> = std::collections::HashSet::new();
+    for i in 0..800_000 {
         fixture.step();
         if fixture.agent.policy_exhausted() { println!(">> exhausted at step {i}"); break; }
         if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
-            if s.map.map == Map::SilphCoElevator { println!(">> REACHED ELEVATOR at step {i}"); break; }
             let p = s.map.player_position;
-            if p != last { last = p; same = 0; if i % 400 == 0 { println!("  step {i}: {} @ {p}", s.map.map); } }
-            else { same += 1; if same == 40_000 {
-                println!(">> STUCK at {} @ {p} facing {:?} front={:?} state={}",
-                    s.map.map, s.map.player_direction, s.map.tile_in_front().map(|(_,t)|t), fixture.agent.state_debug());
+            if matches!(s.map.map, Map::CeladonMansion1F|Map::CeladonMansion2F|Map::CeladonMansion3F|Map::CeladonMansionRoof) && dumped.insert(s.map.map) {
+                println!("=== {} @ {p} ===\n{}", s.map.map, s.map);
+                for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..})) {
+                    println!("   {:?} dest={} route_len={}", a.tile, a.destination, a.route.len());
+                }
+            }
+            if p != last { last = p; same = 0;
+                if s.map.map == Map::Route7 || s.map.map == Map::Route7Gate { println!("  {} @ {p} facing {:?}", s.map.map, s.map.player_direction); }
+                else if i % 300 == 0 { println!("  step {i}: {} @ {p}", s.map.map); } }
+            else if s.mode == GameMode::Overworld { same += 1; if same == 4_000 {
+                println!(">> STUCK (overworld) at {} @ {p} state={}", s.map.map, fixture.agent.state_debug());
+                println!("{}", s.map);
+                for a in s.map.actions().iter().filter(|a| matches!(a.tile, MetaTile::Warp{..} | MetaTile::Connection{..})) {
+                    println!("   {:?} dest={} route_len={}", a.tile, a.destination, a.route.len());
+                }
                 break;
             } }
         }
     }
     if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
-        println!("ended on {} @ {}", s.map.map, s.map.player_position);
+        let stones = s.bag.iter().find(|it| it.id == ItemId::WaterStone).map(|it| it.quantity).unwrap_or(0);
+        println!("ended on {} @ {} — WaterStone ×{} exhausted={}",
+            s.map.map, s.map.player_position, stones, fixture.agent.policy_exhausted());
+        for (i, p) in s.pokemon.iter().enumerate() { println!("   {i}: {:?} lv{} hp {}/{}", p.species, p.level, p.current_hp, p.stats.hp); }
+        if s.pokemon.iter().any(|p| format!("{:?}", p.species) == "Eevee") && s.bag.iter().any(|it| it.id == ItemId::WaterStone) {
+            fixture.save_state_named("src/pokemon/data/eevee-and-stone.bin").unwrap();
+            println!(">> saved eevee-and-stone.bin");
+        }
     }
 }
 
@@ -1198,6 +2371,20 @@ fn probe_stall_dump() {
     // Generic: load the last saved stall state and dump map / player / sprites / reachable actions.
     let bytes = std::fs::read("test_stall_state.bin").expect("stall state");
     let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    {
+        let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+        let mode = api.game_state().map(|g| g.mode);
+        println!("mode={mode:?} menu_state={:?}", api.menu_state());
+        println!("on_screen_text(false)={:?}", api.on_screen_text(false));
+        println!("on_screen_text(true)={:?}", api.on_screen_text(true));
+    }
+    println!("agent state: {}", fixture.agent.state_debug());
+    {
+        let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+        if let Ok(g) = api.game_state() { if let Some(b) = &g.battle {
+            println!("battle: active_slot={} player={:?} enemy lv{} {:?}", b.active_party_slot, b.player.species, b.enemy.level, b.enemy.species);
+        }}
+    }
     let s = fixture.game_state();
     println!("map={} player={} facing={:?}", s.map.map, s.map.player_position, s.map.player_direction);
     println!("{}", s.map);

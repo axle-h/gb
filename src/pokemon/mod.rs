@@ -262,6 +262,16 @@ impl<'a> PokemonApi<'a> {
         mmu.write_bag(&Bag::from_slice(&EPIC_BAG));
         mmu.write_player_pokemon_party(&party)
     }
+
+    /// Reorder the party so the member currently in `slot` becomes the lead (slot 0), shifting the
+    /// rest down. Written straight to RAM (species list + mon blocks + names), so no in-game party-menu
+    /// navigation is needed. Used to make a trained bench mon (e.g. Vaporeon) the battle lead so it
+    /// fights from the start of every battle and earns the XP without any in-battle switch-in.
+    pub fn move_party_member_to_front(&mut self, slot: usize) -> Result<(), String> {
+        let mut party = self.mmu().read_player_pokemon_party()?;
+        party.move_to_front(slot);
+        self.mmu_mut().write_player_pokemon_party(&party)
+    }
 }
 
 impl<'a> PokemonApiTrait for PokemonApi<'a> {
@@ -307,10 +317,12 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             })
         }
 
-        let map = MetaTileMap::new(&match &self.map_cache {
+        let can_use_surf = badges.contains(Badge::SoulBadge) && has_move(&pokemon, PokemonMoveName::Surf);
+        let mut map = MetaTileMap::new(&match &self.map_cache {
             Some(c) => c.read_current_map(mmu)?,
             None    => mmu.read_current_map()?,
         });
+        map.can_surf = can_use_surf;
         // Vermilion Gym trash-can puzzle: EVENT_1ST_LOCK_OPENED = 0x161 → wEventFlags[44] bit 1,
         // EVENT_2ND_LOCK_OPENED = 0x160 → wEventFlags[44] bit 0.
         let trash_cans = (map.map == Map::VermilionGym).then(|| {
@@ -328,6 +340,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             name: mmu.read_pointer_pokemon_string(&pokered_symbols::wPlayerName),
             rival_name: mmu.read_pointer_pokemon_string(&pokered_symbols::wRivalName),
             can_use_cut: badges.contains(Badge::CascadeBadge) && has_move(&pokemon, PokemonMoveName::Cut),
+            can_use_surf,
             badges,
             money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),
             mode: mmu.read_game_mode(),
@@ -533,6 +546,9 @@ pub struct GameState {
     /// knows HM Cut — the two requirements to use Cut outside of battle in pokémon Red.
     /// Currently always false until the player has earned these.
     pub can_use_cut: bool,
+    /// True when the player has the Soul Badge and at least one party Pokémon knows HM Surf — the two
+    /// requirements to Surf outside of battle in pokémon Red. Gates water traversal in the pathfinder.
+    pub can_use_surf: bool,
     /// True once EVENT_GOT_POKEDEX is set (Oak gives the player the Pokédex).
     pub has_pokedex: bool,
     /// Species the player owns (caught or received) — set bit in `wPokedexOwned`.

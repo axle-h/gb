@@ -512,7 +512,11 @@ impl MapMetadataCache {
             .ok_or_else(|| "Invalid map number".to_string())?;
         let player_direction_raw = mmu.read_pointer(&pokered_symbols::wPlayerDirection);
         Ok(CurrentMap {
-            metadata: self.read_map(mmu, map)?,
+            metadata: if map_uses_runtime_blocks(map) {
+                Arc::new(mmu.read_map_metadata_runtime(map)?)
+            } else {
+                self.read_map(mmu, map)?
+            },
             player_position: Point8 {
                 x: mmu.read_pointer(&pokered_symbols::wXCoord),
                 y: mmu.read_pointer(&pokered_symbols::wYCoord),
@@ -539,55 +543,8 @@ impl MapMetadataReader for MMU {
 
     fn read_map_metadata(&self, map: Map) -> Result<MapMetadata, String> {
         let map_header = self.read_map_header(map)?;
-
-        let ts = self.read_tileset_header(map_header.tileset);
-        let collision_tiles = self.read_collision_tiles(ts.coll_ptr);
-
         let map_data = self.rom_data_from_rom_pointer(&map_header.blocks_pointer(), map_header.height as usize * map_header.width as usize).to_vec();
-
-        // Cover both the map's own blocks and any runtime door block (which is not present in
-        // `map_data` but is drawn at runtime — see `apply_door_blocks`).
-        let max_block_id = (*map_data.iter().max().unwrap() as usize).max(max_door_block_id(map));
-        let tileset_data = self.rom_data_from_pointer(ts.bank, ts.blocks_ptr, (max_block_id + 1) * MapMetadata::BLOCK_TILES).to_vec();
-
-        let warp_events = self.read_warp_events(map, &map_header)?;
-
-        let tileset_id = map_header.tileset as u8;
-        let water_tilesets = self.rom_data_from_rom_pointer(&pokered_symbols::WaterTilesets, 16);
-        let is_water_tileset = water_tilesets.iter()
-            .take_while(|&&b| b != 0xFF)
-            .any(|&b| b == tileset_id);
-
-        let connected_strips = self.load_connected_strips(&map_header);
-
-        // HandleLedges in pokered only fires for tileset 0 (Overworld); other tilesets have no ledges.
-        let ledge_tiles = if map_header.tileset == TileSetId::Overworld {
-            self.read_ledge_tiles()
-        } else {
-            HashMap::new()
-        };
-
-        let tile_pair_collisions = self.read_tile_pair_collisions(tileset_id);
-
-        let mut metadata = MapMetadata {
-            map,
-            map_header,
-            map_data,
-            tileset_data,
-            collision_tiles,
-            talking_over_tiles: ts.talking_over_tiles,
-            warp_events,
-            is_water_tileset,
-            grass_tile_id: ts.grass_tile,
-            connected_strips,
-            ledge_tiles,
-            tile_pair_collisions,
-            meta_tiles_base: Vec::new(),
-            raw_tile_ids: Vec::new(),
-        };
-        metadata.meta_tiles_base = metadata.build_meta_tiles_base();
-        metadata.raw_tile_ids = metadata.build_raw_tile_ids();
-        Ok(metadata)
+        self.finish_map_metadata(map, map_header, map_data)
     }
 
     fn read_current_map(&self) -> Result<CurrentMap, String> {
@@ -597,7 +554,11 @@ impl MapMetadataReader for MMU {
 
         Ok(
             CurrentMap {
-                metadata: Arc::new(self.read_map_metadata(map)?),
+                metadata: if map_uses_runtime_blocks(map) {
+                    Arc::new(self.read_map_metadata_runtime(map)?)
+                } else {
+                    Arc::new(self.read_map_metadata(map)?)
+                },
                 player_position: Point8 {
                     x: self.read_pointer(&pokered_symbols::wXCoord),
                     y: self.read_pointer(&pokered_symbols::wYCoord),
@@ -609,6 +570,71 @@ impl MapMetadataReader for MMU {
                 card_key_locked: map_has_card_key_doors(map) && !self.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
             }
         )
+    }
+}
+
+/// Maps whose walkable layout is rewritten at runtime by `ReplaceTileBlock` in a way the static ROM
+/// blocks can't capture — Pokémon Mansion switch-gates and the Cinnabar Gym gate blocks. For these,
+/// build metadata from the live `wOverworldMap` block buffer instead of ROM (see
+/// `MMU::read_map_metadata_runtime`). Everything else stays on the cached ROM path.
+pub fn map_uses_runtime_blocks(map: Map) -> bool {
+    matches!(map,
+        Map::PokemonMansion1F | Map::PokemonMansion2F | Map::PokemonMansion3F
+        | Map::PokemonMansionB1F | Map::CinnabarGym)
+}
+
+impl MMU {
+    /// Shared tail of map-metadata construction, given the block map (`map_data`) from either the ROM
+    /// (static) or `wOverworldMap` (runtime). Everything downstream (tile classification, meta-tiles)
+    /// reads block IDs from `map_data`, so overriding it is all that's needed to reflect runtime tiles.
+    fn finish_map_metadata(&self, map: Map, map_header: MapHeader, map_data: Vec<u8>) -> Result<MapMetadata, String> {
+        let ts = self.read_tileset_header(map_header.tileset);
+        let collision_tiles = self.read_collision_tiles(ts.coll_ptr);
+        // Size the tileset read to cover every block actually referenced (ROM or runtime) plus any
+        // runtime door block.
+        let max_block_id = (*map_data.iter().max().unwrap() as usize).max(max_door_block_id(map));
+        let tileset_data = self.rom_data_from_pointer(ts.bank, ts.blocks_ptr, (max_block_id + 1) * MapMetadata::BLOCK_TILES).to_vec();
+
+        let warp_events = self.read_warp_events(map, &map_header)?;
+        let tileset_id = map_header.tileset as u8;
+        let water_tilesets = self.rom_data_from_rom_pointer(&pokered_symbols::WaterTilesets, 16);
+        let is_water_tileset = water_tilesets.iter().take_while(|&&b| b != 0xFF).any(|&b| b == tileset_id);
+        let connected_strips = self.load_connected_strips(&map_header);
+        let ledge_tiles = if map_header.tileset == TileSetId::Overworld {
+            self.read_ledge_tiles()
+        } else {
+            HashMap::new()
+        };
+        let tile_pair_collisions = self.read_tile_pair_collisions(tileset_id);
+
+        let mut metadata = MapMetadata {
+            map, map_header, map_data, tileset_data, collision_tiles,
+            talking_over_tiles: ts.talking_over_tiles, warp_events, is_water_tileset,
+            grass_tile_id: ts.grass_tile, connected_strips, ledge_tiles, tile_pair_collisions,
+            meta_tiles_base: Vec::new(), raw_tile_ids: Vec::new(),
+        };
+        metadata.meta_tiles_base = metadata.build_meta_tiles_base();
+        metadata.raw_tile_ids = metadata.build_raw_tile_ids();
+        Ok(metadata)
+    }
+
+    /// Build map metadata from the CURRENT runtime block map (`wOverworldMap`) rather than the static
+    /// ROM blocks, so switch-toggled gates (Pokémon Mansion) and gym gate blocks (Cinnabar Gym) are
+    /// reflected in routing. `wOverworldMap` holds the map's blocks inside a 3-block border, stride
+    /// `width + 6`; de-border it back to a plain `width × height` block map.
+    fn read_map_metadata_runtime(&self, map: Map) -> Result<MapMetadata, String> {
+        const BORDER: usize = 3;
+        let map_header = self.read_map_header(map)?;
+        let (w, h) = (map_header.width as usize, map_header.height as usize);
+        let stride = w + BORDER * 2;
+        let base = pokered_symbols::wOverworldMap.address;
+        let mut map_data = vec![0u8; w * h];
+        for by in 0..h {
+            for bx in 0..w {
+                map_data[bx + by * w] = self.read(base + ((by + BORDER) * stride + (bx + BORDER)) as u16);
+            }
+        }
+        self.finish_map_metadata(map, map_header, map_data)
     }
 }
 
@@ -638,20 +664,21 @@ impl MMU {
             let entry = self.rom_data_from_rom_pointer(&base, 4);
             let raw_map_id = entry[3];
             let dest_warp_id = entry[2] as u16; // 0-indexed into destination map's warp table
-            // 0xFF = LAST_MAP sentinel; self-referential (raw_map_id == cur_map) is
-            // pokémon Red's building-exit convention meaning the same thing.
-            // In both cases the true destination is the outdoor map whose warp table
-            // points back to this indoor map.
-            let map_id = if raw_map_id == 0xFF || raw_map_id == cur_map as u8 {
-                // LAST_MAP / self-referential exit: the true destination is the outdoor map whose
-                // warp table points back here. Deep-interior maps you can only reach from *inside*
-                // the building (e.g. Silph Co 11F — the elevator/pad-only Giovanni floor) have no
-                // such outdoor map, so this can't be resolved statically. Skip the warp rather than
-                // failing the whole map read (it's the building-exit warp, not needed for routing).
+            let map_id = if raw_map_id == 0xFF {
+                // LAST_MAP building-exit: the true destination is the outdoor map whose warp table
+                // points back here. Deep-interior maps you can only reach from *inside* the building
+                // (e.g. Silph Co 11F — the elevator/pad-only Giovanni floor) have no such outdoor map,
+                // so this can't be resolved statically. Skip the warp rather than failing the whole map
+                // read (it's the building-exit warp, not needed for routing).
                 match self.find_outdoor_entry_map(cur_map) {
                     Some(m) => m,
                     None => continue,
                 }
+            } else if raw_map_id == cur_map as u8 {
+                // Self-referential warp = an INTERNAL teleporter (Saffron Gym's warp maze): the game
+                // teleports you to warp #dest_warp_id on THIS same map. (Not a building exit — those use
+                // LAST_MAP above.)
+                cur_map
             } else {
                 Map::from_repr(raw_map_id)
                     .ok_or_else(|| format!("Invalid map number {raw_map_id}"))?
@@ -661,8 +688,14 @@ impl MMU {
             // player picks a floor. We can't compute a landing tile for those, but the warp itself
             // is real, so fall back to (0,0) rather than failing the whole map read (which would
             // freeze the agent the moment it stepped into the elevator).
+            // A LAST_MAP / self-referential building-exit warp stores a dummy `dest_warp_id` (the game
+            // ignores it and returns you via `wLastMap` at runtime), which can be out of range for the
+            // resolved outdoor map's warp table (e.g. Saffron Gym's exit → SaffronCity index 22, but
+            // Saffron has 8 warps). Don't fail the whole map read over it — fall back to (0,0); the exit
+            // landing isn't needed for routing.
             let destination_position = if map_id.header_pointer().is_some() {
-                self.read_destination_warp_position(map_id, dest_warp_id)?
+                self.read_destination_warp_position(map_id, dest_warp_id)
+                    .unwrap_or(Point8 { y: 0, x: 0 })
             } else {
                 Point8 { y: 0, x: 0 }
             };

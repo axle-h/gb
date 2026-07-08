@@ -156,6 +156,13 @@ impl MenuState {
         self.text_box_id == TextBoxId::TwoOptionMenu
     }
 
+    /// True when the party-mon SWITCH / STATS / CANCEL sub-menu is showing — opened after selecting a
+    /// party member from the battle PKMN list for a *voluntary* switch. (A forced switch after a faint
+    /// skips this menu.) `current_item` is 0=SWITCH, 1=STATS, 2=CANCEL.
+    pub fn is_switch_stats_cancel_menu(&self) -> bool {
+        self.text_box_id == TextBoxId::SwitchStatsCancelMenuTemplate
+    }
+
     /// Absolute item index in the list (current_item + scroll_offset).
     pub fn list_absolute_index(&self) -> u8 {
         self.current_item.saturating_add(self.scroll_offset)
