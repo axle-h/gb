@@ -281,6 +281,24 @@ Flute**), then **Saffron** opens (Silph Co, Rocket-gated) → **Marsh Badge (Sab
   **Next:** Fuchsia (Safari Zone → Surf HM03 + Gold Teeth → Strength HM04); Saffron/Silph Co → Marsh
   Badge (Sabrina); then Cinnabar/Volcano (Blaine) + Viridian/Earth (Giovanni) → Victory Road → E4.
 
+### VOLCANO BADGE (Blaine, Cinnabar) — DONE ✅ (2026-07-08). See memory `volcano-badge-mansion-cinnabar`:
+- **Secret Key** (`mansion_secret_key_steps`, test `can_get_secret_key`, `at-cinnabar.bin` →
+  `post-secret-key.bin`). Pokémon Mansion = a ONE-global-switch (`EVENT_MANSION_SWITCH_ON`,
+  `GameState::mansion_switch_on`) gate maze. B1F (Secret Key) is reachable ONLY by **falling through a
+  3F floor-hole** to 1F's right side (1F's entrance never walks to the B1F staircase). New mechanics:
+  `MapMetadata::apply_mansion_holes` (3F holes → warp to 1F(16,14)); `route_to_face_dir(target, dir)` +
+  a `facing` field on `CheckTrashCan` so the face-UP statue switches trigger; Mansion `FlipSwitch` =
+  one toggle (baseline compare, not "reveals a warp"); `UseRareCandy{slot}` to free a FULL bag (20/20
+  — 6 gym TMs hidden from `GameState::bag`, so blocked the pickup); heal at Cinnabar first (long
+  battle-heavy crossing, no center inside → else the party Struggles out).
+- **Blaine** (`volcano_badge_steps`, test `can_get_volcano_badge`, `post-secret-key.bin` →
+  `post-volcano-badge.bin`). Exit the mansion by REVERSING the two B1F flips (reopens the up-staircase);
+  the Cinnabar Gym is a quiz-gate snake maze (beating a fire trainer opens the gate ahead, runtime-block
+  modelled). **`DefeatGymLeader` generalised**: when the leader is gated-off, engage the nearest
+  reachable trainer via its **line of sight** (all gym trainers face DOWN → route to the tile directly
+  below; a plain adjacent-approach fails when the maze arrives from behind), skipping already-beaten
+  trainers (`gym_beaten`/`gym_engage` stuck-counter). Venusaur/Vaporeon fold Blaine's fire team.
+
 Then per-badge (walkthrough2): each later badge introduces a new field HM where first
 required — teaching now works via the real menus (`thunder_badge_steps` shows the pattern:
 `TeachMove` → HM-gated `CutTree`-style action). Strength (boulders), Surf (water) and Fly follow the

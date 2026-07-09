@@ -348,6 +348,8 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             trash_cans,
             // EVENT_FOUND_ROCKET_HIDEOUT = 0x1b9 → wEventFlags[55] bit 1.
             found_rocket_hideout: mmu.read(pokered_symbols::wEventFlags.address + 55) & 0x02 != 0,
+            // EVENT_MANSION_SWITCH_ON = 0x278 → wEventFlags[79] bit 0. Toggled by any Mansion statue.
+            mansion_switch_on: mmu.read(pokered_symbols::wEventFlags.address + 79) & 0x01 != 0,
             map,
             battle: mmu.read_battle_state(),
             bag: mmu.read_bag(),
@@ -560,6 +562,9 @@ pub struct GameState {
     /// True once EVENT_FOUND_ROCKET_HIDEOUT is set — the Celadon Game Corner poster switch has been
     /// flipped, opening the hidden staircase down to the Rocket Hideout.
     pub found_rocket_hideout: bool,
+    /// State of EVENT_MANSION_SWITCH_ON — the single global Pokémon Mansion switch that every statue
+    /// on every floor toggles, opening/closing the sliding-door gates on all four floors.
+    pub mansion_switch_on: bool,
 }
 
 /// State of the Vermilion Gym two-switch trash-can puzzle that unlocks the door to Lt. Surge.
