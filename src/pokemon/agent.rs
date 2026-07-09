@@ -192,7 +192,7 @@ enum AgentState {
     /// and face it (recomputed each tick via `MetaTileMap::route_to_face`), then press A to trigger
     /// `GymTrashScript`. `press` alternates for plain press/release mashing. `checked` becomes true
     /// once the check text/menu has appeared, so returning to the overworld means the can was checked.
-    CheckingTrashCan { target: Point8, checked: bool, press: bool },
+    CheckingTrashCan { target: Point8, checked: bool, press: bool, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
 
     /// Using an elevator floor panel: face the panel + A to open the floor list-menu, navigate the
     /// cursor (`wCurrentMenuItem`) to `floor` + A to pick it, then ride the (runtime-redirected)
@@ -504,6 +504,12 @@ impl PokemonAgent {
 
             self.event(AgentEvent::BattleEnded);
             self.set_state(AgentState::Idle);
+            // A battle reloads the map on the way out, so any tree cut on this map has regrown — drop
+            // the "already cut" memory (same reason as the map-change clear above) so the agent re-cuts
+            // it instead of routing through a regrown tree and jamming. This matters inside the Celadon
+            // gym, whose garden cut-trees regrow after each junior-trainer battle mid-approach to Erika;
+            // with a strong lone starter re-cutting them is cheap and keeps Erika reachable.
+            self.cut_tiles.clear();
         }
     }
 
@@ -779,9 +785,9 @@ impl PokemonAgent {
                             self.set_state(AgentState::CuttingTree { press: true, entered_menu: false, tree_pos });
                             return Ok(());
                         }
-                        Some(crate::pokemon::policy::FieldMove::CheckTrashCan { target }) => {
+                        Some(crate::pokemon::policy::FieldMove::CheckTrashCan { target, facing }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::CheckingTrashCan { target, checked: false, press: true });
+                            self.set_state(AgentState::CheckingTrashCan { target, checked: false, press: true, facing });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::UseElevator { panel, floor }) => {
@@ -1026,12 +1032,19 @@ impl PokemonAgent {
                             let game_state = api.game_state()?;
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
                                 new_events.push(AgentEvent::BattleActionStarted { action });
-                                // A healing item on the active mon needs the dedicated HealingActive
-                                // driver (the generic navigator can't drive the "use on which?" party
-                                // menu). Other actions use the generic navigator.
+                                // In-battle item use goes through the dedicated `HealingActive` driver:
+                                // it opens the bag and confirms the item with A, whereas the generic
+                                // navigator hands off to `WaitingForMenu`, which backs out of the bag on
+                                // its "CANCEL" entry before the use commits. This covers both healing
+                                // items (which also need the "use on which POKéMON?" party menu) and
+                                // Poké Balls (thrown straight at the enemy, no party menu — the driver
+                                // gates that step to heal items). Completion for both = the item's count
+                                // in the bag drops.
                                 if let BattleAction::UseItem { item, .. } = action {
                                     use crate::pokemon::item::ItemId;
-                                    if matches!(item.id, ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion | ItemId::FullRestore) {
+                                    if matches!(item.id, ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion
+                                        | ItemId::MaxPotion | ItemId::FullRestore
+                                        | ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall) {
                                         let start_qty = game_state.bag.iter()
                                             .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
                                         let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
@@ -1121,8 +1134,19 @@ impl PokemonAgent {
                                 }
 
                                 if menu_state == menu_target {
-                                    api.release_all_buttons();
-                                    self.set_battle_state(BattleState::default());
+                                    // RUN is a terminal menu option (no sub-menu): press A here to
+                                    // actually flee. Handing off to WaitingForMenu instead would bounce
+                                    // straight back to the policy on seeing the "FIGHT…RUN" main menu, so
+                                    // the flee never fires (an infinite low-PP heal-flee loop). Stay in
+                                    // Navigating so a failed escape ("Can't escape!") retries next turn.
+                                    // Sub-menu targets (MoveList/ItemList/PokemonList) are confirmed by
+                                    // their own WaitingForMenu handlers, so hand those off as before.
+                                    if menu_target == BattleMenuState::Run {
+                                        api.toggle_button(JoypadButton::A);
+                                    } else {
+                                        api.release_all_buttons();
+                                        self.set_battle_state(BattleState::default());
+                                    }
                                 } else {
                                     let resolved_target = if let Some(target_parent) = menu_target.parent() {
                                         if menu_state.parent() == Some(target_parent) {
@@ -1157,6 +1181,7 @@ impl PokemonAgent {
                     }
 
                     BattleState::HealingActive { item, start_qty, entry_hp, press, confirmed, delay: _ } => {
+                        use crate::pokemon::item::ItemId;
                         let item = *item;
                         let start_qty = *start_qty;
                         let entry_hp = *entry_hp;
@@ -1201,8 +1226,14 @@ impl PokemonAgent {
                         }
 
                         // "Use on which POKéMON?" party menu — recognized PokemonList (0,1) or party text.
-                        let party_showing = matches!(bms, Some(BattleMenuState::PokemonList { .. }))
-                            || (bms.is_none() && api.on_screen_text(false).map_or(false, |t| t.matches('/').count() >= 2));
+                        // Only healing items open it; a Poké Ball is thrown straight at the enemy, so for
+                        // a ball this stays false (else the enemy-HP "n/m" bars would look like party text
+                        // and drive a phantom party menu). The battle-screen slash count is compared while
+                        // `bms` is momentarily unreadable.
+                        let is_heal = matches!(item, ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion
+                            | ItemId::MaxPotion | ItemId::FullRestore);
+                        let party_showing = is_heal && (matches!(bms, Some(BattleMenuState::PokemonList { .. }))
+                            || (bms.is_none() && api.on_screen_text(false).map_or(false, |t| t.matches('/').count() >= 2)));
 
                         let next_confirmed = confirmed;
                         let button: Option<JoypadButton> = if party_showing {
@@ -1469,9 +1500,13 @@ impl PokemonAgent {
                 let gs = api.game_state()?;
                 // Done once the mon knows the move (teach) — or, for an evolution stone, once the slot's
                 // species has changed away from `evolve_from` (the evolve animation/text has committed).
+                // For a consumable used from the same menu chain that teaches no move and doesn't evolve
+                // (a Rare Candy), "done" = the item has left the bag (been used up), detected once we've
+                // opened the menu. HMs are never consumed, so this never fires for a real teach.
+                let consumed = entered_menu && api.bag_item_position(item).is_none();
                 let done = match evolve_from {
                     Some(from) => gs.pokemon.get(target_slot as usize).map_or(false, |p| p.species != from),
-                    None => crate::pokemon::policy::hm_move(item).map_or(false, |mv|
+                    None => consumed || crate::pokemon::policy::hm_move(item).map_or(false, |mv|
                         gs.pokemon.get(target_slot as usize)
                             .map_or(false, |p| p.moves.iter().flatten().any(|m| m.name == mv))),
                 };
@@ -1530,9 +1565,13 @@ impl PokemonAgent {
                 } else if top_x == 11 && top_y == 2 {
                     nav(current, 2) // START menu → ITEM (index 2, Pokédex obtained)
                 } else if tbid == Some(TextBoxId::ListMenuBox) {
-                    // Bag list → the HM's row (absolute index = cursor + scroll), then A to select it.
-                    let target_idx = api.bag_item_position(item).unwrap_or(0);
-                    nav(current + scroll, target_idx)
+                    // Bag list → the item's row (absolute index = cursor + scroll), then A to select it.
+                    // If the item is no longer in the bag (a consumable like a Rare Candy that was just
+                    // used up), back out with B instead of selecting whatever sits at row 0.
+                    match api.bag_item_position(item) {
+                        Some(target_idx) => nav(current + scroll, target_idx),
+                        None => JoypadButton::B,
+                    }
                 } else if tbid == Some(TextBoxId::UseTossMenuTemplate) {
                     nav(current, 0) // USE/TOSS → USE (index 0)
                 } else if tbid == Some(TextBoxId::TwoOptionMenu) {
@@ -1651,7 +1690,7 @@ impl PokemonAgent {
                 api.press_button(button);
                 self.set_state(AgentState::Surfing { press: false, entered_menu, water_pos, slot });
             }
-            AgentState::CheckingTrashCan { target, checked, press } => {
+            AgentState::CheckingTrashCan { target, checked, press, facing } => {
                 // Checking a can triggers GymTrashScript, which prints a text box (leaving the
                 // overworld). Once that has appeared (`checked`), the return to the overworld means
                 // the check has resolved — finish so `pick_field_move` re-evaluates (advancing to the
@@ -1665,23 +1704,23 @@ impl PokemonAgent {
                     // The check's text box / script is up — advance it by mashing A.
                     api.release_all_buttons();
                     if press { api.press_button(JoypadButton::A); }
-                    self.set_state(AgentState::CheckingTrashCan { target, checked: true, press: !press });
+                    self.set_state(AgentState::CheckingTrashCan { target, checked: true, press: !press, facing });
                     return Ok(());
                 }
                 // In the overworld: route to a tile adjacent to the can and face it, then check it.
                 let gs = self.observe_state(api)?;
-                match gs.map.route_to_face(target).as_deref() {
+                match gs.map.route_to_face_dir(target, facing).as_deref() {
                     Some([]) => {
                         // Adjacent and facing the can — mash A (clean press/release edges) to check it.
                         api.release_all_buttons();
                         if press { api.press_button(JoypadButton::A); }
-                        self.set_state(AgentState::CheckingTrashCan { target, checked, press: !press });
+                        self.set_state(AgentState::CheckingTrashCan { target, checked, press: !press, facing });
                     }
                     Some(&[btn, ..]) => {
                         // Walk/turn toward the can; hold the direction for continuous movement.
                         api.release_all_buttons();
                         api.press_button(btn);
-                        self.set_state(AgentState::CheckingTrashCan { target, checked, press: true });
+                        self.set_state(AgentState::CheckingTrashCan { target, checked, press: true, facing });
                     }
                     _ => {
                         // No reachable tile adjacent to the can — abort so we don't spin forever.

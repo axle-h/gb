@@ -62,6 +62,22 @@ fn spinner_table(map: Map) -> &'static [(u8, u8, u8, u8)] {
             (13,16,17,16),(14,11,16,11),(14,15,18,15),(14,17,18,15),(14,19,18,15),(15,16,17,16),
             (15,18,15,22),(16,13,16,11),(17,12,17,16),(18,16,18,15),
         ],
+        // Viridian Gym (Giovanni / Earth Badge), decoded from `ViridianGymArrowTilePlayerMovement`
+        // (all single-segment `db PAD_DIR, N`): each arrow at (x,y) slides N tiles → (tx,ty).
+        Map::ViridianGym => &[
+            (19,11,19,2),  // UP 9
+            (19,1,11,1),   // LEFT 8
+            (18,2,18,11),  // DOWN 9
+            (11,2,17,2),   // RIGHT 6
+            (16,10,16,12), // DOWN 2
+            (4,6,4,13),    // DOWN 7
+            (5,13,13,13),  // RIGHT 8
+            (4,14,13,14),  // RIGHT 9
+            (0,15,0,7),    // UP 8
+            (1,15,1,9),    // UP 6
+            (13,16,7,16),  // LEFT 6
+            (13,17,1,17),  // LEFT 12
+        ],
         _ => &[],
     }
 }
@@ -199,6 +215,11 @@ impl MetaTileMap {
                 dist.contains_key(&pos).then_some((pos, *t))
             })
             .collect()
+    }
+
+    /// The set of tiles reachable from the player (debug/diagnostic aid for maze mapping).
+    pub fn reachable_tiles(&self) -> std::collections::HashSet<Point8> {
+        self.bfs_from_player().0.into_keys().collect()
     }
 
     /// BFS from `player_position` outward.
@@ -604,6 +625,14 @@ impl MetaTileMap {
     /// reachable. Unlike `actions()`, this works for a *dynamic* hidden-object tile whose position
     /// is not known at map-build time (e.g. a gym trash can chosen from RAM).
     pub fn route_to_face(&self, target: Point8) -> Option<Vec<JoypadButton>> {
+        self.route_to_face_dir(target, None)
+    }
+
+    /// Like `route_to_face`, but if `required` is `Some(dir)` only the approach that ends with the
+    /// player facing `dir` is considered. Needed for hidden-object switches (Pokémon Mansion statues)
+    /// that only trigger when the player faces them from a specific direction — approaching from any
+    /// other adjacent tile faces the wrong way and pressing A does nothing.
+    pub fn route_to_face_dir(&self, target: Point8, required: Option<PlayerFacingDirection>) -> Option<Vec<JoypadButton>> {
         let (dist, came_from) = self.bfs_from_player();
         let adj: [(PlayerFacingDirection, Point8); 4] = [
             (PlayerFacingDirection::Down,  Point8 { x: target.x,                   y: target.y.saturating_sub(1) }),
@@ -612,6 +641,7 @@ impl MetaTileMap {
             (PlayerFacingDirection::Left,  Point8 { x: target.x + 1,               y: target.y                   }),
         ];
         let (face_dir, dest) = adj.into_iter()
+            .filter(|(dir, _)| required.map_or(true, |r| *dir == r))
             .filter(|(_, p)| {
                 (p.x as usize) < self.width && (p.y as usize) < self.height
                 && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)

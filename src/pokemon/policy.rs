@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver};
 use rand::prelude::StdRng;
@@ -359,6 +359,10 @@ pub enum PolicyStep {
     /// Use an evolution `stone` (e.g. Water Stone) from the bag on the party member in `target_slot`
     /// to evolve it (e.g. Eevee → Vaporeon). Persists until that slot's species changes.
     EvolveWithStone { stone: ItemId, target_slot: u8 },
+    /// Use a Rare Candy from the bag on the party member in `slot` (levels it up and, crucially, frees
+    /// a bag slot). Drives the same START → ITEM → USE → choose-Pokémon menus as teaching a move;
+    /// persists until the Rare Candy is consumed (no longer in the bag).
+    UseRareCandy { slot: u8 },
     /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge). Routes to face a
     /// `MetaTile::CutTree`, then uses the Cut field move. Persists until no reachable tree remains.
     CutTree { map: Map },
@@ -403,14 +407,21 @@ pub enum FieldMove {
     EvolveWithStone { stone: ItemId, target_slot: u8, evolve_from: PokemonSpecies },
     /// Use the Cut field move on the tree the player is currently facing.
     CutTree,
-    /// Walk to the trash can at `target` and press A to check it for a hidden switch.
-    CheckTrashCan { target: crate::geometry::Point8 },
+    /// Walk to the trash can at `target` and press A to check it for a hidden switch. `facing`, if
+    /// set, forces the approach so the player ends up facing that direction (needed for Pokémon
+    /// Mansion statue switches, which only trigger when faced from directly below, i.e. facing Up).
+    CheckTrashCan { target: crate::geometry::Point8, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
     /// Drive the elevator floor menu (panel at `panel`) to select menu index `floor`, then ride the
     /// redirected warp out. Done when the map changes (we've left the elevator room).
     UseElevator { panel: crate::geometry::Point8, floor: u8 },
     /// Face the sprite at `target`, then use bag `item` on it (START → ITEM → select → USE). The
     /// item's field effect (e.g. the Poké Flute waking a Snorlax) does the rest.
     UseFieldItem { item: ItemId, target: crate::geometry::Point8 },
+}
+
+/// True for the four Pokémon Mansion floors, whose statue switches only trigger when faced from below.
+fn is_mansion_floor(map: Map) -> bool {
+    matches!(map, Map::PokemonMansion1F | Map::PokemonMansion2F | Map::PokemonMansion3F | Map::PokemonMansionB1F)
 }
 
 /// The move an HM item teaches (HM01 Cut … HM05 Flash), used to check whether a mon already knows it.
@@ -707,6 +718,10 @@ impl PolicyStep {
     /// crossing the hideout's spinner-tile floors + elevator to Giovanni — handled separately.
     pub fn rocket_hideout_entrance_steps() -> Vec<Self> {
         let mut s = vec![
+            // Beating Erika reloaded the map, so the gym's internal garden trees regrew and now wall
+            // the player in — re-cut them to reach the gym exit warp before leaving (the junior
+            // trainers are already beaten, so re-crossing the garden starts no new battles).
+            Self::CutTree { map: Map::CeladonGym },
             Self::enter(Map::CeladonCity),          // exit the gym into the (regrown) tree enclosure
             Self::CutTree { map: Map::CeladonCity }, // re-cut to reach the rest of the city
             Self::enter(Map::CeladonPokecenter),
@@ -808,6 +823,15 @@ impl PolicyStep {
             Self::enter(Map::UndergroundPathRoute8),
             Self::enter(Map::Route8),
             Self::enter(Map::LavenderTown),
+            // Heal at Lavender before diving into the tower: it's a long, trainer-heavy climb (7 floors
+            // of Channelers + the ghost Marowak + three 7F Rockets) with NO Pokémon Center inside, so a
+            // worn-down lone starter can black out mid-climb — and a tower black-out can't resume the
+            // scripted deep-interior Mr. Fuji rescue (the Interact steps pop "no path" from the far-away
+            // respawn), skipping it. A fresh full-HP/PP party clears the tower in one push. This also
+            // makes Lavender the nearest respawn if it does black out. (Same rule as Rock Tunnel.)
+            Self::enter(Map::LavenderPokecenter),
+            Self::Interact(MapSprite::LAVENDERPOKECENTER_NURSE),
+            Self::enter(Map::LavenderTown),
         ]);
         // Climb the tower. Each up-warp is at the same corner on consecutive floors; Channelers engage
         // by line of sight as the agent routes to each warp. On 6F the walk to the 7F stairs crosses the
@@ -901,7 +925,10 @@ impl PolicyStep {
             // the long way round: Center → East → North → West (the only land route).
             Self::enter(Map::SafariZoneEast),
             Self::enter(Map::SafariZoneNorth),
-            Self::enter(Map::SafariZoneWest),
+            // North→West has two warp pairs: the eastern one (lands (27,0)) drops onto a lower shelf that
+            // one-way ledges wall off from the Gold Teeth / Secret House plateau. Take the WESTERN pair
+            // (North (3,35) → West (21,0)) which lands on the plateau with both reachable.
+            Self::enter_at(Map::SafariZoneWest, 21, 0),
             Self::CollectItem(MapSprite::SAFARIZONEWEST_GOLD_TEETH),
             Self::enter(Map::SafariZoneSecretHouse),
             Self::Interact(MapSprite::SAFARIZONESECRETHOUSE_FISHING_GURU), // hands over HM03 Surf
@@ -980,6 +1007,16 @@ impl PolicyStep {
     /// Hideout's (panel bg-event at (3,0), 11-floor menu: 1F=0 … 5F=4 … 11F=10, redirected exit warp).
     pub fn silph_co_card_key_steps() -> Vec<Self> {
         vec![
+            // Stock up on HYPER Potions at the Saffron Mart before entering Silph. The Silph rival /
+            // Giovanni / Sabrina and Blaine fights need a heal big enough to lift the healer back above
+            // the enemy's per-turn damage — a Super Potion's +50 just cancels Alakazam's Psychic (an
+            // unwinnable stalemate), whereas a Hyper Potion (+200) restores to near-full so the mon
+            // survives above the heal threshold and actually fights back. The heal prefers the biggest
+            // potion in the bag. (Done here, not in saffron_entry, so that leg's exit position — which
+            // the Eevee leg's Route-7 crossing depends on — is unchanged.)
+            Self::enter(Map::SaffronMart),
+            Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 15), map: Map::SaffronMart },
+            Self::enter(Map::SaffronCity),
             Self::enter(Map::SilphCo1F),
             Self::enter(Map::SilphCoElevator),                          // step onto the (20,0) $58 warp tile
             Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 4 }, // 5F = menu index 4
@@ -990,6 +1027,208 @@ impl PolicyStep {
             Self::enter(Map::SilphCo9F),                                // via 5F (9,15) → 9F (17,15)
             Self::enter(Map::SilphCo5F),                                // via 9F (17,15) → arrive at 5F (9,15)
             Self::CollectItem(MapSprite::SILPHCO5F_CARD_KEY),
+        ]
+    }
+
+    /// From the 5F Card-Key pocket: thread the teleport-pad maze up to **Giovanni** on 11F, beat him
+    /// (his after-battle script liberates Saffron), talk to the freed **Silph President** for the Master
+    /// Ball, then thread the pads back down and out to Saffron and heal. Pad chain:
+    ///   5F(9,15)→9F(17,15); 9F→elevator→3F; 3F(11,11)→7F(5,3) rival pocket; 7F(5,7)→11F(3,2).
+    /// Giovanni's scripted battle only fires by STANDING on his trigger (walking to his front passes it),
+    /// so we clear the blocking Rocket then queue many single-shot Interacts until one lands in position.
+    pub fn silph_giovanni_steps() -> Vec<Self> {
+        use crate::pokemon::map::MapSprite as MS;
+        let mut s = vec![
+            // Lead with the bulky Venusaur (already slot 0): with Hyper Potions it out-heals the rival's
+            // Alakazam (Psychic) and Pidgeot and mows the Ground/Rock/Grass-weak mons, while the fresh
+            // Vaporeon stays in RESERVE — it comes in when Venusaur finally falls to the Fire ace
+            // (Charizard) and one-shots it with Surf (4×). Leading the frail Vaporeon instead gets it
+            // KO'd early and wastes its one job.
+            Self::enter(Map::SilphCo9F),                                 // 5F(9,15) pad → 9F(17,15)
+            Self::enter(Map::SilphCoElevator),
+            Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 2 }, // 3F = menu index 2
+            Self::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 3 }) },   // 3F(11,11) pad
+            // Fight the 7F rival EXPLICITLY (walk into his front, battle, end standing there) — routing
+            // straight for the 11F pad instead trips his line-of-sight mid-walk at a stray tile and the
+            // subsequent 11F warp resolves off a desynced position. This mirrors the proven route.
+            Self::Interact(MS::SILPHCO7F_RIVAL),
+            Self::EnterMap { to_map: Map::SilphCo11F, to_position: Some(Point8 { x: 3, y: 2 }) },  // 7F(5,7) pad
+            Self::InteractIfReachable(MS::SILPHCO11F_ROCKET1),
+        ];
+        // Use InteractIfReachable (not Interact): reachable → walk in (crossing his (6,13) trigger fires
+        // the scripted battle whose after-script liberates Saffron); once he's beaten and unreachable it
+        // pops after a bounded wait instead of hanging forever (plain Interact never gives up).
+        for _ in 0..14 { s.push(Self::InteractIfReachable(MS::SILPHCO11F_GIOVANNI)); }
+        s.extend([
+            Self::Interact(MS::SILPHCO11F_SILPH_PRESIDENT),             // Master Ball + Rockets leave Saffron
+            Self::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 7 }) },   // 11F(3,2) pad
+            Self::EnterMap { to_map: Map::SilphCo3F, to_position: Some(Point8 { x: 11, y: 11 }) }, // 7F(5,3) pad
+            Self::enter(Map::SilphCoElevator),
+            Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 }, // 1F
+            Self::enter(Map::SaffronCity),
+            Self::enter(Map::SaffronPokecenter),
+            Self::Interact(MS::SAFFRONPOKECENTER_NURSE),
+            Self::enter(Map::SaffronCity),
+        ]);
+        s
+    }
+
+    /// Marsh Badge: Saffron Gym is a teleport-pad maze; `DefeatGymLeader` routes through the intra-map
+    /// teleporters and beats each gym trainer via line of sight to reach **Sabrina**. Requires Saffron to
+    /// have been liberated (see [`silph_giovanni_steps`]) so the gym door isn't Rocket-blocked.
+    pub fn marsh_badge_steps() -> Vec<Self> {
+        use crate::pokemon::map::MapSprite as MS;
+        vec![
+            Self::enter(Map::SaffronGym),
+            Self::DefeatGymLeader { leader: MS::SAFFRONGYM_SABRINA, badge: Badge::MarshBadge },
+        ]
+    }
+
+    /// From Saffron: fetch the free **Eevee** (Celadon Mansion roof house), buy a **Water Stone** (Celadon
+    /// Dept Store 4F), evolve Eevee → **Vaporeon** and teach it **Surf** — the lone Grass starter can't
+    /// learn Surf, and Surf is needed to reach Cinnabar. Ends back in Celadon. Eevee is the gift Poké Ball
+    /// so it appends to the party at **slot 1** (after the lone Venusaur).
+    pub fn eevee_vaporeon_surf_steps() -> Vec<Self> {
+        use crate::pokemon::map::MapSprite as MS;
+        vec![
+            // Saffron → Celadon via the Route-7 gate (east crossing at (19,10); the plain connection lands
+            // in a ledge-sealed pocket).
+            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 19, y: 10 }) },
+            Self::enter(Map::Route7Gate),
+            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
+            Self::enter(Map::CeladonCity),
+            // Free Eevee from the Celadon Mansion roof house (BACK entrance (24,3)→1F(4,0); the front door
+            // is the dead-end condos). Climb the stairwell to the roof.
+            Self::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
+            Self::enter(Map::CeladonMansion2F),
+            Self::enter(Map::CeladonMansion3F),
+            Self::enter(Map::CeladonMansionRoof),
+            Self::enter(Map::CeladonMansionRoofHouse),
+            Self::CollectItem(MS::CELADONMANSION_ROOF_HOUSE_EEVEE_POKEBALL),
+            Self::enter(Map::CeladonMansionRoof),
+            Self::enter(Map::CeladonMansion3F),
+            Self::enter(Map::CeladonMansion2F),
+            Self::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
+            Self::enter(Map::CeladonCity),
+            // Dept Store 4F: buy a Water Stone.
+            Self::enter(Map::CeladonMart1F),
+            Self::enter(Map::CeladonMart2F),
+            Self::enter(Map::CeladonMart3F),
+            Self::enter(Map::CeladonMart4F),
+            Self::BuyFromMart { item: BagItem::new(ItemId::WaterStone, 1), map: Map::CeladonMart4F },
+            Self::enter(Map::CeladonMart1F),
+            Self::enter(Map::CeladonCity),
+            // Evolve Eevee (slot 1) → Vaporeon and teach it Surf. Vaporeon is the answer to the Silph
+            // rival's Alakazam (Surf ignores its huge Special wall better than Venusaur's resisted Razor
+            // Leaf) and to Blaine's Fire team, plus it carries Surf for the Cinnabar crossing.
+            Self::EvolveWithStone { stone: ItemId::WaterStone, target_slot: 1 },
+            Self::TeachMove { item: ItemId::Hm03Surf, target_slot: 1 },
+            // Back to Saffron for Silph Co (Celadon → Route 7 → Saffron).
+            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
+            Self::enter(Map::Route7Gate),
+            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 19, y: 10 }) },
+            Self::enter(Map::SaffronCity),
+        ]
+    }
+
+    /// Saffron → Cinnabar Island (needs Surf on Vaporeon + Cut on Venusaur). Route 6 → Vermilion →
+    /// Diglett's Cave → Route 2 (Cut two trees) → Viridian → Route 1 → Pallet → **Surf across Route 21**
+    /// to Cinnabar.
+    pub fn saffron_to_cinnabar_steps() -> Vec<Self> {
+        vec![
+            // Venusaur leads here (slot 0), which is what the Cut field-move executor needs — it always
+            // uses the lead and only Venusaur knows Cut. Surf still works from any lead (its executor
+            // picks the surfer's slot dynamically), so Vaporeon can still ferry us across Route 21.
+            Self::enter(Map::SaffronCity),
+            Self::enter(Map::Route6),
+            Self::enter(Map::Route6Gate),
+            Self::EnterMap { to_map: Map::Route6, to_position: Some(Point8 { x: 10, y: 7 }) },
+            Self::enter(Map::VermilionCity),
+            Self::enter(Map::Route11),
+            Self::enter(Map::DiglettsCaveRoute11),
+            Self::enter(Map::DiglettsCave),
+            Self::enter(Map::DiglettsCaveRoute2),
+            Self::enter(Map::Route2),
+            Self::CutTree { map: Map::Route2 },
+            Self::enter(Map::Route2Gate),
+            Self::EnterMap { to_map: Map::Route2, to_position: Some(Point8 { x: 15, y: 39 }) },
+            Self::CutTree { map: Map::Route2 },
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::Route1),
+            Self::enter(Map::PalletTown),
+            Self::enter(Map::Route21),
+            Self::enter(Map::CinnabarIsland),
+        ]
+    }
+
+    /// Pokémon Mansion → Secret Key (unlocks the Cinnabar Gym). The mansion is a switch-gate maze: one
+    /// global switch (`EVENT_MANSION_SWITCH_ON`) toggles every floor's sliding doors, and the only way
+    /// to the B1F Secret Key is to *fall through a 3F hole* to 1F's right side (the hole warp-down is
+    /// modelled in `apply_mansion_holes`). Route (all switch flips are single toggles):
+    ///   1F → 2F → 3F(via the 6,1 north stairs) → flip 3F switch (opens the hole region) → fall to
+    ///   1F(16,14) → B1F → flip (18,25) (opens the top) → flip (20,3) (opens the left column) → Key.
+    /// Frees a bag slot with the Rare Candy first (the bag arrives full at 20/20, blocking the pickup).
+    pub fn mansion_secret_key_steps() -> Vec<Self> {
+        vec![
+            // Heal to full HP/PP first — the mansion is a long battle-heavy crossing with no Pokémon
+            // Center inside, so the party must enter with full move PP (else it Struggles itself out).
+            Self::enter(Map::CinnabarPokecenter),
+            Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
+            Self::enter(Map::CinnabarIsland),
+            Self::UseRareCandy { slot: 0 },
+            Self::enter(Map::PokemonMansion1F),
+            Self::enter(Map::PokemonMansion2F),
+            Self::EnterMap { to_map: Map::PokemonMansion3F, to_position: Some(Point8 { x: 6, y: 1 }) },
+            Self::FlipSwitch { map: Map::PokemonMansion3F, at: Point8 { x: 10, y: 5 }, reveals: Map::PokemonMansion1F },
+            Self::enter(Map::PokemonMansion1F),   // fall through a hole → 1F (16,14)
+            Self::enter(Map::PokemonMansionB1F),  // (21,23) staircase down
+            Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
+            Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 20, y: 3 }, reveals: Map::PokemonMansion1F },
+            Self::CollectItem(MapSprite::POKEMONMANSIONB1F_SECRET_KEY),
+        ]
+    }
+
+    /// Volcano Badge: from the B1F Secret-Key pocket, exit the mansion, heal, and clear the Cinnabar
+    /// Gym. Exiting reverses the two B1F switch flips (reopening the (23,22) staircase up), then out to
+    /// Cinnabar. The gym is a quiz-gate snake maze: `DefeatGymLeader` beats each fire trainer via its
+    /// line of sight (all face down → engage from below), which unlocks the gate ahead, then Blaine.
+    /// Blaine's Fire team folds to Vaporeon's Surf / Venusaur's bulk.
+    pub fn volcano_badge_steps() -> Vec<Self> {
+        vec![
+            Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 20, y: 3 }, reveals: Map::PokemonMansion1F },
+            Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
+            Self::enter(Map::PokemonMansion1F),   // (23,22) staircase up → 1F right side
+            Self::enter(Map::CinnabarIsland),
+            Self::enter(Map::CinnabarPokecenter), // heal before the gym gauntlet
+            Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
+            Self::enter(Map::CinnabarIsland),
+            // Lead with Vaporeon for Blaine — his all-Fire team takes 2× from Surf, and Venusaur (Grass)
+            // is 2× weak to Fire. Party is [Venusaur, Vaporeon] here, so slot 1 → front puts Vaporeon up.
+            Self::MovePokemonToFront { slot: 1 },
+            Self::enter(Map::CinnabarGym),
+            Self::DefeatGymLeader { leader: MapSprite::CINNABARGYM_BLAINE, badge: Badge::VolcanoBadge },
+        ]
+    }
+
+    /// Earth Badge (8th): Giovanni's **Viridian Gym**, which reopens once Team Rocket is beaten at Silph
+    /// Co (done). From Cinnabar, Surf back across Route 21 to Pallet and up to Viridian, heal at the
+    /// Center, then clear the gym's **spinner-tile maze** (see the `ViridianGym` arrow table in
+    /// `tile_map.rs`) to Giovanni. His Ground/Rock team is 2–4× weak to Vaporeon's Surf, which already
+    /// leads coming out of Blaine, so the healed party clears it without a Hyper-Potion restock.
+    pub fn earth_badge_steps() -> Vec<Self> {
+        vec![
+            Self::enter(Map::CinnabarIsland),   // out of Blaine's gym
+            // Cinnabar → Viridian: Surf across Route 21 to Pallet, then up Route 1.
+            Self::enter(Map::Route21),
+            Self::enter(Map::PalletTown),
+            Self::enter(Map::Route1),
+            Self::enter(Map::ViridianCity),
+            // Heal before the toughest gym.
+            Self::enter(Map::ViridianPokecenter),
+            Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::ViridianGym),
+            Self::DefeatGymLeader { leader: MapSprite::VIRIDIANGYM_GIOVANNI, badge: Badge::EarthBadge },
         ]
     }
 
@@ -1031,22 +1270,15 @@ impl PolicyStep {
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
             Self::enter(Map::ViridianCity),
-            Self::enter(Map::ViridianMart),
-            Self::Interact(MapSprite::VIRIDIANMART_CLERK),       // open the shop menu
-            // Only ₽1500 is available here and the game silently rejects an unaffordable order, so buy
-            // 7 Poké Balls (₽1400) — enough to catch a Pidgey. Viridian's Mart does not sell Potions.
-            Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 7), map: Map::ViridianMart },
-            Self::enter(Map::ViridianCity),
 
-            // ── Catch a Pidgey on Route 1 ──
-            Self::enter(Map::Route1),
-            Self::CatchPokemon { species: PokemonSpecies::Pidgey, on_map: Map::Route1 },
-            // Heal after the catch: the catch battles leave the starter (and the just-caught,
-            // low-HP Pidgey) badly hurt; grinding straight away death-spirals. Full-heal first.
-            Self::enter(Map::ViridianCity),
-            Self::enter(Map::ViridianPokecenter),
-            Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
-            Self::enter(Map::ViridianCity),
+            // ── LONE STARTER (no caught second mon). A weak, low-level catch (the old Route 1 Pidgey)
+            // is worse than nothing in the attrition dungeons: when the starter faints there, the game
+            // forces the weakling in, and — being alive but unable to win *or* flee a trainer battle —
+            // it blocks the black-out that would otherwise heal the whole party, hard-deadlocking the
+            // crossing (observed in Mt Moon). With just the starter, a faint triggers a black-out →
+            // heal → re-enter and re-fight already a little stronger, which clears Mt Moon and the
+            // Nugget Bridge by convergent recovery. (So we also skip buying Poké Balls above.)
+
             // ── Grind the starter on Route 1 ──
             Self::enter(Map::Route1),
             Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1, slot: 0 },
@@ -1114,6 +1346,35 @@ impl PolicyStep {
         // ── Lavender → Celadon (Route 7–8 Underground Path) → Rainbow Badge (Erika) ──
         steps.extend(Self::lavender_to_celadon_steps());
         steps.extend(Self::celadon_rainbow_steps());
+        // ── Celadon Game Corner → Rocket Hideout → Silph Scope (Giovanni) ──
+        steps.extend(Self::rocket_hideout_entrance_steps());
+        steps.extend(Self::silph_scope_steps());
+        // ── Pokémon Tower (Silph Scope) → Poké Flute from Mr. Fuji ──
+        steps.extend(Self::poke_flute_steps());
+        // ── Route 12: wake the Snorlax blocking the road south with the Poké Flute ──
+        steps.extend(Self::snorlax_steps());
+        // ── Route 12–15 → Fuchsia → Soul Badge (Koga) ──
+        steps.extend(Self::soul_badge_steps());
+        // ── Safari Zone: HM03 Surf + Gold Teeth → HM04 Strength (Warden) ──
+        steps.extend(Self::safari_zone_surf_steps());
+        steps.extend(Self::safari_zone_strength_steps());
+        // ── Fuchsia → Celadon (buy Super Potions) → Saffron ──
+        steps.extend(Self::saffron_entry_steps());
+        // ── Celadon: free Eevee → Vaporeon, teach Surf, grind it — needed to beat the Silph rival's
+        //    Alakazam (and for Surf to Cinnabar). Done BEFORE Silph. ──
+        steps.extend(Self::eevee_vaporeon_surf_steps());
+        // ── Silph Co: Card Key → Giovanni (liberates Saffron) → out + heal ──
+        steps.extend(Self::silph_co_card_key_steps());
+        steps.extend(Self::silph_giovanni_steps());
+        // ── Saffron Gym → Marsh Badge (Sabrina) ──
+        steps.extend(Self::marsh_badge_steps());
+        // ── Surf across Route 21 to Cinnabar Island ──
+        steps.extend(Self::saffron_to_cinnabar_steps());
+        // ── Pokémon Mansion → Secret Key → Cinnabar Gym → Volcano Badge (Blaine) ──
+        steps.extend(Self::mansion_secret_key_steps());
+        steps.extend(Self::volcano_badge_steps());
+        // ── Cinnabar → Viridian Gym → Earth Badge (Giovanni), the 8th and final gym badge ──
+        steps.extend(Self::earth_badge_steps());
 
         steps
     }
@@ -1148,6 +1409,18 @@ pub struct DeterministicPolicy {
     /// becoming reachable. Past a threshold the step gives up and pops (the trainer is walled off by
     /// the teleport-pad maze) instead of stalling forever like the plain `Interact`.
     interact_skip_waits: u32,
+    /// The value of `mansion_switch_on` captured when the current Pokémon Mansion `FlipSwitch` step
+    /// began. The step completes once the flag differs — i.e. the single global switch has toggled
+    /// exactly once — so each `FlipSwitch` is one deterministic flip (not an oscillating retry loop).
+    mansion_flip_baseline: Option<bool>,
+    /// Positions of gym trainers already beaten during the current `DefeatGymLeader` step (Cinnabar's
+    /// quiz-gate maze): a defeated trainer stays on the map as a sprite, so once we detect we're
+    /// standing in its line of sight with no battle starting, we record it here to avoid re-targeting.
+    gym_beaten: HashSet<Point8>,
+    /// `(trainer position, player position, consecutive stuck ticks)` for the gym-trainer engagement.
+    /// If we keep targeting the same beaten trainer from the same frozen spot (its after-battle text
+    /// aborts the approach, no battle starts), the counter climbs until we mark it beaten and move on.
+    gym_engage: Option<(Point8, Point8, u32)>,
 }
 
 impl DeterministicPolicy {
@@ -1163,6 +1436,9 @@ impl DeterministicPolicy {
             heal_return: None,
             mart_attempts: 0,
             collect_item_seen: false,
+            mansion_flip_baseline: None,
+            gym_beaten: HashSet::new(),
+            gym_engage: None,
             train_slot: None,
             interact_skip_waits: 0,
         }
@@ -1342,6 +1618,8 @@ impl Policy for DeterministicPolicy {
                 },
                 PolicyStep::DefeatGymLeader { leader, badge } => {
                     if state.badges.contains(badge) {
+                        self.gym_beaten.clear();
+                        self.gym_engage = None;
                         self.queue.pop_front();
                         continue;
                     } else if state.map.map != leader.map() {
@@ -1352,13 +1630,54 @@ impl Policy for DeterministicPolicy {
                             continue;
                         }
                         action
-                    } else {
+                    } else if let Some(a) = actions.iter().find(|a| a.tile == MetaTile::Sprite(leader.name)) {
                         // Stay on this step until the badge is obtained — do not pop here.
                         // If the player loses and blacks out, the step remains and the agent
                         // navigates back to try again.
-                        actions.iter()
-                            .find(|a| a.tile == MetaTile::Sprite(leader.name))
-                            .cloned()
+                        Some(a.clone())
+                    } else {
+                        // The leader isn't reachable yet — in a gated gym (Cinnabar's quiz-gate snake
+                        // maze) the path opens only by beating the junior trainers, each of whom unlocks
+                        // the gate ahead. Every gym trainer faces DOWN, so engage the nearest one via its
+                        // line of sight: route to the tile directly below it (`route_to_face_dir(.., Up)`
+                        // lands on that LOS tile) — a plain adjacent-approach fails when the maze arrives
+                        // from behind the trainer. A beaten trainer stays on the map as a sprite; when we
+                        // find ourselves already in its LOS with no battle starting, it's beaten, so
+                        // record it and skip. Re-evaluated every tick until the leader opens up.
+                        use crate::pokemon::map_metadata::PlayerFacingDirection;
+                        let mut cands: Vec<_> = state.map.sprites.iter()
+                            .filter(|s| !s.hidden && s.name != leader.name && !s.name.contains("Guide")
+                                && !self.gym_beaten.contains(&s.position))
+                            .filter_map(|s| state.map.route_to_face_dir(s.position, Some(PlayerFacingDirection::Up))
+                                .map(|r| (s.position, s.name, r)))
+                            .collect();
+                        cands.sort_by_key(|(_, _, r)| r.len());
+                        let cur = state.map.player_position;
+                        let mut chosen = None;
+                        for (pos, name, route) in cands {
+                            if route.is_empty() {
+                                // Standing in this trainer's LOS but not in battle → it's already beaten.
+                                self.gym_beaten.insert(pos);
+                                continue;
+                            }
+                            // Stuck detection: re-targeting the same trainer from the same spot for many
+                            // ticks (its after-battle text keeps aborting the approach) → it's beaten.
+                            match self.gym_engage {
+                                Some((t, p, w)) if t == pos && p == cur => {
+                                    if w + 1 > 40 {
+                                        self.gym_beaten.insert(pos);
+                                        self.gym_engage = None;
+                                        continue;
+                                    }
+                                    self.gym_engage = Some((pos, cur, w + 1));
+                                }
+                                _ => self.gym_engage = Some((pos, cur, 0)),
+                            }
+                            chosen = Some(OverworldAction { map: state.map.map, origin: state.map.player_position,
+                                destination: Point8 { x: pos.x, y: pos.y + 1 }, tile: MetaTile::Sprite(name), route });
+                            break;
+                        }
+                        chosen
                     }
                 },
                 PolicyStep::Interact(sprite) => {
@@ -1518,6 +1837,10 @@ impl Policy for DeterministicPolicy {
                     None
                 }
                 PolicyStep::EvolveWithStone { .. } => {
+                    // Handled by `pick_field_move` (bag menu chain); wait without advancing.
+                    None
+                }
+                PolicyStep::UseRareCandy { .. } => {
                     // Handled by `pick_field_move` (bag menu chain); wait without advancing.
                     None
                 }
@@ -1698,15 +2021,22 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // Use a healing item if HP is below 25% — prioritise max-heal items.
+        // Use a healing item if HP is below 25% — prefer the BIGGEST heal available. This matters against
+        // a fast, super-effective attacker (e.g. the Silph rival's Alakazam vs Venusaur): a Super Potion
+        // (+50) only cancels its ~50 Psychic, so the mon never rises above 25% to attack and stalemates
+        // forever. A Hyper/Max Potion heals to near-full, so the mon survives the next hit above the heal
+        // threshold and gets to actually fight back.
         if battle_state.player.remaining_hp() < 0.25 {
-            let heal = actions.iter().find(|a| matches!(a,
-                BattleAction::UseItem { item, .. }
-                if matches!(item.id, ItemId::MaxPotion | ItemId::HyperPotion | ItemId::SuperPotion | ItemId::Potion)
-            ));
+            let potion_rank = |id: ItemId| match id {
+                ItemId::FullRestore => 4, ItemId::MaxPotion => 3, ItemId::HyperPotion => 2,
+                ItemId::SuperPotion => 1, ItemId::Potion => 0, _ => -1,
+            };
+            let heal = actions.iter()
+                .filter(|a| matches!(a, BattleAction::UseItem { item, .. } if potion_rank(item.id) >= 0))
+                .max_by_key(|a| match a { BattleAction::UseItem { item, .. } => potion_rank(item.id), _ => -1 });
             if let Some(heal_action) = heal {
                 println!("[policy] HP critical ({:.0}%) — using healing item", battle_state.player.remaining_hp() * 100.0);
-                return Some(*heal_action);
+                return Some(heal_action.clone());
             }
         }
 
@@ -1744,6 +2074,27 @@ impl Policy for DeterministicPolicy {
                         return Some(*switch);
                     }
                 }
+            }
+        }
+
+        // Critically low HP with no way to recover in-battle — the <25% heal block above found no
+        // usable potion and the <15% switch block above found no healthy team-mate to swap in — so
+        // flee the wild battle and heal at a Pokémon Center instead of fighting on until the mon
+        // faints. Fainting would force in a weak bench mon (e.g. the lv-4 Pidgey) that can't win yet,
+        // being alive, blocks the black-out that would otherwise heal the party — deadlocking a
+        // dungeon crossing (the lone starter attriting to a faint in Mt Moon). Fleeing to heal keeps
+        // the starter, and it re-crosses the dungeon in successive, progressively-levelled passes
+        // (the "just the starter" recovery loop). Skipped while grinding — there we deliberately fight
+        // on and rely on black-out recovery so the lead keeps earning XP.
+        if !grinding
+            && battle_state.battle_type == BattleType::Wild
+            && self.heal_return.is_none()
+            && battle_state.player.remaining_hp() < 0.15
+        {
+            if let Some(center) = self.last_pokemon_center {
+                println!("[policy] HP critical, no heal/switch — fleeing to {center} to heal");
+                self.heal_return = Some(center);
+                return Some(BattleAction::Run);
             }
         }
 
@@ -1849,6 +2200,18 @@ impl Policy for DeterministicPolicy {
             }
             return Some(FieldMove::TeachMove { item, target_slot });
         }
+        if let Some(&PolicyStep::UseRareCandy { slot }) = self.queue.front() {
+            // Done once the Rare Candy is gone (consumed). Reuse the teach-move menu driver: Rare Candy
+            // teaches no HM move, so its "learned" completion never fires — the agent uses the item,
+            // then backs out when the item disappears from the bag list. Popping here on consumption
+            // guarantees exactly one use.
+            if !state.bag.iter().any(|b| b.id == ItemId::RareCandy) {
+                println!("[policy] UseRareCandy: consumed — done");
+                self.queue.pop_front();
+                return None;
+            }
+            return Some(FieldMove::TeachMove { item: ItemId::RareCandy, target_slot: slot });
+        }
         if let Some(&PolicyStep::EvolveWithStone { stone, target_slot }) = self.queue.front() {
             let current = state.pokemon.get(target_slot as usize).map(|p| p.species);
             match current {
@@ -1872,15 +2235,29 @@ impl Policy for DeterministicPolicy {
                     return None;
                 }
                 let target = if puzzle.first_opened { puzzle.second_target } else { puzzle.first_target };
-                return Some(FieldMove::CheckTrashCan { target });
+                return Some(FieldMove::CheckTrashCan { target, facing: None });
             }
         }
         if let Some(&PolicyStep::FlipSwitch { map, at, reveals }) = self.queue.front() {
             if state.map.map == map {
-                // Done once the passage to `reveals` opens. Rocket Hideout's staircase isn't a gate the
-                // runtime block map exposes, so use its event flag; for switch-gated maps whose blocks we
-                // read live (e.g. the Pokémon Mansion), the flipped gate genuinely changes reachability,
-                // so a reachable warp/connection to `reveals` means the switch is thrown.
+                if is_mansion_floor(map) {
+                    // Pokémon Mansion: one global switch toggles every floor's gates. Flip it exactly
+                    // once — complete when `mansion_switch_on` differs from the value captured when the
+                    // step began — so the route can compose deterministic flips (vs. an oscillating
+                    // "flip until a warp appears" loop, which the single global toggle makes unstable).
+                    let baseline = *self.mansion_flip_baseline.get_or_insert(state.mansion_switch_on);
+                    if state.mansion_switch_on != baseline {
+                        println!("[policy] FlipSwitch: Mansion switch toggled to {} — done", state.mansion_switch_on);
+                        self.mansion_flip_baseline = None;
+                        self.queue.pop_front();
+                        return None;
+                    }
+                    // Statue switches only trigger when faced from directly below (facing Up).
+                    return Some(FieldMove::CheckTrashCan { target: at,
+                        facing: Some(crate::pokemon::map_metadata::PlayerFacingDirection::Up) });
+                }
+                // Non-Mansion (Rocket Hideout poster): done once the passage to `reveals` opens. The
+                // staircase isn't a gate the runtime block map exposes, so use its event flag.
                 let done = match reveals {
                     Map::RocketHideoutB1F => state.found_rocket_hideout,
                     _ => state.map.actions().iter().any(|a| matches!(a.tile,
@@ -1891,8 +2268,7 @@ impl Policy for DeterministicPolicy {
                     self.queue.pop_front();
                     return None;
                 }
-                // Reuse the trash-can face-and-press mechanism to press A on the bg-event tile.
-                return Some(FieldMove::CheckTrashCan { target: at });
+                return Some(FieldMove::CheckTrashCan { target: at, facing: None });
             }
         }
         if let Some(&PolicyStep::UseElevator { panel, floor }) = self.queue.front() {
@@ -1932,7 +2308,7 @@ impl Policy for DeterministicPolicy {
             }
             // Reuse the face-a-bg-event-and-press-A mechanism; the vending menu opens with the cheapest
             // drink at the cursor, so A-mashing buys it. Persists until the drink is in the bag.
-            return Some(FieldMove::CheckTrashCan { target: at });
+            return Some(FieldMove::CheckTrashCan { target: at, facing: None });
         }
         None
     }
@@ -1976,6 +2352,10 @@ impl Policy for DeterministicPolicy {
                 // A gym-leader fight sits on one step for the whole battle, and self-heals + re-routes
                 // on a blackout (queue unchanged the whole time) — legitimately long-running.
                 | Some(PolicyStep::DefeatGymLeader { .. })
+                // Flipping a Pokémon Mansion switch means routing across a battle-heavy floor to reach
+                // the statue (wild encounters + LOS trainers interrupt the walk) — the single FlipSwitch
+                // step legitimately sits unchanged for a long while.
+                | Some(PolicyStep::FlipSwitch { .. })
         )
     }
 }

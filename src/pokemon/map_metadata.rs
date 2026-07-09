@@ -275,6 +275,23 @@ impl MapMetadata {
     }
 }
 
+impl MapMetadata {
+    /// Pokémon Mansion 3F floor holes: stepping onto any of them drops the player to 1F, landing at
+    /// (16,14) (pokered `PokemonMansion3F.asm` `.holeCoords` + `special_warps.asm` `DungeonWarpData`).
+    /// Model them as inter-map warps so BFS routes 3F → hole → 1F automatically — the only way to reach
+    /// 1F's right side, and thus the B1F staircase down to the Secret Key.
+    pub fn apply_mansion_holes(&self, result: &mut [MetaTile]) {
+        if self.map != Map::PokemonMansion3F { return; }
+        let w = self.dimensions().full_width();
+        for (x, y) in [(16usize, 14usize), (17, 14), (19, 14)] {
+            let idx = x + y * w;
+            if idx < result.len() {
+                result[idx] = MetaTile::Warp { to_map: Map::PokemonMansion1F, to_position: Point8 { x: 16, y: 14 } };
+            }
+        }
+    }
+}
+
 /// True on the Silph Co floors that have card-key doors.
 pub fn map_has_card_key_doors(map: Map) -> bool {
     matches!(map,
@@ -1088,6 +1105,8 @@ impl CurrentMap {
         if map_has_card_key_doors(self.metadata.map) {
             self.metadata.apply_card_key_doors(&mut result, self.card_key_locked);
         }
+        // Pokémon Mansion 3F floor holes → warp down to 1F (inert on every other map).
+        self.metadata.apply_mansion_holes(&mut result);
         result
     }
 }
