@@ -335,6 +335,11 @@ pub enum PolicyStep {
     /// blockers that plug a corridor (collecting one Mt Moon fossil opens the exit passage).
     CollectItem(MapSprite),
     DefeatGymLeader { leader: MapSprite, badge: Badge },
+    /// Battle a fixed trainer (e.g. an Elite Four member) by walking into its line of sight, then advance
+    /// once it's beaten. Unlike `DefeatGymLeader` there's no badge to gate on — completion is detected the
+    /// same way as beaten gym trainers (standing in the trainer's LOS with no battle starting). The trainer
+    /// faces DOWN, so route to the tile directly below it (`route_to_face_dir(.., Up)`).
+    BattleTrainer { trainer: MapSprite },
     /// Walk in grass and throw Pokéballs until a Pokémon is caught.
     CatchPokemon { species: PokemonSpecies, on_map: Map },
     /// Enable/disable "train this slot" mode: while `Some(slot)`, the battle policy switches that party
@@ -366,6 +371,20 @@ pub enum PolicyStep {
     /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge). Routes to face a
     /// `MetaTile::CutTree`, then uses the Cut field move. Persists until no reachable tree remains.
     CutTree { map: Map },
+    /// Activate Strength using the party mon at `slot` (an HM-slave that knows it). Completes once
+    /// `BIT_STRENGTH_ACTIVE` is set. Strength resets on every map change, so re-issue it per floor
+    /// before pushing boulders. Only meaningful once a party member knows Strength.
+    UseStrength { slot: u8 },
+    /// Push a boulder onto the Strength switch at `switch` (a cave floor coordinate), solving the
+    /// current floor's boulder puzzle. Requires `BIT_STRENGTH_ACTIVE` already armed (issue `UseStrength`
+    /// first). The agent runs `MetaTileMap::solve_boulder_push(switch)` to plan the pushes and drives
+    /// them. Completes once a boulder sits on `switch` (the map script then sets the switch event and
+    /// opens the barrier). Re-solvable from any partial state, so it resumes after a wild battle.
+    SolveBoulders { switch: crate::geometry::Point8 },
+    /// Push a boulder onto a floor `hole` (Victory Road 3F) so it falls to the floor below — revealing a
+    /// hidden boulder there (VR2F's second-switch boulder). Reuses the boulder solver/executor aimed at
+    /// the hole tile; completes once one boulder has fallen (the visible count drops). Requires Strength.
+    DropBoulderInHole { hole: crate::geometry::Point8 },
     /// Solve the Vermilion Gym trash-can switch puzzle: check the first switch can, then the second,
     /// unlocking the door to Lt. Surge. The correct cans are read from RAM (`GameState::trash_cans`)
     /// so the agent goes straight to them and never triggers a reset. Persists until the 2nd lock is
@@ -417,6 +436,15 @@ pub enum FieldMove {
     /// Face the sprite at `target`, then use bag `item` on it (START → ITEM → select → USE). The
     /// item's field effect (e.g. the Poké Flute waking a Snorlax) does the rest.
     UseFieldItem { item: ItemId, target: crate::geometry::Point8 },
+    /// Activate the Strength field move from the party menu, selecting the mon at `slot` (an HM-slave
+    /// that knows Strength). Arms `BIT_STRENGTH_ACTIVE` so boulders become pushable on this map.
+    UseStrength { slot: u8 },
+    /// Primitive Strength push: shove the boulder at `boulder` one tile in `dir` (Strength must be armed).
+    /// The agent routes behind the boulder and double-presses; it completes as soon as the boulder leaves
+    /// its tile. A policy plans *which* boulder/direction with the `MetaTileMap::solve_boulder_push` helper
+    /// (or, for an LLM, by reasoning over `map.sprites` + `map.strength_switches`), then issues these one
+    /// at a time.
+    PushBoulder { boulder: crate::geometry::Point8, dir: crate::joypad::JoypadButton },
 }
 
 /// True for the four Pokémon Mansion floors, whose statue switches only trigger when faced from below.
@@ -432,6 +460,7 @@ pub fn hm_move(item: ItemId) -> Option<PokemonMoveName> {
         ItemId::Hm03Surf => Some(PokemonMoveName::Surf),
         ItemId::Hm04Strength => Some(PokemonMoveName::Strength),
         ItemId::Hm05Flash => Some(PokemonMoveName::Flash),
+        ItemId::Tm14Blizzard => Some(PokemonMoveName::Blizzard), // TM (consumed on use); the E4 Lance answer
         _ => None,
     }
 }
@@ -1232,6 +1261,70 @@ impl PolicyStep {
         ]
     }
 
+    /// After all 8 badges: reach Victory Road 1F, catch a Machop HM-slave + teach it Strength, then
+    /// solve the 1F boulder puzzle (push a boulder onto the (17,13) switch) and climb the now-open (1,1)
+    /// ladder to VR2F. Reliable from a fresh run; folded into `complete_game_steps`. The deeper VR2F/VR3F
+    /// puzzle is `victory_road_2f_3f_steps` (PP-marginal from a fresh run — see its note).
+    pub fn victory_road_1f_steps(machop_slot: u8) -> Vec<Self> {
+        vec![
+            Self::enter(Map::ViridianCity),          // out of the gym
+            // The Route-22 rival is a Silph-rival redux (Alakazam + Charizard). Beat it like Silph: heal
+            // (full HP/PP), restock Hyper Potions (a Super Potion's +50 only cancels Alakazam's Psychic →
+            // unwinnable stalemate), and lead the bulky Venusaur. Cave wilds during the catch are FLED, not
+            // fought (see the wild-flee block in `pick_battle_action`), so PP holds through the boulder solves.
+            Self::enter(Map::ViridianPokecenter),
+            Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
+            Self::enter(Map::ViridianCity),
+            Self::enter(Map::ViridianMart),
+            Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 15), map: Map::ViridianMart },
+            Self::enter(Map::ViridianCity),
+            Self::MovePokemonToFront { slot: 1 },    // Venusaur leads the rival (Alakazam nemesis)
+            Self::enter(Map::Route22),
+            Self::enter(Map::Route22Gate),           // walk west → rival ambush → gate to Route 23
+            Self::Interact(MapSprite::ROUTE22GATE_GUARD), // walk to (5,2): badge check + flips the dynamic warp
+            Self::enter(Map::Route23),
+            Self::goto(Map::VictoryRoad1F),
+            // Catch a wild Machop (learns Strength) as the boulder HM-slave — Master Ball, thrown at once.
+            Self::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F },
+            Self::TeachMove { item: ItemId::Hm04Strength, target_slot: machop_slot }, // Machop appends after the party
+            // VR1F: push a boulder onto (17,13), climb to VR2F.
+            Self::UseStrength { slot: machop_slot },
+            Self::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+            Self::enter(Map::VictoryRoad2F),
+        ]
+    }
+
+    /// The VR2F/VR3F half of Victory Road (from standing on VR2F to the Indigo Plateau lobby): the
+    /// interconnected hole-drop puzzle. Validated end-to-end by `can_solve_victory_road_2f_3f` (from a
+    /// VR3F fixture). NB: chaining this onto a *fresh* run is PP-marginal — VR's ~9 mandatory trainers
+    /// plus the Route-22 rival drain Venusaur past its ~50 damaging PP in some RNG lines (there is no
+    /// Pokémon Center inside VR), so it is NOT yet in `complete_game_steps`; that needs a stronger team.
+    pub fn victory_road_2f_3f_steps(machop_slot: u8) -> Vec<Self> {
+        vec![
+            // VR2F: switch1 (1,16) → up the (23,7) stairs to VR3F.
+            Self::UseStrength { slot: machop_slot },
+            Self::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
+            Self::enter(Map::VictoryRoad3F),
+            // VR3F: switch (3,5) opens the hole barrier; drop a boulder into the hole (23,15) to reveal 2F's
+            // hidden boulder, then fall through the hole to VR2F's east side.
+            Self::UseStrength { slot: machop_slot },
+            Self::SolveBoulders { switch: Point8 { x: 3, y: 5 } },
+            Self::DropBoulderInHole { hole: Point8 { x: 23, y: 15 } },
+            Self::enter_at(Map::VictoryRoad2F, 22, 16),
+            // VR2F east: push the revealed boulder onto switch2 (9,16); this leaves the player in the west.
+            Self::UseStrength { slot: machop_slot },
+            Self::SolveBoulders { switch: Point8 { x: 9, y: 16 } },
+            // Return trip: climb back to VR3F and fall through the hole again → back east with switch2 open.
+            Self::enter(Map::VictoryRoad3F),
+            Self::enter_at(Map::VictoryRoad2F, 22, 16),
+            // Out the (29,7/8) exit → Route 23 → Indigo Plateau → the Elite Four lobby.
+            Self::enter(Map::Route23),
+            Self::enter(Map::IndigoPlateau),
+            Self::enter(Map::IndigoPlateauLobby),
+        ]
+    }
+
+
     /// The full deterministic playthrough. Every forward map transition is an explicit `EnterMap`;
     /// on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the incrementally-observed
     /// graph. Starter is **Bulbasaur** — its Grass typing is super-effective against both Brock
@@ -1375,6 +1468,10 @@ impl PolicyStep {
         steps.extend(Self::volcano_badge_steps());
         // ── Cinnabar → Viridian Gym → Earth Badge (Giovanni), the 8th and final gym badge ──
         steps.extend(Self::earth_badge_steps());
+        // ── Victory Road 1F: catch a Strength HM-slave, solve the boulder puzzle, climb to VR2F ──
+        // (The full VR2F/VR3F puzzle works — `can_solve_victory_road_2f_3f` — but chaining it here is
+        // PP-marginal for this team; see `victory_road_2f_3f_steps`.)
+        steps.extend(Self::victory_road_1f_steps(2)); // lone-starter party → Machop appends at slot 2
 
         steps
     }
@@ -1400,11 +1497,19 @@ pub struct DeterministicPolicy {
     /// "not yet revealed" — some item balls stay hidden until their guard is beaten (e.g. the Rocket
     /// Hideout Lift Key / Silph Scope), and popping on the initial hidden state would skip them.
     collect_item_seen: bool,
+    /// Consecutive ticks a `CatchPokemon` step has found no encounter source (no grass/cave-object/water).
+    /// On map entry the tile grid is momentarily unsettled (sprites can read out of bounds), so we WAIT a
+    /// bounded number of ticks for it to settle rather than popping the catch immediately.
+    catch_wander_stuck: u32,
     /// When `Some(slot)`, switch that party slot in at the start of every battle (wild *and* trainer)
     /// so it — not the lead — earns the XP. Used to train a bench mon (e.g. Vaporeon) on the trainer
     /// gauntlet. A safety cap skips the switch when the enemy out-levels the trainee by a wide margin,
     /// so it won't suicide into a much stronger foe (e.g. the rival's ace). Toggle with `SetTrainSlot`.
     train_slot: Option<u8>,
+    /// During a `GrindUntilLevel` grind: set once the trainee has been switched into / handed off from the
+    /// CURRENT battle (reset each overworld tick). Stops train_slot re-switching a just-handed-off trainee
+    /// straight back in (which would oscillate with the low-HP hand-off and let it faint anyway).
+    trainee_participated: bool,
     /// Consecutive policy ticks the current `InteractIfReachable` step has waited without the sprite
     /// becoming reachable. Past a threshold the step gives up and pops (the trainer is walled off by
     /// the teleport-pad maze) instead of stalling forever like the plain `Interact`.
@@ -1413,6 +1518,10 @@ pub struct DeterministicPolicy {
     /// began. The step completes once the flag differs — i.e. the single global switch has toggled
     /// exactly once — so each `FlipSwitch` is one deterministic flip (not an oscillating retry loop).
     mansion_flip_baseline: Option<bool>,
+    /// Visible-boulder count captured when the current `DropBoulderInHole` step began. The step completes
+    /// once the count drops (a boulder was pushed onto the hole and fell to the floor below), so exactly
+    /// one boulder is dropped rather than every boulder that can reach the hole.
+    boulder_drop_baseline: Option<usize>,
     /// Positions of gym trainers already beaten during the current `DefeatGymLeader` step (Cinnabar's
     /// quiz-gate maze): a defeated trainer stays on the map as a sprite, so once we detect we're
     /// standing in its line of sight with no battle starting, we record it here to avoid re-targeting.
@@ -1436,10 +1545,13 @@ impl DeterministicPolicy {
             heal_return: None,
             mart_attempts: 0,
             collect_item_seen: false,
+            catch_wander_stuck: 0,
             mansion_flip_baseline: None,
+            boulder_drop_baseline: None,
             gym_beaten: HashSet::new(),
             gym_engage: None,
             train_slot: None,
+            trainee_participated: false,
             interact_skip_waits: 0,
         }
     }
@@ -1452,6 +1564,15 @@ impl DeterministicPolicy {
     /// visited target — the signal that the deterministic policy is under-specified.
     fn route_toward(world_graph: &WorldGraph, actions: &[OverworldAction], target: Map) -> Option<OverworldAction> {
         world_graph.pick_shortest_path_action(actions, target)
+    }
+
+    /// Plan the Sokoban to land a boulder on `target` (a Strength switch or a floor hole) and return the
+    /// FIRST one-tile push as a `FieldMove::PushBoulder`, or `None` if no boulder can reach it right now
+    /// (the caller waits and re-plans next tick). The planner `MetaTileMap::solve_boulder_push` is a shared
+    /// helper any policy can call; the deterministic policy just drives its pushes one at a time.
+    fn next_boulder_push(state: &GameState, target: Point8) -> Option<FieldMove> {
+        let (boulder, dir) = state.map.solve_boulder_push(target)?.into_iter().next()?;
+        Some(FieldMove::PushBoulder { boulder, dir })
     }
 
     /// The action that takes the warp/connection to `to_map` (matching raw `to_position` when
@@ -1481,6 +1602,8 @@ impl DeterministicPolicy {
 impl Policy for DeterministicPolicy {
 
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction> {
+        // Back in the overworld = the previous battle is over; clear the per-battle grind participation flag.
+        self.trainee_participated = false;
         if state.map.map.is_pokemon_center() {
             self.last_pokemon_center = Some(state.map.map);
         }
@@ -1563,20 +1686,39 @@ impl Policy for DeterministicPolicy {
                         // caught the pokemon (note this only works once for each species)
                         self.queue.pop_front();
                         continue;
+                    } else if state.bag.best_pokeball().is_none() {
+                        println!("[policy] want to catch a {}, but no Pokéballs left!", species);
+                        self.queue.pop_front();
+                        continue;
+                    } else if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Grass) {
+                        self.catch_wander_stuck = 0;
+                        Some(action.clone()) // walk in grass to trigger encounters
                     } else if let Some(action) = actions.iter()
-                        .find(|a| a.tile == MetaTile::Grass) {
-                        if state.bag.best_pokeball().is_some() {
-                            // walk in grass
-                            Some(action.clone())
+                        .filter(|a| matches!(a.tile, MetaTile::Sprite(_)))
+                        .max_by_key(|a| a.route.len()) {
+                        // No grass (a cave): walk to the farthest reachable object (e.g. a boulder). The
+                        // long transit ping-pongs across the cave and cave encounters fire per step.
+                        self.catch_wander_stuck = 0;
+                        Some(action.clone())
+                    } else if let Some(action) = state.map.wander_action() {
+                        // No grass and no reachable cave object (a pocket, or a water map like Seafoam):
+                        // pace to the farthest reachable walkable tile — walking/Surfing fires per-step
+                        // encounters just the same.
+                        self.catch_wander_stuck = 0;
+                        Some(action)
+                    } else {
+                        // No encounter source THIS tick. On map entry the tile grid is briefly unsettled
+                        // (sprites can read out of bounds → no reachable cave object), so wait a bounded
+                        // number of ticks for it to settle before giving up, rather than popping instantly.
+                        self.catch_wander_stuck += 1;
+                        if self.catch_wander_stuck < 400 {
+                            None // wait
                         } else {
-                            println!("[policy] want to catch a {}, but no Pokéballs left!", species);
+                            println!("[policy] want to catch a {species}, but nowhere to trigger an encounter (gave up)!");
+                            self.catch_wander_stuck = 0;
                             self.queue.pop_front();
                             continue;
                         }
-                    } else {
-                        println!("[policy] want to catch a {}, but no grass nearby!", species);
-                        self.queue.pop_front();
-                        continue;
                     }
                 },
                 PolicyStep::GrindUntilLevel { target_level, on_map, slot } => {
@@ -1608,10 +1750,32 @@ impl Policy for DeterministicPolicy {
                             continue;
                         }
                         action
-                    } else if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Grass) {
-                        Some(action.clone()) // walk in grass to trigger encounters
+                    } else if let Some(action) = actions.iter()
+                        .filter(|a| a.tile == MetaTile::Grass)
+                        .min_by_key(|a| a.route.len())
+                    {
+                        // Walk in the NEAREST grass to trigger encounters — ping-pong locally rather than
+                        // marching across the map. On a long route (Route 23) wandering far can cross a
+                        // one-way ledge into a pocket from which the Pokémon Center becomes unreachable,
+                        // stranding the heal-return trek; staying near the entry keeps the center routable.
+                        Some(action.clone())
+                    } else if let Some(action) = actions.iter()
+                        .filter(|a| match a.tile {
+                            // Pace to the farthest reachable object/warp so wild encounters (which fire on
+                            // EVERY step in a cave/building) keep coming as the trainee ping-pongs across the
+                            // map. EXCLUDE item-ball sprites (`PictureId::PokeBall`): walking onto one triggers
+                            // a pickup that aborts on a full bag and loops forever (Pokémon Mansion). Warps
+                            // (stairs) are fine targets — taking one just changes floor, and GrindUntilLevel
+                            // routes back; the transit still triggers encounters.
+                            MetaTile::Sprite(name) => !state.map.sprites.iter()
+                                .any(|s| s.name == name && s.picture_id == crate::pokemon::sprite::PictureId::PokeBall),
+                            MetaTile::Warp { .. } => true,
+                            _ => false,
+                        })
+                        .max_by_key(|a| a.route.len()) {
+                        Some(action.clone())
                     } else {
-                        println!("[policy] cannot level up a Pokemon, no grass nearby!");
+                        println!("[policy] cannot level up a Pokemon, no grass or cave objects nearby!");
                         self.queue.pop_front();
                         continue;
                     }
@@ -1678,6 +1842,45 @@ impl Policy for DeterministicPolicy {
                             break;
                         }
                         chosen
+                    }
+                },
+                PolicyStep::BattleTrainer { trainer } => {
+                    use crate::pokemon::map_metadata::PlayerFacingDirection;
+                    if state.map.map != trainer.map() {
+                        // Not in the trainer's room yet (a preceding `enter` normally places us here).
+                        let action = Self::route_toward(world_graph, &actions, trainer.map());
+                        if action.is_none() { self.queue.pop_front(); continue; }
+                        action
+                    } else if let Some(sprite) = state.map.sprites.iter().find(|s| !s.hidden && s.name == trainer.name) {
+                        let pos = sprite.position;
+                        let cur = state.map.player_position;
+                        match state.map.route_to_face_dir(pos, Some(PlayerFacingDirection::Up)) {
+                            // Standing in the trainer's LOS with no battle → it's beaten. Advance.
+                            Some(route) if route.is_empty() => {
+                                self.gym_engage = None;
+                                self.queue.pop_front();
+                                continue;
+                            }
+                            Some(route) => {
+                                // Stuck detection: re-targeting from the same frozen spot (its after-battle
+                                // text keeps aborting the approach) → beaten.
+                                match self.gym_engage {
+                                    Some((t, p, w)) if t == pos && p == cur => {
+                                        if w + 1 > 40 { self.gym_engage = None; self.queue.pop_front(); continue; }
+                                        self.gym_engage = Some((pos, cur, w + 1));
+                                    }
+                                    _ => self.gym_engage = Some((pos, cur, 0)),
+                                }
+                                Some(OverworldAction { map: state.map.map, origin: cur,
+                                    destination: Point8 { x: pos.x, y: pos.y + 1 },
+                                    tile: MetaTile::Sprite(trainer.name), route })
+                            }
+                            None => { self.queue.pop_front(); continue; }
+                        }
+                    } else {
+                        // Trainer sprite absent (hidden/gone) — treat as done.
+                        self.queue.pop_front();
+                        continue;
                     }
                 },
                 PolicyStep::Interact(sprite) => {
@@ -1854,6 +2057,14 @@ impl Policy for DeterministicPolicy {
                     // Handled by `pick_field_move` (a direct RAM reorder); wait without advancing.
                     None
                 }
+                PolicyStep::UseStrength { .. } => {
+                    // Handled by `pick_field_move` (party-menu field-move chain); wait without advancing.
+                    None
+                }
+                PolicyStep::SolveBoulders { .. } | PolicyStep::DropBoulderInHole { .. } => {
+                    // Handled by `pick_field_move` (plans + drives the boulder pushes); wait without advancing.
+                    None
+                }
                 PolicyStep::CutTree { map } => {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
@@ -1929,6 +2140,17 @@ impl Policy for DeterministicPolicy {
         let battle_state = state.battle.as_ref()?;
         let actions = battle_options(state)?;
 
+        // Inside Victory Road the low-PP / low-HP "flee to a Pokémon Center" detours must be SUPPRESSED —
+        // fleeing out of the multi-floor puzzle to walk all the way back to Viridian abandons the solve and
+        // stalls. And every cave wild here is a pure obstacle: fighting them drains PP and interrupts the
+        // long boulder solves / floor-to-floor walks. So on a VR map we suppress the heal detours and flee
+        // wilds outright (except the Machop catch target). Trainers here are mandatory and fought normally.
+        // Only VR2F/VR3F — the long interconnected half where cumulative PP drain matters. VR1F is short
+        // and the freshly-healed team fights its wilds fine (fleeing there just shifts the RNG into a
+        // cooltrainer PP stalemate); the Machop catch on VR1F is handled by the CatchPokemon arm below.
+        let in_victory_road = matches!(state.map.map,
+            Map::VictoryRoad2F | Map::VictoryRoad3F);
+
         // Safari Zone: the deterministic policy never hunts — always RUN (a Safari run never fails), to
         // preserve steps/balls while it navigates to the items. (The BALL/BAIT/ROCK options are still in
         // `battle_options` so a future LLM policy can choose to catch.)
@@ -1949,6 +2171,7 @@ impl Policy for DeterministicPolicy {
         // run from wild battles and queue a detour to the last visited Pokémon Center.
         if battle_state.battle_type == BattleType::Wild
             && self.heal_return.is_none()
+            && !in_victory_road
             && all_damaging_moves_low_pp(&actions)
         {
             if let Some(center) = self.last_pokemon_center {
@@ -1972,6 +2195,25 @@ impl Policy for DeterministicPolicy {
                 .cloned();
         }
 
+        // ── Flee obstacle wilds during Victory Road boulder tasks / the HM-slave catch ───────
+        // Cave wilds here are pure obstacles: fighting each one drains the lead's damaging-move PP over the
+        // long multi-floor traversal (the 27-push 3F solve alone triggers dozens) until it Struggles itself
+        // — and its team — into a black-out that boots the run to Viridian. Flee them instead: `EndOfBattle`
+        // still grants the post-battle no-encounter grace on a run, so the boulder pushes complete between
+        // encounters, and PP is preserved for the *mandatory* VR trainers. During a `CatchPokemon` step,
+        // still engage the target species (it falls through to the catch-throw block below).
+        if battle_state.battle_type == BattleType::Wild
+            && actions.iter().any(|a| matches!(a, BattleAction::Run))
+        {
+            let flee = match self.queue.front() {
+                Some(PolicyStep::CatchPokemon { species, .. }) => battle_state.enemy.species != *species,
+                _ => in_victory_road,
+            };
+            if flee {
+                return Some(BattleAction::Run);
+            }
+        }
+
         // Train a bench mon by switching it in so it — not the lead — earns the XP. Two sources:
         //   • a `GrindUntilLevel` step at the queue front → grind that slot (wild battles only), or
         //   • `train_slot` mode → that slot in *every* battle (wild + trainer gauntlet).
@@ -1979,17 +2221,49 @@ impl Policy for DeterministicPolicy {
         // whoever's out (the GrindUntilLevel arm / blackout recovery heals it). A level-safety cap
         // skips the switch when the enemy out-levels the trainee by >6, so training mode won't suicide
         // the trainee into a much stronger foe (e.g. the rival's ace) — the lead handles those.
+        let is_grinding = matches!(self.queue.front(), Some(&PolicyStep::GrindUntilLevel { .. }));
         let train_slot = match self.queue.front() {
             Some(&PolicyStep::GrindUntilLevel { slot, .. }) if battle_state.battle_type == BattleType::Wild => Some(slot),
             _ => self.train_slot,
         };
         if let Some(slot) = train_slot {
-            if battle_state.active_party_slot != slot {
+            // ── Grind hand-off (prevents the trainee EVER fainting) ────────────────────────────
+            // A weak, underlevelled trainee on high-XP wilds (a lv34 Vaporeon vs Route 23's lv40+ wilds)
+            // gets out-sped and one-shot before a "heal/switch when low" reaction can fire — and a faint
+            // deep in ledge-strewn Route 23 strands the faint-recovery trek and stalls the run. So on TURN 1
+            // hand off immediately to the strongest healthy tank (Venusaur): the trainee led, so it is
+            // flagged as a battle participant and earns the shared Gen-1 XP, and switching resolves before
+            // the enemy attacks (Gen 1) — the trainee takes ZERO damage and never faints, while the tank
+            // lands the KO. `trainee_participated` (reset each overworld tick) then stops train_slot
+            // re-switching it in. Scoped to grinding so `train_slot` mode (mid-`full_playthrough`) is unaffected.
+            // Only hand off when the wild could actually threaten the trainee (its level is within 6 of the
+            // trainee's, or higher). Once the trainee out-levels the local wilds (a lv50 Vaporeon vs the
+            // Mansion's lv30-39 wilds) it solos them safely for FULL XP — much faster than the halved
+            // participation XP a hand-off gives.
+            let enemy_threatens = battle_state.enemy.level + 6 >= battle_state.player.level;
+            if is_grinding && battle_state.active_party_slot == slot && !self.trainee_participated
+                && enemy_threatens
+            {
+                if let Some(sw) = actions.iter()
+                    // Tank must out-level the trainee and be above the 25% heal threshold, so it stays a
+                    // valid hand-off target between battles (it tops itself up via heal-at-25% + the free
+                    // Viridian heal on the low-PP flee) rather than dropping out and re-exposing the trainee.
+                    .filter(|a| matches!(a, BattleAction::SwitchPokemon { pokemon, .. }
+                        if pokemon.current_hp as u32 * 4 > pokemon.stats.hp as u32 && pokemon.level > battle_state.player.level))
+                    .max_by_key(|a| match a { BattleAction::SwitchPokemon { pokemon, .. } => pokemon.level, _ => 0 })
+                {
+                    println!("[policy] grind: trainee (slot {slot}) participated — handing off to a tank");
+                    self.trainee_participated = true;
+                    return Some(sw.clone());
+                }
+            }
+            if battle_state.active_party_slot != slot && !(is_grinding && self.trainee_participated) {
                 if let Some(sw) = actions.iter().find(|a| matches!(a,
                     BattleAction::SwitchPokemon { slot: s, pokemon }
                         if *s == slot && pokemon.current_hp > 0
                         && battle_state.enemy.level <= pokemon.level + 6)) {
                     println!("[policy] training slot {slot} — switching it in to take the XP");
+                    self.trainee_participated = true;
                     return Some(sw.clone());
                 }
             }
@@ -2002,9 +2276,13 @@ impl Policy for DeterministicPolicy {
                     if let Some(use_pokeball_action) = actions.iter()
                         .find(|a| matches!(a, BattleAction::UseItem { item, .. } if item.id == best_pokeball.id )) {
 
-                        // If enemy HP > 50%, try to weaken it first with the move that does
-                        // the most damage without knocking the Pokémon out.
-                        if battle_state.enemy.remaining_hp() > 0.5 {
+                        // If enemy HP > 50%, try to weaken it first with the move that does the most
+                        // damage without knocking the Pokémon out — but NOT for a Master Ball (100%
+                        // catch), and skip it when our attacker heavily out-levels the target (a weak
+                        // HM-slave catch), where even a "safe" hit would KO it.
+                        if battle_state.enemy.remaining_hp() > 0.5
+                            && best_pokeball.id != ItemId::MasterBall
+                            && battle_state.player.level < battle_state.enemy.level + 12 {
                             if let Some(mv) = pick_best_move(&battle_state, &actions, true) {
                                 println!("[policy] enemy HP > 50% — weakening before throwing ball");
                                 return Some(mv);
@@ -2087,6 +2365,7 @@ impl Policy for DeterministicPolicy {
         // (the "just the starter" recovery loop). Skipped while grinding — there we deliberately fight
         // on and rely on black-out recovery so the lead keeps earning XP.
         if !grinding
+            && !in_victory_road
             && battle_state.battle_type == BattleType::Wild
             && self.heal_return.is_none()
             && battle_state.player.remaining_hp() < 0.15
@@ -2095,6 +2374,35 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] HP critical, no heal/switch — fleeing to {center} to heal");
                 self.heal_return = Some(center);
                 return Some(BattleAction::Run);
+            }
+        }
+
+        // Elite-Four tactic: if the active mon can no longer hit the enemy hard (its best available move
+        // does < 1/3 of the enemy's max HP — e.g. a Blizzard/Surf-dry Vaporeon left with weak Bite against
+        // one of Lance's bulky dragons) but a healthy benched team-mate has a MUCH stronger move vs this
+        // enemy, switch to it. This pools both mons' strong PP + super-effective coverage across the fight
+        // instead of chipping to a slow non-finish. Guarded to a big damage jump (≥1.5×) so it never thrashes.
+        if battle_state.battle_type == BattleType::Trainer {
+            let move_dmg = |mon: &crate::pokemon::pokemon::PokemonSummary| -> u32 { mon.moves.iter().flatten()
+                .filter_map(|m| expected_damage(mon, m.name, &battle_state.enemy).map(|d| d as u32))
+                .max().unwrap_or(0) };
+            let active_best = move_dmg(&battle_state.player);
+            if (active_best * 3) < battle_state.enemy.stats.hp as u32 {
+                let best_switch = actions.iter()
+                    .filter(|a| matches!(a, BattleAction::SwitchPokemon { pokemon, .. }
+                        if pokemon.current_hp as u32 * 2 > pokemon.stats.hp as u32
+                        && pokemon.level + 8 >= battle_state.player.level))
+                    .filter_map(|a| match a {
+                        BattleAction::SwitchPokemon { pokemon, .. } => Some((move_dmg(pokemon), a)),
+                        _ => None,
+                    })
+                    .max_by_key(|(d, _)| *d);
+                if let Some((bench_dmg, sw)) = best_switch {
+                    if bench_dmg * 2 >= active_best * 3 && (bench_dmg * 3) >= battle_state.enemy.stats.hp as u32 {
+                        println!("[policy] active out of strong moves (dmg {active_best}) — switching to a fresher attacker (dmg {bench_dmg})");
+                        return Some(sw.clone());
+                    }
+                }
             }
         }
 
@@ -2187,6 +2495,41 @@ impl Policy for DeterministicPolicy {
         if let Some(&PolicyStep::MovePokemonToFront { slot }) = self.queue.front() {
             self.queue.pop_front();
             return Some(FieldMove::ReorderParty { slot });
+        }
+        if let Some(&PolicyStep::UseStrength { slot }) = self.queue.front() {
+            if state.strength_active {
+                println!("[policy] UseStrength: BIT_STRENGTH_ACTIVE set — done");
+                self.queue.pop_front();
+                return None;
+            }
+            return Some(FieldMove::UseStrength { slot });
+        }
+        if let Some(&PolicyStep::SolveBoulders { switch }) = self.queue.front() {
+            // Done once a boulder sits on the switch (the map script then opens the barrier).
+            let boulder_on_switch = state.map.sprites.iter()
+                .any(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == switch);
+            if boulder_on_switch {
+                println!("[policy] SolveBoulders: boulder on switch {switch} — done");
+                self.queue.pop_front();
+                return None;
+            }
+            // Plan the Sokoban to `switch` and emit the FIRST push; the agent executes one push, then
+            // this re-plans from the new positions next tick (resumes cleanly after any interruption).
+            return Self::next_boulder_push(state, switch);
+        }
+        if let Some(&PolicyStep::DropBoulderInHole { hole }) = self.queue.front() {
+            // Count visible boulders on this floor; the step is done once one has fallen (count drops).
+            let visible = state.map.sprites.iter()
+                .filter(|s| s.name.starts_with("Boulder") && !s.hidden).count();
+            let baseline = *self.boulder_drop_baseline.get_or_insert(visible);
+            if visible < baseline {
+                println!("[policy] DropBoulderInHole: a boulder fell into {hole} — done");
+                self.boulder_drop_baseline = None;
+                self.queue.pop_front();
+                return None;
+            }
+            // Plan toward the hole tile (the solver accepts a hole as a push target) and emit one push.
+            return Self::next_boulder_push(state, hole);
         }
         if let Some(&PolicyStep::TeachMove { item, target_slot }) = self.queue.front() {
             let already_knows = hm_move(item).map_or(false, |mv| {
@@ -2352,6 +2695,10 @@ impl Policy for DeterministicPolicy {
                 // A gym-leader fight sits on one step for the whole battle, and self-heals + re-routes
                 // on a blackout (queue unchanged the whole time) — legitimately long-running.
                 | Some(PolicyStep::DefeatGymLeader { .. })
+                // An Elite-Four fight is a long, multi-Pokémon battle with heavy Full-Restore healing
+                // (Lance's 6 dragons vs a 5-PP Blizzard can run many dozens of turns) — the single
+                // BattleTrainer step legitimately sits unchanged well past the 10-minute stall window.
+                | Some(PolicyStep::BattleTrainer { .. })
                 // Flipping a Pokémon Mansion switch means routing across a battle-heavy floor to reach
                 // the statue (wild encounters + LOS trainers interrupt the walk) — the single FlipSwitch
                 // step legitimately sits unchanged for a long while.

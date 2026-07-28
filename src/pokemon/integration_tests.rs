@@ -676,6 +676,13 @@ fn full_playthrough() {
     // extra mon blocks the black-out recovery that clears the early attrition dungeons).
     assert!(state.pokemon.len() >= 2, "party should have the starter + Vaporeon");
     assert!(state.pokemon.iter().any(|p| format!("{:?}", p.species) == "Vaporeon"), "should have a Vaporeon");
+
+    // Post-Earth: Victory Road 1F — caught a Machop HM-slave, taught it Strength, solved the boulder puzzle
+    // (real push onto the (17,13) switch) and climbed to VR2F. The full VR2F/VR3F puzzle is validated
+    // separately by `can_solve_victory_road_2f_3f` (chaining it here is PP-marginal for this team).
+    assert!(state.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| format!("{:?}", m.name) == "Strength")),
+        "a party member should know Strength (the Machop HM-slave)");
+    assert_eq!(state.map.map, Map::VictoryRoad2F, "should have solved VR1F and climbed to Victory Road 2F");
 }
 
 /// From a post-Cascade save state, do the full Bill → SS Ticket → Route 5 → Vermilion leg.
@@ -1202,6 +1209,1251 @@ fn probe_seg3() {
 #[ignore]
 fn probe_seg4() {
     run_chain("post-volcano-lone.bin", "post-earth-lone.bin", 60, 2_000_000, PolicyStep::earth_badge_steps());
+}
+
+/// Probe: from post-Earth, teach Strength then navigate Viridian → Route 22 → Route 23 → Victory Road,
+/// to find exactly where the boulder puzzles / navigation block. Logs party + every map transition.
+#[test]
+#[ignore]
+fn probe_victory_road_route() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read(format!("{SCRATCH}/post-earth-lone.bin")).unwrap_or_else(|_|
+        std::fs::read("src/pokemon/data/post-earth-badge.bin").expect("no post-earth fixture"));
+    let steps = vec![
+        PolicyStep::enter(Map::ViridianCity),          // out of the gym
+        PolicyStep::enter(Map::ViridianPokecenter),    // heal before the rival
+        PolicyStep::Interact(MS::VIRIDIANPOKECENTER_NURSE),
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::MovePokemonToFront { slot: 1 },    // Venusaur leads the rival (Alakazam nemesis)
+        PolicyStep::enter(Map::Route22),
+        PolicyStep::enter(Map::Route22Gate),           // walk west → rival ambush → gate to Route 23
+        // The gate warp is dynamic (→Route23 only when the player's Y<4). Interacting with the guard
+        // walks to his front tile (5,2), which is both the badge-check trigger ("Go right ahead!" with
+        // the Boulder Badge) and Y<4 — so the north warps then read as →Route23.
+        PolicyStep::Interact(MS::ROUTE22GATE_GUARD),
+        PolicyStep::enter(Map::Route23),
+        PolicyStep::goto(Map::VictoryRoad1F),
+        // NOTE: past VR1F needs the Strength boulder-push mechanic (unbuilt) — VR1F gates the 2F stairs
+        // behind a cross-room Sokoban (boulders at (5,15)/(2,10), switch at (17,13)).
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(60), steps);
+    { let s = fixture.game_state(); print!("start {} @ {} party=[", s.map.map, s.map.player_position);
+      for p in s.pokemon.iter() { print!("{:?}{} ", p.species, p.level); } println!("]");
+      print!("bag: "); for it in s.bag.iter() { print!("{:?}x{} ", it.id, it.quantity); } println!(); }
+    let mut last = (Map::PalletTown, Point8 { x: 255, y: 255 });
+    for i in 0..2_000_000 {
+        fixture.step();
+        if i % 100 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  {i}: {} @ {}", s.map.map, s.map.player_position); }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+    // Milestone: the team beats the Route 22 rival (Venusaur-lead + Hyper Potions), crosses the dynamic
+    // Route-22 badge gate, and reaches Victory Road 1F. (Progressing past VR1F needs the Strength
+    // boulder-push mechanic, not yet built.)
+    assert_eq!(s.map.map, Map::VictoryRoad1F, "should reach Victory Road 1F from post-Earth");
+    let _ = MS::ROUTE23_GUARD1;
+}
+
+// Isolated validation of the `victory_road_1f_steps()` leg folded into `full_playthrough`: from post-Earth,
+// catch the Machop HM-slave, teach Strength, solve the VR1F boulder puzzle, and climb to VR2F. (The full
+// VR2F/VR3F puzzle is validated separately by `can_solve_victory_road_2f_3f`.)
+#[test]
+#[ignore]
+fn can_solve_victory_road_1f() {
+    let bytes = std::fs::read("src/pokemon/data/post-earth-badge.bin").expect("no post-earth fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(120), PolicyStep::victory_road_1f_steps(2));
+    let mut last = (Map::PalletTown, Point8 { x: 255, y: 255 });
+    for i in 0..8_000_000 {
+        fixture.step();
+        if i % 500 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  {i}: {} @ {}", s.map.map, s.map.player_position); }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    let has_strength = s.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| format!("{:?}", m.name) == "Strength"));
+    println!("final: {} @ {}  strength={has_strength}", s.map.map, s.map.player_position);
+    assert!(has_strength, "should have caught+taught a Strength HM-slave");
+    assert_eq!(s.map.map, Map::VictoryRoad2F, "should solve VR1F and climb to VR2F");
+}
+
+/// From post-Earth, reach Victory Road 1F, catch a wild Machop (HM-slave) with the Master Ball, and teach
+/// it Strength (HM04). Saves `vr1f-strength.bin` for iterating on the boulder-push mechanic.
+#[test]
+#[ignore]
+fn probe_vr_catch_machop() {
+    use crate::pokemon::map::MapSprite as MS;
+    use crate::pokemon::species::PokemonSpecies;
+    let bytes = std::fs::read("src/pokemon/data/post-earth-badge.bin").expect("no post-earth fixture");
+    let steps = vec![
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::MovePokemonToFront { slot: 1 },
+        PolicyStep::enter(Map::Route22),
+        PolicyStep::enter(Map::Route22Gate),
+        PolicyStep::Interact(MS::ROUTE22GATE_GUARD),
+        PolicyStep::enter(Map::Route23),
+        PolicyStep::goto(Map::VictoryRoad1F),
+        // Catch a Machop (learns Strength) as the boulder HM-slave — Master Ball, thrown immediately.
+        PolicyStep::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F },
+        // Machop appends at slot 2; teach it Strength.
+        PolicyStep::TeachMove { item: ItemId::Hm04Strength, target_slot: 2 },
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(60), steps);
+    let mut last = (Map::PalletTown, Point8 { x: 255, y: 255 });
+    for i in 0..2_000_000 {
+        fixture.step();
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  {i}: {} @ {}", s.map.map, s.map.player_position); }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    print!("final party: ");
+    for p in s.pokemon.iter() {
+        let strength = p.moves.iter().flatten().any(|m| format!("{:?}", m.name) == "Strength");
+        print!("{:?}{}(str={strength}) ", p.species, p.level);
+    }
+    println!();
+    let has_str = s.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| format!("{:?}", m.name) == "Strength"));
+    if has_str {
+        fixture.gb.save_state_to_file(&format!("{SCRATCH}/vr1f-strength.bin")).ok();
+        println!(">> saved vr1f-strength.bin");
+    }
+    assert!(has_str, "a party member should know Strength after the catch+teach");
+}
+
+// Re-verify VR1F solvability from a GUARANTEED-fresh entry (not the vr1f-strength fixture), to rule out
+// fixture corruption. Dumps boulders + solver result + (1,1) reachability.
+#[test]
+#[ignore]
+fn probe_vr1f_fresh() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read("src/pokemon/data/post-earth-badge.bin").expect("no post-earth fixture");
+    let steps = vec![
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::MovePokemonToFront { slot: 1 },
+        PolicyStep::enter(Map::Route22),
+        PolicyStep::enter(Map::Route22Gate),
+        PolicyStep::Interact(MS::ROUTE22GATE_GUARD),
+        PolicyStep::enter(Map::Route23),
+        PolicyStep::goto(Map::VictoryRoad1F),
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(40), steps);
+    let mut reached = 0;
+    for _ in 0..3_000_000 {
+        fixture.step();
+        if fixture.game_state().map.map == Map::VictoryRoad1F { reached += 1; if reached > 300 { break; } }
+        if fixture.agent.policy_exhausted() { break; }
+    }
+    let s = fixture.game_state();
+    println!("map {} @ {}", s.map.map, s.map.player_position);
+    if s.map.map != Map::VictoryRoad1F { println!("!! did not reach VR1F"); return; }
+    for sp in s.map.sprites.iter().filter(|sp| sp.name.starts_with("Boulder")) {
+        println!("  {} @ {}", sp.name, sp.position);
+    }
+    let reach = s.map.reachable_tiles();
+    println!("(1,1) reachable = {}  region size = {}", reach.contains(&Point8 { x: 1, y: 1 }), reach.len());
+    match s.map.solve_boulder_push(Point8 { x: 17, y: 13 }) {
+        Some(p) => println!(">> FRESH VR1F SOLVABLE: {} pushes", p.len()),
+        None => println!(">> FRESH VR1F: no boulder reaches switch (17,13) — same as fixture"),
+    }
+}
+
+// Render the full VR1F collision map with region coloring so the whole puzzle is visible at once.
+#[test]
+#[ignore]
+fn probe_vr1f_render() {
+    use image::{ImageBuffer, Rgb};
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    let reach = s.map.reachable_tiles();
+    let (w, h) = (s.map.width, s.map.height);
+    let scale = 20u32;
+    let mut img = ImageBuffer::new(w as u32 * scale, h as u32 * scale);
+    for y in 0..h { for x in 0..w {
+        let p = Point8 { x: x as u8, y: y as u8 };
+        let boulder = s.map.sprites.iter().any(|sp| sp.name.starts_with("Boulder") && sp.position == p);
+        let color = if p == (Point8 { x: 17, y: 13 }) { Rgb([0u8, 220, 0]) }        // switch = green
+            else if boulder { Rgb([220, 40, 40]) }                                    // boulder = red
+            else if p == (Point8 { x: 1, y: 1 }) { Rgb([40, 80, 255]) }               // 2F ladder = blue
+            else { match s.map.tile_at(p) {
+                MetaTile::Obstacle => Rgb([30, 30, 30]),                               // wall = dark
+                MetaTile::Warp { .. } => Rgb([255, 200, 0]),                           // warp = yellow
+                MetaTile::Empty | MetaTile::Grass if reach.contains(&p) => Rgb([210, 210, 210]), // reachable floor
+                MetaTile::Empty | MetaTile::Grass => Rgb([120, 120, 170]),            // unreachable floor = purple
+                _ => Rgb([90, 60, 60]),
+            } };
+        for dy in 0..scale { for dx in 0..scale {
+            let (px, py) = (x as u32 * scale + dx, y as u32 * scale + dy);
+            // grid lines
+            let c = if dx == 0 || dy == 0 { Rgb([0, 0, 0]) } else { color };
+            img.put_pixel(px, py, c);
+        }}
+    }}
+    img.save(format!("{SCRATCH}/vr1f_map.png")).ok();
+    println!("saved vr1f_map.png ({}x{} tiles)", w, h);
+}
+
+// Impact test: if the player were at Route23(14,31) [where VR1F's exit warp_id 3 points], can they reach
+// VR2F / Indigo Plateau (i.e., is the boulder puzzle skippable via the exit leapfrog)?
+#[test]
+#[ignore]
+fn probe_route23_from_14_31() {
+    use crate::pokemon::symbols::pokered_symbols as ps;
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let steps = vec![PolicyStep::enter(Map::Route23)];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(4), steps);
+    for _ in 0..400_000 { fixture.step(); if fixture.agent.policy_exhausted() { break; } }
+    println!("exited to {}", fixture.game_state().map.player_position);
+    // Force the player to Route23 raw (14,31) — where warp_id 3 points.
+    { let mmu = fixture.gb.core_mut().mmu_mut();
+      mmu.write(ps::wXCoord.address, 14); mmu.write(ps::wYCoord.address, 31); }
+    fixture.gb.run(MachineCycles::from_m(200_000));
+    let s = fixture.game_state();
+    println!("forced to {} on {}", s.map.player_position, s.map.map);
+    let reach = s.map.reachable_tiles();
+    let miny = reach.iter().map(|p| p.y).min().unwrap_or(255);
+    println!("reachable region {} tiles, northmost y = {miny} (0 = Indigo edge)", reach.len());
+    for (i, t) in s.map.meta_tiles.iter().enumerate() {
+        let p = Point8 { x: (i % s.map.width) as u8, y: (i / s.map.width) as u8 };
+        match t {
+            MetaTile::Connection { to_map, .. } => println!("  conn {p} -> {:?} reachable={}", to_map, reach.contains(&p)),
+            MetaTile::Warp { to_map, .. } if format!("{:?}", to_map).contains("Victory") =>
+                println!("  warp {p} -> {:?} reachable={}", to_map, reach.contains(&p)),
+            _ => {}
+        }
+    }
+}
+
+// Where does exiting VR1F via (8,17)/(9,17) REALLY land on Route 23? The warp is LAST_MAP,3 and Route23
+// warp #3 is (14,31) [past the barrier]. Test the real landing (manually, no agent warp logic).
+#[test]
+#[ignore]
+fn probe_vr1f_exit_landing() {
+    use crate::joypad::JoypadButton as JB;
+    use crate::pokemon::symbols::pokered_symbols as ps;
+    let _ = JB::Down;
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let steps = vec![PolicyStep::enter(Map::Route23)];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(4), steps);
+    fixture.gb.run(MachineCycles::from_m(4_000));
+    let last_map = fixture.gb.core().mmu().read_pointer(&ps::wLastMap);
+    println!("wLastMap = {last_map} (Route23 = {})", Map::Route23 as u8);
+    // Poll wDestinationWarpID + coords across the whole exit to catch the warp resolution.
+    let mut prev = (255u8, 255u8, 255u8, Map::PalletTown as u8);
+    for _ in 0..30_000 {
+        fixture.step();
+        let mmu = fixture.gb.core().mmu();
+        let cur = (mmu.read_pointer(&ps::wCurMap), mmu.read(ps::wDestinationWarpID.address),
+                   mmu.read_pointer(&ps::wXCoord), mmu.read_pointer(&ps::wYCoord));
+        let key = (cur.1, cur.2, cur.3, cur.0);
+        if key != prev {
+            println!("  map={} destWarpID={} coords=({},{})", cur.0, cur.1, cur.2, cur.3);
+            prev = key;
+        }
+        if cur.0 == Map::Route23 as u8 && fixture.agent.policy_exhausted() {
+            println!("   (Route23 warp2=(4,31)=entry; warp3=(14,31)=VR2F side)");
+            return;
+        }
+    }
+    println!("did not exit");
+}
+
+// Definitive boulder-model test: flood-fill boulder(5,15)'s REAL reachable set in-game (push it every
+// which way with save/restore) and compare to the solver's prediction. If the game moves it somewhere the
+// solver says is impossible, the boulder model has a bug.
+#[test]
+#[ignore]
+fn probe_vr1f_boulder_flood() {
+    use crate::joypad::JoypadButton as JB;
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(30), vec![]);
+    // Arm Strength.
+    { let a = crate::pokemon::symbols::pokered_symbols::wStatusFlags1.address;
+      let mmu = fixture.gb.core_mut().mmu_mut(); let v = mmu.read(a); mmu.write(a, v | 0x01); }
+    fixture.gb.run(MachineCycles::from_m(4_000));
+    let boulder_at = |fx: &mut TestFixture, b: Point8| -> bool {
+        let s = { PokemonApi::with_cache(&mut fx.gb, &mut fx.map_cache).game_state().unwrap() };
+        s.map.sprites.iter().any(|sp| sp.name.starts_with("Boulder") && sp.position == b)
+    };
+    let stra = crate::pokemon::symbols::pokered_symbols::wStatusFlags1.address;
+    let set_str = |fx: &mut TestFixture, on: bool| {
+        let mmu = fx.gb.core_mut().mmu_mut(); let v = mmu.read(stra);
+        mmu.write(stra, if on { v | 0x01 } else { v & !0x01 });
+    };
+    // Navigate with Strength OFF so we never accidentally push a boulder while routing past it.
+    let walk_to = |fx: &mut TestFixture, target: Point8| -> bool {
+        for _ in 0..80 {
+            set_str(fx, false);
+            let s = fx.game_state();
+            if s.map.player_position == target { return true; }
+            let Some(route) = s.map.route_to(target) else { return false; };
+            let Some(&dir) = route.first() else { return false; };
+            fx.gb.core_mut().mmu_mut().joypad_mut().press_button(dir);
+            fx.gb.run(MachineCycles::from_m(240_000));
+            fx.gb.core_mut().mmu_mut().joypad_mut().release_button(dir);
+            fx.gb.run(MachineCycles::from_m(50_000));
+        }
+        false
+    };
+    let dirs = [(0i32, -1i32, JB::Up), (0, 1, JB::Down), (-1, 0, JB::Left), (1, 0, JB::Right)];
+    // BFS over boulder positions, saving the game state at each.
+    let baseline = fixture.gb.save_state().unwrap();
+    let mut states: std::collections::HashMap<Point8, Vec<u8>> = std::collections::HashMap::new();
+    states.insert(Point8 { x: 5, y: 15 }, baseline);
+    let mut visited: std::collections::HashSet<Point8> = states.keys().copied().collect();
+    let mut queue = vec![Point8 { x: 5, y: 15 }];
+    while let Some(b) = queue.pop() {
+        for &(dx, dy, btn) in &dirs {
+            let (fx2, fy) = (b.x as i32 - dx, b.y as i32 - dy); // push-from = b - dir
+            let (nx, ny) = (b.x as i32 + dx, b.y as i32 + dy); // dest = b + dir
+            if fx2 < 0 || fy < 0 || nx < 0 || ny < 0 { continue; }
+            let from = Point8 { x: fx2 as u8, y: fy as u8 };
+            let dest = Point8 { x: nx as u8, y: ny as u8 };
+            if visited.contains(&dest) { continue; }
+            fixture.gb.load_state(&states[&b]).unwrap();
+            fixture.gb.run(MachineCycles::from_m(2_000));
+            if !walk_to(&mut fixture, from) { continue; }
+            set_str(&mut fixture, true); // arm Strength for the push
+            for _ in 0..6 {
+                fixture.gb.core_mut().mmu_mut().joypad_mut().press_button(btn);
+                fixture.gb.run(MachineCycles::from_m(260_000));
+                fixture.gb.core_mut().mmu_mut().joypad_mut().release_button(btn);
+                fixture.gb.run(MachineCycles::from_m(60_000));
+                if boulder_at(&mut fixture, dest) { break; }
+            }
+            if boulder_at(&mut fixture, dest) {
+                visited.insert(dest);
+                states.insert(dest, fixture.gb.save_state().unwrap());
+                queue.push(dest);
+            }
+        }
+    }
+    let mut cells: Vec<_> = visited.iter().map(|p| (p.x, p.y)).collect();
+    cells.sort_by_key(|&(x, y)| (y, x));
+    println!(">> REAL boulder(5,15) reachable ({} cells): {:?}", cells.len(), cells);
+    println!(">> reached switch (17,13)? {}", visited.contains(&Point8 { x: 17, y: 13 }));
+}
+
+// Route 23 barrier test: from vr1f-strength, exit VR1F to Route 23 (lands north of the water near the
+// VR1F entrance), then MANUALLY drive around the y=32 barrier / toward the VR2F entrance (14,32) to see
+// if the game lets the player reach it or go north — where my model blocks.
+#[test]
+#[ignore]
+fn probe_route23_barrier() {
+    use crate::joypad::JoypadButton as JB;
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let steps = vec![PolicyStep::enter(Map::Route23)];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(5), steps);
+    for i in 0..400_000 { fixture.step(); if fixture.agent.policy_exhausted() { println!(">> on Route23 at {i}"); break; } }
+    let s0 = fixture.game_state();
+    println!("start @ {} map {}", s0.map.player_position, s0.map.map);
+    fixture.gb.save_screenshot_to_file(&format!("{SCRATCH}/route23_start.png")).ok();
+    let drive = |fx: &mut TestFixture, dir: JB, tag: &str| {
+        fx.gb.core_mut().mmu_mut().joypad_mut().press_button(dir);
+        fx.gb.run(MachineCycles::from_m(260_000));
+        fx.gb.core_mut().mmu_mut().joypad_mut().release_button(dir);
+        fx.gb.run(MachineCycles::from_m(60_000));
+        let s = fx.game_state();
+        println!("  {tag} {dir:?}: @ {} map {}", s.map.player_position, s.map.map);
+    };
+    // Go east first (around the VR1F warp that's directly north), then probe north from the east side.
+    for _ in 0..16 { drive(&mut fixture, JB::Right, "E"); }
+    for _ in 0..8 { drive(&mut fixture, JB::Up, "N"); }
+    for _ in 0..6 { drive(&mut fixture, JB::Down, "S"); }
+    for _ in 0..8 { drive(&mut fixture, JB::Left, "W"); }
+    fixture.gb.save_screenshot_to_file(&format!("{SCRATCH}/route23_end.png")).ok();
+}
+
+// Exhaustive boundary test: for every reachable tile bordering an Empty tile my model calls UNreachable,
+// manually try to cross in-game. If the game lets the player cross, my classification/tile-pair logic is
+// wrong there — printing the exact tile pair that diverges.
+#[test]
+#[ignore]
+fn probe_vr1f_boundary_audit() {
+    use crate::joypad::JoypadButton as JB;
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(6), vec![]);
+    fixture.gb.run(MachineCycles::from_m(4_000));
+    let dir_of = |b: JB| match b { JB::Up => (0i32, -1i32), JB::Down => (0, 1), JB::Left => (-1, 0), JB::Right => (1, 0), _ => (0, 0) };
+    let mut walk_to = |fx: &mut TestFixture, target: Point8| -> bool {
+        for _ in 0..160 {
+            let s = fx.game_state();
+            if s.map.player_position == target { return true; }
+            let Some(route) = s.map.route_to(target) else { return false; };
+            let Some(&dir) = route.first() else { return false; };
+            fx.gb.core_mut().mmu_mut().joypad_mut().press_button(dir);
+            fx.gb.run(MachineCycles::from_m(260_000));
+            fx.gb.core_mut().mmu_mut().joypad_mut().release_button(dir);
+            fx.gb.run(MachineCycles::from_m(60_000));
+        }
+        false
+    };
+    // Enumerate boundary crossings from my model.
+    let (reach, w, raw, metas) = {
+        let s = fixture.game_state();
+        (s.map.reachable_tiles(), s.map.width, s.map.raw_tile_ids.clone(), s.map.meta_tiles.clone())
+    };
+    let dirs = [(0i32, -1i32, JB::Up), (0, 1, JB::Down), (-1, 0, JB::Left), (1, 0, JB::Right)];
+    let mut crossings = vec![];
+    for &from in &reach {
+        for &(dx, dy, btn) in &dirs {
+            let (nx, ny) = (from.x as i32 + dx, from.y as i32 + dy);
+            if nx < 0 || ny < 0 || nx >= w as i32 { continue; }
+            let to = Point8 { x: nx as u8, y: ny as u8 };
+            let idx = to.x as usize + to.y as usize * w;
+            if idx >= metas.len() { continue; }
+            // Test ALL unreachable neighbours except warps/connections (stepping on those changes map).
+            if !reach.contains(&to)
+                && !matches!(metas[idx], MetaTile::Warp { .. } | MetaTile::Connection { .. } | MetaTile::ConnectionWater(_)) {
+                crossings.push((from, btn, to));
+            }
+        }
+    }
+    println!("testing {} boundary crossings", crossings.len());
+    let mut bugs = 0;
+    for (from, btn, to) in crossings {
+        if !walk_to(&mut fixture, from) { continue; }
+        fixture.gb.core_mut().mmu_mut().joypad_mut().press_button(btn);
+        fixture.gb.run(MachineCycles::from_m(260_000));
+        fixture.gb.core_mut().mmu_mut().joypad_mut().release_button(btn);
+        fixture.gb.run(MachineCycles::from_m(60_000));
+        let now = fixture.game_state().map.player_position;
+        if now == to {
+            let fi = from.x as usize + from.y as usize * w;
+            let ti = to.x as usize + to.y as usize * w;
+            println!("  !! BUG: game ALLOWS {from}->{to} ({btn:?}) — my model blocks it. tiles ${:02x}->${:02x}", raw[fi], raw[ti]);
+            bugs += 1;
+            // walk back so subsequent tests start from a known region
+        }
+    }
+    println!(">> {bugs} divergences found");
+}
+
+// Exploration: walk the player around VR1F and screenshot the real map at key positions, to compare
+// the actual walls/floors against my MetaTileMap classification (hunt for a misclassified corridor).
+#[test]
+#[ignore]
+fn probe_vr1f_screenshots() {
+    use crate::joypad::JoypadButton as JB;
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(3), vec![]);
+    fixture.gb.run(MachineCycles::from_m(4_000));
+    let dir_of = |b: JB| match b { JB::Up => (0i32, -1i32), JB::Down => (0, 1), JB::Left => (-1, 0), JB::Right => (1, 0), _ => (0, 0) };
+    // Walk to `target` by repeatedly taking the first step of route_to (recomputed each tile — robust to
+    // the initial turn-in-place).
+    let mut walk_to = |fx: &mut TestFixture, target: Point8| {
+        for _ in 0..120 {
+            let s = fx.game_state();
+            if s.map.player_position == target { return true; }
+            let Some(route) = s.map.route_to(target) else { return false; };
+            let Some(&dir) = route.first() else { return false; };
+            let before = s.map.player_position;
+            let (dx, dy) = dir_of(dir);
+            let _ = (dx, dy);
+            fx.gb.core_mut().mmu_mut().joypad_mut().press_button(dir);
+            fx.gb.run(MachineCycles::from_m(260_000));
+            fx.gb.core_mut().mmu_mut().joypad_mut().release_button(dir);
+            fx.gb.run(MachineCycles::from_m(60_000));
+            let after = fx.game_state().map.player_position;
+            let _ = before; let _ = after;
+        }
+        false
+    };
+    // Walk to (7,9) [reachable], then MANUALLY drive Up across the row-9→row-8 tile-pair boundary that
+    // my BFS blocks — does the real game allow it?
+    let ok = walk_to(&mut fixture, Point8 { x: 7, y: 9 });
+    println!("reached (7,9) = {ok}, actual = {}", fixture.game_state().map.player_position);
+    // Raw tile IDs of the boundary tiles.
+    {
+        let s = fixture.game_state();
+        for p in [(7u8, 9u8), (7, 8), (7, 7), (5, 9), (5, 8)] {
+            let idx = p.0 as usize + p.1 as usize * s.map.width;
+            println!("  raw tile id {:?} = ${:02x} (meta {:?})", p, s.map.raw_tile_ids[idx], s.map.tile_at(Point8 { x: p.0, y: p.1 }));
+        }
+    }
+    for n in 0..8 {
+        fixture.gb.core_mut().mmu_mut().joypad_mut().press_button(JB::Up);
+        fixture.gb.run(MachineCycles::from_m(260_000));
+        fixture.gb.core_mut().mmu_mut().joypad_mut().release_button(JB::Up);
+        fixture.gb.run(MachineCycles::from_m(60_000));
+        println!("  up#{n}: player @ {}", fixture.game_state().map.player_position);
+    }
+}
+
+// Is Route 23 a single vertical strip (VR optional) or segmented (VR mandatory)? Approach Route 23 the
+// proper way — up from the Route 22 gate — and report the northmost reachable tile + whether the Indigo
+// Plateau connection and both VR entrances are reachable, WITHOUT entering Victory Road.
+#[test]
+#[ignore]
+fn probe_route23_from_gate() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read("src/pokemon/data/post-earth-badge.bin").expect("no post-earth fixture");
+    let steps = vec![
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::MovePokemonToFront { slot: 1 },
+        PolicyStep::enter(Map::Route22),
+        PolicyStep::enter(Map::Route22Gate),
+        PolicyStep::Interact(MS::ROUTE22GATE_GUARD),
+        PolicyStep::enter(Map::Route23),
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(15), steps);
+    for i in 0..2_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> on Route23 at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    let reach = s.map.reachable_tiles();
+    println!("map {} @ {} size {}x{}", s.map.map, s.map.player_position, s.map.width, s.map.height);
+    let min_y = reach.iter().map(|p| p.y).min().unwrap_or(255);
+    let max_y = reach.iter().map(|p| p.y).max().unwrap_or(0);
+    println!("reachable y range = {min_y}..={max_y} (0 = Indigo Plateau edge), region size {}", reach.len());
+    for (i, t) in s.map.meta_tiles.iter().enumerate() {
+        let p = Point8 { x: (i % s.map.width) as u8, y: (i / s.map.width) as u8 };
+        match t {
+            MetaTile::Connection { to_map, .. } => println!("  conn {p} -> {:?} reachable={}", to_map, reach.contains(&p)),
+            MetaTile::Warp { to_map, .. } if format!("{:?}", to_map).contains("Victory") =>
+                println!("  warp {p} -> {:?} reachable={}", to_map, reach.contains(&p)),
+            _ => {}
+        }
+    }
+}
+
+// Minimal manual boulder-push test: set Strength active in RAM, then mash a direction into a boulder
+// and watch whether the boulder sprite moves — validates the double-press mechanic AND cross-checks the
+// tile-classification (whether a tile my model calls a wall is actually pushable).
+#[test]
+#[ignore]
+fn probe_vr_manual_push() {
+    use crate::joypad::JoypadButton as JB;
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(2), vec![]);
+    // Arm Strength directly (bit0 of wStatusFlags1).
+    {
+        let a = crate::pokemon::symbols::pokered_symbols::wStatusFlags1.address;
+        let mmu = fixture.gb.core_mut().mmu_mut();
+        let v = mmu.read(a); mmu.write(a, v | 0x01);
+    }
+    fixture.gb.run(MachineCycles::from_m(4_000));
+    let boulders = |fx: &mut TestFixture| -> Vec<(String, Point8)> {
+        let s = { PokemonApi::with_cache(&mut fx.gb, &mut fx.map_cache).game_state().unwrap() };
+        s.map.sprites.iter().filter(|sp| sp.name.starts_with("Boulder"))
+            .map(|sp| (sp.name.to_string(), sp.position)).collect()
+    };
+    let s0 = fixture.game_state();
+    println!("player @ {} facing {:?}", s0.map.player_position, s0.map.player_direction);
+    println!("boulders before: {:?}", boulders(&mut fixture));
+    let mut walk = |fx: &mut TestFixture, dir: JB, tag: &str| {
+        fx.gb.core_mut().mmu_mut().joypad_mut().press_button(dir);
+        fx.gb.run(MachineCycles::from_m(260_000)); // ~15 frames — enough for a full step/turn
+        fx.gb.core_mut().mmu_mut().joypad_mut().release_button(dir);
+        fx.gb.run(MachineCycles::from_m(70_000));
+        let s = fx.game_state();
+        println!("  {tag} {dir:?}: player @ {} facing {:?} boulders {:?}", s.map.player_position, s.map.player_direction, boulders(fx));
+    };
+    // Reposition below the boulder: (4,15) -> (4,16) -> (5,16). Then push Up: boulder(5,15) -> (5,14).
+    walk(&mut fixture, JB::Down, "move");
+    walk(&mut fixture, JB::Right, "move");
+    for n in 0..6 { walk(&mut fixture, JB::Up, &format!("push{n}")); }
+}
+
+// Traversal experiment: force ALL VR switch events open every step, reload VR1F so the barrier opens,
+// climb to VR2F, and report which warps/connections each floor can reach — to map the real route to
+// Indigo Plateau (and settle whether VR1F's switch is on the critical path).
+#[test]
+#[ignore]
+fn probe_vr_traverse() {
+    let set_all = |fx: &mut TestFixture| {
+        let base = crate::pokemon::symbols::pokered_symbols::wEventFlags.address;
+        let mmu = fx.gb.core_mut().mmu_mut();
+        for (byte, mask) in [(290u16, 0x80u8), (167, 0x03), (204, 0x03)] {
+            let cur = mmu.read(base + byte);
+            mmu.write(base + byte, cur | mask);
+        }
+    };
+    let dump = |fx: &mut TestFixture, tag: &str| {
+        let s = { PokemonApi::with_cache(&mut fx.gb, &mut fx.map_cache).game_state().unwrap() };
+        let reach = s.map.reachable_tiles();
+        println!("[{tag}] map {} @ {} — reachable warps/connections:", s.map.map, s.map.player_position);
+        for (i, t) in s.map.meta_tiles.iter().enumerate() {
+            let p = Point8 { x: (i % s.map.width) as u8, y: (i / s.map.width) as u8 };
+            match t {
+                MetaTile::Warp { to_map, to_position } if reach.contains(&p) =>
+                    println!("    warp {p} -> {:?} @ {}", to_map, to_position),
+                MetaTile::Connection { to_map, .. } if reach.contains(&p) =>
+                    println!("    conn {p} -> {:?}", to_map),
+                _ => {}
+            }
+        }
+    };
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    // Reload VR1F (event set) so its barrier opens, then climb to VR2F.
+    let steps = vec![
+        PolicyStep::enter(Map::Route23),
+        PolicyStep::enter(Map::VictoryRoad1F),
+        PolicyStep::enter(Map::VictoryRoad2F),               // via 1,1 barrier (now open)
+        PolicyStep::enter(Map::VictoryRoad3F),               // via 23,7 stairs
+        PolicyStep::enter_at(Map::VictoryRoad2F, 22, 16),   // via the 23,15 hole → falls to 2F east side
+        PolicyStep::enter(Map::Route23),                     // via 29,7/8 exit toward Indigo Plateau
+        PolicyStep::soft_goto(Map::IndigoPlateauLobby),
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(18), steps);
+    set_all(&mut fixture);
+    let mut last_map = Map::VictoryRoad1F;
+    for i in 0..1_000_000 {
+        set_all(&mut fixture);
+        fixture.step();
+        if i % 200 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let moved = s.map.map != last_map;
+                if moved { last_map = s.map.map; }
+                if moved || (i > 13000 && i % 2000 == 0) {
+                    println!("  {i}: {} @ {} st={}", s.map.map, s.map.player_position, fixture.agent.state_debug());
+                }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> steps done at {i}"); break; }
+    }
+    dump(&mut fixture, "final");
+    // Also report whether the VR3F hole (23,15) and its switch (3,5) are reachable.
+    let s = fixture.game_state();
+    let reach = s.map.reachable_tiles();
+    for (name, p) in [("hole(23,15)", Point8 { x: 23, y: 15 }), ("switch(3,5)", Point8 { x: 3, y: 5 })] {
+        println!("    {name} reachable={} tile={:?}", reach.contains(&p), s.map.tile_at(p));
+    }
+}
+
+// REAL Victory Road traversal — NO event forcing. Solve each floor's boulder puzzle with genuine
+// Strength pushes (UseStrength + SolveBoulders) and navigate VR1F→VR2F→VR3F→(fall through hole)→VR2F
+// east→Route23→Indigo Plateau. Logs every map transition + push plan so one run shows how far it gets.
+#[test]
+#[ignore]
+fn probe_vr_traverse_real() {
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let steps = vec![
+        // VR1F: push a boulder onto (17,13), then climb the (1,1) ladder to VR2F.
+        PolicyStep::UseStrength { slot: 2 },
+        PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+        PolicyStep::enter(Map::VictoryRoad2F),
+        // VR2F west: press the (1,16) switch, then head up the (23,7) stairs to VR3F.
+        PolicyStep::UseStrength { slot: 2 },
+        PolicyStep::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
+        PolicyStep::enter(Map::VictoryRoad3F),
+        // VR3F: fall through the (23,15) hole to VR2F's east side (lands ~ (22,16)).
+        PolicyStep::enter_at(Map::VictoryRoad2F, 22, 16),
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(20), steps);
+    let mut last_map = Map::VictoryRoad1F;
+    let mut last_state = String::new();
+    for i in 0..3_000_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            let st = fixture.agent.state_debug();
+            if s.map.map != last_map {
+                println!("  {i}: -> {} @ {}", s.map.map, s.map.player_position);
+                last_map = s.map.map;
+            }
+            if st != last_state { println!("       [{i}] st={st}"); last_state = st; }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> traversal steps done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("FINAL: map {} @ {}", s.map.map, s.map.player_position);
+    let reach = s.map.reachable_tiles();
+    for (name, p) in [("VR2F exit (29,7)", Point8 { x: 29, y: 7 }), ("VR2F exit (29,8)", Point8 { x: 29, y: 8 }),
+                      ("switch2 (9,16)", Point8 { x: 9, y: 16 })] {
+        println!("    {name}: reachable={} tile={:?}", reach.contains(&p), s.map.tile_at(p));
+    }
+    for (i, t) in s.map.meta_tiles.iter().enumerate() {
+        let p = Point8 { x: (i % s.map.width) as u8, y: (i / s.map.width) as u8 };
+        if let MetaTile::Warp { to_map, .. } = t {
+            if reach.contains(&p) { println!("    reachable warp {p} -> {:?}", to_map); }
+        }
+    }
+}
+
+// Grind Vaporeon (the weak link) for the Elite Four in the CINNABAR POKÉMON MANSION (from post-volcano-badge,
+// Vaporeon lv36). The Mansion beats Route 23 as a grind map: it's a building (per-step wild encounters, no
+// grass needed — the cave-grind wander applies), it has NO one-way ledge traps (Route 23 stranded the grind
+// in a ledge pocket), the Cinnabar Pokémon Center is a clean short heal-return on the same island (no gates),
+// and Vaporeon's Surf is 2× on the Fire wilds (Ponyta/Magmar). Vaporeon leads (slot 0), participate-then-
+// hand-off keeps it alive, target lv42 → Aurora Beam (Ice, 2× on Lance's dragons). Saves `at-mansion-grinded.bin`.
+#[test]
+#[ignore]
+fn probe_e4_grind() {
+    use crate::pokemon::map::MapSprite as MS;
+    // Grind from `post-volcano-lone.bin` — it has all 7 non-Earth badges (Badge 127, so the Viridian Gym
+    // will open for the Earth Badge) AND a clean 2-mon party [Vaporeon(0) lv29, Venusaur(1)] with no dead-
+    // weight Pidgey, so a caught Machop lands at slot 2 and the DEFAULT VR steps apply. (post-volcano-badge,
+    // used earlier, was missing the Rainbow badge → the Viridian Gym stayed locked.) Grind Vaporeon to lv54
+    // (Hydro Pump). Saves `at-mansion-grinded.bin`.
+    let bytes = std::fs::read("src/pokemon/data/post-volcano-lone.bin").expect("no post-volcano-lone fixture");
+    let target = 54u8;  // Vaporeon learns Hydro Pump at lv54 (no Ice move exists on its Gen-1 learnset)
+    let steps = vec![
+        PolicyStep::enter(Map::CinnabarIsland),               // out of the gym
+        PolicyStep::enter(Map::CinnabarPokecenter),
+        PolicyStep::Interact(MS::CINNABARPOKECENTER_NURSE),   // revive Vaporeon + set Cinnabar as heal anchor
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::PokemonMansion1F),
+        PolicyStep::GrindUntilLevel { target_level: target, on_map: Map::PokemonMansion1F, slot: 0 },
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(180), steps);
+    let mut last = String::new();
+    let mut saved_lv = 0u8;
+    for i in 0..18_000_000 {
+        fixture.step();
+        if i % 2000 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let v = &s.pokemon[0];
+                let cur = format!("Vaporeon lv{} ({}/{}hp) on {}", v.level, v.current_hp, v.stats.hp, s.map.map);
+                if cur != last { last = cur.clone(); println!("  {i}: {cur}"); }
+                // Bank progress at each new level >= 40 (when at healthy HP), so a stall doesn't lose the
+                // grind — the highest-level fixture is always on disk.
+                if v.level > saved_lv && v.level >= 40 && v.current_hp > 0 {
+                    saved_lv = v.level;
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-mansion-grinded.bin").ok();
+                    println!("  >> banked at-mansion-grinded.bin at Vaporeon lv{}", v.level);
+                }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> grind done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final party:"); for p in s.pokemon.iter() {
+        let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}", m.name)).collect();
+        println!("  {:?} lv{} — {}", p.species, p.level, moves.join("/"));
+    }
+    if s.pokemon[0].level >= target {
+        fixture.gb.save_state_to_file("src/pokemon/data/at-mansion-grinded.bin").ok();
+        println!(">> saved at-mansion-grinded.bin (Vaporeon lv{}, in the Pokémon Mansion)", s.pokemon[0].level);
+    }
+}
+
+// Explore Seafoam Islands to plan the Articuno route: from at-mansion-grinded (Cinnabar), teach Strength to
+// Venusaur (for the boulders), Surf east onto Route 20, into Seafoam 1F, and dump each floor's tile grid +
+// boulder positions so we can plan the boulder→hole current-stop puzzle down to Articuno on B4F.
+#[test]
+#[ignore]
+fn probe_seafoam_explore() {
+    use crate::pokemon::map::MapSprite as MS;
+    let _ = MS::SEAFOAMISLANDS1F_BOULDER1;
+    let bytes = std::fs::read("src/pokemon/data/at-mansion-grinded.bin").expect("no fixture");
+    let steps = vec![
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::GreatBall, 10), map: Map::CinnabarMart },
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::Route20),
+        PolicyStep::enter(Map::SeafoamIslands1F),
+        // Seafoam is a cave with LAND encounters — the cave-wander (pace to boulders) triggers Seel.
+        PolicyStep::CatchPokemon { species: crate::pokemon::species::PokemonSpecies::Seel, on_map: Map::SeafoamIslands1F },
+        PolicyStep::TeachMove { item: ItemId::Hm04Strength, target_slot: 2 },
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(30), steps);
+    let mut seen = std::collections::HashSet::new();
+    let dump = |s: &crate::pokemon::GameState| {
+        let m = &s.map;
+        println!("== {} {}x{} player@{} ==", m.map, m.width, m.height, m.player_position);
+        for (i, b) in m.sprites.iter().enumerate() { println!("  sprite{i}: {:?}@{} hidden={}", b.name, b.position, b.hidden); }
+        println!("  strength_switches={:?} holes={:?} can_surf={}", m.strength_switches, m.holes, m.can_surf);
+    };
+    for i in 0..3_000_000 {
+        fixture.step();
+        if i % 500 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if seen.insert(s.map.map) { println!("--- reached {} at {i} ---", s.map.map); dump(&s); }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("FINAL:"); dump(&s);
+}
+
+// E4 attempt, Phase 1: take the strong grinded team (Vaporeon lv54 + Venusaur lv55, `at-mansion-grinded.bin`,
+// at Cinnabar post-Volcano-Badge) through the back-half to the Indigo lobby: Earth Badge (Giovanni) → Victory
+// Road (catch Machop HM-slave, Strength puzzle 1F/2F/3F). The fixture party is [Vaporeon(0), Venusaur(1),
+// Pidgey(2)], so `MovePokemonToFront{1}` (inside the VR steps) leads Venusaur and the caught Machop lands at
+// slot 3. Saves `at-indigo-strong.bin` for the gauntlet leg.
+#[test]
+#[ignore]
+fn probe_e4_backhalf() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read("src/pokemon/data/at-mansion-blizzard.bin").expect("run probe_get_blizzard first");
+    let mut steps = PolicyStep::earth_badge_steps();
+    // Custom VR1F leading the bulky Blizzard VAPOREON (slot 0) at the Route-22 rival instead of Venusaur:
+    // Venusaur is Grass/POISON → 2× to the rival's Alakazam Psychic and runs its RazorLeaf PP out, falling
+    // into a heal-flee loop; Vaporeon (Water, 224 HP, full PP, Blizzard/Surf covers the rival's whole team)
+    // tanks it. Otherwise identical to victory_road_1f_steps(2): catch Machop (slot 2) + Strength + solve 1F.
+    steps.extend(vec![
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::ViridianPokecenter),
+        PolicyStep::Interact(MS::VIRIDIANPOKECENTER_NURSE),
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::ViridianMart),
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 20), map: Map::ViridianMart },
+        PolicyStep::enter(Map::ViridianCity),
+        // NB: no MovePokemonToFront — Vaporeon already leads at slot 0.
+        PolicyStep::enter(Map::Route22),
+        PolicyStep::enter(Map::Route22Gate),
+        PolicyStep::Interact(MS::ROUTE22GATE_GUARD),
+        PolicyStep::enter(Map::Route23),
+        PolicyStep::goto(Map::VictoryRoad1F),
+        PolicyStep::CatchPokemon { species: crate::pokemon::species::PokemonSpecies::Machop, on_map: Map::VictoryRoad1F },
+        PolicyStep::TeachMove { item: ItemId::Hm04Strength, target_slot: 2 },
+        PolicyStep::UseStrength { slot: 2 },
+        PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+        PolicyStep::enter(Map::VictoryRoad2F),
+    ]);
+    steps.extend(PolicyStep::victory_road_2f_3f_steps(2));
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(90), steps);
+    let mut last = Map::PalletTown;
+    for i in 0..9_000_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.map != last { last = s.map.map; println!("  {i}: -> {} (badges {:?})", s.map.map, s.badges); }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> back-half complete at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final: map {} @ {}", s.map.map, s.map.player_position);
+    println!("team:"); for p in s.pokemon.iter() { println!("  {:?} lv{} {}/{}hp", p.species, p.level, p.current_hp, p.stats.hp); }
+    if s.map.map == Map::IndigoPlateauLobby {
+        fixture.gb.save_state_to_file("src/pokemon/data/at-indigo-ice.bin").ok();
+        println!(">> saved at-indigo-ice.bin (Blizzard team at the Indigo lobby)");
+    }
+}
+
+// Validate getting TM14 Blizzard (in Pokémon Mansion B1F) onto Vaporeon, from `at-mansion-grinded.bin`
+// (in Mansion 1F). Blizzard (Ice, 120) is 2× on all of Lance's dragons — the Elite-Four Lance answer.
+// pick_move_to_forget keeps the strongest moves, so Blizzard displaces Mist and survives the later Hydro
+// Pump learn. Saves `at-mansion-blizzard.bin` for a back-half re-run that carries Blizzard to the E4.
+#[test]
+#[ignore]
+fn probe_get_blizzard() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read("src/pokemon/data/at-mansion-grinded.bin").expect("run the grind first");
+    // Reuse the proven B1F navigation from `mansion_secret_key_steps` (up to 3F, flip the switch, fall
+    // through the hole to a new 1F section, take the B1F staircase, flip the B1F switches to open the walls),
+    // then grab the Blizzard TM at (19,25) — right by the (18,25) switch — instead of the Secret Key.
+    let steps = vec![
+        PolicyStep::enter(Map::CinnabarIsland),        // exit the Mansion first (grind ends inside it)
+        PolicyStep::enter(Map::CinnabarPokecenter),   // heal (restore Surf PP for the battle-heavy crossing)
+        PolicyStep::Interact(MS::CINNABARPOKECENTER_NURSE),
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::PokemonMansion1F),
+        PolicyStep::enter(Map::PokemonMansion2F),
+        PolicyStep::EnterMap { to_map: Map::PokemonMansion3F, to_position: Some(Point8 { x: 6, y: 1 }) },
+        PolicyStep::FlipSwitch { map: Map::PokemonMansion3F, at: Point8 { x: 10, y: 5 }, reveals: Map::PokemonMansion1F },
+        PolicyStep::enter(Map::PokemonMansion1F),   // fall through a hole → 1F (16,14)
+        PolicyStep::enter(Map::PokemonMansionB1F),  // (21,23) staircase down
+        // The Blizzard TM (19,25) sits right by the (18,25) switch — flip it and grab the TM immediately,
+        // BEFORE the (20,3) switch (which the Secret-Key route flips next but re-closes this section).
+        PolicyStep::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
+        PolicyStep::CollectItem(MS::POKEMONMANSIONB1F_TM_BLIZZARD),
+        PolicyStep::TeachMove { item: ItemId::Tm14Blizzard, target_slot: 0 }, // Vaporeon (slot 0)
+        // Exit B1F → Cinnabar: flip (18,25) back to default (I flipped it once for the TM) — from the
+        // adjacent Blizzard spot — so the (23,22) staircase area (reachable in the default state, where we
+        // entered) reopens; then up to 1F and out to Cinnabar so the back-half starts cleanly.
+        PolicyStep::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
+        PolicyStep::enter(Map::PokemonMansion1F),   // (23,22) up-staircase → 1F
+        PolicyStep::enter(Map::CinnabarIsland),
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(25), steps);
+    let mut last = Map::PalletTown;
+    for i in 0..2_000_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.map != last { last = s.map.map; println!("  {i}: -> {}", s.map.map); }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    let v = &s.pokemon[0];
+    let moves: Vec<String> = v.moves.iter().flatten().map(|m| format!("{:?}", m.name)).collect();
+    println!("Vaporeon lv{} moves: {}", v.level, moves.join("/"));
+    let has_blizzard = v.moves.iter().flatten().any(|m| format!("{:?}", m.name) == "Blizzard");
+    if has_blizzard {
+        fixture.gb.save_state_to_file("src/pokemon/data/at-mansion-blizzard.bin").ok();
+        println!(">> BLIZZARD TAUGHT — saved at-mansion-blizzard.bin");
+    } else { println!("!! Blizzard not on Vaporeon"); }
+}
+
+// E4 attempt, Phase 2: run the Elite Four gauntlet with the strong grinded team from `at-indigo-strong.bin`
+// (Venusaur lv57 + Vaporeon lv55 Hydro Pump/Surf 238 HP, 54k money → ~15 Full Restores). Heal, stock items,
+// lead Venusaur, then Lorelei → Bruno → Agatha → Lance → Champion. Logs how far it gets.
+#[test]
+#[ignore]
+fn probe_e4_gauntlet() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read("src/pokemon/data/at-indigo-ice.bin").expect("run probe_e4_backhalf first");
+    let steps = vec![
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 15), map: Map::IndigoPlateauLobby },
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::Revive, 5), map: Map::IndigoPlateauLobby },
+        PolicyStep::Interact(MS::INDIGOPLATEAULOBBY_NURSE),  // revive + restore all PP
+        PolicyStep::MovePokemonToFront { slot: 1 },          // Venusaur (slot 1) leads; Vaporeon's Blizzard for Lance
+        PolicyStep::enter(Map::LoreleisRoom),
+        PolicyStep::BattleTrainer { trainer: MS::LORELEISROOM_LORELEI },
+        PolicyStep::enter(Map::BrunosRoom),
+        PolicyStep::BattleTrainer { trainer: MS::BRUNOSROOM_BRUNO },
+        PolicyStep::enter(Map::AgathasRoom),
+        PolicyStep::BattleTrainer { trainer: MS::AGATHASROOM_AGATHA },
+        PolicyStep::enter(Map::LancesRoom),
+        PolicyStep::BattleTrainer { trainer: MS::LANCESROOM_LANCE },
+        PolicyStep::enter(Map::ChampionsRoom),
+        PolicyStep::BattleTrainer { trainer: MS::CHAMPIONSROOM_RIVAL },
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(120), steps); // long attrition vs Lance
+    let mut last = Map::PalletTown;
+    let mut furthest = Map::IndigoPlateauLobby;
+    for i in 0..4_500_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.map != last { last = s.map.map; furthest = s.map.map; println!("  {i}: -> {}", s.map.map); }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> GAUNTLET COMPLETE — E4 BEATEN at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("furthest room: {furthest}; final map {} @ {}", s.map.map, s.map.player_position);
+    println!("final team:"); for p in s.pokemon.iter() { println!("  {:?} lv{} {}/{}hp", p.species, p.level, p.current_hp, p.stats.hp); }
+    if s.map.map == Map::HallOfFame { println!(">> HALL OF FAME REACHED — CHAMPION!"); }
+}
+
+// Dump a fixture's team/location (edit the fixture list); used to plan grinds + the E4 attempt.
+#[test]
+#[ignore]
+fn probe_peb_state() {
+    for f in ["at-mansion-grinded"] {
+        let bytes = match std::fs::read(format!("src/pokemon/data/{f}.bin")) { Ok(b) => b, Err(_) => continue };
+        let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+        let s = fixture.game_state();
+        println!("== {f}: map {} @ {} | badges {:?} | money {}", s.map.map, s.map.player_position, s.badges, s.money);
+        for (i, p) in s.pokemon.iter().enumerate() {
+            let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
+            println!("  slot{i}: {:?} lv{} {}/{}hp — {}", p.species, p.level, p.current_hp, p.stats.hp, moves.join(", "));
+        }
+        let bag: Vec<String> = s.bag.iter().map(|it| format!("{:?}x{}", it.id, it.quantity)).collect();
+        println!("  bag[{}/20]: {}", s.bag.iter().count(), bag.join(", "));
+    }
+}
+
+// Dump the Indigo-lobby team + bag + money, to plan the Elite Four prep (grind / coverage TMs / items).
+#[test]
+#[ignore]
+fn probe_e4_inventory() {
+    let bytes = std::fs::read("src/pokemon/data/at-indigo.bin").expect("run can_solve_victory_road_2f_3f first");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    println!("money: {}", s.money);
+    println!("bag:"); for it in s.bag.iter() { println!("  {:?} x{}", it.id, it.quantity); }
+    println!("party:");
+    for p in s.pokemon.iter() {
+        let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
+        println!("  {:?} lv{} hp{}/{} atk{} def{} spd{} spc{} — {}", p.species, p.level, p.current_hp, p.stats.hp,
+            p.stats.attack, p.stats.defense, p.stats.speed, p.stats.special, moves.join(", "));
+    }
+}
+
+// Exploratory Elite Four attempt with the CURRENT (unprepped) team, from the Indigo lobby fixture. Heals,
+// then walks the gauntlet Lorelei→Bruno→Agatha→Lance→Champion. Logs how far it gets — grounds the team-prep
+// plan in the real failure point + validates room navigation / auto-engage battles. (Run after
+// `can_solve_victory_road_2f_3f` has created `at-indigo.bin`.)
+#[test]
+#[ignore]
+fn probe_e4_first_attempt() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read("src/pokemon/data/at-indigo.bin").expect("run can_solve_victory_road_2f_3f first");
+    let steps = vec![
+        // Stock the gauntlet: Full Restores (heal HP+status) + Revives, from the lobby clerk. ~30k money.
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 8), map: Map::IndigoPlateauLobby },
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
+        PolicyStep::Interact(MS::INDIGOPLATEAULOBBY_NURSE), // heal to full before the gauntlet
+        PolicyStep::MovePokemonToFront { slot: 0 },         // Venusaur leads
+        PolicyStep::enter(Map::LoreleisRoom),
+        PolicyStep::BattleTrainer { trainer: MS::LORELEISROOM_LORELEI },
+        PolicyStep::enter(Map::BrunosRoom),
+        PolicyStep::BattleTrainer { trainer: MS::BRUNOSROOM_BRUNO },
+        PolicyStep::enter(Map::AgathasRoom),
+        PolicyStep::BattleTrainer { trainer: MS::AGATHASROOM_AGATHA },
+        PolicyStep::enter(Map::LancesRoom),
+        PolicyStep::BattleTrainer { trainer: MS::LANCESROOM_LANCE },
+        PolicyStep::enter(Map::ChampionsRoom),
+        PolicyStep::BattleTrainer { trainer: MS::CHAMPIONSROOM_RIVAL },
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(30), steps);
+    { let s = fixture.game_state(); print!("team: "); for p in s.pokemon.iter() { print!("{:?}{} ", p.species, p.level); } println!(); }
+    let mut last = Map::PalletTown;
+    let mut furthest = Map::IndigoPlateauLobby;
+    for i in 0..3_000_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.map != last { last = s.map.map; furthest = s.map.map; println!("  {i}: -> {}", s.map.map); }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> gauntlet complete at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("furthest room reached: {furthest}; final map {} @ {}", s.map.map, s.map.player_position);
+    println!("final team:"); for p in s.pokemon.iter() { println!("  {:?} lv{} {}/{}hp", p.species, p.level, p.current_hp, p.stats.hp); }
+}
+
+// The Strength switch/hole positions are exposed on the map (`strength_switches` / `holes`) so a policy —
+// deterministic or a future LLM — can discover where to push boulders without hardcoding coordinates.
+#[test]
+#[ignore]
+fn strength_switches_are_exposed() {
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    assert_eq!(s.map.map, Map::VictoryRoad1F);
+    assert_eq!(s.map.strength_switches, vec![Point8 { x: 17, y: 13 }], "VR1F switch should be exposed");
+    assert!(s.map.holes.is_empty(), "VR1F has no holes");
+}
+
+// Validates the full interconnected VR2F/VR3F Strength puzzle → Indigo Plateau lobby. Self-contained: from
+// `vr1f-strength.bin` (Machop HM-slave already caught+taught), solve VR1F, climb to VR2F, then run the
+// `victory_road_2f_3f_steps` puzzle (switch1 → 3F → hole-drop reveals the hidden 2F boulder → fall → switch2
+// → return trip → exit). Every boulder is a real Strength push. This is the proof the VR2F/VR3F mechanic
+// works end-to-end; chaining it onto a *fresh* run is PP-marginal (see `victory_road_2f_3f_steps`).
+#[test]
+#[ignore]
+fn can_solve_victory_road_2f_3f() {
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut steps = vec![
+        PolicyStep::UseStrength { slot: 2 },
+        PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+        PolicyStep::enter(Map::VictoryRoad2F),
+    ];
+    steps.extend(PolicyStep::victory_road_2f_3f_steps(2));
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(60), steps);
+    let mut last = (Map::PalletTown, Point8 { x: 255, y: 255 });
+    for i in 0..6_000_000 {
+        fixture.step();
+        if i % 500 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let k = (s.map.map, s.map.player_position);
+                if k != last { last = k; println!("  {i}: {} @ {}", s.map.map, s.map.player_position); }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+    assert_eq!(s.map.map, Map::IndigoPlateauLobby, "should clear the VR2F/VR3F puzzle to the Indigo Plateau lobby");
+    // Snapshot the Indigo Plateau lobby (weak team) for fast Elite Four iteration.
+    fixture.gb.save_state_to_file("src/pokemon/data/at-indigo.bin").ok();
+}
+
+// Validate the Strength-activation executor: from vr1f-strength (Machop-with-Strength at slot 2), run
+// PolicyStep::UseStrength and assert BIT_STRENGTH_ACTIVE gets set.
+#[test]
+#[ignore]
+fn probe_vr_use_strength() {
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let steps = vec![PolicyStep::UseStrength { slot: 2 }];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(2), steps);
+    let mut activated = false;
+    let mut last = String::new();
+    for i in 0..300_000 {
+        fixture.step();
+        if i % 20 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                if s.strength_active { activated = true; }
+                let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                let txt = api.on_screen_text(false).unwrap_or_default();
+                let cur = format!("{:?} st={} str={} txt={:?}", s.mode, fixture.agent.state_debug(), s.strength_active, txt.chars().take(40).collect::<String>());
+                if cur != last { println!("  {i}: {cur}"); last = cur; }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> policy done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("strength_active = {} (seen active during run = {activated})", s.strength_active);
+    assert!(activated, "Strength should have been activated (BIT_STRENGTH_ACTIVE set)");
+}
+
+// END-TO-END VR1F STRENGTH PROOF: from vr1f-strength.bin, arm Strength (Machop @ slot 2) then run the
+// SolveBoulders driver. Prove — in the running emulator — that the agent pushes a real boulder onto the
+// real switch (17,13): screenshot it, assert the boulder-on-switch event gets set by the map script, and
+// assert the (1,1) → VR2F ladder becomes reachable (the ReplaceTileBlock barrier opened). This is the
+// definitive "Strength CAN work" confirmation, with no RAM cheating.
+#[test]
+#[ignore]
+fn probe_vr1f_strength_solve() {
+    let switch = Point8 { x: 17, y: 13 };
+    let ladder = Point8 { x: 1, y: 1 };
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let steps = vec![
+        PolicyStep::UseStrength { slot: 2 },
+        PolicyStep::SolveBoulders { switch },
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(6), steps);
+
+    let vr1_byte = 290u16; let vr1_mask = 0x80u8; // EVENT_VICTORY_ROAD_1_BOULDER_ON_SWITCH
+    let event_set = |fx: &mut TestFixture| -> bool {
+        let base = crate::pokemon::symbols::pokered_symbols::wEventFlags.address;
+        (fx.gb.core_mut().mmu_mut().read(base + vr1_byte) & vr1_mask) != 0
+    };
+    let boulder_on_switch = |fx: &mut TestFixture| -> bool {
+        let s = { PokemonApi::with_cache(&mut fx.gb, &mut fx.map_cache).game_state() };
+        s.map(|s| s.map.sprites.iter().any(|sp| sp.name.starts_with("Boulder") && sp.position == switch)).unwrap_or(false)
+    };
+
+    let mut last = String::new();
+    let mut shot_on_switch = false;
+    for i in 0..2_000_000 {
+        fixture.step();
+        if i % 50 == 0 {
+            let st = fixture.agent.state_debug();
+            if st != last { println!("  {i}: state={st}"); last = st; }
+        }
+        if !shot_on_switch && boulder_on_switch(&mut fixture) {
+            fixture.gb.save_screenshot_to_file(&format!("{SCRATCH}/vr1f_boulder_on_switch.png")).ok();
+            println!(">> boulder reached switch {switch} at step {i}");
+            shot_on_switch = true;
+        }
+        if fixture.agent.policy_exhausted() { println!(">> policy exhausted at {i}"); break; }
+    }
+
+    let on_switch = boulder_on_switch(&mut fixture);
+    let evt = event_set(&mut fixture);
+    let s = fixture.game_state();
+    let reach = s.map.reachable_tiles();
+    let ladder_reachable = reach.contains(&ladder);
+    fixture.gb.save_screenshot_to_file(&format!("{SCRATCH}/vr1f_after_solve.png")).ok();
+    println!("boulder on switch = {on_switch}, event set = {evt}, (1,1) ladder reachable = {ladder_reachable}");
+    println!("player @ {}, reachable region = {} tiles", s.map.player_position, reach.len());
+
+    assert!(on_switch, "a boulder should be sitting on the switch {switch}");
+    assert!(evt, "the boulder-on-switch event should be set by the map script");
+    assert!(ladder_reachable, "the (1,1) → VR2F ladder should be reachable (ReplaceTileBlock barrier opened)");
+}
+
+// Validate the barrier model: force the VR1 boulder-on-switch event, reload VR1F so the game runs
+// ReplaceTileBlock, and confirm the (1,1) up-ladder to VR2F becomes reachable.
+#[test]
+#[ignore]
+fn probe_vr_barrier_test() {
+    let vr1_byte = 290u16; let vr1_mask = 0x80u8;
+    let set_vr1 = |fx: &mut TestFixture| {
+        let base = crate::pokemon::symbols::pokered_symbols::wEventFlags.address;
+        let mmu = fx.gb.core_mut().mmu_mut();
+        let cur = mmu.read(base + vr1_byte);
+        mmu.write(base + vr1_byte, cur | vr1_mask);
+    };
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    // Exit to Route 23 and back into VR1F so the load script runs ReplaceTileBlock with the event set.
+    let steps = vec![PolicyStep::enter(Map::Route23), PolicyStep::enter(Map::VictoryRoad1F)];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(6), steps);
+    set_vr1(&mut fixture);
+    for i in 0..600_000 {
+        set_vr1(&mut fixture); // keep it set across any script that might clear it
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> back in VR1F at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    let reach = s.map.reachable_tiles();
+    println!("map {} player @ {}", s.map.map, s.map.player_position);
+    println!("(1,1) reachable = {}", reach.contains(&Point8 { x: 1, y: 1 }));
+    println!("(9,12) walkable = {:?}", s.map.tile_at(Point8 { x: 9, y: 12 }));
+}
+
+// Can the player walk up Route 23 to the Indigo Plateau connection with 8 badges (is Victory Road
+// mandatory)?  From vr1f-strength (in VR1F), exit to Route 23 and inspect reachability + connections.
+#[test]
+#[ignore]
+fn probe_route23_walkup() {
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let steps = vec![PolicyStep::enter(Map::Route23)];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(5), steps);
+    for i in 0..400_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> reached Route23 at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("map {} player @ {} size {}x{}", s.map.map, s.map.player_position, s.map.width, s.map.height);
+    let reach = s.map.reachable_tiles();
+    // Report every Connection tile and whether it's reachable (the north one → IndigoPlateau).
+    for (i, t) in s.map.meta_tiles.iter().enumerate() {
+        if let MetaTile::Connection { to_map, .. } = t {
+            let p = Point8 { x: (i % s.map.width) as u8, y: (i / s.map.width) as u8 };
+            println!("  Connection {p} -> {:?} reachable={}", to_map, reach.contains(&p));
+        }
+        if let MetaTile::Warp { to_map, .. } = t {
+            let p = Point8 { x: (i % s.map.width) as u8, y: (i / s.map.width) as u8 };
+            if format!("{:?}", to_map).contains("Victory") {
+                println!("  Warp {p} -> {:?} reachable={}", to_map, reach.contains(&p));
+            }
+        }
+    }
+    let min_y = reach.iter().map(|p| p.y).min().unwrap_or(255);
+    println!("northmost reachable y = {min_y} (0 = Indigo Plateau edge)");
+}
+
+// Test the single-boulder Sokoban solver against the VR1F puzzle (switch at (17,13)).
+#[test]
+#[ignore]
+fn probe_vr1f_solve() {
+    let bytes = std::fs::read("src/pokemon/data/vr1f-strength.bin").expect("no vr1f-strength fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    println!("player @ {}, map {}", s.map.player_position, s.map.map);
+    for sp in s.map.sprites.iter().filter(|sp| sp.name.starts_with("Boulder")) {
+        println!("  {} @ {}", sp.name, sp.position);
+    }
+    // Dump the tile grid (F=floor/empty, G=grass, #=obstacle, ~=water, B=boulder, W=warp, .=other)
+    println!("grid {}x{}:", s.map.width, s.map.height);
+    for y in 0..s.map.height {
+        let mut row = String::new();
+        for x in 0..s.map.width {
+            let p = Point8 { x: x as u8, y: y as u8 };
+            let c = if s.map.sprites.iter().any(|sp| sp.name.starts_with("Boulder") && sp.position == p) { 'B' }
+                else if p == (Point8 { x: 17, y: 13 }) { 'S' }
+                else if p == s.map.player_position { '@' }
+                else { match s.map.tile_at(p) {
+                    MetaTile::Empty => '.',
+                    MetaTile::Grass => 'G',
+                    MetaTile::Water => '~',
+                    MetaTile::Warp { .. } => 'W',
+                    MetaTile::Obstacle => '#',
+                    _ => '?',
+                } };
+            row.push(c);
+        }
+        println!("{y:2} {row}");
+    }
+    let reach = s.map.reachable_tiles();
+    for target in [(1u8, 1u8), (8, 17), (17, 13), (17, 12), (14, 2), (2, 10), (5, 4), (11, 2)] {
+        let p = Point8 { x: target.0, y: target.1 };
+        println!("reachable {:?} = {}", target, reach.contains(&p));
+    }
+    println!("reachable region size = {}", reach.len());
+    // The apparent column-7 passage (rows 6-8) that my grid shows connecting bottom<->top:
+    for c in [(7u8, 6u8), (7, 7), (7, 8), (7, 9), (5, 7), (5, 8), (5, 9), (5, 10), (6, 6), (6, 7)] {
+        let p = Point8 { x: c.0, y: c.1 };
+        println!("  col-check {:?}: tile={:?} reachable={}", c, s.map.tile_at(p), reach.contains(&p));
+    }
+    let switch = Point8 { x: 17, y: 13 };
+    match s.map.solve_boulder_push(switch) {
+        Some(pushes) => {
+            println!(">> solution ({} pushes):", pushes.len());
+            for (from, dir) in &pushes {
+                println!("   push boulder at {from} {:?}", dir);
+            }
+        }
+        None => println!(">> NO SOLUTION"),
+    }
 }
 
 #[test]

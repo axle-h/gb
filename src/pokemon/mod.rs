@@ -350,6 +350,9 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             found_rocket_hideout: mmu.read(pokered_symbols::wEventFlags.address + 55) & 0x02 != 0,
             // EVENT_MANSION_SWITCH_ON = 0x278 → wEventFlags[79] bit 0. Toggled by any Mansion statue.
             mansion_switch_on: mmu.read(pokered_symbols::wEventFlags.address + 79) & 0x01 != 0,
+            // BIT_STRENGTH_ACTIVE = bit 0 of wStatusFlags1 — set by using Strength from the party menu,
+            // reset on every map change. Required before a boulder will move when pushed.
+            strength_active: mmu.read_pointer(&pokered_symbols::wStatusFlags1) & 0x01 != 0,
             map,
             battle: mmu.read_battle_state(),
             bag: mmu.read_bag(),
@@ -565,6 +568,9 @@ pub struct GameState {
     /// State of EVENT_MANSION_SWITCH_ON — the single global Pokémon Mansion switch that every statue
     /// on every floor toggles, opening/closing the sliding-door gates on all four floors.
     pub mansion_switch_on: bool,
+    /// True while Strength is active (BIT_STRENGTH_ACTIVE in `wStatusFlags1`) — set by using Strength
+    /// from the party menu, reset on every map change. A boulder only moves when pushed with this set.
+    pub strength_active: bool,
 }
 
 /// State of the Vermilion Gym two-switch trash-can puzzle that unlocks the door to Lt. Surge.

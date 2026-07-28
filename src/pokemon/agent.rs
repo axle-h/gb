@@ -188,6 +188,12 @@ enum AgentState {
     /// state active means the mount finished. `water_pos` is the tile being surfed onto (used to face it).
     Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8 },
 
+    /// Activating the Strength field move so boulders become pushable: drive START→POKéMON→(the mon at
+    /// `slot`, e.g. an HM-slave Machop)→STRENGTH. Sets `BIT_STRENGTH_ACTIVE`. Same press/release mashing
+    /// as `CuttingTree`/`Surfing`; `entered_menu` tracks that we left the overworld, so a return to it
+    /// means the activation dialog finished. Unlike Cut/Surf there is no target tile — Strength just arms.
+    UsingStrength { press: bool, entered_menu: bool, slot: u8 },
+
     /// Checking a Vermilion Gym trash can for a hidden switch: route to a tile adjacent to `target`
     /// and face it (recomputed each tick via `MetaTileMap::route_to_face`), then press A to trigger
     /// `GymTrashScript`. `press` alternates for plain press/release mashing. `checked` becomes true
@@ -205,6 +211,14 @@ enum AgentState {
     /// Flute wakes a Snorlax → a battle, which the battle handler wins). `press` alternates for plain
     /// press/release mashing; `entered_menu` tracks that we left the overworld into the bag menus.
     UsingFieldItem { item: crate::pokemon::item::ItemId, target: Point8, press: bool, entered_menu: bool },
+
+    /// Executing ONE Strength boulder push (the primitive behind `FieldMove::PushBoulder`): route the
+    /// player to the tile behind the boulder at `boulder` (via `route_to`), face it, and hold `dir` — the
+    /// game's double-press logic advances the boulder one tile (the dust animation locks input, so it
+    /// never over-pushes). Done as soon as the boulder leaves `boulder` (moved one tile, or fell through a
+    /// hole). Any interruption (wild battle, script) drops to Idle; the policy re-decides the next push.
+    /// Planning which boulder to push where lives in the policy (`MetaTileMap::solve_boulder_push`), not here.
+    PushingBoulder { boulder: Point8, dir: JoypadButton },
 }
 
 impl AgentState {
@@ -251,9 +265,11 @@ impl Display for AgentState {
             AgentState::TeachingMove { item, .. } => write!(f, "teach:{item:?}"),
             AgentState::CuttingTree { .. } => write!(f, "cut"),
             AgentState::Surfing { .. } => write!(f, "surf"),
+            AgentState::UsingStrength { slot, .. } => write!(f, "strength:slot{slot}"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
+            AgentState::PushingBoulder { boulder, dir } => write!(f, "push-boulder:{boulder}{dir:?}"),
         }
     }
 }
@@ -690,7 +706,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingStrength { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -788,6 +804,18 @@ impl PokemonAgent {
                         Some(crate::pokemon::policy::FieldMove::CheckTrashCan { target, facing }) => {
                             api.release_all_buttons();
                             self.set_state(AgentState::CheckingTrashCan { target, checked: false, press: true, facing });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::UseStrength { slot }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::UsingStrength { press: true, entered_menu: false, slot });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::PushBoulder { boulder, dir }) => {
+                            // Primitive: push the boulder at `boulder` one tile in `dir`. The policy plans
+                            // *which* push (via `MetaTileMap::solve_boulder_push`); the agent just executes it.
+                            api.release_all_buttons();
+                            self.set_state(AgentState::PushingBoulder { boulder, dir });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::UseElevator { panel, floor }) => {
@@ -1689,6 +1717,96 @@ impl PokemonAgent {
                 api.release_all_buttons();
                 api.press_button(button);
                 self.set_state(AgentState::Surfing { press: false, entered_menu, water_pos, slot });
+            }
+            AgentState::UsingStrength { press, entered_menu, slot } => {
+                use crate::pokemon::menu::TextBoxId;
+                // Using Strength opens the party menu → field-move menu → STRENGTH, shows a confirmation
+                // dialog ("… can now use STRENGTH!"), then returns to the overworld with the ability armed.
+                // So once we've entered a menu, the first return to the overworld ends it — hand back to
+                // the policy, which re-checks `strength_active` and proceeds to push.
+                if entered_menu && game_mode == GameMode::Overworld {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let entered_menu = entered_menu || game_mode != GameMode::Overworld;
+
+                // Plain press/release mashing (see CuttingTree).
+                if !press {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::UsingStrength { press: true, entered_menu, slot });
+                    return Ok(());
+                }
+
+                let (top_x, top_y, current, _) = api.menu_geometry();
+                let tbid = api.menu_state().map(|m| m.text_box_id);
+                let nav = |cur: u8, target: u8| -> JoypadButton {
+                    if cur < target { JoypadButton::Down }
+                    else if cur > target { JoypadButton::Up }
+                    else { JoypadButton::A }
+                };
+                let button = if game_mode == GameMode::Overworld {
+                    JoypadButton::Start // no target tile — just open START
+                } else if tbid == Some(TextBoxId::FieldMoveMonMenu) || top_y == 10 {
+                    nav(current, 0) // field-move menu → STRENGTH (the HM-slave's only field move)
+                } else if top_x == 11 && top_y == 2 {
+                    nav(current, 1) // START menu → POKéMON (index 1, Pokédex obtained)
+                } else if top_x == 0 && (top_y == 1 || top_y == 3) {
+                    nav(current, slot) // party menu → the Strength mon
+                } else {
+                    JoypadButton::A // transitional text ("used STRENGTH!" / "can now use STRENGTH!")
+                };
+                api.release_all_buttons();
+                api.press_button(button);
+                self.set_state(AgentState::UsingStrength { press: false, entered_menu, slot });
+            }
+            AgentState::PushingBoulder { boulder, dir } => {
+                let game_state = self.observe_state(api)?;
+                // Any interruption (wild battle in the cave, a script/text box) — drop to Idle. The policy
+                // decides the next push from the live positions, so partial progress is never lost.
+                if game_state.mode != GameMode::Overworld {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let map = &game_state.map;
+                let boulder_at = |p: Point8| map.sprites.iter()
+                    .any(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == p);
+
+                // Done the moment the boulder leaves its tile — it moved one step (into `boulder + dir`) or
+                // fell through a hole. Either way this single push is complete; hand back to the policy.
+                if !boulder_at(boulder) {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // The tile the player must stand on to push: one step *behind* the boulder.
+                let opposite = match dir {
+                    JoypadButton::Up => JoypadButton::Down, JoypadButton::Down => JoypadButton::Up,
+                    JoypadButton::Left => JoypadButton::Right, JoypadButton::Right => JoypadButton::Left,
+                    other => other,
+                };
+                let Some(behind) = step_pos(boulder, opposite) else {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                };
+
+                if map.player_position != behind {
+                    // Walk to the push tile. `route_to` is recomputed each tick and routes around the
+                    // boulders (sprites/obstacles), so the approach never accidentally shoves one.
+                    match map.route_to(behind).and_then(|r| r.first().copied()) {
+                        Some(btn) => { api.release_all_buttons(); api.press_button(btn); }
+                        None => { api.release_all_buttons(); self.set_state(AgentState::Idle); return Ok(()); }
+                    }
+                } else {
+                    // Behind the boulder: face + hold the push direction. The game arms on the first
+                    // attempt and advances the boulder one tile on the next; its dust animation then locks
+                    // input, so we advance exactly one tile before the completion check above fires.
+                    api.release_all_buttons();
+                    api.press_button(dir);
+                }
+                self.set_state(AgentState::PushingBoulder { boulder, dir });
             }
             AgentState::CheckingTrashCan { target, checked, press, facing } => {
                 // Checking a can triggers GymTrashScript, which prints a text box (leaving the

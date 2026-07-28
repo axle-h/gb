@@ -40,6 +40,34 @@ pub struct MetaTileMap {
     /// treats `Water` tiles as passable so routes cross water; the agent mounts Surf at the land↔water
     /// boundary. Set by `game_state()` after construction (the map builder has no party access).
     pub can_surf: bool,
+    /// Strength boulder-switch tiles on this map (invisible pressure plates, from the ROM map scripts):
+    /// push a boulder onto one to open its barrier. Exposed so a policy (deterministic or LLM) can
+    /// discover *where* to push without hardcoding coordinates. Empty for maps with no Strength puzzle.
+    pub strength_switches: Vec<Point8>,
+    /// Floor-hole tiles on this map (Victory Road 3F): the player can fall through one to the floor
+    /// below, and pushing a boulder onto one drops it there (revealing a hidden boulder). Also modelled
+    /// as `MetaTile::Warp` for routing (see `apply_victory_road_holes`); this list is for discovery.
+    pub holes: Vec<Point8>,
+}
+
+/// Strength boulder-switch tiles per map (raw object/script coords, no connection offset), from the
+/// pokered map scripts (e.g. `VictoryRoad1F.asm` `.SwitchCoords`). Pushing a boulder onto a switch runs
+/// its `ReplaceTileBlock` (opens a barrier). Add other Strength maps (Seafoam, Rock Tunnel…) here.
+fn strength_switch_table(map: Map) -> &'static [(u8, u8)] {
+    match map {
+        Map::VictoryRoad1F => &[(17, 13)],
+        Map::VictoryRoad2F => &[(1, 16), (9, 16)],
+        Map::VictoryRoad3F => &[(3, 5)],
+        _ => &[],
+    }
+}
+
+/// Floor-hole tiles per map (raw coords): a boulder pushed onto one falls to the floor below.
+fn hole_table(map: Map) -> &'static [(u8, u8)] {
+    match map {
+        Map::VictoryRoad3F => &[(23, 15)],
+        _ => &[],
+    }
 }
 
 /// Arrow-tile → slide-destination tables for the spinner-floor maps (raw map coords), decoded from
@@ -129,6 +157,12 @@ impl MetaTileMap {
             }).collect(),
             meta_tiles,
             can_surf: false,
+            strength_switches: strength_switch_table(map.metadata.map).iter()
+                .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
+                .collect(),
+            holes: hole_table(map.metadata.map).iter()
+                .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
+                .collect(),
         }
     }
 
@@ -220,6 +254,154 @@ impl MetaTileMap {
     /// The set of tiles reachable from the player (debug/diagnostic aid for maze mapping).
     pub fn reachable_tiles(&self) -> std::collections::HashSet<Point8> {
         self.bfs_from_player().0.into_keys().collect()
+    }
+
+    /// A wander action to the farthest reachable WALKABLE tile: walking (or Surfing) there triggers a
+    /// per-step encounter on a cave/water map that has no grass and no reachable cave object to pace toward
+    /// (e.g. entering Seafoam in a pocket away from the boulders). Only Empty/Grass/Water destinations are
+    /// considered — never a Warp/Connection tile (stepping onto one would leave the map). `None` if the only
+    /// reachable tile is the player's own.
+    pub fn wander_action(&self) -> Option<crate::pokemon::actions::OverworldAction> {
+        let (dist, _) = self.bfs_from_player();
+        let dest = dist.iter()
+            .filter(|(p, _)| matches!(
+                self.meta_tiles[p.x as usize + p.y as usize * self.width],
+                MetaTile::Empty | MetaTile::Grass | MetaTile::Water))
+            .max_by_key(|(_, d)| **d)
+            .map(|(p, _)| *p)?;
+        let route = self.route_to(dest)?;
+        (!route.is_empty()).then(|| crate::pokemon::actions::OverworldAction {
+            map: self.map, origin: self.player_position, destination: dest,
+            tile: self.meta_tiles[dest.x as usize + dest.y as usize * self.width], route,
+        })
+    }
+
+    /// Single-boulder Sokoban: plan a sequence of one-tile pushes that lands a boulder on `switch`.
+    /// Each entry is `(boulder_position_before_that_push, push_direction)`; returns `None` if no boulder
+    /// can reach the switch. Boulders are the sprites named "Boulder …"; the boulder being pushed treats
+    /// the others (and walls/water/warps) as fixed obstacles. After a push the player ends on the
+    /// boulder's old tile, so its reachable region is recomputed from there each step.
+    pub fn solve_boulder_push(&self, switch: Point8) -> Option<Vec<(Point8, JoypadButton)>> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+        // Only *visible* boulders are physically present and pushable. A hidden boulder (e.g. Victory
+        // Road 2F's boulder that stays hidden until a 3F boulder falls through a hole onto it) must be
+        // ignored, or the solver plans pushes of a phantom sprite that can never actually move.
+        let boulders: Vec<Point8> = self.sprites.iter()
+            .filter(|s| s.name.starts_with("Boulder") && !s.hidden)
+            .map(|s| s.position).collect();
+        let all: HashSet<Point8> = boulders.iter().copied().collect();
+        let dirs = [(0i32, -1i32, JoypadButton::Up), (0, 1, JoypadButton::Down),
+                    (-1, 0, JoypadButton::Left), (1, 0, JoypadButton::Right)];
+        let inb = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height;
+        let mv = |p: Point8, dx: i32, dy: i32| -> Option<Point8> {
+            let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
+            inb(x, y).then(|| Point8 { x: x as u8, y: y as u8 })
+        };
+        for &start in &boulders {
+            let others: HashSet<Point8> = all.iter().copied().filter(|&b| b != start).collect();
+            // A tile the player may STAND ON to push a boulder: ordinary floor, and also inter-map
+            // warp tiles.  The player can legitimately stand on a coordinate-warp (e.g. Victory Road
+            // 1F's entrance warps at (8,17)/(9,17), plain cave floor $21) and push a boulder past it —
+            // the warp only fires when moving *onto* it toward the warp, not when pushing up into a
+            // boulder (VR1F is Cavern, so `ExtraWarpCheck` = `IsWarpTileInFrontOfPlayer`, and the tile
+            // in front when pushing is not a warp tile).  Excluding warps here was the bug that made
+            // VR1F look unsolvable.
+            // `self.tile_at` reports the *live* boulder sprites as occupied, but the solver simulates
+            // boulders moving — so the tile UNDER any boulder must count as floor (the solver tracks
+            // boulder occupancy itself via `active`/`others`). Without this, a boulder's own starting
+            // tile stays a phantom wall after it has (in simulation) been pushed away.
+            let under_boulder = |p: Point8| all.contains(&p);
+            let player_stand = |p: Point8, active: Point8| p != active && !others.contains(&p)
+                && (under_boulder(p) || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. }));
+            // A tile a BOULDER may be pushed onto: ordinary floor (or a tile vacated by a boulder), or
+            // the explicit `switch` target itself — this lets the caller aim a boulder at a hole tile
+            // (a `MetaTile::Warp`) to drop it to the floor below (Victory Road 3F), which normal floor
+            // rules would reject. Any other warp/ladder is off-limits.
+            let boulder_dest = |p: Point8, active: Point8| p != active && !others.contains(&p)
+                && (p == switch || under_boulder(p) || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass));
+            // Tiles the player can reach from `from`, with the active boulder + others as walls.
+            // Respects tile-pair collisions (cave "cliffs") exactly like real player movement — without
+            // this, vacating a boulder could wrongly appear to open a barrier the player can't cross.
+            let reach = |active: Point8, from: Point8| -> HashSet<Point8> {
+                let mut seen = HashSet::from([from]);
+                let mut q = VecDeque::from([from]);
+                while let Some(p) = q.pop_front() {
+                    for &(dx, dy, _) in &dirs {
+                        if let Some(n) = mv(p, dx, dy) {
+                            if player_stand(n, active) && !self.pair_blocked(p, n) && seen.insert(n) {
+                                q.push_back(n);
+                            }
+                        }
+                    }
+                }
+                seen
+            };
+            // Complete single-boulder Sokoban: the state is (boulder position, player's connected
+            // component) so the same boulder tile is revisited when the player can approach from a
+            // different side. The component is represented by its lexicographically-smallest floor tile.
+            let norm = |set: &HashSet<Point8>| -> Point8 {
+                *set.iter().min_by_key(|p| (p.y, p.x)).unwrap()
+            };
+            // state key = (boulder, player_component_rep); value = (prev_state, push_dir, push_from_boulder)
+            let mut came: HashMap<(Point8, Point8), ((Point8, Point8), JoypadButton)> = HashMap::new();
+            let start_rep = norm(&reach(start, self.player_position));
+            let mut visited: HashSet<(Point8, Point8)> = HashSet::from([(start, start_rep)]);
+            let mut q = VecDeque::from([(start, self.player_position)]);
+            let mut boulder_cells: HashSet<Point8> = HashSet::from([start]);
+            while let Some((b, player_from)) = q.pop_front() {
+                let r = reach(b, player_from);
+                let brep = norm(&r);
+                if b == switch {
+                    if std::env::var("BOULDER_DEBUG").is_ok() { eprintln!("  boulder {start} CAN reach switch {switch}"); }
+                    let mut pushes = vec![];
+                    let mut state = (b, brep);
+                    while let Some(&(prev_state, dir)) = came.get(&state) {
+                        pushes.push((prev_state.0, dir)); // push the boulder from its previous position
+                        state = prev_state;
+                    }
+                    pushes.reverse();
+                    return Some(pushes);
+                }
+                for &(dx, dy, dir) in &dirs {
+                    let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
+                    // The player must be able to reach the tile behind the boulder, the destination must
+                    // be plain floor, and there must be no elevation/tile-pair cliff between the boulder
+                    // and its destination (pokered `CheckForCollisionWhenPushingBoulder`).
+                    if r.contains(&side) && boulder_dest(dest, b) && !self.pair_blocked(b, dest) {
+                        // After the push the player stands on `b`; recompute its component.
+                        let dest_rep = norm(&reach(dest, b));
+                        if visited.insert((dest, dest_rep)) {
+                            came.insert((dest, dest_rep), ((b, brep), dir));
+                            boulder_cells.insert(dest);
+                            q.push_back((dest, b));
+                        }
+                    }
+                }
+            }
+            if std::env::var("BOULDER_DEBUG").is_ok() {
+                let mut cells: Vec<_> = boulder_cells.iter().copied().collect();
+                cells.sort_by_key(|p| (p.y, p.x));
+                eprintln!("  boulder {start}: reached {} cells: {:?}", cells.len(),
+                    cells.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
+            }
+        }
+        None
+    }
+
+    /// The shortest walking route (button sequence) from the player to an arbitrary reachable tile,
+    /// or `None` if unreachable. Used to position the player next to a boulder before a Strength push
+    /// (the standard `actions()` routes only target *typed* tiles, not arbitrary floor positions).
+    pub fn route_to(&self, dest: Point8) -> Option<Vec<JoypadButton>> {
+        let (dist, came_from) = self.bfs_from_player();
+        if !dist.contains_key(&dest) { return None; }
+        let mut route = vec![];
+        let mut pos = dest;
+        while let Some(&(prev, dir)) = came_from.get(&pos) {
+            route.push(dir);
+            pos = prev;
+        }
+        route.reverse();
+        Some(route)
     }
 
     /// BFS from `player_position` outward.
@@ -723,5 +905,87 @@ fn opposite_dir(dir: JoypadButton) -> JoypadButton {
         JoypadButton::Up    => JoypadButton::Down,
         JoypadButton::Down  => JoypadButton::Up,
         other               => other,
+    }
+}
+#[cfg(test)]
+mod boulder_solver_tests {
+    use super::*;
+    use crate::pokemon::sprite::{Sprite, PictureId};
+
+    /// Build a synthetic `MetaTileMap` from ASCII: `#`=wall, `.`=floor, `P`=player, `S`=switch(floor),
+    /// `W`=an inter-map warp tile (walkable — the player may stand on it to push), digits `1..9`=boulders.
+    /// Returns the map + the switch position.
+    fn from_ascii(rows: &[&str]) -> (MetaTileMap, Point8) {
+        let h = rows.len();
+        let w = rows[0].len();
+        let mut meta = vec![MetaTile::Obstacle; w * h];
+        let mut sprites = vec![];
+        let mut player = Point8 { x: 0, y: 0 };
+        let mut switch = Point8 { x: 0, y: 0 };
+        for (y, row) in rows.iter().enumerate() {
+            for (x, c) in row.chars().enumerate() {
+                let p = Point8 { x: x as u8, y: y as u8 };
+                let idx = x + y * w;
+                match c {
+                    '#' => {}
+                    '.' => meta[idx] = MetaTile::Empty,
+                    'W' => meta[idx] = MetaTile::Warp { to_map: Map::Route23, to_position: Point8 { x: 0, y: 0 } },
+                    'P' => { meta[idx] = MetaTile::Empty; player = p; }
+                    'S' => { meta[idx] = MetaTile::Empty; switch = p; }
+                    d if d.is_ascii_digit() => {
+                        meta[idx] = MetaTile::Empty;
+                        sprites.push(Sprite { index: d as u8, picture_id: PictureId::Monster,
+                            position: p, on_screen: true, hidden: false,
+                            name: Box::leak(format!("Boulder {d}").into_boxed_str()) });
+                    }
+                    _ => panic!("bad char {c}"),
+                }
+            }
+        }
+        (MetaTileMap {
+            player_position: player, player_direction: PlayerFacingDirection::Down,
+            map: Map::VictoryRoad1F, width: w, height: h, meta_tiles: meta,
+            raw_tile_ids: vec![0; w * h], tile_pair_collisions: vec![], sprites,
+            warp_targets: HashSet::new(), connection_targets: HashSet::new(),
+            spinners: HashMap::new(), can_surf: false,
+            strength_switches: vec![switch], holes: vec![],
+        }, switch)
+    }
+
+    #[test]
+    fn solves_trivial_one_push() {
+        // Player at (1,2) pushes boulder (2,2) right onto the switch (3,2).
+        let (map, switch) = from_ascii(&["#####", "#...#", "#P1S#", "#...#", "#####"]);
+        let sol = map.solve_boulder_push(switch).expect("should solve");
+        assert_eq!(sol, vec![(Point8 { x: 2, y: 2 }, JoypadButton::Right)]);
+    }
+
+    #[test]
+    fn solves_two_push_around_corner() {
+        // Boulder (2,2) → up to (2,1) [player below] → right to (3,1)=switch [player must go AROUND to
+        // (1,1)]. Exercises the player-component completeness of the solver.
+        let (map, switch) = from_ascii(&["#####", "#..S#", "#.1.#", "#P..#", "#####"]);
+        let sol = map.solve_boulder_push(switch).expect("should solve the around-corner push");
+        assert_eq!(sol.last().unwrap().1, JoypadButton::Right);
+        assert!(sol.len() >= 2, "needs at least two pushes, got {sol:?}");
+    }
+
+    #[test]
+    fn solves_push_while_standing_on_warp() {
+        // The VR1F crux in miniature: the switch (2,1) can only be reached by pushing the boulder
+        // (2,2) UP, which requires the player to stand DIRECTLY BELOW it at (2,3) — and that tile is a
+        // warp (like VR1F's entrance warp at (8,17)). The player may legitimately stand on it to push.
+        // Before the fix the solver excluded warp tiles from standable floor and reported no solution.
+        let (map, switch) = from_ascii(&["#####", "#.S.#", "#.1.#", "#PW.#", "#####"]);
+        let sol = map.solve_boulder_push(switch).expect("must solve by standing on the warp tile");
+        assert_eq!(sol.last().unwrap(), &(Point8 { x: 2, y: 2 }, JoypadButton::Up));
+    }
+
+    #[test]
+    fn reports_unsolvable() {
+        // Boulder walled so it can only wobble left/right in a 1-wide slot, never reaching the switch.
+        let (map, switch) = from_ascii(&["#######", "#.....#", "#.###.#", "#.#1#.#", "#.#.#.#", "#..P.S#", "#######"]);
+        // The boulder at (3,3) sits in a vertical dead-end; the switch (5,5) is unreachable for it.
+        assert!(map.solve_boulder_push(switch).is_none());
     }
 }
