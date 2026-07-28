@@ -290,6 +290,20 @@ impl MapMetadata {
             }
         }
     }
+
+    /// Victory Road 3F has one floor hole at (23,15). Stepping on it drops the player to VR2F
+    /// (`IsPlayerOnDungeonWarp` + `DungeonWarpData VICTORY_ROAD_2F` → the fly-warp landing (22,16)) —
+    /// the only way onto VR2F's east side that reaches the Route 23 exit. Model it as a `Warp` so BFS
+    /// routes 3F → hole → 2F automatically. (Pushing a boulder onto this same hole instead reveals a
+    /// hidden VR2F boulder; that is handled separately by the boulder solver.)
+    pub fn apply_victory_road_holes(&self, result: &mut [MetaTile]) {
+        if self.map != Map::VictoryRoad3F { return; }
+        let w = self.dimensions().full_width();
+        let idx = 23 + 15 * w;
+        if idx < result.len() {
+            result[idx] = MetaTile::Warp { to_map: Map::VictoryRoad2F, to_position: Point8 { x: 22, y: 16 } };
+        }
+    }
 }
 
 /// True on the Silph Co floors that have card-key doors.
@@ -597,7 +611,12 @@ impl MapMetadataReader for MMU {
 pub fn map_uses_runtime_blocks(map: Map) -> bool {
     matches!(map,
         Map::PokemonMansion1F | Map::PokemonMansion2F | Map::PokemonMansion3F
-        | Map::PokemonMansionB1F | Map::CinnabarGym)
+        | Map::PokemonMansionB1F | Map::CinnabarGym
+        // Victory Road: boulder-on-switch `ReplaceTileBlock`s open barriers to the up-ladders.
+        | Map::VictoryRoad1F | Map::VictoryRoad2F | Map::VictoryRoad3F
+        // Elite Four rooms: beating each member runs a `ReplaceTileBlock` that opens the door up to the
+        // next room, so the tile map must reflect the live block state to route to the (now-open) exit.
+        | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom)
 }
 
 impl MMU {
@@ -687,7 +706,7 @@ impl MMU {
                 // (e.g. Silph Co 11F — the elevator/pad-only Giovanni floor) have no such outdoor map,
                 // so this can't be resolved statically. Skip the warp rather than failing the whole map
                 // read (it's the building-exit warp, not needed for routing).
-                match self.find_outdoor_entry_map(cur_map) {
+                match self.find_outdoor_entry_map(cur_map, index) {
                     Some(m) => m,
                     None => continue,
                 }
@@ -775,24 +794,35 @@ impl MMU {
     /// Scans every Overworld-tileset map in ROM for a warp tile whose destination map
     /// equals `indoor_map`.  Returns the first match — this is the outdoor map the
     /// player should be returned to when they step on a self-referential / LAST_MAP exit warp.
-    fn find_outdoor_entry_map(&self, indoor_map: Map) -> Option<Map> {
+    /// The outdoor map a `LAST_MAP` (building-exit) warp returns to. `gate_warp_index` is the warp's
+    /// index in THIS map's warp table: a GATE that connects two outdoor maps (e.g. Route 22 Gate joins
+    /// Route 22 to the south and Route 23 to the north) has LAST_MAP warps on both edges, and each side
+    /// must resolve to the *right* map. We disambiguate by matching the outdoor warp's `dest_warp_id`
+    /// (which points back at a specific warp of this map) to `gate_warp_index`; a normal one-exit
+    /// building has no such ambiguity, so fall back to any outdoor map whose warp points here.
+    fn find_outdoor_entry_map(&self, indoor_map: Map, gate_warp_index: u16) -> Option<Map> {
         let map_banks = self.rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT);
-        (0..Map::COUNT)
-            .filter_map(|id| {
-                let outdoor_map = Map::from_repr(id as u8)?;
-                let header      = self.read_map_header(outdoor_map).ok()?;
-                if header.tileset != TileSetId::Overworld { return None; }
-                let bank        = map_banks[id] as usize;
-                let warp_count  = self.rom_data_from_pointer(bank, header.objects_address + 1, 1)[0] as u16;
-                for wi in 0..warp_count {
-                    let entry = self.rom_data_from_pointer(bank, header.objects_address + 2 + wi * 4, 4);
-                    if entry[3] == indoor_map as u8 {
-                        return Some(outdoor_map);
-                    }
+        let mut fallback = None;
+        for id in 0..Map::COUNT {
+            let Some(outdoor_map) = Map::from_repr(id as u8) else { continue };
+            if outdoor_map == indoor_map { continue; }
+            let Ok(header) = self.read_map_header(outdoor_map) else { continue };
+            // Consider any outdoor-style map that could be the return side. Gates join routes that may
+            // use non-Overworld tilesets (Route 23 is PLATEAU, cave routes are CAVERN), so don't restrict
+            // to Overworld — the "has a warp pointing back at us" check below is the real constraint.
+            if !matches!(header.tileset, TileSetId::Overworld | TileSetId::Plateau | TileSetId::Cavern) { continue; }
+            let bank        = map_banks[id] as usize;
+            let warp_count  = self.rom_data_from_pointer(bank, header.objects_address + 1, 1)[0] as u16;
+            for wi in 0..warp_count {
+                let entry = self.rom_data_from_pointer(bank, header.objects_address + 2 + wi * 4, 4);
+                if entry[3] == indoor_map as u8 {
+                    // Exact match: this outdoor warp returns to *our* warp → the correct side of a gate.
+                    if entry[2] as u16 == gate_warp_index { return Some(outdoor_map); }
+                    fallback.get_or_insert(outdoor_map);
                 }
-                None
-            })
-            .next()
+            }
+        }
+        fallback
     }
 
     /// Reads the `LedgeTiles` ROM table and returns a map of tile_id → JumpDirection.
@@ -1107,6 +1137,8 @@ impl CurrentMap {
         }
         // Pokémon Mansion 3F floor holes → warp down to 1F (inert on every other map).
         self.metadata.apply_mansion_holes(&mut result);
+        // Victory Road 3F floor hole → fall down to 2F (inert on every other map).
+        self.metadata.apply_victory_road_holes(&mut result);
         result
     }
 }
