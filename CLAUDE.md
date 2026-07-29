@@ -33,7 +33,7 @@ src/
     ├── battle.rs         — battle state reader + BattleAction
     ├── delay.rs          — DelayContext: cycle-accurate waits between agent steps
     ├── text.rs           — PokemonTextReader: reads on-screen text from VRAM
-    ├── integration_tests.rs — slow agent integration tests (run in release mode)
+    ├── integration_tests/ — agent end-to-end tests, tiered (see Tests below)
     ├── data/             — saved emulator state snapshots (.bin) used by tests
     └── roms.rs           — embeds pokered/pokered.gbc as a compile-time byte slice
 ```
@@ -94,21 +94,44 @@ cargo run --release
 
 ### Tests
 
-**Integration tests run the emulator and are very slow in debug mode.** Always use `--release`. Agent/policy debugging goes to stdout so use `--nocapture`:
+**Always use `--release`.** The integration tests emulate every frame and are unusably slow in debug
+mode. Agent/policy debugging goes to stdout, so add `--nocapture` when you care about it.
+
+The crate has **no lib target** — everything lives in the `gb` binary, so it is `--bin gb`, never
+`--lib`.
+
+`src/pokemon/integration_tests/` is tiered by how much **game time** a test emulates, which is what it
+costs: the emulator runs at ~23× realtime and the agent adds only ~11% on top (measured by
+`bench_emulation_throughput`), so wall clock ≈ emulated-minutes ÷ 23.
 
 ```bash
-# Run all tests (release for reasonable speed)
+# Default tier: all unit tests + agent mechanics + two navigation smoke tests. ~22s, 800+ tests.
 cargo test --release
 
-# Run a specific integration test with stdout visible
-cargo test --release --package gb --bin gb -- pokemon::integration_tests::test_debouncing --exact --nocapture
+# Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.
+cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
 
-# Run a specific integration test (another example)
-cargo test --release --package gb --bin gb -- pokemon::integration_tests::test_ledge_jump_does_not_abort_overworld_movement --exact --nocapture
+# The whole game from a fresh save, ~20 min of wall clock.
+cargo test --release --features full-playthrough full_playthrough
 
-# Run unit tests only (fast, debug mode is fine)
-cargo test --package gb --lib
+# A single test with output (file module included in the path).
+cargo test --release --bin gb -- pokemon::integration_tests::mechanics::test_debouncing --exact --nocapture
+
+# The throughput benchmark (ignored by default).
+cargo test --release --bin gb -- bench_emulation_throughput --exact --ignored --nocapture
 ```
+
+**Fixtures are committed inputs.** Each leg test snapshots its end state for the next leg, but the
+write is a no-op unless `--features regen-fixtures` is on — otherwise every run silently changes the
+next run's inputs, and a leg "fails" only because an earlier one re-saved its fixture. To regenerate
+after a deliberate change, run the affected legs **in chain order**:
+
+```bash
+cargo test --release --features slow-tests,regen-fixtures --bin gb -- can_clear_ss_anne --exact
+```
+
+Failure artifacts (a save state + screenshot at the point of a stall or timeout) land in
+`target/test-artifacts/`, not the repo root.
 
 ### Test ROM compatibility tests
 
