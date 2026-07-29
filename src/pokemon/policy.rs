@@ -1517,6 +1517,47 @@ impl PolicyStep {
         ]
     }
 
+    /// The Elite Four gauntlet, from the Indigo Plateau lobby to the Champion: stock up, heal, then
+    /// Lorelei → Bruno → Agatha → Lance → the rival. Validated by `can_beat_elite_four`.
+    ///
+    /// The two leads are passed in as slots rather than hardcoded because `MovePokemonToFront` rotates
+    /// the party — where Articuno sits after Venusaur is pulled to the front depends on where both
+    /// started, and a grinded fixture arrives in a different order from an ungrinded one. Callers should
+    /// look both up **by species** (see `can_beat_elite_four`), not assume a layout.
+    ///
+    /// Not folded into `complete_game_steps`: that run stops on Victory Road 2F, because chaining
+    /// `victory_road_2f_3f_steps` onto a fresh party is PP-marginal (see its note), so the plateau is
+    /// out of reach from there.
+    ///
+    /// `ice_lead` takes over before Lance. The battle policy only switches when the active mon has *no*
+    /// damaging move left, so without the swap Vaporeon stays in and chips away with Bite once
+    /// Blizzard's 5 PP is gone — which is exactly how the first Articuno attempt ran Lance's room out of
+    /// the clock. Ice Beam is 4× on Dragonair/Dragonite, 2× on Gyarados and Aerodactyl, and 2× again on
+    /// the Champion's Pidgeot/Exeggutor/Rhydon/Gyarados.
+    pub fn elite_four_steps(lead: u8, ice_lead: u8) -> Vec<Self> {
+        vec![
+            // ¥3000 and ¥1500 each — 12 + 4 is ¥42,000, inside what the Articuno team arrives with
+            // (~¥50k). `BuyFromMart` gives up rather than buying fewer, so asking for more than the
+            // wallet holds silently leaves the gauntlet with nothing.
+            Self::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 12), map: Map::IndigoPlateauLobby },
+            Self::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
+            Self::Interact(MapSprite::INDIGOPLATEAULOBBY_NURSE),   // revive + restore all PP
+            // Venusaur leads: Razor Leaf is 2× on all of Lorelei's Water types and 4× on Bruno's Onix.
+            Self::MovePokemonToFront { slot: lead },
+            Self::enter(Map::LoreleisRoom),
+            Self::BattleTrainer { trainer: MapSprite::LORELEISROOM_LORELEI },
+            Self::enter(Map::BrunosRoom),
+            Self::BattleTrainer { trainer: MapSprite::BRUNOSROOM_BRUNO },
+            Self::enter(Map::AgathasRoom),
+            Self::BattleTrainer { trainer: MapSprite::AGATHASROOM_AGATHA },
+            Self::MovePokemonToFront { slot: ice_lead },
+            Self::enter(Map::LancesRoom),
+            Self::BattleTrainer { trainer: MapSprite::LANCESROOM_LANCE },
+            Self::enter(Map::ChampionsRoom),
+            Self::BattleTrainer { trainer: MapSprite::CHAMPIONSROOM_RIVAL },
+        ]
+    }
+
 
     /// The full deterministic playthrough. Every forward map transition is an explicit `EnterMap`;
     /// on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the incrementally-observed

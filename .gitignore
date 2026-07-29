@@ -1,9 +1,5 @@
 /target
 .idea/
-# Test failure artifacts (save_failure_artifacts)
-test_stall_*.bin
-test_stall_*.png
-test_timeout_*.bin
-test_timeout_*.png
+# Test failure artifacts now go to target/test-artifacts/ (save_failure_artifacts), already ignored.
 
 .claude/

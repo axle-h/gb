@@ -4,9 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Opt-in for the full ~2h `can_start_game` end-to-end playthrough. Off by default so it doesn't run
-# on a normal `cargo test`; enable with `cargo test --release --features slow-tests can_start_game`.
+# The Pokémon integration tests are tiered by how much game time they emulate. The emulator runs at
+# ~23x realtime, so game time is the cost: a plain `cargo test --release` stays under a minute by
+# running only the mechanic tests and two navigation smoke tests.
+#
+# Every per-badge leg test (`can_reach_vermilion` … `can_enter_hall_of_fame`), each seeded from a
+# committed `src/pokemon/data/*.bin` snapshot.
+#   cargo test --release --features slow-tests
 slow-tests = []
+# `full_playthrough` alone — a fresh save played to the Hall of Fame, ~20 min of wall clock. Kept off
+# the `slow-tests` gate so the leg chain can be run without paying for it.
+#   cargo test --release --features full-playthrough full_playthrough
+full-playthrough = []
+# Let tests overwrite the committed fixtures they snapshot. Off by default: a normal test run must
+# leave the working tree clean, or every run silently changes the next run's inputs.
+#   cargo test --release --features regen-fixtures,slow-tests
+regen-fixtures = []
 
 [dependencies]
 strum = "0.27"
@@ -27,3 +40,12 @@ phf = { version = "0.13.1", features = ["macros"] }
 
 [build-dependencies]
 regex = "1.12.2"
+
+# The integration tests are bound by raw emulation speed — the agent's observe/policy/input work is
+# only ~11% on top of it — so these two are the only knob that makes every test faster at once.
+# Measured on the `bench_emulation_throughput` fixture: 23.8x → 29.7x realtime raw, 21.4x → 25.6x with
+# the agent (~+20%), for a full-build cost of 18s → 40s. `-C target-cpu=native` was tried on top of
+# this and made it *slower* (26.3x raw), so it is deliberately not set.
+[profile.release]
+lto = "thin"
+codegen-units = 1
