@@ -400,7 +400,7 @@ fn test_caught_pokemon_nickname() {
         include_bytes!("data/viridian-forest.bin"),
         Duration::from_mins(10),
         vec![
-            PolicyStep::CatchPokemon { species: PokemonSpecies::Weedle, on_map: Map::ViridianForest },
+            PolicyStep::CatchPokemon { species: PokemonSpecies::Weedle, on_map: Map::ViridianForest, ball: None },
             PolicyStep::goto(Map::ViridianForest),
         ]
     );
@@ -619,9 +619,12 @@ fn mt_moon_traversal_steps() -> Vec<PolicyStep> {
 /// and earns **all 8 gym badges**: Boulder → Cascade → Thunder → Rainbow → (Silph Scope → Poké Flute →
 /// Snorlax) → Soul → (Safari Surf/Strength → Eevee→Vaporeon+Surf) → Silph Co (Card Key → rival → Giovanni
 /// → liberation) → Marsh → surf to Cinnabar → Pokémon Mansion Secret Key → Volcano → back to the Viridian
-/// Gym for **Earth** (Giovanni). The only Pokémon caught is the free Celadon **Eevee**, evolved to
-/// **Vaporeon** (its Surf counters the Silph rival's Alakazam / Blaine's Fire / Giovanni's Ground, and
-/// ferries the party across Route 21). It emulates every frame, so even in `--release` it takes ~15 min
+/// Gym for **Earth** (Giovanni), with the **Seafoam Islands** detour for Articuno slotted in between
+/// Volcano and Earth. Nothing is caught before then: the run is carried by the starter and the free
+/// Celadon **Eevee**, evolved to **Vaporeon** (its Surf counters the Silph rival's Alakazam / Blaine's
+/// Fire / Giovanni's Ground, and ferries the party across Route 21), because a weak extra mon breaks
+/// the black-out recovery the early dungeons rely on. Seafoam then adds a **Slowpoke** HM-slave
+/// (Strength + Dig) and **Articuno**. It emulates every frame, so even in `--release` it takes ~20 min
 /// of wall-clock; it is therefore **opt-in**, running only with the `slow-tests` feature
 /// (`cargo test --release --features slow-tests full_playthrough`). The per-leg focused tests above (each
 /// seeded from a saved fixture) cover the same ground quickly.
@@ -672,16 +675,20 @@ fn full_playthrough() {
     assert!(state.badges.contains(Badge::VolcanoBadge), "should have the Volcano Badge");
     assert!(state.badges.contains(Badge::EarthBadge), "should have the Earth Badge (all 8 gym badges)");
 
-    // Lone starter + the one free Eevee (evolved to Vaporeon for Surf); nothing else is caught (a weak
-    // extra mon blocks the black-out recovery that clears the early attrition dungeons).
-    assert!(state.pokemon.len() >= 2, "party should have the starter + Vaporeon");
+    // The starter and the one free Eevee (evolved to Vaporeon for Surf) carry the whole run — nothing
+    // is caught before Seafoam, because a weak extra mon blocks the black-out recovery that clears the
+    // early attrition dungeons. Seafoam then adds the two the Elite Four needs: a Slowpoke HM-slave
+    // (Strength for Victory Road, Dig for the way out of the islands) and Articuno.
+    assert!(state.pokemon.len() >= 4, "party should have the starter + Vaporeon + the Slowpoke slave + Articuno");
     assert!(state.pokemon.iter().any(|p| format!("{:?}", p.species) == "Vaporeon"), "should have a Vaporeon");
+    assert!(state.pokemon.iter().any(|p| format!("{:?}", p.species) == "Articuno"),
+        "should have caught Articuno in the Seafoam Islands");
 
     // Post-Earth: Victory Road 1F — caught a Machop HM-slave, taught it Strength, solved the boulder puzzle
     // (real push onto the (17,13) switch) and climbed to VR2F. The full VR2F/VR3F puzzle is validated
     // separately by `can_solve_victory_road_2f_3f` (chaining it here is PP-marginal for this team).
     assert!(state.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| format!("{:?}", m.name) == "Strength")),
-        "a party member should know Strength (the Machop HM-slave)");
+        "a party member should know Strength (the Seafoam Slowpoke, and the Victory Road Machop)");
     assert_eq!(state.map.map, Map::VictoryRoad2F, "should have solved VR1F and climbed to Victory Road 2F");
 }
 
@@ -1061,7 +1068,9 @@ fn probe_reach_elevator() {
     let mut last = fixture.game_state().map.map;
     let mut last_pos = fixture.game_state().map.player_position;
     let mut stuck = 0;
-    for _ in 0..400_000 {
+    // Oak's congratulation, his aside about the rival, and the walk to the Hall of Fame are a chain of
+    // map scripts, each one text box at a time — it takes far longer than the fight did.
+    for _ in 0..600_000 {
         fixture.step();
         let m = fixture.game_state().map.map;
         if m != last { println!("--> {m} @ {}", fixture.game_state().map.player_position); last = m; }
@@ -1303,7 +1312,7 @@ fn probe_vr_catch_machop() {
         PolicyStep::enter(Map::Route23),
         PolicyStep::goto(Map::VictoryRoad1F),
         // Catch a Machop (learns Strength) as the boulder HM-slave — Master Ball, thrown immediately.
-        PolicyStep::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F },
+        PolicyStep::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F, ball: None },
         // Machop appends at slot 2; teach it Strength.
         PolicyStep::TeachMove { item: ItemId::Hm04Strength, target_slot: 2 },
     ];
@@ -1910,7 +1919,7 @@ fn probe_e4_grind() {
         PolicyStep::enter(Map::PokemonMansion1F),
         PolicyStep::GrindUntilLevel { target_level: target, on_map: Map::PokemonMansion1F, slot: 0 },
     ];
-    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(180), steps);
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(400), steps);
     let mut last = String::new();
     let mut saved_lv = 0u8;
     for i in 0..18_000_000 {
@@ -1958,7 +1967,7 @@ fn probe_seafoam_explore() {
         PolicyStep::enter(Map::Route20),
         PolicyStep::enter(Map::SeafoamIslands1F),
         // Seafoam is a cave with LAND encounters — the cave-wander (pace to boulders) triggers Seel.
-        PolicyStep::CatchPokemon { species: crate::pokemon::species::PokemonSpecies::Seel, on_map: Map::SeafoamIslands1F },
+        PolicyStep::CatchPokemon { species: crate::pokemon::species::PokemonSpecies::Seel, on_map: Map::SeafoamIslands1F, ball: None },
         PolicyStep::TeachMove { item: ItemId::Hm04Strength, target_slot: 2 },
     ];
     let mut fixture = TestFixture::new(&bytes, Duration::from_mins(30), steps);
@@ -2011,7 +2020,7 @@ fn probe_e4_backhalf() {
         PolicyStep::Interact(MS::ROUTE22GATE_GUARD),
         PolicyStep::enter(Map::Route23),
         PolicyStep::goto(Map::VictoryRoad1F),
-        PolicyStep::CatchPokemon { species: crate::pokemon::species::PokemonSpecies::Machop, on_map: Map::VictoryRoad1F },
+        PolicyStep::CatchPokemon { species: crate::pokemon::species::PokemonSpecies::Machop, on_map: Map::VictoryRoad1F, ball: None },
         PolicyStep::TeachMove { item: ItemId::Hm04Strength, target_slot: 2 },
         PolicyStep::UseStrength { slot: 2 },
         PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
@@ -2033,6 +2042,74 @@ fn probe_e4_backhalf() {
     if s.map.map == Map::IndigoPlateauLobby {
         fixture.gb.save_state_to_file("src/pokemon/data/at-indigo-ice.bin").ok();
         println!(">> saved at-indigo-ice.bin (Blizzard team at the Indigo lobby)");
+    }
+}
+
+/// **E4 back half, with Articuno.** From `post-articuno.bin` (Cinnabar Island, 7 badges, party
+/// [Vaporeon(0), Venusaur(1), Slowpoke(2), Articuno(3)]) to the Indigo Plateau lobby: Earth Badge
+/// (Giovanni) → Route 22 rival → Victory Road 1F/2F/3F → Route 23 → Indigo. Saves
+/// `at-indigo-articuno.bin` for the gauntlet.
+///
+/// Two differences from `probe_e4_backhalf` (its pre-Articuno ancestor): **no Machop is caught** — the
+/// Seafoam Slowpoke at slot 2 is already the Strength slave — and there is bag room for the Hyper
+/// Potions, because the Seafoam leg tossed the Nugget and consumed both the Master Ball and TM28.
+/// Vaporeon leads at the Route-22 rival: Venusaur is Grass/Poison, so the rival's Alakazam Psychic is
+/// 2× on it and it burns its RazorLeaf PP into a heal-flee loop, while Vaporeon simply tanks the fight.
+#[test]
+#[ignore]
+fn probe_e4_backhalf_articuno() {
+    use crate::pokemon::map::MapSprite as MS;
+    // `FIXTURE=` swaps the team — `at-mansion-lv70.bin` is the grinded one (`probe_grind_to_70`),
+    // which also comes out in a different party order, so the Strength slave is located by species
+    // rather than hardcoded. Slot references are the fragile part of every step list in this file.
+    let path = std::env::var("FIXTURE").unwrap_or("src/pokemon/data/post-articuno.bin".into());
+    let bytes = std::fs::read(&path).expect("run can_catch_articuno first");
+    let slave = {
+        let mut probe = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+        let party = probe.game_state().pokemon;
+        party.iter().position(|p| p.moves.iter().flatten()
+                .any(|m| format!("{:?}", m.name) == "Strength"))
+            .expect("no party member knows Strength") as u8
+    };
+    println!("== back half from {path} (Strength slave at slot {slave})");
+    let mut steps = PolicyStep::earth_badge_steps();
+    steps.extend(vec![
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::ViridianPokecenter),
+        PolicyStep::Interact(MS::VIRIDIANPOKECENTER_NURSE),
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::ViridianMart),
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 20), map: Map::ViridianMart },
+        PolicyStep::enter(Map::ViridianCity),
+        PolicyStep::enter(Map::Route22),
+        PolicyStep::enter(Map::Route22Gate),
+        PolicyStep::Interact(MS::ROUTE22GATE_GUARD),
+        PolicyStep::enter(Map::Route23),
+        PolicyStep::goto(Map::VictoryRoad1F),
+        PolicyStep::UseStrength { slot: slave },
+        PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+        PolicyStep::enter(Map::VictoryRoad2F),
+    ]);
+    steps.extend(PolicyStep::victory_road_2f_3f_steps(slave));
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(90), steps);
+    let mut last = Map::PalletTown;
+    for i in 0..9_000_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.map != last { last = s.map.map; println!("  {i}: -> {} (badges {:?})", s.map.map, s.badges); }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> back-half complete at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final: map {} @ {} money {}", s.map.map, s.map.player_position, s.money);
+    println!("team:");
+    for p in s.pokemon.iter() {
+        let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
+        println!("  {:?} lv{} {}/{}hp — {}", p.species, p.level, p.current_hp, p.stats.hp, moves.join(", "));
+    }
+    if s.map.map == Map::IndigoPlateauLobby {
+        fixture.gb.save_state_to_file("src/pokemon/data/at-indigo-articuno.bin").ok();
+        println!(">> saved at-indigo-articuno.bin (the Articuno team at the Indigo lobby)");
     }
 }
 
@@ -2069,7 +2146,6 @@ fn probe_get_blizzard() {
         // entered) reopens; then up to 1F and out to Cinnabar so the back-half starts cleanly.
         PolicyStep::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
         PolicyStep::enter(Map::PokemonMansion1F),   // (23,22) up-staircase → 1F
-        PolicyStep::enter(Map::CinnabarIsland),
     ];
     let mut fixture = TestFixture::new(&bytes, Duration::from_mins(25), steps);
     let mut last = Map::PalletTown;
@@ -2091,6 +2167,154 @@ fn probe_get_blizzard() {
     } else { println!("!! Blizzard not on Vaporeon"); }
 }
 
+/// Same Mansion B1F run as `probe_get_blizzard`, but it only **takes** TM14 and never teaches it, so
+/// the TM is still in the bag afterwards. Saves `at-mansion-tm14.bin`, which is what
+/// `can_catch_articuno` should start from (`FIXTURE=`) when building the Elite Four chain: the Seafoam
+/// leg then teaches Blizzard to Articuno, which arrives with only 10 PP of Ice Beam for five rooms.
+///
+/// The playthrough deliberately does not take this TM — see the note in `mansion_secret_key_steps`.
+#[test]
+#[ignore]
+fn probe_get_blizzard_tm_only() {
+    use crate::pokemon::map::MapSprite as MS;
+    let bytes = std::fs::read("src/pokemon/data/at-mansion-grinded.bin").expect("run the grind first");
+    let steps = vec![
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::CinnabarPokecenter),
+        PolicyStep::Interact(MS::CINNABARPOKECENTER_NURSE),
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::PokemonMansion1F),
+        PolicyStep::enter(Map::PokemonMansion2F),
+        PolicyStep::EnterMap { to_map: Map::PokemonMansion3F, to_position: Some(Point8 { x: 6, y: 1 }) },
+        PolicyStep::FlipSwitch { map: Map::PokemonMansion3F, at: Point8 { x: 10, y: 5 }, reveals: Map::PokemonMansion1F },
+        PolicyStep::enter(Map::PokemonMansion1F),
+        PolicyStep::enter(Map::PokemonMansionB1F),
+        PolicyStep::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
+        // The bag is at its 20-item cap down here, and a full bag makes an item ball simply not be
+        // picked up (the sprite stays and `CollectItem` waits forever). TM34 is BIDE — free that slot.
+        PolicyStep::TossItem { item: ItemId::Tm34Bide },
+        PolicyStep::CollectItem(MS::POKEMONMANSIONB1F_TM_BLIZZARD),
+        PolicyStep::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
+        PolicyStep::enter(Map::PokemonMansion1F),
+        PolicyStep::enter(Map::CinnabarIsland),
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(25), steps);
+    for i in 0..2_000_000 {
+        fixture.step();
+        if fixture.agent.policy_exhausted() { println!(">> done at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    let has_tm = s.bag.iter().any(|b| b.id == ItemId::Tm14Blizzard);
+    println!("final: {} @ {} — TM14 in bag: {has_tm}", s.map.map, s.map.player_position);
+    if has_tm {
+        fixture.gb.save_state_to_file("src/pokemon/data/at-mansion-tm14.bin").ok();
+        println!(">> saved at-mansion-tm14.bin (TM14 unspent, for the Articuno chain)");
+    }
+}
+
+/// **Grind the fighting team to lv70** for the Elite Four, from `post-articuno.bin` (Cinnabar Island,
+/// party [Vaporeon(0), Venusaur(1), Slowpoke(2), Articuno(3)]). The Champion's lv61–65 team walls a
+/// lv50–57 party — see the Elite Four section of `docs/articuno-e4-plan.md`.
+///
+/// **Where.** Pokémon Mansion 1F: wilds are lv28–39 Koffing/Ponyta/Weezing/Muk, worth ~577 XP a battle
+/// on the Gen-1 slot weights — better than Route 23's ~455, whose high-level Fearows sit in the rare
+/// slots — and the Cinnabar Pokémon Center is one map away. That adjacency is the point: grinding
+/// deadlocks anywhere the low-PP flee cannot reach a Center (Victory Road being the known trap), and
+/// this run must finish **before** the one-way climb to Indigo anyway.
+///
+/// **How.** Each mon is rotated to the front and trained as the lead, so it takes the whole XP rather
+/// than splitting it. `move_to_front` rotates (remove + insert), so after training Vaporeon the party
+/// is [Venusaur, Vaporeon, Slowpoke, Articuno] and Articuno is still at index 3. The Slowpoke HM-slave
+/// is deliberately left at lv30 — it exists to know Strength and Dig.
+///
+/// This is a long run: ~600k XP across the three, so roughly a thousand battles. It banks a fixture at
+/// every new level from 60 up, so a run that is cut short still leaves usable progress on disk.
+#[test]
+#[ignore]
+fn probe_grind_to_70() {
+    use crate::pokemon::map::MapSprite as MS;
+    let target: u8 = std::env::var("TARGET").ok().and_then(|v| v.parse().ok()).unwrap_or(70);
+    let bytes = std::fs::read("src/pokemon/data/post-articuno.bin").expect("run can_catch_articuno first");
+    let steps = vec![
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::CinnabarPokecenter),
+        // Also sets the policy's `last_pokemon_center`, which is what the low-PP/faint heal-return
+        // routes to — a fresh policy has none, and the grind would otherwise strand itself.
+        PolicyStep::Interact(MS::CINNABARPOKECENTER_NURSE),
+        PolicyStep::enter(Map::CinnabarIsland),
+        PolicyStep::enter(Map::PokemonMansion1F),
+        PolicyStep::GrindUntilLevel { target_level: target, on_map: Map::PokemonMansion1F, slot: 0 }, // Vaporeon
+        PolicyStep::MovePokemonToFront { slot: 1 },                                                   // Venusaur
+        PolicyStep::GrindUntilLevel { target_level: target, on_map: Map::PokemonMansion1F, slot: 0 },
+        PolicyStep::MovePokemonToFront { slot: 3 },                                                   // Articuno
+        PolicyStep::GrindUntilLevel { target_level: target, on_map: Map::PokemonMansion1F, slot: 0 },
+    ];
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1500), steps);
+    let mut last = String::new();
+    let mut banked = 0u8;
+    // Watchdog: a grind is thousands of battles, so a single wedged one is invisible in the log — the
+    // agent just stops printing. Snapshot what the screen and the battle actually look like when
+    // nothing has moved for a while, instead of letting the run burn its whole budget.
+    let mut fingerprint = String::new();
+    let mut frozen_for = 0u32;
+    for i in 0..12_000_000 {
+        fixture.step();
+        if i % 100 == 0 {
+            let (fp, screen) = {
+                let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                let screen = api.on_screen_text(false).unwrap_or_default();
+                let fp = match api.game_state() {
+                    Ok(s) => format!("{}|{:?}|{}|{}", s.map.map, s.map.player_position,
+                        s.pokemon.iter().map(|p| format!("{}:{}", p.level, p.current_hp))
+                            .collect::<Vec<_>>().join(","),
+                        s.battle.as_ref().map_or(String::new(), |b| format!("{}/{}", b.player.current_hp, b.enemy.current_hp))),
+                    Err(_) => String::new(),
+                };
+                (fp, screen)
+            };
+            if fp == fingerprint && !fp.is_empty() {
+                frozen_for += 1;
+                if frozen_for == 30 {   // 3000 steps ≈ 60 s of game time with nothing changing
+                    println!("!! FROZEN at step {i}: {fp}");
+                    println!("!! agent state: {}", fixture.agent.state_debug());
+                    println!("!! screen: {screen:?}");
+                    fixture.gb.save_state_to_file("grind_stall.bin").ok();
+                    println!("!! saved grind_stall.bin");
+                    break;
+                }
+            } else {
+                fingerprint = fp;
+                frozen_for = 0;
+            }
+        }
+        if i % 5000 == 0 {
+            if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+                let cur = s.pokemon.iter().map(|p| format!("{:?} lv{}", p.species, p.level))
+                    .collect::<Vec<_>>().join(", ");
+                if cur != last { last = cur.clone(); println!("  {i}: {cur}"); }
+                // Bank progress from lv60 up, keyed on the lead: a cut-short run still leaves a fixture.
+                let lead = s.pokemon[0].level;
+                if lead > banked && lead >= 60 && s.pokemon.iter().all(|p| p.current_hp > 0) {
+                    banked = lead;
+                    fixture.gb.save_state_to_file("src/pokemon/data/at-mansion-lv70.bin").ok();
+                    println!("  >> banked at-mansion-lv70.bin (lead at lv{lead})");
+                }
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> grind complete at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final team:");
+    for p in s.pokemon.iter() {
+        let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
+        println!("  {:?} lv{} {}/{}hp — {}", p.species, p.level, p.current_hp, p.stats.hp, moves.join(", "));
+    }
+    if s.pokemon.iter().filter(|p| p.level >= target).count() >= 3 {
+        fixture.gb.save_state_to_file("src/pokemon/data/at-mansion-lv70.bin").ok();
+        println!(">> saved at-mansion-lv70.bin (three fighters at lv{target})");
+    }
+}
+
 // E4 attempt, Phase 2: run the Elite Four gauntlet with the strong grinded team from `at-indigo-strong.bin`
 // (Venusaur lv57 + Vaporeon lv55 Hydro Pump/Surf 238 HP, 54k money → ~15 Full Restores). Heal, stock items,
 // lead Venusaur, then Lorelei → Bruno → Agatha → Lance → Champion. Logs how far it gets.
@@ -2098,24 +2322,52 @@ fn probe_get_blizzard() {
 #[ignore]
 fn probe_e4_gauntlet() {
     use crate::pokemon::map::MapSprite as MS;
-    let bytes = std::fs::read("src/pokemon/data/at-indigo-ice.bin").expect("run probe_e4_backhalf first");
+    // `FIXTURE=<path>` picks the team to run: `at-indigo-ice.bin` is the pre-Articuno Blizzard-Vaporeon
+    // team (`probe_e4_backhalf`), `at-indigo-articuno.bin` the current one (`probe_e4_backhalf_articuno`).
+    let path = std::env::var("FIXTURE").unwrap_or("src/pokemon/data/at-indigo-articuno.bin".into());
+    let bytes = std::fs::read(&path).expect("run a back-half probe first");
+    println!("== gauntlet from {path}");
+    // The two leads are looked up by species, not hardcoded: `move_to_front` rotates the party, so
+    // Articuno's index after Venusaur is pulled to the front depends on where both started — and the
+    // grinded fixture arrives in a different order from the ungrinded one.
+    let (venusaur, articuno_after) = {
+        let mut probe = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+        let party = probe.game_state().pokemon;
+        let idx = |name: &str| party.iter().position(|p| format!("{:?}", p.species) == name);
+        let v = idx("Venusaur").unwrap_or(1) as u8;
+        let a = idx("Articuno").unwrap_or(3) as u8;
+        // After `move_to_front(v)`, anything that sat before v shifts one later.
+        (v, if a < v { a + 1 } else { a })
+    };
     let steps = vec![
-        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 15), map: Map::IndigoPlateauLobby },
-        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::Revive, 5), map: Map::IndigoPlateauLobby },
+        // ¥3000 and ¥1500 each — 12 + 4 is ¥42,000, inside what the Articuno team arrives with (~¥50k).
+        // `BuyFromMart` gives up rather than buying fewer, so asking for more than the wallet holds
+        // silently leaves the gauntlet with nothing.
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 12), map: Map::IndigoPlateauLobby },
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
         PolicyStep::Interact(MS::INDIGOPLATEAULOBBY_NURSE),  // revive + restore all PP
-        PolicyStep::MovePokemonToFront { slot: 1 },          // Venusaur (slot 1) leads; Vaporeon's Blizzard for Lance
+        PolicyStep::MovePokemonToFront { slot: venusaur },   // Venusaur leads: Razor Leaf is 2× on all of
+                                                            // Lorelei's Water types and 4× on Bruno's Onix
         PolicyStep::enter(Map::LoreleisRoom),
         PolicyStep::BattleTrainer { trainer: MS::LORELEISROOM_LORELEI },
         PolicyStep::enter(Map::BrunosRoom),
         PolicyStep::BattleTrainer { trainer: MS::BRUNOSROOM_BRUNO },
         PolicyStep::enter(Map::AgathasRoom),
         PolicyStep::BattleTrainer { trainer: MS::AGATHASROOM_AGATHA },
+        // Articuno (slot 3) leads from here: Ice Beam is 4× on Dragonair/Dragonite and 2× on Gyarados
+        // and Aerodactyl, and the Champion's Pidgeot/Exeggutor/Rhydon/Gyarados are all 2× as well. The
+        // battle policy only switches when the active mon has *no* damaging move, so without this
+        // Vaporeon stays in and chips away with Bite once Blizzard's 5 PP is gone — which is exactly
+        // how the first Articuno attempt ran Lance's room out of the clock.
+        PolicyStep::MovePokemonToFront { slot: articuno_after },
         PolicyStep::enter(Map::LancesRoom),
         PolicyStep::BattleTrainer { trainer: MS::LANCESROOM_LANCE },
         PolicyStep::enter(Map::ChampionsRoom),
         PolicyStep::BattleTrainer { trainer: MS::CHAMPIONSROOM_RIVAL },
     ];
-    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(120), steps); // long attrition vs Lance
+    // 120 min covers the five rooms; the rest is Oak's post-Champion speech and the walk to the Hall
+    // of Fame, which the loop below sits through.
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(180), steps);
     let mut last = Map::PalletTown;
     let mut furthest = Map::IndigoPlateauLobby;
     for i in 0..4_500_000 {
@@ -2124,11 +2376,242 @@ fn probe_e4_gauntlet() {
             if s.map.map != last { last = s.map.map; furthest = s.map.map; println!("  {i}: -> {}", s.map.map); }
         }
         if fixture.agent.policy_exhausted() { println!(">> GAUNTLET COMPLETE — E4 BEATEN at {i}"); break; }
+        // The Champion's room is where the queue stops draining: the rival battle starts from a map
+        // script rather than from a step, and once it is won the agent hands itself to
+        // `drive_post_champion_cutscene`, which stops polling the policy. So the last two steps stay
+        // queued and "done" is the credits map, not an empty queue.
+        if last == Map::HallOfFame { println!(">> HALL OF FAME at {i} — E4 BEATEN AND CREDITS ROLLING"); break; }
     }
+    // Bank the moment of victory: everything after this is Oak's post-win script chain, and iterating
+    // on that from here takes seconds instead of re-fighting five rooms.
+    fixture.gb.save_state_to_file("src/pokemon/data/post-champion.bin").ok();
+    println!(">> saved post-champion.bin (rival beaten, Oak about to arrive)");
     let s = fixture.game_state();
     println!("furthest room: {furthest}; final map {} @ {}", s.map.map, s.map.player_position);
     println!("final team:"); for p in s.pokemon.iter() { println!("  {:?} lv{} {}/{}hp", p.species, p.level, p.current_hp, p.stats.hp); }
-    if s.map.map == Map::HallOfFame { println!(">> HALL OF FAME REACHED — CHAMPION!"); }
+    if s.map.map == Map::HallOfFame {
+        println!(">> HALL OF FAME REACHED — CHAMPION!");
+        fixture.gb.save_state_to_file("src/pokemon/data/post-hall-of-fame.bin").ok();
+        println!(">> saved post-hall-of-fame.bin");
+    }
+}
+
+/// Drive the post-Champion sequence from `post-champion.bin` (rival beaten, Oak about to walk in) to
+/// the **Hall of Fame** — i.e. roll the credits. **Currently it does not get there**, and this probe
+/// exists to make the blocker cheap to work on: it reaches the wedge in ~10 s and dumps what the game
+/// is showing and thinking.
+///
+/// Oak's congratulation, his aside about the rival, his "come with me", his exit and the player
+/// following him are five map-script stages (`ChampionsRoom_ScriptPointers`), each gated on a text box.
+/// The agent advances the first few and then wedges at stage 6 (OAK_DISAPPOINTED) with the box showing
+/// "…you have forgotten to treat your POKéMON…". Two obvious explanations have been **ruled out by
+/// experiment**, so don't spend time on them again:
+///
+///  * *the agent holding A.* The wedge persists with the joypad verifiably all-false, and no press
+///    cadence shifts it — fast toggling, 100 ms holds, or a second of silence followed by one clean
+///    press (all tried; the reader's plain A-toggle was left alone as a result).
+///  * *`wJoyIgnore`.* It reads `$F0` there, which masks A/B out of `JoypadLowSensitivity` and so should
+///    make `WaitForTextScrollButtonPress` unsatisfiable — but writing 0 over it changes nothing.
+///
+/// So the stall is somewhere else in the post-battle script chain. Note the game itself is **won**:
+/// `EVENT_BEAT_CHAMPION_RIVAL` is set and the rival has conceded; only the credits are missing.
+#[test]
+#[ignore]
+fn probe_hall_of_fame() {
+    let bytes = std::fs::read("src/pokemon/data/post-champion.bin").expect("run probe_e4_gauntlet first");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(120), vec![]);
+    let mut fingerprint = String::new();
+    let mut frozen_for = 0u32;
+    for i in 0..600_000 {
+        fixture.step();
+        if i % 50 == 0 {
+            let (map, mode, screen, state) = {
+                let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                let screen = api.on_screen_text(false).unwrap_or_default();
+                let (map, mode) = match api.game_state() {
+                    Ok(s) => (format!("{} @ {}", s.map.map, s.map.player_position), format!("{:?}", s.mode)),
+                    Err(_) => (String::new(), String::new()),
+                };
+                (map, mode, screen, fixture.agent.state_debug())
+            };
+            if map.starts_with("HallOfFame") {
+                println!(">> HALL OF FAME at step {i} — CREDITS ROLLING");
+                fixture.gb.save_state_to_file("src/pokemon/data/post-hall-of-fame.bin").ok();
+                println!(">> saved post-hall-of-fame.bin");
+                return;
+            }
+            let fp = format!("{map}|{mode}|{screen}");
+            if fp == fingerprint {
+                frozen_for += 1;
+                if frozen_for == 40 {
+                    // The recipe that got through once: hands off the pad entirely for a second, then
+                    // one 100 ms A press, then let the agent resume. Re-run to check reproducibility.
+                    println!("  -- hands-off second, then one clean A press");
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    api.release_all_buttons();
+                    for _ in 0..50 { fixture.step_without_agent(); }
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    api.press_button(JoypadButton::A);
+                    for _ in 0..5 { fixture.step_without_agent(); }
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    api.release_all_buttons();
+                    for _ in 0..20 { fixture.step_without_agent(); }
+                }
+                if frozen_for % 200 == 0 {
+                    use crate::pokemon::symbols::pokered_symbols as sym;
+                    let api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    println!("  stuck {}s at {map} mode={mode} agent={state}", frozen_for / 10);
+                    println!("    screen: {screen:?}");
+                    println!("    wChampionsRoomCurScript={} wJoyIgnore={:#04x} wStatusFlags5={:#04x} \
+                              wSimulatedJoypadStatesIndex={} joypad={:?}",
+                        api.mmu().read_pointer(&sym::wChampionsRoomCurScript),
+                        api.mmu().read_pointer(&sym::wJoyIgnore),
+                        api.mmu().read_pointer(&sym::wStatusFlags5),
+                        api.mmu().read_pointer(&sym::wSimulatedJoypadStatesIndex),
+                        api.read_joypad_state());
+                }
+            } else {
+                if frozen_for > 0 { println!("  {i}: {map} mode={mode} agent={state} :: {screen:.120?}"); }
+                fingerprint = fp;
+                frozen_for = 0;
+            }
+        }
+    }
+    let s = fixture.game_state();
+    println!("!! never reached the Hall of Fame — ended on {} @ {}", s.map.map, s.map.player_position);
+}
+
+/// Screenshot the Hall of Fame from `post-hall-of-fame.bin`. The ceremony inducts the party one mon
+/// at a time, so `AT=<n>` picks how many agent ticks to let it run before the shot (default lands on
+/// the induction of the lead). Writes `hall-of-fame.png`.
+#[test]
+#[ignore]
+fn probe_screenshot_hall_of_fame() {
+    let at: usize = std::env::var("AT").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+    let bytes = std::fs::read("src/pokemon/data/post-hall-of-fame.bin").expect("run probe_e4_gauntlet first");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(30), vec![]);
+    for _ in 0..at { fixture.step(); }
+    let s = fixture.game_state();
+    println!("map {} @ {} after {at} ticks", s.map.map, s.map.player_position);
+    println!("screen: {:?}", {
+        let api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+        api.on_screen_text(false)
+    });
+    let out = format!("hall-of-fame{}.png", if at == 600 { String::new() } else { format!("-{at}") });
+    fixture.gb.save_screenshot_to_file(&out).expect("screenshot");
+    println!(">> saved {out}");
+}
+
+/// **Why does the post-Champion chain wedge?** A bisect over what the agent does each tick, from
+/// `post-champion.bin`. `MODE=` selects one arm; each reports whether the Hall of Fame is reached.
+///
+///  * `agent`   — the agent drives, as in a real run (the baseline: wedges).
+///  * `toggle`  — no agent at all; the probe toggles A on the same 20 ms cadence the text reader uses.
+///                Isolates the *cadence* from everything else the agent does.
+///  * `press`   — no agent; hands off for 1 s, then one clean 100 ms A press, repeatedly. This is the
+///                sequence known to work.
+///  * `reads`   — the probe does the `press` cycle AND performs the agent's per-tick reads
+///                (`game_state` + `on_screen_text`). Isolates whether *observing* is what breaks it.
+///  * `agent-press` — the agent drives, but the probe overrides the joypad with the `press` cycle.
+///                Isolates the agent's button writes from the rest of its behaviour.
+#[test]
+#[ignore]
+fn probe_hall_of_fame_bisect() {
+    let mode = std::env::var("MODE").unwrap_or("agent".into());
+    let bytes = std::fs::read("src/pokemon/data/post-champion.bin").expect("run probe_e4_gauntlet first");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(120), vec![]);
+    println!("== mode={mode}");
+    let mut reached = None;
+    for i in 0..120_000 {
+        match mode.as_str() {
+            "agent" => fixture.step(),
+            "toggle-after" => {
+                // Exactly the agent's ordering — emulate first, then set the button — but with no
+                // agent involved. Isolates *when* the joypad is written relative to the emulated
+                // frames from everything else the agent does.
+                fixture.step_without_agent();
+                let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                api.toggle_button(JoypadButton::A);
+            }
+            "toggle" => {
+                let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                api.toggle_button(JoypadButton::A);
+                fixture.step_without_agent();
+            }
+            "press" | "reads" | "agent-press" => {
+                let phase = i % 75;
+                if phase == 0 {
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    api.release_all_buttons();
+                } else if phase == 50 {
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    api.press_button(JoypadButton::A);
+                } else if phase == 55 {
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    api.release_all_buttons();
+                }
+                if mode == "reads" {
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    let _ = api.game_state();
+                    let _ = api.on_screen_text(false);
+                }
+                if mode == "agent-press" { fixture.step(); } else { fixture.step_without_agent(); }
+            }
+            "memdiff" => {
+                // Emulate, snapshot RAM, run ONLY the agent, snapshot again. The agent is supposed to
+                // touch nothing but the joypad; anything else it writes shows up here as an address.
+                fixture.step_without_agent();
+                let before: Vec<u8> = {
+                    let api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    (0xC000u16..=0xDFFFu16).map(|a| api.mmu().read(a)).collect()
+                };
+                {
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    let _ = fixture.agent.update(&mut api, AGENT_RESOLUTION);
+                }
+                let after: Vec<u8> = {
+                    let api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    (0xC000u16..=0xDFFFu16).map(|a| api.mmu().read(a)).collect()
+                };
+                if i > 600 && i < 640 {
+                    let diffs: Vec<String> = before.iter().zip(after.iter()).enumerate()
+                        .filter(|(_, (b, a))| b != a)
+                        .map(|(off, (b, a))| format!("{:#06x}:{b:#04x}->{a:#04x}", 0xC000 + off))
+                        .collect();
+                    if !diffs.is_empty() { println!("  {i}: agent wrote {diffs:?}"); }
+                }
+            }
+            "diagnose" => {
+                // Run the agent, but report what the per-tick guards see: if `trainer_battle_pending`
+                // is stuck true, the agent releases every button and returns early on any non-TextBox
+                // frame, so its A press never survives to be sampled.
+                let (pending, mode, state) = {
+                    let mut api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+                    (api.trainer_battle_pending(), format!("{:?}", api.game_mode()), fixture.agent.state_debug())
+                };
+                if i > 600 && i < 620 {
+                    let j = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).read_joypad_state();
+                    println!("  {i}: pending={pending} mode={mode} agent={state} A={} B={}", j.a, j.b);
+                }
+                fixture.step();
+            }
+            other => panic!("unknown MODE {other}"),
+        }
+        if std::env::var("TRACE").is_ok() && (600..700).contains(&i) {
+            let j = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).read_joypad_state();
+            print!("{}", if j.a { '1' } else { '0' });
+            if i == 699 { println!(" <- A trace for {mode}"); }
+        }
+        if i % 100 == 0 {
+            let map = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache)
+                .game_state().map(|s| s.map.map);
+            if map == Ok(Map::HallOfFame) { reached = Some(i); break; }
+        }
+    }
+    match reached {
+        Some(i) => println!(">> {mode}: HALL OF FAME at step {i}"),
+        None => println!(">> {mode}: WEDGED (never reached the Hall of Fame)"),
+    }
 }
 
 // Dump a fixture's team/location (edit the fixture list); used to plan grinds + the E4 attempt.
@@ -4392,6 +4875,12 @@ impl TestFixture {
         }
     }
 
+    /// Advance the emulator WITHOUT letting the agent touch the joypad — for probes that need to
+    /// drive input themselves (e.g. proving whether a stuck text box is the agent's held button).
+    pub fn step_without_agent(&mut self) {
+        self.gb.run(AGENT_RESOLUTION);
+    }
+
     pub fn step(&mut self) {
         let cycles = self.gb.run(AGENT_RESOLUTION);
 
@@ -4401,17 +4890,27 @@ impl TestFixture {
         self.total_cycles += cycles;
 
         // Stall detection: GrindUntilLevel and CatchPokemon legitimately sit on the
-        // same step for long stretches — exempt them regardless of queue length.
+        // same step for long stretches — exempt them regardless of queue length. A battle gets a
+        // *longer leash* rather than an exemption: the queue cannot advance mid-fight, so a six-mon
+        // rival or an Elite Four room needs far more than the usual threshold — but a fight can also
+        // deadlock outright (an attacker out of PP, healing itself forever against a mon it cannot KO),
+        // and that has to keep failing fast instead of running to the cycle cap.
+        const BATTLE_STALL_FACTOR: usize = 8;
         let steps = self.agent.policy_steps_remaining();
         let long_running = self.agent.policy_current_step_is_long_running();
+        let threshold = if self.agent.in_battle() {
+            self.stall_threshold * BATTLE_STALL_FACTOR
+        } else {
+            self.stall_threshold
+        };
         if steps != self.last_steps_remaining {
             self.last_steps_remaining = steps;
             self.stall_cycles = MachineCycles::ZERO;
         } else if !long_running && steps.map_or(false, |n| n > 1) {
             self.stall_cycles += cycles;
-            if self.stall_cycles >= self.stall_threshold {
+            if self.stall_cycles >= threshold {
                 self.save_failure_artifacts("test_stall");
-                panic!("policy stalled — queue unchanged for {:?} of game time", self.stall_threshold);
+                panic!("policy stalled — queue unchanged for {:?} of game time", threshold);
             }
         }
 
@@ -4915,3 +5414,485 @@ fn debug_mt_moon_navigation() {
 
 
 
+
+/// Offline (no emulation) dump of every Seafoam Islands floor straight from the ROM block data:
+/// walkability grid + warps + boulder/Articuno object positions. Used to plan the Articuno route
+/// without paying for a multi-minute emulator run. Legend: `O`=wall `_`=floor `X`=water `W`=warp.
+#[test]
+#[ignore]
+fn probe_seafoam_maps_offline() {
+    use crate::pokemon::map_metadata::MapMetadataReader;
+    use crate::pokemon::tile_map::MetaTileMap;
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(roms::POKERED).unwrap();
+    for map in [Map::Route20, Map::SeafoamIslands1F, Map::SeafoamIslandsB1F,
+                Map::SeafoamIslandsB2F, Map::SeafoamIslandsB3F, Map::SeafoamIslandsB4F] {
+        let metadata = Arc::new(mmu.read_map_metadata(map).unwrap());
+        let current = crate::pokemon::map_metadata::CurrentMap {
+            player_position: crate::geometry::Point8 { x: 0, y: 0 },
+            player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+            sprites: vec![],
+            metadata,
+            closed_doors: vec![],
+            card_key_locked: false,
+        };
+        let tm = MetaTileMap::new(&current);
+        println!("===== {map} {}x{}", tm.width, tm.height);
+        print!("   ");
+        for x in 0..tm.width { print!("{}", x % 10); }
+        println!();
+        for y in 0..tm.height {
+            print!("{y:2} ");
+            for x in 0..tm.width {
+                let t = tm.meta_tiles[x + y * tm.width];
+                print!("{}", match t {
+                    MetaTile::Empty => '_', MetaTile::Obstacle => 'O', MetaTile::Water => 'X',
+                    MetaTile::Warp { .. } => 'W', MetaTile::Connection { .. } => 'C',
+                    MetaTile::ConnectionWater(_) => '~', _ => '?',
+                });
+            }
+            println!();
+        }
+        println!("  warps:");
+        for (i, t) in tm.meta_tiles.iter().enumerate() {
+            if let MetaTile::Warp { to_map, to_position } = t {
+                println!("    ({},{}) -> {to_map} @ {to_position}", i % tm.width, i / tm.width);
+            }
+        }
+    }
+}
+
+/// Run `celadon_rainbow_steps` from an arbitrary fixture (`FIXTURE=<path>`), to tell a real
+/// regression apart from **fixture drift**: `data/*.bin` are rewritten by the very tests that consume
+/// them, so `can_get_rainbow_badge` can fail purely because a preceding leg re-saved `at-celadon.bin`
+/// with a slightly different state. Check with HEAD's copy before believing a regression:
+/// `git show HEAD:src/pokemon/data/at-celadon.bin > /tmp/x.bin && FIXTURE=/tmp/x.bin cargo test …`
+#[test]
+#[ignore]
+fn probe_rainbow_from_file() {
+    let path = std::env::var("FIXTURE").expect("set FIXTURE=<path>");
+    let bytes = std::fs::read(path).expect("no fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(45), PolicyStep::celadon_rainbow_steps());
+    {
+        let s = fixture.game_state();
+        println!("start: {} @ {} badges={:?} money={}", s.map.map, s.map.player_position, s.badges, s.money);
+        for (i, p) in s.pokemon.iter().enumerate() {
+            let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
+            println!("  slot{i}: {:?} lv{} {}/{}hp — {}", p.species, p.level, p.current_hp, p.stats.hp, moves.join(", "));
+        }
+    }
+    for _ in 0..4_000_000 {
+        fixture.step();
+        if fixture.game_state().badges.contains(Badge::RainbowBadge) { println!(">> RAINBOW BADGE"); break; }
+        if fixture.agent.policy_exhausted() { println!("!! queue emptied without the badge"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final: {:?} on {} @ {}", s.badges, s.map.map, s.map.player_position);
+}
+
+/// Dump a fixture's bag as the game sees it. `Bag`'s reader silently drops any item id outside
+/// `ItemId` — every TM, mostly — so a bag that looks half empty can be at the game's 20-slot cap, and
+/// then every mart purchase of a NEW item fails with "You can't carry any more items." while the
+/// policy retries and gives up. That is what silently broke the Articuno leg: the Great Balls never
+/// arrived, so the Master Ball went on the HM-slave and the bird was left uncatchable. The leg now
+/// opens with `PolicyStep::TossItem { Nugget }`.
+#[test]
+#[ignore]
+fn probe_bag_contents() {
+    let path = std::env::var("FIXTURE").unwrap_or("src/pokemon/data/at-mansion-blizzard.bin".into());
+    let bytes = std::fs::read(&path).expect("no fixture");
+    println!("== {path}");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    println!("money {}", s.money);
+    for it in s.bag.iter() { println!("  {:?} x{}", it.id, it.quantity); }
+    // Raw RAM view: `Bag`'s reader drops any item id outside `ItemId`, so a bag that looks half
+    // empty can be at the game's 20-slot cap (which is what made mart purchases silently fail).
+    let api = PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache);
+    let n = api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wNumBagItems);
+    println!("wNumBagItems = {n} (BAG_ITEM_CAPACITY = 20)");
+    let base = crate::pokemon::symbols::pokered_symbols::wBagItems.address;
+    for i in 0..n as u16 {
+        println!("  raw slot {i}: id={:#04x} qty={}",
+            api.mmu().read(base + i * 2), api.mmu().read(base + i * 2 + 1));
+    }
+}
+
+/// **Catch Articuno.** Runs `PolicyStep::seafoam_articuno_steps()` from `at-mansion-blizzard.bin`
+/// (Cinnabar Island, all 7 non-Earth badges, Vaporeon lv52 with Surf, Master Ball and TM28 in the
+/// bag): heal, toss the Nugget to free a bag slot, buy Great Balls, Surf to Route 20, thread the warp
+/// hops down to B3F's west half,
+/// catch a Slowpoke and teach it Strength + Dig, drop two boulders into B3F's holes to kill the B4F
+/// current, fall through a hole onto the west lake, Master-Ball the bird, and DIG back to Cinnabar.
+/// Asserts Articuno is in the party and the leg ends on Cinnabar Island; saves `post-articuno.bin`.
+/// See `seafoam_articuno_steps` for why each hop is what it is.
+#[test]
+#[ignore]
+fn can_catch_articuno() {
+    // `FIXTURE=<path>` swaps the starting state — use `at-mansion-tm14.bin` (from
+    // `probe_get_blizzard_tm_only`) to carry TM14 in the bag, so the leg's TeachMove puts **Blizzard on
+    // Articuno** for the Elite Four chain instead of skipping.
+    let path = std::env::var("FIXTURE").unwrap_or("src/pokemon/data/at-mansion-blizzard.bin".into());
+    let bytes = std::fs::read(&path).expect("no at-mansion-blizzard fixture");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(60), PolicyStep::seafoam_articuno_steps());
+    let mut last = Map::PalletTown;
+    let mut caught_at = None;
+    for i in 0..4_000_000 {
+        fixture.step();
+        if let Ok(s) = { PokemonApi::with_cache(&mut fixture.gb, &mut fixture.map_cache).game_state() } {
+            if s.map.map != last {
+                last = s.map.map;
+                println!("  {i}: -> {} @ {}", s.map.map, s.map.player_position);
+            }
+            if caught_at.is_none() && s.pokemon.iter().any(|p| p.species == PokemonSpecies::Articuno) {
+                caught_at = Some(i);
+                println!("  {i}: >> ARTICUNO CAUGHT");
+            }
+        }
+        if fixture.agent.policy_exhausted() { println!(">> leg complete at {i}"); break; }
+    }
+    let s = fixture.game_state();
+    println!("final: map {} @ {}", s.map.map, s.map.player_position);
+    println!("party:");
+    for (i, p) in s.pokemon.iter().enumerate() {
+        let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}", m.name)).collect();
+        println!("  slot{i}: {:?} lv{} {}/{}hp — {}", p.species, p.level, p.current_hp, p.stats.hp, moves.join("/"));
+    }
+    assert!(s.pokemon.iter().any(|p| p.species == PokemonSpecies::Articuno),
+        "Articuno should be in the party after the Seafoam leg");
+    assert_eq!(s.map.map, Map::CinnabarIsland, "the leg should end back on Cinnabar Island");
+    fixture.gb.save_state_to_file("src/pokemon/data/post-articuno.bin").ok();
+    println!(">> saved post-articuno.bin");
+}
+
+/// Offline reachability check: build a Seafoam floor from ROM, drop the player on a given tile and
+/// list the `actions()` the agent would see (plus the BFS-reachable region). Used to work out which
+/// warp hops are actually routable before paying for an emulator run.
+#[test]
+#[ignore]
+fn probe_seafoam_actions_offline() {
+    use crate::pokemon::map_metadata::MapMetadataReader;
+    use crate::pokemon::tile_map::MetaTileMap;
+    use crate::geometry::Point8;
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(roms::POKERED).unwrap();
+    // Edit this list to inspect a floor from a given landing tile; set RAW=1 to also dump raw tile IDs
+    // (needed to reason about the Cavern elevation / water tile-pair collisions).
+    for (map, start) in [
+        (Map::SeafoamIslands1F,  Point8 { x: 26, y: 17 }),
+        (Map::SeafoamIslandsB1F, Point8 { x: 23, y: 15 }),
+        (Map::SeafoamIslandsB2F, Point8 { x: 25, y: 11 }),
+        (Map::SeafoamIslandsB3F, Point8 { x: 25, y: 14 }),
+        (Map::SeafoamIslandsB3F, Point8 { x: 8,  y: 6  }),
+        (Map::SeafoamIslandsB4F, Point8 { x: 5,  y: 14 }),
+    ] {
+        let metadata = Arc::new(mmu.read_map_metadata(map).unwrap());
+        let current = crate::pokemon::map_metadata::CurrentMap {
+            player_position: start,
+            player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+            sprites: vec![],
+            metadata,
+            closed_doors: vec![],
+            card_key_locked: false,
+        };
+        let mut tm = MetaTileMap::new(&current);
+        tm.can_surf = true;
+        println!("===== {map} from {start}  (pair collisions: {:?})", tm.tile_pair_collisions);
+        for a in tm.actions() {
+            println!("   dest={} tile={:?} steps={}", a.destination, a.tile, a.route.len());
+        }
+        let reach = tm.reachable_tiles();
+        println!("   reachable={} tiles", reach.len());
+        if std::env::var("RAW").is_ok() {
+            for y in 0..tm.height {
+                print!("{y:2} ");
+                for x in 0..tm.width { print!(" {:02x}", tm.raw_tile_ids[x + y * tm.width]); }
+                println!();
+            }
+        }
+        if map == Map::Route20 {
+            for y in 2..11u8 { for x in 44..53u8 {
+                let t = tm.meta_tiles[x as usize + y as usize * tm.width];
+                if !matches!(t, MetaTile::Empty | MetaTile::Obstacle | MetaTile::Water) {
+                    println!("   odd tile ({x},{y}) = {t:?} reachable={}", reach.contains(&Point8{x,y}));
+                }
+            } }
+        }
+        print!("   ");
+        for x in 0..tm.width { print!("{}", x % 10); }
+        println!();
+        for y in 0..tm.height {
+            print!("{y:2} ");
+            for x in 0..tm.width {
+                let p = Point8 { x: x as u8, y: y as u8 };
+                if p == start { print!("P"); continue; }
+                let t = tm.meta_tiles[x + y * tm.width];
+                let walkable = matches!(t, MetaTile::Empty | MetaTile::Water | MetaTile::Warp { .. });
+                let c = match t {
+                    MetaTile::Empty => '.', MetaTile::Obstacle => '#', MetaTile::Water => '~',
+                    MetaTile::Warp { .. } => 'W', _ => '?',
+                };
+                print!("{}", if walkable && reach.contains(&p) { c } else if walkable { ' ' } else { c });
+            }
+            println!();
+        }
+    }
+}
+
+/// Dump the state saved by a failed run's `save_failure_artifacts` (test_stall_state.bin).
+#[test]
+#[ignore]
+fn probe_stall_state() {
+    let bytes = std::fs::read(std::env::var("STALL").unwrap_or("test_stall_state.bin".into())).expect("no stall state");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_mins(1), vec![]);
+    let s = fixture.game_state();
+    println!("map {} @ {} facing {:?}", s.map.map, s.map.player_position, s.map.player_direction);
+    println!("tile under player = {:?}", s.map.player_tile());
+    println!("tile in front = {:?}", s.map.tile_in_front());
+    for s2 in s.map.sprites.iter() { println!("  sprite {} at {} hidden={}", s2.name, s2.position, s2.hidden); }
+    println!("{}", s.map);
+    println!("raw tile ids:");
+    for y in 8..17usize {
+        print!("{y:2} ");
+        for x in 12..28usize { print!("{:02x} ", s.map.raw_tile_ids[x + y * s.map.width]); }
+        println!();
+    }
+}
+
+/// Offline whole-dungeon connectivity search across the Seafoam Islands floors: flood-fill each
+/// floor's walkable/surfable region from an entry tile, follow every warp (and modelled floor hole)
+/// it reaches, and report which `(map, entry)` pairs are reachable from the Route-20 east entrance —
+/// and whether Articuno's tile at B4F (6,1) is among them. Prints the warp path to it.
+#[test]
+#[ignore]
+fn probe_seafoam_connectivity_offline() {
+    use crate::pokemon::map_metadata::MapMetadataReader;
+    use crate::pokemon::tile_map::MetaTileMap;
+    use crate::geometry::Point8;
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(roms::POKERED).unwrap();
+    let build = |map: Map, at: Point8| {
+        let metadata = Arc::new(mmu.read_map_metadata(map).unwrap());
+        let current = crate::pokemon::map_metadata::CurrentMap {
+            player_position: at,
+            player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+            sprites: vec![], metadata, closed_doors: vec![], card_key_locked: false,
+        };
+        let mut tm = MetaTileMap::new(&current);
+        tm.can_surf = true;
+        tm
+    };
+
+    let start = (Map::SeafoamIslands1F, Point8 { x: 26, y: 17 });
+    let mut seen: HashMap<(Map, Point8), Option<(Map, Point8)>> = HashMap::new();
+    let mut queue = VecDeque::new();
+    seen.insert(start, None);
+    queue.push_back(start);
+    let mut articuno_entry = None;
+
+    while let Some((map, at)) = queue.pop_front() {
+        let tm = build(map, at);
+        let reach = tm.reachable_tiles();
+        if map == Map::SeafoamIslandsB4F && articuno_entry.is_none() {
+            // Articuno is at (6,1); reaching it means standing on one of its four neighbours.
+            let adj = [Point8 { x: 6, y: 0 }, Point8 { x: 6, y: 2 },
+                       Point8 { x: 5, y: 1 }, Point8 { x: 7, y: 1 }];
+            if adj.iter().any(|p| reach.contains(p)) { articuno_entry = Some((map, at)); }
+        }
+        println!("{map} @ {at}: {} reachable", reach.len());
+        for (pos, tile) in tm.all_reachable_warps_and_connections() {
+            if let MetaTile::Warp { to_map, to_position } = tile {
+                if !matches!(to_map, Map::SeafoamIslands1F | Map::SeafoamIslandsB1F
+                    | Map::SeafoamIslandsB2F | Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F) { continue; }
+                let next = (to_map, to_position);
+                println!("    warp {pos} -> {to_map} @ {to_position}");
+                // `HashMap::insert` OVERWRITES, so recording the parent unconditionally re-parents
+                // an already-visited node — including the start, whose `None` marks the root. Two
+                // floors that warp to each other then form a parent cycle and the path walk below
+                // loops forever, growing `path` until the process is OOM-killed. Only ever record a
+                // parent for a node seen for the first time.
+                if !seen.contains_key(&next) {
+                    seen.insert(next, Some((map, at)));
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    match articuno_entry {
+        None => println!("\n!! ARTICUNO NOT REACHABLE from the Route-20 east entrance"),
+        Some(entry) => {
+            println!("\n>> ARTICUNO reachable from {} @ {}", entry.0, entry.1);
+            let mut path = vec![entry];
+            let mut cur = entry;
+            let mut walked: std::collections::HashSet<(Map, Point8)> = HashSet::from([entry]);
+            // Belt-and-braces: never walk a parent chain unbounded, whatever the parent map says.
+            while let Some(Some(prev)) = seen.get(&cur) {
+                if !walked.insert(*prev) { println!("   !! parent cycle at {} @ {}", prev.0, prev.1); break; }
+                path.push(*prev);
+                cur = *prev;
+            }
+            path.reverse();
+            for (m, p) in path { println!("   {m} @ {p}"); }
+        }
+    }
+}
+
+/// Offline reproduction of what the `CatchPokemon` arm sees on Seafoam B4F right after the hole-fall:
+/// build the floor from ROM with Articuno visible at (6,1) and the two boulders hidden, drop the
+/// player on the lake at (5,14), and list the `actions()` the policy would choose from.
+#[test]
+#[ignore]
+fn probe_seafoam_b4f_articuno_actions() {
+    use crate::pokemon::map_metadata::MapMetadataReader;
+    use crate::pokemon::tile_map::MetaTileMap;
+    use crate::pokemon::sprite::{Sprite, PictureId};
+    use crate::geometry::Point8;
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(roms::POKERED).unwrap();
+    let metadata = Arc::new(mmu.read_map_metadata(Map::SeafoamIslandsB4F).unwrap());
+    let sprites = vec![
+        Sprite { index: 1, picture_id: PictureId::Boulder, position: Point8 { x: 4, y: 15 },
+                 on_screen: false, hidden: true, name: "Boulder 1" },
+        Sprite { index: 2, picture_id: PictureId::Boulder, position: Point8 { x: 5, y: 15 },
+                 on_screen: false, hidden: true, name: "Boulder 2" },
+        Sprite { index: 3, picture_id: PictureId::Bird, position: Point8 { x: 6, y: 1 },
+                 on_screen: true, hidden: false, name: "Articuno" },
+    ];
+    for start in [Point8 { x: 5, y: 14 }, Point8 { x: 7, y: 10 }] {
+        let current = crate::pokemon::map_metadata::CurrentMap {
+            player_position: start,
+            player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+            sprites: sprites.clone(), metadata: Arc::clone(&metadata),
+            closed_doors: vec![], card_key_locked: false,
+        };
+        let mut tm = MetaTileMap::new(&current);
+        tm.can_surf = true;
+        println!("===== B4F from {start}");
+        for a in tm.actions() {
+            println!("   dest={} tile={:?} steps={} route={:?}", a.destination, a.tile, a.route.len(), a.route);
+        }
+    }
+}
+
+/// Offline checks for the boulder route to Articuno:
+///  1. Seafoam B3F's own four pushable boulders can be Sokoban-pushed into its two floor holes
+///     ((3,16) and (6,16)) — the pushes that set `EVENT_SEAFOAM4_BOULDER{1,2}_DOWN_HOLE` and kill the
+///     B4F current, without any of the multi-floor boulder chain.
+///  2. Route 20's **west** Seafoam entrance can be exited: the warp lands inside a ledge ring, so the
+///     player must be able to jump out of it and surf back to Cinnabar.
+#[test]
+#[ignore]
+fn probe_seafoam_boulder_and_exit_offline() {
+    use crate::pokemon::map_metadata::MapMetadataReader;
+    use crate::pokemon::tile_map::MetaTileMap;
+    use crate::pokemon::sprite::{Sprite, PictureId};
+    use crate::geometry::Point8;
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(roms::POKERED).unwrap();
+
+    // ── 1. B3F boulder Sokoban ────────────────────────────────────────────────
+    let metadata = Arc::new(mmu.read_map_metadata(Map::SeafoamIslandsB3F).unwrap());
+    let boulder = |i: u8, x: u8, y: u8, name: &'static str| Sprite {
+        index: i, picture_id: PictureId::Boulder, position: Point8 { x, y },
+        on_screen: true, hidden: false, name,
+    };
+    let sprites = vec![
+        boulder(1, 5, 14, "Boulder 1"), boulder(2, 3, 15, "Boulder 2"),
+        boulder(3, 8, 14, "Boulder 3"), boulder(4, 9, 14, "Boulder 4"),
+    ];
+    for (hole, from) in [
+        (Point8 { x: 3, y: 16 }, Point8 { x: 8, y: 6 }),
+        (Point8 { x: 6, y: 16 }, Point8 { x: 8, y: 6 }),
+        (Point8 { x: 3, y: 16 }, Point8 { x: 7, y: 17 }),
+        (Point8 { x: 6, y: 16 }, Point8 { x: 7, y: 17 }),
+    ] {
+        let current = crate::pokemon::map_metadata::CurrentMap {
+            player_position: from,
+            player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+            sprites: sprites.clone(), metadata: Arc::clone(&metadata),
+            closed_doors: vec![], card_key_locked: false,
+        };
+        let mut tm = MetaTileMap::new(&current);
+        tm.can_surf = true;
+        match tm.solve_boulder_push(hole) {
+            Some(pushes) => {
+                println!("B3F hole {hole} from {from}: SOLVABLE in {} pushes", pushes.len());
+                for (p, dir) in pushes { println!("    push boulder at {p} {dir:?}"); }
+            }
+            None => println!("B3F hole {hole} from {from}: !! NO SOLUTION"),
+        }
+    }
+
+    // The second B3F hole is solved from the state the FIRST drop leaves behind: boulder 2 gone into
+    // (3,16), boulder 1 parked at (2,14) by the pushes that cleared the corridor, player at (3,15).
+    let after_first = vec![
+        boulder(1, 2, 14, "Boulder 1"),
+        boulder(3, 8, 14, "Boulder 3"), boulder(4, 9, 14, "Boulder 4"),
+    ];
+    let current = crate::pokemon::map_metadata::CurrentMap {
+        player_position: Point8 { x: 3, y: 15 },
+        player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+        sprites: after_first, metadata: Arc::clone(&metadata),
+        closed_doors: vec![], card_key_locked: false,
+    };
+    let mut tm = MetaTileMap::new(&current);
+    tm.can_surf = true;
+    match tm.solve_boulder_push(Point8 { x: 6, y: 16 }) {
+        Some(pushes) => {
+            println!("B3F hole (6,16) after the (3,16) drop: SOLVABLE in {} pushes", pushes.len());
+            for (p, dir) in pushes { println!("    push boulder at {p} {dir:?}"); }
+        }
+        None => println!("B3F hole (6,16) after the (3,16) drop: !! NO SOLUTION"),
+    }
+
+    // ── 1b. B2F boulder Sokoban (SEAFOAM3 — unseals the eastern way back out) ──
+    // B2F's two boulders sit right beside its two holes: (18,6)→(19,6) and (23,6)→(22,6), one push
+    // each. Dropping them sets `EVENT_SEAFOAM3_BOULDER{1,2}_DOWN_HOLE`, which kills B3F's (15,8)
+    // current AND lifts the forced-UP script off B4F's (20,17)/(21,17) warps — i.e. it is what makes
+    // the inbound route reversible instead of a one-way trip out at Fuchsia.
+    let metadata = Arc::new(mmu.read_map_metadata(Map::SeafoamIslandsB2F).unwrap());
+    let sprites = vec![boulder(1, 18, 6, "Boulder 1"), boulder(2, 23, 6, "Boulder 2")];
+    for (hole, from) in [
+        (Point8 { x: 22, y: 6 }, Point8 { x: 25, y: 3 }),    // ← the route: down from B3F (25,3)
+        (Point8 { x: 19, y: 6 }, Point8 { x: 5,  y: 3 }),    // ← the route: down from B1F (4,2)
+        (Point8 { x: 19, y: 6 }, Point8 { x: 25, y: 11 }),   // (not routable: the east column is walled off)
+        (Point8 { x: 22, y: 6 }, Point8 { x: 25, y: 11 }),
+    ] {
+        let current = crate::pokemon::map_metadata::CurrentMap {
+            player_position: from,
+            player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+            sprites: sprites.clone(), metadata: Arc::clone(&metadata),
+            closed_doors: vec![], card_key_locked: false,
+        };
+        let mut tm = MetaTileMap::new(&current);
+        tm.can_surf = true;
+        match tm.solve_boulder_push(hole) {
+            Some(pushes) => {
+                println!("B2F hole {hole} from {from}: SOLVABLE in {} pushes", pushes.len());
+                for (p, dir) in pushes { println!("    push boulder at {p} {dir:?}"); }
+            }
+            None => println!("B2F hole {hole} from {from}: !! NO SOLUTION"),
+        }
+    }
+
+    // ── 2. Route 20 west entrance, exiting ────────────────────────────────────
+    let metadata = Arc::new(mmu.read_map_metadata(Map::Route20).unwrap());
+    let current = crate::pokemon::map_metadata::CurrentMap {
+        player_position: Point8 { x: 48, y: 5 },   // raw landing of SeafoamIslands1F (4,17)
+        player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
+        sprites: vec![], metadata, closed_doors: vec![], card_key_locked: false,
+    };
+    let mut tm = MetaTileMap::new(&current);
+    tm.can_surf = true;
+    println!("===== Route20 from the west Seafoam entrance");
+    for a in tm.actions() {
+        println!("   dest={} tile={:?} steps={}", a.destination, a.tile, a.route.len());
+    }
+}

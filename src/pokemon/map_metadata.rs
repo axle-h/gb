@@ -39,6 +39,13 @@ pub struct MapMetadata {
     /// tileset you cannot step between tile $20 and tile $05. The pair is unordered: a move is
     /// blocked if either (standing, front) or (front, standing) matches an entry.
     pub tile_pair_collisions: Vec<(u8, u8)>,
+    /// The same, but from pokered `TilePairCollisionsWater` — the table the game checks whenever
+    /// **water is involved**: mounting Surf (`UsedSurf` → `.tryToSurf`), stepping ashore again
+    /// (`.tryToStopSurfing`), and every move made while surfing (`CollisionCheckOnWater`). In the
+    /// Cavern tileset it holds `($14, $05)`, i.e. inside Seafoam Islands you may not surf on or off
+    /// the water from a plain cave floor tile — only from the shore tiles ($15, …). Without this the
+    /// BFS plans crossings the game refuses with "No SURFing here!".
+    pub tile_pair_collisions_water: Vec<(u8, u8)>,
     /// Pre-computed tile grid without sprites. Tiles, warps, and connection strips are all
     /// ROM-derived and never change, so this is computed once at construction and cloned
     /// in `meta_tiles` before the sprite overlay is applied.
@@ -302,6 +309,61 @@ impl MapMetadata {
         let idx = 23 + 15 * w;
         if idx < result.len() {
             result[idx] = MetaTile::Warp { to_map: Map::VictoryRoad2F, to_position: Point8 { x: 22, y: 16 } };
+        }
+    }
+
+    /// Seafoam Islands floor holes. Each floor has two (pokered `SeafoamIslands*.asm`
+    /// `Seafoam{1,2,3,4}HolesCoords`); standing on one drops the player to the floor below, landing
+    /// at the matching `DungeonWarpData` `fly_warp` (`data/maps/special_warps.asm`). Modelled as
+    /// inter-map warps so BFS routes through them.
+    ///
+    /// The B3F pair matters most: it is the **only** way onto B4F's west lake, and hence the only way
+    /// to Articuno. B4F's single shore tile (7,11) is refused by pokered's `IsSurfingAllowed`
+    /// ("The current is much too fast!") until both boulders are down — but *falling* through a B3F
+    /// hole lands the player at (4,14)/(5,14), which `ForcedBikeOrSurfMaps` puts straight into Surf,
+    /// bypassing the gate entirely.
+    pub fn apply_seafoam_holes(&self, result: &mut [MetaTile]) {
+        let holes: &[((u8, u8), Map, (u8, u8))] = match self.map {
+            Map::SeafoamIslands1F  => &[((17, 6), Map::SeafoamIslandsB1F, (18, 7)),
+                                        ((24, 6), Map::SeafoamIslandsB1F, (23, 7))],
+            Map::SeafoamIslandsB1F => &[((18, 6), Map::SeafoamIslandsB2F, (19, 7)),
+                                        ((23, 6), Map::SeafoamIslandsB2F, (22, 7))],
+            Map::SeafoamIslandsB2F => &[((19, 6), Map::SeafoamIslandsB3F, (18, 7)),
+                                        ((22, 6), Map::SeafoamIslandsB3F, (19, 7))],
+            Map::SeafoamIslandsB3F => &[((3, 16), Map::SeafoamIslandsB4F, (4, 14)),
+                                        ((6, 16), Map::SeafoamIslandsB4F, (5, 14))],
+            _ => return,
+        };
+        let w = self.dimensions().full_width();
+        for &((x, y), to_map, (tx, ty)) in holes {
+            let idx = x as usize + y as usize * w;
+            if idx < result.len() {
+                result[idx] = MetaTile::Warp { to_map, to_position: Point8 { x: tx, y: ty } };
+            }
+        }
+    }
+
+    /// Seafoam Islands B3F strong-current trap tile. Surfing onto (15,8) hands control to
+    /// `SeafoamIslandsB3FDefaultScript`, which force-walks the player DOWN 6 / RIGHT 5 / DOWN 3 into
+    /// the (20,17) warp and out onto B4F's *east* water — a region walled off from Articuno. The agent
+    /// models no currents, so the tile is simply marked impassable and BFS routes around it.
+    ///
+    /// The trap is armed until the two **B2F** boulders are dropped
+    /// (`CheckBothEventsSet EVENT_SEAFOAM3_BOULDER{1,2}_DOWN_HOLE; ret z` — Z, and so the early `ret`,
+    /// means *both are down*). Those boulders start hidden behind the whole 1F→B1F→B2F chain, so on
+    /// the Articuno route the trap is always live and this stays unconditional.
+    ///
+    /// The floors' two other currents are left unmodelled because the route never rides them: B3F's
+    /// (18/19, 7) — armed on the same SEAFOAM3 condition — can only be reached by falling through a
+    /// B2F hole, which is why there is no walking route back east (the agent looped B2F → B3F → B4F
+    /// proving it); and B4F's (4,14)/(5,14) is armed on SEAFOAM4, which the route drops *before*
+    /// falling onto those tiles.
+    pub fn apply_seafoam_currents(&self, result: &mut [MetaTile]) {
+        if self.map != Map::SeafoamIslandsB3F { return; }
+        let w = self.dimensions().full_width();
+        let idx = 15 + 8 * w;
+        if idx < result.len() {
+            result[idx] = MetaTile::Obstacle;
         }
     }
 }
@@ -641,12 +703,16 @@ impl MMU {
         } else {
             HashMap::new()
         };
-        let tile_pair_collisions = self.read_tile_pair_collisions(tileset_id);
+        let tile_pair_collisions =
+            self.read_tile_pair_collisions(&pokered_symbols::TilePairCollisionsLand, tileset_id);
+        let tile_pair_collisions_water =
+            self.read_tile_pair_collisions(&pokered_symbols::TilePairCollisionsWater, tileset_id);
 
         let mut metadata = MapMetadata {
             map, map_header, map_data, tileset_data, collision_tiles,
             talking_over_tiles: ts.talking_over_tiles, warp_events, is_water_tileset,
             grass_tile_id: ts.grass_tile, connected_strips, ledge_tiles, tile_pair_collisions,
+            tile_pair_collisions_water,
             meta_tiles_base: Vec::new(), raw_tile_ids: Vec::new(),
         };
         metadata.meta_tiles_base = metadata.build_meta_tiles_base();
@@ -851,13 +917,13 @@ impl MMU {
         result
     }
 
-    /// Reads `TilePairCollisionsLand` and returns the `(tile1, tile2)` pairs that apply to
-    /// `tileset`. The table is 3-byte entries `[tileset, tile1, tile2]` terminated by `0xFF`.
-    ///
-    /// Only the Land table is used: the Water table applies exclusively while surfing, which
-    /// the agent never does. Mirrors `CheckForTilePairCollisions` in home/overworld.asm.
-    fn read_tile_pair_collisions(&self, tileset: u8) -> Vec<(u8, u8)> {
-        let data = self.rom_data_from_rom_pointer(&pokered_symbols::TilePairCollisionsLand, 64);
+    /// Reads a tile-pair-collision table (`TilePairCollisionsLand` / `…Water`) and returns the
+    /// `(tile1, tile2)` pairs that apply to `tileset`. The table is 3-byte entries
+    /// `[tileset, tile1, tile2]` terminated by `0xFF`. Mirrors `CheckForTilePairCollisions` in
+    /// home/overworld.asm. The Land table governs walking; the Water table governs mounting,
+    /// dismounting and moving while surfing.
+    fn read_tile_pair_collisions(&self, table: &crate::pokemon::symbols::DmgPointer, tileset: u8) -> Vec<(u8, u8)> {
+        let data = self.rom_data_from_rom_pointer(table, 64);
         let mut pairs = vec![];
         let mut i = 0;
         while i + 2 < data.len() {
@@ -1139,6 +1205,10 @@ impl CurrentMap {
         self.metadata.apply_mansion_holes(&mut result);
         // Victory Road 3F floor hole → fall down to 2F (inert on every other map).
         self.metadata.apply_victory_road_holes(&mut result);
+        // Seafoam Islands floor holes → fall to the floor below (inert on every other map).
+        self.metadata.apply_seafoam_holes(&mut result);
+        // Seafoam Islands B3F strong-current trap tile → impassable (inert on every other map).
+        self.metadata.apply_seafoam_currents(&mut result);
         result
     }
 }

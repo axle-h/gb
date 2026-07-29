@@ -156,8 +156,10 @@ enum AgentState {
     /// written to the naming buffer and START is toggled each tick until the screen exits.
     NamingPokemon { species: PokemonSpecies, decided: bool },
 
-    /// Player alternates between two adjacent grass tiles until a wild battle triggers.
-    WanderingInGrass { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool },
+    /// Player alternates between two adjacent tiles until a wild battle triggers — grass above ground,
+    /// plain cave floor underground (see `adjacent_pacing_pair`). Either way it is the per-step encounter
+    /// check that does the work, so any pair of walkable tiles will do.
+    PacingForEncounters { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool },
 
     Battle(BattleState),
 
@@ -188,11 +190,18 @@ enum AgentState {
     /// state active means the mount finished. `water_pos` is the tile being surfed onto (used to face it).
     Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8 },
 
-    /// Activating the Strength field move so boulders become pushable: drive START→POKéMON→(the mon at
-    /// `slot`, e.g. an HM-slave Machop)→STRENGTH. Sets `BIT_STRENGTH_ACTIVE`. Same press/release mashing
-    /// as `CuttingTree`/`Surfing`; `entered_menu` tracks that we left the overworld, so a return to it
-    /// means the activation dialog finished. Unlike Cut/Surf there is no target tile — Strength just arms.
-    UsingStrength { press: bool, entered_menu: bool, slot: u8 },
+    /// Using a party field move that has no target tile: drive START→POKéMON→(the mon at `slot`)→the
+    /// field-move entry at `move_index`. STRENGTH arms `BIT_STRENGTH_ACTIVE` so boulders become
+    /// pushable; DIG warps the player out of the cave. Same press/release mashing as
+    /// `CuttingTree`/`Surfing`; `entered_menu` tracks that we left the overworld, so a return to it —
+    /// or a move away from `from_map`, which is all DIG does — means the move finished.
+    UsingFieldMove { press: bool, entered_menu: bool, slot: u8, move_index: u8, from_map: Map },
+
+    /// Tossing a bag item to make room: START→ITEM→(bag list)→TOSS→quantity→YES. Gen 1's bag holds 20
+    /// items and a mart purchase of a *new* item silently fails once it is full ("You can't carry any
+    /// more items"), so a leg that must buy something has to free a slot first. Same press/release
+    /// mashing as `TeachingMove`; the step is done when the item has left the bag.
+    TossingItem { item: crate::pokemon::item::ItemId, press: bool, entered_menu: bool },
 
     /// Checking a Vermilion Gym trash can for a hidden switch: route to a tile adjacent to `target`
     /// and face it (recomputed each tick via `MetaTileMap::route_to_face`), then press A to trigger
@@ -254,7 +263,7 @@ impl Display for AgentState {
             AgentState::ReadingTextBox { .. }         => write!(f, "text"),
             AgentState::RunningScript { .. }          => write!(f, "script"),
             AgentState::NamingPokemon { species, .. } => write!(f, "name:{:?}", species),
-            AgentState::WanderingInGrass { .. }       => write!(f, "wander"),
+            AgentState::PacingForEncounters { .. }    => write!(f, "wander"),
             AgentState::Battle(s) => match s {
                 BattleState::WaitingForMenu { .. } => write!(f, "battle:wait"),
                 BattleState::AwaitingPolicy { .. } => write!(f, "battle:policy"),
@@ -265,7 +274,8 @@ impl Display for AgentState {
             AgentState::TeachingMove { item, .. } => write!(f, "teach:{item:?}"),
             AgentState::CuttingTree { .. } => write!(f, "cut"),
             AgentState::Surfing { .. } => write!(f, "surf"),
-            AgentState::UsingStrength { slot, .. } => write!(f, "strength:slot{slot}"),
+            AgentState::UsingFieldMove { slot, move_index, .. } => write!(f, "fieldmove:slot{slot}#{move_index}"),
+            AgentState::TossingItem { item, .. } => write!(f, "toss:{item:?}"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
@@ -276,6 +286,8 @@ impl Display for AgentState {
 
 pub struct PokemonAgent {
     state: AgentState,
+    /// Tick counter for the post-Champion cutscene cadence — see `drive_post_champion_cutscene`.
+    post_champion_tick: u32,
     backup_state: Option<AgentState>,
     event_buffer: VecDeque<AgentEvent>,
     cycles: MachineCycles,
@@ -312,6 +324,7 @@ impl PokemonAgent {
     pub fn new(policy: Box<dyn Policy>) -> Self {
         Self {
             state: AgentState::default(),
+            post_champion_tick: 0,
             backup_state: None,
             event_buffer: VecDeque::new(),
             cycles: MachineCycles::default(),
@@ -339,6 +352,14 @@ impl PokemonAgent {
 
     pub fn policy_current_step_is_long_running(&self) -> bool {
         self.policy.current_step_is_long_running()
+    }
+
+    /// True while a battle is being fought. The policy queue cannot advance during one — a step only
+    /// completes between battles — so a stall detector that counts "queue unchanged" time has to
+    /// discount this, or a long fight (the Route-22 rival's six mons, an Elite Four room) reads as a
+    /// deadlock. Any battle blocks the queue by design, whatever step happens to be at its front.
+    pub fn in_battle(&self) -> bool {
+        matches!(self.state, AgentState::Battle(_))
     }
 
     /// Drains all buffered events and returns them.
@@ -374,6 +395,49 @@ impl PokemonAgent {
 
     /// Read the game state, overriding tiles the agent has cut down to `Empty` (the ROM-decoded map
     /// still shows them as `CutTree`). Use this wherever the map is used for routing/movement.
+    /// True while the post-Champion cutscene is running, in which case this has driven this tick.
+    ///
+    /// Detection is the Champion's room with its map script at or past OAK_ARRIVES; the chain ends by
+    /// warping to the Hall of Fame, at which point the map is no longer ChampionsRoom and the agent
+    /// resumes normally.
+    ///
+    /// What matters is the **early return**, not the cadence: with this handler in place even the text
+    /// reader's fast 20 ms toggle walks the chain to the Hall of Fame, and without it no cadence does.
+    /// The reason is the stray `release_all_buttons` calls the agent's ordinary per-tick machinery
+    /// makes as it transitions between states. `toggle_button` flips relative to the *current* joypad,
+    /// so a release landing between two toggles turns the alternation into two presses in a row — and
+    /// A held across a tick boundary is exactly what pokered's `HoldTextDisplayOpen` spins on, since it
+    /// holds the dialogue box open for as long as A is down. The deliberate press below is simply the
+    /// clearest thing to send once the agent is out of its own way.
+    fn drive_post_champion_cutscene(&mut self, api: &mut PokemonApi) -> bool {
+        use crate::pokemon::symbols::pokered_symbols as sym;
+        // Wait for OAK_ARRIVES rather than RIVAL_DEFEATED: the stage before it is the rival's own
+        // concession text, and the policy needs one ordinary tick there to notice the trainer is
+        // beaten and pop its `BattleTrainer` step. Taking over at stage 3 strands that step forever.
+        const SCRIPT_OAK_ARRIVES: u8 = 4;
+        const CYCLE: u32 = 75;
+        const PRESS_AT: u32 = 50;
+        const RELEASE_AT: u32 = 55;
+
+        if api.game_state().map_or(true, |s| s.map.map != Map::ChampionsRoom) {
+            self.post_champion_tick = 0;
+            return false;
+        }
+        if api.mmu().read_pointer(&sym::wChampionsRoomCurScript) < SCRIPT_OAK_ARRIVES {
+            self.post_champion_tick = 0;
+            return false;
+        }
+        let phase = self.post_champion_tick % CYCLE;
+        self.post_champion_tick = self.post_champion_tick.wrapping_add(1);
+        match phase {
+            0 => api.release_all_buttons(),
+            PRESS_AT => api.press_button(JoypadButton::A),
+            RELEASE_AT => api.release_all_buttons(),
+            _ => {}
+        }
+        true
+    }
+
     fn observe_state(&self, api: &PokemonApi) -> Result<crate::pokemon::GameState, String> {
         let mut state = api.game_state()?;
         for &(map, pos) in &self.cut_tiles {
@@ -554,8 +618,12 @@ impl PokemonAgent {
     /// its previous state (e.g. OverworldMovement for a ledge jump).
     fn assert_script_state(&mut self, game_mode: GameMode) {
         // Checking a trash can runs GymTrashScript (Script mode); the CheckingTrashCan state drives
-        // and completes it itself, so don't hand it off to the RunningScript machinery.
-        if matches!(self.state, AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }) {
+        // and completes it itself, so don't hand it off to the RunningScript machinery. Field moves are
+        // the same: DIG warps the player out of the cave, and that warp runs as a script — hand it to
+        // RunningScript and the short rollback restores `UsingFieldMove` with `entered_menu` cleared, so
+        // the agent re-opens the menu and tries to Dig again from wherever it landed, forever.
+        if matches!(self.state, AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }
+            | AgentState::UsingFieldMove { .. }) {
             return;
         }
         if game_mode == GameMode::Script {
@@ -564,7 +632,7 @@ impl PokemonAgent {
                 // navigating so no ledge jump ever commits.  From any other state (Idle,
                 // AwaitingOverworldAction…) the script is external — commit in 40 ms.
                 let rollback_delay = match self.state {
-                    AgentState::OverworldMovement { .. } | AgentState::WanderingInGrass { .. } => DelayContext::long(),
+                    AgentState::OverworldMovement { .. } | AgentState::PacingForEncounters { .. } => DelayContext::long(),
                     _ => DelayContext::short(),
                 };
 
@@ -656,6 +724,20 @@ impl PokemonAgent {
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
 
+        // ── Post-Champion cutscene ────────────────────────────────────────────────
+        // Beating the rival hands the game to a five-stage script chain (Oak's congratulation, his
+        // aside about the rival, "come with me", his exit, the player following him to the Hall of
+        // Fame). It is not something to *play*: there is nothing to route to and no decision to make,
+        // only text to sit through. Driving it with the agent's normal per-tick machinery wedges it
+        // solid at stage 6 — verified at length in `probe_hall_of_fame_bisect`, which shows the same
+        // A-button trace advancing the chain fine when the agent is not in the loop, so the cause is
+        // something the agent does, not the input it sends. Rather than keep guessing, the agent
+        // recognises the cutscene and gets out of its own way: hands off the joypad, one deliberate A
+        // press per cycle, nothing else.
+        if self.drive_post_champion_cutscene(api) {
+            return Ok(());
+        }
+
         // Silph Co's card-key doors/walls are placed into the map at runtime and are invisible to the
         // ROM-decoded `MetaTileMap`, so the agent routes straight into them. When facing one, try to
         // open it with the Card Key; unopenable ones get blocked so the BFS routes around (see
@@ -706,7 +788,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingStrength { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -806,9 +888,14 @@ impl PokemonAgent {
                             self.set_state(AgentState::CheckingTrashCan { target, checked: false, press: true, facing });
                             return Ok(());
                         }
-                        Some(crate::pokemon::policy::FieldMove::UseStrength { slot }) => {
+                        Some(crate::pokemon::policy::FieldMove::UseFieldMove { slot, move_index }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::UsingStrength { press: true, entered_menu: false, slot });
+                            self.set_state(AgentState::UsingFieldMove { press: true, entered_menu: false, slot, move_index, from_map: game_state.map.map });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::TossItem { item }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::TossingItem { item, press: true, entered_menu: false });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::PushBoulder { boulder, dir }) => {
@@ -867,12 +954,29 @@ impl PokemonAgent {
                         else { JoypadButton::Right };
                     api.release_all_buttons();
                     api.press_button(exit_dir);
+                } else if destination == MetaTile::Empty {
+                    // A cave "wander" (`MetaTileMap::wander_action`): the policy asked for a plain floor
+                    // tile purely to keep the player walking so per-step wild encounters fire — there is
+                    // no grass to stand in underground. Untyped tiles are never in `actions()`, so there
+                    // is nothing to route to and nothing to "arrive" at; pace between two adjacent floor
+                    // tiles instead, exactly as the grass case does. Pacing starts on a NEIGHBOUR, never
+                    // the player's own tile, because a wander often begins on the warp the player just
+                    // came in through — stepping back onto that would warp straight out again.
+                    let pos = game_state.map.player_position;
+                    match adjacent_pacing_pair(&game_state.map, pos) {
+                        Some((tile_a, tile_b)) => self.set_state(AgentState::PacingForEncounters {
+                            map: game_state.map.map, tile_a, tile_b, heading_to_b: false }),
+                        None => {
+                            self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination));
+                            self.set_state(AgentState::Idle);
+                        }
+                    }
                 } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp { .. }) {
                     if destination == MetaTile::Grass {
                         let tile_a = game_state.map.player_position;
                         let tile_b = adjacent_grass(&game_state.map, tile_a);
                         if let Some(tile_b) = tile_b {
-                            self.set_state(AgentState::WanderingInGrass { map: game_state.map.map, tile_a, tile_b, heading_to_b: true });
+                            self.set_state(AgentState::PacingForEncounters { map: game_state.map.map, tile_a, tile_b, heading_to_b: true });
                         } else {
                             // TODO this should not happen, we shouldn't generate an action if this is true
                             //      the adjacent grass tile should be in the action
@@ -1022,16 +1126,31 @@ impl PokemonAgent {
                                 }
                                 Some(BattleMenuState::MoveList { index }) => {
                                     // A move list is showing. Normally this is the move Navigating
-                                    // highlighted, so confirm it with A. But if the highlighted move
-                                    // is Disabled, confirming bounces back with "… is disabled!"
-                                    // forever — press B to back out to the main menu so the policy
-                                    // re-picks a usable move (the disabled slot is excluded from the
-                                    // available moves).
+                                    // highlighted, so confirm it with A. Two cases bounce straight back
+                                    // to this menu instead, and confirming them again loops forever:
+                                    //
+                                    //   • the move is **Disabled** ("… is disabled!") — the disabled
+                                    //     slot is already excluded from the available moves, so backing
+                                    //     out with B lets the policy pick another;
+                                    //   • the move is **out of PP** ("No PP left"). `available_battle_moves`
+                                    //     filters pp == 0, so this only happens on a stale read — the
+                                    //     policy spent the last PP and still sees the pre-turn value, then
+                                    //     picks that move again. Backing out re-polls the policy against
+                                    //     fresh PP. (Found by a grind wedging here for hours: the screen
+                                    //     read "TYPE/ WATER 166/234 0/ 5 … No PP left" with the agent
+                                    //     happily re-confirming Hydro Pump.)
                                     let disabled = api.game_state().ok()
                                         .and_then(|g| g.battle)
-                                        .and_then(|b| b.player.disabled_move_slot)
-                                        == Some(index);
-                                    if disabled {
+                                        .and_then(|b| b.player.disabled_move_slot) == Some(index);
+                                    // Only the game's own message counts here. Reading the move's PP
+                                    // out of RAM instead looked equivalent but is not: that copy is a
+                                    // turn stale, so it reports 0 for moves the game will happily
+                                    // accept, and backing out of those changes move choice all over
+                                    // the run (it re-tuned the playthrough's whole RNG line, and it
+                                    // broke in two different places before this was narrowed).
+                                    let no_pp = api.on_screen_text(false).unwrap_or_default()
+                                        .contains("No PP left");
+                                    if disabled || no_pp {
                                         api.toggle_button(JoypadButton::B);
                                     } else {
                                         api.toggle_button(JoypadButton::A);
@@ -1300,7 +1419,7 @@ impl PokemonAgent {
                     }
                 }
             }
-            AgentState::WanderingInGrass { map, tile_a, tile_b, ref mut heading_to_b } => {
+            AgentState::PacingForEncounters { map, tile_a, tile_b, ref mut heading_to_b } => {
                 let game_state = api.game_state()?;
                 if game_state.mode == GameMode::Overworld {
                     if game_state.map.map != map {
@@ -1718,13 +1837,20 @@ impl PokemonAgent {
                 api.press_button(button);
                 self.set_state(AgentState::Surfing { press: false, entered_menu, water_pos, slot });
             }
-            AgentState::UsingStrength { press, entered_menu, slot } => {
+            AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map } => {
                 use crate::pokemon::menu::TextBoxId;
-                // Using Strength opens the party menu → field-move menu → STRENGTH, shows a confirmation
-                // dialog ("… can now use STRENGTH!"), then returns to the overworld with the ability armed.
-                // So once we've entered a menu, the first return to the overworld ends it — hand back to
-                // the policy, which re-checks `strength_active` and proceeds to push.
-                if entered_menu && game_mode == GameMode::Overworld {
+                // A field move opens the party menu → field-move menu → the move, shows a confirmation
+                // dialog ("… can now use STRENGTH!" / the Dig animation), then returns to the overworld
+                // with the effect applied. So once we've entered a menu, the first return to the
+                // overworld ends it — hand back to the policy, which re-checks the step's own condition
+                // (`strength_active`, or the map having changed for Dig).
+                //
+                // DIG's whole effect *is* a warp, and it leaves a text box open on the far side. Waiting
+                // for the overworld there means mashing buttons at whatever the player landed in front
+                // of — on Cinnabar Island that is an NPC, whose dialogue then re-opens forever. So a
+                // changed map ends this state too, and Idle's normal text handling takes over.
+                let map_changed = api.game_state().map_or(false, |s| s.map.map != from_map);
+                if entered_menu && (game_mode == GameMode::Overworld || map_changed) {
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -1734,7 +1860,7 @@ impl PokemonAgent {
                 // Plain press/release mashing (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::UsingStrength { press: true, entered_menu, slot });
+                    self.set_state(AgentState::UsingFieldMove { press: true, entered_menu, slot, move_index, from_map });
                     return Ok(());
                 }
 
@@ -1748,17 +1874,76 @@ impl PokemonAgent {
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start // no target tile — just open START
                 } else if tbid == Some(TextBoxId::FieldMoveMonMenu) || top_y == 10 {
-                    nav(current, 0) // field-move menu → STRENGTH (the HM-slave's only field move)
+                    nav(current, move_index) // field-move menu → the requested move (see `field_move_index`)
                 } else if top_x == 11 && top_y == 2 {
                     nav(current, 1) // START menu → POKéMON (index 1, Pokédex obtained)
                 } else if top_x == 0 && (top_y == 1 || top_y == 3) {
-                    nav(current, slot) // party menu → the Strength mon
+                    nav(current, slot) // party menu → the mon that knows the move
                 } else {
                     JoypadButton::A // transitional text ("used STRENGTH!" / "can now use STRENGTH!")
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::UsingStrength { press: false, entered_menu, slot });
+                self.set_state(AgentState::UsingFieldMove { press: false, entered_menu, slot, move_index, from_map });
+            }
+            AgentState::TossingItem { item, press, entered_menu } => {
+                use crate::pokemon::menu::TextBoxId;
+                // Done once the item has left the bag. Gen 1 drops back to the bag list afterwards, so
+                // back out with B until the overworld returns.
+                if entered_menu && api.bag_item_position(item).is_none() {
+                    if game_mode != GameMode::Overworld {
+                        api.release_all_buttons();
+                        if press { api.press_button(JoypadButton::B); }
+                        self.set_state(AgentState::TossingItem { item, press: !press, entered_menu });
+                        return Ok(());
+                    }
+                    api.release_all_buttons();
+                    self.event(AgentEvent::TextBox { message: format!("Tossed {item:?} to free a bag slot") });
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // Back in the overworld with the item still held — the attempt fizzled; let the policy
+                // re-issue it and start the menu chain fresh.
+                if entered_menu && game_mode == GameMode::Overworld {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let entered_menu = entered_menu || game_mode != GameMode::Overworld;
+                if !press {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::TossingItem { item, press: true, entered_menu });
+                    return Ok(());
+                }
+                let (top_x, top_y, current, scroll) = api.menu_geometry();
+                let tbid = api.menu_state().map(|m| m.text_box_id);
+                let nav = |cur: u8, target: u8| -> JoypadButton {
+                    if cur < target { JoypadButton::Down }
+                    else if cur > target { JoypadButton::Up }
+                    else { JoypadButton::A }
+                };
+                let button = if game_mode == GameMode::Overworld {
+                    JoypadButton::Start
+                } else if top_x == 11 && top_y == 2 {
+                    nav(current, 2) // START menu → ITEM (index 2, Pokédex obtained)
+                } else if tbid == Some(TextBoxId::ListMenuBox) {
+                    // Bag list → the item's row. This is also what the quantity selector reports, but
+                    // the only items worth tossing are held singly, so its cursor cannot move anyway
+                    // and the A press below confirms "1".
+                    match api.bag_item_position(item) {
+                        Some(target_idx) => nav(current + scroll, target_idx),
+                        None => JoypadButton::B,
+                    }
+                } else if tbid == Some(TextBoxId::UseTossMenuTemplate) {
+                    nav(current, 1) // USE/TOSS → TOSS (index 1)
+                } else if tbid == Some(TextBoxId::TwoOptionMenu) {
+                    nav(current, 0) // "Is it OK to toss away …?" → YES (index 0)
+                } else {
+                    JoypadButton::A // quantity selector / "Threw away …" text
+                };
+                api.release_all_buttons();
+                api.press_button(button);
+                self.set_state(AgentState::TossingItem { item, press: false, entered_menu });
             }
             AgentState::PushingBoulder { boulder, dir } => {
                 let game_state = self.observe_state(api)?;
@@ -2062,6 +2247,20 @@ fn surf_slot(state: &crate::pokemon::GameState) -> Option<u8> {
 }
 
 /// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.
+/// Two adjacent plain-floor tiles to pace between for cave encounters, the first of them next to
+/// `pos`. Only `MetaTile::Empty` qualifies: water carries no encounters inside Seafoam, and warps,
+/// ladders and holes would end the walk instead of continuing it. Tile-pair collisions (the Cavern
+/// "cliffs") are honoured, so the pair is always genuinely walkable in both directions.
+fn adjacent_pacing_pair(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<(Point8, Point8)> {
+    let plain = |p: Point8| (p.x as usize) < map.width && (p.y as usize) < map.height
+        && map.meta_tiles[p.x as usize + p.y as usize * map.width] == MetaTile::Empty;
+    let neighbours = |p: Point8| [
+        Point8 { x: p.x, y: p.y.saturating_sub(1) }, Point8 { x: p.x, y: p.y.saturating_add(1) },
+        Point8 { x: p.x.saturating_sub(1), y: p.y }, Point8 { x: p.x.saturating_add(1), y: p.y },
+    ].into_iter().filter(move |&n| n != p && plain(n) && !map.pair_blocked(p, n));
+    neighbours(pos).find_map(|a| neighbours(a).find(|&b| b != pos).map(|b| (a, b)))
+}
+
 fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<Point8> {
     let neighbors = [
         Point8 { x: pos.x,                  y: pos.y.saturating_sub(1) },
