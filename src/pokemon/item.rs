@@ -92,5 +92,7 @@ pub enum ItemId {
     Hm05Flash = 0xC8,
     // TMs are 0xC9 (TM01) .. 0xFA (TM50). Only the ones the agent teaches are enumerated.
     Tm14Blizzard = 0xD6, // TM01(0xC9) + 13 — Ice, 120 power; the Elite-Four Lance answer (found in Mansion B1F)
+    Tm28Dig = 0xE4,      // TM01(0xC9) + 27 — DIG doubles as a reusable Escape Rope out of any cave
+    Tm34Bide = 0xEA,     // TM01(0xC9) + 33 — BIDE, the bag's most useless item: tossed to make room
 
 }

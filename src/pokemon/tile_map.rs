@@ -24,6 +24,11 @@ pub struct MetaTileMap {
     /// Unordered raw-tile-ID pairs the player may not walk between in this tileset (elevation
     /// boundaries from pokered `TilePairCollisionsLand`). Empty for most tilesets.
     pub tile_pair_collisions: Vec<(u8, u8)>,
+    /// The pairs that apply when **water is on either side** of the move — mounting Surf, stepping
+    /// ashore, or moving while surfing (pokered `TilePairCollisionsWater`). In the Cavern tileset
+    /// this is `($14, $05)`: inside Seafoam the player can only get on/off the water at a shore
+    /// tile, never straight off a plain cave floor.
+    pub tile_pair_collisions_water: Vec<(u8, u8)>,
     pub sprites: Vec<Sprite>,
     /// Unique `(destination_map, destination_position)` pairs reachable via warp tiles.
     /// Keyed on destination position so that two staircase/door warps that lead to
@@ -48,6 +53,9 @@ pub struct MetaTileMap {
     /// below, and pushing a boulder onto one drops it there (revealing a hidden boulder). Also modelled
     /// as `MetaTile::Warp` for routing (see `apply_victory_road_holes`); this list is for discovery.
     pub holes: Vec<Point8>,
+    /// Land tiles the player may not mount Surf from (Seafoam B4F's (7,11) — "The current is much too
+    /// fast!"). One-way: stepping ashore onto them is still allowed. See [`no_surf_mount_table`].
+    pub no_surf_mount: HashSet<Point8>,
 }
 
 /// Strength boulder-switch tiles per map (raw object/script coords, no connection offset), from the
@@ -62,10 +70,29 @@ fn strength_switch_table(map: Map) -> &'static [(u8, u8)] {
     }
 }
 
-/// Floor-hole tiles per map (raw coords): a boulder pushed onto one falls to the floor below.
+/// Floor-hole tiles per map (raw coords): a boulder pushed onto one falls to the floor below — and so
+/// does the player. Also modelled as `MetaTile::Warp` (see `apply_victory_road_holes` /
+/// `apply_seafoam_holes`) so BFS routes through them.
 fn hole_table(map: Map) -> &'static [(u8, u8)] {
     match map {
         Map::VictoryRoad3F => &[(23, 15)],
+        // pokered `Seafoam{1,2,3,4}HolesCoords`.
+        Map::SeafoamIslands1F  => &[(17, 6), (24, 6)],
+        Map::SeafoamIslandsB1F => &[(18, 6), (23, 6)],
+        Map::SeafoamIslandsB2F => &[(19, 6), (22, 6)],
+        Map::SeafoamIslandsB3F => &[(3, 16), (6, 16)],
+        _ => &[],
+    }
+}
+
+/// Land tiles from which the game refuses to let the player *mount* Surf, even though they sit next
+/// to water (raw coords). Only Seafoam Islands B4F has one: pokered `IsSurfingAllowed` prints
+/// "The current is much too fast!" at (7,11) — the floor's single shore tile — until both boulders
+/// have been dropped into the B4F holes. Stepping *ashore* there is still fine, so the restriction is
+/// one-way (land → water) and the BFS applies it in that direction only.
+fn no_surf_mount_table(map: Map) -> &'static [(u8, u8)] {
+    match map {
+        Map::SeafoamIslandsB4F => &[(7, 11)],
         _ => &[],
     }
 }
@@ -148,6 +175,7 @@ impl MetaTileMap {
                 .collect(),
             raw_tile_ids: map.metadata.raw_tile_ids.clone(),
             tile_pair_collisions: map.metadata.tile_pair_collisions.clone(),
+            tile_pair_collisions_water: map.metadata.tile_pair_collisions_water.clone(),
             spinners: spinner_table(map.metadata.map).iter().map(|&(x, y, tx, ty)| {
                 let off = |px: u8, py: u8| Point8 {
                     x: px + dimensions.west_extra as u8,
@@ -161,6 +189,9 @@ impl MetaTileMap {
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
                 .collect(),
             holes: hole_table(map.metadata.map).iter()
+                .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
+                .collect(),
+            no_surf_mount: no_surf_mount_table(map.metadata.map).iter()
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
                 .collect(),
         }
@@ -186,13 +217,27 @@ impl MetaTileMap {
     }
 
     /// True if the player may not step between meta-tiles `a` and `b` because their bottom-left
-    /// raw tile IDs form a forbidden pair in this tileset (pokered `TilePairCollisionsLand`).
-    /// The check is symmetric, matching `CheckForTilePairCollisions`.
-    fn pair_blocked(&self, a: Point8, b: Point8) -> bool {
-        if self.tile_pair_collisions.is_empty() { return false; }
+    /// raw tile IDs form a forbidden pair in this tileset. The check is symmetric, matching
+    /// `CheckForTilePairCollisions`.
+    ///
+    /// Which table applies depends on whether water is involved, exactly as in pokered: moving on
+    /// foot uses `TilePairCollisionsLand` (`CollisionCheckOnLand`), while getting on the water
+    /// (`UsedSurf`), stepping back off it, and every move made while surfing
+    /// (`CollisionCheckOnWater`) use `TilePairCollisionsWater`. So if either end of this edge is a
+    /// water tile, the water table governs it.
+    pub(crate) fn pair_blocked(&self, a: Point8, b: Point8) -> bool {
+        let is_water = |p: Point8| matches!(
+            self.meta_tiles[p.x as usize + p.y as usize * self.width],
+            MetaTile::Water | MetaTile::ConnectionWater(_));
+        let table = if is_water(a) || is_water(b) {
+            &self.tile_pair_collisions_water
+        } else {
+            &self.tile_pair_collisions
+        };
+        if table.is_empty() { return false; }
         let ta = self.raw_tile_ids[a.x as usize + a.y as usize * self.width];
         let tb = self.raw_tile_ids[b.x as usize + b.y as usize * self.width];
-        self.tile_pair_collisions.iter().any(|&(t1, t2)| {
+        table.iter().any(|&(t1, t2)| {
             (ta == t1 && tb == t2) || (ta == t2 && tb == t1)
         })
     }
@@ -276,20 +321,42 @@ impl MetaTileMap {
         })
     }
 
-    /// Single-boulder Sokoban: plan a sequence of one-tile pushes that lands a boulder on `switch`.
+    /// Multi-boulder Sokoban: plan a sequence of one-tile pushes that lands *some* boulder on `switch`.
     /// Each entry is `(boulder_position_before_that_push, push_direction)`; returns `None` if no boulder
-    /// can reach the switch. Boulders are the sprites named "Boulder …"; the boulder being pushed treats
-    /// the others (and walls/water/warps) as fixed obstacles. After a push the player ends on the
-    /// boulder's old tile, so its reachable region is recomputed from there each step.
+    /// can reach the switch. Boulders are the sprites named "Boulder …".
+    ///
+    /// **All** visible boulders move in a single search, which matters wherever one boulder blocks the
+    /// player's approach to another. Seafoam B3F is the case that forced it: the boulder at (5,14) seals
+    /// the only corridor to (3,14), and (3,14) is the one tile from which the boulder at (3,15) can be
+    /// pushed south into the hole at (3,16). A per-boulder search (each treating the rest as walls)
+    /// declares that floor unsolvable, which is what it did before this was generalised.
+    ///
+    /// The state is `(all boulder positions, the player's connected component)` — the component matters
+    /// because the same layout is a different position depending on which side of a boulder the player is
+    /// stranded on. It is canonicalised by its lexicographically-smallest reachable tile. After a push
+    /// the player stands on the pushed boulder's old tile, so the component is recomputed from there.
+    ///
+    /// Bounded by `MAX_STATES`: BFS over boulder layouts is exponential in the boulder count, and this
+    /// runs every agent tick while a boulder step is active. Hitting the cap returns `None` (an
+    /// unsolvable-looking floor) rather than growing without limit.
     pub fn solve_boulder_push(&self, switch: Point8) -> Option<Vec<(Point8, JoypadButton)>> {
         use std::collections::{HashMap, HashSet, VecDeque};
+        /// Layouts explored before giving up. Real floors settle in the low thousands; the cap only
+        /// fires on a pathological map, and keeps the search's memory in the low megabytes.
+        const MAX_STATES: usize = 50_000;
         // Only *visible* boulders are physically present and pushable. A hidden boulder (e.g. Victory
         // Road 2F's boulder that stays hidden until a 3F boulder falls through a hole onto it) must be
         // ignored, or the solver plans pushes of a phantom sprite that can never actually move.
-        let boulders: Vec<Point8> = self.sprites.iter()
+        let mut boulders: Vec<Point8> = self.sprites.iter()
             .filter(|s| s.name.starts_with("Boulder") && !s.hidden)
             .map(|s| s.position).collect();
-        let all: HashSet<Point8> = boulders.iter().copied().collect();
+        if boulders.is_empty() { return None; }
+        boulders.sort_by_key(|p| (p.y, p.x));   // canonical order, so a layout has one key
+        // `self.tile_at` reports the *live* boulder sprites as occupied, but the solver simulates
+        // boulders moving — so the tile UNDER any boulder's STARTING position must count as floor (the
+        // solver tracks occupancy itself). Without this, a boulder's own starting tile stays a phantom
+        // wall after it has (in simulation) been pushed away.
+        let initial: HashSet<Point8> = boulders.iter().copied().collect();
         let dirs = [(0i32, -1i32, JoypadButton::Up), (0, 1, JoypadButton::Down),
                     (-1, 0, JoypadButton::Left), (1, 0, JoypadButton::Right)];
         let inb = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height;
@@ -297,93 +364,89 @@ impl MetaTileMap {
             let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
             inb(x, y).then(|| Point8 { x: x as u8, y: y as u8 })
         };
-        for &start in &boulders {
-            let others: HashSet<Point8> = all.iter().copied().filter(|&b| b != start).collect();
-            // A tile the player may STAND ON to push a boulder: ordinary floor, and also inter-map
-            // warp tiles.  The player can legitimately stand on a coordinate-warp (e.g. Victory Road
-            // 1F's entrance warps at (8,17)/(9,17), plain cave floor $21) and push a boulder past it —
-            // the warp only fires when moving *onto* it toward the warp, not when pushing up into a
-            // boulder (VR1F is Cavern, so `ExtraWarpCheck` = `IsWarpTileInFrontOfPlayer`, and the tile
-            // in front when pushing is not a warp tile).  Excluding warps here was the bug that made
-            // VR1F look unsolvable.
-            // `self.tile_at` reports the *live* boulder sprites as occupied, but the solver simulates
-            // boulders moving — so the tile UNDER any boulder must count as floor (the solver tracks
-            // boulder occupancy itself via `active`/`others`). Without this, a boulder's own starting
-            // tile stays a phantom wall after it has (in simulation) been pushed away.
-            let under_boulder = |p: Point8| all.contains(&p);
-            let player_stand = |p: Point8, active: Point8| p != active && !others.contains(&p)
-                && (under_boulder(p) || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. }));
-            // A tile a BOULDER may be pushed onto: ordinary floor (or a tile vacated by a boulder), or
-            // the explicit `switch` target itself — this lets the caller aim a boulder at a hole tile
-            // (a `MetaTile::Warp`) to drop it to the floor below (Victory Road 3F), which normal floor
-            // rules would reject. Any other warp/ladder is off-limits.
-            let boulder_dest = |p: Point8, active: Point8| p != active && !others.contains(&p)
-                && (p == switch || under_boulder(p) || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass));
-            // Tiles the player can reach from `from`, with the active boulder + others as walls.
-            // Respects tile-pair collisions (cave "cliffs") exactly like real player movement — without
-            // this, vacating a boulder could wrongly appear to open a barrier the player can't cross.
-            let reach = |active: Point8, from: Point8| -> HashSet<Point8> {
-                let mut seen = HashSet::from([from]);
-                let mut q = VecDeque::from([from]);
-                while let Some(p) = q.pop_front() {
-                    for &(dx, dy, _) in &dirs {
-                        if let Some(n) = mv(p, dx, dy) {
-                            if player_stand(n, active) && !self.pair_blocked(p, n) && seen.insert(n) {
-                                q.push_back(n);
-                            }
+        // A tile the player may STAND ON to push a boulder: ordinary floor, and also inter-map warp
+        // tiles. The player can legitimately stand on a coordinate-warp (e.g. Victory Road 1F's entrance
+        // warps at (8,17)/(9,17), plain cave floor $21) and push a boulder past it — the warp only fires
+        // when moving *onto* it toward the warp, not when pushing up into a boulder (VR1F is Cavern, so
+        // `ExtraWarpCheck` = `IsWarpTileInFrontOfPlayer`, and the tile in front when pushing is not a
+        // warp tile). Excluding warps here was the bug that made VR1F look unsolvable.
+        let floor = |p: Point8| initial.contains(&p)
+            || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. });
+        // A tile a BOULDER may be pushed onto: ordinary floor (or a tile vacated by a boulder), or the
+        // explicit `switch` target itself — this lets the caller aim a boulder at a hole tile (a
+        // `MetaTile::Warp`) to drop it to the floor below (Victory Road 3F, Seafoam B3F), which normal
+        // floor rules would reject. Any other warp/ladder is off-limits.
+        let dest_floor = |p: Point8| p == switch || initial.contains(&p)
+            || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass);
+        // Tiles the player can reach from `from` with this layout's boulders as walls. Respects
+        // tile-pair collisions (cave "cliffs") exactly like real player movement — without this,
+        // vacating a boulder could wrongly appear to open a barrier the player can't cross.
+        let reach = |bs: &[Point8], from: Point8| -> HashSet<Point8> {
+            let mut seen = HashSet::from([from]);
+            let mut q = VecDeque::from([from]);
+            while let Some(p) = q.pop_front() {
+                for &(dx, dy, _) in &dirs {
+                    if let Some(n) = mv(p, dx, dy) {
+                        if floor(n) && !bs.contains(&n) && !self.pair_blocked(p, n) && seen.insert(n) {
+                            q.push_back(n);
                         }
                     }
                 }
-                seen
-            };
-            // Complete single-boulder Sokoban: the state is (boulder position, player's connected
-            // component) so the same boulder tile is revisited when the player can approach from a
-            // different side. The component is represented by its lexicographically-smallest floor tile.
-            let norm = |set: &HashSet<Point8>| -> Point8 {
-                *set.iter().min_by_key(|p| (p.y, p.x)).unwrap()
-            };
-            // state key = (boulder, player_component_rep); value = (prev_state, push_dir, push_from_boulder)
-            let mut came: HashMap<(Point8, Point8), ((Point8, Point8), JoypadButton)> = HashMap::new();
-            let start_rep = norm(&reach(start, self.player_position));
-            let mut visited: HashSet<(Point8, Point8)> = HashSet::from([(start, start_rep)]);
-            let mut q = VecDeque::from([(start, self.player_position)]);
-            let mut boulder_cells: HashSet<Point8> = HashSet::from([start]);
-            while let Some((b, player_from)) = q.pop_front() {
-                let r = reach(b, player_from);
-                let brep = norm(&r);
-                if b == switch {
-                    if std::env::var("BOULDER_DEBUG").is_ok() { eprintln!("  boulder {start} CAN reach switch {switch}"); }
-                    let mut pushes = vec![];
-                    let mut state = (b, brep);
-                    while let Some(&(prev_state, dir)) = came.get(&state) {
-                        pushes.push((prev_state.0, dir)); // push the boulder from its previous position
-                        state = prev_state;
-                    }
-                    pushes.reverse();
-                    return Some(pushes);
+            }
+            seen
+        };
+        let norm = |set: &HashSet<Point8>| -> Point8 { *set.iter().min_by_key(|p| (p.y, p.x)).unwrap() };
+
+        type Key = (Vec<Point8>, Point8);           // (boulder layout, player component)
+        // The component is only known once a state is popped (it needs a flood fill), so dedup happens
+        // at pop time and the queue carries the parent link to record on first arrival.
+        let mut visited: HashSet<Key> = HashSet::new();
+        let mut came: HashMap<Key, (Key, Point8, JoypadButton)> = HashMap::new();
+        let mut q: VecDeque<(Vec<Point8>, Point8, Option<(Key, Point8, JoypadButton)>)> =
+            VecDeque::from([(boulders.clone(), self.player_position, None)]);
+        while let Some((bs, player_at, parent)) = q.pop_front() {
+            let key: Key = (bs.clone(), norm(&reach(&bs, player_at)));
+            if !visited.insert(key.clone()) { continue; }
+            if let Some(link) = parent { came.insert(key.clone(), link); }
+            if bs.contains(&switch) {
+                if std::env::var("BOULDER_DEBUG").is_ok() {
+                    eprintln!("  switch {switch}: solved after exploring {} layouts", visited.len());
                 }
+                let mut pushes = vec![];
+                let mut cur = key;
+                while let Some((prev, from, dir)) = came.get(&cur).cloned() {
+                    pushes.push((from, dir));
+                    cur = prev;
+                }
+                pushes.reverse();
+                return Some(pushes);
+            }
+            if visited.len() >= MAX_STATES {
+                if std::env::var("BOULDER_DEBUG").is_ok() {
+                    eprintln!("  switch {switch}: gave up at the {MAX_STATES}-layout cap");
+                }
+                break;
+            }
+            let r = reach(&bs, player_at);
+            for (i, &b) in bs.iter().enumerate() {
                 for &(dx, dy, dir) in &dirs {
                     let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
                     // The player must be able to reach the tile behind the boulder, the destination must
                     // be plain floor, and there must be no elevation/tile-pair cliff between the boulder
                     // and its destination (pokered `CheckForCollisionWhenPushingBoulder`).
-                    if r.contains(&side) && boulder_dest(dest, b) && !self.pair_blocked(b, dest) {
-                        // After the push the player stands on `b`; recompute its component.
-                        let dest_rep = norm(&reach(dest, b));
-                        if visited.insert((dest, dest_rep)) {
-                            came.insert((dest, dest_rep), ((b, brep), dir));
-                            boulder_cells.insert(dest);
-                            q.push_back((dest, b));
-                        }
-                    }
+                    if !r.contains(&side) || bs.contains(&dest) || !dest_floor(dest) { continue; }
+                    if self.pair_blocked(b, dest) { continue; }
+                    let mut next = bs.clone();
+                    next[i] = dest;
+                    next.sort_by_key(|p| (p.y, p.x));
+                    // After the push the player stands on the boulder's old tile.
+                    q.push_back((next, b, Some((key.clone(), b, dir))));
                 }
             }
-            if std::env::var("BOULDER_DEBUG").is_ok() {
-                let mut cells: Vec<_> = boulder_cells.iter().copied().collect();
-                cells.sort_by_key(|p| (p.y, p.x));
-                eprintln!("  boulder {start}: reached {} cells: {:?}", cells.len(),
-                    cells.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
-            }
+        }
+        if std::env::var("BOULDER_DEBUG").is_ok() {
+            eprintln!("  switch {switch}: NO SOLUTION after {} layouts (boulders {:?})",
+                visited.len(), boulders.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
         }
         None
     }
@@ -502,6 +565,16 @@ impl MetaTileMap {
                     // even though both are passable (e.g. Cavern $20↔$05). Skip this edge so
                     // `nb` may still be reached from a non-blocked neighbour.
                     if self.pair_blocked(pos, nb) { continue; }
+                    // Getting ON the water is refused from certain shore tiles (Seafoam B4F's
+                    // (7,11), where the current is "much too fast"). One-way — coming ashore there
+                    // is fine — so only skip the land → water direction.
+                    if self.no_surf_mount.contains(&pos)
+                        && matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_))
+                        && !matches!(self.meta_tiles[pos.x as usize + pos.y as usize * self.width],
+                            MetaTile::Water | MetaTile::ConnectionWater(_))
+                    {
+                        continue;
+                    }
                     dist.insert(nb, d + 1);
                     came_from.insert(nb, (pos, dir));
                     // Warp and Connection tiles are terminal: the player can reach one but cannot
@@ -945,10 +1018,11 @@ mod boulder_solver_tests {
         (MetaTileMap {
             player_position: player, player_direction: PlayerFacingDirection::Down,
             map: Map::VictoryRoad1F, width: w, height: h, meta_tiles: meta,
-            raw_tile_ids: vec![0; w * h], tile_pair_collisions: vec![], sprites,
+            raw_tile_ids: vec![0; w * h], tile_pair_collisions: vec![],
+            tile_pair_collisions_water: vec![], sprites,
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
             spinners: HashMap::new(), can_surf: false,
-            strength_switches: vec![switch], holes: vec![],
+            strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
         }, switch)
     }
 

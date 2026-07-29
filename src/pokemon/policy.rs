@@ -340,8 +340,11 @@ pub enum PolicyStep {
     /// same way as beaten gym trainers (standing in the trainer's LOS with no battle starting). The trainer
     /// faces DOWN, so route to the tile directly below it (`route_to_face_dir(.., Up)`).
     BattleTrainer { trainer: MapSprite },
-    /// Walk in grass and throw Pokéballs until a Pokémon is caught.
-    CatchPokemon { species: PokemonSpecies, on_map: Map },
+    /// Walk in grass and throw Pokéballs until a Pokémon is caught. `ball` pins *which* ball to throw:
+    /// `Bag::best_pokeball` ranks by effectiveness, so with a Master Ball in the bag every catch spends
+    /// it — fine for a legendary, ruinous for an incidental HM-slave. `None` keeps the old "best in the
+    /// bag" behaviour; an explicit ball falls back to that once it runs out.
+    CatchPokemon { species: PokemonSpecies, on_map: Map, ball: Option<ItemId> },
     /// Enable/disable "train this slot" mode: while `Some(slot)`, the battle policy switches that party
     /// member in at the start of each battle so it earns the XP (for levelling a bench mon on the
     /// trainer gauntlet). `None` turns it off (e.g. before a hard fight where the lead must stay in).
@@ -368,6 +371,19 @@ pub enum PolicyStep {
     /// a bag slot). Drives the same START → ITEM → USE → choose-Pokémon menus as teaching a move;
     /// persists until the Rare Candy is consumed (no longer in the bag).
     UseRareCandy { slot: u8 },
+    /// Toss `item` from the bag to free a slot. Gen 1's bag holds **20** items and a mart purchase of a
+    /// *new* item silently fails once it is full — the clerk says "You can't carry any more items", the
+    /// `BuyFromMart` step retries and gives up, and the leg carries on without what it bought. Note that
+    /// `state.bag` under-reports: `Bag`'s reader drops every id `ItemId` cannot name (all the TMs), so a
+    /// bag printing 13 entries can be at 19. Pops immediately if the item isn't held, so it is safe to
+    /// leave in a step list. Key items and HMs cannot be tossed (pokered `IsKeyItem`/`IsItemHM`).
+    TossItem { item: ItemId },
+    /// Use the **DIG** field move (TM28) from the party menu with the mon in `slot` — Gen 1's reusable
+    /// Escape Rope. In any `EscapeRopeTilesets` map (Cavern included) it warps the player to
+    /// `wLastBlackoutMap`, the town of the last Pokémon Center used, so healing before a dungeon also
+    /// chooses where Dig lands. Completes on the map change. This is how the Seafoam leg gets home:
+    /// every walkable route back east is script-sealed until the boulder chain no one needs is done.
+    Dig { slot: u8 },
     /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge). Routes to face a
     /// `MetaTile::CutTree`, then uses the Cut field move. Persists until no reachable tree remains.
     CutTree { map: Map },
@@ -436,9 +452,14 @@ pub enum FieldMove {
     /// Face the sprite at `target`, then use bag `item` on it (START → ITEM → select → USE). The
     /// item's field effect (e.g. the Poké Flute waking a Snorlax) does the rest.
     UseFieldItem { item: ItemId, target: crate::geometry::Point8 },
-    /// Activate the Strength field move from the party menu, selecting the mon at `slot` (an HM-slave
-    /// that knows Strength). Arms `BIT_STRENGTH_ACTIVE` so boulders become pushable on this map.
-    UseStrength { slot: u8 },
+    /// Use a field move from the party menu: START → POKéMON → the mon at `slot` → the field-move entry
+    /// at `move_index`. That menu lists only the mon's *field* moves (`FieldMoveDisplayData`) and keeps
+    /// them in its move-slot order, so the index depends on what else the mon knows — the policy
+    /// computes it from the live move list (`field_move_index`). Strength arms `BIT_STRENGTH_ACTIVE`;
+    /// Dig warps the player out of the cave.
+    UseFieldMove { slot: u8, move_index: u8 },
+    /// Toss `item` from the bag (START → ITEM → the item → TOSS → quantity → YES) to free a slot.
+    TossItem { item: ItemId },
     /// Primitive Strength push: shove the boulder at `boulder` one tile in `dir` (Strength must be armed).
     /// The agent routes behind the boulder and double-presses; it completes as soon as the boulder leaves
     /// its tile. A policy plans *which* boulder/direction with the `MetaTileMap::solve_boulder_push` helper
@@ -461,8 +482,28 @@ pub fn hm_move(item: ItemId) -> Option<PokemonMoveName> {
         ItemId::Hm04Strength => Some(PokemonMoveName::Strength),
         ItemId::Hm05Flash => Some(PokemonMoveName::Flash),
         ItemId::Tm14Blizzard => Some(PokemonMoveName::Blizzard), // TM (consumed on use); the E4 Lance answer
+        ItemId::Tm28Dig => Some(PokemonMoveName::Dig),           // TM (consumed on use); the way out of a cave
         _ => None,
     }
+}
+
+/// The moves that get their own entry in the party menu's field-move list, from pokered
+/// `FieldMoveDisplayData`. (Its ordering column is display-only — the menu itself lists a mon's field
+/// moves in move-slot order, which is why the index has to be computed per mon.)
+fn is_field_move(name: PokemonMoveName) -> bool {
+    matches!(name, PokemonMoveName::Cut | PokemonMoveName::Fly | PokemonMoveName::Surf
+        | PokemonMoveName::Strength | PokemonMoveName::Flash | PokemonMoveName::Dig
+        | PokemonMoveName::Teleport | PokemonMoveName::Softboiled)
+}
+
+/// Where `want` sits in the field-move menu for the party member in `slot`: the count of field moves
+/// it knows in earlier move slots. Defaults to 0 if the mon or the move is missing, which is what a
+/// lone-field-move HM slave would use anyway.
+fn field_move_index(state: &GameState, slot: u8, want: PokemonMoveName) -> u8 {
+    let Some(mon) = state.pokemon.get(slot as usize) else { return 0 };
+    let field_moves: Vec<PokemonMoveName> = mon.moves.iter().flatten()
+        .map(|m| m.name).filter(|&n| is_field_move(n)).collect();
+    field_moves.iter().position(|&n| n == want).unwrap_or(0) as u8
 }
 
 impl PolicyStep {
@@ -1212,6 +1253,13 @@ impl PolicyStep {
             Self::enter(Map::PokemonMansion1F),   // fall through a hole → 1F (16,14)
             Self::enter(Map::PokemonMansionB1F),  // (21,23) staircase down
             Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
+            // NB: TM14 **Blizzard** sits at (19,25), right beside this switch, and taking it here is
+            // tempting — it is the Elite Four's Lance answer once it is on Articuno. It is deliberately
+            // NOT collected: adding it shifted the RNG line onto the losing side of the Route-22 rival
+            // fight, which is a coin flip this run cannot afford (see `victory_road_1f_steps` — its
+            // Hyper Potion restock is a no-op because the Viridian Mart does not stock them, so that
+            // fight is fought on leftovers and stalemates on PP). `probe_get_blizzard` takes the TM for
+            // the Elite Four fixture chain instead, where `seafoam_articuno_steps` teaches it.
             Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 20, y: 3 }, reveals: Map::PokemonMansion1F },
             Self::CollectItem(MapSprite::POKEMONMANSIONB1F_SECRET_KEY),
         ]
@@ -1236,6 +1284,149 @@ impl PolicyStep {
             Self::MovePokemonToFront { slot: 1 },
             Self::enter(Map::CinnabarGym),
             Self::DefeatGymLeader { leader: MapSprite::CINNABARGYM_BLAINE, badge: Badge::VolcanoBadge },
+        ]
+    }
+
+    /// **Articuno** (Seafoam Islands B4F) — the Ice sweeper the Elite Four's Lance needs. A
+    /// there-and-back detour off Cinnabar Island: Surf east onto Route 20, dive into the Seafoam
+    /// **east** entrance, solve both boulder puzzles on the way down, and throw the **Master Ball**
+    /// (guaranteed catch) at the static lv50 bird on B4F.
+    ///
+    /// ## The one boulder pair that matters
+    ///
+    /// Every gate in these caves reads `CheckBothEventsSet`, whose `and mask` / `cp mask` sets Z when
+    /// **both** flags are set — so each guard's `jr z` / `ret z` means *the obstacle is gone once the
+    /// pair is down*, not before. (Reading it the other way round is what once made a boulder-free
+    /// route look possible; the emulator disproved it, `mode Script` and all.)
+    ///
+    /// **SEAFOAM4** (`EVENT_SEAFOAM4_BOULDER{1,2}_DOWN_HOLE`, set by pushing two of B3F's own boulders
+    /// into its floor holes at (3,16)/(6,16)) is what lets the player onto B4F's west lake, the only
+    /// approach to Articuno at (6,1). Both ways onto that lake are gated on it:
+    ///  * the lake's single shore tile (7,11), where `IsSurfingAllowed`
+    ///    (`engine/overworld/field_move_messages.asm`) refuses to mount Surf with "The current is much
+    ///    too fast!"; and
+    ///  * falling through a B3F floor hole, which lands the player at B4F (4,14)/(5,14) already surfing
+    ///    (`DungeonWarpData` + `ForcedBikeOrSurfMaps`) — but `SeafoamIslandsB4FMoveObjectScript` then
+    ///    force-walks them UP/RIGHT/UP straight back off the lake onto the central land at (7,10).
+    ///
+    /// B3F is the only floor below 1F whose boulders can be pushed on arrival. The game intends a chain
+    /// — 1F's pair into 1F's holes reveals B1F's pair, which reveals B2F's, which reveals B3F's last two
+    /// — and `hide_show_data.asm` enforces it: every boulder on B1F and B2F starts HIDDEN. B3F is the
+    /// exception. Its (5,14) and (9,14) are not missable objects at all (permanently visible) and its
+    /// (3,15)/(8,14) start SHOWn, so the floor offers four pushable boulders with no prerequisites —
+    /// which is exactly the pair of drops SEAFOAM4 needs, and why the chain above can be skipped.
+    ///
+    /// ## Getting out again — an Escape Rope, because there is no way back east on foot
+    ///
+    /// **SEAFOAM3** (B2F's boulders, hidden behind that same 1F→B1F→B2F chain) is what would reopen the
+    /// eastward return, and without it every candidate is sealed:
+    ///  * B4F's (20,17)/(21,17) staircases: `SeafoamIslandsB4FDefaultScript` force-walks the player
+    ///    north off them, `res BIT_FORCED_WARP` cancelling the warp, until SEAFOAM3 is set;
+    ///  * B2F's floor hole at (22,6) (reached from B4F via the (25,4)/(25,3) pockets, and free of any
+    ///    boulder requirement) drops the player into B3F's east region at (19,7) — but landing there
+    ///    runs `SeafoamIslandsB3FMoveObjectScript`, whose x=18/19 strong-current RLE sweeps them right
+    ///    back down to B4F. Verified the hard way: the agent looped B2F → B3F → B4F → B2F;
+    ///  * B3F's (15,8) current tile is one-way west→east into the same sweep;
+    ///  * and the west exit (up B3F (5,12) → B2F → B1F → 1F, out of Route 20's **west** entrance) lands
+    ///    on the far side of Route 20's x=63 wall — Fuchsia, not Cinnabar, with no way back short of
+    ///    walking half of Kanto.
+    ///
+    /// So the leg leaves the way any Gen-1 player would: an **Escape Rope**. Seafoam is Cavern, which is
+    /// in `EscapeRopeTilesets`, and the rope warps to `wLastBlackoutMap` — set by the last Pokémon
+    /// Center used, which is the Cinnabar heal at the top of this list. One item, one step, and the six
+    /// boulder pushes across three floors that SEAFOAM3 would have cost are never needed.
+    ///
+    /// ## Getting to the boulders
+    ///
+    /// No floor is one connected space: the Cavern tileset has **elevation tile-pair collisions** —
+    /// $05↔$20/$21/$2A/$41 on land, $14↔$05 on water (so inside Seafoam you can only get on or off the
+    /// water at a shore tile) — which cut columns that look wide open in the block map. Every floor is a
+    /// set of walled pockets joined only by warps, so each hop is an explicit `enter_at`:
+    ///
+    /// | leg | route |
+    /// |---|---|
+    /// | in | Route 20 → 1F (26,17) → B1F (23,15) → B2F (25,11) → B3F (25,14) |
+    /// | | → B4F (20,17) → B3F (8,6): the only crossing to B3F's **west** half |
+    /// | SEAFOAM4 | drop two of B3F's boulders into (3,16) and (6,16) — kills the B4F current |
+    /// | catch | hole (6,16) → B4F (5,14), afloat on the west lake; Master Ball on the bird |
+    /// | out | Escape Rope → Cinnabar Island |
+    ///
+    /// The B4F round trip on the way in is not a detour, it is the only way across: B3F's east and west
+    /// halves are joined solely by the (15,8) strong-current tile (modelled impassable — see
+    /// `apply_seafoam_currents`), so the west half, and hence its holes, can only be entered from B4F.
+    /// Two other approaches are dead ends: Route 20's west Seafoam entrance (48,5) sits behind one-way
+    /// ledges (Jump West/South) so it can only be walked *out of*, never surfed into; and on B2F the
+    /// east column stops at row 10 on an elevation boundary, putting (25,3) out of reach from (25,11).
+    ///
+    /// ## The Strength slave
+    ///
+    /// Neither Venusaur nor Vaporeon learns HM04, so the pushes need a slave. **Slowpoke** does learn
+    /// it and is one of the two commonest land encounters on Seafoam 1F (which has the highest
+    /// encounter rate of the five floors, and whose entry pocket is all land), so it is caught on the
+    /// way in — with **Great Balls**, explicitly, because `Bag::best_pokeball` would otherwise spend the
+    /// Master Ball earmarked for Articuno on it. It lands at party slot 2 and Strength is re-armed on
+    /// every floor, since `BIT_STRENGTH_ACTIVE` resets on each map change.
+    ///
+    /// The floors are decoded offline from the ROM block maps by `probe_seafoam_actions_offline`,
+    /// `probe_seafoam_connectivity_offline` (which floods the whole dungeon through its warps) and
+    /// `probe_seafoam_boulder_and_exit_offline` (which runs the Sokoban planner on both pairs) — all
+    /// ROM-only and instant, so the whole chain below is checked before paying for an emulator run.
+    pub fn seafoam_articuno_steps() -> Vec<Self> {
+        // Strength is armed per floor: `BIT_STRENGTH_ACTIVE` is cleared on every map change, and the
+        // route leaves and re-enters each boulder floor.
+        let slave = 2u8;   // the Slowpoke caught below, appended after Vaporeon + Venusaur
+        vec![
+            // Heal and stock balls first: Route 20's swimmer gauntlet is fought on the way over, and
+            // there is no Pokémon Center inside Seafoam (its wilds are fled — `in_center_less_dungeon`).
+            Self::enter(Map::CinnabarIsland),
+            Self::enter(Map::CinnabarPokecenter),
+            Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
+            Self::enter(Map::CinnabarIsland),
+            // The bag is at Gen 1's 20-item cap by now, and a full bag makes the purchase below fail
+            // silently — the clerk refuses and `BuyFromMart` just gives up, which then spends the
+            // Master Ball on the HM-slave and leaves nothing for Articuno. The Nugget is pure
+            // sell-fodder this run never sells, and it is not a key item, so it is the slot to free.
+            Self::TossItem { item: ItemId::Nugget },
+            Self::BuyFromMart { item: BagItem::new(ItemId::GreatBall, 10), map: Map::CinnabarMart },
+            // Top the Hyper Potions back up while at the last mart on the route that sells them. The
+            // Route-22 rival, three legs from here, is the fight this run is thinnest for, and it used
+            // to be fought on whatever was left over from Saffron. No bag slot needed: the run is
+            // already carrying a Hyper Potion stack, so this only deepens it.
+            Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 20), map: Map::CinnabarMart },
+            Self::enter(Map::CinnabarIsland),
+            // Surf east across Route 20 to the east Seafoam entrance.
+            Self::enter(Map::Route20),
+            Self::enter_at(Map::SeafoamIslands1F, 26, 17),
+            // The HM slave, before anything needs pushing.
+            Self::CatchPokemon { species: PokemonSpecies::Slowpoke, on_map: Map::SeafoamIslands1F,
+                                 ball: Some(ItemId::GreatBall) },
+            Self::TeachMove { item: ItemId::Hm04Strength, target_slot: slave },
+            // TM28 is dead weight in the bag and the way home in the slave's move list.
+            Self::TeachMove { item: ItemId::Tm28Dig, target_slot: slave },
+            // Down the east side, one walled pocket at a time, then across to B3F's west half.
+            Self::enter_at(Map::SeafoamIslandsB1F, 23, 15),
+            Self::enter_at(Map::SeafoamIslandsB2F, 25, 11),
+            Self::enter_at(Map::SeafoamIslandsB3F, 25, 14),
+            Self::enter_at(Map::SeafoamIslandsB4F, 20, 17),
+            Self::enter_at(Map::SeafoamIslandsB3F, 8, 6),
+            // ── SEAFOAM4: two of B3F's four boulders into its two holes. The planner moves (5,14) out
+            // of the corridor first — it is the only tile from which (3,15) can be reached at all.
+            Self::UseStrength { slot: slave },
+            Self::DropBoulderInHole { hole: Point8 { x: 3, y: 16 } },
+            Self::DropBoulderInHole { hole: Point8 { x: 6, y: 16 } },
+            // Fall through the (6,16) hole into the west lake, already surfing, and Master-Ball the bird.
+            Self::enter_at(Map::SeafoamIslandsB4F, 5, 14),
+            Self::CatchPokemon { species: PokemonSpecies::Articuno, on_map: Map::SeafoamIslandsB4F,
+                                 ball: Some(ItemId::MasterBall) },
+            // The bird arrives with Peck and Ice Beam — 10 PP of Ice for five Elite Four rooms. TM14
+            // (taken in the Mansion) adds Blizzard: same STAB, 120 power, and five more Ice attacks.
+            // Skipped harmlessly if this run never collected the TM.
+            Self::TeachMove { item: ItemId::Tm14Blizzard, target_slot: 3 },
+            // Out with DIG: there is no walkable way back east (see the doc above), and it lands on
+            // Cinnabar Island because that is where the Pokémon Center at the top of this list set
+            // `wLastBlackoutMap`.
+            Self::Dig { slot: slave },
+            Self::enter(Map::CinnabarIsland),
         ]
     }
 
@@ -1275,9 +1466,11 @@ impl PolicyStep {
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
             Self::enter(Map::ViridianCity),
-            Self::enter(Map::ViridianMart),
-            Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 15), map: Map::ViridianMart },
-            Self::enter(Map::ViridianCity),
+            // (No mart stop here: the **Viridian Mart does not sell Hyper Potions** — Poké Ball,
+            // Antidote, Parlyz Heal, Burn Heal only, per `data/items/marts.asm` — so the restock that
+            // used to sit here walked in, failed four times and walked out. The stack is bought on
+            // Cinnabar instead, in `seafoam_articuno_steps`, at the last mart on the route that
+            // stocks them.)
             Self::MovePokemonToFront { slot: 1 },    // Venusaur leads the rival (Alakazam nemesis)
             Self::enter(Map::Route22),
             Self::enter(Map::Route22Gate),           // walk west → rival ambush → gate to Route 23
@@ -1285,7 +1478,7 @@ impl PolicyStep {
             Self::enter(Map::Route23),
             Self::goto(Map::VictoryRoad1F),
             // Catch a wild Machop (learns Strength) as the boulder HM-slave — Master Ball, thrown at once.
-            Self::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F },
+            Self::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F, ball: None },
             Self::TeachMove { item: ItemId::Hm04Strength, target_slot: machop_slot }, // Machop appends after the party
             // VR1F: push a boulder onto (17,13), climb to VR2F.
             Self::UseStrength { slot: machop_slot },
@@ -1466,12 +1659,16 @@ impl PolicyStep {
         // ── Pokémon Mansion → Secret Key → Cinnabar Gym → Volcano Badge (Blaine) ──
         steps.extend(Self::mansion_secret_key_steps());
         steps.extend(Self::volcano_badge_steps());
+        // ── Seafoam Islands (off Cinnabar) → Master-Ball ARTICUNO, the Elite-Four Ice sweeper ──
+        // Starts and ends on Cinnabar Island, so it drops straight in ahead of the Earth Badge. It adds
+        // two party members: a Slowpoke HM-slave (Strength + Dig) at slot 2 and Articuno at slot 3.
+        steps.extend(Self::seafoam_articuno_steps());
         // ── Cinnabar → Viridian Gym → Earth Badge (Giovanni), the 8th and final gym badge ──
         steps.extend(Self::earth_badge_steps());
         // ── Victory Road 1F: catch a Strength HM-slave, solve the boulder puzzle, climb to VR2F ──
         // (The full VR2F/VR3F puzzle works — `can_solve_victory_road_2f_3f` — but chaining it here is
         // PP-marginal for this team; see `victory_road_2f_3f_steps`.)
-        steps.extend(Self::victory_road_1f_steps(2)); // lone-starter party → Machop appends at slot 2
+        steps.extend(Self::victory_road_1f_steps(4)); // starter + Vaporeon + Slowpoke + Articuno → Machop at slot 4
 
         steps
     }
@@ -1492,6 +1689,15 @@ pub struct DeterministicPolicy {
     /// joypad rising edge), so the step verifies the bag and retries a few times before giving up
     /// (e.g. for an item the mart doesn't actually sell).
     mart_attempts: u32,
+    /// Consecutive ticks the current `DefeatGymLeader` step has failed to find a route to its gym.
+    /// A lost gym battle blacks the player out, and for a few ticks after that warp the map/actions are
+    /// still unsettled, so routing legitimately fails; popping the step on the first failure (as this
+    /// used to) strands the run with an unwinnable queue. Bounded so a genuinely unreachable gym still
+    /// gives up instead of deadlocking.
+    gym_route_stuck: u32,
+    /// The map a `Dig` step was issued from, so the step can pop when Dig has actually warped the
+    /// player somewhere else (rather than on the first tick, before the menus have even opened).
+    dig_from_map: Option<Map>,
     /// True once the current `CollectItem` step's item sprite has been observed present (not hidden).
     /// The step then pops only when the item *disappears* (collected). Distinguishes "collected" from
     /// "not yet revealed" — some item balls stay hidden until their guard is beaten (e.g. the Rocket
@@ -1534,6 +1740,9 @@ pub struct DeterministicPolicy {
 
 impl DeterministicPolicy {
     /// How many times to re-open the shop for one `BuyFromMart` step before giving up.
+    /// Ticks a `DefeatGymLeader` step waits for a route to its gym before concluding there isn't one
+    /// (20 ms each, so ~8 s of game time — long enough to cover a black-out warp and its dialogue).
+    const MAX_GYM_ROUTE_WAIT: u32 = 400;
     const MAX_MART_ATTEMPTS: u32 = 4;
 
     pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>) -> Self {
@@ -1544,6 +1753,8 @@ impl DeterministicPolicy {
             last_pokemon_center: None,
             heal_return: None,
             mart_attempts: 0,
+            gym_route_stuck: 0,
+            dig_from_map: None,
             collect_item_seen: false,
             catch_wander_stuck: 0,
             mansion_flip_baseline: None,
@@ -1673,7 +1884,7 @@ impl Policy for DeterministicPolicy {
                     }
                     action
                 },
-                PolicyStep::CatchPokemon { species, on_map } => {
+                PolicyStep::CatchPokemon { species, on_map, .. } => {
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
@@ -1690,6 +1901,36 @@ impl Policy for DeterministicPolicy {
                         println!("[policy] want to catch a {}, but no Pokéballs left!", species);
                         self.queue.pop_front();
                         continue;
+                    } else if on_map.sprites().iter().any(|s| s.name == species.to_string()) {
+                        // STATIC encounter: the legendaries (Articuno on Seafoam B4F, …) are not wild
+                        // spawns at all — they are ordinary map sprites named after the species, and
+                        // the battle starts by walking into one and pressing A. Route straight to it
+                        // instead of pacing for a random encounter. This must be its own branch: the
+                        // wander fallback below would otherwise stroll off across the map, which on
+                        // B4F means leaving the west lake by its one-way (7,11) shore and stranding
+                        // the catch (the game refuses to let you Surf back on).
+                        match actions.iter().find(|a| matches!(a.tile, MetaTile::Sprite(n) if n == species.to_string())) {
+                            Some(action) => {
+                                println!("[policy] static encounter: routing to {species} at {} ({} steps)",
+                                    action.destination, action.route.len());
+                                self.catch_wander_stuck = 0;
+                                Some(action.clone())
+                            }
+                            None => {
+                                // Not actionable yet. Right after a warp the sprite list is briefly
+                                // unsettled, so wait for it rather than wandering; past the bound the
+                                // target really is walled off (or already beaten) and we move on.
+                                self.catch_wander_stuck += 1;
+                                if self.catch_wander_stuck < 400 {
+                                    None
+                                } else {
+                                    println!("[policy] {species} is on {on_map} but unreachable (gave up)");
+                                    self.catch_wander_stuck = 0;
+                                    self.queue.pop_front();
+                                    continue;
+                                }
+                            }
+                        }
                     } else if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Grass) {
                         self.catch_wander_stuck = 0;
                         Some(action.clone()) // walk in grass to trigger encounters
@@ -1784,21 +2025,58 @@ impl Policy for DeterministicPolicy {
                     if state.badges.contains(badge) {
                         self.gym_beaten.clear();
                         self.gym_engage = None;
+                        self.gym_route_stuck = 0;
                         self.queue.pop_front();
                         continue;
                     } else if state.map.map != leader.map() {
-                        let action = Self::route_toward(world_graph, &actions, leader.map());
-                        if action.is_none() {
-                            println!("[policy] want to defeat {} to obtain the {}, but no path there!", leader, badge);
-                            self.queue.pop_front();
-                            continue;
+                        // Losing to the leader blacks the player out to the last Pokémon Center — which
+                        // is the whole reason this step never pops itself on a defeat. Getting back in
+                        // is not just a walk, though: the black-out reloads the map, so any tree the
+                        // leg cut on its way in has **regrown**, and Celadon's gym entrance is sealed by
+                        // exactly such trees. So when there is no route, re-cut whatever is reachable
+                        // first — `CutTree` pops itself once no reachable tree remains, handing the gym
+                        // back to this step with the way open.
+                        match Self::route_toward(world_graph, &actions, leader.map()) {
+                            Some(action) => { self.gym_route_stuck = 0; Some(action) }
+                            None if actions.iter().any(|a| a.tile == MetaTile::CutTree) => {
+                                println!("[policy] no route to {} — cutting the regrown trees on {}",
+                                    leader.map(), state.map.map);
+                                self.gym_route_stuck = 0;
+                                self.queue.push_front(PolicyStep::CutTree { map: state.map.map });
+                                continue;
+                            }
+                            None => {
+                                // Right after the black-out warp the map and its actions are briefly
+                                // unsettled, so wait rather than giving up on the first miss; past the
+                                // bound the gym really is unreachable (wrong order, a gate still shut)
+                                // and the run moves on.
+                                self.gym_route_stuck += 1;
+                                if self.gym_route_stuck < Self::MAX_GYM_ROUTE_WAIT {
+                                    None
+                                } else {
+                                    println!("[policy] want to defeat {} to obtain the {}, but no path there!", leader, badge);
+                                    self.gym_route_stuck = 0;
+                                    self.queue.pop_front();
+                                    continue;
+                                }
+                            }
                         }
-                        action
                     } else if let Some(a) = actions.iter().find(|a| a.tile == MetaTile::Sprite(leader.name)) {
+                        self.gym_route_stuck = 0;
                         // Stay on this step until the badge is obtained — do not pop here.
                         // If the player loses and blacks out, the step remains and the agent
                         // navigates back to try again.
                         Some(a.clone())
+                    } else if actions.iter().any(|a| a.tile == MetaTile::CutTree) {
+                        // The leader is walled off behind cuttable trees. Celadon's gym is a garden maze
+                        // of them, and they all regrow when the map reloads — which is exactly what a
+                        // black-out on a failed attempt does, leaving the run inside a gym it can no
+                        // longer cross. Re-cut and come back to this step (see the sibling recovery in
+                        // the off-map branch above).
+                        println!("[policy] {} is walled off — cutting the regrown trees in {}",
+                            leader, state.map.map);
+                        self.queue.push_front(PolicyStep::CutTree { map: state.map.map });
+                        continue;
                     } else {
                         // The leader isn't reachable yet — in a gated gym (Cinnabar's quiz-gate snake
                         // maze) the path opens only by beating the junior trainers, each of whom unlocks
@@ -2008,8 +2286,11 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     } else if self.mart_attempts >= Self::MAX_MART_ATTEMPTS {
-                        // The shop re-opened this many times without the item appearing — the mart
-                        // probably doesn't sell it (e.g. Potion in Viridian). Give up on this step.
+                        // The shop re-opened this many times without the item appearing. Either the mart
+                        // doesn't sell it (e.g. Potion in Viridian), or the bag is at its 20-slot cap and
+                        // the game answered "You can't carry any more items." — note that `state.bag` can
+                        // look far shorter than 20, because `Bag`'s reader drops item ids `ItemId` has no
+                        // name for (every TM, mostly). Give up either way.
                         println!("[policy] gave up buying {} from {} after {} attempts", item, map, self.mart_attempts);
                         self.mart_attempts = 0;
                         self.queue.pop_front();
@@ -2043,7 +2324,7 @@ impl Policy for DeterministicPolicy {
                     // Handled by `pick_field_move` (bag menu chain); wait without advancing.
                     None
                 }
-                PolicyStep::UseRareCandy { .. } => {
+                PolicyStep::UseRareCandy { .. } | PolicyStep::Dig { .. } | PolicyStep::TossItem { .. } => {
                     // Handled by `pick_field_move` (bag menu chain); wait without advancing.
                     None
                 }
@@ -2148,8 +2429,13 @@ impl Policy for DeterministicPolicy {
         // Only VR2F/VR3F — the long interconnected half where cumulative PP drain matters. VR1F is short
         // and the freshly-healed team fights its wilds fine (fleeing there just shifts the RNG into a
         // cooltrainer PP stalemate); the Machop catch on VR1F is handled by the CatchPokemon arm below.
-        let in_victory_road = matches!(state.map.map,
-            Map::VictoryRoad2F | Map::VictoryRoad3F);
+        // The same reasoning applies inside the **Seafoam Islands**: it is a five-floor, Pokémon-Center-
+        // less cave whose only job is to reach Articuno, its wilds are pure obstacles, and a heal-flee
+        // detour from four floors down would abandon the warp chain the leg is scripted on.
+        let in_center_less_dungeon = matches!(state.map.map,
+            Map::VictoryRoad2F | Map::VictoryRoad3F
+            | Map::SeafoamIslands1F | Map::SeafoamIslandsB1F | Map::SeafoamIslandsB2F
+            | Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F);
 
         // Safari Zone: the deterministic policy never hunts — always RUN (a Safari run never fails), to
         // preserve steps/balls while it navigates to the items. (The BALL/BAIT/ROCK options are still in
@@ -2171,7 +2457,7 @@ impl Policy for DeterministicPolicy {
         // run from wild battles and queue a detour to the last visited Pokémon Center.
         if battle_state.battle_type == BattleType::Wild
             && self.heal_return.is_none()
-            && !in_victory_road
+            && !in_center_less_dungeon
             && all_damaging_moves_low_pp(&actions)
         {
             if let Some(center) = self.last_pokemon_center {
@@ -2207,7 +2493,7 @@ impl Policy for DeterministicPolicy {
         {
             let flee = match self.queue.front() {
                 Some(PolicyStep::CatchPokemon { species, .. }) => battle_state.enemy.species != *species,
-                _ => in_victory_road,
+                _ => in_center_less_dungeon,
             };
             if flee {
                 return Some(BattleAction::Run);
@@ -2270,9 +2556,14 @@ impl Policy for DeterministicPolicy {
         }
 
         // When catching, throw a Pokéball immediately if one is available.
-        if let Some(PolicyStep::CatchPokemon { species, .. }) = self.queue.front() {
+        if let Some(PolicyStep::CatchPokemon { species, ball, .. }) = self.queue.front() {
             if battle_state.battle_type == BattleType::Wild && battle_state.enemy.species == *species {
-                if let Some(best_pokeball) = state.bag.best_pokeball() {
+                // A step may pin its ball so an incidental catch doesn't spend the Master Ball; fall
+                // back to the best in the bag if that ball has run out.
+                let chosen = ball
+                    .and_then(|id| state.bag.iter().find(|i| i.id == id && i.quantity > 0))
+                    .or_else(|| state.bag.best_pokeball());
+                if let Some(best_pokeball) = chosen {
                     if let Some(use_pokeball_action) = actions.iter()
                         .find(|a| matches!(a, BattleAction::UseItem { item, .. } if item.id == best_pokeball.id )) {
 
@@ -2365,7 +2656,7 @@ impl Policy for DeterministicPolicy {
         // (the "just the starter" recovery loop). Skipped while grinding — there we deliberately fight
         // on and rely on black-out recovery so the lead keeps earning XP.
         if !grinding
-            && !in_victory_road
+            && !in_center_less_dungeon
             && battle_state.battle_type == BattleType::Wild
             && self.heal_return.is_none()
             && battle_state.player.remaining_hp() < 0.15
@@ -2406,7 +2697,14 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // 1. pick the strongest move
+        // 1. pick the strongest move.
+        //
+        // (A grind-only variant — prefer the *highest-PP* move that still one-shots, since the trainee
+        // vastly out-levels what it farms and the Pokémon Center round trips cost far more than the
+        // fights — was tried and reverted: it changes move choice in the Route-1 starter grind too, and
+        // the RNG line that comes out of that is the one the fragile early game is tuned against. Worth
+        // revisiting behind a flag if a dedicated grind ever needs it; `probe_grind_to_70` is fast
+        // enough without it now that the 0-PP deadlock is fixed.)
         let result = pick_best_move(&battle_state, &actions, false);
         if result.is_some() {
             return result;
@@ -2502,7 +2800,7 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
-            return Some(FieldMove::UseStrength { slot });
+            return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Strength) });
         }
         if let Some(&PolicyStep::SolveBoulders { switch }) = self.queue.front() {
             // Done once a boulder sits on the switch (the map script then opens the barrier).
@@ -2541,6 +2839,14 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
+            // A TM that was never picked up cannot be taught, and the menu driver would loop forever
+            // looking for it in the bag. (HMs are never consumed, so a missing HM means it genuinely
+            // was not collected either — the same conclusion.) Skip rather than stall.
+            if !state.bag.iter().any(|b| b.id == item) {
+                println!("[policy] TeachMove: {item:?} is not in the bag — skipping");
+                self.queue.pop_front();
+                return None;
+            }
             return Some(FieldMove::TeachMove { item, target_slot });
         }
         if let Some(&PolicyStep::UseRareCandy { slot }) = self.queue.front() {
@@ -2554,6 +2860,29 @@ impl Policy for DeterministicPolicy {
                 return None;
             }
             return Some(FieldMove::TeachMove { item: ItemId::RareCandy, target_slot: slot });
+        }
+        if let Some(&PolicyStep::TossItem { item }) = self.queue.front() {
+            if !state.bag.iter().any(|b| b.id == item) {
+                println!("[policy] TossItem: no {item:?} in the bag — done");
+                self.queue.pop_front();
+                return None;
+            }
+            return Some(FieldMove::TossItem { item });
+        }
+        if let Some(&PolicyStep::Dig { slot }) = self.queue.front() {
+            // Done when Dig has warped us off this map. The map we started on is remembered on the first
+            // tick, so a re-issue after an interruption still terminates.
+            match self.dig_from_map {
+                Some(from) if from != state.map.map => {
+                    println!("[policy] Dig: out of {from} → {} — done", state.map.map);
+                    self.dig_from_map = None;
+                    self.queue.pop_front();
+                    return None;
+                }
+                None => self.dig_from_map = Some(state.map.map),
+                _ => {}
+            }
+            return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Dig) });
         }
         if let Some(&PolicyStep::EvolveWithStone { stone, target_slot }) = self.queue.front() {
             let current = state.pokemon.get(target_slot as usize).map(|p| p.species);
