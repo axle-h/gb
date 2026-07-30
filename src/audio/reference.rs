@@ -55,8 +55,12 @@ pub fn capture_transitions(save_state: &[u8], game_time: Duration) -> Vec<(u16, 
 }
 
 /// Run the emulator and collect the resampled output as interleaved stereo `f32`.
-pub fn render(save_state: &[u8], game_time: Duration) -> Vec<f32> {
+///
+/// `speed` mirrors the UI's fast-forward: at 2.0 the same span of game time yields half as many
+/// output frames, because those frames are meant to be played back in half the wall-clock time.
+pub fn render(save_state: &[u8], game_time: Duration, speed: f64) -> Vec<f32> {
     let mut gb = load_fixture(save_state);
+    gb.core_mut().mmu_mut().audio_mut().set_emulation_speed(speed);
     let target = MachineCycles::from_duration(game_time);
     let mut elapsed = MachineCycles::ZERO;
     let slice = MachineCycles::from_duration(Duration::from_millis(10));
@@ -144,19 +148,26 @@ mod tests {
     #[test]
     #[ignore = "ear check, not a test; run with --ignored"]
     fn render_reference_wav() {
-        let out = render(CAPTURE_FIXTURE, Duration::from_secs(CAPTURE_SECONDS));
         let rate = crate::audio::blip::DEFAULT_SAMPLE_RATE;
-        let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-
-        let path = artifact_dir().join("blip-reference.wav");
-        write_wav_i16(&path, rate, 2, &f32_to_i16(&out)).unwrap();
-        println!(
-            "wrote {} ({} frames, {:.2}s, peak {:.4} = {:.1} dBFS)",
-            path.display(),
-            out.len() / 2,
-            out.len() as f64 / 2.0 / rate as f64,
-            peak,
-            20.0 * peak.log10(),
-        );
+        // 1x is the A/B against rubato-reference.wav; the rest are the fast-forward speeds the UI's
+        // number keys select, which should sound like a tape being wound on.
+        for (speed, name) in [
+            (1.0, "blip-reference.wav"),
+            (3.006, "blip-speed3.wav"),
+            (5.016, "blip-speed5.wav"),
+        ] {
+            let out = render(CAPTURE_FIXTURE, Duration::from_secs(CAPTURE_SECONDS), speed);
+            let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            let path = artifact_dir().join(name);
+            write_wav_i16(&path, rate, 2, &f32_to_i16(&out)).unwrap();
+            println!(
+                "wrote {} — {:.1}x: {} frames, {:.2}s of playback for {CAPTURE_SECONDS}s of game time, peak {:.1} dBFS",
+                path.display(),
+                speed,
+                out.len() / 2,
+                out.len() as f64 / 2.0 / rate as f64,
+                20.0 * peak.log10(),
+            );
+        }
     }
 }

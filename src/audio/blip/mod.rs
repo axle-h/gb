@@ -90,6 +90,8 @@ pub struct BlipStereo {
     right: BlipBuffer,
     left_synth: BlipSynth<QUALITY>,
     right_synth: BlipSynth<QUALITY>,
+    /// Source clock rate at 1× speed. [`Self::set_speed`] scales against this.
+    base_clock_rate: u32,
     /// Transition log for the golden-fixture generator in `audio::reference`. Test-only, and free
     /// to live here because `BlipStereo` is excluded from the emulator's serialised state.
     #[cfg(test)]
@@ -104,9 +106,34 @@ impl BlipStereo {
             right: BlipBuffer::new(clock_rate, sample_rate, BUFFER_MS, DEFAULT_BASS_HZ),
             left_synth: BlipSynth::new(eq, 1.0),
             right_synth: BlipSynth::new(eq, 1.0),
+            base_clock_rate: clock_rate,
             #[cfg(test)]
             capture: None,
         }
+    }
+
+    /// Track how fast the emulator is running relative to real time, so that fast-forwarding plays
+    /// back faster (and higher pitched) instead of backing up the sink's queue. 1.0 is real time.
+    ///
+    /// This scales the *source clock* rather than dividing the output sample rate. The two are
+    /// arithmetically identical — `factor` is only ever `sample_rate / clock_rate` — but the buffer
+    /// is sized from the sample rate, so leaving that at the sink's actual rate keeps the buffer
+    /// worth 100 ms of **wall-clock** audio at any speed. Dividing the sample rate instead would
+    /// shrink it to 100/N ms and start dropping audio exactly when the emulator is producing the
+    /// most of it.
+    ///
+    /// Cheap enough to call every frame: it recomputes one fixed-point ratio per channel and leaves
+    /// the buffered audio alone, so there is no click on a speed change.
+    pub fn set_speed(&mut self, speed: f64) {
+        assert!(speed > 0.0 && speed.is_finite(), "speed must be positive and finite, got {speed}");
+        let clock_rate = (self.base_clock_rate as f64 * speed).round().max(1.0) as u32;
+        self.left.set_clock_rate(clock_rate);
+        self.right.set_clock_rate(clock_rate);
+    }
+
+    /// The speed multiplier currently in effect.
+    pub fn speed(&self) -> f64 {
+        self.left.clock_rate() as f64 / self.base_clock_rate as f64
     }
 
     /// Start logging the transitions handed to [`Self::update`], for fixture generation.

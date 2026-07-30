@@ -82,6 +82,8 @@ pub fn render() -> Result<(), String> {
     let mut iteration_count = 0;
     let mut cycle_count = MachineCycles::ZERO;
     let mut cycle_duration = REALTIME_CYCLE_DURATION;
+    // Watched so a speed change can be mirrored into the resampler; see below the event loop.
+    let mut applied_cycle_duration = cycle_duration;
 
     let mut previous_wram = [0u8; 0x2000];
     let mut agent_running = false;
@@ -213,6 +215,17 @@ pub fn render() -> Result<(), String> {
                 }
                 _ => {}
             }
+        }
+
+        // Keep the resampler in step with the emulation speed, otherwise fast-forwarding just
+        // out-runs the audio device and backs its queue up. Derived from `cycle_duration` rather
+        // than from the key that was pressed, so it tracks the speed the emulator is *actually*
+        // targeting — `REALTIME_CYCLE_DURATION / 5` truncates to 190 ns, which is 5.016x, not 5x.
+        if cycle_duration != applied_cycle_duration {
+            applied_cycle_duration = cycle_duration;
+            let speed = REALTIME_CYCLE_DURATION.as_secs_f64() / cycle_duration.as_secs_f64();
+            gb.core_mut().mmu_mut().audio_mut().set_emulation_speed(speed);
+            println!("emulation speed: {speed:.3}x");
         }
 
         let mut min_cycles = MachineCycles::ZERO;

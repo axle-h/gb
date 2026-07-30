@@ -583,6 +583,50 @@ fn stereo_knobs_take_effect() {
     assert!(full > thin * 2.0, "bass 28 Hz ({full}) barely differs from 2 kHz ({thin})");
 }
 
+/// Fast-forward contract: however fast the emulator runs, the *wall-clock* output rate must stay
+/// at the sink's rate. That is what stops a sped-up emulator out-running the audio device.
+///
+/// Concretely — at N× speed one wall second contains N seconds of game time, so N seconds of game
+/// time has to yield exactly one sink-second of samples.
+#[test]
+fn speed_keeps_the_wall_clock_output_rate_constant() {
+    for speed in [1.0, 2.0, 3.006, 5.016, 0.5] {
+        let mut stereo = BlipStereo::new(CLOCK_RATE, SAMPLE_RATE);
+        stereo.set_speed(speed);
+        assert!((stereo.speed() - speed).abs() < 1e-3, "speed() reported {}", stereo.speed());
+
+        // One wall-clock second of emulation, fed in 10 ms slices so the buffer is drained rather
+        // than overflowed.
+        let mut frames = 0usize;
+        let mut scratch = vec![0.0f32; 16384];
+        let game_clocks = (CLOCK_RATE as f64 * speed) as u32;
+        let slice = game_clocks / 100;
+        for _ in 0..100 {
+            stereo.end_frame(slice);
+            frames += stereo.read_interleaved_f32(&mut scratch);
+        }
+
+        let error = (frames as f64 - SAMPLE_RATE as f64).abs() / SAMPLE_RATE as f64;
+        assert!(
+            error < 0.005,
+            "at {speed}x, one wall second produced {frames} frames, expected ~{SAMPLE_RATE}",
+        );
+    }
+}
+
+/// Changing speed must not disturb audio already buffered — a speed change should not click.
+#[test]
+fn speed_change_preserves_buffered_audio() {
+    let mut stereo = BlipStereo::new(CLOCK_RATE, SAMPLE_RATE);
+    stereo.update(crate::audio::sample::AudioSample::new(0.5, -0.5));
+    stereo.end_frame(CLOCK_RATE / 100);
+    let before = stereo.frames_avail();
+    assert!(before > 0);
+
+    stereo.set_speed(5.0);
+    assert_eq!(stereo.frames_avail(), before, "a speed change discarded buffered frames");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Spectral behaviour — is this actually a good resampler, independent of the reference?
 // ---------------------------------------------------------------------------------------------
