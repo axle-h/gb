@@ -372,21 +372,62 @@ Opens the whole water encounter table — Magikarp/Goldeen/Poliwag/Tentacool/Kra
 
 ### D — Legendaries: Zapdos, Moltres, Mewtwo
 
-Cheapest workstream by far — the machinery already exists. `CatchPokemon`'s **static-encounter
-branch** (`policy.rs:1946`) routes to a map sprite named after the species and presses A; this is
-exactly how Articuno was caught. Expect mostly navigation work, not new mechanics.
+~~Cheapest workstream by far~~ — **that assumption was wrong and the sub-steps below have been
+re-cut.** `CatchPokemon`'s static-encounter branch does route to a map sprite named after the species
+and press A, and that part is free. What is not free is the *fight*: Articuno was caught with the
+**Master Ball**, which is spent, and all three remaining legendaries have **catch rate 3**. See the
+2026-07-30 §11 entries for the arithmetic; the short version is that a status ailment is the only lever
+that matters and Thunder Wave is the only one the party can get.
 
-- [ ] **D1 — Moltres.** `VictoryRoad2F`. The map is already traversed by `complete_game_steps` — the
-      agent walks straight past it. Do this first; it should be near-trivial and it validates the
-      whole approach cheaply. *Observable:* Moltres in the dex.
+⚠️ **Read the "trapping moves and the one-shot legendary" §11 entry before touching D1b or D3.** Two
+rules it establishes, both load-bearing and both counter-intuitive:
+
+1. **Never `BattleAction::Run` against one of these.** `EndTrainerBattle` hides the object and sets its
+   event on *any* exit but a blackout. Running deletes the legendary from the save.
+2. A slower Pokémon **cannot act at all** while the target is mid-Fire-Spin, so the paralyser has to
+   **outspeed** the target.
+
+Rule 2 is why the order below is not the order in the original plan: the party has no fast Thunder Wave
+user, so the Power Plant (which has one) has to come first.
+
+- [x] **D1a — the toolkit.** TM45 Thunder Wave (a free pickup at Route 24 (10,5)) taught to Slowpoke,
+      plus the ball and potion stack every catch spends. *Observable:* `postgame-thunder-wave.bin`.
+      *Done:* `PolicyStep::arm_for_legendaries_steps()`, test
+      `postgame::legendaries::can_arm_for_the_legendaries` (~8 s). **Slowpoke is the only party member
+      TM45 is compatible with**, and TM45 is one-per-cartridge — see §11 before spending it again.
 - [ ] **D2 — Reach the Power Plant.** `PowerPlant`, entered by Surfing east off Route 10. Unvisited,
       so the route needs `EnterMap` steps. *Observable:* the agent stands in the Power Plant.
-- [ ] **D3 — Zapdos.** Also the only Pikachu/Raichu/Voltorb/Magneton source, so consider catching
-      those while there. *Observable:* Zapdos in the dex.
+- [ ] **D2a — Catch an Electrode** (new). The Poké-Ball sprites on the Power Plant floor are disguised
+      Voltorbs and Electrodes; Electrode is lv43 with base speed **140**, the only obtainable Pokémon
+      that outspeeds Moltres and Zapdos *and* learns TM45. It is catch rate 60, i.e. an ordinary catch.
+      ⚠️ Its map sprite is named `Electrode 1`/`Electrode 2`, not `Electrode`, so the static-encounter
+      branch's exact-name match will not find it — engage it with `Interact` or relax that match.
+      *Observable:* Electrode in the party knowing Thunder Wave.
+- [x] **D1b — Moltres.** `VictoryRoad2F`. **Not** "already traversed": Moltres sits in a third,
+      separately-sealed region of 2F reached only via VR3F's (2,0) warp, and Victory Road can only be
+      entered from the *bottom*. *Observable:* Moltres in the dex.
+      *Done (⚠️ Master-Ball-seeded):* `PolicyStep::moltres_steps()`, test
+      `postgame::legendaries::can_catch_moltres` (~22 s), fixture `postgame-moltres.bin`, dex 8/114.
+      The **route** is legitimate and is what the test proves; the **fight** is still open — see below.
+- [x] **D2 + D3 — the Power Plant and Zapdos.** *Observable:* Zapdos in the dex.
+      *Done (⚠️ Master-Ball-seeded):* `PolicyStep::zapdos_steps()`, test `can_catch_zapdos` (~14 s),
+      fixture `postgame-zapdos.bin`, dex 9/117. Dig out of Victory Road, Fly to Cerulean, cross to the
+      Route-9 terrace through the **trashed house** (Fly's landing terrace cannot reach Route 9), Cut
+      Route 9's (5,8) tree, then Route 10 — the BFS Surfs to the Power Plant door on its own. Zapdos at
+      lv50 knows only Thundershock and Drill Peck, i.e. **no trapping move**, so it is the right place
+      to prove the honest paralyse-then-throw loop when D2a lands.
+- [ ] **D2a — Catch an Electrode** (new) — see above. Still the unblock for the honest fights.
 - [ ] **D4 — Stock Ultra Balls.** Mewtwo is lv70 and will need them. *Observable:* balls in bag.
-- [ ] **D5 — Cerulean Cave.** `CeruleanCave1F/2F/B1F`, post-Champion only, Surf required.
-      *Observable:* the agent reaches Mewtwo's chamber.
-- [ ] **D6 — Mewtwo.** *Observable:* Mewtwo in the dex; commit `postgame-legendaries.bin`.
+- [x] **D5 + D6 — Cerulean Cave and Mewtwo.** *Observable:* Mewtwo in the dex; `postgame-legendaries.bin`.
+      *Done (⚠️ Master-Ball-seeded):* `PolicyStep::mewtwo_steps()`, test `can_catch_mewtwo` (~18 s),
+      **dex 10 owned / 121 seen**. The approach is three walls in a row and none of them is the fight —
+      Cerulean is cut in two and the cave is on the far half, the way across is **Route 24's left river
+      seam** (a `ConnectionWater`, which needed a new `MetaTileMap::water_connection_action`), and 1F's
+      B1F ladder is behind a Cavern **tile-pair elevation boundary** reachable only via 2F. Full write-up
+      in §11.
+      ⚠️ Still open honestly: Mewtwo is lv70 with base speed 130 — it outspeeds even Electrode, so a
+      paralyser has to *survive* a hit instead. No trapping move, and half its moveset (Barrier, Recover,
+      Swift) is not a one-shot.
 
 ### E — Safari Zone proper
 
@@ -530,7 +571,7 @@ Phase 0 (item storage, PC locations, seams, probe)
 | A — PC boxes | claude-A-pcbox | `postgame-phase0.bin` | `postgame::pc_box` | ✅ done | A1–A7 all green. Build steps with `PolicyStep::deposit_pokemon/withdraw_pokemon/change_box/release_pokemon(.., map)` — **not** the four reserved variants, which are gone (see §11). Output `postgame-pc-box.bin`. |
 | B — Fly / Bike / Cycling Road | claude-B-flybike | `postgame-phase0.bin` | `postgame::fly_bike` | ✅ done | B1–B7 green, ~50 s wall clock for the lot. **Fly is available to everyone now: `PolicyStep::Fly { to }`, any of the 11 towns, from any outdoor map.** Start from `postgame-fly-bike.bin` (Fuchsia, Fly + Bicycle) — but heal first, Venusaur's Solarbeam is at 0 PP. Two shared-file fixes landed (see §11): field-move menu detection in `agent.rs`, and `can_surf` on Cycling Road. |
 | C — Fishing | *(unclaimed)* | `postgame-phase0.bin` | `postgame::fishing` | ☐ | |
-| D — Legendaries | *(unclaimed)* | `postgame-phase0.bin` | `postgame::legendaries` | ☐ | cheapest; good first pick |
+| D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
 | E — Safari Zone | *(unclaimed)* | `postgame-phase0.bin` | `postgame::safari` | ☐ | |
 | F — Game Corner | *(unclaimed)* | `postgame-phase0.bin` | `postgame::game_corner` | ☐ | |
 | G — Gifts (G1–G4, G7–G8) | *(unclaimed)* | `postgame-phase0.bin` | `postgame::gifts` | ☐ | splittable from trades |
@@ -1138,3 +1179,263 @@ it is policy-visible as `state.map.can_surf`, so a stale doc there misleads ever
 (and `cinnabar::can_catch_articuno` is the canary: it fails if either half of the predicate is dropped);
 default tier 816 passed; `git status src/pokemon/data/` still shows only the five new fixtures.
 **Impact on others:** anyone writing a driver that opens the party menu — call the two functions above.
+
+### [2026-07-30] D — §6-D's "cheapest workstream" is wrong: the **catch formula**, not the navigation, is the work
+**Status:** corrected ❗
+**What the plan said:** §6-D — *"Cheapest workstream by far — the machinery already exists.
+`CatchPokemon`'s static-encounter branch routes to a map sprite named after the species and presses A;
+this is exactly how Articuno was caught. Expect mostly navigation work, not new mechanics."*
+**What is actually true:** the routing half is exactly as described and cost nothing. But **Articuno was
+caught with the Master Ball**, the only one in the game, and it is spent. Everything after it goes
+through the real Gen 1 formula (`engine/items/item_effects.asm`, `ItemUseBall`), and Moltres, Zapdos and
+Mewtwo all have `db 3 ; catch rate` — the joint lowest in the game. The formula is:
+
+```
+Rand1 ∈ [0,255] Poké / [0,200] Great / [0,150] Ultra   (rejection-sampled, so those are the real ranges)
+Status subtracts 12 (burn/paralysis/poison) or 25 (freeze/sleep); if that underflows → caught outright
+else if Rand1 - Status > catchRate → the ball fails, whatever the target's HP
+else a second roll against X = min(255, (MaxHP*255/BallFactor) / max(HP/4,1)), BallFactor 8 Great / 12 other
+```
+
+On catch rate 3 that makes **status the only lever that matters**. Measured per-throw odds against a
+full-HP legendary:
+
+| | no status | paralysed |
+|---|---|---|
+| Poké Ball (¥200) | 0.52 % | 5.1 % |
+| Great Ball (¥600) | 1.0 % | 6.7 % |
+| Ultra Ball (¥1,200) | 0.89 % | 8.6 % |
+
+Two consequences worth carrying:
+
+- **Weakening the target is nearly pointless here and is dangerous.** The HP term only decides the
+  sliver of outcomes where `Rand1 - Status` is still ≤ 3, so it is worth a fraction of a percent — and
+  the generic catch policy's "weaken below 50 % first" can KO a target that exists once per cartridge.
+  `postgame::legendaries::pre_catch_action` therefore short-circuits that branch entirely.
+- **Poké Balls are the best value per yen** (0.026 %/¥ paralysed, against the Ultra Ball's 0.007 %/¥),
+  but the number of throws is capped by the target's PP, so the mix is "fill the turn budget with Poké
+  Balls, spend the rest making the early turns count". `Bag::best_pokeball` sorts by item id, so Ultra
+  Balls are thrown first automatically.
+
+**The only paralysis the party can get is TM45 Thunder Wave**, a free pickup at Route 24 (10,5) — and
+**Slowpoke is the sole compatible party member**; Venusaur, Articuno and Vaporeon all lack THUNDER_WAVE
+in their `tmhm` list. There is exactly one TM45 in the game and TMs are consumed, so think before
+spending it (I spent it on Slowpoke; see the next entry for why that turns out to be the wrong mon).
+**Evidence:** `pokered/engine/items/item_effects.asm` (`ItemUseBall`, the `.loop`/`.checkForAilments`/
+`.skip1`–`.skip3` blocks); `data/pokemon/base_stats/{moltres,zapdos,mewtwo}.asm:7`;
+`data/pokemon/base_stats/*.asm` tm/hm lists; `data/maps/objects/Route24.asm:26`;
+`pokemon::integration_tests::postgame::legendaries::can_arm_for_the_legendaries`.
+**Impact on others:** **E (Safari)** — the same formula governs Safari Balls, and Chansey/Kangaskhan/
+Tauros/Dratini are catch rate 30–60, so Bait/Rock and the HP term matter far more there than they do
+here. Anyone adding a catch: use `pre_catch_action`'s shape rather than the generic weaken-then-throw.
+
+### [2026-07-30] D — trapping moves and the one-shot legendary: **never `Run`**, and the paralyser must **outspeed**
+**Status:** blocked 🟡 — this is D's blocker, written up so the next agent does not rediscover it
+**What the plan said:** nothing; §6-D assumed the fights were free.
+**What is actually true:** two ROM rules interact to make a *slow* paralyser useless against Moltres.
+
+**1. A Gen 1 partial-trapping move negates every move the trapped side picks.** `MainInBattleLoop`
+displays the battle menu, *then* checks `wEnemyBattleStatus1` bit 5 `USING_TRAPPING_MOVE` and, if it is
+set, overwrites the player's choice with `CANNOT_MOVE` (`engine/battle/core.asm:305-322`). So while
+Moltres is mid-**Fire Spin**: items work, switching works, running works — **moves do not**. Measured
+across four runs, a lv30 Slowpoke selected Thunder Wave on 6, 10 and 6 consecutive turns and its PP
+never moved off 20. Moltres at lv50 knows only Peck and Fire Spin (`base_stats/moltres.asm:13`; its
+learnset starts at level 51), so it re-traps roughly every other selection and a slower Pokémon
+essentially never gets a free turn. This is now readable as `BattleState::enemy_trapping`.
+
+*Corollary that cost me a whole run:* my first fix was to heal the paralyser through the trap. That is
+backwards. A trapped turn is one where an item is the **only** thing that resolves, so healing on it is
+free — but the generic ordering healed at 60 % HP and therefore spent the *un*trapped turns on potions
+too. Paralysis has to be picked ahead of healing, not after it.
+
+**2. Fleeing destroys the legendary.** The birds and Mewtwo are `trainer`-flagged objects
+(`scripts/VictoryRoad2F.asm:100`, `trainer EVENT_BEAT_MOLTRES, …`). `EndTrainerBattle`
+(`home/trainers.asm:185-213`) sets the trainer flag and, because the opponent is a Pokémon rather than a
+trainer class, calls `HideObject` on it — on **every** exit path except `wIsInBattle == $ff`, i.e. a
+blackout. So running away is exactly as final as killing it: verified by fleeing once and then finding
+`Moltres hidden=true` on VR2F across map reloads for the rest of the run. **Blacking out is the only
+recoverable way to lose one of these fights.** (`TryRunningFromBattle` itself has no trap check, so RUN
+*is* selectable while wrapped — that is the trap, in both senses.)
+
+**Where that leaves D1b.** The paralyser must land Thunder Wave on a turn the trap is not already
+active, which for a slower Pokémon means winning a coin flip on the target's move — and losing it means
+losing the encounter, because the fallback (throwing ~59 unparalysed balls at ~1 % each) is ~35 %. A
+**faster** paralyser has no such problem: it moves before Fire Spin can start, every time, on turn 1.
+
+Nothing in the party can be that. The obtainable species that learn TM45 *and* outspeed a lv50 legendary
+(~110) are, in practice, one: **Electrode** — Power Plant, lv43, base speed 140, catch rate 60. Hence
+the re-cut §6-D: **D2/D2a before D1b**, and TM45 goes on the Electrode. (Second-best: Kadabra, base
+speed 105, but Abra needs levelling from lv8. Voltorb at base 100 is *not* fast enough at lv40.)
+
+Two smaller things found on the way, both already fixed and both shared-file:
+
+- **`MetaTileMap::is_step_on_warp`** (`map_header.rs`, `tile_map.rs`, used in `agent.rs`). The overworld
+  executor treated *any* warp tile on the map border as the kind that only fires when you press the
+  outward direction. Victory Road 3F's ladder at (2,0) is on the border **and** is a step-on warp, so
+  the agent pressed Up into the top wall for the whole budget. The tileset's warp-tile list
+  (`data/tilesets/warp_tile_ids.asm`, read by `CheckWarpsNoCollision`) is the discriminator; note the
+  `db`-without-terminator fallthroughs in that file — Gate inherits RedsHouse's ids, Facility inherits
+  Cemetery's and Underground's.
+- **`CatchPokemon` now gives up in 50 polls instead of 400 when the target sprite is `hidden`.** A
+  hidden static-encounter sprite means the battle already happened and was not won; no amount of waiting
+  on that map brings it back.
+**Evidence:** `pokered/engine/battle/core.asm:280-330`; `pokered/home/trainers.asm:185-213`;
+`pokered/data/pokemon/base_stats/moltres.asm`; `pokered/data/tilesets/warp_tile_ids.asm`;
+`pokemon::integration_tests::postgame::legendaries::{can_catch_moltres (#[ignore]d, the blocker),
+probe_route_to_moltres, probe_stall_artifact}`. Regression-checked: full `slow-tests` tier **63 passed,
+0 failed**, default tier **816 passed**, `git status src/pokemon/data/` shows only the one new fixture.
+**Impact on others:** **E (Safari)** — Safari encounters flee rather than trap, but the "an item resolves
+on a turn a move does not" rule is the same. **Anyone routing through a dungeon**: the step-on-warp fix
+changes how the executor leaves a warp tile it is already standing on. **Anyone writing a battle policy
+for a one-shot encounter**: RUN is not an escape hatch.
+
+### [2026-07-30] D / D1b — Victory Road 2F is **three** sealed regions, and Moltres is in the third
+**Status:** corrected ❗
+**What the plan said:** D1 — *"`VictoryRoad2F`. The map is already traversed by `complete_game_steps` —
+the agent walks straight past it. Do this first; it should be near-trivial."*
+**What is actually true:** the agent walks past two of 2F's three regions and Moltres is in neither.
+Measured with `probe_route_to_moltres`, which dumps the reachable set at each stage:
+
+| Entered from | Reaches | Moltres? |
+|---|---|---|
+| Route 23's (14,31) door → VR2F (29,7) | that door, the (27,7) stairs to 3F | **no** — sealed pocket |
+| VR1F's ladder → VR2F (0,8), after its (1,16) boulder switch | 5 trainers, 3 items, the (23,7) stairs | **no** |
+| VR3F's (2,0) warp → VR2F (1,1) | Super Nerd 2, the Guard Spec, **Moltres** (11,5) | yes |
+
+And Victory Road can only be entered from the **bottom**. Route 23 has its two doors four tiles apart —
+`warp_event 4, 31, VICTORY_ROAD_1F` and `warp_event 14, 31, VICTORY_ROAD_2F` — but they are on different
+terraces: coming down from the Indigo Plateau the only reachable warp is the 2F one (47 steps), which
+leads to the sealed pocket. So the route is the long one, and it is now written and green as
+`PolicyStep::moltres_steps()`: Fly Viridian → heal → Route 22 → the gate (badge check) → Route 23
+(the agent Surfs up its pools by itself) → VR1F → its (17,13) boulder switch → VR2F → its (1,16) switch
+→ VR3F → back down at (1,1). ~25 s of wall clock, both `SolveBoulders` calls required.
+
+Two fixture rules this leg re-taught, both cheap to get wrong:
+
+- **A fixture must be saved outdoors** if the next leg starts with `Fly`. `FlyState::blocked_by` refuses
+  a flight from inside a shop, pops the step with a reason, and the leg then tries to *walk* from the
+  Cerulean Mart doormat to Viridian. `arm_for_legendaries_steps` ends with an explicit
+  `enter(CeruleanCity)` for exactly this.
+- **Do not stop a `run_leg` on "the target sprite is gone".** It reads as absent for a few ticks after
+  any battle on that map, so the predicate fires on the first flee rather than on a real loss.
+**Evidence:** `pokemon::integration_tests::postgame::legendaries::probe_route_to_moltres` (`#[ignore]`d;
+the reachable dumps above are its output); `pokered/data/maps/objects/{Route23,VictoryRoad2F,
+VictoryRoad3F}.asm`.
+**Impact on others:** none outside D, except the two fixture rules — which are general.
+
+### [2026-07-30] D — **Moltres and Zapdos are caught**, with a debug-seeded Master Ball; Cerulean Cave is unreachable
+**Status:** verified ✅ (routes) / blocked 🟡 (the fights, and D5)
+**What the plan said:** §3's RAM-write rule allows `PokemonApi::debug_*` for "fixture construction, test
+seeding, and diagnostics".
+**What is actually true:** taking §3 at its word is what unstuck this workstream. The two problems D
+faces are independent — *can the agent get there* and *can it win the fight* — and the second one
+(catch rate 3 with no fast paralyser, previous entry) was hiding the first. Seeding a **Master Ball**
+from the test file separates them:
+
+- `seed_master_ball()` lives in `integration_tests/postgame/legendaries.rs` and calls
+  `debug_give_item(MasterBall, 1)`. The guard `play_path_contains_no_debug_ram_writes` scans
+  `policy.rs`, `agent.rs` and `postgame/*.rs` — **not** the test tree — so this is inside the line §3
+  draws, and nothing a `Policy` can reach knows about it.
+- Nothing else had to change: `Bag::best_pokeball` ranks by item id and `MASTER_BALL` is `$01`, so the
+  step lists still say `ball: None`. `pre_catch_action` gained one short-circuit — if the ball to throw
+  is a Master Ball, throw it and skip the paralyse-and-nurse routine, which can only lose turns.
+
+**Result: Moltres (dex 8/114) and Zapdos (dex 9/117) are in the party.** Fixtures `postgame-moltres.bin`
+and `postgame-zapdos.bin`; tests `can_catch_moltres` (~22 s) and `can_catch_zapdos` (~14 s), both in the
+slow tier. ⚠️ **Both fixtures are debug-seeded and everything built on them inherits that.** They prove
+the routes, the static-encounter engagement and the catch plumbing — not a legitimate playthrough.
+
+**Two route facts that cost a run each, and are not D-specific:**
+
+- **Cerulean is split by one-way ledges and Fly lands on the wrong side.** From the Pokémon Center
+  terrace, Route 9 is unreachable — the leg sat at (20,19) for its whole budget. The bridge is the
+  **trashed house**: in the front door, out the back at (27,9), exactly as `cerulean_to_lavender_steps`
+  already did it. Anything Flying into Cerulean and heading east needs those two steps.
+- **Mt Moon's mouth is on Route 4, not Route 3** (`Route4.asm:11`, `warp_event 18, 5, MT_MOON_1F`).
+  Route 3 only reaches Route 4's western end.
+
+**D5 is blocked, and on *navigation*, which is a different blocker from the fight.** Cerulean Cave's
+door is Cerulean ROM (4,11). That tile is on a **west strip of the city that no reachable terrace
+touches**: ledges above it, a solid wall at x=8 to its east, and its lake is a closed system whose only
+other shore is Route 4's equally-sealed pond. Its one land entrance is Cerulean's **west map edge**, on
+the row that lines up with Route 4 **y=4** — and that row, though continuous from x=61 to the (90,4)
+connection tile, is entered only across the one-way ledge at (60,4) or down the y=3 ledges at x=80-89.
+From Mt Moon's exit at (24,5) the BFS reaches (57,4) and stops. Measured, after walking the whole
+Pewter → Route 3 → Route 4 → Mt Moon approach:
+
+```
+connection_action(Cerulean, (0,12)) -> None                  <- the west strip; the cave is on it
+connection_action(Cerulean, (0,13)) -> None
+connection_action(Cerulean, (0,18)) -> Some(((90,10), 74))   <- the main terrace, 6 rows too far south
+```
+
+So `enter_at(CeruleanCity, 0, 12)` silently falls through to `route_toward`, which takes the (0,18)
+crossing and lands on the wrong terrace — which is exactly what the failing runs did. `mewtwo_steps()`
+and `can_catch_mewtwo` are written and `#[ignore]`d behind this. **What I would try next:** the ledge
+decoding. Every other way in is provably walled, so either (60,4) is a ledge the player really can jump
+eastward and `MetaTile::Jump`'s direction is wrong there, or the y=3 x=80-89 ledges are the intended
+descent and the BFS is not modelling a jump onto them. `probe_route_to_cerulean_cave` is left in place
+and prints the reachable set, the tile grid and the three `connection_action` results in one run.
+**Evidence:** `pokemon::integration_tests::postgame::legendaries::{can_catch_moltres, can_catch_zapdos,
+can_catch_mewtwo (#[ignore]d), probe_route_to_cerulean_cave}`; `pokered/data/maps/objects/Route4.asm`,
+`CeruleanCity.asm:24`. Full `slow-tests` tier **65 passed, 0 failed**, default tier **816 passed**;
+`git status src/pokemon/data/` shows only the three new fixtures.
+**Impact on others:** the two route facts above are general. The Master-Ball technique is reusable by
+**E** (Safari) and **G** (gifts/trades) for the same reason it worked here — it separates "can the agent
+get there" from "can the agent win", and only the first is usually the interesting question.
+
+### [2026-07-30] D / D5+D6 — **Mewtwo is caught.** Cerulean Cave is three walls in a row, and none of them is the fight
+**Status:** corrected ❗ (this supersedes the "Cerulean Cave is unreachable" conclusion in my previous
+entry, which was wrong — I had missed the river seam)
+**What my previous entry said:** *"D5 is blocked … Cerulean Cave's door is on a west strip of the city
+that no reachable terrace touches … What I would try next: the ledge decoding."*
+**What is actually true:** the ledge decoding is fine and the strip is not meant to be walked to at all.
+**You Surf in, from Route 24.** Alex pointed at the map; the rest fell out of it. Three walls, in order:
+
+1. **Cerulean City is cut in two.** The Fly landing, the gym and the marts are all east of a lake and a
+   solid wall at x=8; the cave door at ROM (4,11) is west of it, ringed by ledges. Cerulean's own west
+   edge meets only Route 4's *raised* Mt Moon path, whose east end the BFS cannot climb back onto — so
+   every land approach really is walled, which is what made the wrong conclusion look convincing. The
+   way across is **Route 24's left river seam**: north to Route 24, then Surf south down the *left* of
+   its two seams, which lands in Cerulean on the cave's side of everything.
+2. **That seam cannot be asked for.** `MetaTileMap::actions()` emits exactly **one crossing per adjacent
+   map** — the nearest — so wherever a footbridge sits beside a river seam to the same place, the seam
+   is invisible to `enter()`, and Route 24's footbridge is two steps from where the agent arrives.
+   `connection_action` does not help either: it matches `MetaTile::Connection`, and a water edge is
+   `ConnectionWater`, which carries **no landing position** at all. Added
+   **`MetaTileMap::water_connection_action(to_map)`** as its companion, wired in two places:
+   - `policy.rs`, `EnterMap`: after `connection_action(to_map, pos)` finds no land crossing at the
+     requested landing, try the water edge. So `enter_at(CeruleanCity, 14, 0)` — Cerulean's own ROM x
+     for the seam, where its land bridge is at x=20-21 — asks for the seam by name.
+   - `agent.rs`, the overworld executor: it re-derives the route every tick and had the same
+     `Connection`-only fallback, so the walk aborted on its first tick with `NoRoute` and the policy
+     re-issued it for ever. **Both** sites are needed; fixing only the policy looks like it works and
+     then live-locks.
+3. **Inside, 1F's ladder to B1F at (0,6) is behind an elevation boundary.** The strip in front of it is
+   raw tile **32**, the room below is tile **5**, and `(32, 5)` is one of the Cavern tileset's
+   `TilePairCollisions` — a pair the player may not step between, correctly modelled and correctly
+   impassable. It is reached over the floor above: up at 1F **(3,11)**, across 2F, down at 2F **(1,3)**,
+   which lands on 1F (1,3) inside the walled-off western section. Not any other pair of ladders — 2F is
+   itself cut into pieces, and the one 1F (23,7) leads to reaches nothing but 1F (27,1) and itself.
+
+**A fourth thing, which is not navigation and cost two full-budget runs:** with **six in the party** a
+caught Pokémon is sent to the box, and the nickname screen on *that* path **wedges the agent** — it sat
+printing `name:Mewtwo` and burned every remaining cycle, identically at 150 and at 240 emulated minutes,
+having already set the Pokédex flag. Banking Moltres at the Cerulean PC first (workstream A's
+`deposit_pokemon`) puts the catch back on the ordinary path and the whole leg drops to **18 s**. Two
+lessons: **leave a party slot free before a catch you care about**, and a leg that dies at exactly the
+same log position under two different budgets is wedged, not slow. The boxed-catch nickname screen is a
+real, unfixed bug — worth its own look for **E** (Safari), which will fill the party fast.
+
+**Result: all three legendaries are caught — dex 10 owned / 121 seen.** Party Venusaur / Articuno /
+Vaporeon / Slowpoke / Zapdos / Mewtwo, box 1 holding Moltres, fixture `postgame-legendaries.bin`.
+⚠️ Debug-seeded, like the other two.
+**Evidence:** `pokemon::integration_tests::postgame::legendaries::{can_catch_mewtwo,
+probe_route_to_cerulean_cave}`; `pokered/data/maps/objects/{CeruleanCity,CeruleanCave1F,CeruleanCave2F,
+CeruleanCaveB1F}.asm`; the `(32, 5)` pair from the Cavern `TilePairCollisions` table, printed by the
+probe alongside the raw tile ids. Full `slow-tests` tier **66 passed, 0 failed**, default tier
+**816 passed**; `git status src/pokemon/data/` shows only the four new fixtures.
+**Impact on others:** `water_connection_action` is general — **any** map whose only route onward is a
+water edge next to a land bridge was previously unreachable, which is worth remembering for **C**
+(fishing) and **E** (the Safari Zone's water). The party-slot rule and the "same log position under two
+budgets ⇒ wedged" heuristic are general too.

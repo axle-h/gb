@@ -1005,6 +1005,12 @@ impl PokemonAgent {
                 } else if matches!(destination, MetaTile::Warp { .. })
                     && game_state.map.player_tile() == destination
                     && is_on_map_border(&game_state.map)
+                    // …and it is *not* one of the tileset's step-on warp tiles. Being on the border is
+                    // not enough: Victory Road 3F's ladder down to 2F sits at (2,0) and is a Cavern
+                    // step-on tile, so the outward press just walks into the top wall — the agent sat
+                    // there for the whole budget. Those go to the route branch below, which builds the
+                    // step-off/step-on pair that re-fires them.
+                    && !game_state.map.is_step_on_warp(game_state.map.player_position)
                 {
                     // Player is standing on an EDGE warp tile (at y=0, y=max, x=0, or x=max).
                     // These only fire when the player presses the outward direction off the map
@@ -1063,6 +1069,12 @@ impl PokemonAgent {
                         .or_else(|| match destination {
                             MetaTile::Connection { to_map, to_position } =>
                                 game_state.map.connection_action(to_map, to_position),
+                            // Nor is a water edge, when a land bridge to the same map is nearer —
+                            // `actions()` emits one crossing per adjacent map. Without this the walk to
+                            // one aborts on its first tick with `NoRoute` and the policy re-issues it
+                            // for ever (Route 24 → Cerulean, the only way to Cerulean Cave).
+                            MetaTile::ConnectionWater(to_map) =>
+                                game_state.map.water_connection_action(to_map),
                             _ => None,
                         });
                     match action {

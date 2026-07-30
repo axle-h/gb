@@ -101,5 +101,11 @@ pub enum ItemId {
     Tm27Fissure = 0xE3,     // TM01(0xC9) + 26
     Tm28Dig = 0xE4,      // TM01(0xC9) + 27 — DIG doubles as a reusable Escape Rope out of any cave
     Tm34Bide = 0xEA,     // TM01(0xC9) + 33 — BIDE, the bag's most useless item: tossed to make room
+    /// TM01(0xC9) + 44 — THUNDER WAVE, a free pickup on Route 24 and the **only** paralysis move the
+    /// party can learn (Slowpoke is the sole compatible member). Workstream D throws balls at the
+    /// legendaries behind it: a status ailment is worth 12 off Rand1 in the Gen 1 catch formula, which
+    /// on a catch-rate-3 target is the difference between ~2 % and ~9 % per ball. See
+    /// `postgame::legendaries`.
+    Tm45ThunderWave = 0xF5,
 
 }

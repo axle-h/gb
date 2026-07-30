@@ -21,6 +21,9 @@ pub struct MetaTileMap {
     /// Bottom-left raw tile ID of each meta-tile (parallel to `meta_tiles`). Used to evaluate
     /// `tile_pair_collisions` during BFS. `0xFF` for border/connection cells.
     pub raw_tile_ids: Vec<u8>,
+    /// This map's tileset. Kept so per-tileset ROM tables can be consulted against `raw_tile_ids` —
+    /// currently [`crate::pokemon::map_header::TileSetId::warp_tile_ids`], via [`Self::is_step_on_warp`].
+    pub tileset: crate::pokemon::map_header::TileSetId,
     /// Unordered raw-tile-ID pairs the player may not walk between in this tileset (elevation
     /// boundaries from pokered `TilePairCollisionsLand`). Empty for most tilesets.
     pub tile_pair_collisions: Vec<(u8, u8)>,
@@ -179,6 +182,7 @@ impl MetaTileMap {
                 })
                 .collect(),
             raw_tile_ids: map.metadata.raw_tile_ids.clone(),
+            tileset: map.metadata.map_header.tileset,
             tile_pair_collisions: map.metadata.tile_pair_collisions.clone(),
             tile_pair_collisions_water: map.metadata.tile_pair_collisions_water.clone(),
             spinners: spinner_table(map.metadata.map).iter().map(|&(x, y, tx, ty)| {
@@ -249,6 +253,16 @@ impl MetaTileMap {
 
     pub fn tile_at(&self, point: Point8) -> MetaTile {
         self.meta_tiles[point.x as usize + point.y as usize * self.width]
+    }
+
+    /// True if the warp on `point` is the kind that fires the moment you **step onto** it
+    /// (`CheckWarpsNoCollision`), rather than the map-edge kind that needs the outward direction
+    /// pressed. See [`crate::pokemon::map_header::TileSetId::warp_tile_ids`] for why the two cannot be
+    /// told apart by position.
+    pub fn is_step_on_warp(&self, point: Point8) -> bool {
+        let index = point.x as usize + point.y as usize * self.width;
+        self.raw_tile_ids.get(index)
+            .is_some_and(|id| self.tileset.warp_tile_ids().contains(id))
     }
 
     /// Bounds-checked `tile_at` — `None` if `point` is off the map.
@@ -858,6 +872,42 @@ impl MetaTileMap {
         Some(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route })
     }
 
+    /// Route to the nearest reachable **water** edge into `to_map` — a `ConnectionWater` tile, crossed
+    /// by Surfing off the map edge.
+    ///
+    /// The companion to [`Self::connection_action`], and needed for the same reason: `actions()` emits
+    /// exactly one crossing per adjacent map, the nearest one, so wherever a land bridge and a water
+    /// edge both lead to the same map the land bridge always wins and the water edge is unaskable.
+    /// Route 24 → Cerulean is the case that motivated it: the footbridge is two steps away, while the
+    /// river seam beside it is the *only* way into the half of Cerulean that holds Cerulean Cave.
+    ///
+    /// `ConnectionWater` carries no landing position (the game decides where you surface), so unlike
+    /// `connection_action` there is nothing to disambiguate on — this returns the nearest such edge.
+    pub fn water_connection_action(&self, to_map: Map) -> Option<OverworldAction> {
+        let (full_dist, full_from) = self.bfs_from_player();
+        let (dest, tile) = self.meta_tiles.iter().enumerate()
+            .filter_map(|(i, t)| match t {
+                MetaTile::ConnectionWater(m) if *m == to_map => {
+                    let p = Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
+                    full_dist.get(&p).map(|d| (*d, p, *t))
+                }
+                _ => None,
+            })
+            .min_by_key(|(d, _, _)| *d)
+            .map(|(_, p, t)| (p, t))?;
+
+        let mut route = vec![];
+        let mut pos = dest;
+        while let Some(&(prev, dir)) = full_from.get(&pos) { route.push(dir); pos = prev; }
+        route.reverse();
+        let enter_dir = if dest.y == 0 { JoypadButton::Up }
+            else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
+            else if dest.x == 0 { JoypadButton::Left }
+            else { JoypadButton::Right };
+        route.push(enter_dir);
+        Some(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route })
+    }
+
     /// The tile directly in front of the player (based on facing), if within bounds.
     pub fn tile_in_front(&self) -> Option<(Point8, MetaTile)> {
         let p = self.player_position;
@@ -1095,7 +1145,8 @@ mod boulder_solver_tests {
         (MetaTileMap {
             player_position: player, player_direction: PlayerFacingDirection::Down,
             map: Map::VictoryRoad1F, width: w, height: h, meta_tiles: meta,
-            raw_tile_ids: vec![0; w * h], tile_pair_collisions: vec![],
+            raw_tile_ids: vec![0; w * h], tileset: crate::pokemon::map_header::TileSetId::Cavern,
+            tile_pair_collisions: vec![],
             tile_pair_collisions_water: vec![], sprites,
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
             spinners: HashMap::new(), can_surf: false,

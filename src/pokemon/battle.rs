@@ -18,6 +18,14 @@ pub struct BattleState {
     pub enemy:             PokemonSummary,
     /// 0-based index into the pokemon party for the currently-active Pokemon.
     pub active_party_slot: u8,
+    /// The enemy is part-way through a **partial-trapping move** — Wrap, Fire Spin, Clamp, Bind.
+    ///
+    /// This is not cosmetic: `MainInBattleLoop` checks exactly this bit and, when it is set, replaces
+    /// whatever move the player chose with `CANNOT_MOVE` (`engine/battle/core.asm:316-322`). The battle
+    /// menu still opens, so **items, switching and running all still work** — only moves are negated.
+    /// A policy that keeps re-picking a move while this is set gets nothing done, which is the Gen 1
+    /// "wrap lock" and is exactly what stops a slow Pokémon ever landing Thunder Wave on Moltres.
+    pub enemy_trapping: bool,
 }
 
 /// Action the player can take on their turn.
@@ -140,6 +148,9 @@ impl BattleStateReader for MMU {
                 },
             },
             active_party_slot,
+            // `wEnemyBattleStatus1` bit 5 = `USING_TRAPPING_MOVE`
+            // (`pokered/constants/battle_constants.asm:86`).
+            enemy_trapping: self.read_pointer(&pokered_symbols::wEnemyBattleStatus1) & (1 << 5) != 0,
         })
     }
 }

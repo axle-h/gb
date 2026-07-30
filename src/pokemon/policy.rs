@@ -1966,6 +1966,15 @@ impl Policy for DeterministicPolicy {
                         if let Some(action) = state.map.connection_action(to_map, pos) {
                             return Some(action);
                         }
+                        // No *land* crossing lands there. Then the caller is asking for the far side of
+                        // a water edge, whose `ConnectionWater` tile carries no landing position and
+                        // which `actions()` only ever emits when it is the nearest route to that map —
+                        // so wherever a footbridge sits beside a river seam, the seam is otherwise
+                        // unaskable. Route 24 → Cerulean is exactly that, and the seam is the only way
+                        // into the half of Cerulean that holds Cerulean Cave.
+                        if let Some(action) = state.map.water_connection_action(to_map) {
+                            return Some(action);
+                        }
                     }
                     // Recovery: the direct transition isn't on the current map. This happens when a
                     // teleport back into already-explored territory desyncs the linear EnterMap
@@ -2024,8 +2033,17 @@ impl Policy for DeterministicPolicy {
                                 // Not actionable yet. Right after a warp the sprite list is briefly
                                 // unsettled, so wait for it rather than wandering; past the bound the
                                 // target really is walled off (or already beaten) and we move on.
+                                //
+                                // A *hidden* sprite is a different thing and gets a much shorter fuse:
+                                // a static encounter's sprite vanishes the moment its battle starts and
+                                // does not come back until the map is reloaded, so if we are still here
+                                // and it is hidden, the encounter happened and was not won (we fled, or
+                                // blacked out). Nothing on this map will bring it back — pop, and let
+                                // the caller's next step warp out and back in to respawn it.
                                 self.catch_wander_stuck += 1;
-                                if self.catch_wander_stuck < 400 {
+                                let spent = state.map.sprites.iter()
+                                    .any(|s| s.hidden && s.name == species.to_string());
+                                if self.catch_wander_stuck < if spent { 50 } else { 400 } {
                                     None
                                 } else {
                                     println!("[policy] {species} is on {on_map} but unreachable (gave up)");
@@ -2693,6 +2711,12 @@ impl Policy for DeterministicPolicy {
                 if let Some(best_pokeball) = chosen {
                     if let Some(use_pokeball_action) = actions.iter()
                         .find(|a| matches!(a, BattleAction::UseItem { item, .. } if item.id == best_pokeball.id )) {
+
+                        // Catch-rate-3 targets (the legendaries) are paralysed and then only thrown at
+                        // — never weakened. See `postgame::legendaries::pre_catch_action`.
+                        if let Some(action) = crate::pokemon::postgame::legendaries::pre_catch_action(state, *species, &actions, Some(use_pokeball_action)) {
+                            return Some(action);
+                        }
 
                         // If enemy HP > 50%, try to weaken it first with the move that does the most
                         // damage without knocking the Pokémon out — but NOT for a Master Ball (100%
