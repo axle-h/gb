@@ -107,6 +107,10 @@ impl BlipBuffer {
         self.sample_rate
     }
 
+    pub fn clock_rate(&self) -> u32 {
+        self.clock_rate
+    }
+
     pub fn factor(&self) -> u64 {
         self.factor
     }

@@ -163,7 +163,13 @@ invalidate the port's correctness fixtures.
 emulated minutes, no aliasing on a 15 kHz square, and surviving a minute of emulation with no audio
 consumer at all (which is what the headless integration tests do).
 
-For an ear check, render a few seconds to `target/test-artifacts/`:
+**Fast-forward.** The number keys `1`–`5` in the SDL UI scale emulation speed, and `render.rs`
+mirrors that into `Audio::set_emulation_speed` so the resampler scales its *source clock* to match.
+Without it a sped-up emulator simply produces audio faster than the device drains it and the queue
+backs up. The speed is derived from `cycle_duration`, not from the key pressed, so it tracks what the
+emulator actually targets — `REALTIME_CYCLE_DURATION / 5` truncates to 190 ns, which is 5.016×.
+
+For an ear check, render a few seconds to `target/test-artifacts/` (1×, 3× and 5×):
 
 ```bash
 cargo test --release --bin gb -- audio::reference::tests::render_reference_wav --exact --ignored --nocapture

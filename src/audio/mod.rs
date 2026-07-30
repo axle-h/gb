@@ -73,6 +73,17 @@ impl Audio {
         self.output.set_sample_rate(sample_rate);
     }
 
+    /// Tell the resampler how fast the emulator is running relative to real time (1.0 = realtime).
+    ///
+    /// Without this, fast-forwarding produces audio faster than the sink drains it: the queue grows
+    /// without bound, latency climbs, and the buffer eventually starts dropping the backlog. With
+    /// it, the sped-up audio plays back sped-up — higher pitched, like fast-forwarding a tape.
+    ///
+    /// Like the output sample rate, this is not part of the serialised state.
+    pub fn set_emulation_speed(&mut self, speed: f64) {
+        self.output.set_speed(speed);
+    }
+
     /// Fill `out` with interleaved L/R frames, returning the number of *frames* written; zero means
     /// nothing was ready.
     ///
