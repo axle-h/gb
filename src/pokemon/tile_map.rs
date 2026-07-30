@@ -41,9 +41,14 @@ pub struct MetaTileMap {
     /// the ROM `RocketHideout{2,3}ArrowTilePlayerMovement` tables). The BFS treats stepping onto an
     /// arrow as landing at its destination. Empty for maps without arrow tiles.
     pub spinners: HashMap<Point8, Point8>,
-    /// True when the player can Surf (Soul Badge + a party mon that knows Surf). When set, the BFS
+    /// True when the player can Surf **here**: Soul Badge, a party mon that knows Surf, and not being
+    /// force-ridden on the bike (`IsSurfingAllowed` refuses Surf on Cycling Road, and Routes 16–18 run
+    /// along the sea, so believing otherwise routes the BFS straight down the water). When set, the BFS
     /// treats `Water` tiles as passable so routes cross water; the agent mounts Surf at the land↔water
     /// boundary. Set by `game_state()` after construction (the map builder has no party access).
+    ///
+    /// `IsSurfingAllowed`'s *other* refusal — Seafoam's "current is much too fast" shore tiles — is
+    /// modelled separately as [`Self::no_surf_mount`], because it is per-tile rather than per-map.
     pub can_surf: bool,
     /// Strength boulder-switch tiles on this map (invisible pressure plates, from the ROM map scripts):
     /// push a boulder onto one to open its barrier. Exposed so a policy (deterministic or LLM) can

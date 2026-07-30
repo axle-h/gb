@@ -324,7 +324,19 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             })
         }
 
-        let can_use_surf = badges.contains(Badge::SoulBadge) && has_move(&pokemon, PokemonMoveName::Surf);
+        // `BIT_ALWAYS_ON_BIKE` (wStatusFlags6 bit 5) is set while the player is forced onto the bike —
+        // i.e. on Cycling Road — and `IsSurfingAllowed` refuses Surf outright there
+        // (`engine/overworld/field_move_messages.asm:21-45`: *"Surfing isn't allowed on the Cycling
+        // Road…"*, answered with "Cycling is fun! Forget SURFing!"). It has to be part of `can_surf`
+        // because Routes 16–18 run **along the sea**: with Surf believed available, the BFS routes
+        // straight down the water rather than along the road, and the agent then stands on the last dry
+        // tile trying to mount Surf for the rest of the budget. Discovered riding Cycling Road for
+        // workstream B — see `docs/postgame-coverage-plan.md` §11.
+        const BIT_ALWAYS_ON_BIKE: u8 = 1 << 5;
+        let forced_onto_bike = mmu.read_pointer(&pokered_symbols::wStatusFlags6) & BIT_ALWAYS_ON_BIKE != 0;
+        let can_use_surf = badges.contains(Badge::SoulBadge)
+            && has_move(&pokemon, PokemonMoveName::Surf)
+            && !forced_onto_bike;
         let mut map = MetaTileMap::new(&match &self.map_cache {
             Some(c) => c.read_current_map(mmu)?,
             None    => mmu.read_current_map()?,

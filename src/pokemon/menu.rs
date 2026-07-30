@@ -152,6 +152,29 @@ impl MenuState {
             && self.top_menu_item_y == 4
     }
 
+    /// True when the party menu's **field-move box** is the live menu — the little
+    /// CUT/SURF/STRENGTH/FLY list opened by choosing a mon from the party screen.
+    ///
+    /// Needs both halves, because each is wrong on its own and each was wrong in this codebase:
+    ///
+    /// - `top_menu_item_y` counts **down from 12 by two per field move** the mon knows
+    ///   (`engine/menus/start_sub_menus.asm:36-47`), so it is 10 for one field move, 8 for two, 6 for
+    ///   three and 4 for four. Testing `== 10` silently misses every mon that knows more than one, which
+    ///   is how a Strength/Dig HM-slave gets driven into the wrong menu entry. `top_menu_item_x` is no
+    ///   help at all: it is `wFieldMovesLeftmostXCoord`, pulled left to fit the longest move name, so it
+    ///   is 12 for `CUT` and 10 for `STRENGTH` (`engine/menus/text_box.asm:382-492`).
+    /// - `text_box_id` is only written when a text box is **drawn**, so it lingers on
+    ///   `FieldMoveMonMenu` long after the menu is gone — a Fly leaves it set for the whole flight — and
+    ///   a driver that trusts it alone presses A into whatever menu is really open (in practice: the
+    ///   START menu, selecting POKéDEX).
+    ///
+    /// Together they are exact: the geometry says a box of that shape is configured, the id says it is
+    /// what is on screen right now rather than a message box drawn over it.
+    pub fn is_field_move_menu(&self) -> bool {
+        self.text_box_id == TextBoxId::FieldMoveMonMenu
+            && matches!(self.top_menu_item_y, 4 | 6 | 8 | 10)
+    }
+
     pub fn is_yes_no_menu(&self) -> bool {
         self.text_box_id == TextBoxId::TwoOptionMenu
     }

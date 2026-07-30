@@ -240,6 +240,12 @@ fn probe_coverage() {
         ("postgame-post-credits", include_bytes!("../data/postgame-post-credits.bin")),
         ("postgame-phase0", include_bytes!("../data/postgame-phase0.bin")),
         ("postgame-pc-box", include_bytes!("../data/postgame-pc-box.bin")),
+        // Workstream B's chain: voucher → Bicycle → HM02 → Fly proven → Cycling Road.
+        ("postgame-bike-voucher", include_bytes!("../data/postgame-bike-voucher.bin")),
+        ("postgame-bicycle", include_bytes!("../data/postgame-bicycle.bin")),
+        ("postgame-hm02", include_bytes!("../data/postgame-hm02.bin")),
+        ("postgame-fly", include_bytes!("../data/postgame-fly.bin")),
+        ("postgame-fly-bike", include_bytes!("../data/postgame-fly-bike.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);
