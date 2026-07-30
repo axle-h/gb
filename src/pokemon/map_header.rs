@@ -5,9 +5,10 @@ use bitflags::{bitflags, Flags};
 use itertools::Itertools;
 use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr)]
 #[repr(u8)]
 pub enum TileSetId {
+    #[default]
     Overworld = 0, // OVERWORLD
     RedsHouse1 = 1, // REDS_HOUSE_1
     Mart = 2, // MART
@@ -38,6 +39,40 @@ impl TileSetId {
     const GYM_CUT_TREE: u8 = 0x50;
     const OVERWORLD_CUT_TREE: u8 = 0x3d;
     
+    /// Raw tile IDs in this tileset that warp the player the moment they **step onto** them —
+    /// `pokered/data/tilesets/warp_tile_ids.asm`, read by `CheckWarpsNoCollision`.
+    ///
+    /// The distinction matters to anything driving a player who is *already standing* on a warp tile.
+    /// A tile in this list re-fires if you step off and back on; a warp tile that is **not** in it (the
+    /// map-edge kind) only fires when you press the outward direction. Guessing from geometry gets
+    /// Victory Road 3F's (2,0) ladder wrong — it sits on the map border and is a step-on tile, so the
+    /// outward press does nothing at all and the agent pushes into the wall for ever.
+    pub fn warp_tile_ids(&self) -> &'static [u8] {
+        match self {
+            Self::Overworld => &[0x1B, 0x58],
+            // The `db` entries in that file fall through into the next label, so Gate/Museum/
+            // ForestGate pick up RedsHouse's two ids as well, Facility picks up Cemetery's and
+            // Underground's, and Cemetery picks up Underground's.
+            Self::ForestGate | Self::Museum | Self::Gate => &[0x3B, 0x1A, 0x1C],
+            Self::RedsHouse1 | Self::RedsHouse2 => &[0x1A, 0x1C],
+            Self::Mart | Self::Pokecenter => &[0x5E],
+            Self::Forest => &[0x5A, 0x5C, 0x3A],
+            Self::Dojo | Self::Gym => &[0x4A],
+            Self::House => &[0x54, 0x5C, 0x32],
+            Self::Ship => &[0x37, 0x39, 0x1E, 0x4A],
+            Self::Interior => &[0x15, 0x55, 0x04],
+            Self::Cavern => &[0x18, 0x1A, 0x22],
+            Self::Lobby => &[0x1A, 0x1C, 0x38],
+            Self::Mansion => &[0x1A, 0x1C, 0x53],
+            Self::Lab => &[0x34],
+            Self::Facility => &[0x43, 0x58, 0x20, 0x1B, 0x13],
+            Self::Cemetery => &[0x1B, 0x13],
+            Self::Underground => &[0x13],
+            Self::Plateau => &[0x1B, 0x3B],
+            Self::ShipPort | Self::Club => &[],
+        }
+    }
+
     pub fn cut_tree_tile_id(&self) -> Option<u8> {
         match self {  
             Self::Overworld => Some(Self::OVERWORLD_CUT_TREE),
