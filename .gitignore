@@ -3,3 +3,5 @@
 # Test failure artifacts now go to target/test-artifacts/ (save_failure_artifacts), already ignored.
 
 .claude/
+# Compiled golden-vector generator (tools/blip-golden/build.sh builds into target/)
+/tools/blip-golden/gen_golden

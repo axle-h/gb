@@ -1,10 +1,9 @@
-use std::collections::VecDeque;
 use bincode::{BorrowDecode, Decode, Encode};
 use bincode::de::{BorrowDecoder, Decoder};
 use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
 use frame_sequencer::FrameSequencer;
-use filters::CapacitanceFilter;
+use blip::BlipStereo;
 use master_volume::MasterVolume;
 use square_channel::SquareWaveChannel;
 use crate::audio::noise_channel::NoiseChannel;
@@ -25,8 +24,12 @@ pub mod sample;
 pub mod dac;
 pub mod wave_channel;
 pub mod noise_channel;
-mod filters;
+pub mod blip;
 mod timer;
+#[cfg(test)]
+mod reference;
+#[cfg(test)]
+mod wav;
 
 pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 
@@ -40,12 +43,9 @@ pub struct Audio {
     channel2: SquareWaveChannel,
     channel3: WaveChannel,
     channel4: NoiseChannel,
-    high_pass_filter: CapacitanceFilter,
-    buffer: VecDeque<f32>,
-}
-
-fn default_buffer() -> VecDeque<f32> {
-    VecDeque::with_capacity(2 * GB_SAMPLE_RATE / 10) // buffer for 100ms of audio, 2 channels
+    /// Band-limited synthesis and resampling to the sink's rate. Also supplies the DC blocker that
+    /// used to be a separate `CapacitanceFilter` — see [`blip::DEFAULT_BASS_HZ`].
+    output: BlipStereo,
 }
 
 impl Default for Audio {
@@ -59,15 +59,28 @@ impl Default for Audio {
             channel2: SquareWaveChannel::channel2(),
             channel3: WaveChannel::default(),
             channel4: NoiseChannel::default(),
-            high_pass_filter: CapacitanceFilter::default(),
-            buffer: default_buffer()
+            output: BlipStereo::default(),
         }
     }
 }
 
 impl Audio {
-    pub fn buffer_mut(&mut self) -> &mut VecDeque<f32> {
-        &mut self.buffer
+    /// Retune the resampler to the sink's rate.
+    ///
+    /// Not part of the serialised state (see the `Encode`/`Decode` impls below), so a caller that
+    /// loads a save state has to re-apply this afterwards.
+    pub fn set_output_sample_rate(&mut self, sample_rate: u32) {
+        self.output.set_sample_rate(sample_rate);
+    }
+
+    /// Fill `out` with interleaved L/R frames, returning the number of *frames* written; zero means
+    /// nothing was ready.
+    ///
+    /// Knows nothing about the sink: an audio queue, a WAV file and a network stream all look the
+    /// same from here. [`BlipStereo::read_interleaved_i16`] is the 16-bit equivalent, if a sink ever
+    /// wants one.
+    pub fn read_samples_f32(&mut self, out: &mut [f32]) -> usize {
+        self.output.read_interleaved_f32(out)
     }
 
     fn reset(&mut self) {
@@ -78,7 +91,9 @@ impl Audio {
         self.channel2 = SquareWaveChannel::channel2();
         self.channel3.reset(); // not all of the wave channel is reset
         self.channel4 = NoiseChannel::default();
-        self.buffer.clear();
+        // Deliberately *not* clearing the output buffer, which is what the old ring buffer did here.
+        // A power-off already drives the mix to zero through `push_sample`, so the synth ramps down
+        // on its own; throwing away audio the sink has not read yet would just add a click.
     }
 
     pub fn update(&mut self, delta: MachineCycles, div_clocks: DividerClocks) {
@@ -109,16 +124,18 @@ impl Audio {
         self.push_sample(delta, sample);
     }
 
+    /// Hand the mixed output level to the resampler and advance its clock by `delta`.
+    ///
+    /// The level is reported as changing at the *start* of the window, which is what the old
+    /// zero-order-hold loop here effectively did when it pushed `delta` copies of one value.
+    ///
+    /// There is no frame-time bookkeeping because there does not need to be any: the buffer's time
+    /// cursor is 16.16 fixed point and carries its fractional part across calls, so ending a frame
+    /// every instruction still lands every transition on the correct sub-sample phase. It also
+    /// keeps latency at the kernel tail (8 output samples) rather than a chunk size.
     fn push_sample(&mut self, delta: MachineCycles, sample: AudioSample) {
-        for _ in 0..delta.m_cycles() {
-            let filtered_sample = self.high_pass_filter.process(sample);
-            self.buffer.push_back(filtered_sample.left);
-            self.buffer.push_back(filtered_sample.right);
-            if self.buffer.len() >= self.buffer.capacity() {
-                // audio buffer overflow :-(
-                self.buffer.drain(..2);
-            }
-        }
+        self.output.update(sample);
+        self.output.end_frame(delta.m_cycles() as u32);
     }
 
     pub fn nr52_master_control(&self) -> u8 {
@@ -305,8 +322,7 @@ impl<__Context> Decode<__Context> for Audio {
             channel2: Decode::decode(decoder)?,
             channel3: Decode::decode(decoder)?,
             channel4: Decode::decode(decoder)?,
-            high_pass_filter: CapacitanceFilter::default(),
-            buffer: default_buffer(),
+            output: BlipStereo::default(),
         })
     }
 }
@@ -322,8 +338,7 @@ impl<'__de, __Context> BorrowDecode<'__de, __Context> for Audio {
             channel2: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
             channel3: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
             channel4: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            high_pass_filter: CapacitanceFilter::default(),
-            buffer: default_buffer(),
+            output: BlipStereo::default(),
         })
     }
 }

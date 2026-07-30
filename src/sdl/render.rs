@@ -2,14 +2,11 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use itertools::Itertools;
-use rubato::{Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction};
-use audioadapter::direct::InterleavedSlice;
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::pixels::PixelFormatEnum;
-use crate::audio::GB_SAMPLE_RATE;
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
 use crate::lcd_control::{TileDataMode, TileMapMode};
@@ -56,29 +53,12 @@ pub fn render() -> Result<(), String> {
     let audio_spec = audio_queue.spec();
     audio_queue.resume();
 
-    // Create audio resampler from Game Boy native frequency (1048576 Hz) to SDL2 frequency
-    // TODO use a much simpler resampler with lower latency and fewer dependencies
-    //      E.g. GameBoy audio is 1048576hz, to get to 48khz we need to resample by a factor of 1048576/48000 = 8192/375
-    //      So, (ref: https://en.wikipedia.org/wiki/Downsampling_(signal_processing)) we can:
-    //      1. Increase (resample) the sequence by a factor of 375 (i.e. insert 374 zeros between each sample)
-    //      2. Apply a low-pass filter (probably an FFT, not sure what the cut off frequency should be)
-    //      3. Decrease (resample) the sequence by a factor of 8192 (i.e. keep every 8192nd sample, simple decimation)
-    //      looks like this library might also work: https://slack.net/~ant/libs/audio.html#Blip_Buffer
-    let mut resampler = Async::<f32>::new_sinc(
-        audio_spec.freq as usize as f64 / GB_SAMPLE_RATE as f64,
-        2.0,  // max_resample_ratio_relative
-        SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
-        },
-        1024, // chunk_size, 1024 is a close common factor of the GB sample rate and 44100hz
-        audio_spec.channels as usize,
-        FixedAsync::Input,
-    ).map_err(|e| e.to_string())?;
-    let mut resampled_audio_buffer = vec![0.0f32; resampler.input_frames_max() * 2];
+    // The APU resamples itself, band-limited, straight to the sink's rate — see `audio::blip`. The
+    // rate is not part of the serialised state, so it has to be re-applied here (and again after any
+    // load_state).
+    gb.core_mut().mmu_mut().audio_mut().set_output_sample_rate(audio_spec.freq as u32);
+    // One UI iteration's worth of audio, with generous headroom. Reused every frame.
+    let mut audio_scratch = vec![0.0f32; audio_spec.freq as usize / 8 * 2];
 
     // Create texture creator for LCD rendering
     let texture_creator = canvas.texture_creator();
@@ -171,6 +151,9 @@ pub fn render() -> Result<(), String> {
                         }
                         Keycode::F9 => {
                             gb.load_state_from_file("pokemon-red.bin")?;
+                            // The resampler is not serialised, so a restored state comes back at
+                            // the default output rate.
+                            gb.core_mut().mmu_mut().audio_mut().set_output_sample_rate(audio_spec.freq as u32);
                         }
                         Keycode::F10 => {
                             let pokemon_api = PokemonApi::new(&mut gb);
@@ -257,20 +240,14 @@ pub fn render() -> Result<(), String> {
             }
         }
 
-        let audio_buffer = gb.core_mut().mmu_mut().audio_mut().buffer_mut();
-        let required_input_frames = resampler.input_frames_next();
-        let required_input_samples = required_input_frames * 2; // stereo
-        while audio_buffer.len() >= required_input_samples {
-            let audio_sample = audio_buffer.drain(..required_input_samples).collect::<Vec<f32>>();
-            let input_adapter = InterleavedSlice::new(&audio_sample, 2, audio_sample.len() / 2)
-                .map_err(|e| format!("could not create input_adapter: {}", e))?;
-            let output_frames = resampler.output_frames_next();
-            let mut output_adapter =
-                InterleavedSlice::new_mut(&mut resampled_audio_buffer, audio_spec.channels as usize, output_frames * 2)
-                    .map_err(|e| format!("could not create output_adapter: {}", e))?;
-            let (_, frames_written) = resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)
-                .map_err(|e| format!("Audio error: {}", e))?;
-            audio_queue.queue_audio(&resampled_audio_buffer[..frames_written * 2])?;
+        // Samples are ready as soon as they are synthesised, so there is no chunk to wait for —
+        // drain whatever has accumulated since the last iteration.
+        loop {
+            let frames = gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut audio_scratch);
+            if frames == 0 {
+                break;
+            }
+            audio_queue.queue_audio(&audio_scratch[..frames * 2])?;
         }
 
         if since_last_render >= TARGET_FRAME_TIME {
