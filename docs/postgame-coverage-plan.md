@@ -278,23 +278,39 @@ what you learn to §11. If a sub-step turns out to be three, split it here first
 
 **Why first among equals:** unblocks holding more than 6 Pokémon, which C, D, E, F and G all want.
 
-- [ ] **A1 — Read box state.** Expose `GameState.boxed_pokemon` (read `wBoxCount` + the SRAM box data
+- [x] **A1 — Read box state.** Expose `GameState.boxed_pokemon` (read `wBoxCount` + the SRAM box data
       via `encoding.rs`). *Observable:* the probe prints box contents, empty at first.
-- [ ] **A2 — Open Bill's PC.** Navigate the parent PC menu to the `BILL's PC` entry. ⚠️ The parent
+      *Done:* `GameState.boxed_pokemon` + `.current_box`, reader in `postgame::pc_box`. The box data is
+      in **WRAM**, not SRAM — see §11. Probe prints `box1: empty`; decode pinned by the default-tier
+      test `postgame::pc_box::reads_a_boxed_pokemon_out_of_wram`.
+- [x] **A2 — Open Bill's PC.** Navigate the parent PC menu to the `BILL's PC` entry. ⚠️ The parent
       menu's entry *list varies* — `PROF.OAK's PC` only appears once the Pokédex is owned, and a
       `<PKMN>LEAGUE` entry appears post-Champion — so **read the on-screen text, don't hard-code the
       index**. Same trap as the forget-move menu (`menu::is_forget_move_prompt`).
       *Observable:* a test asserting the `WITHDRAW/DEPOSIT/RELEASE` submenu text is on screen.
-- [ ] **A3 — Deposit.** `PolicyStep::DepositPokemon { slot }`. Submenu entries are `WITHDRAW <PKMN>` /
+      *Done:* `postgame::pc_box::can_open_bills_pc` — asserts the parent menu appears **before** the
+      submenu, so a deliberate selection is distinguished from falling into entry 0. Index 0 turns out
+      to be safe; it is the *label* that varies. See §11.
+- [x] **A3 — Deposit.** `PolicyStep::DepositPokemon { slot }`. Submenu entries are `WITHDRAW <PKMN>` /
       `DEPOSIT <PKMN>` / `RELEASE <PKMN>` / `CHANGE BOX` / `SEE YA!`, indices 0–4
       (`engine/pokemon/bills_pc.asm:341`). *Observable:* party count drops, `wBoxCount` rises.
-- [ ] **A4 — Withdraw.** `PolicyStep::WithdrawPokemon { box_slot }`. *Observable:* the same mon
+      *Done:* `PolicyStep::deposit_pokemon(slot, map)`; test `postgame::pc_box::can_deposit_a_pokemon`.
+      The submenu transcription in the plan is exactly right.
+- [x] **A4 — Withdraw.** `PolicyStep::WithdrawPokemon { box_slot }`. *Observable:* the same mon
       round-trips back into the party.
-- [ ] **A5 — Change box.** `PolicyStep::ChangeBox { n }`. 12 boxes of 20. ⚠️ Changing box **saves the
+      *Done:* `PolicyStep::withdraw_pokemon(box_slot, map)`; test
+      `postgame::pc_box::pokemon_round_trips_through_the_box`.
+- [x] **A5 — Change box.** `PolicyStep::ChangeBox { n }`. 12 boxes of 20. ⚠️ Changing box **saves the
       game** — expect a confirmation prompt and a pause. *Observable:* `wCurrentBoxNum` changes.
-- [ ] **A6 — Release.** `PolicyStep::ReleasePokemon { box_slot }`. *Observable:* `wBoxCount` drops.
-- [ ] **A7 — Full round-trip test + fixture.** Deposit, change box, withdraw; party/box counts match
+      *Done:* `PolicyStep::change_box(n, map)`; test `postgame::pc_box::can_change_box` switches away
+      and back and finds the banked mon still there. The first change also wipes SRAM — see §11.
+- [x] **A6 — Release.** `PolicyStep::ReleasePokemon { box_slot }`. *Observable:* `wBoxCount` drops.
+      *Done:* `PolicyStep::release_pokemon(box_slot, map)`; test `postgame::pc_box::can_release_a_pokemon`.
+- [x] **A7 — Full round-trip test + fixture.** Deposit, change box, withdraw; party/box counts match
       at every stage. *Observable:* `postgame-pc-box.bin` committed, test green.
+      *Done:* `postgame::pc_box::can_round_trip_a_pokemon_through_two_boxes` — deposit → box 2 → box 1
+      → withdraw, asserting `(party, box, open box)` between each. Fixture committed and added to
+      `probe_coverage`; it restores the party, so its value is the *capability*, not the arrangement.
 
 ### B — Fly, the Bicycle, and Cycling Road
 
@@ -488,7 +504,7 @@ Phase 0 (item storage, PC locations, seams, probe)
 | Stream | Owner | Entry fixture | Test | Status | Notes |
 |---|---|---|---|---|---|
 | 0 — foundation | claude-phase0 | `post-hall-of-fame.bin` | `postgame::phase0` | ✅ done | ⚠️ **A–H: root at `postgame-phase0.bin`**, NOT `post-hall-of-fame.bin` (a cutscene). Bag 14/20, party healed, parked at the Viridian PC. See §11. |
-| A — PC boxes | *(unclaimed)* | `postgame-phase0.bin` | `postgame::pc_box` | ☐ | |
+| A — PC boxes | claude-A-pcbox | `postgame-phase0.bin` | `postgame::pc_box` | ✅ done | A1–A7 all green. Build steps with `PolicyStep::deposit_pokemon/withdraw_pokemon/change_box/release_pokemon(.., map)` — **not** the four reserved variants, which are gone (see §11). Output `postgame-pc-box.bin`. |
 | B — Fly / Bike / Cycling Road | *(unclaimed)* | `postgame-phase0.bin` | `postgame::fly_bike` | ☐ | land early if agents are scarce |
 | C — Fishing | *(unclaimed)* | `postgame-phase0.bin` | `postgame::fishing` | ☐ | |
 | D — Legendaries | *(unclaimed)* | `postgame-phase0.bin` | `postgame::legendaries` | ☐ | cheapest; good first pick |
@@ -811,3 +827,111 @@ entry) and not `postgame-post-credits.bin` (full bag, hurt party; kept only as 0
 (813 passing, up from 809). No fixture drift: `git status src/pokemon/data/` shows only the two new
 files.
 **Impact on others:** **everything**. Phase 0 is done and A–H are unblocked. Claim a row in §9.
+
+### [2026-07-30] A / A1 — the box you can read is in **WRAM**, and the other eleven are unreachable
+**Status:** corrected ❗
+**What the plan said:** A1 — *"Expose `GameState.boxed_pokemon` (read `wBoxCount` + the SRAM box data
+via `encoding.rs`)."*
+**What is actually true:** the box the PC menus operate on is in **WRAM**, at `wBoxDataStart` `$da80`
+— count, a `$ff`-terminated species list, twenty 33-byte `box_struct`s, then parallel 11-byte OT and
+nickname arrays. SRAM holds the *other* eleven: `sBox1`…`sBox12` in banks 2–3, and `CHANGE BOX` is
+precisely the operation that copies WRAM↔SRAM (`engine/menus/save.asm:377-387`).
+
+That distinction is load-bearing, because **the eleven inactive boxes cannot be read at all today**:
+`DmgPointerRead for MMU` does `panic!("SRAM banking not implemented")` on every `DmgBank::SRAM` arm
+(`symbols.rs:115`). So `GameState.boxed_pokemon` is the open box only, and a workstream that banks a
+mon and then changes box will see its `boxed_pokemon` go empty. `GameState.current_box` says which box
+that is. Implementing SRAM-banked reads would make all twelve visible; nothing in A needed it.
+
+Two things worth copying if you read a game array:
+
+- **A `box_struct` is not a `party_struct`.** It is the first 33 bytes of one: the level is at offset
+  **3** (`BoxLevel`, which a party mon also carries as a duplicate of its offset-33 `Level`), and there
+  are no computed stats. Reading a boxed mon at the party's 44-byte stride puts slot 1 eleven bytes
+  into slot 0's neighbour. Hence a separate `BoxedPokemon` rather than reusing `Pokemon`.
+- **Never drop a slot you can't decode.** `read_current_box` *ends* the list at an undecodable species
+  byte instead of skipping it, so the entry at index `i` is always box slot `i`. The menus are
+  navigated by index, and silently skipping is exactly how `GameState::bag` mis-numbers the bag rows
+  (§10). Pinned by `postgame::pc_box::reads_a_boxed_pokemon_out_of_wram`, which plants two members and
+  checks the second — the one that catches a wrong stride.
+**Evidence:** `pokered/macros/ram.asm:9-39` (`box_struct` / `party_struct`); `pokered/pokered.sym`
+(`wBoxCount` `$da80`, `wBoxMon1` `$da96`, `wBoxMon2` `$dab7` → 33-byte stride, `wBoxMonOT` `$dd2a`,
+`wBoxMonNicks` `$de06`); `pokered/engine/menus/save.asm:377-387`; `src/pokemon/symbols.rs:115`.
+**Impact on others:** anyone reading box contents — `boxed_pokemon` is one box, not 240 slots. Anyone
+reading any other banked game array will hit the same SRAM wall.
+
+### [2026-07-30] A — **COMPLETE**. Box storage works; the four reserved `PolicyStep`s are now one
+**Status:** verified ✅ (with one shape correction ❗)
+**What the plan said:** A2–A7, with `PolicyStep::DepositPokemon { slot }`,
+`WithdrawPokemon { box_slot }`, `ChangeBox { n }`, `ReleasePokemon { box_slot }`.
+**What is actually true:** every menu index and warning in §6-A was correct, and the whole workstream
+came in at **~19 s of wall clock across 7 tests** — the entry fixture parks the player in the Viridian
+Pokémon Center, so there is no travel to pay for. Details worth having:
+
+**The seam changed shape (this is the bit that affects you).** The four reserved variants are **gone**,
+replaced by one `PolicyStep::UsePcBox { op: PcBoxOp, map: Map }` with four `const fn` constructors in
+`postgame/pc_box.rs`. Two reasons: none of the four could say *which* PC to use, and collapsing them
+let the routing arm become a one-word edit — `PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox
+{ map, .. } =>` — reusing the item PC's existing "route to `map`, then hand over" body verbatim. Build
+steps with `PolicyStep::deposit_pokemon(slot, map)` / `withdraw_pokemon(box_slot, map)` /
+`change_box(n, map)` / `release_pokemon(box_slot, map)`. `AgentState::UsingPcBox` now carries a
+`PcBoxState` (op + PC coordinate + count baselines + press/tick bookkeeping) rather than a bare op.
+**This confirms §4.1's premise**: shared-file cost for the whole workstream was one enum variant, one
+`|` added to an existing arm, one 8-line `pick_field_move` block, one `AgentState` type parameter and
+two one-line arms. Everything else is in two owned files.
+
+**One driver covers all four operations**, because they are the same chain with different indices
+(`postgame/pc_box.rs`). Menu order is measured, not guessed: `WITHDRAW` 0, `DEPOSIT` 1, `RELEASE` 2,
+`CHANGE BOX` 3, `SEE YA!` 4. Three ordering traps in the screen-matching, all real:
+
+1. `DisplayDepositWithdrawMenu` draws the `DEPOSIT|WITHDRAW / STATS / CANCEL` box straight over the mon
+   list **without touching `wTextBoxID`**, so that screen still reports `ListMenuBox`. It has to be
+   matched (on `STATS` + `CANCEL`) *before* the list-menu check, or the driver drives the list forever.
+2. The Bill's PC menu itself contains the string **`CHANGE BOX`**, so the change-box list is matched on
+   its prompt (`Choose a`) and never on the word BOX.
+3. `SEE YA!` is checked before `LOG OFF` because the Bill's menu is drawn **over** the parent menu one
+   row at a time, so mid-redraw frames carry both menus' text — e.g. the captured screen
+   `WITHDRAW Pokémon DEPOSIT Pokémon PROF.OAK's PC PokémonLEAGUE LOG OFF`. A driver that matched
+   `LOG OFF` first would read a half-drawn box submenu as the parent menu and re-select entry 0.
+
+**A2's warning is right, but not for the reason given.** The parent menu really does vary in length —
+`PROF.OAK's PC` only with `EVENT_GOT_POKEDEX`, `<PKMN>LEAGUE` only with `wNumHoFTeams != 0` — but every
+conditional entry comes **after** the first two, so `BILL's PC` at index 0 and the player's item PC at
+index 1 are both safe, and it is `LOG OFF` whose index moves. What is genuinely unsafe is the **label**:
+without `EVENT_MET_BILL`, `DisplayPCMainMenu` writes `SOMEONE's PC` instead. So match the screen on
+`LOG OFF` and select index 0. Measured on this save: `BILL's PC · CLAUDE's PC · PROF.OAK's PC ·
+PokémonLEAGUE · LOG OFF`.
+
+**`CHANGE BOX` saves the game — and the first one ever wipes SRAM.** `ChangeBox`
+(`engine/menus/save.asm:358`) prints a YES/NO, and if `BIT_HAS_CHANGED_BOXES` (bit 7 of
+`wCurrentBoxNum`) is clear it calls `EmptyAllSRAMBoxes` before anything else. That runs *before* the
+open box is copied out to SRAM, so a mon deposited seconds earlier survives — verified by switching to
+box 2 and back and finding it. `postgame-pc-box.bin` has that bit set, so no later change re-triggers
+it. Mask `wCurrentBoxNum` with `$7f` (`BOX_NUM_MASK`) or the box number reads as 128.
+
+**Guards are pre-checked, not read off the screen.** pokered answers "deposit your last mon", "box
+full", "party full", "box empty" with a message and a bounce straight back to the Bill's PC menu — from
+which a driver that re-picks the same entry loops forever. `PcBoxOp::blocked_by` refuses those four up
+front from `wPartyCount`/`wBoxCount` and aborts with a reason on the event stream. There is also a
+1200-tick budget so a wedge reports itself instead of pulsing A for the whole test budget.
+
+**⚠️ A test that checks intermediate states must not call `step_until_exhausted`.** `UsePcBox` pops the
+moment the driver takes over (like `UseItemPc` and `MovePokemonToFront`), so the queue empties when the
+*last* step is **issued** — by which point every earlier operation has already completed. My
+four-step A7 chain blew straight past `current_box == 1` that way and died on the cycle cap with all
+four operations having visibly succeeded in the log. Chain `run_until` instead; it checks every tick
+while the policy advances. This is a sharper version of the note Phase 0 left for `UseItemPc`, and it
+will bite any workstream whose step list is longer than two.
+
+**Output fixture `postgame-pc-box.bin`** — `postgame-phase0.bin` plus proven, initialised box storage.
+The party is deliberately **restored** (Slowpoke is the only holder of Strength *and* Dig, so banking it
+would quietly cost two field moves): party 4, box 1 empty, `wCurrentBoxNum=128`, bag 14/20, standing at
+the Viridian PC. Party space is now one `deposit_pokemon` step away at any Pokémon Center, so arrange it
+yourself rather than depending on this fixture's layout.
+**Evidence:** `pokemon::integration_tests::postgame::pc_box::*` — 7 tests, ~19 s wall clock for the lot
+(6 under `slow-tests`, 1 in the default tier). Full slow tier re-run green: **56 passed, 8 pre-existing
+ignores**, and the default tier 814 passed (up from 813). `git status src/pokemon/data/` shows only the
+one new file — no drift. ROM: `engine/pokemon/bills_pc.asm:1-176, 207-339, 382-431`,
+`engine/menus/save.asm:358-402, 437-500`, `data/text/text_2.asm:1548-1618`, `macros/ram.asm:9-39`.
+**Impact on others:** **C, D, E, F and G are unblocked** for holding more than six Pokémon. §6-A's step
+names are stale — use the constructors above. §8's dependency graph is satisfied for A.

@@ -239,6 +239,7 @@ fn probe_coverage() {
         ("post-hall-of-fame", include_bytes!("../data/post-hall-of-fame.bin")),
         ("postgame-post-credits", include_bytes!("../data/postgame-post-credits.bin")),
         ("postgame-phase0", include_bytes!("../data/postgame-phase0.bin")),
+        ("postgame-pc-box", include_bytes!("../data/postgame-pc-box.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);
@@ -273,6 +274,19 @@ pub fn print_coverage(name: &str, save_state: &[u8]) {
     println!("   storage: wBoxCount={} wCurrentBoxNum={}",
         mmu.read_pointer(&pokered_symbols::wBoxCount),
         mmu.read_pointer(&pokered_symbols::wCurrentBoxNum));
+
+    // The open box only — the other eleven are in SRAM banks the pointer reader can't reach yet.
+    if state.boxed_pokemon.is_empty() {
+        println!("   box{}: empty", state.current_box + 1);
+    } else {
+        println!("   box{}[{}]:", state.current_box + 1, state.boxed_pokemon.len());
+        for (i, p) in state.boxed_pokemon.iter().enumerate() {
+            let moves: Vec<String> = p.moves.iter().flatten()
+                .map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
+            println!("     box{i}: {:?} \"{}\" lv{} {}hp — {}",
+                p.species, p.nickname, p.level, p.current_hp, moves.join(", "));
+        }
+    }
 
     println!("   party[{}]:", state.pokemon.len());
     for (i, p) in state.pokemon.iter().enumerate() {
