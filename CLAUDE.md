@@ -17,6 +17,7 @@ src/
 ├── mmu.rs               — memory map, bank switching
 ├── ppu.rs               — pixel processing unit (LCD rendering)
 ├── audio/               — APU (4-channel Game Boy audio)
+│   └── blip/            — band-limited synthesis + resampling to the sink's rate (Blip_Buffer port)
 ├── sdl/                 — SDL2 UI: renders LCD at 4× scale, drives audio, keyboard input
 │   └── render.rs        — main render loop; instantiates GameBoy + PokemonAgent
 ├── roms/                — bundled test ROMs (cpu_instrs, dmg-acid2, etc.)
@@ -44,7 +45,7 @@ src/
 |---|---|---|
 | Language | Rust | Performance; the emulator must run faster than real-time |
 | UI | SDL2 (`sdl2` crate) | Lightweight, easy audio queue + video surface |
-| Audio resampling | `rubato` | High-quality sinc resampler from GB native 1 048 576 Hz → 44 100 Hz |
+| Audio resampling | `src/audio/blip/` (no dependency) | Rust port of blargg's Blip_Buffer. Band-limited *step* synthesis rather than sinc resampling: the APU reports amplitude transitions and they are written straight into a buffer already at the output rate. 8 output samples of latency, no FFT, no crates. |
 | Serialisation | `bincode` + `lz4_flex` | Fast snapshot/restore for save states used in tests |
 | Symbol codegen | `build.rs` + `pokered/pokered.sym` | Parses the pokered symbol map at build time and generates typed `DmgPointer` constants for every RAM/ROM address |
 | pokered submodule | `pokered/` (git submodule) | Source of truth for ROM binary (`pokered.gbc`), symbol map, and game data |
@@ -137,6 +138,37 @@ Failure artifacts (a save state + screenshot at the point of a stall or timeout)
 
 The `src/roms/` directory contains standard GB test ROMs. These are exercised by unit tests and do not require the pokered submodule.
 
+### Audio / resampler tests
+
+`src/audio/blip/tests.rs` checks the resampler two independent ways, and they fail differently.
+
+**Golden vectors** are bit-exact comparisons against the original C++ (Blip_Buffer ships no test
+suite of its own, only interactive SDL demos). The fixtures in `src/audio/data/blip_*.bin` are
+produced by linking the vendored library in `tools/blip-golden/`. Regenerate after a *deliberate*
+change to the algorithm or its parameters:
+
+```bash
+# 1. only if the realistic-signal input needs refreshing (writes src/audio/data/apu_capture_in.bin)
+cargo test --release --bin gb -- audio::reference::tests::capture_golden_input --exact --ignored
+# 2. always — reads apu_capture_in.bin, writes the other src/audio/data/blip_*.bin
+tools/blip-golden/build.sh
+```
+
+The goldens are pinned to `GOLDEN_TREBLE_DB` in the test module, deliberately *not* to
+`blip::DEFAULT_TREBLE_DB` — tone is a taste knob, so changing what the emulator ships does not
+invalidate the port's correctness fixtures.
+
+**Invariants** need no C++ toolchain and are the real regression net: every phase's taps summing to
+`kernel_unit`, a step depositing exactly its own amplitude of DC, zero sample-count drift over ten
+emulated minutes, no aliasing on a 15 kHz square, and surviving a minute of emulation with no audio
+consumer at all (which is what the headless integration tests do).
+
+For an ear check, render a few seconds to `target/test-artifacts/`:
+
+```bash
+cargo test --release --bin gb -- audio::reference::tests::render_reference_wav --exact --ignored --nocapture
+```
+
 ## Save state format
 
 The emulator state is serialised with `bincode` + lz4 compression. `GameBoy` implements `Encode`/`Decode`. Test fixture snapshots live in `src/pokemon/data/*.bin` and are `include_bytes!`'d at compile time. `pokemon-red.sav` is the SRAM save loaded/written at runtime by the SDL2 UI.
@@ -147,3 +179,12 @@ The emulator state is serialised with `bincode` + lz4 compression. `GameBoy` imp
 - `AGENT_RESOLUTION` (20 ms) is a tuned constant — too long and the player overshoots on the overworld, too short and the game state doesn't settle between frames.
 - `DelayContext` post-script delay is 2500 ms — tuned to cover the worst-case pre-battle animation gap observed in practice.
 - The SDL2 UI renders at 4× scale (640×576) and targets 60 fps with a 600-frame rolling FPS window.
+- **Nothing may be added to `Audio`'s serialised fields.** Its hand-written `Encode`/`Decode` in
+  `src/audio/mod.rs` deliberately skips the resampler, and `PartialEq` excludes it. Adding a field
+  would change the bincode layout and make all 27 committed fixtures in `src/pokemon/data/*.bin`
+  undecodable. This is why the output sample rate is applied by `Audio::set_output_sample_rate` from
+  the UI rather than stored — a caller that loads a save state must re-apply it (see the `F9` handler
+  in `render.rs`).
+- `src/audio/blip/` is a translation of LGPL 2.1+ code (blargg's Blip_Buffer 0.4.0). The original C++
+  and its licence live in `tools/blip-golden/vendor/`. The repo has no top-level `LICENSE`; if one is
+  ever added, this is the constraint to check.
