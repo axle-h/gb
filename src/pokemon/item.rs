@@ -90,8 +90,15 @@ pub enum ItemId {
     Hm03Surf = 0xC6,
     Hm04Strength = 0xC7,
     Hm05Flash = 0xC8,
-    // TMs are 0xC9 (TM01) .. 0xFA (TM50). Only the ones the agent teaches are enumerated.
+    // TMs are 0xC9 (TM01) .. 0xFA (TM50). Only the ones the agent teaches — or has to shift out of a
+    // full bag — are enumerated; anything unnamed here is dropped by `GameState::bag`, which is why
+    // occupancy and menu indices must come from raw `wBagItems` (`bag_item_position`) instead.
+    Tm06Toxic = 0xCE,       // TM01(0xC9) + 5
+    Tm11Bubblebeam = 0xD3,  // TM01(0xC9) + 10
     Tm14Blizzard = 0xD6, // TM01(0xC9) + 13 — Ice, 120 power; the Elite-Four Lance answer (found in Mansion B1F)
+    Tm21MegaDrain = 0xDD,   // TM01(0xC9) + 20
+    Tm24Thunderbolt = 0xE0, // TM01(0xC9) + 23
+    Tm27Fissure = 0xE3,     // TM01(0xC9) + 26
     Tm28Dig = 0xE4,      // TM01(0xC9) + 27 — DIG doubles as a reusable Escape Rope out of any cave
     Tm34Bide = 0xEA,     // TM01(0xC9) + 33 — BIDE, the bag's most useless item: tossed to make room
 

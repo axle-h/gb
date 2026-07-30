@@ -217,6 +217,94 @@ fn dump_fixture_states() {
     }
 }
 
+/// Coverage probe — task 0.1 of `docs/postgame-coverage-plan.md`, and the first thing every postgame
+/// workstream runs against its entry fixture (§4.4).
+///
+/// Deliberately more than [`dump_fixture_states`] prints: the postgame plan turns on numbers that
+/// test aren't in it — **dex owned/seen counts** (the Oak's-aide gates are 10/30/50 owned),
+/// `wBoxCount`/`wCurrentBoxNum` (the storage system), `wPlayerCoins` (the Game Corner economy), and a
+/// **raw** bag read.
+///
+/// The bag is read from `wNumBagItems`/`wBagItems` rather than `GameState::bag`, because the latter
+/// silently drops every id [`ItemId`] cannot name — most of the TMs — so it under-reports occupancy
+/// against the 20-slot ceiling that is the whole reason Phase 0 exists. Unnamed ids print as `$xx`.
+///
+/// Run with
+/// `cargo test --release --bin gb -- probe_coverage --exact --ignored --nocapture`.
+#[test]
+#[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
+fn probe_coverage() {
+    // Postgame entry fixtures. Append each `postgame-*.bin` here as its workstream commits one.
+    const FIXTURES: &[(&str, &[u8])] = &[
+        ("post-hall-of-fame", include_bytes!("../data/post-hall-of-fame.bin")),
+        ("postgame-post-credits", include_bytes!("../data/postgame-post-credits.bin")),
+        ("postgame-phase0", include_bytes!("../data/postgame-phase0.bin")),
+    ];
+    for (name, bytes) in FIXTURES {
+        print_coverage(name, bytes);
+    }
+}
+
+/// The body of [`probe_coverage`] for one snapshot. Separate so a workstream can call it on a state
+/// it has just driven to, not only on a committed file.
+pub fn print_coverage(name: &str, save_state: &[u8]) {
+    use crate::pokemon::bag::Bag;
+    use crate::pokemon::item::ItemId;
+    use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
+
+    let mut fixture = TestFixture::new(save_state, Duration::from_mins(1), vec![]);
+    let state = fixture.game_state();
+    let api = fixture.api();
+    let mmu = api.mmu();
+
+    let badge_bits = mmu.read_pointer(&pokered_symbols::wObtainedBadges);
+    let owned = state.pokedex_owned.species();
+    let seen = state.pokedex_seen.species();
+
+    println!("== {name}");
+    println!("   map:     {} @ {}", state.map.map, state.map.player_position);
+    println!("   badges:  {badge_bits} ({:?})", state.badges);
+    println!("   money:   ¥{}", state.money);
+    println!("   coins:   {} (wPlayerCoins)",
+        encoding::reverse_bcd(mmu.read_pointer_u16_be(&pokered_symbols::wPlayerCoins) as u32));
+    println!("   dex:     OWNED {} / SEEN {}", owned.len(), seen.len());
+    let owned_names: Vec<String> = owned.iter().map(|s| format!("{s:?}")).collect();
+    println!("   owned:   {}", owned_names.join(", "));
+    println!("   storage: wBoxCount={} wCurrentBoxNum={}",
+        mmu.read_pointer(&pokered_symbols::wBoxCount),
+        mmu.read_pointer(&pokered_symbols::wCurrentBoxNum));
+
+    println!("   party[{}]:", state.pokemon.len());
+    for (i, p) in state.pokemon.iter().enumerate() {
+        let moves: Vec<String> = p.moves.iter().flatten()
+            .map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
+        println!("     slot{i}: {:?} lv{} {}/{}hp — {}",
+            p.species, p.level, p.current_hp, p.stats.hp, moves.join(", "));
+    }
+
+    // Raw bag: `wBagItems` is (id, qty) pairs, `wNumBagItems` long.
+    let count = mmu.read_pointer(&pokered_symbols::wNumBagItems) as usize;
+    let base = pokered_symbols::wBagItems.address;
+    let items: Vec<String> = (0..count).map(|i| {
+        let id = mmu.read(base + i as u16 * 2);
+        let qty = mmu.read(base + i as u16 * 2 + 1);
+        // `ItemId` names only a handful of the machines, but the postgame plan cares which ones are
+        // in the bag (they are the obvious things to toss for space, and H wants HM05). Decode the
+        // rest by id: `constants/item_constants.asm` puts HM01–HM05 at $C4 and TM01–TM50 at $C9.
+        let label = if let Some(item) = ItemId::from_repr(id) {
+            format!("{item:?}")
+        } else if (0xC4..=0xC8).contains(&id) {
+            format!("HM{:02}", id - 0xC3)
+        } else if (0xC9..=0xFA).contains(&id) {
+            format!("TM{:02}", id - 0xC8)
+        } else {
+            format!("${id:02x}")
+        };
+        format!("{label}x{qty}")
+    }).collect();
+    println!("   bag[{count}/{}]: {}", Bag::MAX_ITEMS, items.join(", "));
+}
+
 /// Micro-benchmark, not a test: raw emulation throughput vs. the full agent step, from a mid-game
 /// fixture. Establishes which half of the loop to optimise — as of writing, **23× realtime raw and
 /// 20× with the agent**, i.e. the emulator is the cost and the agent's observe/policy/input work is

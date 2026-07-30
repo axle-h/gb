@@ -600,15 +600,10 @@ impl MetaTileMap {
         (dist, came_from)
     }
 
-    /// Fixed PC-tile coordinates on this map (hidden objects the player faces + A to use). These
-    /// are not derivable from the tileset, so they are hard-coded from pokered
-    /// `data/events/hidden_objects.asm`. `actions()` emits a face-and-A route to each.
+    /// Fixed PC-tile coordinates on this map — see [`pc_locations_for`]. `actions()` emits a
+    /// face-and-A route to each.
     fn pc_locations(&self) -> &'static [Point8] {
-        match self.map {
-            // Bill's cell-separator PC — used mid-SS-Ticket script (stand at (1,5) facing up + A).
-            Map::BillsHouse => &[Point8 { x: 1, y: 4 }],
-            _ => &[],
-        }
+        pc_locations_for(self.map)
     }
 
     pub fn actions(&self) -> Vec<OverworldAction> {
@@ -760,28 +755,28 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
 
-        // 5. PC tiles (hidden-object interactables): route to a walkable tile adjacent to the PC,
-        //    face it, press A. Mirrors the sprite-interaction routing (a PC is not a sprite, so it
-        //    is keyed by fixed coordinate rather than found in the sprite list).
+        // 5. PC tiles (hidden-object interactables): route to the tile below the PC, face up, press A.
+        //    Mirrors the sprite-interaction routing (a PC is not a sprite, so it is keyed by fixed
+        //    coordinate rather than found in the sprite list).
         for &pc in self.pc_locations() {
-            let adj: [(PlayerFacingDirection, Point8); 4] = [
-                (PlayerFacingDirection::Down,  Point8 { x: pc.x,                   y: pc.y.saturating_sub(1) }),
-                (PlayerFacingDirection::Up,    Point8 { x: pc.x,                   y: pc.y + 1               }),
-                (PlayerFacingDirection::Right, Point8 { x: pc.x.saturating_sub(1), y: pc.y                   }),
-                (PlayerFacingDirection::Left,  Point8 { x: pc.x + 1,               y: pc.y                   }),
-            ];
-            let Some((face_dir, dest)) = adj.iter()
-                .filter(|(_, p)| {
-                    (p.x as usize) < self.width && (p.y as usize) < self.height
-                    && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
-                    && best_dist_from(p).is_some()
-                })
-                .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
-                .copied()
-            else { continue };
-            let (_, came_from) = best_dist_from(&dest).unwrap();
+            // **The only usable approach is from directly below, facing up.** Not because of the
+            // `SPRITE_FACING_UP` in the hidden-object table — that argument does not restrict
+            // anything, and `data/events/hidden_objects.asm:191` says so explicitly; matching is
+            // purely on the tile in front of the player. It is the *routines* that check: both
+            // `OpenPokemonCenterPC` and `BillsHousePC` open with
+            // `ld a, [wSpritePlayerStateData1FacingDirection] / cp SPRITE_FACING_UP / ret nz`.
+            //
+            // That makes a side approach a silent no-op — the object matches and is dispatched, and
+            // the routine returns without drawing anything — so the agent stands there pressing A
+            // forever. Approaching a Pokémon Center PC from the west is *nearer* than from below, so
+            // a plain nearest-adjacent-tile search picks exactly the one that cannot work.
+            let dest = Point8 { x: pc.x, y: pc.y + 1 };
+            if (dest.x as usize) >= self.width || (dest.y as usize) >= self.height { continue }
+            if !matches!(self.meta_tiles[dest.x as usize + dest.y as usize * self.width], MetaTile::Empty) { continue }
+            let Some((_, came_from)) = best_dist_from(&dest) else { continue };
             let mut route = reconstruct(dest, came_from);
-            let face_button: JoypadButton = face_dir.into();
+            let face_button = JoypadButton::Up;
+            let face_dir = PlayerFacingDirection::Up;
             if route.is_empty() {
                 if face_dir != self.player_direction { route.push(face_button); }
             } else if route.last() != Some(&face_button) {
@@ -971,6 +966,47 @@ fn step_one(pos: Point8, dir: JoypadButton, width: usize, height: usize) -> Opti
     }
 }
 
+/// Fixed PC-tile coordinates on `map` — hidden objects the player faces (from below) and presses A on.
+///
+/// PCs are not derivable from the tileset: a PC is a `hidden_object`, so nothing distinguishes its
+/// tile from the wall it is drawn on. This table is transcribed from pokered
+/// `data/events/hidden_objects.asm`, cross-referenced against `HiddenObjectMaps` so each object list
+/// is attributed to the right map — the labels in that file are stale (`SafariZoneRestHouse2` is
+/// `SAFARI_ZONE_WEST_REST_HOUSE`, `CinnabarLab4` is `CINNABAR_LAB_FOSSIL_ROOM`), so the label alone is
+/// not a safe guide.
+///
+/// Every entry in the file that runs `OpenPokemonCenterPC`, `OpenRedsPC` or `BillsHousePC` is here;
+/// there are 22 of them across 21 maps.
+pub fn pc_locations_for(map: Map) -> &'static [Point8] {
+    /// The overwhelmingly common case: the PC on the back wall of a Pokémon Center, right of the
+    /// healing counter. The Celadon Hotel and three of the four Safari rest houses reuse the same
+    /// Pokémon-Center layout and so share it.
+    const CENTRE_PC: &[Point8] = &[Point8 { x: 13, y: 3 }];
+
+    match map {
+        Map::ViridianPokecenter | Map::PewterPokecenter | Map::CeruleanPokecenter
+        | Map::LavenderPokecenter | Map::VermilionPokecenter | Map::CeladonPokecenter
+        | Map::FuchsiaPokecenter | Map::CinnabarPokecenter | Map::MtMoonPokecenter
+        | Map::RockTunnelPokecenter | Map::SaffronPokecenter
+        | Map::CeladonHotel
+        | Map::SafariZoneWestRestHouse | Map::SafariZoneEastRestHouse
+        | Map::SafariZoneNorthRestHouse => CENTRE_PC,
+
+        // Bill's cell-separator PC — used mid-SS-Ticket script (stand at (1,5) facing up + A).
+        Map::BillsHouse => &[Point8 { x: 1, y: 4 }],
+        // The player's own bedroom PC. Note this one runs `OpenRedsPC`, whose menu leads with an
+        // ITEM entry the Pokémon-Center PC does not have.
+        Map::RedsHouse2F => &[Point8 { x: 0, y: 1 }],
+        Map::CeladonMansion2F => &[Point8 { x: 0, y: 5 }],
+        Map::IndigoPlateauLobby => &[Point8 { x: 15, y: 7 }],
+        // The only map with two: the fossil room's lab machines both open the PC menu.
+        Map::CinnabarLabFossilRoom => &[Point8 { x: 0, y: 4 }, Point8 { x: 2, y: 4 }],
+        Map::SilphCo11F => &[Point8 { x: 10, y: 12 }],
+
+        _ => &[],
+    }
+}
+
 fn opposite_dir(dir: JoypadButton) -> JoypadButton {
     match dir {
         JoypadButton::Left  => JoypadButton::Right,
@@ -980,6 +1016,42 @@ fn opposite_dir(dir: JoypadButton) -> JoypadButton {
         other               => other,
     }
 }
+#[cfg(test)]
+mod pc_location_tests {
+    use super::*;
+
+    /// Every Pokémon Center has a PC, and it is at the same place in all of them. Before task 0.3 of
+    /// the postgame plan, `pc_locations` knew only Bill's house, so the agent could not reach a PC
+    /// anywhere it would actually want one.
+    #[test]
+    fn every_pokemon_center_has_a_pc() {
+        const CENTRES: &[Map] = &[
+            Map::ViridianPokecenter, Map::PewterPokecenter, Map::CeruleanPokecenter,
+            Map::LavenderPokecenter, Map::VermilionPokecenter, Map::CeladonPokecenter,
+            Map::FuchsiaPokecenter, Map::CinnabarPokecenter, Map::MtMoonPokecenter,
+            Map::RockTunnelPokecenter, Map::SaffronPokecenter,
+        ];
+        for &map in CENTRES {
+            assert_eq!(pc_locations_for(map), &[Point8 { x: 13, y: 3 }], "no PC on {map}");
+        }
+    }
+
+    /// The exceptions, which is the whole reason this is a table and not a constant.
+    #[test]
+    fn non_centre_pcs_are_where_the_disassembly_says() {
+        assert_eq!(pc_locations_for(Map::BillsHouse),           &[Point8 { x: 1,  y: 4  }]);
+        assert_eq!(pc_locations_for(Map::RedsHouse2F),          &[Point8 { x: 0,  y: 1  }]);
+        assert_eq!(pc_locations_for(Map::CeladonMansion2F),     &[Point8 { x: 0,  y: 5  }]);
+        assert_eq!(pc_locations_for(Map::IndigoPlateauLobby),   &[Point8 { x: 15, y: 7  }]);
+        assert_eq!(pc_locations_for(Map::SilphCo11F),           &[Point8 { x: 10, y: 12 }]);
+        assert_eq!(pc_locations_for(Map::CinnabarLabFossilRoom),
+            &[Point8 { x: 0, y: 4 }, Point8 { x: 2, y: 4 }]);
+        // The Safari *Center* rest house is the one of the four without a PC.
+        assert!(pc_locations_for(Map::SafariZoneCenterRestHouse).is_empty());
+        assert!(pc_locations_for(Map::PalletTown).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod boulder_solver_tests {
     use super::*;

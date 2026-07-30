@@ -139,7 +139,7 @@ enum PokemartState {
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
-enum AgentState {
+pub(crate) enum AgentState {
     #[default]
     Idle,
     /// Policy returned None for an overworld action — waiting out a delay then re-polling.
@@ -202,6 +202,25 @@ enum AgentState {
     /// more items"), so a leg that must buy something has to free a slot first. Same press/release
     /// mashing as `TeachingMove`; the step is done when the item has left the bag.
     TossingItem { item: crate::pokemon::item::ItemId, press: bool, entered_menu: bool },
+    /// Depositing an item into, or withdrawing it from, PC item storage. Phase 0 tasks
+    /// 0.5/0.6 — the whole state machine lives in [`crate::pokemon::postgame::item_storage`].
+    UsingItemPc(crate::pokemon::postgame::item_storage::ItemPcState),
+
+    // ── Reserved postgame seams (task 0.8 of `docs/postgame-coverage-plan.md`) ───────────────────
+    // Landed up front so a workstream adds only a match arm to this file, never a variant. Nothing
+    // constructs these yet; each arm delegates to a `todo!()` in the owning workstream's module.
+    // The shapes are drafts from §6 of the plan — reshape them when the real driver is written.
+    /// **A** — driving Bill's PC box menus.
+    UsingPcBox(crate::pokemon::postgame::pc_box::PcBoxOp),
+    /// **B** — driving the Fly menu chain and the bespoke town-map screen.
+    Flying { to: Map },
+    /// **C** — rod cast, waiting on "not even a nibble" / a bite.
+    Fishing { rod: crate::pokemon::postgame::fishing::Rod, at: Point8 },
+    /// **G** — driving an in-game trade's offer/accept flow.
+    Trading { give_slot: u8, at: Map },
+    /// **H** — searching a bg-event tile for a hidden item.
+    SearchingHiddenItem { at: Point8 },
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// Checking a Vermilion Gym trash can for a hidden switch: route to a tile adjacent to `target`
     /// and face it (recomputed each tick via `MetaTileMap::route_to_face`), then press A to trigger
@@ -276,6 +295,12 @@ impl Display for AgentState {
             AgentState::Surfing { .. } => write!(f, "surf"),
             AgentState::UsingFieldMove { slot, move_index, .. } => write!(f, "fieldmove:slot{slot}#{move_index}"),
             AgentState::TossingItem { item, .. } => write!(f, "toss:{item:?}"),
+            AgentState::UsingItemPc(s)           => write!(f, "itempc:{:?}:{:?}x{}", s.op, s.item, s.qty),
+            AgentState::UsingPcBox(op)           => write!(f, "pcbox:{op:?}"),
+            AgentState::Flying { to }            => write!(f, "fly→{to:?}"),
+            AgentState::Fishing { rod, at }      => write!(f, "fish:{rod:?}@{at}"),
+            AgentState::Trading { give_slot, at } => write!(f, "trade:slot{give_slot}@{at:?}"),
+            AgentState::SearchingHiddenItem { at } => write!(f, "hidden@{at}"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
@@ -372,7 +397,7 @@ impl PokemonAgent {
         format!("{}", self.state)
     }
 
-    fn event(&mut self, event: AgentEvent) {
+    pub(crate) fn event(&mut self, event: AgentEvent) {
         println!("{:?}", event);
         self.event_buffer.push_back(event);
         while self.event_buffer.len() > 100 {
@@ -438,7 +463,7 @@ impl PokemonAgent {
         true
     }
 
-    fn observe_state(&self, api: &PokemonApi) -> Result<crate::pokemon::GameState, String> {
+    pub(crate) fn observe_state(&self, api: &PokemonApi) -> Result<crate::pokemon::GameState, String> {
         let mut state = api.game_state()?;
         for &(map, pos) in &self.cut_tiles {
             if state.map.map == map {
@@ -501,7 +526,7 @@ impl PokemonAgent {
         }
     }
 
-    fn set_state(&mut self, state: AgentState) {
+    pub(crate) fn set_state(&mut self, state: AgentState) {
         if self.state != state {
             self.state = state;
 
@@ -788,7 +813,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing { .. } | AgentState::Trading { .. } | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -898,6 +923,18 @@ impl PokemonAgent {
                             self.set_state(AgentState::TossingItem { item, press: true, entered_menu: false });
                             return Ok(());
                         }
+                        Some(crate::pokemon::policy::FieldMove::UseItemPc { op, item, qty, pc }) => {
+                            use crate::pokemon::postgame::item_storage::ItemPcState;
+                            api.release_all_buttons();
+                            // Baseline the source inventory *now*, before any menu is touched, so the
+                            // driver can tell "moved `qty`" from "was already short".
+                            let start_qty = match op {
+                                crate::pokemon::postgame::item_storage::PcItemOp::Deposit => api.bag_item_quantity(item),
+                                crate::pokemon::postgame::item_storage::PcItemOp::Withdraw => api.pc_box_item_quantity(item),
+                            };
+                            self.set_state(AgentState::UsingItemPc(ItemPcState::new(op, item, qty, pc, start_qty)));
+                            return Ok(());
+                        }
                         Some(crate::pokemon::policy::FieldMove::PushBoulder { boulder, dir }) => {
                             // Primitive: push the boulder at `boulder` one tile in `dir`. The policy plans
                             // *which* push (via `MetaTileMap::solve_boulder_push`); the agent just executes it.
@@ -913,6 +950,33 @@ impl PokemonAgent {
                         Some(crate::pokemon::policy::FieldMove::UseFieldItem { item, target }) => {
                             api.release_all_buttons();
                             self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: false });
+                            return Ok(());
+                        }
+                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
+                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
+                        Some(crate::pokemon::policy::FieldMove::UsePcBox { op }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::UsingPcBox(op));
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::Fly { to }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Flying { to });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::Fish { rod, at }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Fishing { rod, at });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::Trade { give_slot, at }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Trading { give_slot, at });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::SearchHiddenItem { at }) => {
+                            api.release_all_buttons();
+                            self.set_state(AgentState::SearchingHiddenItem { at });
                             return Ok(());
                         }
                         None => {}
@@ -1993,6 +2057,13 @@ impl PokemonAgent {
                 }
                 self.set_state(AgentState::PushingBoulder { boulder, dir });
             }
+            AgentState::UsingItemPc(s) => return crate::pokemon::postgame::item_storage::tick(self, api, s),
+            // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
+            AgentState::UsingPcBox(op) => return crate::pokemon::postgame::pc_box::tick(self, api, op),
+            AgentState::Flying { to } => return crate::pokemon::postgame::fly_bike::tick(self, api, to),
+            AgentState::Fishing { rod, at } => return crate::pokemon::postgame::fishing::tick(self, api, rod, at),
+            AgentState::Trading { give_slot, at } => return crate::pokemon::postgame::trades::tick(self, api, give_slot, at),
+            AgentState::SearchingHiddenItem { at } => return crate::pokemon::postgame::aides::tick(self, api, at),
             AgentState::CheckingTrashCan { target, checked, press, facing } => {
                 // Checking a can triggers GymTrashScript, which prints a text box (leaving the
                 // overworld). Once that has appeared (`checked`), the return to the overworld means

@@ -327,6 +327,39 @@ pub enum PolicyStep {
     /// hidden-object tile, not a sprite; `MetaTileMap::pc_locations` supplies its coordinate. Should
     /// be scripted only when using the PC is valid (e.g. after Bill's Pokémon enters the machine).
     UsePc { map: Map },
+
+    // ── Reserved postgame seams (task 0.8 of `docs/postgame-coverage-plan.md`) ───────────────────
+    //
+    // Landed up front so a workstream never has to add a variant *and* a match arm to this file —
+    // only the arm. Each is inert until its owner implements it: nothing constructs these, and every
+    // arm delegates to a `todo!()` in the owning workstream's own module.
+    //
+    // **Treat the signatures as drafts.** They are transcribed from §6 of the plan, which was written
+    // before anyone tried the mechanic; if the real driver wants different fields, change them. The
+    // seam is the point, not the shape.
+    /// **A** — deposit the party member in `slot` into the current PC box.
+    DepositPokemon { slot: u8 },
+    /// **A** — withdraw the box member at `box_slot` into the party.
+    WithdrawPokemon { box_slot: u8 },
+    /// **A** — switch to box `n` (0-based; 12 boxes of 20). ⚠️ Changing box **saves the game**.
+    ChangeBox { n: u8 },
+    /// **A** — permanently release the box member at `box_slot`.
+    ReleasePokemon { box_slot: u8 },
+    /// **B** — Fly to `to`. ⚠️ The town map is a bespoke screen, not a `HandleMenuInput` list.
+    Fly { to: Map },
+    /// **C** — fish at the water tile `at` with `rod`.
+    Fish { rod: crate::pokemon::postgame::fishing::Rod, at: crate::geometry::Point8 },
+    /// **G** — offer the party member in `slot` to the in-game trade NPC on map `at`.
+    TradePokemon { give_slot: u8, at: Map },
+    /// **H** — search for the hidden item at `at` (a bg-event object, same shape as `FlipSwitch`).
+    SearchHiddenItem { at: crate::geometry::Point8 },
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// Move `qty` of `item` between the bag and PC item storage, at the PC on `map` (Phase 0 tasks
+    /// 0.5/0.6). Routing to `map` happens here; everything from the walk to the PC tile onward is
+    /// [`crate::pokemon::postgame::item_storage`], which needs to own the A press that opens the PC.
+    /// Build with [`Self::deposit_item`] / [`Self::withdraw_item`].
+    UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, map: Map },
     /// Walk to and pick up an item sprite (a Poké Ball on the ground), staying on this step until
     /// the sprite is gone. Unlike [`Interact`], this does **not** pop after issuing a single walk:
     /// picking up an item can be interrupted (e.g. the Mt Moon fossil area triggers the Super Nerd
@@ -460,6 +493,24 @@ pub enum FieldMove {
     UseFieldMove { slot: u8, move_index: u8 },
     /// Toss `item` from the bag (START → ITEM → the item → TOSS → quantity → YES) to free a slot.
     TossItem { item: ItemId },
+    /// Walk to the PC at `pc`, open it, and move `qty` of `item` between the bag and PC item storage.
+    /// Driven by [`crate::pokemon::postgame::item_storage`] (Phase 0 tasks 0.5/0.6).
+    UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, pc: crate::geometry::Point8 },
+
+    // ── Reserved postgame seams (task 0.8) ──────────────────────────────────────────────────────
+    // The entry points for the reserved `AgentState`s. `agent.rs` already turns each of these into
+    // its state in one line, so a workstream only has to return one from its own `pick_field_move`.
+    /// **A** — drive Bill's PC box menus.
+    UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp },
+    /// **B** — Fly to `to`.
+    Fly { to: Map },
+    /// **C** — cast `rod` at the water tile `at`.
+    Fish { rod: crate::pokemon::postgame::fishing::Rod, at: crate::geometry::Point8 },
+    /// **G** — offer the party member in `give_slot` to the trade NPC on `at`.
+    Trade { give_slot: u8, at: Map },
+    /// **H** — search the bg-event tile at `at` for a hidden item.
+    SearchHiddenItem { at: crate::geometry::Point8 },
+    // ────────────────────────────────────────────────────────────────────────────────────────────
     /// Primitive Strength push: shove the boulder at `boulder` one tile in `dir` (Strength must be armed).
     /// The agent routes behind the boulder and double-presses; it completes as soon as the boulder leaves
     /// its tile. A policy plans *which* boulder/direction with the `MetaTileMap::solve_boulder_push` helper
@@ -518,6 +569,17 @@ impl PolicyStep {
     /// Explicit single forward map transition (any warp/connection to `map`).
     pub const fn enter(map: Map) -> Self {
         Self::EnterMap { to_map: map, to_position: None }
+    }
+
+    /// Bank `qty` of `item` in PC item storage, freeing bag slots. `map` must have a PC —
+    /// any Pokémon Center will do (see `MetaTileMap::pc_locations`).
+    pub const fn deposit_item(item: ItemId, qty: u8, map: Map) -> Self {
+        Self::UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp::Deposit, item, qty, map }
+    }
+
+    /// Take `qty` of `item` back out of PC item storage.
+    pub const fn withdraw_item(item: ItemId, qty: u8, map: Map) -> Self {
+        Self::UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp::Withdraw, item, qty, map }
     }
 
     /// Explicit forward transition to `map`, disambiguated by the raw landing `to_position`.
@@ -2280,6 +2342,30 @@ impl Policy for DeterministicPolicy {
                         None
                     }
                 }
+                // Reserved seams (task 0.8) — inert until their workstream implements them. To take
+                // one: move your variant out of this list into its own one-line arm delegating to
+                // your own module. That is a one-line edit to this file, which is the whole point.
+                PolicyStep::DepositPokemon { .. } | PolicyStep::WithdrawPokemon { .. }
+                | PolicyStep::ChangeBox { .. } | PolicyStep::ReleasePokemon { .. }
+                | PolicyStep::Fly { .. } | PolicyStep::Fish { .. }
+                | PolicyStep::TradePokemon { .. } | PolicyStep::SearchHiddenItem { .. } =>
+                    crate::pokemon::postgame::unimplemented_seam(&step),
+                PolicyStep::UseItemPc { map, .. } => {
+                    // Routing only. Once we are standing on `map`, `pick_field_move` hands the step to
+                    // the storage driver, which walks the last tiles itself so that it — and not the
+                    // generic overworld executor — owns the A press that opens the PC.
+                    if state.map.map != map {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            println!("[policy] want the item PC on {}, but no path there!", map);
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        None
+                    }
+                }
                 PolicyStep::CollectItem(sprite) => {
                     let map = sprite.map();
                     if state.map.map != map {
@@ -2829,6 +2915,25 @@ impl Policy for DeterministicPolicy {
                 && matches!(state.map.tile_in_front(), Some((_, MetaTile::CutTree)))
             {
                 return Some(FieldMove::CutTree);
+            }
+        }
+        if let Some(&PolicyStep::UseItemPc { op, item, qty, map }) = self.queue.front() {
+            // Wait until we are on the right map — `pick_overworld_action` is doing the routing.
+            if state.map.map == map {
+                match crate::pokemon::tile_map::pc_locations_for(map).first() {
+                    // Popped on issue, like `MovePokemonToFront`: the driver owns the operation from
+                    // here to completion and `pick_field_move` is not polled again until it is done,
+                    // so leaving the step queued would only re-issue it forever.
+                    Some(&pc) => {
+                        self.queue.pop_front();
+                        return Some(FieldMove::UseItemPc { op, item, qty, pc });
+                    }
+                    None => {
+                        println!("[policy] UseItemPc: {map} has no PC — skipping");
+                        self.queue.pop_front();
+                        return None;
+                    }
+                }
             }
         }
         if let Some(&PolicyStep::MovePokemonToFront { slot }) = self.queue.front() {

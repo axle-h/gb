@@ -53,6 +53,7 @@ mod menu;
 pub mod delay;
 pub mod damage;
 pub mod world_graph;
+pub mod postgame;
 
 #[cfg(test)]
 mod integration_tests;
@@ -94,6 +95,12 @@ pub trait PokemonApiTrait {
     /// `wBagItems` so it matches the on-screen list exactly (unlike `read_bag`, which drops item ids
     /// not in the `ItemId` enum and so shifts every later index). Used to navigate the bag cursor.
     fn bag_item_position(&self, item: ItemId) -> Option<u8>;
+    /// How many of `item` the bag holds (0 if absent), read from raw `wBagItems`.
+    fn bag_item_quantity(&self, item: ItemId) -> u8;
+    /// The same two reads against **PC item storage** (`wNumBoxItems`/`wBoxItems`), which the
+    /// player's-PC deposit/withdraw list shows. Same `(id, quantity)` pair layout as the bag.
+    fn pc_box_item_position(&self, item: ItemId) -> Option<u8>;
+    fn pc_box_item_quantity(&self, item: ItemId) -> u8;
     /// Returns the species currently being named on the nickname-entry screen.
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String>;
 
@@ -471,6 +478,18 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         (0..count).find(|&i| mmu.read(base + i as u16 * 2) == item as u8).map(|i| i as u8)
     }
 
+    fn bag_item_quantity(&self, item: ItemId) -> u8 {
+        inventory_quantity(self.mmu(), &pokered_symbols::wNumBagItems, &pokered_symbols::wBagItems, item)
+    }
+
+    fn pc_box_item_position(&self, item: ItemId) -> Option<u8> {
+        inventory_position(self.mmu(), &pokered_symbols::wNumBoxItems, &pokered_symbols::wBoxItems, item)
+    }
+
+    fn pc_box_item_quantity(&self, item: ItemId) -> u8 {
+        inventory_quantity(self.mmu(), &pokered_symbols::wNumBoxItems, &pokered_symbols::wBoxItems, item)
+    }
+
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String> {
         let byte = self.mmu().read_pointer(&pokered_symbols::wCurPartySpecies);
         PokemonSpecies::from_repr(byte)
@@ -587,6 +606,26 @@ pub struct TrashCanPuzzle {
     pub second_target: crate::geometry::Point8,
     pub first_opened: bool,
     pub second_opened: bool,
+}
+
+/// Both the bag (`wNumBagItems`/`wBagItems`) and PC item storage (`wNumBoxItems`/`wBoxItems`) are a
+/// count byte followed by `(id, quantity)` pairs, so the two readers below serve either.
+///
+/// These read **raw** RAM rather than going through [`Bag`], which silently drops every id [`ItemId`]
+/// cannot name — most of the TMs — and so reports both the wrong count and shifted indices. Menu
+/// navigation and occupancy checks must use these.
+fn inventory_position(mmu: &MMU, count_ptr: &symbols::DmgPointer, base_ptr: &symbols::DmgPointer, item: ItemId) -> Option<u8> {
+    let count = mmu.read_pointer(count_ptr) as usize;
+    (0..count)
+        .find(|&i| mmu.read(base_ptr.address + i as u16 * 2) == item as u8)
+        .map(|i| i as u8)
+}
+
+fn inventory_quantity(mmu: &MMU, count_ptr: &symbols::DmgPointer, base_ptr: &symbols::DmgPointer, item: ItemId) -> u8 {
+    match inventory_position(mmu, count_ptr, base_ptr, item) {
+        Some(i) => mmu.read(base_ptr.address + i as u16 * 2 + 1),
+        None => 0,
+    }
 }
 
 /// Map coordinate of gym trash-can hidden object `index` (0..=14), from pokered
