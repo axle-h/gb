@@ -57,6 +57,7 @@ mod saffron;
 mod cinnabar;
 mod endgame;
 mod playthrough;
+mod postgame;
 
 pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("../data/pallet-town-state.bin");
 pub const ROUTE1_STATE: &[u8] = include_bytes!("../data/route1-state.bin");
