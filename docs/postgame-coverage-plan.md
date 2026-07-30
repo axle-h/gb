@@ -358,17 +358,35 @@ workstream pays for in emulated minutes. **Land this early if agents are scarce.
 
 ### C — Fishing
 
-- [ ] **C1 — Old Rod.** `VermilionOldRodHouse`. *Observable:* rod in bag.
-- [ ] **C2 — The fishing driver.** `PolicyStep::Fish { rod, at }` + `AgentState::Fishing`: face a
+- [x] **C1 — Old Rod.** `VermilionOldRodHouse`. *Observable:* rod in bag.
+      *Done:* `PolicyStep::old_rod_steps()`, test `postgame::fishing::can_get_the_old_rod` (~1 s). One
+      `Interact`; the guru's YES/NO needs no driver, exactly like B1's chairman. ⚠️ The leg ends with an
+      extra `enter(town)` so the fixture is saved **outdoors** — see §11.
+- [x] **C2 — The fishing driver.** `PolicyStep::Fish { rod, at }` + `AgentState::Fishing`: face a
       water tile, use the rod from the bag (same START → ITEM → USE chain as `UsingFieldItem`),
       handle the "not even a nibble" / "hooked" text, drop into the normal battle handler on a bite.
       *Observable:* a wild battle starts from a water tile.
-- [ ] **C3 — Catch from a bite.** *Observable:* one water species in the dex.
-- [ ] **C4 — Good Rod.** `FuchsiaGoodRodHouse`. *Observable:* rod in bag, different encounter table.
-- [ ] **C5 — Super Rod.** `Route12SuperRodHouse`. *Observable:* as above; commit
+      *Done:* [`postgame::fishing::tick`] + `FishState`, test `can_fish_a_wild_battle_out_of_the_water`
+      (~2 s). The shape changed: the step is `Fish { rod, map, goal }` and the *policy* picks the water
+      tile and owns the repetition, one cast per driver invocation. ⚠️ The one real trap is that the
+      cast animation **must be mashed through, not waited out** — see §11.
+- [x] **C3 — Catch from a bite.** *Observable:* one water species in the dex.
+      *Done:* `FishGoal::Catch`, test `can_catch_a_magikarp_on_the_old_rod` (~2 s), fixture
+      `postgame-magikarp.bin`. No weakening pass: everything fishable is catch rate 155–255.
+- [x] **C4 — Good Rod.** `FuchsiaGoodRodHouse`. *Observable:* rod in bag, different encounter table.
+      *Done:* `PolicyStep::good_rod_steps()`, test `can_get_the_good_rod_and_catch_a_goldeen` (~10 s),
+      fixture `postgame-good-rod.bin`. **Goldeen** is the proof — it is in the Good Rod's table and not
+      the Old Rod's (which is Magikarp and nothing else).
+- [x] **C5 — Super Rod.** `Route12SuperRodHouse`. *Observable:* as above; commit
       `postgame-fishing.bin`.
+      *Done:* `PolicyStep::super_rod_steps()`, test `can_get_the_super_rod_and_catch_a_tentacool`
+      (~16 s). **Tentacool** is the proof (Pallet's Super Rod group only). ⚠️ Route 12's road is
+      blocked by its gate building and the house is at (11,77), 56 tiles south of it. The party is
+      banked down to four at the Viridian PC first, to keep the catch off the boxed-catch path that
+      wedges the agent (§11, D/D5).
 
 Opens the whole water encounter table — Magikarp/Goldeen/Poliwag/Tentacool/Krabby/Horsea/Staryu.
+**Dex after C: 10 owned / 113 seen** (from 7/112).
 
 ### D — Legendaries: Zapdos, Moltres, Mewtwo
 
@@ -570,7 +588,7 @@ Phase 0 (item storage, PC locations, seams, probe)
 | 0 — foundation | claude-phase0 | `post-hall-of-fame.bin` | `postgame::phase0` | ✅ done | ⚠️ **A–H: root at `postgame-phase0.bin`**, NOT `post-hall-of-fame.bin` (a cutscene). Bag 14/20, party healed, parked at the Viridian PC. See §11. |
 | A — PC boxes | claude-A-pcbox | `postgame-phase0.bin` | `postgame::pc_box` | ✅ done | A1–A7 all green. Build steps with `PolicyStep::deposit_pokemon/withdraw_pokemon/change_box/release_pokemon(.., map)` — **not** the four reserved variants, which are gone (see §11). Output `postgame-pc-box.bin`. |
 | B — Fly / Bike / Cycling Road | claude-B-flybike | `postgame-phase0.bin` | `postgame::fly_bike` | ✅ done | B1–B7 green, ~50 s wall clock for the lot. **Fly is available to everyone now: `PolicyStep::Fly { to }`, any of the 11 towns, from any outdoor map.** Start from `postgame-fly-bike.bin` (Fuchsia, Fly + Bicycle) — but heal first, Venusaur's Solarbeam is at 0 PP. Two shared-file fixes landed (see §11): field-move menu detection in `agent.rs`, and `can_surf` on Cycling Road. |
-| C — Fishing | *(unclaimed)* | `postgame-phase0.bin` | `postgame::fishing` | ☐ | |
+| C — Fishing | claude-C-fishing | `postgame-fly-bike.bin` | `postgame::fishing` | ✅ done | C1–C5 green, ~31 s wall clock for the five legs. Entry fixture is **B's output, not `postgame-phase0.bin`** — the three rods are in three corners of Kanto and Fly makes each trip one step (see §11). Output `postgame-fishing.bin`: all three rods, **dex 10 owned / 113 seen**, Goldeen + Magikarp banked in box 1, Tentacool in the party. Build sessions with `PolicyStep::fish(rod, map, goal)`. |
 | D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
 | E — Safari Zone | *(unclaimed)* | `postgame-phase0.bin` | `postgame::safari` | ☐ | |
 | F — Game Corner | *(unclaimed)* | `postgame-phase0.bin` | `postgame::game_corner` | ☐ | |
@@ -1439,3 +1457,106 @@ probe alongside the raw tile ids. Full `slow-tests` tier **66 passed, 0 failed**
 water edge next to a land bridge was previously unreachable, which is worth remembering for **C**
 (fishing) and **E** (the Safari Zone's water). The party-slot rule and the "same log position under two
 budgets ⇒ wedged" heuristic are general too.
+
+### [2026-07-30] C — **COMPLETE**. The one hard thing was a **deadlock with the game**, not a menu
+**Status:** verified ✅ (with one seam reshape ❗)
+**What the plan said:** C1–C5 as written in §6-C, with `PolicyStep::Fish { rod, at }`.
+**What is actually true:** all five, in **~31 s of wall clock across five legs**. The rod pickups are
+three copies of B1's chairman (one `Interact`, `YesNoChoice` opens on YES, the generic A-mash answers
+it) and cost nothing. Everything interesting is in the driver, and one thing in it is worth the price
+of this whole entry.
+
+**⚠️ The fishing animation must be *mashed through*, not waited out.** This cost most of the task.
+`FishingAnim` sets `wMovementFlags` bit 6 (`BIT_LEDGE_OR_FISHING`) for its whole duration, which is the
+obvious "a cast is in progress" flag and is exactly right — the animation reloads the overworld under
+itself, so without it `game_mode` reads `Overworld` mid-cast and a driver declares the cast resolved
+with the rod still in the water. The trap is what you do while it is set. The animation **ends** by
+printing `NoNibbleText` / `ItsABiteText`, both of which end in `prompt` — i.e. they block until a
+button is pressed — and only *then* does it clear the bit
+(`engine/overworld/player_animations.asm:447-449`). So a driver that keeps its hands off while the flag
+is set is deadlocked with the game: the flag it is waiting on cannot clear until it presses something.
+`DelayFrames` does not read the joypad and there is no menu between the rod and the bite, so the fix is
+simply to keep mashing A across the whole animation.
+
+The failure mode is worth describing because it argues for the wrong diagnosis at every step: the cast
+*works*, the bite is real (`wRodResponse` = 1, `wCurOpponent` filled in), and the moment anything else
+presses a button the battle starts — so the first symptom was "the driver times out and then a battle
+immediately begins", which reads as a slow cast. Raising the tick budget just made it time out later.
+Two things settled it: the screen (`hDisableJoypadPolling`, `wJoyIgnore` and `wStatusFlags5` were all
+clean, and a screenshot showed the ▼ prompt arrow), and the **program counter** — parked in
+`DelayFrame.halt` with the return address in `EmotionBubble` and `c` counting down, which is what
+proved the animation itself was *fine* and the wait after it was not. A one-off `dbg_registers()`
+accessor on `Core` (reverted) plus reading `[sp]` against `pokered.sym` is a fast way to answer "what is
+the ROM actually doing" and I would reach for it sooner next time.
+
+**The seam changed shape** (`PolicyStep::Fish { rod, at }` → `Fish { rod, map, goal }`), for a reason
+other workstreams will meet: **a cast's outcome is invisible to the policy.** The bite is a wild battle,
+`assert_battle_state` takes the driver's state away before it can observe anything, and by the time
+`pick_field_move` is polled again the battle is over and nothing in `GameState` records that it
+happened. `pokedex_seen` is no help either — this save has **seen 112 of 151 species**, so every fish
+in every rod's table is already on it and a "fish until you see something new" goal never terminates.
+So the driver does exactly **one cast** and returns to `Idle`, and the policy owns the repetition
+against the two things it *can* see:
+
+- `FishGoal::Casts(n)` — a cast counter the policy keeps (`DeterministicPolicy::fish_casts`).
+- `FishGoal::Catch { species, max_casts }` — the Pokédex **owned** set, with a bound.
+
+Everything not the target is fled from (`fishing::pick_battle_action`, one delegating call from
+`pick_battle_action`, placed *before* the low-PP/heal detours so a session is not abandoned mid-cast).
+No weakening pass before a throw: every fishable species is catch rate 155–255, so the HP term is worth
+a few per cent and a stray critical hit from a lv73 lead costs the encounter. That is
+`legendaries::pre_catch_action`'s reasoning arriving from the opposite end of the range.
+
+**Rooted on `postgame-fly-bike.bin`, not `postgame-phase0.bin`** (§9's row said the latter). The three
+rods are in Vermilion, Fuchsia and Route 12; with Fly each is one step and the whole workstream is 31 s,
+without it each leg is a cross-Kanto walk. §4.2's "siblings off the root, not a chain" is still the right
+default — this is a deliberate exception, and B's row explicitly offers it.
+
+**Four smaller facts, all of which cost a run:**
+
+- **A fixture whose next leg starts with `Fly` must be saved outdoors.** D recorded this for Moltres; it
+  bit again here immediately. `rod_pickup` therefore ends with an `enter(town)`. The failure is silent:
+  `FlyState::blocked_by` pops the step with a reason and the *rest of the queue* is then discarded for
+  want of a route, so the test dies with `queue_len=0` and no obvious cause.
+- **Route 12's road is blocked by its own gate building**, and the Super Rod house is at
+  `warp_event 11, 77` (`data/maps/objects/Route12.asm:19`) — 56 tiles *south* of it. Lavender's
+  connection lands on the north tip, so the leg has to go in the gate's north warp and out its south
+  one, disambiguated by landing `(10,21)` or `EnterMap` takes the north warp straight back out and
+  loops. `poke_flute_steps` already did this; I did not, and sat at `(10,1)` for the whole budget.
+  (Below the gate the BFS Surfs down the route's water on its own, which is why the walk is quick.)
+- **`run_until(|s| s.pokemon.len() == n)` fires mid-deposit.** `wPartyCount` drops to its post-deposit
+  value partway through the box menus while the on-screen list still shows the old party, so a wait for
+  "party is 4" returned in the middle of the *first* of two deposits and the next assertion then read a
+  half-banked party. Wait on `boxed_pokemon.len()` instead. Same family as A's "don't
+  `step_until_exhausted`" warning, one level down: the queue is not the only thing that lies about
+  progress.
+- **The catch waits on the party, not the dex bit.** `ItemUseBall` sets `wPokedexOwned` inside the catch
+  routine, several text boxes and a nickname screen before the mon is actually appended, so
+  `run_until(dex owned)` returns with the party still its old length.
+
+**Two guards worth copying.** `FishState::blocked_by` refuses up front when the rod is not in the bag,
+when surfing, or when the map's tileset is not in `WaterTilesets` — because the last two answer "Not the
+time to use that!", which looks exactly like a resolved cast, so the policy would re-issue for ever. And
+`fishing::pick` rejects a water tile whose walk crosses water: with `can_surf` set the BFS treats water
+as pass-through, and the overworld walker cannot mount Surf.
+
+**Output fixture `postgame-fishing.bin`** — Pallet Town (4,14), all three rods (bag 19/20), **dex 10
+owned / 113 seen**, party Venusaur / Articuno / Vaporeon / Slowpoke / **Tentacool**, box 1 holding
+**Goldeen** and **Magikarp**. Pallet Town is the cheapest complete fishing spot in the game: a Fly
+destination *and* a Super Rod group (`.Group1`, `data/wild/super_rod.asm:4`), so all three rods have
+something to catch one step from anywhere.
+**Evidence:** `pokemon::integration_tests::postgame::fishing::*` — 5 slow-tier tests, ~31 s wall clock
+for the lot; `pokemon::postgame::fishing::tests::*` (2, default tier). Full `slow-tests` tier
+**889 passed, 0 failed**, 13 pre-existing ignores; default tier **837 passed**.
+`git status src/pokemon/data/` shows only the four new files — no drift. ROM:
+`engine/items/item_effects.asm:1826-1885, 2817-2882` (the three rods, `FishingInit`,
+`IsNextTileShoreOrWater`, `ReadSuperRodData`), `engine/overworld/player_animations.asm:378-450`,
+`data/wild/{good_rod,super_rod}.asm`, `data/tilesets/water_tilesets.asm`,
+`data/text/text_1.asm:21-33`.
+**Impact on others:** **E (Safari)** — the "an outcome the policy cannot see" problem is the same shape
+there (a Safari encounter that flees leaves no trace either), and the cast-counter pattern is the
+answer. **Anyone writing a driver around a ROM animation**: check whether the flag you are waiting on
+is cleared *after* a `prompt`; if it is, waiting is a deadlock, not patience. `PolicyStep::fish(rod,
+map, goal)` is available to anyone who wants a water encounter — the whole table is Magikarp, Goldeen,
+Poliwag, Tentacool, Krabby, Horsea, Staryu, Shellder, Psyduck, Slowpoke, Dratini (Safari) and their
+evolutions.
