@@ -339,8 +339,6 @@ pub enum PolicyStep {
     // seam is the point, not the shape.
     /// **B** — Fly to `to`. ⚠️ The town map is a bespoke screen, not a `HandleMenuInput` list.
     Fly { to: Map },
-    /// **C** — fish at the water tile `at` with `rod`.
-    Fish { rod: crate::pokemon::postgame::fishing::Rod, at: crate::geometry::Point8 },
     /// **G** — offer the party member in `slot` to the in-game trade NPC on map `at`.
     TradePokemon { give_slot: u8, at: Map },
     /// **H** — search for the hidden item at `at` (a bg-event object, same shape as `FlipSwitch`).
@@ -357,6 +355,14 @@ pub enum PolicyStep {
     /// [`crate::pokemon::postgame::pc_box`]. Build with [`Self::deposit_pokemon`],
     /// [`Self::withdraw_pokemon`], [`Self::change_box`], [`Self::release_pokemon`].
     UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp, map: Map },
+    /// **C** — a fishing session on `map` with `rod`, running until `goal` is met. Routing to `map`
+    /// happens here; each individual cast is [`crate::pokemon::postgame::fishing`]. Build with
+    /// [`Self::fish`].
+    Fish {
+        rod: crate::pokemon::postgame::fishing::Rod,
+        map: Map,
+        goal: crate::pokemon::postgame::fishing::FishGoal,
+    },
     /// Walk to and pick up an item sprite (a Poké Ball on the ground), staying on this step until
     /// the sprite is gone. Unlike [`Interact`], this does **not** pop after issuing a single walk:
     /// picking up an item can be interrupted (e.g. the Mt Moon fossil area triggers the Super Nerd
@@ -502,7 +508,8 @@ pub enum FieldMove {
     // its state in one line, so a workstream only has to return one from its own `pick_field_move`.
     /// **B** — Fly to `to`.
     Fly { to: Map },
-    /// **C** — cast `rod` at the water tile `at`.
+    /// **C** — cast `rod` **once** at the water tile `at`. Driven by
+    /// [`crate::pokemon::postgame::fishing`].
     Fish { rod: crate::pokemon::postgame::fishing::Rod, at: crate::geometry::Point8 },
     /// **G** — offer the party member in `give_slot` to the trade NPC on `at`.
     Trade { give_slot: u8, at: Map },
@@ -1836,6 +1843,11 @@ pub struct DeterministicPolicy {
     /// quiz-gate maze): a defeated trainer stays on the map as a sprite, so once we detect we're
     /// standing in its line of sight with no battle starting, we record it here to avoid re-targeting.
     gym_beaten: HashSet<Point8>,
+    /// Casts the current `Fish` step has issued (workstream C). A cast's outcome is invisible from the
+    /// overworld — the bite is a battle that is over by the time the policy is polled again, and this
+    /// save has already *seen* every fishable species — so the cast count is what both `FishGoal`s are
+    /// measured against. Reset whenever the step pops.
+    fish_casts: u32,
     /// `(trainer position, player position, consecutive stuck ticks)` for the gym-trainer engagement.
     /// If we keep targeting the same beaten trainer from the same frozen spot (its after-battle text
     /// aborts the approach, no battle starts), the counter climbs until we mark it beaten and move on.
@@ -1868,6 +1880,7 @@ impl DeterministicPolicy {
             train_slot: None,
             trainee_participated: false,
             interact_skip_waits: 0,
+            fish_casts: 0,
         }
     }
 
@@ -2364,9 +2377,24 @@ impl Policy for DeterministicPolicy {
                 // Reserved seams (task 0.8) — inert until their workstream implements them. To take
                 // one: move your variant out of this list into its own one-line arm delegating to
                 // your own module. That is a one-line edit to this file, which is the whole point.
-                PolicyStep::Fish { .. }
-                | PolicyStep::TradePokemon { .. } | PolicyStep::SearchHiddenItem { .. } =>
+                PolicyStep::TradePokemon { .. } | PolicyStep::SearchHiddenItem { .. } =>
                     crate::pokemon::postgame::unimplemented_seam(&step),
+                PolicyStep::Fish { map, .. } => {
+                    // Routing only, like `UseItemPc` below: once we are standing on `map`,
+                    // `pick_field_move` picks the water tile and hands each cast to the driver.
+                    if state.map.map != map {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            println!("[policy] want to fish on {map}, but no path there!");
+                            self.fish_casts = 0;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        None
+                    }
+                }
                 PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
                     // Routing only. Once we are standing on `map`, `pick_field_move` hands the step to
                     // the storage driver, which walks the last tiles itself so that it — and not the
@@ -2587,6 +2615,15 @@ impl Policy for DeterministicPolicy {
         // `battle_options` so a future LLM policy can choose to catch.)
         if battle_state.battle_type == BattleType::Safari {
             return Some(BattleAction::Run);
+        }
+
+        // **Workstream C.** A wild battle during a `Fish` step is the bite that step went looking for:
+        // throw at the target species, flee everything else. Placed before the heal/PP detours below,
+        // which would otherwise abandon the session to walk to a Pokémon Center mid-cast.
+        if let Some(&PolicyStep::Fish { goal, .. }) = self.queue.front() {
+            if let Some(action) = crate::pokemon::postgame::fishing::pick_battle_action(state, goal, &actions) {
+                return Some(action);
+            }
         }
 
         if self.heal_return.is_some() && battle_state.battle_type == BattleType::Wild {
@@ -2971,6 +3008,28 @@ impl Policy for DeterministicPolicy {
                 };
             }
         }
+        if let Some(&PolicyStep::Fish { rod, map, goal }) = self.queue.front() {
+            // **Workstream C.** One cast per issue: the driver returns to `Idle` after each one (and a
+            // bite hands the agent to the battle handler before that), so the repetition lives here.
+            if state.map.map == map {
+                use crate::pokemon::postgame::fishing;
+                if fishing::goal_met(state, goal, self.fish_casts) {
+                    println!("[policy] Fish: {goal:?} met after {} casts — done", self.fish_casts);
+                    self.fish_casts = 0;
+                    self.queue.pop_front();
+                    return None;
+                }
+                match fishing::pick(state, rod) {
+                    Some(field_move) => { self.fish_casts += 1; return Some(field_move); }
+                    None => {
+                        println!("[policy] Fish: no water on {map} the player can stand next to — skipping");
+                        self.fish_casts = 0;
+                        self.queue.pop_front();
+                        return None;
+                    }
+                }
+            }
+        }
         if let Some(&PolicyStep::Fly { to }) = self.queue.front() {
             // **Workstream B.** Popped on issue like `MovePokemonToFront`: the driver owns everything
             // from the START menu to the landing, and `pick_field_move` is not polled again until it
@@ -3221,6 +3280,10 @@ impl Policy for DeterministicPolicy {
                 // the statue (wild encounters + LOS trainers interrupt the walk) — the single FlipSwitch
                 // step legitimately sits unchanged for a long while.
                 | Some(PolicyStep::FlipSwitch { .. })
+                // A fishing session is one step across many casts and the battles they start — a
+                // `Catch` goal against a two-species table routinely runs dozens of casts deep
+                // (workstream C).
+                | Some(PolicyStep::Fish { .. })
         )
     }
 }

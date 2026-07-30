@@ -216,8 +216,10 @@ pub(crate) enum AgentState {
     /// **Workstream B** — driving the Fly menu chain and the bespoke town-map screen. The whole state
     /// machine lives in [`crate::pokemon::postgame::fly_bike`].
     Flying(crate::pokemon::postgame::fly_bike::FlyState),
-    /// **C** — rod cast, waiting on "not even a nibble" / a bite.
-    Fishing { rod: crate::pokemon::postgame::fishing::Rod, at: Point8 },
+    /// **Workstream C** — one rod cast: the walk to the shore, the bag menu chain, and the wait on
+    /// "not even a nibble". A bite becomes a wild battle and `assert_battle_state` takes over. The
+    /// state machine lives in [`crate::pokemon::postgame::fishing`].
+    Fishing(crate::pokemon::postgame::fishing::FishState),
     /// **G** — driving an in-game trade's offer/accept flow.
     Trading { give_slot: u8, at: Map },
     /// **H** — searching a bg-event tile for a hidden item.
@@ -300,7 +302,7 @@ impl Display for AgentState {
             AgentState::UsingItemPc(s)           => write!(f, "itempc:{:?}:{:?}x{}", s.op, s.item, s.qty),
             AgentState::UsingPcBox(s)            => write!(f, "pcbox:{:?}", s.op),
             AgentState::Flying(s)                => write!(f, "fly→{:?}", s.to),
-            AgentState::Fishing { rod, at }      => write!(f, "fish:{rod:?}@{at}"),
+            AgentState::Fishing(s)               => write!(f, "fish:{:?}@{}", s.rod, s.at),
             AgentState::Trading { give_slot, at } => write!(f, "trade:slot{give_slot}@{at:?}"),
             AgentState::SearchingHiddenItem { at } => write!(f, "hidden@{at}"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
@@ -815,7 +817,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing { .. } | AgentState::Trading { .. } | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::Trading { .. } | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -966,13 +968,14 @@ impl PokemonAgent {
                             self.set_state(AgentState::Flying(FlyState::new(to)));
                             return Ok(());
                         }
-                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
-                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
                         Some(crate::pokemon::policy::FieldMove::Fish { rod, at }) => {
+                            use crate::pokemon::postgame::fishing::FishState;
                             api.release_all_buttons();
-                            self.set_state(AgentState::Fishing { rod, at });
+                            self.set_state(AgentState::Fishing(FishState::new(rod, at)));
                             return Ok(());
                         }
+                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
+                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
                         Some(crate::pokemon::policy::FieldMove::Trade { give_slot, at }) => {
                             api.release_all_buttons();
                             self.set_state(AgentState::Trading { give_slot, at });
@@ -2037,8 +2040,8 @@ impl PokemonAgent {
             AgentState::UsingItemPc(s) => return crate::pokemon::postgame::item_storage::tick(self, api, s),
             AgentState::UsingPcBox(s) => return crate::pokemon::postgame::pc_box::tick(self, api, s),
             AgentState::Flying(s) => return crate::pokemon::postgame::fly_bike::tick(self, api, s),
+            AgentState::Fishing(s) => return crate::pokemon::postgame::fishing::tick(self, api, s),
             // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
-            AgentState::Fishing { rod, at } => return crate::pokemon::postgame::fishing::tick(self, api, rod, at),
             AgentState::Trading { give_slot, at } => return crate::pokemon::postgame::trades::tick(self, api, give_slot, at),
             AgentState::SearchingHiddenItem { at } => return crate::pokemon::postgame::aides::tick(self, api, at),
             AgentState::CheckingTrashCan { target, checked, press, facing } => {

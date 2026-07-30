@@ -246,6 +246,12 @@ fn probe_coverage() {
         ("postgame-hm02", include_bytes!("../data/postgame-hm02.bin")),
         ("postgame-fly", include_bytes!("../data/postgame-fly.bin")),
         ("postgame-fly-bike", include_bytes!("../data/postgame-fly-bike.bin")),
+        // Workstream C's chain, rooted on B's output: Old Rod → a Magikarp → Good Rod + a Goldeen →
+        // Super Rod + a Tentacool (with the first two banked at the Viridian PC).
+        ("postgame-old-rod", include_bytes!("../data/postgame-old-rod.bin")),
+        ("postgame-magikarp", include_bytes!("../data/postgame-magikarp.bin")),
+        ("postgame-good-rod", include_bytes!("../data/postgame-good-rod.bin")),
+        ("postgame-fishing", include_bytes!("../data/postgame-fishing.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);
