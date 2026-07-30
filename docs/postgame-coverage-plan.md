@@ -317,21 +317,44 @@ what you learn to §11. If a sub-step turns out to be three, split it here first
 The biggest quality-of-life win in the plan: Fly collapses cross-Kanto travel, which every other
 workstream pays for in emulated minutes. **Land this early if agents are scarce.**
 
-- [ ] **B1 — Bike Voucher.** `PokemonFanClub` (Vermilion), talk to the chairman.
+- [x] **B1 — Bike Voucher.** `PokemonFanClub` (Vermilion), talk to the chairman.
       *Observable:* voucher in bag.
-- [ ] **B2 — Bicycle.** `BikeShop` (Cerulean), trade the voucher. *Observable:* Bicycle in bag.
-- [ ] **B3 — HM02.** `Route16FlyHouse`, reached from Celadon via `Route16` (needs Cut).
+      *Done:* `PolicyStep::bike_voucher_steps()`, test `postgame::fly_bike::can_get_the_bike_voucher`
+      (~8 s). The chairman's YES/NO needs no driver — `YesNoChoice` opens on YES and the generic A-mash
+      answers it. Viridian → Vermilion goes through **Diglett's Cave**, not the Mt Moon loop.
+      Fixture `postgame-bike-voucher.bin`.
+- [x] **B2 — Bicycle.** `BikeShop` (Cerulean), trade the voucher. *Observable:* Bicycle in bag.
+      *Done:* `PolicyStep::bicycle_steps()`, test `can_trade_the_voucher_for_a_bicycle` (~4 s). One
+      `Interact`: with the voucher held the clerk gives the bike and removes it, no menu.
+      Fixture `postgame-bicycle.bin`.
+- [x] **B3 — HM02.** `Route16FlyHouse`, reached from Celadon via `Route16` (needs Cut).
       *Observable:* HM02 in bag.
-- [ ] **B4 — Teach Fly.** `PolicyStep::TeachMove { item: Hm02Fly, .. }` already works — just use it.
+      *Done:* `PolicyStep::hm02_steps()`, test `can_get_hm02_fly` (~5 s). ⚠️ **B3 depends on B2**, which
+      §6-B does not say: `Route16Gate1F` is two separate corridors and the guard between them wants to
+      see the Bicycle. Fixture `postgame-hm02.bin`.
+- [x] **B4 — Teach Fly.** `PolicyStep::TeachMove { item: Hm02Fly, .. }` already works — just use it.
       *Observable:* a party mon knows Fly.
-- [ ] **B5 — The Fly driver.** `PolicyStep::Fly { to: Map }` + `AgentState::Flying`, driving
+      *Done:* test `can_teach_fly` (~1 s). **Articuno is the only compatible party member.** The plan was
+      right that this is free — and the "`TeachMove` wedges on a deep-bag HM" suspicion did **not**
+      reproduce at bag index 15; see §11.
+- [x] **B5 — The Fly driver.** `PolicyStep::Fly { to: Map }` + `AgentState::Flying`, driving
       START → POKéMON → mon → FLY → town-map cursor. ⚠️ The town map is a **bespoke screen**, not a
       `HandleMenuInput` list — budget real time for this one and record what you find in §11.
       *Observable:* the agent Flies between two towns.
-- [ ] **B6 — Cycling Road.** `Route17` is bike-gated; `Route16/17/18` then connect Celadon → Fuchsia.
+      *Done:* [`postgame::fly_bike::tick`] + `FlyState`, test `can_fly_between_towns` (Route 16 → Pewter,
+      ~1 s). The warning was an understatement — the cursor is not in RAM at all and there is no flag for
+      the screen. Three §11 entries came out of it. Fixture `postgame-fly.bin`.
+- [x] **B6 — Cycling Road.** `Route17` is bike-gated; `Route16/17/18` then connect Celadon → Fuchsia.
       *Observable:* the agent walks Celadon → Fuchsia via Cycling Road.
-- [ ] **B7 — Route 16 Snorlax.** The **second** Snorlax; `UseFieldItem { PokeFlute }` already exists.
+      *Done:* `PolicyStep::cycling_road_steps()`, test `can_ride_cycling_road_to_fuchsia` (~16 s).
+      Nothing has to *use* the Bicycle: owning it opens the gate and Route 16 (17,10)/(17,11) mount it.
+      Two blockers found on the way — see §11 (`can_surf` on Cycling Road, and Route 18's water flanks).
+- [x] **B7 — Route 16 Snorlax.** The **second** Snorlax; `UseFieldItem { PokeFlute }` already exists.
       *Observable:* Snorlax gone, route passable. Then commit `postgame-fly-bike.bin`.
+      *Done:* same test (the two share a map, and the Snorlax battle regrows the cut tree the Cycling
+      Road entrance is behind). It turns out the Route 16 Snorlax does **not** block the road — the road
+      is two tiles tall and it sits on only one of them — so this is dex coverage (SEEN 112), not a gate.
+      Fixture `postgame-fly-bike.bin`.
 
 ### C — Fishing
 
@@ -505,7 +528,7 @@ Phase 0 (item storage, PC locations, seams, probe)
 |---|---|---|---|---|---|
 | 0 — foundation | claude-phase0 | `post-hall-of-fame.bin` | `postgame::phase0` | ✅ done | ⚠️ **A–H: root at `postgame-phase0.bin`**, NOT `post-hall-of-fame.bin` (a cutscene). Bag 14/20, party healed, parked at the Viridian PC. See §11. |
 | A — PC boxes | claude-A-pcbox | `postgame-phase0.bin` | `postgame::pc_box` | ✅ done | A1–A7 all green. Build steps with `PolicyStep::deposit_pokemon/withdraw_pokemon/change_box/release_pokemon(.., map)` — **not** the four reserved variants, which are gone (see §11). Output `postgame-pc-box.bin`. |
-| B — Fly / Bike / Cycling Road | *(unclaimed)* | `postgame-phase0.bin` | `postgame::fly_bike` | ☐ | land early if agents are scarce |
+| B — Fly / Bike / Cycling Road | claude-B-flybike | `postgame-phase0.bin` | `postgame::fly_bike` | ✅ done | B1–B7 green, ~50 s wall clock for the lot. **Fly is available to everyone now: `PolicyStep::Fly { to }`, any of the 11 towns, from any outdoor map.** Start from `postgame-fly-bike.bin` (Fuchsia, Fly + Bicycle) — but heal first, Venusaur's Solarbeam is at 0 PP. Two shared-file fixes landed (see §11): field-move menu detection in `agent.rs`, and `can_surf` on Cycling Road. |
 | C — Fishing | *(unclaimed)* | `postgame-phase0.bin` | `postgame::fishing` | ☐ | |
 | D — Legendaries | *(unclaimed)* | `postgame-phase0.bin` | `postgame::legendaries` | ☐ | cheapest; good first pick |
 | E — Safari Zone | *(unclaimed)* | `postgame-phase0.bin` | `postgame::safari` | ☐ | |
@@ -935,3 +958,183 @@ one new file — no drift. ROM: `engine/pokemon/bills_pc.asm:1-176, 207-339, 382
 `engine/menus/save.asm:358-402, 437-500`, `data/text/text_2.asm:1548-1618`, `macros/ram.asm:9-39`.
 **Impact on others:** **C, D, E, F and G are unblocked** for holding more than six Pokémon. §6-A's step
 names are stale — use the constructors above. §8's dependency graph is satisfied for A.
+
+### [2026-07-30] B / B5 — the town map has no cursor in RAM and no flag on it; it is identified by its **broken font**
+**Status:** corrected ❗ (B5's warning was right, and understated)
+**What the plan said:** B5 — *"⚠️ The town map is a **bespoke screen**, not a `HandleMenuInput` list —
+budget real time for this one."*
+**What is actually true:** it is worse than "not a menu". `LoadTownMap_Fly` keeps the cursor in the `hl`
+register and never writes it to RAM, and it sets no state a driver can key on. Three separate traps, in
+the order I walked into them:
+
+1. **`wTownMapSpriteBlinkingEnabled` is not the flag it looks like.** It shares its byte with
+   `wPartyMenuAnimMonEnabled` (`ram/wram.asm:1444-1447`), which the **party menu** sets. A driver keyed
+   on it starts "driving the town map" while still in the party list, presses Up at the party cursor
+   forever, and reports a wedge 1200 ticks later. (wram.asm even says the town cursor blinks regardless
+   of the value.)
+2. **The screen cannot be read.** `on_screen_text` returns `None` for it, because `LoadTownMap_Fly`
+   copies its up-arrow glyph to `vChars1 tile $6d` — **inside** the font block at `vFont` ($8800, $80
+   tiles) — so `pokemon_font_loaded()` is false. That is deterministic and happens *before* the input
+   loop opens, which turns the bug into the detector: **no font + not the overworld + `wTownMapCoords`
+   holding a real town coordinate ⇒ the fly screen, and nothing else.** One caveat that cost a run: the
+   clobbered font *survives the landing* until some menu redraws it, so a fixture captured just after a
+   flight looks like a town map. The driver therefore also requires having seen the font loaded during
+   this flight's menu chain (`FlyState::saw_font`).
+3. **Choosing FLY changes nothing a geometry test can see, and the load takes ~30 ticks.** `wTopMenuItemY`
+   still says field-move menu while the map loads, so a driver that keeps driving it keeps pressing A —
+   and the first A that survives into the fly screen's input loop confirms whatever the cursor starts on:
+   **Pallet Town, every time.** The fix is a hard input barrier: from the A that selects FLY until the
+   town map is recognised, the driver presses **nothing** (`FlyState::chose_fly_at`, with a
+   150-tick fallback because that first A is routinely swallowed by a still-drawing menu).
+
+**How the cursor is steered.** `wTownMapCoords` (low nibble x, high nibble y) is rewritten on every
+redraw by `DrawPlayerOrBirdSprite`, so it *is* the cursor position — compared against
+`ExternalMapEntries + 3 * map_id` read straight from ROM bank `$1c`. All eleven towns have distinct
+coordinates; `town_map_coordinates_match_the_rom_table` pins the table in the default tier. Only **Up**
+is ever pressed: `.pressedUp` walks forward through `wFlyLocationsList` skipping unvisited towns and
+wraps at the end, so one button reaches everything and an overshoot costs a lap, not a flight. Presses
+are dropped on purpose — each cursor move ends in `ld c, 15 / call DelayFrames` — so the driver re-reads
+the coordinate every tick instead of counting presses, and A is idempotent while the cursor is on target.
+
+**Pre-flight guards, because none of these are visible afterwards:** the target must be one of the 11
+towns, **visited** (`wTownVisitedFlag`; an unvisited town is absent from the cursor's list, so the driver
+would circle forever), on an **outside** map (`CheckIfInOutsideMap`: tileset `OVERWORLD` or `PLATEAU`),
+and some party member must know Fly.
+**Evidence:** `pokemon::integration_tests::postgame::fly_bike::can_fly_between_towns` (Route 16 → Pewter,
+cursor walks `b2` Pallet → `82` Viridian → `32` Pewter → A); `pokemon::postgame::fly_bike::tests::*`;
+`pokered/engine/items/town_map.asm:141-252, 347-371, 559-587`; `pokered/ram/wram.asm:953-965, 1444-1447`;
+`pokered/ram/vram.asm:6-14`; `pokered/data/maps/town_map_entries.asm`.
+**Impact on others:** **everyone** — `PolicyStep::Fly { to }` now works from any outdoor map, so no
+workstream needs to walk across Kanto again. If you write a driver for another bespoke screen, the lesson
+is that this codebase has three menu signals (`wTextBoxID`, `wTopMenuItem*`, on-screen text) and a screen
+like this one poisons all three; find something the ROM changes *as a side effect* and prove it.
+
+### [2026-07-30] B — two **shared-file** fixes landed: field-move menu detection, and `can_surf` on Cycling Road
+**Status:** corrected ❗ — read this if a Cut / Surf / Strength / Dig driver misbehaves
+**What the plan said:** §4.1 — a workstream should touch shared files on four delegating lines. These two
+changes are not that, and are logged because they change behaviour every workstream depends on.
+
+**1. `agent.rs`: the field-move menu was being detected two different wrong ways.** `CuttingTree`,
+`Surfing` and `UsingFieldMove` all tested `tbid == FieldMoveMonMenu || top_y == 10`, first, before the
+START- and party-menu tests. Both halves of that are wrong:
+
+- `wTextBoxID` is only written when a text box is **drawn**, so it lingers on `FieldMoveMonMenu` for the
+  whole of a flight. The first `CutTree` after a Fly therefore "recognised" the field-move menu while the
+  START menu was open, pressed A on entry 0, and sat in the **Pokédex** until the budget ran out.
+- `top_y == 10` is only true for a mon with **one** field move: the box's row counts down from 12 by two
+  per field move (`engine/menus/start_sub_menus.asm:36-47`), so Slowpoke (Strength + Dig) is at 8. And
+  `top_x` cannot help — it is `wFieldMovesLeftmostXCoord`, pulled left to fit the longest move name, so
+  it is 12 for `CUT` and 10 for `STRENGTH` (`engine/menus/text_box.asm:382-492`).
+
+Now: the unambiguous menus are matched first (START at (11,2), party at (0,1)/(0,3)), and the field-move
+box needs **both** signals — `tbid == FieldMoveMonMenu && top_y ∈ {4,6,8,10}`. Geometry says "a box of
+that shape is configured", the id says "and it is what is on screen, not the message box over it".
+Getting this wrong in either direction is silent: with only geometry, `can_catch_articuno` re-selected
+STRENGTH forever on the "used STRENGTH." text box; with only the id, Cut opened the Pokédex.
+
+**2. `mod.rs`: `can_surf` must be false while the player is forced onto the bike.** `IsSurfingAllowed`
+refuses Surf on Cycling Road outright — the ROM comment says so in as many words
+(`engine/overworld/field_move_messages.asm:21-45`, answered with "Cycling is fun! Forget SURFing!") —
+and it matters because **Routes 16–18 run along the sea**. With Surf believed available the BFS treats
+water as pass-through, so the shortest path down Cycling Road is *straight down the water*: the agent
+rode to the shore, tried to mount Surf, was refused, and pulsed A at the party menu for the rest of the
+budget. `can_surf` now also requires `wStatusFlags6` bit 5 (`BIT_ALWAYS_ON_BIKE`) clear. (The Seafoam
+"current too fast" half of the same routine is already modelled separately as `no_surf_mount`.)
+**Evidence:** both found by `postgame::fly_bike::can_ride_cycling_road_to_fuchsia`; the field-move fix is
+pinned by the full `slow-tests` tier — **62 passed, 0 failed, 8 pre-existing ignores** — and
+`cinnabar::can_catch_articuno` is the test that fails if either half of the new predicate is dropped
+(verified against a clean `git archive HEAD` build, where it passes, so the regression was mine).
+Default tier 816 passed.
+**Impact on others:** anything that uses a field move, i.e. all of A–H. If you add a field-move driver,
+copy the predicate — do not re-derive it. And if you route across a coastal map on the bike, `can_surf`
+now tells the BFS the truth.
+
+### [2026-07-30] B — **COMPLETE**. Fly, the Bicycle and Cycling Road, plus four route facts worth having
+**Status:** verified ✅
+**What the plan said:** B1–B7 as written in §6-B.
+**What is actually true:** all seven, and the whole workstream is **~50 s of wall clock across 6 tests**
+(5 slow-tier legs plus 2 default-tier unit tests) because each leg starts from the previous one's fixture.
+The chain is `postgame-phase0` → `-bike-voucher` → `-bicycle` → `-hm02` → `-fly` → `-fly-bike`; it is a
+chain rather than five siblings because the travel is the cost, and after B5 the travel is free.
+
+Beyond the two shared fixes above, four things about the routes that no amount of reading the plan would
+have told me:
+
+- **§6-B's ordering hides a dependency: B3 needs B2.** `Route16Gate1F` is not one corridor but two —
+  west/east door pairs at Route 16 y=10/11 (the Cycling Road road) and y=4/5 (where the Fly house is) —
+  joined only by the middle column past a guard who blocks it unless the **Bicycle** is in the bag
+  (`scripts/Route16Gate1F.asm:16-46`, stop coords (4,7)…(4,10)).
+- **Nothing ever *uses* the Bicycle.** Owning it satisfies the gate guards, and Route 16 (17,10)/(17,11)
+  are in `ForcedBikeOrSurfMaps` (`data/maps/force_bike_surf.asm:7-8`), so stepping out of the gate mounts
+  it for you. No bike-riding driver is needed, and none was written.
+- **Route 18's connection strip is water on both flanks** — it reads `~~~~~CCCCCCCC~~~~~~`, i.e.
+  `ConnectionWater` at x=1–5 and x=14–19 — so a plain `enter(Route18)` picks a water tile and strands the
+  agent on the last dry tile of Cycling Road. Land explicitly: `enter_at(Route18, 13, 0)`. Any coastal
+  connection is worth checking for this.
+- **Viridian ↔ Vermilion is Diglett's Cave**, not the Pewter/Mt Moon loop, and it needs Venusaur rotated
+  to slot 0 first: the `CuttingTree` executor only ever asks party **slot 0**, and Route 2's east side has
+  cuttable trees on both sides of `Route2Gate`. Also a reminder the hard way: Saffron → Celadon must cross
+  at `enter_at(Route7, 19, 10)`; the plain connection lands in a ledge-sealed pocket at (20,2), exactly as
+  `eevee_vaporeon_surf_steps` already warns.
+
+**One thing the plan feared and I could not reproduce:** the `#[ignore]`d `endgame::can_solve_victory_road_1f`
+blames `TeachMove` for wedging on "an HM deep in the bag" (HM04 at index 11 of 16). HM02 sits at **index
+15 of 16** here and `can_teach_fly` taught it in 0.6 s, first try, no retries. So bag depth is not the
+cause of that failure and whoever picks it up should look elsewhere — my guess is the party slot, since
+both ignored tests also address a mon by slot on a fixture whose party has shifted.
+
+**Output fixture `postgame-fly-bike.bin`** — Fuchsia City (1,16), Fly on **Articuno (slot 1)**, Bicycle in
+the bag (16/20), badges 255, dex 7 owned / **112 seen** (Snorlax), ¥41,209 from the Cycling Road bikers.
+⚠️ **Heal before you fight anything**: the ride leaves Venusaur at 205/232 with **Solarbeam at 0 PP**. The
+party order is Venusaur / Articuno / Vaporeon / Slowpoke — Venusaur leads because Cut needs slot 0, and
+that is worth preserving.
+**Evidence:** `pokemon::integration_tests::postgame::fly_bike::*` (5 slow-tier tests, all green) and
+`pokemon::postgame::fly_bike::tests::*` (2, default tier); `fixture::probe_coverage` output for all five
+new fixtures; full slow tier 62 passed / 0 failed; default tier 816 passed. `git status src/pokemon/data/`
+shows only the five new files — no drift.
+**Impact on others:** **C, D, E, F, G, H** — travel is now one step. `PolicyStep::Fly { to }` reaches any
+of the 11 towns from any outdoor map and refuses (with a reason on the event stream) rather than wedging
+when it cannot. The §8 dependency graph's note that "B makes every other stream cheaper" is satisfied.
+
+### [2026-07-30] B — follow-up: the field-move menu chain is now **one shared function**, not four copies
+**Status:** corrected ❗ — this supersedes the "copy the predicate" advice in my entry above
+**What my earlier entry said:** *"If you add a field-move driver, copy the predicate — do not re-derive
+it."* That was the wrong conclusion from the right observation: the original bug existed *because* the
+test was written twice and drifted, and I had just made it four copies.
+**What is actually true now:** there is one predicate and one chain driver, and a new field-move driver
+should call them rather than copy anything.
+
+- **[`MenuState::is_field_move_menu`]** (`src/pokemon/menu.rs`) — the two-part test (`wTextBoxID` **and**
+  `wTopMenuItemY ∈ {4,6,8,10}`), with the whole ROM rationale attached to it once. It sits beside the
+  existing `is_main_battle_menu` / `is_mart_item_list` / `is_switch_stats_cancel_menu` predicates, which
+  is where this family of tbid-plus-geometry questions already lived.
+- **`agent::field_move_menu_button(api, slot, move_index)`** — everything after the overworld branch of
+  the chain: START menu → POKéMON, party list → `slot`, field-move box → `move_index`, A for the text in
+  between. `CuttingTree` (0, 0), `Surfing` (slot, 0), `UsingFieldMove` (slot, move_index) and the Fly
+  driver all call it; each keeps only its own overworld behaviour (face a tree, face the water, press
+  START). That removed ~45 lines, a fifth copy of the `nav` closure, and three restated comments — two of
+  which had already drifted into saying the opposite of what the code did, inside a single change.
+
+Also from the same clean-up pass, worth knowing: `policy::field_move_index_of(mon, want)` now exists
+beside `field_move_index` for callers that hold one Pokémon rather than a whole `GameState`, which is how
+the Fly driver gets its slot and row from **one** party read instead of two party reads plus two full
+`GameState` builds per tick. And `MetaTileMap::can_surf`'s doc comment now states its third condition;
+it is policy-visible as `state.map.can_surf`, so a stale doc there misleads every future workstream.
+
+**Two things deliberately *not* done**, so nobody re-opens them expecting a quick win:
+
+1. **Route knowledge stays duplicated between `policy.rs`'s step lists and mine.** The Cerulean
+   trashed-house bridge, the Route 6↔5 Underground Path chain and the Saffron↔Celadon (19,10) crossing
+   are each written out in two or three places now, and a shared `cerulean_terrace_bridge()` /
+   `saffron_to_celadon()` would be better. But those coordinates live inside `complete_game_steps`'
+   legs, which §4.2 **freezes**, and touching them means re-cutting the whole leg-fixture chain. Someone
+   doing a deliberate routing-helper pass should do it; a workstream should not.
+2. **`CuttingTree` still hardcodes party slot 0**, which is why every step list here inserts
+   `MovePokemonToFront { slot: 1 }` before a `CutTree`. Teaching it to find the Cut holder itself is the
+   right fix and would delete that dance everywhere, but it changes behaviour on every committed fixture,
+   so it is out of proportion to a workstream and belongs with its own test run.
+
+**Evidence:** full `slow-tests` tier after the refactor — **62 passed, 0 failed**, 8 pre-existing ignores
+(and `cinnabar::can_catch_articuno` is the canary: it fails if either half of the predicate is dropped);
+default tier 816 passed; `git status src/pokemon/data/` still shows only the five new fixtures.
+**Impact on others:** anyone writing a driver that opens the party menu — call the two functions above.

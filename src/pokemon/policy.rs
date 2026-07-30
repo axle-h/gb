@@ -548,11 +548,14 @@ fn is_field_move(name: PokemonMoveName) -> bool {
 /// Where `want` sits in the field-move menu for the party member in `slot`: the count of field moves
 /// it knows in earlier move slots. Defaults to 0 if the mon or the move is missing, which is what a
 /// lone-field-move HM slave would use anyway.
-fn field_move_index(state: &GameState, slot: u8, want: PokemonMoveName) -> u8 {
-    let Some(mon) = state.pokemon.get(slot as usize) else { return 0 };
-    let field_moves: Vec<PokemonMoveName> = mon.moves.iter().flatten()
-        .map(|m| m.name).filter(|&n| is_field_move(n)).collect();
-    field_moves.iter().position(|&n| n == want).unwrap_or(0) as u8
+pub(crate) fn field_move_index(state: &GameState, slot: u8, want: PokemonMoveName) -> u8 {
+    state.pokemon.get(slot as usize).map_or(0, |mon| field_move_index_of(mon, want))
+}
+
+/// `want`'s row in `mon`'s field-move box, for callers that hold the mon but not a whole `GameState`.
+pub(crate) fn field_move_index_of(mon: &crate::pokemon::pokemon::Pokemon, want: PokemonMoveName) -> u8 {
+    mon.moves.iter().flatten().map(|m| m.name).filter(|&n| is_field_move(n))
+        .position(|n| n == want).unwrap_or(0) as u8
 }
 
 impl PolicyStep {
@@ -2343,7 +2346,7 @@ impl Policy for DeterministicPolicy {
                 // Reserved seams (task 0.8) — inert until their workstream implements them. To take
                 // one: move your variant out of this list into its own one-line arm delegating to
                 // your own module. That is a one-line edit to this file, which is the whole point.
-                PolicyStep::Fly { .. } | PolicyStep::Fish { .. }
+                PolicyStep::Fish { .. }
                 | PolicyStep::TradePokemon { .. } | PolicyStep::SearchHiddenItem { .. } =>
                     crate::pokemon::postgame::unimplemented_seam(&step),
                 PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
@@ -2457,8 +2460,9 @@ impl Policy for DeterministicPolicy {
                     self.queue.pop_front();
                     continue;
                 }
-                PolicyStep::MovePokemonToFront { .. } => {
-                    // Handled by `pick_field_move` (a direct RAM reorder); wait without advancing.
+                PolicyStep::MovePokemonToFront { .. } | PolicyStep::Fly { .. } => {
+                    // Handled by `pick_field_move` (a direct RAM reorder; the Fly menu chain and town
+                    // map, workstream B); wait without advancing.
                     None
                 }
                 PolicyStep::UseStrength { .. } => {
@@ -2942,6 +2946,14 @@ impl Policy for DeterministicPolicy {
                     None => { println!("[policy] UsePcBox: {map} has no PC — skipping"); None }
                 };
             }
+        }
+        if let Some(&PolicyStep::Fly { to }) = self.queue.front() {
+            // **Workstream B.** Popped on issue like `MovePokemonToFront`: the driver owns everything
+            // from the START menu to the landing, and `pick_field_move` is not polled again until it
+            // returns to `Idle`. It refuses impossible flights itself (indoors, unvisited town, no Fly)
+            // rather than making that this file's problem.
+            self.queue.pop_front();
+            return Some(FieldMove::Fly { to });
         }
         if let Some(&PolicyStep::MovePokemonToFront { slot }) = self.queue.front() {
             self.queue.pop_front();

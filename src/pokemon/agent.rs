@@ -213,8 +213,9 @@ pub(crate) enum AgentState {
     // Landed up front so a workstream adds only a match arm to this file, never a variant. Nothing
     // constructs these yet; each arm delegates to a `todo!()` in the owning workstream's module.
     // The shapes are drafts from §6 of the plan — reshape them when the real driver is written.
-    /// **B** — driving the Fly menu chain and the bespoke town-map screen.
-    Flying { to: Map },
+    /// **Workstream B** — driving the Fly menu chain and the bespoke town-map screen. The whole state
+    /// machine lives in [`crate::pokemon::postgame::fly_bike`].
+    Flying(crate::pokemon::postgame::fly_bike::FlyState),
     /// **C** — rod cast, waiting on "not even a nibble" / a bite.
     Fishing { rod: crate::pokemon::postgame::fishing::Rod, at: Point8 },
     /// **G** — driving an in-game trade's offer/accept flow.
@@ -298,7 +299,7 @@ impl Display for AgentState {
             AgentState::TossingItem { item, .. } => write!(f, "toss:{item:?}"),
             AgentState::UsingItemPc(s)           => write!(f, "itempc:{:?}:{:?}x{}", s.op, s.item, s.qty),
             AgentState::UsingPcBox(s)            => write!(f, "pcbox:{:?}", s.op),
-            AgentState::Flying { to }            => write!(f, "fly→{to:?}"),
+            AgentState::Flying(s)                => write!(f, "fly→{:?}", s.to),
             AgentState::Fishing { rod, at }      => write!(f, "fish:{rod:?}@{at}"),
             AgentState::Trading { give_slot, at } => write!(f, "trade:slot{give_slot}@{at:?}"),
             AgentState::SearchingHiddenItem { at } => write!(f, "hidden@{at}"),
@@ -959,13 +960,14 @@ impl PokemonAgent {
                             self.set_state(AgentState::UsingPcBox(PcBoxState::new(op, pc, api)));
                             return Ok(());
                         }
-                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
-                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
                         Some(crate::pokemon::policy::FieldMove::Fly { to }) => {
+                            use crate::pokemon::postgame::fly_bike::FlyState;
                             api.release_all_buttons();
-                            self.set_state(AgentState::Flying { to });
+                            self.set_state(AgentState::Flying(FlyState::new(to)));
                             return Ok(());
                         }
+                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
+                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
                         Some(crate::pokemon::policy::FieldMove::Fish { rod, at }) => {
                             api.release_all_buttons();
                             self.set_state(AgentState::Fishing { rod, at });
@@ -1823,26 +1825,12 @@ impl PokemonAgent {
                     return Ok(());
                 }
 
-                let (top_x, top_y, current, _) = api.menu_geometry();
-                let tbid = api.menu_state().map(|m| m.text_box_id);
-                let nav = |cur: u8, target: u8| -> JoypadButton {
-                    if cur < target { JoypadButton::Down }
-                    else if cur > target { JoypadButton::Up }
-                    else { JoypadButton::A }
-                };
-                // Navigate each menu's cursor to its target index, then confirm with A. Only navigate
-                // when a menu is actually open — in the overworld a Down/Up would move the player off
-                // the tree, so there we only open the menu with Start.
+                // In the overworld a Down/Up would move the player off the tree, so there we only open
+                // the menu; from there the shared chain drives to CUT on party slot 0.
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start // facing the tree, no menu yet → open START
-                } else if tbid == Some(TextBoxId::FieldMoveMonMenu) || top_y == 10 {
-                    nav(current, 0) // field-move menu → CUT (index 0, the mon's only field move)
-                } else if top_x == 11 && top_y == 2 {
-                    nav(current, 1) // START menu → POKéMON (index 1, Pokédex obtained)
-                } else if top_x == 0 && (top_y == 1 || top_y == 3) {
-                    nav(current, 0) // party menu → the Cut mon (slot 0)
                 } else {
-                    JoypadButton::A // transitional text ("used CUT!")
+                    field_move_menu_button(api, 0, 0)
                 };
                 api.release_all_buttons();
                 api.press_button(button);
@@ -1872,13 +1860,6 @@ impl PokemonAgent {
                     return Ok(());
                 }
 
-                let (top_x, top_y, current, _) = api.menu_geometry();
-                let tbid = api.menu_state().map(|m| m.text_box_id);
-                let nav = |cur: u8, target: u8| -> JoypadButton {
-                    if cur < target { JoypadButton::Down }
-                    else if cur > target { JoypadButton::Up }
-                    else { JoypadButton::A }
-                };
                 let button = if game_mode == GameMode::Overworld {
                     // No menu yet: face the water tile first (a walk step brought us adjacent but maybe
                     // facing another way), then open START. Pressing toward water while on foot only
@@ -1890,14 +1871,9 @@ impl PokemonAgent {
                     } else {
                         dir_to(gs.map.player_position, water_pos).unwrap_or(JoypadButton::Start)
                     }
-                } else if tbid == Some(TextBoxId::FieldMoveMonMenu) || top_y == 10 {
-                    nav(current, 0) // field-move menu → SURF (the surf mon's only field move)
-                } else if top_x == 11 && top_y == 2 {
-                    nav(current, 1) // START menu → POKéMON (index 1, Pokédex obtained)
-                } else if top_x == 0 && (top_y == 1 || top_y == 3) {
-                    nav(current, slot) // party menu → the Surf mon
                 } else {
-                    JoypadButton::A // transitional text ("used SURF!")
+                    // SURF is the surf mon's only field move, hence index 0.
+                    field_move_menu_button(api, slot, 0)
                 };
                 api.release_all_buttons();
                 api.press_button(button);
@@ -1930,23 +1906,10 @@ impl PokemonAgent {
                     return Ok(());
                 }
 
-                let (top_x, top_y, current, _) = api.menu_geometry();
-                let tbid = api.menu_state().map(|m| m.text_box_id);
-                let nav = |cur: u8, target: u8| -> JoypadButton {
-                    if cur < target { JoypadButton::Down }
-                    else if cur > target { JoypadButton::Up }
-                    else { JoypadButton::A }
-                };
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start // no target tile — just open START
-                } else if tbid == Some(TextBoxId::FieldMoveMonMenu) || top_y == 10 {
-                    nav(current, move_index) // field-move menu → the requested move (see `field_move_index`)
-                } else if top_x == 11 && top_y == 2 {
-                    nav(current, 1) // START menu → POKéMON (index 1, Pokédex obtained)
-                } else if top_x == 0 && (top_y == 1 || top_y == 3) {
-                    nav(current, slot) // party menu → the mon that knows the move
                 } else {
-                    JoypadButton::A // transitional text ("used STRENGTH!" / "can now use STRENGTH!")
+                    field_move_menu_button(api, slot, move_index)
                 };
                 api.release_all_buttons();
                 api.press_button(button);
@@ -2061,8 +2024,8 @@ impl PokemonAgent {
             }
             AgentState::UsingItemPc(s) => return crate::pokemon::postgame::item_storage::tick(self, api, s),
             AgentState::UsingPcBox(s) => return crate::pokemon::postgame::pc_box::tick(self, api, s),
+            AgentState::Flying(s) => return crate::pokemon::postgame::fly_bike::tick(self, api, s),
             // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
-            AgentState::Flying { to } => return crate::pokemon::postgame::fly_bike::tick(self, api, to),
             AgentState::Fishing { rod, at } => return crate::pokemon::postgame::fishing::tick(self, api, rod, at),
             AgentState::Trading { give_slot, at } => return crate::pokemon::postgame::trades::tick(self, api, give_slot, at),
             AgentState::SearchingHiddenItem { at } => return crate::pokemon::postgame::aides::tick(self, api, at),
@@ -2313,6 +2276,37 @@ fn step_pos(from: Point8, btn: JoypadButton) -> Option<Point8> {
 }
 
 /// The party slot (0-based) of the first Pokémon that knows Surf — the mon the Surf-mount menu picks.
+/// The button that advances the **field-move menu chain** — START → POKéMON → the mon in `slot` → the
+/// field move at `move_index` — from whatever screen is currently up, plus A for the text in between.
+///
+/// Every field move is driven through the same three menus, so this is shared by `CuttingTree`,
+/// `Surfing`, `UsingFieldMove` and [`crate::pokemon::postgame::fly_bike`]; the callers differ only in
+/// their overworld behaviour (face a tree, face the water, just press START) and in the two indices.
+/// Keeping it in one place is not only dedup: the field-move box needs a two-part test that took two
+/// regressions to get right (see [`MenuState::is_field_move_menu`]), and four hand-copies of it drifted
+/// apart the first time anything was learned about it.
+///
+/// The unambiguous menus are matched first, on geometry that each of them rewrites as it opens — the
+/// START menu at (11,2), the party list at (0,1)/(0,3) — because `wTextBoxID` is *not* rewritten and can
+/// still name a menu that closed minutes ago.
+pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index: u8) -> JoypadButton {
+    let (top_x, top_y, current, _) = api.menu_geometry();
+    let nav = |target: u8| -> JoypadButton {
+        if current < target { JoypadButton::Down }
+        else if current > target { JoypadButton::Up }
+        else { JoypadButton::A }
+    };
+    if top_x == 11 && top_y == 2 {
+        nav(1) // START menu → POKéMON (index 1, Pokédex obtained)
+    } else if top_x == 0 && (top_y == 1 || top_y == 3) {
+        nav(slot) // party menu → the mon that knows the move
+    } else if api.menu_state().is_some_and(|m| m.is_field_move_menu()) {
+        nav(move_index) // field-move box → the move itself
+    } else {
+        JoypadButton::A // transitional text ("used STRENGTH!", "can now use CUT!")
+    }
+}
+
 fn surf_slot(state: &crate::pokemon::GameState) -> Option<u8> {
     state.pokemon.iter().position(|p| {
         p.moves.iter().flatten().any(|m| m.name == crate::pokemon::move_name::PokemonMoveName::Surf)
