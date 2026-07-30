@@ -363,6 +363,8 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             map,
             battle: mmu.read_battle_state(),
             bag: mmu.read_bag(),
+            boxed_pokemon: postgame::pc_box::read_current_box(mmu),
+            current_box: postgame::pc_box::current_box_num(mmu),
             has_pokedex: mmu.read_has_pokedex(),
             pokedex_owned: mmu.read_pokedex(&pokered_symbols::wPokedexOwned)?,
             pokedex_seen: mmu.read_pokedex(&pokered_symbols::wPokedexSeen)?,
@@ -566,6 +568,11 @@ pub struct GameState {
     pub bag: Bag,
     /// Populated whenever `mode` is `WildBattle` or `TrainerBattle`.
     pub battle: Option<BattleState>,
+    /// Contents of the **currently open** PC box (`wBoxCount`/`wBoxMons`). Only ever one box of the
+    /// twelve — see [`postgame::pc_box::read_current_box`] for why the other eleven aren't readable.
+    pub boxed_pokemon: Vec<postgame::pc_box::BoxedPokemon>,
+    /// Which box is open, 0-based (`wCurrentBoxNum`).
+    pub current_box: u8,
     /// True when the player has the Cascade Badge and at least one party Pokémon
     /// knows HM Cut — the two requirements to use Cut outside of battle in pokémon Red.
     /// Currently always false until the player has earned these.

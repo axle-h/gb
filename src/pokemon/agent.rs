@@ -205,13 +205,14 @@ pub(crate) enum AgentState {
     /// Depositing an item into, or withdrawing it from, PC item storage. Phase 0 tasks
     /// 0.5/0.6 — the whole state machine lives in [`crate::pokemon::postgame::item_storage`].
     UsingItemPc(crate::pokemon::postgame::item_storage::ItemPcState),
+    /// **Workstream A** — driving Bill's PC box menus (deposit / withdraw / release / change box). The
+    /// whole state machine lives in [`crate::pokemon::postgame::pc_box`].
+    UsingPcBox(crate::pokemon::postgame::pc_box::PcBoxState),
 
     // ── Reserved postgame seams (task 0.8 of `docs/postgame-coverage-plan.md`) ───────────────────
     // Landed up front so a workstream adds only a match arm to this file, never a variant. Nothing
     // constructs these yet; each arm delegates to a `todo!()` in the owning workstream's module.
     // The shapes are drafts from §6 of the plan — reshape them when the real driver is written.
-    /// **A** — driving Bill's PC box menus.
-    UsingPcBox(crate::pokemon::postgame::pc_box::PcBoxOp),
     /// **B** — driving the Fly menu chain and the bespoke town-map screen.
     Flying { to: Map },
     /// **C** — rod cast, waiting on "not even a nibble" / a bite.
@@ -296,7 +297,7 @@ impl Display for AgentState {
             AgentState::UsingFieldMove { slot, move_index, .. } => write!(f, "fieldmove:slot{slot}#{move_index}"),
             AgentState::TossingItem { item, .. } => write!(f, "toss:{item:?}"),
             AgentState::UsingItemPc(s)           => write!(f, "itempc:{:?}:{:?}x{}", s.op, s.item, s.qty),
-            AgentState::UsingPcBox(op)           => write!(f, "pcbox:{op:?}"),
+            AgentState::UsingPcBox(s)            => write!(f, "pcbox:{:?}", s.op),
             AgentState::Flying { to }            => write!(f, "fly→{to:?}"),
             AgentState::Fishing { rod, at }      => write!(f, "fish:{rod:?}@{at}"),
             AgentState::Trading { give_slot, at } => write!(f, "trade:slot{give_slot}@{at:?}"),
@@ -952,13 +953,14 @@ impl PokemonAgent {
                             self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: false });
                             return Ok(());
                         }
-                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
-                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
-                        Some(crate::pokemon::policy::FieldMove::UsePcBox { op }) => {
+                        Some(crate::pokemon::policy::FieldMove::UsePcBox { op, pc }) => {
+                            use crate::pokemon::postgame::pc_box::PcBoxState;
                             api.release_all_buttons();
-                            self.set_state(AgentState::UsingPcBox(op));
+                            self.set_state(AgentState::UsingPcBox(PcBoxState::new(op, pc, api)));
                             return Ok(());
                         }
+                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
+                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
                         Some(crate::pokemon::policy::FieldMove::Fly { to }) => {
                             api.release_all_buttons();
                             self.set_state(AgentState::Flying { to });
@@ -2058,8 +2060,8 @@ impl PokemonAgent {
                 self.set_state(AgentState::PushingBoulder { boulder, dir });
             }
             AgentState::UsingItemPc(s) => return crate::pokemon::postgame::item_storage::tick(self, api, s),
+            AgentState::UsingPcBox(s) => return crate::pokemon::postgame::pc_box::tick(self, api, s),
             // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
-            AgentState::UsingPcBox(op) => return crate::pokemon::postgame::pc_box::tick(self, api, op),
             AgentState::Flying { to } => return crate::pokemon::postgame::fly_bike::tick(self, api, to),
             AgentState::Fishing { rod, at } => return crate::pokemon::postgame::fishing::tick(self, api, rod, at),
             AgentState::Trading { give_slot, at } => return crate::pokemon::postgame::trades::tick(self, api, give_slot, at),

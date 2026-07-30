@@ -337,14 +337,6 @@ pub enum PolicyStep {
     // **Treat the signatures as drafts.** They are transcribed from §6 of the plan, which was written
     // before anyone tried the mechanic; if the real driver wants different fields, change them. The
     // seam is the point, not the shape.
-    /// **A** — deposit the party member in `slot` into the current PC box.
-    DepositPokemon { slot: u8 },
-    /// **A** — withdraw the box member at `box_slot` into the party.
-    WithdrawPokemon { box_slot: u8 },
-    /// **A** — switch to box `n` (0-based; 12 boxes of 20). ⚠️ Changing box **saves the game**.
-    ChangeBox { n: u8 },
-    /// **A** — permanently release the box member at `box_slot`.
-    ReleasePokemon { box_slot: u8 },
     /// **B** — Fly to `to`. ⚠️ The town map is a bespoke screen, not a `HandleMenuInput` list.
     Fly { to: Map },
     /// **C** — fish at the water tile `at` with `rod`.
@@ -360,6 +352,11 @@ pub enum PolicyStep {
     /// [`crate::pokemon::postgame::item_storage`], which needs to own the A press that opens the PC.
     /// Build with [`Self::deposit_item`] / [`Self::withdraw_item`].
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, map: Map },
+    /// **A** — deposit / withdraw / release / change box at the PC on `map`, via `BILL's PC`. Routed
+    /// and handed over exactly like [`Self::UseItemPc`]; the driver is
+    /// [`crate::pokemon::postgame::pc_box`]. Build with [`Self::deposit_pokemon`],
+    /// [`Self::withdraw_pokemon`], [`Self::change_box`], [`Self::release_pokemon`].
+    UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp, map: Map },
     /// Walk to and pick up an item sprite (a Poké Ball on the ground), staying on this step until
     /// the sprite is gone. Unlike [`Interact`], this does **not** pop after issuing a single walk:
     /// picking up an item can be interrupted (e.g. the Mt Moon fossil area triggers the Super Nerd
@@ -496,12 +493,13 @@ pub enum FieldMove {
     /// Walk to the PC at `pc`, open it, and move `qty` of `item` between the bag and PC item storage.
     /// Driven by [`crate::pokemon::postgame::item_storage`] (Phase 0 tasks 0.5/0.6).
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, pc: crate::geometry::Point8 },
+    /// **Workstream A** — walk to the PC at `pc` and drive Bill's PC box menus. Driven by
+    /// [`crate::pokemon::postgame::pc_box`].
+    UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp, pc: crate::geometry::Point8 },
 
     // ── Reserved postgame seams (task 0.8) ──────────────────────────────────────────────────────
     // The entry points for the reserved `AgentState`s. `agent.rs` already turns each of these into
     // its state in one line, so a workstream only has to return one from its own `pick_field_move`.
-    /// **A** — drive Bill's PC box menus.
-    UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp },
     /// **B** — Fly to `to`.
     Fly { to: Map },
     /// **C** — cast `rod` at the water tile `at`.
@@ -2345,19 +2343,17 @@ impl Policy for DeterministicPolicy {
                 // Reserved seams (task 0.8) — inert until their workstream implements them. To take
                 // one: move your variant out of this list into its own one-line arm delegating to
                 // your own module. That is a one-line edit to this file, which is the whole point.
-                PolicyStep::DepositPokemon { .. } | PolicyStep::WithdrawPokemon { .. }
-                | PolicyStep::ChangeBox { .. } | PolicyStep::ReleasePokemon { .. }
-                | PolicyStep::Fly { .. } | PolicyStep::Fish { .. }
+                PolicyStep::Fly { .. } | PolicyStep::Fish { .. }
                 | PolicyStep::TradePokemon { .. } | PolicyStep::SearchHiddenItem { .. } =>
                     crate::pokemon::postgame::unimplemented_seam(&step),
-                PolicyStep::UseItemPc { map, .. } => {
+                PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
                     // Routing only. Once we are standing on `map`, `pick_field_move` hands the step to
                     // the storage driver, which walks the last tiles itself so that it — and not the
                     // generic overworld executor — owns the A press that opens the PC.
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want the item PC on {}, but no path there!", map);
+                            println!("[policy] want the PC on {}, but no path there!", map);
                             self.queue.pop_front();
                             continue;
                         }
@@ -2934,6 +2930,17 @@ impl Policy for DeterministicPolicy {
                         return None;
                     }
                 }
+            }
+        }
+        if let Some(&PolicyStep::UsePcBox { op, map }) = self.queue.front() {
+            // Same hand-over as `UseItemPc` above, for the same reason: the box driver owns the walk
+            // to the PC tile and the A press that opens it, and the step pops on issue.
+            if state.map.map == map {
+                self.queue.pop_front();
+                return match crate::pokemon::tile_map::pc_locations_for(map).first() {
+                    Some(&pc) => Some(FieldMove::UsePcBox { op, pc }),
+                    None => { println!("[policy] UsePcBox: {map} has no PC — skipping"); None }
+                };
             }
         }
         if let Some(&PolicyStep::MovePokemonToFront { slot }) = self.queue.front() {
