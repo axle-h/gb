@@ -362,6 +362,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             can_use_surf,
             badges,
             money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),
+            coins: encoding::reverse_bcd(mmu.read_pointer_u16_be(&pokered_symbols::wPlayerCoins) as u32) as u16,
             mode: mmu.read_game_mode(),
             pokemon,
             trash_cans,
@@ -574,6 +575,10 @@ pub struct GameState {
     pub rival_name: PokemonString,
     pub badges: Badge,
     pub money: u32,
+    /// Game Corner coins (`wPlayerCoins`, two BCD bytes, so 0–9999). Only spendable in the prize
+    /// room; bought at the counter at ¥1000 → 50. Zero until the Coin Case is held — the counter
+    /// refuses without it — which is why workstream F starts there.
+    pub coins: u16,
     pub pokemon: PokemonParty,
     pub mode: GameMode,
     pub map: MetaTileMap,

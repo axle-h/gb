@@ -363,6 +363,21 @@ pub enum PolicyStep {
         map: Map,
         goal: crate::pokemon::postgame::fishing::FishGoal,
     },
+    /// **F** — buy Game Corner coins at the counter until at least `target` are held, ¥1000 → 50 a
+    /// time. Routes to `Map::GameCorner` and then talks to the coin clerk once per purchase; the
+    /// clerk's YES/NO opens on YES so the generic A-mash answers it and no driver is needed. Pops
+    /// early (with a reason) when the money or the 9999-coin case runs out.
+    /// [`crate::pokemon::postgame::game_corner`].
+    BuyGameCoins { target: u16 },
+    /// **F** — sell `item` to the mart clerk on `map`. Routed and handed over exactly like
+    /// [`Self::UseItemPc`]: the driver walks the last tiles itself because it must own the whole
+    /// conversation, including the Buy/**Sell**/Quit menu that `assert_pokemart_state` would otherwise
+    /// take for a purchase. Driver: [`crate::pokemon::postgame::game_corner`].
+    SellToMart { map: Map, item: BagItem },
+    /// **F** — buy `prize` from a Game Corner prize vendor. Routes to `Map::GameCornerPrizeRoom`, then
+    /// the driver faces the vendor's bg-event and drives the prize menu.
+    /// [`crate::pokemon::postgame::game_corner`].
+    RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
     /// Walk to and pick up an item sprite (a Poké Ball on the ground), staying on this step until
     /// the sprite is gone. Unlike [`Interact`], this does **not** pop after issuing a single walk:
     /// picking up an item can be interrupted (e.g. the Mt Moon fossil area triggers the Super Nerd
@@ -511,6 +526,12 @@ pub enum FieldMove {
     /// **C** — cast `rod` **once** at the water tile `at`. Driven by
     /// [`crate::pokemon::postgame::fishing`].
     Fish { rod: crate::pokemon::postgame::fishing::Rod, at: crate::geometry::Point8 },
+    /// **F** — walk to the mart clerk at `clerk` and sell `item` to them. Driven by
+    /// [`crate::pokemon::postgame::game_corner`].
+    SellToMart { item: BagItem, clerk: (crate::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection) },
+    /// **F** — walk to the prize vendor's bg-event tile and buy `prize` with coins. Driven by
+    /// [`crate::pokemon::postgame::game_corner`].
+    RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
     /// **G** — offer the party member in `give_slot` to the trade NPC on `at`.
     Trade { give_slot: u8, at: Map },
     /// **H** — search the bg-event tile at `at` for a hidden item.
@@ -1890,7 +1911,7 @@ impl DeterministicPolicy {
     /// so this succeeds for backtracking / already-explored territory (heal-return, reaching a map
     /// the explicit `EnterMap` steps have already led through) and returns `None` for a not-yet-
     /// visited target — the signal that the deterministic policy is under-specified.
-    fn route_toward(world_graph: &WorldGraph, actions: &[OverworldAction], target: Map) -> Option<OverworldAction> {
+    pub(crate) fn route_toward(world_graph: &WorldGraph, actions: &[OverworldAction], target: Map) -> Option<OverworldAction> {
         world_graph.pick_shortest_path_action(actions, target)
     }
 
@@ -2395,7 +2416,21 @@ impl Policy for DeterministicPolicy {
                         None
                     }
                 }
-                PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
+                PolicyStep::BuyGameCoins { target } => match crate::pokemon::postgame::game_corner::buy_coins_action(state, &actions, world_graph, target) {
+                    Some(action) => action,
+                    None => { self.queue.pop_front(); continue }
+                },
+                PolicyStep::RedeemPrize { .. } if state.map.map != Map::GameCornerPrizeRoom => {
+                    let action = Self::route_toward(world_graph, &actions, Map::GameCornerPrizeRoom);
+                    if action.is_none() {
+                        println!("[policy] want a prize, but no path to the prize room!");
+                        self.queue.pop_front();
+                        continue;
+                    }
+                    action
+                }
+                PolicyStep::RedeemPrize { .. } => None, // on the map — handed to `pick_field_move`
+                PolicyStep::SellToMart { map, .. } | PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
                     // Routing only. Once we are standing on `map`, `pick_field_move` hands the step to
                     // the storage driver, which walks the last tiles itself so that it — and not the
                     // generic overworld executor — owns the A press that opens the PC.
@@ -3006,6 +3041,21 @@ impl Policy for DeterministicPolicy {
                     Some(&pc) => Some(FieldMove::UsePcBox { op, pc }),
                     None => { println!("[policy] UsePcBox: {map} has no PC — skipping"); None }
                 };
+            }
+        }
+        if let Some(&PolicyStep::SellToMart { map, item }) = self.queue.front() {
+            // **Workstream F.** Same hand-over as `UseItemPc`, and pops on issue for the same reason.
+            if state.map.map == map {
+                self.queue.pop_front();
+                return crate::pokemon::postgame::game_corner::pick_sale(state, item);
+            }
+        }
+        if let Some(&PolicyStep::RedeemPrize { prize }) = self.queue.front() {
+            // **Workstream F.** The vendors are bg-events, not sprites, so the driver walks to the tile
+            // below one and owns the A press — same shape as the PC.
+            if state.map.map == Map::GameCornerPrizeRoom {
+                self.queue.pop_front();
+                return crate::pokemon::postgame::game_corner::pick_prize(state, prize);
             }
         }
         if let Some(&PolicyStep::Fish { rod, map, goal }) = self.queue.front() {

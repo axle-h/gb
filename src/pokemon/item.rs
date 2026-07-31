@@ -97,6 +97,9 @@ pub enum ItemId {
     Tm11Bubblebeam = 0xD3,  // TM01(0xC9) + 10
     Tm14Blizzard = 0xD6, // TM01(0xC9) + 13 — Ice, 120 power; the Elite-Four Lance answer (found in Mansion B1F)
     Tm21MegaDrain = 0xDD,   // TM01(0xC9) + 20
+    /// TM01(0xC9) + 22 — DRAGON RAGE, the cheapest of the three **Game Corner prize TMs** at 3300
+    /// coins, and so the one workstream F proves the prize room's `GiveItem` branch with.
+    Tm23DragonRage = 0xDF,
     Tm24Thunderbolt = 0xE0, // TM01(0xC9) + 23
     Tm27Fissure = 0xE3,     // TM01(0xC9) + 26
     Tm28Dig = 0xE4,      // TM01(0xC9) + 27 — DIG doubles as a reusable Escape Rope out of any cave
@@ -108,4 +111,31 @@ pub enum ItemId {
     /// `postgame::legendaries`.
     Tm45ThunderWave = 0xF5,
 
+}
+
+impl ItemId {
+    /// True for the items pokered's `IsKeyItem` refuses to sell or toss ("I can't put a PRICE on
+    /// that!" / "That's too important!").
+    ///
+    /// Transcribed from `data/items/key_items.asm`, which is the authority — it is a flat bit array
+    /// over every item id, and the set is not guessable from the names: the **fossils**, the
+    /// **fishing rods** and the badges are all key items, while the Nugget, the Poké Doll and the
+    /// vending-machine drinks are not. Only ids this enum names are listed; TMs are never key items.
+    pub const fn is_key_item(self) -> bool {
+        matches!(self,
+            Self::TownMap | Self::Bicycle | Self::Surfboard | Self::SafariBall | Self::Pokedex
+            | Self::BoulderBadge | Self::CascadeBadge | Self::ThunderBadge | Self::RainbowBadge
+            | Self::SoulBadge | Self::MarshBadge | Self::VolcanoBadge | Self::EarthBadge
+            | Self::OldAmber | Self::DomeFossil | Self::HelixFossil | Self::SecretKey
+            | Self::UnusedItem2C | Self::BikeVoucher | Self::CardKey | Self::SSTicket
+            | Self::GoldTeeth | Self::CoinCase | Self::OaksParcel | Self::Itemfinder
+            | Self::SilphScope | Self::PokeFlute | Self::LiftKey
+            | Self::OldRod | Self::GoodRod | Self::SuperRod)
+    }
+
+    /// True for HM01–HM05 (item ids `$C4`–`$C8`), which `IsItemHM` also refuses to sell or toss —
+    /// they are reusable and one-per-cartridge.
+    pub const fn is_hm(self) -> bool {
+        (self as u8) >= Self::Hm01Cut as u8 && (self as u8) <= Self::Hm05Flash as u8
+    }
 }

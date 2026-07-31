@@ -220,6 +220,14 @@ pub(crate) enum AgentState {
     /// "not even a nibble". A bite becomes a wild battle and `assert_battle_state` takes over. The
     /// state machine lives in [`crate::pokemon::postgame::fishing`].
     Fishing(crate::pokemon::postgame::fishing::FishState),
+    /// **Workstream F** — selling a bag item to a mart clerk. Owns the whole conversation rather than
+    /// letting [`Self::PokemartShopping`] have it, because the Buy/Sell/Quit menu is shared and that
+    /// state machine only knows how to buy. State machine in
+    /// [`crate::pokemon::postgame::game_corner`].
+    SellingToMart(crate::pokemon::postgame::game_corner::SellState),
+    /// **Workstream F** — buying a Game Corner prize: the walk to a vendor bg-event and the bespoke
+    /// prize menu. State machine in [`crate::pokemon::postgame::game_corner`].
+    RedeemingPrize(crate::pokemon::postgame::game_corner::PrizeState),
     /// **G** — driving an in-game trade's offer/accept flow.
     Trading { give_slot: u8, at: Map },
     /// **H** — searching a bg-event tile for a hidden item.
@@ -303,6 +311,8 @@ impl Display for AgentState {
             AgentState::UsingPcBox(s)            => write!(f, "pcbox:{:?}", s.op),
             AgentState::Flying(s)                => write!(f, "fly→{:?}", s.to),
             AgentState::Fishing(s)               => write!(f, "fish:{:?}@{}", s.rod, s.at),
+            AgentState::SellingToMart(s)         => write!(f, "sell:{:?}x{}", s.item.id, s.item.quantity),
+            AgentState::RedeemingPrize(s)        => write!(f, "prize:{:?}", s.prize),
             AgentState::Trading { give_slot, at } => write!(f, "trade:slot{give_slot}@{at:?}"),
             AgentState::SearchingHiddenItem { at } => write!(f, "hidden@{at}"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
@@ -696,7 +706,10 @@ impl PokemonAgent {
 
         // When the Buy/Sell/Quit menu appears for the first time, ask the policy what to buy.
         if let Some(menu) = api.menu_state() {
-            if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_)) {
+            // `SellingToMart` is excluded because it drives the *same* Buy/Sell/Quit menu itself:
+            // `PokemartState` only knows how to buy, so letting it take over would answer a sell
+            // step's menu with BUY. See `postgame::game_corner`.
+            if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::SellingToMart(_)) {
                 let game_state = api.game_state()?;
                 if let Some(item) = self.policy.pick_mart_purchase(&game_state) {
                     api.release_all_buttons();
@@ -817,7 +830,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::Trading { .. } | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::RedeemingPrize(_) | AgentState::Trading { .. } | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -972,6 +985,18 @@ impl PokemonAgent {
                             use crate::pokemon::postgame::fishing::FishState;
                             api.release_all_buttons();
                             self.set_state(AgentState::Fishing(FishState::new(rod, at)));
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::SellToMart { item, clerk }) => {
+                            use crate::pokemon::postgame::game_corner::SellState;
+                            api.release_all_buttons();
+                            self.set_state(AgentState::SellingToMart(SellState::new(item, clerk, api)));
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::RedeemPrize { prize }) => {
+                            use crate::pokemon::postgame::game_corner::PrizeState;
+                            api.release_all_buttons();
+                            self.set_state(AgentState::RedeemingPrize(PrizeState::new(prize, api)));
                             return Ok(());
                         }
                         // Reserved seams (task 0.8): each turns into its state in one line. Nothing
@@ -2041,6 +2066,8 @@ impl PokemonAgent {
             AgentState::UsingPcBox(s) => return crate::pokemon::postgame::pc_box::tick(self, api, s),
             AgentState::Flying(s) => return crate::pokemon::postgame::fly_bike::tick(self, api, s),
             AgentState::Fishing(s) => return crate::pokemon::postgame::fishing::tick(self, api, s),
+            AgentState::SellingToMart(s) => return crate::pokemon::postgame::game_corner::sell_tick(self, api, s),
+            AgentState::RedeemingPrize(s) => return crate::pokemon::postgame::game_corner::prize_tick(self, api, s),
             // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
             AgentState::Trading { give_slot, at } => return crate::pokemon::postgame::trades::tick(self, api, give_slot, at),
             AgentState::SearchingHiddenItem { at } => return crate::pokemon::postgame::aides::tick(self, api, at),
