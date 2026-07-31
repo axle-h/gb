@@ -252,6 +252,12 @@ fn probe_coverage() {
         ("postgame-magikarp", include_bytes!("../data/postgame-magikarp.bin")),
         ("postgame-good-rod", include_bytes!("../data/postgame-good-rod.bin")),
         ("postgame-fishing", include_bytes!("../data/postgame-fishing.bin")),
+        // Workstream F's chain, also rooted on B's output: the Coin Case → 200 coins → three junk
+        // TMs sold → an Abra out of the prize room.
+        ("postgame-coin-case", include_bytes!("../data/postgame-coin-case.bin")),
+        ("postgame-coins", include_bytes!("../data/postgame-coins.bin")),
+        ("postgame-sold", include_bytes!("../data/postgame-sold.bin")),
+        ("postgame-game-corner", include_bytes!("../data/postgame-game-corner.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);

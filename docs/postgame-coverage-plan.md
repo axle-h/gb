@@ -467,16 +467,35 @@ The Safari Zone is currently entered only to grab HM03 and the Gold Teeth, and
 
 No slot machines (out of scope). Coins are bought with money instead.
 
-- [ ] **F1 — Coin Case.** From a man in the **`CeladonDiner`** (verified: `scripts/CeladonDiner.asm`
+- [x] **F1 — Coin Case.** From a man in the **`CeladonDiner`** (verified: `scripts/CeladonDiner.asm`
       is one of only two files referencing `COIN_CASE`). The Diner is on the unvisited-maps list.
       *Observable:* Coin Case in bag.
-- [ ] **F2 — Buy coins.** `GameCorner` counter clerk, ¥1000 → 50 coins. *Observable:* `wPlayerCoins`
+      *Done:* `PolicyStep::coin_case_steps()`, test `postgame::game_corner::can_get_the_coin_case`
+      (~2 s), fixture `postgame-coin-case.bin`. The giver is the **gym guide**, not the "middle aged
+      man" the name suggests; one `Interact` and no menu, exactly like B1's chairman.
+- [x] **F2 — Buy coins.** `GameCorner` counter clerk, ¥1000 → 50 coins. *Observable:* `wPlayerCoins`
       rises; the probe confirms it.
-- [ ] **F3 — Sell to a mart.** The mart driver only implements Buy today. Needed because Porygon is
+      *Done:* `PolicyStep::BuyGameCoins { target }` + `buy_coins_steps(target)`, test
+      `can_buy_game_coins` (~2 s), fixture `postgame-coins.bin` (200 coins for ¥4,000). No driver: the
+      clerk's YES/NO opens on YES like B1's chairman, so the step just re-issues one `Interact` per
+      purchase and stops on the coin count. Every *refusal* is a pre-check — see §11.
+- [x] **F3 — Sell to a mart.** The mart driver only implements Buy today. Needed because Porygon is
       9999 coins ≈ ¥200 000. *Observable:* money rises after selling junk.
-- [ ] **F4 — Redeem a prize.** `GameCornerPrizeRoom`: Abra, Clefairy, Nidorina, **Dratini**,
+      *Done:* `PolicyStep::SellToMart { map, item }` + `AgentState::SellingToMart`, driver
+      [`postgame::game_corner::sell_tick`], test `can_sell_junk_to_a_mart` (~3 s), fixture
+      `postgame-sold.bin` (+¥6,000 from three banked TMs). Selling is **not** a mirror of buying —
+      different list, halved prices, and no screen shows that it worked. See §11.
+- [x] **F4 — Redeem a prize.** `GameCornerPrizeRoom`: Abra, Clefairy, Nidorina, **Dratini**,
       **Scyther**, **Porygon**, plus prize TMs. *Observable:* a prize Pokémon in the party; commit
       `postgame-game-corner.bin`.
+      *Done:* `PolicyStep::RedeemPrize { prize }` + `AgentState::RedeemingPrize`, driver
+      [`postgame::game_corner::prize_tick`], test `can_redeem_a_prize_pokemon` (~2 s) — an **Abra**,
+      180 coins, **dex 8 owned**. All nine prizes are modelled as `Prize`, with the table pinned
+      against ROM by `prize_table_matches_the_rom`. **Both** branches of `HandlePrizeChoice` are
+      covered: the mon one honestly, and the `GiveItem` one by `can_redeem_a_prize_tm` (~15 s) — TM23
+      Dragon Rage, 3300 coins, i.e. 66 trips through the counter clerk, with the **money**
+      debug-seeded per §3 and everything else driven normally. Its fixture is deliberately not
+      committed, so F's chain still ends on an honestly-earned state.
 
 ### G — Gifts, trades, and one-off rooms
 
@@ -591,7 +610,7 @@ Phase 0 (item storage, PC locations, seams, probe)
 | C — Fishing | claude-C-fishing | `postgame-fly-bike.bin` | `postgame::fishing` | ✅ done | C1–C5 green, ~31 s wall clock for the five legs. Entry fixture is **B's output, not `postgame-phase0.bin`** — the three rods are in three corners of Kanto and Fly makes each trip one step (see §11). Output `postgame-fishing.bin`: all three rods, **dex 10 owned / 113 seen**, Goldeen + Magikarp banked in box 1, Tentacool in the party. Build sessions with `PolicyStep::fish(rod, map, goal)`. |
 | D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
 | E — Safari Zone | *(unclaimed)* | `postgame-phase0.bin` | `postgame::safari` | ☐ | |
-| F — Game Corner | *(unclaimed)* | `postgame-phase0.bin` | `postgame::game_corner` | ☐ | |
+| F — Game Corner | claude-F-gamecorner | `postgame-fly-bike.bin` | `postgame::game_corner` | ✅ done | F1–F4 green, **~9 s of wall clock for the four legs**. Rooted on **B's output**, not `postgame-phase0.bin` (same reasoning C's row gives). Output `postgame-game-corner.bin`: Coin Case, 20 coins, ¥43,209, **dex 8 owned**, an **Abra** in slot 4. Three things other streams can use: **`PolicyStep::SellToMart { map, item }`** — the mart's sell half, which nothing had — **`PolicyStep::RedeemPrize { prize }`** for all nine prizes, and `ItemId::is_key_item()` / `is_hm()`, pinned bit-for-bit against the ROM. Both prize branches (mon and TM) are covered; the TM one seeds **money** from the debug tier, like D's Master Ball. See §11. |
 | G — Gifts (G1–G4, G7–G8) | *(unclaimed)* | `postgame-phase0.bin` | `postgame::gifts` | ☐ | splittable from trades |
 | G — Trades (G5–G6) | *(unclaimed)* | `postgame-phase0.bin` | `postgame::trades` | ☐ | needs the 9 give-species |
 | H — Oak's aides | *(unclaimed)* | *(after A–G)* | `postgame::aides` | ☐ | dex-gated 10/30/50 |
@@ -1560,3 +1579,133 @@ is cleared *after* a `prompt`; if it is, waiting is a deadlock, not patience. `P
 map, goal)` is available to anyone who wants a water encounter — the whole table is Magikarp, Goldeen,
 Poliwag, Tentacool, Krabby, Horsea, Staryu, Shellder, Psyduck, Slowpoke, Dratini (Safari) and their
 evolutions.
+
+### [2026-07-30] F — **COMPLETE**. Selling is not buying-in-reverse, and a *gift* mon **is** named
+**Status:** verified ✅ (with two corrections ❗)
+**What the plan said:** F1–F4 as written in §6-F.
+**What is actually true:** all four, in **~9 s of wall clock across four legs**, and the two halves the
+plan treated as afterthoughts (F3's sell path, F4's menu) were the entire cost. F1 and F2 are free.
+
+**F1/F2 were exactly as described.** The Coin Case giver is the Diner's **gym guide** — one `Interact`,
+`GiveItem COIN_CASE` behind an event flag, no menu, the same shape as B1's chairman and C1's gurus. The
+counter clerk is the same shape again: `YesNoChoice` opens on YES, so the generic A-mash buys, and
+`BuyGameCoins { target }` just re-issues one `Interact` per purchase and stops on `wPlayerCoins`. What
+*did* need care is that **every way the counter can refuse looks identical from outside** — no Coin
+Case, a full case and ¥999 all print one text box and return — so all three are pre-checks in
+`buy_coins_action`. A driver that simply kept talking would have looped to the budget in all three.
+
+**❗ F3: selling is a different chain from buying, not a mirror of it.** Four differences, each of
+which breaks a driver written from the buy path (`engine/events/pokemart.asm:36-115`):
+
+1. **The list is the bag, not the shop's stock**, so the row comes from `bag_item_position` and not
+   `mart_item_list`.
+2. **`mart_in_quantity_selector()` is useless here.** It keys on `wMaxItemQuantity == 99`, which only
+   the *buy* path writes; selling's maximum is the size of the stack. The quantity box is drawn over
+   the bag list without touching `wTextBoxID`, so both screens report `ListMenuBox` — the same trap
+   A hit with `DisplayDepositWithdrawMenu`. The discriminator is **`wListMenuID`**: `.sellMenuLoop`
+   sets `ITEMLISTMENU` (0) before each list and `PRICEDITEMLISTMENU` (2) before the quantity box.
+3. **A completed sale returns to the bag list**, not to BUY/SELL/QUIT (`jp .sellMenuLoop`), so "done"
+   is only visible in the bag — and B is the only way back out, twice.
+4. **Key items and HMs are refused with a bounce back to the main menu**, from which re-picking SELL
+   loops for ever. `SellState::blocked_by` refuses them up front, which needed `ItemId::is_key_item()`
+   / `is_hm()` — new, and **pinned bit-for-bit against the ROM's `KeyItemFlags` array** by
+   `key_item_predicate_matches_the_rom_bit_array`, because the set is not guessable from the names
+   (the fossils and the three fishing rods are key items; the Nugget and the Poké Doll are not).
+
+**❗ The one that cost the most: `route_to_face_dir` cannot reach a mart clerk.** A clerk stands behind
+a `Counter` and pokered reaches *through* the counter tile, so the standing position is two tiles away,
+not adjacent — and only `MetaTileMap::actions()` models that (`tile_map.rs` §2's `counter_extra`).
+`route_to_face_dir` knows nothing about it and returned `None`, i.e. **"can't reach the clerk at
+(0,5)"** for a clerk standing in an open room. `pick_sale` therefore resolves the standing tile out of
+`actions()` and hands the driver a *(tile to face, direction to face it from)* pair. Worth knowing
+generally: **`actions()` and `route_to_face_dir` do not model the same map.** A driver that owns its own
+walk to a *sprite* — rather than to a hidden object, which is what the PC/vending-machine drivers do —
+has to take the position from `actions()` or it will fail on every counter in the game.
+
+**❗ F4: a Game Corner prize *is* offered a nickname, and this is the opposite of D's boxed-catch bug.**
+`_GivePokemon` → `AddPartyMon` names the mon whenever `wMonDataLocation` is 0, and nothing on the prize
+path sets it otherwise (`engine/pokemon/add_mon.asm:43-52`) — so the run goes through the same naming
+screen a catch does, and the agent's generic handler answers it (`[policy] pick name=Celina` in the
+log). With a **full party** the prize goes to `SendNewMonToBox` instead, which skips naming entirely.
+So for a *gift*, a full party is the **safe** path and an empty slot is the interesting one — exactly
+inverted from the catch path D found wedging. Anyone doing G's gifts (Lapras, the fossils, the Dojo
+mon) inherits this: they are all `GivePokemon`.
+
+The prize menu itself is a **third bespoke screen**, after B's town map and A's deposit box:
+`CeladonPrizeMenu` draws its box with `TextBoxBorder` and **never writes `wTextBoxID`**, so the id on
+that screen is whatever the last real text box left — which is `TwoOptionMenu`, the very thing the next
+step keys on. The driver therefore matches the prize list on its screen text (`NO THANKS`, placed by
+the menu code for all three vendors) **before** the yes/no test, not after. Which of the three vendors
+you get is decided by `hTextID` — i.e. by the bg-event tile you are standing in front of — so the three
+counter tiles (2,2)/(4,2)/(6,2) *are* the three menus, and `Prize` encodes tile, row and price
+together. The whole nine-prize table is pinned against ROM by `prize_table_matches_the_rom`; note the
+`db …, "@"` terminator is **`$50` in pokered's charmap**, not ASCII `@`, which is how that test first
+failed. Completion is read from **coins**, not the party: `HandlePrizeChoice` subtracts the price
+*last* and returns without charging if both party and box are full, so a coin drop proves delivery for
+all nine prizes including the three TMs, where no count moves.
+
+**⚠️ What is *not* covered, and what would unblock it.** F4 proves the mon branch and vendor window 0
+only. The TM branch is a genuinely different code path (`GiveItem` rather than `GivePokemon`) and the
+cheapest TM prize is **3300 coins ≈ ¥66,000**; this save has ¥43,209 and there is no more junk worth
+selling (the three TMs left in PC storage are worth ¥4,000 together). Porygon at 9999 coins is
+**¥200,000**. So the prize economy's expensive half needs a *money* source, not more mechanism: the
+Elite Four rematch is the in-scope one, and it is also several minutes of emulated time per lap. I left
+it rather than grind, since §1's target is mechanism coverage.
+
+**Shared-file cost, for §4.1's record:** two `PolicyStep` variants plus one word added to an existing
+routing arm, two `FieldMove` variants, two `AgentState` variants, four delegating arms, two additions
+to `agent.rs`'s exclusion lists (one of them load-bearing: `assert_pokemart_state` would otherwise hand
+a *sale's* Buy/Sell/Quit menu to the buy-only `PokemartState` and answer it with BUY), plus one
+`GameState.coins` field and `DeterministicPolicy::route_toward` widened to `pub(crate)` so a postgame
+module can route. Everything else is in the two owned files. The seam held.
+**Evidence:** `pokemon::integration_tests::postgame::game_corner::*` — 4 slow-tier tests, ~9 s wall
+clock for the lot; `pokemon::postgame::game_corner::tests::*` (2, default tier, both ROM-pinned). Full
+`slow-tests` tier **896 passed, 0 failed**, 13 pre-existing ignores; default tier **839 passed**
+(up from 837). (895/839 before the TM-branch follow-up entry below added a fifth leg.)
+`git status src/pokemon/data/` shows only the four new fixtures — no drift. ROM:
+`engine/events/pokemart.asm:36-115`, `engine/events/prize_menu.asm` (all of it),
+`engine/events/give_pokemon.asm:1-52`, `engine/pokemon/add_mon.asm:1-55`,
+`engine/items/item_effects.asm:2616-2644` (`IsKeyItem_`), `home/list_menu.asm:197-300`,
+`scripts/{CeladonDiner,GameCorner,GameCornerPrizeRoom}.asm`, `data/events/prizes.asm`,
+`data/items/{key_items,tm_prices}.asm`.
+**Impact on others:** **G** most of all — `SellToMart` exists now, every gift mon in G1–G4 goes through
+the `GivePokemon` naming path described above, and the counter-mediated-walk finding applies to any
+driver that walks to a *sprite* rather than a tile. **E** gets `ItemId::is_key_item()` (the Safari Ball
+is a key item). **H**: dex owned is now **8**, so Flash at 10 is two species away.
+
+### [2026-07-30] F — follow-up: the TM prize branch **is** covered; "unfunded" was the wrong call
+**Status:** corrected ❗ — this supersedes the "⚠️ What is *not* covered" paragraph of my entry above
+**What my previous entry said:** *"the cheapest TM prize is 3300 coins ≈ ¥66,000; this save has
+¥43,209 … the prize economy's expensive half needs a money source, not more mechanism … I left it
+rather than grind."*
+**What is actually true:** that reasoning stopped one step short. Alex pointed it out: §3 already
+allows `PokemonApi::debug_*` for *test seeding*, and D had already proved the pattern with the Master
+Ball — so the money was never the obstacle, only the assumption that a test had to earn it.
+
+The distinction that matters, and that I should have drawn the first time: **seeding an input is not
+short-circuiting the mechanism.** `seed_money(fixture, 100_000)` in the test file replaces the answer
+to *"can the agent earn ¥66,000?"* — an economy question whose only in-scope answer is grinding the
+Elite Four, minutes of emulated time a lap, and which says nothing about menus. Everything downstream
+still runs for real: **66 separate conversations** with the counter clerk, the walk to the third vendor
+tile, the item-name menu, the purchase. The right test to ask of a debug seed is not "did it write
+RAM?" but "does the write stand in for the thing under test, or for a prerequisite?" Here it is a
+prerequisite; the Master Ball was the same shape.
+
+`can_redeem_a_prize_tm` is therefore green (~15 s), and it does earn its place — the TM vendor is a
+real fork, not a cosmetic one. `HandlePrizeChoice` branches on `wWhichPrizeWindow == 2` into
+`GetItemName` + `GiveItem` instead of `GetMonName` + `GivePokemon`, so it is the case where **no party
+count moves**, which is exactly what the driver's coin-based completion check exists for and had never
+actually been exercised. Result: TM23 Dragon Rage in the bag, party unchanged at 5, coins 20 → 3320 →
+20, ¥100,000 → ¥34,000. `ItemId` gained `Tm23DragonRage` (`$df`) so the bag can be addressed at all —
+the same reason Phase 0 added the other five TMs.
+
+**One deliberate asymmetry:** this test writes **no fixture**. F's committed chain still ends at
+`postgame-game-corner.bin`, which is honestly earned, so nothing downstream inherits seeded money —
+unlike D, where the seeded catches *are* the chain and every later state carries that caveat. If a
+test only needs the seed to reach a branch, it can prove the branch and throw the state away.
+**Evidence:** `pokemon::integration_tests::postgame::game_corner::can_redeem_a_prize_tm`;
+`engine/events/prize_menu.asm` (`HandlePrizeChoice`, the `cp 2 ; is prize a TM?` fork).
+**Impact on others:** anyone who catches themselves writing "I left it rather than grind" — check
+whether the thing you would grind for is the mechanism or a prerequisite for it. **E (Safari)** will
+meet this directly: Safari Balls and the 500-step budget are prerequisites, and the entry fee is ¥500
+a go.
