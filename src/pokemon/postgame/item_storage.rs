@@ -95,8 +95,16 @@ pub struct ItemPcState {
 }
 
 impl ItemPcState {
+    /// ⚠️ `qty` is **clamped to `start_qty`**, and that is not tidiness — it is the difference between
+    /// working and hanging. `DisplayChooseQuantityMenu` wraps at `wMaxItemQuantity`, which the item
+    /// list sets to the size of the stack (`home/list_menu.asm:.incrementQuantity`), so a target above
+    /// what is actually held is **unrepresentable**: the driver presses Up for ever watching the
+    /// counter cycle 1…n…1 past a number it can never see. Clamping turns "deposit more than I have"
+    /// into "deposit all of it", which is what every caller means, and lets a caller pass a
+    /// deliberately large `qty` for "the whole stack" without knowing the count. Found by G7, whose
+    /// nine Great Balls had quietly become eight — see the plan's §11.
     pub fn new(op: PcItemOp, item: ItemId, qty: u8, pc: Point8, start_qty: u8) -> Self {
-        Self { op, item, qty, pc, start_qty, press: true, entered_menu: false }
+        Self { op, item, qty: qty.min(start_qty), pc, start_qty, press: true, entered_menu: false }
     }
 }
 
@@ -176,8 +184,15 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
         // Quantity selector: Up/Down adjust `wItemQuantity`, A confirms. Reading the live value
         // rather than counting presses keeps this correct if an input is dropped.
         let shown = api.mart_item_quantity();
-        if shown < s.qty { JoypadButton::Up }
-        else if shown > s.qty { JoypadButton::Down }
+        // ⚠️ Clamp the target to what the source inventory holds **right now**, not to `qty`. The
+        // selector wraps at `wMaxItemQuantity`, which the list menu sets to the live stack size, so a
+        // target above it is unrepresentable and the driver would press Up for ever watching the
+        // counter cycle past a number it can never reach. The stack can shrink after the step began —
+        // G7 watched nine Great Balls become eight between `ItemPcState::new` and this menu — and
+        // completion is measured against `start_qty`, so moving the smaller amount still finishes.
+        let want = s.qty.min(s.op.source_quantity(api, s.item)).max(1);
+        if shown < want { JoypadButton::Up }
+        else if shown > want { JoypadButton::Down }
         else { JoypadButton::A }
     } else if tbid == Some(TextBoxId::ListMenuBox) {
         // The item list — the bag when depositing, PC storage when withdrawing.

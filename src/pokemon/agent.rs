@@ -225,11 +225,13 @@ pub(crate) enum AgentState {
     /// state machine only knows how to buy. State machine in
     /// [`crate::pokemon::postgame::game_corner`].
     SellingToMart(crate::pokemon::postgame::game_corner::SellState),
+    /// **Workstream G** — a one-NPC script that opens the party menu on a stale cursor (the Day Care,
+    /// the Name Rater): the walk to the NPC and the menu. State machine in
+    /// [`crate::pokemon::postgame::gifts`].
+    UsingPartyScript(crate::pokemon::postgame::gifts::PartyScriptState),
     /// **Workstream F** — buying a Game Corner prize: the walk to a vendor bg-event and the bespoke
     /// prize menu. State machine in [`crate::pokemon::postgame::game_corner`].
     RedeemingPrize(crate::pokemon::postgame::game_corner::PrizeState),
-    /// **G** — driving an in-game trade's offer/accept flow.
-    Trading { give_slot: u8, at: Map },
     /// **H** — searching a bg-event tile for a hidden item.
     SearchingHiddenItem { at: Point8 },
     // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -312,8 +314,8 @@ impl Display for AgentState {
             AgentState::Flying(s)                => write!(f, "fly→{:?}", s.to),
             AgentState::Fishing(s)               => write!(f, "fish:{:?}@{}", s.rod, s.at),
             AgentState::SellingToMart(s)         => write!(f, "sell:{:?}x{}", s.item.id, s.item.quantity),
+            AgentState::UsingPartyScript(s)      => write!(f, "{:?}:slot{}", s.script, s.slot),
             AgentState::RedeemingPrize(s)        => write!(f, "prize:{:?}", s.prize),
-            AgentState::Trading { give_slot, at } => write!(f, "trade:slot{give_slot}@{at:?}"),
             AgentState::SearchingHiddenItem { at } => write!(f, "hidden@{at}"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
@@ -830,7 +832,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::RedeemingPrize(_) | AgentState::Trading { .. } | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_) | AgentState::RedeemingPrize(_) | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -975,6 +977,12 @@ impl PokemonAgent {
                             self.set_state(AgentState::UsingPcBox(PcBoxState::new(op, pc, api)));
                             return Ok(());
                         }
+                        Some(crate::pokemon::policy::FieldMove::UsePartyScript { script, slot, npc }) => {
+                            use crate::pokemon::postgame::gifts::PartyScriptState;
+                            api.release_all_buttons();
+                            self.set_state(AgentState::UsingPartyScript(PartyScriptState::new(script, slot, npc, api)));
+                            return Ok(());
+                        }
                         Some(crate::pokemon::policy::FieldMove::Fly { to }) => {
                             use crate::pokemon::postgame::fly_bike::FlyState;
                             api.release_all_buttons();
@@ -999,13 +1007,8 @@ impl PokemonAgent {
                             self.set_state(AgentState::RedeemingPrize(PrizeState::new(prize, api)));
                             return Ok(());
                         }
-                        // Reserved seams (task 0.8): each turns into its state in one line. Nothing
-                        // returns these yet — see `docs/postgame-coverage-plan.md` §6.
-                        Some(crate::pokemon::policy::FieldMove::Trade { give_slot, at }) => {
-                            api.release_all_buttons();
-                            self.set_state(AgentState::Trading { give_slot, at });
-                            return Ok(());
-                        }
+                        // Reserved seam (task 0.8): turns into its state in one line. Nothing returns
+                        // this yet — see `docs/postgame-coverage-plan.md` §6-H.
                         Some(crate::pokemon::policy::FieldMove::SearchHiddenItem { at }) => {
                             api.release_all_buttons();
                             self.set_state(AgentState::SearchingHiddenItem { at });
@@ -2064,12 +2067,12 @@ impl PokemonAgent {
             }
             AgentState::UsingItemPc(s) => return crate::pokemon::postgame::item_storage::tick(self, api, s),
             AgentState::UsingPcBox(s) => return crate::pokemon::postgame::pc_box::tick(self, api, s),
+            AgentState::UsingPartyScript(s) => return crate::pokemon::postgame::gifts::tick(self, api, s),
             AgentState::Flying(s) => return crate::pokemon::postgame::fly_bike::tick(self, api, s),
             AgentState::Fishing(s) => return crate::pokemon::postgame::fishing::tick(self, api, s),
             AgentState::SellingToMart(s) => return crate::pokemon::postgame::game_corner::sell_tick(self, api, s),
             AgentState::RedeemingPrize(s) => return crate::pokemon::postgame::game_corner::prize_tick(self, api, s),
             // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
-            AgentState::Trading { give_slot, at } => return crate::pokemon::postgame::trades::tick(self, api, give_slot, at),
             AgentState::SearchingHiddenItem { at } => return crate::pokemon::postgame::aides::tick(self, api, at),
             AgentState::CheckingTrashCan { target, checked, press, facing } => {
                 // Checking a can triggers GymTrashScript, which prints a text box (leaving the

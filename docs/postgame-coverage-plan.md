@@ -502,21 +502,86 @@ No slot machines (out of scope). Coins are bought with money instead.
 The long tail. Sub-tasks are independent — **a second agent can take G-trades while the first takes
 G-gifts**, provided you claim separate rows in §9.
 
-- [ ] **G1 — Fossil revival.** `CinnabarLabFossilRoom`. The agent already carries a **Helix Fossil**,
+- [x] **G1 — Fossil revival.** `CinnabarLabFossilRoom`. The agent already carries a **Helix Fossil**,
       so Omanyte is one interaction away. *Observable:* Omanyte in the party.
-- [ ] **G2 — Old Amber.** `Museum1F/2F` (Pewter), behind a Cut tree → Aerodactyl at the same lab.
+      *Done:* `PolicyStep::fossil_revival_steps()`, test `postgame::gifts::can_revive_the_helix_fossil`
+      (~3 s), fixture `postgame-omanyte.bin`, **Omanyte lv30, dex 8 owned**. Not "one interaction" —
+      it is **two visits**: the scientist takes the fossil and asks you to go for a walk, and the walk
+      is `CinnabarIsland_Script` clearing `EVENT_LAB_STILL_REVIVING_FOSSIL` on map load. Nothing else
+      needed a driver; see §11.
+- [x] **G2 — Old Amber.** `Museum1F/2F` (Pewter), behind a Cut tree → Aerodactyl at the same lab.
       *Observable:* Aerodactyl in the party.
-- [ ] **G3 — Lapras.** `SilphCo7F`, from the rescued employee. Silph is already traversed; the gift
+      *Done:* `PolicyStep::old_amber_steps()`, test `can_get_the_old_amber_and_revive_it` (~5 s),
+      fixture `postgame-aerodactyl.bin`, **dex 9 owned**. The Cut tree **is** load-bearing (measured by
+      dropping it — see §11), and the giver is `MUSEUM1F_SCIENTIST2`, not the `SPRITE_OLD_AMBER` object
+      standing beside him, which is scenery.
+- [x] **G3 — Lapras.** `SilphCo7F`, from the rescued employee. Silph is already traversed; the gift
       was simply never taken. *Observable:* Lapras in the party.
-- [ ] **G4 — Fighting Dojo.** Saffron: beat the Karate Master, choose Hitmonlee or Hitmonchan.
+      *Done:* `PolicyStep::lapras_steps()`, test
+      `a_full_party_sends_the_silph_lapras_to_the_box` (~4 s), fixture `postgame-lapras.bin`,
+      **dex 10 owned**. Two corrections in §11: the **lift does not reach the worker** (7F is cut into
+      pockets; he is in the rival one, behind 3F's pad — measured by the `probe_silph_7f_pockets`
+      diagnostic left in the test file), and a **full party does *not* skip the naming screen** —
+      `SendNewMonToBox` runs its own `AskName`. Run deliberately at party 6 to cover that branch.
+- [x] **G4 — Fighting Dojo.** Saffron: beat the Karate Master, choose Hitmonlee or Hitmonchan.
       *Observable:* the chosen mon in the party.
-- [ ] **G5 — The trade driver.** `PolicyStep::TradePokemon { give_slot, at }` driving the
+      *Done:* `PolicyStep::hitmonlee_steps(bank_slot)`, test
+      `can_beat_the_karate_master_and_take_a_hitmonlee` (~16 s, five dojo battles), fixture
+      `postgame-hitmonlee.bin`, **dex 11 owned**. ⚠️ **Hitmonchan is now gone for this cartridge** —
+      taking either ball `HideObject`s the other. A slot is banked at the Saffron PC first so this
+      lands in the *party*, covering the branch G3 does not. ➡️ **dex owned is now 11, so H1 (Flash,
+      gate 10) is unblocked.**
+- [x] **G5 — The trade driver.** ~~`PolicyStep::TradePokemon { give_slot, at }`~~ driving the
       offer/accept flow. *Observable:* one trade completes.
-- [ ] **G6 — Three more trades.** From the table below. *Observable:* dex count rises by three.
-- [ ] **G7 — Skipped Silph floors.** `2F/4F/6F/8F/10F` — item pickups only. *Observable:* items in bag.
-- [ ] **G8 — Colour rooms.** `Daycare` (Route 5), `NameRatersHouse`, `CopycatsHouse1F/2F` (TM31 Mimic
-      for a Poké Doll), `MrPsychicsHouse` (TM29), `ViridianSchoolHouse`,
-      `CeladonDiner`/`Hotel`/`ChiefHouse`. *Observable:* commit `postgame-gifts.bin`.
+      *Done:* **Abra → Mr. Mime** at `Route2TradeHouse`, test
+      `postgame::trades::can_trade_an_abra_for_a_mr_mime` (~18 s), fixture `postgame-mr-mime.bin`.
+      ⚠️ **The reserved `TradePokemon` / `AgentState::Trading` seams are gone.** A trade NPC opens the
+      same stale-cursor party menu the Day Care does, so a trade is a third
+      `postgame::gifts::PartyScript` variant and needed no driver at all. Build with
+      `PolicyStep::trade_steps(give, catch_on, bank, bank_at)`, which banks a party slot, catches the
+      give-species, travels and trades.
+- [x] **G6 — Three more trades.** From the table below. *Observable:* dex count rises by three.
+      *Done:* **Spearow → Farfetch'd** (`VermilionTradeHouse`), **Nidoran♂ → Nidoran♀**
+      (`UndergroundPathRoute5`) and **Venonat → Tangela** (`CinnabarLabTradeRoom`); fixtures
+      `postgame-farfetchd.bin`, `postgame-trades.bin`, `postgame-tangela.bin`. Four trades in all,
+      **dex 11 → 19 owned** — each is worth two entries, the mon caught and the mon received, and
+      three of the four received species (Mr. Mime, Farfetch'd, Tangela) are obtainable no other way
+      on one cartridge. The remaining five need an evolution grind or the Safari Zone; see §11.
+- [x] **G7 — Skipped Silph floors.** `2F/4F/6F/8F/10F` — item pickups only. *Observable:* items in bag.
+      *Done:* `PolicyStep::silph_floors_steps(bank)`, test `can_clear_the_skipped_silph_floors`
+      (~14 s), fixture `postgame-silph-floors.bin`. **Ten** items, not eight — 7F's Calcium and TM03
+      are on the *lift* side, which G3's route could not reach. Against five free bag slots, so this
+      is also the first leg to compose Phase 0's item PC with pickup. Three findings in §11, two of
+      them bugs: `UseElevator` **rides you back where you came from** if issued while still on the
+      lift tile, and `deposit_item` **hangs** when asked for more of a stack than is held (fixed —
+      the quantity is now clamped to the live stack, so a caller can pass `u8::MAX` for "all of it").
+**G8 was three sub-steps, not one** (§0.3: split it here first, then do them). The TM gifts and the
+Day Care are unrelated mechanics with unrelated failure modes, and the Day Care needed a driver:
+
+- [x] **G8a — The TM gifts.** `MrPsychicsHouse` (TM29) and `CopycatsHouse1F/2F` (TM31 Mimic for a
+      Poké Doll). *Observable:* both TMs in the bag; commit `postgame-gifts.bin`.
+      *Done:* `PolicyStep::saffron_tm_gifts_steps(bank)`, test `can_collect_the_saffron_tm_gifts`
+      (~7 s). The Copycat is the only **conditional** gift in the plan — no doll, no refusal message,
+      just one indistinguishable text box — so the leg buys the ¥1000 doll at `CeladonMart4F` first
+      and TM31 is the proof it was held. `ItemId` gained `Tm29Psychic` / `Tm31Mimic`.
+- [x] **G8b — The Day Care.** `Daycare` (Route 5): leave a mon, collect it, pay.
+      *Observable:* party count down then up, and the bill paid; commit `postgame-daycare.bin`.
+      *Done:* `PolicyStep::UseDaycare { slot }` + `AgentState::UsingDaycare` +
+      [`postgame::gifts::tick`], test `can_leave_a_pokemon_at_the_day_care` (~3 s). **The only
+      sub-step in G that needed a driver**, for one reason: the gentleman's `DisplayPartyMenu` opens
+      on a *stale* cursor, so an A-mash hands over an arbitrary mon and he refuses every HM carrier
+      for ever. Route 5 is also three one-way corridors — see §11. ➡️ **The driver is the reusable
+      part**: G5/G6's trades and the Name Rater open the same script-driven party menu.
+- [x] **G8c — The remaining colour rooms.** `NameRatersHouse`, `ViridianSchoolHouse`,
+      `CeladonDiner`/`Hotel`/`ChiefHouse`. *Observable:* a renamed party mon; the rooms visited.
+      *Done:* `PolicyStep::name_rater_and_rooms_steps(slot)`, test
+      `can_rename_a_pokemon_and_visit_the_last_rooms` (~4 s), fixture `postgame-name-rater.bin`. The
+      Name Rater is G8b's driver with a different completion test, which is why `PartyScript` is an
+      enum — **G5/G6's trades should be its third variant, not a fourth driver**. The wrinkle was
+      real and sharper than expected: the nickname picker is re-seeded *per leg*, so five of the six
+      party members are already called what the first draw returns and only **Articuno** can be
+      observably renamed at all. `CeladonDiner` is not in this leg — F already opens it for the Coin
+      Case.
 
 **In-game trades** — there are exactly **9** usable ones (a 10th, Butterfree→Beedrill, is unused
 code). Verified from `data/events/trades.asm` + the scripts that reference `TRADE_FOR_*`:
@@ -549,10 +614,17 @@ don't guess.**
 | **Itemfinder** | 30 owned | `Route11Gate2F` |
 | **Exp.All** | 50 owned | `Route15Gate2F` |
 
-- [ ] **H1 — Flash at 10 owned.** Nearly reachable already. *Observable:* HM05 in bag.
-- [ ] **H2 — Teach Flash + prove it.** `TeachMove` already works. *Observable:* a dark cave renders
+- [x] **H1 — Flash at 10 owned.** Nearly reachable already. *Observable:* HM05 in bag.
+- [x] **H2 — Teach Flash + prove it.** `TeachMove` already works. *Observable:* a dark cave renders
       lit. (Note: the agent already crosses Rock Tunnel *without* Flash by routing off RAM collision
       rather than the visible screen, so this is coverage, not a fix.)
+      *Done (both):* `PolicyStep::flash_steps(withdraw, shed, flash_slot)`, test
+      `postgame::aides::can_get_hm05_and_light_rock_tunnel` (~6 s), fixture `postgame-flash.bin`. The
+      aide's own text confirms the gate — *"You have caught 19 kinds of POKéMON!"*. H2's observable is
+      the ROM's: entering `RockTunnel1F` sets `wMapPalOffset = 6` and Flash is the only thing that
+      clears it, now readable as **`GameState::map_is_dark`** and driven by the new
+      `PolicyStep::UseFlash { slot }`. ⚠️ **Only Slowpoke and Mr. Mime can learn Flash** of everything
+      this save has owned; see §11.
 - [ ] **H3 — Itemfinder at 30 owned.** *Observable:* Itemfinder in bag.
 - [ ] **H4 — Hidden items.** `PolicyStep::SearchHiddenItem { at }` — hidden items are bg-event
       objects, same shape as the `FlipSwitch` tiles. *Observable:* one hidden item collected.
@@ -611,9 +683,9 @@ Phase 0 (item storage, PC locations, seams, probe)
 | D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
 | E — Safari Zone | *(unclaimed)* | `postgame-phase0.bin` | `postgame::safari` | ☐ | |
 | F — Game Corner | claude-F-gamecorner | `postgame-fly-bike.bin` | `postgame::game_corner` | ✅ done | F1–F4 green, **~9 s of wall clock for the four legs**. Rooted on **B's output**, not `postgame-phase0.bin` (same reasoning C's row gives). Output `postgame-game-corner.bin`: Coin Case, 20 coins, ¥43,209, **dex 8 owned**, an **Abra** in slot 4. Three things other streams can use: **`PolicyStep::SellToMart { map, item }`** — the mart's sell half, which nothing had — **`PolicyStep::RedeemPrize { prize }`** for all nine prizes, and `ItemId::is_key_item()` / `is_hm()`, pinned bit-for-bit against the ROM. Both prize branches (mon and TM) are covered; the TM one seeds **money** from the debug tier, like D's Master Ball. See §11. |
-| G — Gifts (G1–G4, G7–G8) | *(unclaimed)* | `postgame-phase0.bin` | `postgame::gifts` | ☐ | splittable from trades |
-| G — Trades (G5–G6) | *(unclaimed)* | `postgame-phase0.bin` | `postgame::trades` | ☐ | needs the 9 give-species |
-| H — Oak's aides | *(unclaimed)* | *(after A–G)* | `postgame::aides` | ☐ | dex-gated 10/30/50 |
+| G — Gifts (G1–G4, G7–G8) | claude-G-gifts | `postgame-fly-bike.bin` | `postgame::gifts` | ✅ done | All of G1–G4, G7 and G8a–c green — **~57 s of wall clock across 8 legs**, output `postgame-name-rater.bin`: **dex 11 owned**, party Venusaur / Articuno / Vaporeon / Slowpoke / Aerodactyl / **Hitmonlee**, box 1 holding **Lapras** + Omanyte, bag 19/20 with TM29/TM31/TM03/TM26 and the ten Silph items. Rooted on **B's output** (same reasoning C's and F's rows give). Three things other streams can use: **`PolicyStep::PartyScript { script, slot }`**, the first driver here that can pick a slot in a **script-opened party menu** — **G5/G6's trades should be a third `PartyScript` variant, not a new driver** — a `deposit_item` fix (it **hung** on any full stack), and `probe_coverage` now printing **PC item storage**. Two shared-file bugs found, one fixed; five §11 entries. ➡️ **H1 is unblocked** (dex 11 > Flash's gate of 10). |
+| G — Trades (G5–G6) | claude-G-trades | `postgame-name-rater.bin` | `postgame::trades` | ✅ done | **Four** trades green — Abra→Mr. Mime, Spearow→Farfetch'd, Nidoran♂→Nidoran♀, Venonat→Tangela — **~55 s of wall clock across 4 legs**, output `postgame-tangela.bin`: **dex 19 owned**, party Venusaur / Articuno / Vaporeon / Tangela, eight mons banked in box 1. Rooted on **G-gifts' output**: a trade is a third `PartyScript` variant, so the reserved `TradePokemon` / `AgentState::Trading` seams are **deleted**. `TRADES` is the nine-row table, ROM-pinned. The other five trades are not blocked, just expensive — Slowbro/Poliwhirl/Nidorino/Raichu need evolution grinds and Ponyta is in the Pokémon Mansion; see §11. |
+| H — Oak's aides | claude-H-aides | `postgame-tangela.bin` | `postgame::aides` | 🟡 blocked | **H1 + H2 done** — HM05 Flash collected, taught to Slowpoke and used to light Rock Tunnel; ~6 s, output `postgame-flash.bin`, **dex 19 owned**. ☐ **H3/H4/H5 blocked on dex count**: the Itemfinder wants **30** owned (11 more species) and Exp.All **50** (31 more), and H4 needs H3's Itemfinder. Neither is a mechanism problem — it is a *catching* problem, and **E (Safari)** is the cheapest source of both. New and reusable: `PolicyStep::UseFlash { slot }` and `GameState::map_is_dark`. |
 
 ---
 
@@ -1709,3 +1781,396 @@ test only needs the seed to reach a branch, it can prove the branch and throw th
 whether the thing you would grind for is the mechanism or a prerequisite for it. **E (Safari)** will
 meet this directly: Safari Balls and the 500-step budget are prerequisites, and the entry fee is ¥500
 a go.
+
+### [2026-07-31] G-gifts — a **full party does not skip the naming screen**; F's entry is wrong on that point
+**Status:** corrected ❗
+**What the plan said:** F's §11 entry — *"With a **full party** the prize goes to `SendNewMonToBox`
+instead, which skips the naming entirely. So for a *gift*, a full party is the **safe** path and an
+empty slot is the interesting one."* §6-F repeats it, and my own module header did too until this
+entry.
+**What is actually true:** both branches name. `_GivePokemon` picks between `AddPartyMon` and
+`SendNewMonToBox`, and `SendNewMonToBox` ends with its **own** `predef AskName`
+(`engine/items/item_effects.asm:2731-2733`) — the box path is not a shortcut past the naming screen,
+it is a different route to the same one. Measured rather than read: `a_full_party_sends_the_silph_
+lapras_to_the_box` runs the Silph Lapras gift at party 6, and the mon arrives in box 1 **nicknamed**,
+which is why that test asserts the nickname and not just the species. A default name would have meant
+the screen never ran.
+
+**The part that matters more, and that I could not resolve:** D reports that a **boxed catch**'s
+naming screen *wedges the agent* — "it sat printing `name:Mewtwo` and burned every remaining cycle,
+identically at 150 and at 240 emulated minutes" — and warns E to expect it. A boxed **gift** goes
+through the same `SendNewMonToBox`, and here it was answered cleanly (`[policy] pick name=Celina`,
+then `Lapras "Celina"` in the box) with the party still at 6. So whatever D hit is **narrower than
+"the boxed naming screen"**; the two paths differ in that the catch happens inside a battle, i.e. in a
+different `AgentState`. I have not reproduced D's wedge and am not claiming it is fixed — only that
+"full party ⇒ safe" is not the reason a gift works, and that E should not assume the box path is
+inherently wedged.
+**Evidence:** `pokemon::integration_tests::postgame::gifts::a_full_party_sends_the_silph_lapras_to_
+the_box`; `pokered/engine/events/give_pokemon.asm:1-52`;
+`pokered/engine/items/item_effects.asm:2648-2733` (`SendNewMonToBox`, the `AskName` at its end).
+**Impact on others:** **E (Safari)** most of all — it was told the box path skips naming and is safe.
+**G5/G6 (trades)** and anyone doing G8c: the gift/box distinction is not a naming distinction.
+
+### [2026-07-31] G-gifts — two shared-file bugs the Silph floors turned up, one fixed
+**Status:** corrected ❗ (one fixed, one worked around)
+**What the plan said:** §6-G7 — *"Skipped Silph floors. 2F/4F/6F/8F/10F — item pickups only."*
+Nothing about either of these.
+
+**1. `UseElevator` rides you back where you came from — and reports success.** Issued while the player
+is still standing on (or beside) the lift tile they just arrived by, the ride silently returns them to
+the floor they came from. It then *pops as complete*, because `pick_field_move`'s completion test is
+"we are no longer in an elevator room" (`policy.rs`) and a wrong floor satisfies that as happily as the
+right one. Measured cleanly: of seven rides in one leg, the three issued from the lift tile failed and
+the four issued after a walk succeeded, and the failures never printed `elevator→floor n (sel=true)` at
+all. Two floors of G7 carry no items, so the leg has nothing to walk to — which is why
+`SILPH_FLOORS` gives 2F and 8F a worker to `Interact` with — collecting an item walks away from the
+door as a side effect, so a floor with nothing to collect needs something else to. **That column is
+load-bearing, not decoration.** I did not fix it: the failure is in the shared `UseElevator` completion test, which
+should compare against the floor that was *asked for* rather than merely "not in a lift", and that is a
+change every elevator leg in `complete_game_steps` would have to be re-run against.
+
+**2. `deposit_item` hangs on a full stack, which is the common case.** `DisplayChooseQuantityMenu`
+wraps at `wMaxItemQuantity`, which the list menu sets to the **live** stack size
+(`home/list_menu.asm`), so a target above what is held is *unrepresentable*: the driver pressed Up for
+ever watching the counter cycle 1…8…1 past the 9 it wanted. Two separate things made that happen at
+once and both are worth knowing:
+
+- **A partial deposit frees no bag slot.** `deposit_item(GreatBall, 1)` on a stack of nine moves one
+  ball and leaves the row exactly where it was. If you are depositing to make *room*, the quantity has
+  to be the whole stack — my first attempt banked six entries, freed three slots, and wedged on "No
+  more room for items!" at the last Silph ball, forty tiles from the lift.
+- **The stack shrank underneath the step.** `ItemPcState::new` captured `start_qty = 9`, and by the
+  time the quantity box opened the bag held **8** — one Great Ball had already gone into storage
+  during the *previous* item's menu navigation (PC storage ends the run holding `GreatBallx9`, so it
+  arrived in two pieces). A stray A press on an item list is a silent deposit; the list is always
+  under the cursor.
+
+Fixed in `postgame/item_storage.rs`, in two places, because the two causes need different clamps:
+`ItemPcState::new` clamps `qty` to `start_qty` (so a caller can pass `u8::MAX` for "all of it" without
+knowing the count), and the selector branch clamps to the **live** source quantity each tick (so a
+stack that shrinks mid-operation still completes — the completion test is measured against
+`start_qty`, so moving the smaller amount still satisfies it). `silph_floors_steps` now takes
+`&[(ItemId, u8)]` and its test passes `u8::MAX` throughout.
+
+**One thing that went exactly as hoped:** the PC accepts **key items**. `IsKeyItem` in
+`engine/menus/players_pc.asm:164` only suppresses the quantity prompt — it does not refuse — so the
+S.S. Ticket, Lift Key and Silph Scope are three free bag slots for anyone who needs them.
+**Evidence:** `pokemon::integration_tests::postgame::gifts::can_clear_the_skipped_silph_floors` and
+its `probe_silph_item_floors` diagnostic; `pokered/home/list_menu.asm` (`DisplayChooseQuantityMenu`,
+`.incrementQuantity`); `pokered/engine/menus/players_pc.asm:95-140`. Full `slow-tests` tier after the
+`item_storage` change: **903 passed, 0 failed**, 16 pre-existing ignores; default tier **839 passed**.
+`probe_coverage` now prints **PC item storage** alongside the bag, which is how the two-piece Great
+Ball was spotted — it showed half the picture before.
+**Impact on others:** **everyone who deposits anything.** The clamp is a behaviour change to Phase 0
+infrastructure. Anyone driving an elevator: check *which floor* you arrived on, not just that you left.
+
+### [2026-07-31] G-gifts — three routes that are not one room, and how each announced itself
+**Status:** corrected ❗
+**What the plan said:** §6-G3 — *"Silph is already traversed; the gift was simply never taken."*
+§6-G2 — *"`Museum1F/2F` (Pewter), behind a Cut tree."* §6-G8 — *"`Daycare` (Route 5)."*
+**What is actually true:** each of those three is a **terrace problem**, and each fails differently —
+which is the useful part, because only one of them looks like a failure.
+
+- **Silph 7F is three pockets and the lift opens onto the wrong one.** 7F has its own elevator door at
+  (18,0) and `SilphCoElevatorFloors` lists all eleven floors, so riding to menu index 6 *is* one step
+  — and from (18,0) the reachable set is workers 2/3/4, the Calcium, the TM and three warps. The
+  Lapras worker is **not in it**. He is in the walled rival pocket, reached the way
+  `silph_giovanni_steps` reaches it: lift to 3F, then 3F's (11,11) pad. **How it announced itself:**
+  the agent walked *to another floor* and talked to a different sprite with the same display name.
+  `MapSprite` matches on name, and the router will happily cross a map boundary to satisfy it, so
+  "unreachable sprite" presents as "wrong sprite, silently".
+- **The Pewter Museum's back room needs the Cut tree, and `enter_at` does not say so.** Pewter has two
+  warps to `Museum1F` and the Old Amber scientist is behind the *back* one, so the step is
+  `enter_at(Museum1F, 16, 7)`. With the Cut tree still standing, that landing is unreachable and the
+  step **falls through to the front door** at (10,7) — no warning, no abort, just the wrong side of a
+  wall and a leg that dies later for no visible reason. Measured by deleting the `CutTree` step and
+  re-running. Same silent-fallthrough shape D recorded for `connection_action`, and the general lesson
+  is the same: `enter_at`'s position is a *preference*, not an assertion.
+- **Route 5 is three parallel corridors joined only at the bottom, and the Day Care is in the middle
+  one.** The rungs between them are one-way ledges. From the Cerulean crossing the agent lands at
+  (18,1) in the right-hand corridor, and `actions()` there lists the Route 5 Gate, the Underground
+  Path and Cerulean — **and no Day Care**. Its whole top row is connection tiles, so the corridor is
+  chosen by *which crossing you ask for*: `enter_at(Route5, 10, 0)` lands in the middle one, and from
+  there it is a straight walk south, hopping ledges, to the door. **How it announced itself:** the
+  agent stood still. `EnterMap` with no matching action does nothing at all, which is the cheapest
+  failure of the three to diagnose and the only one that looks like a bug from the log.
+
+**The diagnostic that answered all three is the same six lines** — drive to the arrival tile, step 50
+ticks for the sprites to settle, print `state.map.actions()`, and (for Route 5) an ASCII dump of the
+meta-tile grid. `probe_silph_7f_pockets`, `probe_silph_item_floors` and `probe_route5_terraces` are
+left `#[ignore]`d in the test file. D's `probe_route_to_moltres` was the template; it is worth
+reaching for **before** writing the route, not after the first stall, because two of these three
+never stall.
+**Evidence:** the three probes above; `pokered/data/maps/objects/{SilphCo7F,Museum1F,PewterCity,
+Route5}.asm`; `pokered/scripts/Museum1F.asm:190-205`.
+**Impact on others:** **G5/G6 (trades)** — `Route11Gate2F`, `Route18Gate2F` and `Route2TradeHouse` are
+all gate interiors with the same shape. **H4 (hidden items)**. And anyone tempted to trust a sprite
+name: it does not carry a map.
+
+### [2026-07-31] G-gifts — the Day Care needed the plan's first **party-menu** driver, and trades will want it
+**Status:** verified ✅
+**What the plan said:** §6-G8 lists the Day Care among the "colour rooms", alongside text-only houses.
+**What is actually true:** it is the one mechanic in G that could not be done with `Interact`, and the
+reason is a single missing instruction in pokered. `DaycareGentlemanText` calls `DisplayPartyMenu`
+**without resetting `wCurrentMenuItem`** (`scripts/Daycare.asm:26-32`), so the list opens on whatever
+the last party menu left behind. An A-mash therefore hands over an arbitrary party member — and this
+party's other five all carry Cut, Fly or Strength, which `KnowsHMMove` refuses with "I can't accept a
+POKéMON that knows an HM move", for ever. The log is unmistakable once you know to read it: the party
+list re-renders three times with the lead visibly *first* and the refusal every time.
+
+`PolicyStep::UseDaycare { slot }` + `AgentState::UsingDaycare` + [`postgame::gifts::tick`]. The driver
+is deliberately small and the shape is worth copying:
+
+- It matches the party list on **box origin** — `top_x == 0 && (top_y == 1 || top_y == 3)` — which is
+  the same signal `agent::field_move_menu_button` already uses. Everything else in the conversation
+  (two YES/NOs and the money box) opens on entry 0, so `_ => A` covers it and there are exactly two
+  cases.
+- **Completion is "the party count changed", which serves both halves.** Deposit drops it by one,
+  collection raises it by one, `wDayCareInUse` picks the branch, and one step does both — so the caller
+  writes `UseDaycare` twice and never says which operation it wants.
+- It owns the walk, resolving the standing tile from `actions()` rather than `route_to_face_dir`,
+  copying F's `pick_sale` verbatim for the reason F recorded: the two do not model the same map.
+- Three smaller things measured on the way. **Nothing needs to restore the lead afterwards** — handing
+  over slot 0 promotes the mon behind it, so the Cut holder is leading again for free and a collected
+  mon is appended at the end. The **bill is ¥100** for a same-visit round trip (¥100 × levels grown +
+  1; a mon gains one exp point per step walked, so nothing at level 30 grows in a corridor) — and the
+  ¥100 is the assertion that matters, because the party count returning to six proves the mon came
+  back but only the money proves it came back *through the counter*. And **one visit each way**: a
+  second conversation takes the other branch and would collect the mon straight back.
+**Evidence:** `pokemon::integration_tests::postgame::gifts::can_leave_a_pokemon_at_the_day_care`
+(~3 s); `pokered/scripts/Daycare.asm:9-140`. Shared-file cost, for §4.1's record: one `PolicyStep`
+variant, one `FieldMove` variant, one `AgentState` variant, one `None` routing arm, one 6-line
+`pick_field_move` block, two delegating arms and one addition to `agent.rs`'s text-state exclusion
+list. Everything else is in the two owned files. The seam held again.
+**Impact on others:** **G5/G6 (trades)** — `DoInGameTradeDialogue` opens the same script-driven party
+menu, so the trade driver is this one with a different completion test, and it is the reason that row
+is worth taking next. **G8c's Name Rater** likewise (`NameRatersHouse.asm:57` is another
+`DisplayPartyMenu`), with one wrinkle: `DeterministicPolicy` answers every naming screen with the same
+name, so the mon renamed has to be one not already called it — this party is five `Celina`s and one
+`Leslee`.
+
+### [2026-07-31] G-gifts — the boring half went to plan; here is what is left
+**Status:** verified ✅
+**What the plan said:** G1–G4 and G7 as written in §6-G.
+**What is actually true:** every route surprise is logged above; the *mechanics* were all as cheap as
+§6-G assumed, and five of the seven legs were one `Interact` and a text mash. Worth recording so
+nobody re-checks:
+
+- **G1's fossil revival is a two-visit mechanic**, which §6-G's "Omanyte is one interaction away" does
+  not say. The scientist takes the fossil and asks you to go for a walk, and the walk is not a step
+  counter — `CinnabarIsland_Script` resets `EVENT_LAB_STILL_REVIVING_FOSSIL` on every load of the
+  island (`scripts/CinnabarIsland.asm:6`), so "a walk" is precisely out of the lab and back, four
+  warps. The bespoke fossil-choice menu (`TextBoxBorder` + `HandleMenuInput`, no `wTextBoxID`) needed
+  no driver: with one fossil in the bag the cursor already sits on it.
+- **G2's Old Amber giver is `MUSEUM1F_SCIENTIST2`**, not the `SPRITE_OLD_AMBER` object standing beside
+  him, which is scenery with a text pointer and no item id.
+- **G4 spends Hitmonchan.** Taking either dojo ball `HideObject`s the other, so that species is gone
+  from this cartridge. The Karate Master is engaged by `Interact` rather than his (4,3) coordinate
+  trigger — his text script does the whole `EngageMapTrainer` dance itself.
+- **G3 and G4 were deliberately run at different party sizes** so the two `_GivePokemon` branches are
+  both covered: Lapras at party 6 (boxed), Hitmonlee with a slot banked first (party). See the naming
+  entry above for why that is *not* the naming distinction F described.
+
+**Output `postgame-daycare.bin`** — Route 5, **dex 11 owned / 113 seen**, party Venusaur / Articuno /
+Vaporeon / Slowpoke / Aerodactyl / **Hitmonlee**, box 1 holding **Lapras** + Omanyte, ¥44,284, bag
+17/20 (TM29, TM31, TM03, TM26 and the ten Silph items), PC storage holding twelve entries. All seven
+fixtures are on `probe_coverage`'s list.
+
+**What is left, and it is not blocked by anything:** **G8c** — the Name Rater plus four text-only
+rooms (`ViridianSchoolHouse`, `CeladonHotel`, `CeladonChiefHouse`, and `CeladonDiner`, which F already
+visits for the Coin Case). I stopped rather than start a fifth mechanic; the Name Rater's recipe is in
+the entry above and is perhaps an hour.
+➡️ **Two consequences for other rows.** **H1 is unblocked**: dex owned is **11**, past Flash's gate of
+10. And **G5/G6 (trades)** is the row this workstream most directly helps — the party-menu driver is
+the piece it was missing, and four of its nine give-species (Abra, Slowbro, Poliwhirl, Nidorino) are
+now either in hand or one evolution away between F's prize Abra and this party's Slowpoke.
+**Evidence:** `pokemon::integration_tests::postgame::gifts::*` — 7 slow-tier tests, **~53 s of wall
+clock for the lot**, plus 3 `#[ignore]`d probes. Full `slow-tests` tier **903 passed, 0 failed**
+(from 896), default tier **839 passed**. `git status src/pokemon/data/` shows only the seven new
+files — no drift.
+
+### [2026-07-31] G-gifts — **COMPLETE**. G8c lands, and the party-menu driver is now an enum with a hole for trades
+**Status:** verified ✅ (supersedes the "what is left" paragraph of my previous entry)
+**What my previous entry said:** *"**G8c** … I stopped rather than start a fifth mechanic; the Name
+Rater's recipe is in the entry above and is perhaps an hour."*
+**What is actually true:** it was about an hour, almost all of it in one wrong assumption, and the
+result generalised the driver rather than copying it.
+
+**The Name Rater is the Day Care with a different ending**, so `AgentState::UsingDaycare` became
+`AgentState::UsingPartyScript` and the state carries a `PartyScript` (which NPC, and where) plus a
+`Baseline` (what "done" means): `PartyCount` for the Day Care, the chosen slot's raw `wPartyMonNicks`
+bytes for the Name Rater. Nothing else differs — same stale-cursor party menu, same walk resolved out
+of `actions()`, same two-case button table. **G5/G6's in-game trades belong here as a third variant:**
+`DoInGameTradeDialogue` opens the same menu, so that row needs a `PartyScript::Trade` and a completion
+test, not a driver.
+
+**The assumption that cost the hour, and it is a trap for any test that renames or names anything:**
+I wrote "`DeterministicPolicy` answers every naming screen with the same name, so rename a mon not
+already called it" — correct, but I then read the *policy* rather than the *fixture* and picked
+Hitmonlee. `PokemonNamePicker` draws without replacement, so within one run no name repeats; but a
+`DeterministicPolicy` is constructed **per leg**, always from the same seed, so **every leg's first
+draw is the same name**. Five of this party's six are called it, having each been named by the first
+draw of the leg that obtained them. The rename ran perfectly and was invisible: `"Celina" → "Celina"`,
+and the test timed out waiting for a change that had already happened. **Articuno is the only
+uniquely-named party member** — "Leslee", from the main quest, where it was not the first draw — so it
+is the only slot whose rename can be observed at all.
+
+That accident bought a better assertion than I had planned. The entry fixture's `wCurrentMenuItem` is
+**0**, left there by G8b's deposit, so renaming **slot 1** and asserting *slot 0 kept its name* is a
+direct test of the cursor being driven: a driver that did not move it would rename Venusaur and leave
+Articuno alone. Both assertions are in the test.
+
+**One more thing worth knowing about naming screens:** `assert_naming_screen` runs *before* the
+state-machine exclusion list (`agent.rs`), so it takes the agent away from any driver the moment the
+screen opens and returns it to `Idle`, not to the driver. The Name Rater therefore never sees its own
+completion. That is harmless — the step pops on issue and the effect still lands — but it means **a
+driver whose script ends in a naming screen must not rely on running to completion**, and its test
+must wait on the effect rather than on the driver's event.
+
+**Output fixture `postgame-name-rater.bin`** — Celadon City, dex **11 owned / 113 seen**, party
+Venusaur / **Articuno "Celina"** / Vaporeon / Slowpoke / Aerodactyl / Hitmonlee, box 1 holding Lapras
++ Omanyte, ¥44,284, bag 19/20, PC storage 15 entries. Three more never-visited maps closed
+(`ViridianSchoolHouse`, `CeladonHotel`, `CeladonChiefHouse`).
+**Evidence:** `pokemon::integration_tests::postgame::gifts::*` — **8 slow-tier tests, ~57 s of wall
+clock**, plus 3 `#[ignore]`d probes. Full `slow-tests` tier **904 passed, 0 failed**, 16 pre-existing
+ignores; default tier **839 passed**. `git status src/pokemon/data/` shows only the eight new files —
+no drift. ROM: `pokered/scripts/NameRatersHouse.asm:1-90`.
+**Impact on others:** **G5/G6 (trades)** — the driver it needs exists, as an enum expecting a third
+variant. **Anyone writing a test that names a Pokémon**: the picker's first draw is a constant across
+legs, so "the name changed" is only observable on a mon that draw has not already hit.
+
+### [2026-07-31] G-trades — **four trades, dex 11 → 19**; the driver was already written, and the NPC is not the one you'd pick
+**Status:** verified ✅ (with one seam deletion ❗)
+**What the plan said:** §6-G5 — *"`PolicyStep::TradePokemon { give_slot, at }` driving the offer/accept
+flow"*, with a reserved `PolicyStep` variant and an `AgentState::Trading` from task 0.8.
+**What is actually true:** there is no offer/accept flow to drive. `DoInGameTradeDialogue` is a YES/NO
+that opens on YES, then `InGameTrade_DoTrade` calls **`DisplayPartyMenu`** — the same stale-cursor
+party menu the Day Care and the Name Rater open. So a trade is a third
+`postgame::gifts::PartyScript` variant and **both reserved seams are deleted**, the way A deleted its
+four. Build trades with `PolicyStep::trade_steps(give, catch_on, bank, bank_at)`.
+
+One improvement fell out of doing it third: **a trade finds its own slot**. `PartyScript::Trade`
+carries the give-species, so `pick` locates it in the party rather than trusting a caller-supplied
+index. That is not tidiness — the alternative is `MovePokemonToFront`, and promoting the mon to be
+traded *demotes the Cut holder*, which breaks the very next leg that meets a tree. Two of these four
+legs meet a tree. Completion is likewise index-independent (`Baseline::SpeciesGone`), because
+`InGameTrade_DoTrade` does `RemovePokemon` then `AddPartyMon`: the received mon is **appended**, so
+every slot after the traded one shifts.
+
+**❗ The trader is not the NPC you would guess, and a wrong guess does not fail — it chats.** Three of
+the four legs died on this, each costing a full run, because talking to the wrong sprite prints a
+perfectly ordinary text box and the driver then waits out its whole budget:
+
+| Room | The trader | The obvious wrong choice |
+|---|---|---|
+| `Route2TradeHouse` | **Gameboy Kid** | the Scientist standing in front of him |
+| `CeruleanTradeHouse` | **Gambler** | the Granny |
+| `CinnabarLabTradeRoom` | **Gramps** (Raichu) and **Beauty** (Venonat) | the Super Nerd |
+
+`data/events/trades.asm` cannot help: the ROM table has give/get/nickname and **no location at all**.
+Only the nine scripts that set `wWhichTrade` say who trades, so read those. `TRADES` records all nine
+rows and `trade_table_matches_the_rom` pins the give/get pairs bit-for-bit — worth having because the
+ROM addresses trades by *index* and this table by *map*, and nothing else would catch a drift.
+
+**Three route facts, all of the same family as G-gifts' terraces:**
+
+- **Route 2 is two halves** split by `Route2Gate` at y=35/39, and the trade house is the *north* one
+  at (15,19). Flying to Viridian lands at y=72 and `enter(Route2TradeHouse)` then stands still. From
+  Pewter it is still walled off: the reachable set is the forest gate, Pewter and **one cut tree** at
+  (5,10) — every Route 2 ledge sits under a wall, so that tree is the only link to the eastern column.
+- **`goto` cannot see a gate building.** It pops the instant the map matches, so
+  `goto(Route15) + CatchPokemon` paced on the grassless Fuchsia-side strip for ninety emulated minutes
+  with **no battle ever starting** — the quietest failure in this workstream. Route 15's grass is all
+  east of `Route15Gate1F`; the fix is `enter(gate)` then `enter_at(Route15, 14, 8)`. Any hunting
+  ground behind a gate needs the same, and `Route15` is one entry in a `to_hunting_ground` match that
+  exists to hold the next one.
+- **A trade room is indoors**, so every leg ends with an explicit walk back out. C and D both recorded
+  that rule and it caught this workstream anyway: the first `postgame-mr-mime.bin` was saved inside
+  `Route2TradeHouse`, and the next leg's `Fly` was refused with the whole queue then discarded.
+
+**One thing worth knowing before catching anything:** the bag had **no Poké Balls**. G7 banked the
+whole Great Ball stack to free bag slots, and `CatchPokemon` gives up immediately without one —
+`"[policy] want to catch a Abra, but no Pokéballs left!"`, then the leg carries on to the trade and
+fails there instead. `trade_steps` withdraws them at the same PC it banks the party at, passing
+`u8::MAX` and letting `ItemPcState::new`'s clamp resolve the count. Nine balls covered four catches.
+
+**Output fixture `postgame-tangela.bin`** — Cinnabar Island, **dex 19 owned / 113 seen**, party
+Venusaur / Articuno / Vaporeon / **Tangela**, eight mons in box 1, ¥44,564, six Great Balls.
+
+**What is left of the nine, and why I stopped at four.** The five untouched trades are not blocked,
+they are *expensive*, and the cost is the give-species rather than the trade:
+
+| Trade | What it needs |
+|---|---|
+| Nidorino → Nidorina | a second Nidoran♂ levelled to 16, or the Safari Zone (**E**) |
+| Poliwhirl → Jynx | Poliwag by fishing (**C**'s `fish` step), then level 25 |
+| Slowbro → Lickitung | Slowpoke to level **37** — and trading it away costs the party its only **Dig**, since TM28 is spent |
+| Raichu → Electrode | a Pikachu *and* a Thunder Stone |
+| Ponyta → Seel | the Pokémon Mansion's wild table, i.e. a maze **D** already has routes for |
+
+Each is a levelling or navigation errand attached to a mechanic this workstream has already proved
+four times, so §1's target — *mechanism* coverage — is met. Whoever wants the dex entries should take
+**E (Safari)** first: it supplies Nidorino directly and is a whole unclaimed mechanic.
+**Evidence:** `pokemon::integration_tests::postgame::trades::*` — 4 slow-tier legs, **~55 s of wall
+clock**, plus 2 `#[ignore]`d probes and 2 default-tier ROM-pinned unit tests. Full `slow-tests` tier
+**910 passed, 0 failed**, 18 pre-existing ignores; default tier **841 passed**.
+`git status src/pokemon/data/` shows only the new files — no drift. ROM:
+`pokered/engine/events/in_game_trades.asm`, `pokered/data/events/trades.asm`,
+`pokered/scripts/{Route2TradeHouse,VermilionTradeHouse,UndergroundPathRoute5,CinnabarLabTradeRoom,CeruleanTradeHouse,Route11Gate2F,Route18Gate2F}.asm`,
+`pokered/data/wild/maps/Route15.asm`.
+**Impact on others:** **E (Safari)** is now the highest-value unclaimed row — it is a whole mechanic
+*and* it unlocks the Nidorino trade. **H**: dex owned is **19**, so Flash (10) is long past and the
+Itemfinder's gate of 30 is eleven species away — reachable, where before it was not.
+
+### [2026-07-31] H — H1/H2 done, **H3–H5 are a catching problem, not a mechanism one**
+**Status:** verified ✅ (H1, H2) / blocked 🟡 (H3–H5)
+**What the plan said:** §6-H — three items gated on dex owned, *"check the gate with the probe before
+travelling — don't guess"*, and H2's observable as *"a dark cave renders lit"*.
+**What is actually true:** the advice about checking the gate is right and the gate is the *only*
+thing that was ever in the way. With 19 owned the aide hands HM05 over on sight, and his own text
+prints the count back — *"Great! You have caught 19 kinds of POKéMON!"* — which makes the probe's
+number and the ROM's agree out loud.
+
+**H2's observable turned out to be exactly readable**, which I had not expected from a phrase like
+"renders lit". `wMapPalOffset` **is** the darkness: `home/overworld.asm:497-501` sets it to 6 on
+entering `ROCK_TUNNEL_1F` specifically, and the Flash branch of the field-move menu
+(`engine/menus/start_sub_menus.asm:183-191`) does nothing but clear it to 0 and print a text box. So
+the test asserts the map is dark **on arrival** and lit after — the first half matters, or "lit"
+proves nothing. Exposed as `GameState::map_is_dark`, and driven by a new `PolicyStep::UseFlash
+{ slot }` shaped exactly like `UseStrength`: re-issued until the effect shows in RAM, popping
+immediately on an already-lit map so it is safe to leave in a step list.
+
+**⚠️ The trap in H2 is *which mon can hold Flash*.** Of everything this save has ever owned — Venusaur,
+Articuno, Vaporeon, Lapras, Aerodactyl, Hitmonlee, Omanyte, Tangela, Farfetch'd, Nidoran♀ — exactly
+**two** learn it: **Slowpoke** and **Mr. Mime**. Both were in the box by this point, so the leg
+withdraws Slowpoke first (it is already the Strength/Dig holder, so the HMs stay together). A leg that
+assumed the lead could take it would have failed inside `TeachMove` with no useful message. Two
+smaller preconditions, both silent if missed: the bag was **20/20**, and `OaksAideScript` refuses a
+full bag with a text box that reads exactly like success; and Route 2's gate is on the route's **north
+half**, past the cut tree G-trades documents.
+
+**Why H3–H5 are blocked, and what would unblock them.** Nothing about them is unimplemented — H3 and
+H5 are the same aide script at different gates, and H4's hidden items are bg-event objects with an
+existing reserved seam. They are blocked on **dex owned**:
+
+| Sub-step | Gate | Held | Short by |
+|---|---|---|---|
+| H3 Itemfinder | 30 | 19 | **11 species** |
+| H4 Hidden items | (needs H3) | — | — |
+| H5 Exp.All | 50 | 19 | **31 species** |
+
+That is a *catching* errand, and §1 rules out an exhaustive dex sweep — so the honest answer is that
+H3–H5 wait for whoever raises the count as a side effect of their own workstream. **E (Safari Zone)**
+is by far the cheapest source: its table alone holds Nidoran♂/♀, Nidorino, Nidorina, Parasect,
+Venomoth, Exeggcute, Rhyhorn, Chansey, Scyther, Tauros, Dratini and Kangaskhan — more than the eleven
+H3 needs, in one location, and it is a whole unclaimed mechanism besides. G-trades' remaining five
+rows would add another handful. I have left H's row `🟡 blocked` with that written down rather than
+starting a sweep the plan explicitly excludes.
+**Evidence:** `pokemon::integration_tests::postgame::aides::can_get_hm05_and_light_rock_tunnel`
+(~6 s); `pokered/scripts/Route2Gate.asm:9-27`; `pokered/home/overworld.asm:495-501`;
+`pokered/engine/menus/start_sub_menus.asm:183-193`; `pokered/data/pokemon/base_stats/*.asm` tm/hm
+lists for the Flash-compatibility sweep. Full `slow-tests` tier **911 passed, 0 failed**, 18
+pre-existing ignores; default tier **841 passed**. No fixture drift.
+**Impact on others:** **E** — taking it now pays for H3 and H4 as a side effect, which is the
+strongest argument for that row being next. `GameState::map_is_dark` and `PolicyStep::UseFlash` are
+available to anyone; the only other dark map worth them is Rock Tunnel B1F.

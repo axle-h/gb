@@ -103,6 +103,12 @@ pub enum ItemId {
     Tm24Thunderbolt = 0xE0, // TM01(0xC9) + 23
     Tm27Fissure = 0xE3,     // TM01(0xC9) + 26
     Tm28Dig = 0xE4,      // TM01(0xC9) + 27 — DIG doubles as a reusable Escape Rope out of any cave
+    /// TM01(0xC9) + 28 — PSYCHIC, given away by the old man in `MrPsychicsHouse` for nothing at all.
+    Tm29Psychic = 0xE5,
+    /// TM01(0xC9) + 30 — MIMIC, the Copycat's swap for a **Poké Doll**. Her script checks
+    /// `IsItemInBag POKE_DOLL` and silently says nothing else without one, so this TM arriving is the
+    /// only evidence the doll was in hand (`scripts/CopycatsHouse2F.asm:22`).
+    Tm31Mimic = 0xE7,
     Tm34Bide = 0xEA,     // TM01(0xC9) + 33 — BIDE, the bag's most useless item: tossed to make room
     /// TM01(0xC9) + 44 — THUNDER WAVE, a free pickup on Route 24 and the **only** paralysis move the
     /// party can learn (Slowpoke is the sole compatible member). Workstream D throws balls at the
