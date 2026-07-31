@@ -258,6 +258,23 @@ fn probe_coverage() {
         ("postgame-coins", include_bytes!("../data/postgame-coins.bin")),
         ("postgame-sold", include_bytes!("../data/postgame-sold.bin")),
         ("postgame-game-corner", include_bytes!("../data/postgame-game-corner.bin")),
+        // Workstream G-gifts' chain, also rooted on B's output: Omanyte → Aerodactyl → Lapras (boxed,
+        // full party) → Hitmonlee (in the party, a slot banked first).
+        ("postgame-omanyte", include_bytes!("../data/postgame-omanyte.bin")),
+        ("postgame-aerodactyl", include_bytes!("../data/postgame-aerodactyl.bin")),
+        ("postgame-lapras", include_bytes!("../data/postgame-lapras.bin")),
+        ("postgame-hitmonlee", include_bytes!("../data/postgame-hitmonlee.bin")),
+        ("postgame-silph-floors", include_bytes!("../data/postgame-silph-floors.bin")),
+        ("postgame-gifts", include_bytes!("../data/postgame-gifts.bin")),
+        ("postgame-daycare", include_bytes!("../data/postgame-daycare.bin")),
+        ("postgame-name-rater", include_bytes!("../data/postgame-name-rater.bin")),
+        // Workstream G-trades' chain, rooted on G-gifts' output.
+        ("postgame-mr-mime", include_bytes!("../data/postgame-mr-mime.bin")),
+        ("postgame-farfetchd", include_bytes!("../data/postgame-farfetchd.bin")),
+        ("postgame-trades", include_bytes!("../data/postgame-trades.bin")),
+        ("postgame-tangela", include_bytes!("../data/postgame-tangela.bin")),
+        // Workstream H, rooted on G-trades' output — the dex count is what gates it.
+        ("postgame-flash", include_bytes!("../data/postgame-flash.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);
@@ -314,27 +331,34 @@ pub fn print_coverage(name: &str, save_state: &[u8]) {
             p.species, p.level, p.current_hp, p.stats.hp, moves.join(", "));
     }
 
-    // Raw bag: `wBagItems` is (id, qty) pairs, `wNumBagItems` long.
-    let count = mmu.read_pointer(&pokered_symbols::wNumBagItems) as usize;
-    let base = pokered_symbols::wBagItems.address;
-    let items: Vec<String> = (0..count).map(|i| {
-        let id = mmu.read(base + i as u16 * 2);
-        let qty = mmu.read(base + i as u16 * 2 + 1);
-        // `ItemId` names only a handful of the machines, but the postgame plan cares which ones are
-        // in the bag (they are the obvious things to toss for space, and H wants HM05). Decode the
-        // rest by id: `constants/item_constants.asm` puts HM01–HM05 at $C4 and TM01–TM50 at $C9.
-        let label = if let Some(item) = ItemId::from_repr(id) {
-            format!("{item:?}")
-        } else if (0xC4..=0xC8).contains(&id) {
-            format!("HM{:02}", id - 0xC3)
-        } else if (0xC9..=0xFA).contains(&id) {
-            format!("TM{:02}", id - 0xC8)
-        } else {
-            format!("${id:02x}")
-        };
-        format!("{label}x{qty}")
-    }).collect();
+    // Raw inventories: `wBagItems` / `wBoxItems` are (id, qty) pairs, `wNum*Items` long.
+    let read_inventory = |count_at: &_, base: u16| -> (usize, Vec<String>) {
+        let count = mmu.read_pointer(count_at) as usize;
+        let items = (0..count).map(|i| {
+            let id = mmu.read(base + i as u16 * 2);
+            let qty = mmu.read(base + i as u16 * 2 + 1);
+            // `ItemId` names only a handful of the machines, but the postgame plan cares which ones
+            // are held (they are the obvious things to shed for space, and H wants HM05). Decode the
+            // rest by id: `constants/item_constants.asm` puts HM01–HM05 at $C4 and TM01–TM50 at $C9.
+            let label = if let Some(item) = ItemId::from_repr(id) {
+                format!("{item:?}")
+            } else if (0xC4..=0xC8).contains(&id) {
+                format!("HM{:02}", id - 0xC3)
+            } else if (0xC9..=0xFA).contains(&id) {
+                format!("TM{:02}", id - 0xC8)
+            } else {
+                format!("${id:02x}")
+            };
+            format!("{label}x{qty}")
+        }).collect();
+        (count, items)
+    };
+    let (count, items) = read_inventory(&pokered_symbols::wNumBagItems, pokered_symbols::wBagItems.address);
     println!("   bag[{count}/{}]: {}", Bag::MAX_ITEMS, items.join(", "));
+    // Item PC storage (Phase 0 tasks 0.5/0.6) — the only reason the 20-slot bag is survivable, so a
+    // probe that shows the bag without it shows half the picture.
+    let (stored, items) = read_inventory(&pokered_symbols::wNumBoxItems, pokered_symbols::wBoxItems.address);
+    println!("   PC items[{stored}]: {}", items.join(", "));
 }
 
 /// Micro-benchmark, not a test: raw emulation throughput vs. the full agent step, from a mid-game

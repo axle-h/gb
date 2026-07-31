@@ -339,10 +339,17 @@ pub enum PolicyStep {
     // seam is the point, not the shape.
     /// **B** — Fly to `to`. ⚠️ The town map is a bespoke screen, not a `HandleMenuInput` list.
     Fly { to: Map },
-    /// **G** — offer the party member in `slot` to the in-game trade NPC on map `at`.
-    TradePokemon { give_slot: u8, at: Map },
     /// **H** — search for the hidden item at `at` (a bg-event object, same shape as `FlipSwitch`).
     SearchHiddenItem { at: crate::geometry::Point8 },
+    /// **H** — use **HM05 Flash** from the party menu with the mon in `slot`, lighting a dark cave.
+    /// Completes when `wMapPalOffset` reaches 0, which is what "lit" means to the ROM; pops
+    /// immediately on an already-lit map, so it is safe to leave in a step list.
+    UseFlash { slot: u8 },
+    /// **G** — run a one-NPC script that opens the **party menu**, acting on `slot`: the Route 5
+    /// Day Care, or the Lavender Name Rater. An `enter(script.map())` must precede it; the driver
+    /// ([`crate::pokemon::postgame::gifts`]) walks the last tiles and owns the conversation, because
+    /// these menus open on a *stale* cursor and an A-mash acts on an arbitrary mon.
+    PartyScript { script: crate::pokemon::postgame::gifts::PartyScript, slot: u8 },
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// Move `qty` of `item` between the bag and PC item storage, at the PC on `map` (Phase 0 tasks
@@ -503,6 +510,14 @@ pub enum FieldMove {
     /// Face the sprite at `target`, then use bag `item` on it (START → ITEM → select → USE). The
     /// item's field effect (e.g. the Poké Flute waking a Snorlax) does the rest.
     UseFieldItem { item: ItemId, target: crate::geometry::Point8 },
+    /// **G** — a party-menu script: walk to `npc` (a *(tile to face, direction)* pair, resolved from
+    /// `actions()` because `route_to_face_dir` cannot reach a sprite behind a counter), then drive
+    /// the party menu to `slot`. Driver: [`crate::pokemon::postgame::gifts::tick`].
+    UsePartyScript {
+        script: crate::pokemon::postgame::gifts::PartyScript,
+        slot: u8,
+        npc: (crate::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection),
+    },
     /// Use a field move from the party menu: START → POKéMON → the mon at `slot` → the field-move entry
     /// at `move_index`. That menu lists only the mon's *field* moves (`FieldMoveDisplayData`) and keeps
     /// them in its move-slot order, so the index depends on what else the mon knows — the policy
@@ -532,8 +547,6 @@ pub enum FieldMove {
     /// **F** — walk to the prize vendor's bg-event tile and buy `prize` with coins. Driven by
     /// [`crate::pokemon::postgame::game_corner`].
     RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
-    /// **G** — offer the party member in `give_slot` to the trade NPC on `at`.
-    Trade { give_slot: u8, at: Map },
     /// **H** — search the bg-event tile at `at` for a hidden item.
     SearchHiddenItem { at: crate::geometry::Point8 },
     // ────────────────────────────────────────────────────────────────────────────────────────────
@@ -2398,7 +2411,8 @@ impl Policy for DeterministicPolicy {
                 // Reserved seams (task 0.8) — inert until their workstream implements them. To take
                 // one: move your variant out of this list into its own one-line arm delegating to
                 // your own module. That is a one-line edit to this file, which is the whole point.
-                PolicyStep::TradePokemon { .. } | PolicyStep::SearchHiddenItem { .. } =>
+                PolicyStep::UseFlash { .. } => None, // on the map — `pick_field_move` drives the menu
+                PolicyStep::SearchHiddenItem { .. } =>
                     crate::pokemon::postgame::unimplemented_seam(&step),
                 PolicyStep::Fish { map, .. } => {
                     // Routing only, like `UseItemPc` below: once we are standing on `map`,
@@ -2430,6 +2444,7 @@ impl Policy for DeterministicPolicy {
                     action
                 }
                 PolicyStep::RedeemPrize { .. } => None, // on the map — handed to `pick_field_move`
+                PolicyStep::PartyScript { .. } => None, // already routed by a preceding `enter` step
                 PolicyStep::SellToMart { map, .. } | PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
                     // Routing only. Once we are standing on `map`, `pick_field_move` hands the step to
                     // the storage driver, which walks the last tiles itself so that it — and not the
@@ -3043,6 +3058,14 @@ impl Policy for DeterministicPolicy {
                 };
             }
         }
+        if let Some(&PolicyStep::PartyScript { script, slot }) = self.queue.front() {
+            // **Workstream G.** Same hand-over shape as `UsePcBox`, and pops on issue for the same
+            // reason — the driver owns the walk and the whole conversation.
+            if state.map.map == script.map() {
+                self.queue.pop_front();
+                return crate::pokemon::postgame::gifts::pick(state, script, slot);
+            }
+        }
         if let Some(&PolicyStep::SellToMart { map, item }) = self.queue.front() {
             // **Workstream F.** Same hand-over as `UseItemPc`, and pops on issue for the same reason.
             if state.map.map == map {
@@ -3091,6 +3114,16 @@ impl Policy for DeterministicPolicy {
         if let Some(&PolicyStep::MovePokemonToFront { slot }) = self.queue.front() {
             self.queue.pop_front();
             return Some(FieldMove::ReorderParty { slot });
+        }
+        if let Some(&PolicyStep::UseFlash { slot }) = self.queue.front() {
+            // **Workstream H.** Same shape as `UseStrength` below: re-issued each tick until the
+            // effect shows in RAM, so an interruption costs a tick rather than the step.
+            if !state.map_is_dark {
+                println!("[policy] UseFlash: {} is lit — done", state.map.map);
+                self.queue.pop_front();
+                return None;
+            }
+            return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Flash) });
         }
         if let Some(&PolicyStep::UseStrength { slot }) = self.queue.front() {
             if state.strength_active {

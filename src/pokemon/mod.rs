@@ -363,6 +363,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             badges,
             money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),
             coins: encoding::reverse_bcd(mmu.read_pointer_u16_be(&pokered_symbols::wPlayerCoins) as u32) as u16,
+            map_is_dark: mmu.read_pointer(&pokered_symbols::wMapPalOffset) != 0,
             mode: mmu.read_game_mode(),
             pokemon,
             trash_cans,
@@ -579,6 +580,11 @@ pub struct GameState {
     /// room; bought at the counter at ¥1000 → 50. Zero until the Coin Case is held — the counter
     /// refuses without it — which is why workstream F starts there.
     pub coins: u16,
+    /// True on a **dark** map, i.e. one that HM05 Flash lights. `wMapPalOffset` is set to 6 on
+    /// entering `ROCK_TUNNEL_1F` (`home/overworld.asm:497-501`) and cleared to 0 by the Flash field
+    /// move (`engine/menus/start_sub_menus.asm:183-191`) — the palette offset *is* the darkness, so
+    /// this one byte is both the precondition for using Flash and the proof that it worked.
+    pub map_is_dark: bool,
     pub pokemon: PokemonParty,
     pub mode: GameMode,
     pub map: MetaTileMap,
