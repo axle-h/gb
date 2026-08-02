@@ -26,6 +26,13 @@ pub struct BattleState {
     /// A policy that keeps re-picking a move while this is set gets nothing done, which is the Gen 1
     /// "wrap lock" and is exactly what stops a slow Pokémon ever landing Thunder Wave on Moltres.
     pub enemy_trapping: bool,
+    /// `wEnemyMonActualCatchRate` — the catch rate `ItemUseBall` actually compares `Rand1` against.
+    ///
+    /// Deliberately the **live** byte rather than the species' base stat: in the Safari Zone a ROCK
+    /// doubles it and a BAIT halves it for the rest of the encounter
+    /// (`engine/items/item_effects.asm:1432-1457`), so the base stat would misreport the odds of every
+    /// throw after the first. Zero outside a battle-initialised state.
+    pub enemy_catch_rate: u8,
 }
 
 /// Action the player can take on their turn.
@@ -151,6 +158,7 @@ impl BattleStateReader for MMU {
             // `wEnemyBattleStatus1` bit 5 = `USING_TRAPPING_MOVE`
             // (`pokered/constants/battle_constants.asm:86`).
             enemy_trapping: self.read_pointer(&pokered_symbols::wEnemyBattleStatus1) & (1 << 5) != 0,
+            enemy_catch_rate: self.read_pointer(&pokered_symbols::wEnemyMonActualCatchRate),
         })
     }
 }

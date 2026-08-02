@@ -334,13 +334,26 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         // workstream B — see `docs/postgame-coverage-plan.md` §11.
         const BIT_ALWAYS_ON_BIKE: u8 = 1 << 5;
         let forced_onto_bike = mmu.read_pointer(&pokered_symbols::wStatusFlags6) & BIT_ALWAYS_ON_BIKE != 0;
-        let can_use_surf = badges.contains(Badge::SoulBadge)
-            && has_move(&pokemon, PokemonMoveName::Surf)
-            && !forced_onto_bike;
+        // The four Safari Zone areas are the other place Surf is refused, and the refusal is quieter
+        // than the Cycling Road's. Their tileset is `FOREST`, which `TilePairCollisionsWater` gives two
+        // rules for — `db FOREST, $14, $2E` and `db FOREST, $48, $2E`
+        // (`data/tilesets/pair_collision_tile_ids.asm:20-23`) — so a mount from the bank answers "No
+        // SURFing here!" and nothing happens. With `can_surf` left true the BFS treats the centre's
+        // pond as pass-through, and since a route across it can tie with the route around it, a plain
+        // walk to the *nearest grass tile* picks the water at random and the agent then re-issues a
+        // refused mount for the rest of the budget (workstream E; see `probe_safari_centre_from_the_
+        // entrance`). Treating the zone's water as a wall is also what the pre-existing Safari steps
+        // already assume — they cross Centre → East → North → West "the long way round".
         let mut map = MetaTileMap::new(&match &self.map_cache {
             Some(c) => c.read_current_map(mmu)?,
             None    => mmu.read_current_map()?,
         });
+        let in_safari_zone = matches!(map.map,
+            Map::SafariZoneCenter | Map::SafariZoneEast | Map::SafariZoneNorth | Map::SafariZoneWest);
+        let can_use_surf = badges.contains(Badge::SoulBadge)
+            && has_move(&pokemon, PokemonMoveName::Surf)
+            && !forced_onto_bike
+            && !in_safari_zone;
         map.can_surf = can_use_surf;
         // Vermilion Gym trash-can puzzle: EVENT_1ST_LOCK_OPENED = 0x161 → wEventFlags[44] bit 1,
         // EVENT_2ND_LOCK_OPENED = 0x160 → wEventFlags[44] bit 0.
@@ -374,6 +387,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             // BIT_STRENGTH_ACTIVE = bit 0 of wStatusFlags1 — set by using Strength from the party menu,
             // reset on every map change. Required before a boulder will move when pushed.
             strength_active: mmu.read_pointer(&pokered_symbols::wStatusFlags1) & 0x01 != 0,
+            safari: postgame::safari::read_state(mmu),
             map,
             battle: mmu.read_battle_state(),
             bag: mmu.read_bag(),
@@ -617,6 +631,10 @@ pub struct GameState {
     /// State of EVENT_MANSION_SWITCH_ON — the single global Pokémon Mansion switch that every statue
     /// on every floor toggles, opening/closing the sliding-door gates on all four floors.
     pub mansion_switch_on: bool,
+    /// Live state of a Safari Zone trip — `Some` only while `EVENT_IN_SAFARI_ZONE` is set, which is
+    /// every tick between paying the ¥500 and the gate printing "good haul". Carries the two budgets
+    /// the game enforces (502 steps, 30 balls); see [`postgame::safari::SafariState`].
+    pub safari: Option<postgame::safari::SafariState>,
     /// True while Strength is active (BIT_STRENGTH_ACTIVE in `wStatusFlags1`) — set by using Strength
     /// from the party menu, reset on every map change. A boulder only moves when pushed with this set.
     pub strength_active: bool,

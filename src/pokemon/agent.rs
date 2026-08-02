@@ -1399,7 +1399,18 @@ impl PokemonAgent {
                                     // Navigating so a failed escape ("Can't escape!") retries next turn.
                                     // Sub-menu targets (MoveList/ItemList/PokemonList) are confirmed by
                                     // their own WaitingForMenu handlers, so hand those off as before.
-                                    if menu_target == BattleMenuState::Run {
+                                    //
+                                    // **Every Safari option is terminal too** (workstream E): BALL,
+                                    // BAIT and ROCK all resolve the turn on the spot, with no list to
+                                    // confirm. Without them here a Safari hunt cannot throw anything —
+                                    // the menu opens on BALL, so target == state on the very first
+                                    // tick, and handing off would bounce straight back to the policy
+                                    // with the ball unthrown, for ever. RUN worked only because it is
+                                    // the one Safari option that was already in this test.
+                                    if matches!(menu_target, BattleMenuState::Run
+                                        | BattleMenuState::SafariBall
+                                        | BattleMenuState::SafariBait
+                                        | BattleMenuState::SafariRock) {
                                         api.toggle_button(JoypadButton::A);
                                     } else {
                                         api.release_all_buttons();
@@ -2265,7 +2276,24 @@ impl PokemonAgent {
                     // exits (wFontLoaded → 0, so game_mode leaves TextBox/NamingScreen).
                     // Also stay while wIsInBattle is still 1 after a catch (game_mode stays
                     // WildBattle after the name is written but before EndOfBattle runs).
-                    api.toggle_button(JoypadButton::Start);
+                    //
+                    // ⚠️ **START submits the grid; it does not advance what comes after it.** Once the
+                    // name is in, the game may still owe us text boxes, and `WaitForTextScrollButtonPress`
+                    // only accepts **A or B** — a driver that keeps pulsing START there is deadlocked
+                    // with the game, waiting for a mode change that its own input cannot cause. That is
+                    // the "boxed catch wedges the agent" bug D reported and G-gifts could not reproduce
+                    // (see §11 of the postgame plan): catching at party 6 sends the mon to the box, and
+                    // `SendNewMonToBox` prints "<name> was transferred to BILL's PC!" *after* its
+                    // `AskName` — a prompt that START cannot dismiss. A gift never hit it because
+                    // `_GivePokemon`'s box branch has no trailing prompt.
+                    //
+                    // `wNamingScreenSubmitName` is the discriminator, not `game_mode`: writing the
+                    // buffer directly stops the strict NamingScreen detection firing (it tests for an
+                    // empty buffer), so from this state's point of view the mode reads `TextBox` both
+                    // while the grid is still up and long after it is gone. The ROM's own submit flag
+                    // does not have that ambiguity — 0 while the grid waits, 1 the moment it is taken.
+                    let submitted = api.mmu().read_pointer(&pokered_symbols::wNamingScreenSubmitName) != 0;
+                    api.toggle_button(if submitted { JoypadButton::A } else { JoypadButton::Start });
                     let still_in_naming = matches!(
                         game_mode,
                         GameMode::TextBox | GameMode::NamingScreen
