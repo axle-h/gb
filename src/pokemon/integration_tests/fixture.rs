@@ -275,6 +275,8 @@ fn probe_coverage() {
         ("postgame-tangela", include_bytes!("../data/postgame-tangela.bin")),
         // Workstream H, rooted on G-trades' output — the dex count is what gates it.
         ("postgame-flash", include_bytes!("../data/postgame-flash.bin")),
+        // Workstream E, rooted on H's output — the four-area sweep that takes the dex past H3's gate.
+        ("postgame-safari", include_bytes!("../data/postgame-safari.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);
@@ -309,6 +311,14 @@ pub fn print_coverage(name: &str, save_state: &[u8]) {
     println!("   storage: wBoxCount={} wCurrentBoxNum={}",
         mmu.read_pointer(&pokered_symbols::wBoxCount),
         mmu.read_pointer(&pokered_symbols::wCurrentBoxNum));
+    // Task E1: the Safari trip's two budgets. `None` off the clock, which is every fixture that was
+    // not saved mid-hunt — printed anyway, because "not in the zone" is the thing a leg starting with
+    // `Fly` needs to be true.
+    println!("   safari:  {}", match state.safari {
+        Some(s) => format!("{} steps, {} balls left{}",
+            s.steps_left, s.balls_left, if s.game_over { ", GAME OVER" } else { "" }),
+        None => "not in the zone".into(),
+    });
 
     // The open box only — the other eleven are in SRAM banks the pointer reader can't reach yet.
     if state.boxed_pokemon.is_empty() {

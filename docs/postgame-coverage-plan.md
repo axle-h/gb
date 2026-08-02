@@ -452,16 +452,38 @@ user, so the Power Plant (which has one) has to come first.
 The Safari Zone is currently entered only to grab HM03 and the Gold Teeth, and
 `pick_battle_action` **hard-codes RUN on every Safari encounter** (`policy.rs:2484`).
 
-- [ ] **E1 — Model the step budget.** The **500-step** counter and the ejection back to the gate.
+- [x] **E1 — Model the step budget.** The **500-step** counter and the ejection back to the gate.
       Without this a run ends mid-hunt with no warning. *Observable:* the step count is in
       `GameState` and the probe prints it.
-- [ ] **E2 — Replace the blanket RUN.** `BattleAction::SafariBall/Bait/Rock` already exist and are
+      *Done:* `GameState::safari` — `Option<SafariState>` carrying steps, balls and the game-over flag,
+      keyed off `EVENT_IN_SAFARI_ZONE` rather than the map (they disagree exactly where it matters, see
+      §11). The counter is **502**, not 500, and `probe_coverage` prints it for every fixture. Test
+      `postgame::safari::runs_the_step_budget_down_and_is_ejected` (~25 s).
+- [x] **E2 — Replace the blanket RUN.** `BattleAction::SafariBall/Bait/Rock` already exist and are
       already offered — write a real catch policy. Rock raises catch rate *and* flee rate; Bait does
       the inverse. *Observable:* the agent throws a ball instead of running.
-- [ ] **E3 — Catch a Safari-exclusive.** Chansey, Scyther, Kangaskhan, Tauros, Dratini, Exeggcute,
+      *Done:* [`postgame::safari::pick_battle_action`], scoped to a live `SafariHunt` step so the legs
+      that merely *cross* the zone keep the old always-RUN behaviour. ⚠️ **BAIT and ROCK are never
+      thrown**, and that is an evidence-backed decision, not a shortcut — worked exactly through the
+      ROM's turn in `bait_and_rock_are_never_worth_throwing`, both lose to a plain ball. One shared-file
+      bug had to be fixed first: the agent physically **could not press BALL**. See §11.
+- [x] **E3 — Catch a Safari-exclusive.** Chansey, Scyther, Kangaskhan, Tauros, Dratini, Exeggcute,
       Rhyhorn, Parasect, Venomoth. (Pinsir is Blue-only.) *Observable:* one of them in the dex.
-- [ ] **E4 — Exit cleanly.** Both ways: walking out, and being ejected at 0 steps.
+      *Done:* `PolicyStep::safari_hunt_steps(targets, max_trips)`, test `can_catch_a_safari_exclusive`
+      (~4 s) — a **Rhyhorn**, dex 19 → 20, caught on the second ball of the first trip.
+- [x] **E4 — Exit cleanly.** Both ways: walking out, and being ejected at 0 steps.
       *Observable:* test green both ways; commit `postgame-safari.bin`.
+      *Done:* both, in the two tests above — walking out crosses the gate's "leaving early?"
+      (`YesNoChoice`, opens on YES, no driver needed); the ejection is the ROM warping the player to the
+      gate at 0 steps. ⚠️ The two are **not symmetric**, and the gap is a trap: `EVENT_IN_SAFARI_ZONE`
+      stays set for a few ticks *after* the ejection warp, so a hunt that keeps routing there pays a
+      second ¥500. See §11.
+- [x] **E5 — Sweep all four areas** (added; E3 at full size). *Observable:* dex past H3's gate of 30.
+      *Done:* `PolicyStep::safari_sweep_steps(max_trips)` + `safari::grounds`, test
+      `can_sweep_the_safari_zone` — **dex 19 → 31 owned, all twelve targets, 21 trips, ¥9,000, ~6.5 min
+      of wall clock**. Fixture `postgame-safari.bin`. Which *area* each species is hunted in is the
+      whole cost of this leg — the same species sits in a 4.3 % slot on one map and a 1.2 % slot on
+      another. ➡️ **H3 (Itemfinder, 30 owned) and H4 are unblocked.**
 
 ### F — Game Corner economy
 
@@ -681,11 +703,11 @@ Phase 0 (item storage, PC locations, seams, probe)
 | B — Fly / Bike / Cycling Road | claude-B-flybike | `postgame-phase0.bin` | `postgame::fly_bike` | ✅ done | B1–B7 green, ~50 s wall clock for the lot. **Fly is available to everyone now: `PolicyStep::Fly { to }`, any of the 11 towns, from any outdoor map.** Start from `postgame-fly-bike.bin` (Fuchsia, Fly + Bicycle) — but heal first, Venusaur's Solarbeam is at 0 PP. Two shared-file fixes landed (see §11): field-move menu detection in `agent.rs`, and `can_surf` on Cycling Road. |
 | C — Fishing | claude-C-fishing | `postgame-fly-bike.bin` | `postgame::fishing` | ✅ done | C1–C5 green, ~31 s wall clock for the five legs. Entry fixture is **B's output, not `postgame-phase0.bin`** — the three rods are in three corners of Kanto and Fly makes each trip one step (see §11). Output `postgame-fishing.bin`: all three rods, **dex 10 owned / 113 seen**, Goldeen + Magikarp banked in box 1, Tentacool in the party. Build sessions with `PolicyStep::fish(rod, map, goal)`. |
 | D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
-| E — Safari Zone | *(unclaimed)* | `postgame-phase0.bin` | `postgame::safari` | ☐ | |
+| E — Safari Zone | claude-E-safari | `postgame-flash.bin` | `postgame::safari` | ✅ done | E1–E4 green plus an **E5** the plan lacked (the four-area sweep) — **~7 min of wall clock across 3 legs**, output `postgame-safari.bin`: **dex 31 owned / 116 seen**, all twelve Safari species, party 6, box **18 of 20**, ¥35,564. Rooted on **H's output** (the chain head), not `postgame-phase0.bin` — same reasoning C/F/G's rows give; ⚠️ it is saved inside Rock Tunnel, so every leg opens with a `Dig`. **Three shared-file fixes, all in §11 and all of them other people's problems too:** the battle executor **could not press BALL** (only RUN was treated as terminal); the **boxed-catch wedge D reported is fixed** (START at a prompt that only takes A — so "leave a party slot free before a catch" is retired); and `can_surf` is false in the zone (Surf is refused there, and the BFS was routing across the pond). New for anyone: `GameState::safari`, `BattleState::enemy_catch_rate`, `PolicyStep::{safari_hunt_steps, safari_sweep_steps, SafariExit}`. ⚠️ **BAIT and ROCK are never thrown** — worked exactly through the ROM, both lose to a plain ball. ➡️ **H3 + H4 unblocked.** |
 | F — Game Corner | claude-F-gamecorner | `postgame-fly-bike.bin` | `postgame::game_corner` | ✅ done | F1–F4 green, **~9 s of wall clock for the four legs**. Rooted on **B's output**, not `postgame-phase0.bin` (same reasoning C's row gives). Output `postgame-game-corner.bin`: Coin Case, 20 coins, ¥43,209, **dex 8 owned**, an **Abra** in slot 4. Three things other streams can use: **`PolicyStep::SellToMart { map, item }`** — the mart's sell half, which nothing had — **`PolicyStep::RedeemPrize { prize }`** for all nine prizes, and `ItemId::is_key_item()` / `is_hm()`, pinned bit-for-bit against the ROM. Both prize branches (mon and TM) are covered; the TM one seeds **money** from the debug tier, like D's Master Ball. See §11. |
 | G — Gifts (G1–G4, G7–G8) | claude-G-gifts | `postgame-fly-bike.bin` | `postgame::gifts` | ✅ done | All of G1–G4, G7 and G8a–c green — **~57 s of wall clock across 8 legs**, output `postgame-name-rater.bin`: **dex 11 owned**, party Venusaur / Articuno / Vaporeon / Slowpoke / Aerodactyl / **Hitmonlee**, box 1 holding **Lapras** + Omanyte, bag 19/20 with TM29/TM31/TM03/TM26 and the ten Silph items. Rooted on **B's output** (same reasoning C's and F's rows give). Three things other streams can use: **`PolicyStep::PartyScript { script, slot }`**, the first driver here that can pick a slot in a **script-opened party menu** — **G5/G6's trades should be a third `PartyScript` variant, not a new driver** — a `deposit_item` fix (it **hung** on any full stack), and `probe_coverage` now printing **PC item storage**. Two shared-file bugs found, one fixed; five §11 entries. ➡️ **H1 is unblocked** (dex 11 > Flash's gate of 10). |
 | G — Trades (G5–G6) | claude-G-trades | `postgame-name-rater.bin` | `postgame::trades` | ✅ done | **Four** trades green — Abra→Mr. Mime, Spearow→Farfetch'd, Nidoran♂→Nidoran♀, Venonat→Tangela — **~55 s of wall clock across 4 legs**, output `postgame-tangela.bin`: **dex 19 owned**, party Venusaur / Articuno / Vaporeon / Tangela, eight mons banked in box 1. Rooted on **G-gifts' output**: a trade is a third `PartyScript` variant, so the reserved `TradePokemon` / `AgentState::Trading` seams are **deleted**. `TRADES` is the nine-row table, ROM-pinned. The other five trades are not blocked, just expensive — Slowbro/Poliwhirl/Nidorino/Raichu need evolution grinds and Ponyta is in the Pokémon Mansion; see §11. |
-| H — Oak's aides | claude-H-aides | `postgame-tangela.bin` | `postgame::aides` | 🟡 blocked | **H1 + H2 done** — HM05 Flash collected, taught to Slowpoke and used to light Rock Tunnel; ~6 s, output `postgame-flash.bin`, **dex 19 owned**. ☐ **H3/H4/H5 blocked on dex count**: the Itemfinder wants **30** owned (11 more species) and Exp.All **50** (31 more), and H4 needs H3's Itemfinder. Neither is a mechanism problem — it is a *catching* problem, and **E (Safari)** is the cheapest source of both. New and reusable: `PolicyStep::UseFlash { slot }` and `GameState::map_is_dark`. |
+| H — Oak's aides | claude-H-aides | `postgame-tangela.bin` | `postgame::aides` | 🟡 blocked (H3/H4 now unblocked by **E** — dex 31 ≥ 30, start from `postgame-safari.bin`) | **H1 + H2 done** — HM05 Flash collected, taught to Slowpoke and used to light Rock Tunnel; ~6 s, output `postgame-flash.bin`, **dex 19 owned**. ☐ **H3/H4/H5 blocked on dex count**: the Itemfinder wants **30** owned (11 more species) and Exp.All **50** (31 more), and H4 needs H3's Itemfinder. Neither is a mechanism problem — it is a *catching* problem, and **E (Safari)** is the cheapest source of both. New and reusable: `PolicyStep::UseFlash { slot }` and `GameState::map_is_dark`. |
 
 ---
 
@@ -2174,3 +2196,230 @@ pre-existing ignores; default tier **841 passed**. No fixture drift.
 **Impact on others:** **E** — taking it now pays for H3 and H4 as a side effect, which is the
 strongest argument for that row being next. `GameState::map_is_dark` and `PolicyStep::UseFlash` are
 available to anyone; the only other dark map worth them is Rock Tunnel B1F.
+
+### [2026-07-31] E — the agent **could not press BALL**, and the Safari's water is a wall
+**Status:** corrected ❗ — two shared-file fixes, both of which cost a run before they were found
+**What the plan said:** §6-E2 — *"`BattleAction::SafariBall/Bait/Rock` already exist and are already
+offered — write a real catch policy."* True as far as it goes, and it hides both of these.
+
+**1. `SafariBall` was offered, selectable, and unpressable.** `battle_options` has emitted the four
+Safari actions since before this plan, and `menu.rs` maps each to its 2×2 cursor position, so
+everything looked wired. But the battle executor confirms a chosen menu entry in two different ways:
+a *sub-menu* target (MoveList/ItemList/PokemonList) is handed to `WaitingForMenu`, which presses A on
+its own list, while a *terminal* target has to be pressed right there. The only terminal option in the
+match was `Run` (`agent.rs`, the `BattleState::Navigating` arm) — because RUN is the only Safari
+option any leg had ever chosen.
+
+The failure is silent and self-concealing: the Safari menu **opens on BALL**, so `menu_state ==
+menu_target` on the very first tick, the executor hands off, `WaitingForMenu` sees the main menu again
+and bounces straight back to the policy, which picks BALL again. No error, no wrong button, no
+movement — an encounter that lasts until the enemy flees. All three throwables are terminal (BALL,
+BAIT and ROCK all resolve the turn on the spot), so the fix is to match all four.
+
+**2. Surf is refused in the Safari Zone, and the BFS did not know.** The four areas' tileset is
+`FOREST`, which `TilePairCollisionsWater` gives two rules for — `db FOREST, $14, $2E` and
+`db FOREST, $48, $2E` (`data/tilesets/pair_collision_tile_ids.asm:20-23`) — so mounting Surf from the
+bank answers **"No SURFing here!"** and nothing happens. With `can_surf` left true the BFS treats the
+centre's pond as pass-through, and this is the part worth remembering: **a route across the water can
+*tie* with the route around it.** The nearest grass from the entrance is (13,22), five steps away
+either through (14,22) — water — or around it. The BFS picked the water, the mount was refused, the
+policy re-issued the same walk, and the leg timed out 90 emulated minutes later having never left the
+entrance. `GameState::can_use_surf` now excludes the four areas, exactly as B excluded the Cycling
+Road, and for the same reason.
+
+That second one is also an argument for the traps memo's six-line probe. `probe_safari_centre_from_the
+_entrance` prints the action list *and* an ASCII meta-tile grid, and it answered "is the grass on our
+side of the water" in 3 seconds against a 3½-minute timeout — it is left `#[ignore]`d in the tree.
+**Evidence:** `pokemon::integration_tests::postgame::safari::{probe_safari_centre_from_the_entrance,
+can_catch_a_safari_exclusive}`; the failure artifact's screenshot
+(`target/test-artifacts/test_timeout_screenshot.png`) reading *"No SURFing on Celina here!"*;
+`pokered/engine/items/item_effects.asm:669-680` (`ItemUseSurfboard` → `SurfingAttemptFailed`);
+`pokered/data/tilesets/pair_collision_tile_ids.asm:20-23`.
+**Impact on others:** **anyone driving a Safari battle** — the executor fix is what makes BALL/BAIT/
+ROCK usable at all. **Anyone routing on a map with water and Surf in the party**: a tie between a wet
+route and a dry one is resolved by BFS insertion order, not by preference, so a map where Surf is
+refused needs `can_surf` false rather than a hope that the dry route is shorter. Fishing's
+`route_stays_on_land` is the other half of this lesson, arrived at from the other direction.
+
+### [2026-07-31] E — **BAIT and ROCK are never worth throwing**, and it is not close
+**Status:** corrected ❗
+**What the plan said:** §6-E2 — *"Rock raises catch rate *and* flee rate; Bait does the inverse"* —
+presented as the trade-off a real catch policy would have to weigh. And §11's D entry expected them to
+matter here: *"Bait/Rock and the HP term matter far more there than they do here."*
+**What is actually true:** both descriptions are accurate and the conclusion drawn from them is wrong.
+The two throwables lose to a plain ball against every species in the zone, including the ones with the
+most to gain from them, because of two asymmetries the one-line description hides:
+
+- **Both effects decay, and can decay to nothing immediately.** `PrintSafariZoneBattleText`
+  (`engine/battle/safari_zone.asm:1-14`) decrements the live counter once per turn **before** the flee
+  check in `core.asm:186-199` reads it. The counter is rolled uniform on 1..=5, so a throw that rolls
+  a 1 buys *zero* protected turns, and the expectation is about two.
+- **Bait's penalty is permanent; its benefit is not.** Only the *escape* counter's expiry reloads
+  `wMonHCatchRate` into `wEnemyMonActualCatchRate`. A bait halves the catch rate for the rest of the
+  encounter and then stops protecting.
+
+Worked exactly — every branch of the ROM's turn, not a simulation — in
+`postgame::safari::tests::bait_and_rock_are_never_worth_throwing`, against a lv23 **Chansey** (catch
+rate 30, Speed stat ~35), the zone's hardest catch and a middling runner, i.e. the species with the
+most to gain either way:
+
+| opening | per encounter |
+|---|---|
+| balls only | **21.3 %** |
+| bait, then balls | 13.1 % |
+| rock, then balls | 11.9 % |
+
+Rock loses even where it looks strongest (a slow Exeggcute whose doubled rate saturates the ball's
+first roll): 54.6 % against 35.2 %. So `pick_battle_action` throws balls and nothing else, and the two
+`BattleAction`s stay in `battle_options` for an LLM policy to reach for.
+
+Two numbers worth carrying, both from `ItemUseBall` with the Safari branch's constants:
+
+- A Safari Ball shares the **Ultra Ball's** `[0,150]` rejection range, so its first roll is
+  `(catch_rate + 1)/151`, not `/256`.
+- At **full HP** the second roll is a constant: `X = ((MaxHP·255)/12)/(MaxHP/4) = 85`, i.e. 86/256 ≈
+  **33.6 %**, whatever the species. There is no weakening pass to write here even in principle — the
+  player has no moves — and the flat 33.6 % is why the *catch rate* is the only thing that varies.
+**Evidence:** `pokered/engine/battle/safari_zone.asm`; `pokered/engine/battle/core.asm:181-207`;
+`pokered/engine/items/item_effects.asm:104-300` (`ItemUseBall`), `:1433-1480` (`ItemUseBait`,
+`ItemUseRock`, `BaitRockCommon`); `postgame::safari::tests::{bait_and_rock_are_never_worth_throwing,
+rock_loses_even_where_it_looks_strongest, a_full_hp_throw_collapses_to_the_ball_range}` (default tier).
+**Impact on others:** the D entry's aside about Bait/Rock mattering in the Safari is superseded. Its
+*other* conclusion still holds and generalises: on a one-shot encounter, weakening is a trap.
+
+### [2026-07-31] E — a trip is **502 steps**, and the ejection has a gap that costs ¥500
+**Status:** corrected ❗ / verified ✅
+**What the plan said:** §6-E1 — *"the **500-step** counter and the ejection back to the gate"*.
+**What is actually true:** the gate writes `HIGH(502)`/`LOW(502)` into `wSafariSteps`
+(`scripts/SafariZoneGate.asm:189-192`) — the counter is **502**, and the signs in the game are the
+ones rounding. Not that the two matter apart, but the first value a test can *observe* is **500**,
+because paying ends in a scripted three-tile auto-walk north and those tiles are charged like any
+others. A test asserting 502 on arrival fails against a perfectly correct read.
+
+Three more facts about the trip model, all of which the driver depends on:
+
+- **`wSafariSteps` is big-endian** (`ld a, HIGH(502)` into the low address), unlike most 16-bit WRAM
+  in this game. Read it with `read_pointer_u16_be`.
+- **Running out of *balls* ends the trip too**, on the same code path as running out of steps
+  (`SafariZoneCheck` → `SafariZoneGameOver`), so a hunt that throws freely gets ejected early rather
+  than standing around with an empty pocket.
+- ⚠️ **Ejection is not instantaneous, and the gap re-pays.** `SafariZoneGameOver` warps the player to
+  the gate and sets `EVENT_SAFARI_GAME_OVER`, but `EVENT_IN_SAFARI_ZONE` stays set until the gate
+  script's `CheckAndResetEvent` runs a few ticks later. In that window the player is standing on the
+  gate mat with the trip over while the state still reads "inside" — and a hunt that routes back
+  toward the zone there walks straight into the join prompt and pays another ¥500, blowing its trip
+  budget silently. `safari::pick` therefore treats an ejected trip as *outside* and issues nothing
+  until the script lands. This is why the reader is keyed on the **event** rather than on `wCurMap`:
+  the map says "gate" a few ticks before the game agrees the trip is over.
+
+The happy consequence of all this is that **a trip is re-entrant and cheap**: being ejected is the
+ordinary end of a trip, not a failure, so one `SafariHunt` step spans as many ¥500 entries as its
+`max_trips` allows and the policy never has to model the ejection as an error path.
+**Evidence:** `pokered/scripts/SafariZoneGate.asm:150-230`;
+`pokered/engine/events/hidden_objects/safari_game.asm`;
+`pokemon::integration_tests::postgame::safari::runs_the_step_budget_down_and_is_ejected` (~25 s, one
+whole trip spent deliberately), whose log shows the PA announcement, the warp, "Did you get a good
+haul?", and the hunt stopping *without* a second payment.
+**Impact on others:** **H3/H4** — this is the mechanism that makes a multi-trip catching leg possible
+at all. Anyone reading `GameState::safari`: `Some` does not mean "still hunting", check `game_over`.
+
+### [2026-07-31] E — the **boxed-catch wedge is real, reproduced, and fixed**; it was START at an A prompt
+**Status:** corrected ❗ — a shared-file fix that unblocks every workstream, not just this one
+**What the plan said:** D's §11 entry: *"with **six in the party** a caught Pokémon is sent to the box,
+and the nickname screen on *that* path **wedges the agent** … The boxed-catch nickname screen is a
+real, unfixed bug — worth its own look for **E** (Safari), which will fill the party fast."* G-gifts
+then could not reproduce it for a boxed *gift* and narrowed it to "whatever D hit is narrower than the
+boxed naming screen".
+**What is actually true:** D's report is exactly right, E reproduced it on the first sweep — 20 emulated
+hours burned on `name:Parasect`, from a party of six — and the cause is one line in the naming driver.
+
+The failure artifact is the whole diagnosis. The screenshot is not the naming grid at all: it reads
+**"Leslee was transferred to"** with the ▼ prompt arrow. The name had been accepted; what the agent was
+stuck on was the text box *after* it. `AgentState::NamingPokemon { decided: true }` pulses **START**
+until the game leaves the naming/battle modes — correct for the grid, which START submits, and a
+deadlock afterwards, because `WaitForTextScrollButtonPress` accepts only **A or B**. The flag the
+driver waits on cannot clear until it presses something the game is listening for. Exactly C's fishing
+animation, one screen along.
+
+Why a gift never hit it: `_GivePokemon`'s box branch ends at `AskName`, while `SendNewMonToBox` — the
+**catch** path — prints its transfer text *after* naming (`item_effects.asm:2648-2733`). Same screen,
+different tail.
+
+**The fix is to press A once the grid is gone**, and the discriminator is not `game_mode`:
+`write_naming_screen_buffer` fills `wStringBuffer`, and the strict NamingScreen detection tests for an
+*empty* buffer, so from `decided: true` onward the mode reads `TextBox` both while the grid is up and
+long after. `wNamingScreenSubmitName` has no such ambiguity — 0 while the grid waits, 1 the moment it
+is taken. START until then, A after.
+
+Two consequences worth taking:
+
+- **The "leave a party slot free before a catch you care about" rule is retired.** It was a workaround
+  for this bug. C banked its party down to four before fishing and D banked Moltres at the Cerulean PC
+  for the same reason; neither needs to now. E's sweep catches twelve species into a full party.
+- `can_catch_a_safari_exclusive` is the regression test: it runs at party 5, so the first catch fills
+  the party and the second takes the box path, and it asserts the box grew by one.
+**Evidence:** the timeout artifact's screenshot; `pokemon::integration_tests::postgame::safari::
+can_catch_a_safari_exclusive` (10 s, fails without the fix); `pokered/engine/items/item_effects.asm:
+2648-2733`; `pokered/engine/events/give_pokemon.asm`; `pokered/home/text.asm`
+(`WaitForTextScrollButtonPress`).
+**Impact on others:** **everyone who catches or is given a Pokémon.** The box path is now drivable, so
+a full party is no longer a reason to detour to a PC.
+
+### [2026-07-31] E — **COMPLETE**. The Safari Zone is a **chain**, not a hub, and that is most of the work
+**Status:** verified ✅ (with three corrections ❗)
+**What the plan said:** §6-E's four sub-steps, and §9's *"Entry fixture `postgame-phase0.bin`"*.
+**What is actually true:** all four, plus an **E5** the plan did not have (the four-area sweep), in
+**~7 minutes of wall clock across three legs** — 10 s for the mechanism, 25 s for the ejection, 6.5 min
+for the sweep. Rooted on **`postgame-flash.bin`**, H's output, for the reason C and F give: the dex
+count is the thing E is for, and starting from the chain head means the 19 already owned are not
+re-caught. ⚠️ It is saved **inside Rock Tunnel**, so every leg opens with a `Dig` off Slowpoke.
+
+**Output `postgame-safari.bin` — Fuchsia City, dex 31 owned / 116 seen, party 6, box 18 of 20,
+¥35,564.** Twelve new species in 21 paid trips: Rhyhorn, Exeggcute, Nidorino, Nidorina, Parasect,
+**Scyther** (centre), Doduo, **Kangaskhan** (east), Paras, Venomoth, **Chansey** (north), **Tauros**
+(west). The four in bold exist nowhere else on a single Red cartridge.
+
+**The three corrections, in order of how much they cost:**
+
+1. **The zone is a chain — Gate ↔ Centre ↔ East ↔ North ↔ West — and only once water is a wall.** With
+   `can_surf` true the centre's action list offers all three areas and the map reads as a hub; on foot
+   the pond cuts it in two and **only the east warp is reachable** from the entrance side. Worse, the
+   *far* side of the pond is a genuinely separate region: the west's own shortcut warp back to the
+   centre lands at (0,10) over there, and from that landing the gate **cannot be reached at all**. So
+   the way out is the way in, reversed — which is what the pre-existing `safari_zone_strength_steps`
+   does by hand, and why `PolicyStep::SafariExit` exists rather than an `enter(gate)`.
+2. **Which of the north's four west-warps you take decides whether the hunt works.**
+   `safari_zone_surf_steps` pins the western pair (landing (21,0)) because that is the Gold Teeth and
+   Secret House plateau. A *hunt* wants the eastern pair (26,0) for the same reason that leg avoided
+   it: one-way ledges seal the shelves off from each other and **all the west's grass is on the eastern
+   one**. `probe_safari_areas` prints `grass: None` from (21,0) against `grass: Some(((6,20), 44))`
+   from (26,0). A hunt on the plateau does not fail — it stands still, and a wait for grass has to be
+   *bounded* for exactly that reason: the trip's step counter only moves when the player walks, so the
+   budget that bounds every other case never runs down.
+3. **`route_toward` cannot recover from an ejection.** The world graph is keyed by *(map, entry
+   position)* and its nodes come from walking; being ejected is a **warp** onto the gate's third mat, a
+   node no walk ever created, so from there the graph offers no path anywhere. A sweep lost four
+   species to `no route from SafariZoneGate to SafariZoneEast` — two warps apart, both walked minutes
+   earlier. The chain does not need a graph, and a route that reads as absent for a few ticks after a
+   warp needs the same patience `CatchPokemon` gives it.
+
+**What the sweep actually costs, since the plan will want it again:** the rare targets are all in
+**4.3 %** encounter slots and are 18–22 % per encounter, so each costs 3–10 trips. Centre 10 (Scyther),
+east 1, north 7 (Chansey), west 3 (Tauros) — and hunting each species in the area where its slot is
+fattest is the difference between that and an hour: Chansey is 4.3 % in the north and 1.2 % in the
+centre, Tauros 4.3 % west and 1.2 % north, Kangaskhan 4.3 % east and 1.2 % west. [`safari::grounds`]
+records the assignment.
+
+**Two things the next agent should know about the output fixture.** The box is **18 of 20** and the
+party is full, so the next catching leg needs `change_box` or a `release`. And the ROM's own ceiling is
+now close: 31 of the 125 obtainable species, with the Safari's table spent.
+**Evidence:** `pokemon::integration_tests::postgame::safari::*` — 3 slow-tier legs and 2 `#[ignore]`d
+probes; `pokemon::postgame::safari::tests::*` (5, default tier). Full `slow-tests` tier **919 passed,
+0 failed**, 20 pre-existing ignores; default tier **846 passed**. `git status src/pokemon/data/` shows
+only the one new fixture — no drift.
+ROM: `pokered/data/wild/maps/SafariZone*.asm`, `pokered/data/wild/probabilities.asm`,
+`pokered/data/maps/objects/SafariZone{North,West}.asm`, `pokered/scripts/SafariZoneGate.asm`.
+**Impact on others:** **H3 and H4 are unblocked** — 31 owned against the Itemfinder's gate of 30, and
+H4's hidden items need only H3. H5 wants 50 and is still 19 away, which is now a *catching* errand with
+no cheap source left. **G5/G6**: the remaining Nidorino→Nidorina trade's give-species is in the box.
+And the boxed-catch fix in the entry above is the one every workstream should notice.

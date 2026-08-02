@@ -370,6 +370,21 @@ pub enum PolicyStep {
         map: Map,
         goal: crate::pokemon::postgame::fishing::FishGoal,
     },
+    /// **E** — hunt `targets` in the Safari Zone on `map`, for at most `max_trips` paid entries.
+    ///
+    /// One step spans the whole hunt, including being ejected at 0 steps and walking back in for
+    /// another ¥500 — the trip is the game's unit, not the policy's. Both halves live in
+    /// [`crate::pokemon::postgame::safari`]: [`safari::pick`](crate::pokemon::postgame::safari::pick)
+    /// paces the grass and re-enters, and
+    /// [`safari::pick_battle_action`](crate::pokemon::postgame::safari::pick_battle_action) replaces
+    /// the blanket RUN for the encounters it starts. Build with [`Self::safari_hunt_steps`].
+    SafariHunt { targets: &'static [PokemonSpecies], map: Map, max_trips: u32 },
+    /// **E** — walk out of the Safari Zone to the gate mat, from whichever area a hunt ended in.
+    ///
+    /// Its own step rather than an `enter(SafariZoneGate)` because a hunt can end in two very
+    /// different places — deep in the west, or standing on the gate after an ejection — and only the
+    /// zone's own chain topology gets out of both. [`crate::pokemon::postgame::safari::exit`].
+    SafariExit,
     /// **F** — buy Game Corner coins at the counter until at least `target` are held, ¥1000 → 50 a
     /// time. Routes to `Map::GameCorner` and then talks to the coin clerk once per purchase; the
     /// clerk's YES/NO opens on YES so the generic A-mash answers it and no driver is needed. Pops
@@ -1882,6 +1897,10 @@ pub struct DeterministicPolicy {
     /// save has already *seen* every fishable species — so the cast count is what both `FishGoal`s are
     /// measured against. Reset whenever the step pops.
     fish_casts: u32,
+    /// Trip bookkeeping for the current `SafariHunt` step (workstream E): how many ¥500 entries have
+    /// been paid, and whether we were inside the zone last tick — an ejection at 0 steps is an
+    /// *edge*, and `EVENT_IN_SAFARI_ZONE` is only a level. Reset whenever the step pops.
+    safari: crate::pokemon::postgame::safari::HuntProgress,
     /// `(trainer position, player position, consecutive stuck ticks)` for the gym-trainer engagement.
     /// If we keep targeting the same beaten trainer from the same frozen spot (its after-battle text
     /// aborts the approach, no battle starts), the counter climbs until we mark it beaten and move on.
@@ -1915,6 +1934,7 @@ impl DeterministicPolicy {
             trainee_participated: false,
             interact_skip_waits: 0,
             fish_casts: 0,
+            safari: Default::default(),
         }
     }
 
@@ -2430,6 +2450,26 @@ impl Policy for DeterministicPolicy {
                         None
                     }
                 }
+                PolicyStep::SafariHunt { targets, map, max_trips } => {
+                    // **Workstream E.** Paying, pacing the grass, being ejected at 0 steps and walking
+                    // back in are all one step — see `postgame::safari::pick`.
+                    use crate::pokemon::postgame::safari::Hunt;
+                    match crate::pokemon::postgame::safari::pick(
+                        &mut self.safari, state, world_graph, &actions, targets, map, max_trips)
+                    {
+                        Hunt::Walk(action) => Some(action),
+                        Hunt::Wait => None,
+                        Hunt::Done => { self.safari.reset(); self.queue.pop_front(); continue }
+                    }
+                }
+                PolicyStep::SafariExit => {
+                    use crate::pokemon::postgame::safari::Hunt;
+                    match crate::pokemon::postgame::safari::exit(&mut self.safari, state, world_graph, &actions) {
+                        Hunt::Walk(action) => Some(action),
+                        Hunt::Wait => None,
+                        Hunt::Done => { self.safari.reset(); self.queue.pop_front(); continue }
+                    }
+                }
                 PolicyStep::BuyGameCoins { target } => match crate::pokemon::postgame::game_corner::buy_coins_action(state, &actions, world_graph, target) {
                     Some(action) => action,
                     None => { self.queue.pop_front(); continue }
@@ -2660,10 +2700,16 @@ impl Policy for DeterministicPolicy {
             | Map::SeafoamIslands1F | Map::SeafoamIslandsB1F | Map::SeafoamIslandsB2F
             | Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F);
 
-        // Safari Zone: the deterministic policy never hunts — always RUN (a Safari run never fails), to
-        // preserve steps/balls while it navigates to the items. (The BALL/BAIT/ROCK options are still in
-        // `battle_options` so a future LLM policy can choose to catch.)
+        // Safari Zone. **Workstream E.** During a `SafariHunt` the encounter is the point, so the hunt
+        // owns the choice (throw at anything still wanted, run from the rest — see
+        // `postgame::safari::pick_battle_action`). Outside one, keep the old behaviour: always RUN, so
+        // the legs that merely *cross* the zone for HM03 and the Gold Teeth spend no steps or balls.
         if battle_state.battle_type == BattleType::Safari {
+            if let Some(&PolicyStep::SafariHunt { targets, .. }) = self.queue.front() {
+                if let Some(action) = crate::pokemon::postgame::safari::pick_battle_action(state, targets, &actions) {
+                    return Some(action);
+                }
+            }
             return Some(BattleAction::Run);
         }
 
@@ -3367,6 +3413,13 @@ impl Policy for DeterministicPolicy {
                 // `Catch` goal against a two-species table routinely runs dozens of casts deep
                 // (workstream C).
                 | Some(PolicyStep::Fish { .. })
+                // A Safari hunt is one step across every encounter of every ¥500 trip, and a trip that
+                // spends its whole 502-step budget without meeting a target is an ordinary outcome
+                // (workstream E).
+                | Some(PolicyStep::SafariHunt { .. })
+                // Walking out of the west is four map transitions on one step, and an ejection part
+                // way through restarts it from the gate — legitimately longer than the stall window.
+                | Some(PolicyStep::SafariExit)
         )
     }
 }
