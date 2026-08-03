@@ -569,6 +569,19 @@ impl ConnectedMapStrip {
 /// - Tiles `$32` (eastern shore) and `$48` (Safari Zone shore) are shore tiles,
 ///   **unless** the tileset is `ShipPort` (Vermilion Dock), where `$32` is dock planks.
 /// - Returns false for any tileset not listed in the `WaterTilesets` ROM table.
+///
+/// ⚠️ **`Forest` is excluded from the shore ids too, and the ROM does not do that.** The difference is
+/// what the answer is *used for*: the ROM asks this about the one tile in front of the player when
+/// Surf is used, and `IsSurfingAllowed` refuses anyway; here the answer classifies every sub-tile of
+/// every block, and a false positive becomes a tile the BFS will happily route across. `WaterTilesets`
+/// lists `FOREST`, whose only map is **Viridian Forest** — which has no water at all, and six
+/// impassable bush blocks whose ids are `$32`/`$48`. One of them sits between the forest's south exit
+/// and everything else, so the agent routed into it, tried to mount Surf on dry land, and the leg died
+/// on "No SURFing on land!".
+///
+/// Passability is deliberately *not* the test here: real water is **not** in a tileset's land
+/// collision list — `CollisionCheckOnWater` is a separate path — so requiring it drops every genuine
+/// water tile in the game (measured: 12 surf/fishing legs fail).
 fn is_water_tile_id(tile_id: u8, is_water_tileset: bool, tileset: TileSetId) -> bool {
     const WATER: u8 = 0x14;
     const EASTERN_SHORE: u8 = 0x32;
@@ -576,7 +589,8 @@ fn is_water_tile_id(tile_id: u8, is_water_tileset: bool, tileset: TileSetId) -> 
     if !is_water_tileset {
         return false;
     }
-    if tileset != TileSetId::ShipPort && (tile_id == EASTERN_SHORE || tile_id == SAFARI_ZONE_EASTERN_SHORE) {
+    let shore_ids_mean_shore = !matches!(tileset, TileSetId::ShipPort | TileSetId::Forest);
+    if shore_ids_mean_shore && (tile_id == EASTERN_SHORE || tile_id == SAFARI_ZONE_EASTERN_SHORE) {
         return true;
     }
     tile_id == WATER

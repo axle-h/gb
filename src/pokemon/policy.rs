@@ -339,8 +339,11 @@ pub enum PolicyStep {
     // seam is the point, not the shape.
     /// **B** — Fly to `to`. ⚠️ The town map is a bespoke screen, not a `HandleMenuInput` list.
     Fly { to: Map },
-    /// **H** — search for the hidden item at `at` (a bg-event object, same shape as `FlipSwitch`).
-    SearchHiddenItem { at: crate::geometry::Point8 },
+    /// **H** — collect the hidden `item` on `map`. Routes itself, like `Fish`. The tile comes from
+    /// [`crate::pokemon::tile_map::MetaTileMap::hidden_items`] rather than the caller, because the
+    /// ROM's coordinates need the map's connection-strip offset applied first. Driver:
+    /// [`crate::pokemon::postgame::aides`]; build with [`Self::hidden_item_steps`].
+    SearchHiddenItem { map: Map, item: ItemId },
     /// **H** — use **HM05 Flash** from the party menu with the mon in `slot`, lighting a dark cave.
     /// Completes when `wMapPalOffset` reaches 0, which is what "lit" means to the ROM; pops
     /// immediately on an already-lit map, so it is safe to leave in a step list.
@@ -418,6 +421,15 @@ pub enum PolicyStep {
     /// it — fine for a legendary, ruinous for an incidental HM-slave. `None` keeps the old "best in the
     /// bag" behaviour; an explicit ball falls back to that once it runs out.
     CatchPokemon { species: PokemonSpecies, on_map: Map, ball: Option<ItemId> },
+    /// **H5** — walk `on_map`'s grass throwing balls at anything the dex does not have, until every
+    /// species whose encounter share is at least `min_share` percent is owned. The species list is not
+    /// passed in: it comes from the ROM's own wild table via [`crate::pokemon::wild`], because the
+    /// point of the step is that a route's contents are a fact, not a guess. Driver:
+    /// [`crate::pokemon::postgame::aides`]; build with [`Self::dex_sweep_steps`].
+    ///
+    /// ⚠️ **Needs a box with room in it.** A catch with a full party goes to the open PC box, and a
+    /// full box refuses it — which looks like a ball that keeps failing.
+    SweepDex { on_map: Map, min_share: u8, ball: Option<ItemId> },
     /// Enable/disable "train this slot" mode: while `Some(slot)`, the battle policy switches that party
     /// member in at the start of each battle so it earns the XP (for levelling a bench mon on the
     /// trainer gauntlet). `None` turns it off (e.g. before a hard fight where the lead must stay in).
@@ -515,9 +527,15 @@ pub enum FieldMove {
     EvolveWithStone { stone: ItemId, target_slot: u8, evolve_from: PokemonSpecies },
     /// Use the Cut field move on the tree the player is currently facing.
     CutTree,
-    /// Walk to the trash can at `target` and press A to check it for a hidden switch. `facing`, if
-    /// set, forces the approach so the player ends up facing that direction (needed for Pokémon
-    /// Mansion statue switches, which only trigger when faced from directly below, i.e. facing Up).
+    /// Walk to the tile at `target` and press A. `facing`, if set, forces the approach so the player
+    /// ends up facing that direction (needed for Pokémon Mansion statue switches, which only trigger
+    /// when faced from directly below, i.e. facing Up).
+    ///
+    /// Named for the Vermilion Gym cans it was written for, but it is the generic **face a tile and
+    /// interact** move, and three unrelated steps ride it: `SolveTrashCans`, `FlipSwitch` (Mansion
+    /// statues, the Rocket Hideout poster) and `SearchHiddenItem`. They share it because the ROM does:
+    /// all three are `hidden_object`s, dispatched by `CheckForHiddenObject` when A is pressed and the
+    /// tile in front of the player matches.
     CheckTrashCan { target: crate::geometry::Point8, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
     /// Drive the elevator floor menu (panel at `panel`) to select menu index `floor`, then ride the
     /// redirected warp out. Done when the map changes (we've left the elevator room).
@@ -562,8 +580,9 @@ pub enum FieldMove {
     /// **F** — walk to the prize vendor's bg-event tile and buy `prize` with coins. Driven by
     /// [`crate::pokemon::postgame::game_corner`].
     RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
-    /// **H** — search the bg-event tile at `at` for a hidden item.
-    SearchHiddenItem { at: crate::geometry::Point8 },
+    // (**H** reserved a `SearchHiddenItem` field move here. It is gone: a hidden item is collected by
+    // facing its tile and pressing A, which is exactly `CheckTrashCan` — see
+    // [`crate::pokemon::postgame::aides`].)
     // ────────────────────────────────────────────────────────────────────────────────────────────
     /// Primitive Strength push: shove the boulder at `boulder` one tile in `dir` (Strength must be armed).
     /// The agent routes behind the boulder and double-presses; it completes as soon as the boulder leaves
@@ -1884,6 +1903,10 @@ pub struct DeterministicPolicy {
     /// began. The step completes once the flag differs — i.e. the single global switch has toggled
     /// exactly once — so each `FlipSwitch` is one deterministic flip (not an oscillating retry loop).
     mansion_flip_baseline: Option<bool>,
+    /// How many of the wanted item the bag held when the current `SearchHiddenItem` step began, so
+    /// the pick-up is detected as an *increase*. Same shape, and the same reason, as
+    /// [`Self::mansion_flip_baseline`].
+    hidden_item_baseline: Option<u8>,
     /// Visible-boulder count captured when the current `DropBoulderInHole` step began. The step completes
     /// once the count drops (a boulder was pushed onto the hole and fell to the floor below), so exactly
     /// one boulder is dropped rather than every boulder that can reach the hole.
@@ -1908,6 +1931,21 @@ pub struct DeterministicPolicy {
 }
 
 impl DeterministicPolicy {
+    /// Whether the step at the queue front wants `enemy` caught, and with which ball.
+    ///
+    /// `Some(None)` means "catch it, best ball in the bag" — distinct from `None`, which means this
+    /// battle is not a catch at all. Both the flee test and the throw read it, so the two can never
+    /// disagree: fleeing from a species the throw block would have caught is how a sweep silently
+    /// never finishes.
+    fn catch_target(&self, state: &GameState, enemy: PokemonSpecies) -> Option<Option<ItemId>> {
+        match self.queue.front() {
+            Some(&PolicyStep::CatchPokemon { species, ball, .. }) if species == enemy => Some(ball),
+            Some(&PolicyStep::SweepDex { ball, .. })
+                if crate::pokemon::postgame::aides::sweep_wants(state, enemy) => Some(ball),
+            _ => None,
+        }
+    }
+
     /// How many times to re-open the shop for one `BuyFromMart` step before giving up.
     /// Ticks a `DefeatGymLeader` step waits for a route to its gym before concluding there isn't one
     /// (20 ms each, so ~8 s of game time — long enough to cover a black-out warp and its dialogue).
@@ -1927,6 +1965,7 @@ impl DeterministicPolicy {
             collect_item_seen: false,
             catch_wander_stuck: 0,
             mansion_flip_baseline: None,
+            hidden_item_baseline: None,
             boulder_drop_baseline: None,
             gym_beaten: HashSet::new(),
             gym_engage: None,
@@ -2145,6 +2184,55 @@ impl Policy for DeterministicPolicy {
                             None // wait
                         } else {
                             println!("[policy] want to catch a {species}, but nowhere to trigger an encounter (gave up)!");
+                            self.catch_wander_stuck = 0;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                    }
+                },
+                PolicyStep::SweepDex { on_map, min_share, .. } => {
+                    // **Workstream H (H5).** The same wander as `CatchPokemon` above, minus its
+                    // static-encounter branch (a sweep is wild-only) — what differs is the *stop*
+                    // condition, which is a set rather than one species.
+                    use crate::pokemon::postgame::aides;
+                    if state.map.map != on_map {
+                        let action = Self::route_toward(world_graph, &actions, on_map);
+                        if action.is_none() {
+                            println!("[policy] want to sweep {on_map}, but no path there!");
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else if aides::sweep_remaining(&state, on_map, min_share).is_empty() {
+                        println!("[policy] SweepDex {on_map}: every target owned — done ({} in the dex)",
+                            state.pokedex_owned.species().len());
+                        self.catch_wander_stuck = 0;
+                        self.queue.pop_front();
+                        continue;
+                    } else if state.bag.best_pokeball().is_none() {
+                        println!("[policy] SweepDex {on_map}: out of Pokéballs, {:?} still missing!",
+                            aides::sweep_remaining(&state, on_map, min_share));
+                        self.catch_wander_stuck = 0;
+                        self.queue.pop_front();
+                        continue;
+                    } else if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Grass) {
+                        self.catch_wander_stuck = 0;
+                        Some(action.clone())
+                    } else if let Some(action) = actions.iter()
+                        .filter(|a| matches!(a.tile, MetaTile::Sprite(_)))
+                        .max_by_key(|a| a.route.len()) {
+                        // A cave: pace between the farthest objects, which fires per-step encounters.
+                        self.catch_wander_stuck = 0;
+                        Some(action.clone())
+                    } else if let Some(action) = state.map.wander_action() {
+                        self.catch_wander_stuck = 0;
+                        Some(action)
+                    } else {
+                        self.catch_wander_stuck += 1;
+                        if self.catch_wander_stuck < 400 {
+                            None
+                        } else {
+                            println!("[policy] SweepDex {on_map}: nowhere to trigger an encounter (gave up)!");
                             self.catch_wander_stuck = 0;
                             self.queue.pop_front();
                             continue;
@@ -2432,8 +2520,21 @@ impl Policy for DeterministicPolicy {
                 // one: move your variant out of this list into its own one-line arm delegating to
                 // your own module. That is a one-line edit to this file, which is the whole point.
                 PolicyStep::UseFlash { .. } => None, // on the map — `pick_field_move` drives the menu
-                PolicyStep::SearchHiddenItem { .. } =>
-                    crate::pokemon::postgame::unimplemented_seam(&step),
+                PolicyStep::SearchHiddenItem { map, .. } => {
+                    // **Workstream H.** Routing only, like `Fish`; `pick_field_move` owns the walk to
+                    // the tile and the A press once we are standing on `map`.
+                    if state.map.map != map {
+                        let action = Self::route_toward(world_graph, &actions, map);
+                        if action.is_none() {
+                            println!("[policy] want the hidden item on {map}, but no path there!");
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        None
+                    }
+                }
                 PolicyStep::Fish { map, .. } => {
                     // Routing only, like `UseItemPc` below: once we are standing on `map`,
                     // `pick_field_move` picks the water tile and hands each cast to the driver.
@@ -2770,7 +2871,8 @@ impl Policy for DeterministicPolicy {
             && actions.iter().any(|a| matches!(a, BattleAction::Run))
         {
             let flee = match self.queue.front() {
-                Some(PolicyStep::CatchPokemon { species, .. }) => battle_state.enemy.species != *species,
+                Some(PolicyStep::CatchPokemon { .. }) | Some(PolicyStep::SweepDex { .. }) =>
+                    self.catch_target(state, battle_state.enemy.species).is_none(),
                 _ => in_center_less_dungeon,
             };
             if flee {
@@ -2833,9 +2935,16 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // When catching, throw a Pokéball immediately if one is available.
-        if let Some(PolicyStep::CatchPokemon { species, ball, .. }) = self.queue.front() {
-            if battle_state.battle_type == BattleType::Wild && battle_state.enemy.species == *species {
+        // When catching, throw a Pokéball immediately if one is available. Two steps get here —
+        // `CatchPokemon`, which wants one named species, and H5's `SweepDex`, which wants anything the
+        // dex is missing — so the target test is `catch_target` rather than an equality.
+        if let Some(ball) = self.catch_target(state, battle_state.enemy.species) {
+            let species = &battle_state.enemy.species;
+            // ⚠️ **Wild only.** A trainer's Pokémon can be an unowned species too, and the game answers
+            // a ball with "the TRAINER blocked the BALL!" and no turn consumed — an infinite retry, not
+            // a wasted turn. This guard is what stops a sweep dying to the first trainer whose line of
+            // sight crosses the grass it is pacing in.
+            if battle_state.battle_type == BattleType::Wild {
                 // A step may pin its ball so an incidental catch doesn't spend the Master Ball; fall
                 // back to the best in the bag if that ball has run out.
                 let chosen = ball
@@ -3320,6 +3429,25 @@ impl Policy for DeterministicPolicy {
                 return Some(FieldMove::CheckTrashCan { target: at, facing: None });
             }
         }
+        if let Some(&PolicyStep::SearchHiddenItem { map, item }) = self.queue.front() {
+            // **Workstream H.** Baseline the bag *now*, before the first A press, so "collected" is
+            // "the count went up" rather than "the item is present" — the bag may already hold a
+            // stack of the same thing.
+            if state.map.map == map {
+                use crate::pokemon::postgame::aides;
+                let baseline = *self.hidden_item_baseline
+                    .get_or_insert_with(|| aides::bag_quantity(state, item));
+                match aides::pick(state, item, baseline) {
+                    Some(field_move) => return Some(field_move),
+                    None => {
+                        println!("[policy] SearchHiddenItem: {item:?} collected on {map} — done");
+                        self.hidden_item_baseline = None;
+                        self.queue.pop_front();
+                        return None;
+                    }
+                }
+            }
+        }
         if let Some(&PolicyStep::UseElevator { panel, floor }) = self.queue.front() {
             // The step completes once we've ridden the elevator out to another floor — i.e. once we're
             // no longer standing in an elevator room. (Any of the game's elevators, not just Rocket
@@ -3394,6 +3522,9 @@ impl Policy for DeterministicPolicy {
             self.queue.front(),
             Some(PolicyStep::GrindUntilLevel { .. })
                 | Some(PolicyStep::CatchPokemon { .. })
+                // H5's sweep is one step per map and stays on it for every species that map owes —
+                // dozens of encounters, most of them fled.
+                | Some(PolicyStep::SweepDex { .. })
                 // Collecting the Mt Moon fossil means crossing a battle-heavy floor: each wild
                 // encounter interrupts the walk, and with a real (non-pimped) party those battles
                 // are slow, so the single CollectItem step legitimately sits for a long while.
