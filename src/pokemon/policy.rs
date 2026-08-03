@@ -1930,6 +1930,17 @@ pub struct DeterministicPolicy {
     gym_engage: Option<(Point8, Point8, u32)>,
 }
 
+
+/// Whether a map sprite is a static encounter of `species`.
+///
+/// Not equality, because **a map with more than one of a species numbers them**: the Power Plant's
+/// disguised Poké Balls are `Voltorb 1..6` and `Electrode 1`/`Electrode 2`, so an exact match finds
+/// neither and `CatchPokemon` falls through to pacing for a wild encounter on a map that has none.
+/// The legendaries are unnumbered and match either way.
+fn sprite_is_species(name: &str, species: PokemonSpecies) -> bool {
+    name.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ') == species.to_string()
+}
+
 impl DeterministicPolicy {
     /// Whether the step at the queue front wants `enemy` caught, and with which ball.
     ///
@@ -2120,7 +2131,7 @@ impl Policy for DeterministicPolicy {
                         println!("[policy] want to catch a {}, but no Pokéballs left!", species);
                         self.queue.pop_front();
                         continue;
-                    } else if on_map.sprites().iter().any(|s| s.name == species.to_string()) {
+                    } else if on_map.sprites().iter().any(|s| sprite_is_species(s.name, species)) {
                         // STATIC encounter: the legendaries (Articuno on Seafoam B4F, …) are not wild
                         // spawns at all — they are ordinary map sprites named after the species, and
                         // the battle starts by walking into one and pressing A. Route straight to it
@@ -2128,7 +2139,7 @@ impl Policy for DeterministicPolicy {
                         // wander fallback below would otherwise stroll off across the map, which on
                         // B4F means leaving the west lake by its one-way (7,11) shore and stranding
                         // the catch (the game refuses to let you Surf back on).
-                        match actions.iter().find(|a| matches!(a.tile, MetaTile::Sprite(n) if n == species.to_string())) {
+                        match actions.iter().find(|a| matches!(a.tile, MetaTile::Sprite(n) if sprite_is_species(n, species))) {
                             Some(action) => {
                                 println!("[policy] static encounter: routing to {species} at {} ({} steps)",
                                     action.destination, action.route.len());
@@ -2148,7 +2159,7 @@ impl Policy for DeterministicPolicy {
                                 // the caller's next step warp out and back in to respawn it.
                                 self.catch_wander_stuck += 1;
                                 let spent = state.map.sprites.iter()
-                                    .any(|s| s.hidden && s.name == species.to_string());
+                                    .any(|s| s.hidden && sprite_is_species(s.name, species));
                                 if self.catch_wander_stuck < if spent { 50 } else { 400 } {
                                     None
                                 } else {
@@ -3588,5 +3599,23 @@ mod move_learn_tests {
         let moves = [mv(Cut), mv(Growl), mv(LeechSeed), mv(Poisonpowder)];
         let slot = p.pick_move_to_forget(&moves, Poisonpowder).flatten().unwrap();
         assert_ne!(moves[slot].name, Cut, "must never forget an HM move (Cut)");
+    }
+}
+
+#[cfg(test)]
+mod policy_helper_tests {
+    use super::*;
+
+    /// The Power Plant numbers its disguised Poké Balls, and an exact name match finds none of them —
+    /// which presents as `CatchPokemon` pacing a map that has no wild encounters at all.
+    #[test]
+    fn numbered_static_encounters_match_their_species() {
+        assert!(sprite_is_species("Electrode 1", PokemonSpecies::Electrode));
+        assert!(sprite_is_species("Electrode 2", PokemonSpecies::Electrode));
+        assert!(sprite_is_species("Voltorb 6", PokemonSpecies::Voltorb));
+        assert!(sprite_is_species("Moltres", PokemonSpecies::Moltres));
+        assert!(sprite_is_species("Zapdos", PokemonSpecies::Zapdos));
+        assert!(!sprite_is_species("Electrode 1", PokemonSpecies::Voltorb));
+        assert!(!sprite_is_species("Rare Candy", PokemonSpecies::Electrode));
     }
 }

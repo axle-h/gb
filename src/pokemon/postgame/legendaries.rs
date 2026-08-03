@@ -204,6 +204,71 @@ pub fn pre_catch_action(
 }
 
 impl PolicyStep {
+    /// **D2a** — catch an **Electrode** in the Power Plant and give it **TM45 Thunder Wave**.
+    ///
+    /// This is the sub-step the re-cut §6-D turns on, and its whole point is *speed*. A Gen 1
+    /// partial-trapping move overwrites the trapped side's chosen move with `CANNOT_MOVE`, so a
+    /// paralyser slower than Moltres never gets to act at all; the fix is a paralyser that moves
+    /// first, on turn 1, before Fire Spin can start. Of everything obtainable that learns TM45,
+    /// exactly one is fast enough: Electrode, base speed **140** against a lv50 bird's ~110.
+    ///
+    /// Ordering matters and is the reason this cannot simply be appended to
+    /// [`Self::arm_for_legendaries_steps`]: **TM45 is one per cartridge and a Gen 1 TM is consumed on
+    /// use**, so the Electrode has to be in the party *before* the TM is picked up. This step does
+    /// both, in that order, and D1a's Slowpoke version is superseded.
+    ///
+    /// Two things about the target are worth knowing before the run:
+    ///
+    /// - ⚠️ **It is one of eight disguised Poké Balls**, and the ROM numbers them — `Electrode 1` and
+    ///   `Electrode 2`, `Voltorb 1..6` (`data/maps/objects/PowerPlant.asm`). `CatchPokemon` matched
+    ///   sprite names against the species name exactly, which found neither and left it pacing a map
+    ///   with no wild encounters; `sprite_is_species` now strips the number.
+    /// - ⚠️ **A lv43 Electrode knows Selfdestruct.** Its last four learnt moves are Sonicboom (17),
+    ///   Selfdestruct (22), Light Screen (29) and Swift (40), so roughly a quarter of its turns end the
+    ///   encounter by killing the target. That is what the *second* Electrode is for — the step lists
+    ///   both, and the first is skipped in 50 polls once its sprite reads `hidden`.
+    ///
+    /// Catch rate 60 makes this an ordinary catch, and at full HP a **Great Ball** is the right one:
+    /// its second roll is `128/256` against the Ultra Ball's `86/256`, which more than pays for the
+    /// worse first roll (`61/201` vs `61/151`). The fixture carries nine, and no weakening turn is
+    /// available anyway — the lead out-levels it by nearly thirty.
+    ///
+    /// The route is [`Self::zapdos_steps`]' without the `Dig`: Cerulean is split by one-way ledges and
+    /// Fly lands on the terrace that cannot reach Route 9, so the trashed house is the bridge.
+    pub fn electrode_steps(electrode_slot: u8) -> Vec<Self> {
+        let mut steps = vec![
+            Self::Fly { to: Map::CeruleanCity },
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::CeruleanTrashedHouse),   // main terrace front door
+            Self::enter_at(Map::CeruleanCity, 27, 9), // back door → the Route-9 terrace
+            Self::enter(Map::Route9),
+            Self::CutTree { map: Map::Route9 },        // the (5,8) tree boxing in the west pocket
+            Self::enter(Map::Route10),
+            Self::enter(Map::PowerPlant),
+        ];
+        // Two attempts at the same species. The first `CatchPokemon` pops on its own once the dex has
+        // an Electrode in it, so the second is a no-op on a successful run.
+        steps.extend(std::iter::repeat_n(
+            Self::CatchPokemon { species: PokemonSpecies::Electrode, on_map: Map::PowerPlant,
+                                 ball: Some(ItemId::GreatBall) }, 2));
+        steps.extend([
+            // Out on foot — the Power Plant door leads straight back to Route 10 — then Route 24 for
+            // the TM. Nugget Bridge's five trainers are between Cerulean and it; heal first.
+            Self::enter(Map::Route10),
+            Self::Fly { to: Map::CeruleanCity },
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::Route24),
+            Self::CollectItem(MapSprite::ROUTE24_TM_THUNDER_WAVE),
+            Self::TeachMove { item: ItemId::Tm45ThunderWave, target_slot: electrode_slot },
+            Self::enter(Map::CeruleanCity),
+        ]);
+        steps
+    }
+
     /// **D1a** — the toolkit all three catches share: a stack of balls, plus **TM45 Thunder Wave**
     /// picked up on Route 24 and taught to Slowpoke.
     ///
