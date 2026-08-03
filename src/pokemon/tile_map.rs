@@ -64,6 +64,12 @@ pub struct MetaTileMap {
     /// Land tiles the player may not mount Surf from (Seafoam B4F's (7,11) — "The current is much too
     /// fast!"). One-way: stepping ashore onto them is still allowed. See [`no_surf_mount_table`].
     pub no_surf_mount: HashSet<Point8>,
+    /// Hidden items on this map and what each one is: tiles that look like nothing and hand over an
+    /// item when faced and pressed A. Nothing on screen marks them, so like [`Self::strength_switches`]
+    /// this is exposed so a policy can *discover* them rather than hardcode coordinates. Decoded from
+    /// the ROM by [`crate::pokemon::postgame::aides::hidden_items`]; positions are corrected for the
+    /// connection strip here, where the raw tables all are. Empty for most maps.
+    pub hidden_items: Vec<(Point8, crate::pokemon::item::ItemId)>,
 }
 
 /// Strength boulder-switch tiles per map (raw object/script coords, no connection offset), from the
@@ -202,6 +208,10 @@ impl MetaTileMap {
                 .collect(),
             no_surf_mount: no_surf_mount_table(map.metadata.map).iter()
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
+                .collect(),
+            hidden_items: crate::pokemon::postgame::aides::hidden_items(map.metadata.map).into_iter()
+                .map(|h| (Point8 { x: h.at.x + dimensions.west_extra as u8,
+                                   y: h.at.y + dimensions.north_extra as u8 }, h.item))
                 .collect(),
         }
     }
@@ -1151,6 +1161,7 @@ mod boulder_solver_tests {
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
             spinners: HashMap::new(), can_surf: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
+            hidden_items: vec![],
         }, switch)
     }
 

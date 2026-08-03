@@ -53,6 +53,7 @@ mod menu;
 pub mod delay;
 pub mod damage;
 pub mod world_graph;
+pub mod wild;
 pub mod postgame;
 
 #[cfg(test)]

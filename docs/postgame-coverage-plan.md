@@ -647,10 +647,43 @@ don't guess.**
       clears it, now readable as **`GameState::map_is_dark`** and driven by the new
       `PolicyStep::UseFlash { slot }`. ⚠️ **Only Slowpoke and Mr. Mime can learn Flash** of everything
       this save has owned; see §11.
-- [ ] **H3 — Itemfinder at 30 owned.** *Observable:* Itemfinder in bag.
-- [ ] **H4 — Hidden items.** `PolicyStep::SearchHiddenItem { at }` — hidden items are bg-event
-      objects, same shape as the `FlipSwitch` tiles. *Observable:* one hidden item collected.
-- [ ] **H5 — Exp.All at 50 owned.** *Observable:* Exp.All in bag; commit `postgame-aides.bin`.
+- [x] **H3 — Itemfinder at 30 owned.** *Observable:* Itemfinder in bag.
+      *Done:* [`PolicyStep::itemfinder_steps(shed)`], test `postgame::aides::can_get_the_itemfinder`
+      (~10 s), fixture `postgame-itemfinder.bin`, entered from **E's** `postgame-safari.bin` (dex 31).
+      The aide's own text confirms the gate — *"You have caught 31 kinds of POKéMON!"*. `shed` is two
+      bag slots deposited on the way past, because the bag is 20/20 and a full bag is the one failure
+      that reads exactly like success.
+- [x] **H4 — Hidden items.** ~~`PolicyStep::SearchHiddenItem { at }` — hidden items are bg-event
+      objects, same shape as the `FlipSwitch` tiles.~~ *Observable:* one hidden item collected.
+      *Done:* `PolicyStep::SearchHiddenItem { map, item }` + `hidden_item_steps`, test
+      `postgame::aides::can_collect_a_hidden_item` (~0.4 s), fixture `postgame-hidden-item.bin`.
+      **"Same shape as `FlipSwitch`" was an understatement — it is the *same field move*.** The
+      reserved `FieldMove::SearchHiddenItem` and `AgentState::SearchingHiddenItem` seams are deleted;
+      `FieldMove::CheckTrashCan` drives all three. New and reusable: **`MetaTileMap::hidden_items`**
+      (all 54, ROM-derived, connection-offset applied) and
+      `postgame::aides::hidden_items(map) -> Vec<HiddenItem>`. ⚠️ **The Itemfinder is not a
+      prerequisite** — see §11.
+- [x] **H5 — Exp.All at 50 owned.** *Observable:* Exp.All in bag; commit `postgame-aides.bin`.
+      *Done:* **dex 31 → 52 owned**, Exp.All collected, `postgame-aides.bin`. Unlike H1–H4 this is not
+      a mechanism, it is a **catching errand**, split into four legs of a Fly stop each — ~110 s of
+      wall clock for the lot once the routes were right:
+      - [x] **H5a — outfit + the Vermilion grounds** (~10 s, 31 → 34). 99 Poké Balls, an empty box,
+            then Route 11 (Ekans, Drowzee) and Diglett's Cave (Diglett 94.5 %).
+            `postgame-sweep-vermilion.bin`.
+      - [x] **H5b — Route 1 + Viridian Forest** (~38 s, 34 → 41). Pidgey, Rattata, Weedle, Kakuna, and
+            at a 5 % floor Caterpie, Metapod and **Pikachu** too. `postgame-sweep-viridian.bin`.
+      - [x] **H5c — the Lavender grounds** (~17 s, 41 → 46). Pokémon Tower **3F** (Gastly 89.5 %) and
+            Rock Tunnel 1F (Zubat, Geodude, Machop). `postgame-sweep-lavender.bin`.
+      - [x] **H5d/e — Route 7, the Mansion, then the aide** (~43 s, 46 → 52). `postgame-aides.bin`.
+
+      New and reusable, and the reason the grounds above are *these* grounds: **`crate::pokemon::wild`**
+      — the ROM's own encounter tables, decoded (`WildDataPointers` + `WildMonEncounterSlotChances`), so
+      "what lives here and how often" is a lookup rather than a walkthrough. Plus
+      `PolicyStep::SweepDex { on_map, min_share, ball }`, which catches everything the dex is missing on
+      a map and leaves once its slots above `min_share` are owned. ⚠️ **Five traps, four of them silent,
+      all in §11** — the two that will catch anyone are the **Silph Scope** (in the PC, so every
+      Pokémon Tower wild is an uncatchable GHOST) and **pacing into an obstacle** (no step, so no
+      encounter roll, so nothing happens at all).
 
 ---
 
@@ -707,7 +740,7 @@ Phase 0 (item storage, PC locations, seams, probe)
 | F — Game Corner | claude-F-gamecorner | `postgame-fly-bike.bin` | `postgame::game_corner` | ✅ done | F1–F4 green, **~9 s of wall clock for the four legs**. Rooted on **B's output**, not `postgame-phase0.bin` (same reasoning C's row gives). Output `postgame-game-corner.bin`: Coin Case, 20 coins, ¥43,209, **dex 8 owned**, an **Abra** in slot 4. Three things other streams can use: **`PolicyStep::SellToMart { map, item }`** — the mart's sell half, which nothing had — **`PolicyStep::RedeemPrize { prize }`** for all nine prizes, and `ItemId::is_key_item()` / `is_hm()`, pinned bit-for-bit against the ROM. Both prize branches (mon and TM) are covered; the TM one seeds **money** from the debug tier, like D's Master Ball. See §11. |
 | G — Gifts (G1–G4, G7–G8) | claude-G-gifts | `postgame-fly-bike.bin` | `postgame::gifts` | ✅ done | All of G1–G4, G7 and G8a–c green — **~57 s of wall clock across 8 legs**, output `postgame-name-rater.bin`: **dex 11 owned**, party Venusaur / Articuno / Vaporeon / Slowpoke / Aerodactyl / **Hitmonlee**, box 1 holding **Lapras** + Omanyte, bag 19/20 with TM29/TM31/TM03/TM26 and the ten Silph items. Rooted on **B's output** (same reasoning C's and F's rows give). Three things other streams can use: **`PolicyStep::PartyScript { script, slot }`**, the first driver here that can pick a slot in a **script-opened party menu** — **G5/G6's trades should be a third `PartyScript` variant, not a new driver** — a `deposit_item` fix (it **hung** on any full stack), and `probe_coverage` now printing **PC item storage**. Two shared-file bugs found, one fixed; five §11 entries. ➡️ **H1 is unblocked** (dex 11 > Flash's gate of 10). |
 | G — Trades (G5–G6) | claude-G-trades | `postgame-name-rater.bin` | `postgame::trades` | ✅ done | **Four** trades green — Abra→Mr. Mime, Spearow→Farfetch'd, Nidoran♂→Nidoran♀, Venonat→Tangela — **~55 s of wall clock across 4 legs**, output `postgame-tangela.bin`: **dex 19 owned**, party Venusaur / Articuno / Vaporeon / Tangela, eight mons banked in box 1. Rooted on **G-gifts' output**: a trade is a third `PartyScript` variant, so the reserved `TradePokemon` / `AgentState::Trading` seams are **deleted**. `TRADES` is the nine-row table, ROM-pinned. The other five trades are not blocked, just expensive — Slowbro/Poliwhirl/Nidorino/Raichu need evolution grinds and Ponyta is in the Pokémon Mansion; see §11. |
-| H — Oak's aides | claude-H-aides | `postgame-tangela.bin` | `postgame::aides` | 🟡 blocked (H3/H4 now unblocked by **E** — dex 31 ≥ 30, start from `postgame-safari.bin`) | **H1 + H2 done** — HM05 Flash collected, taught to Slowpoke and used to light Rock Tunnel; ~6 s, output `postgame-flash.bin`, **dex 19 owned**. ☐ **H3/H4/H5 blocked on dex count**: the Itemfinder wants **30** owned (11 more species) and Exp.All **50** (31 more), and H4 needs H3's Itemfinder. Neither is a mechanism problem — it is a *catching* problem, and **E (Safari)** is the cheapest source of both. New and reusable: `PolicyStep::UseFlash { slot }` and `GameState::map_is_dark`. |
+| H — Oak's aides | claude-H-aides | `postgame-tangela.bin` (H1/H2) · `postgame-safari.bin` (H3+) | `postgame::aides` | ✅ done | **All of H1–H5.** H1/H2 HM05 Flash + a lit Rock Tunnel; **H3** the Itemfinder (~10 s), rooted on **E's** `postgame-safari.bin` whose dex 31 cleared the gate of 30; **H4** a hidden Escape Rope on Route 11 (~0.4 s); **H5** the dex sweep, **31 → 52 owned**, Exp.All in the bag (~110 s across four legs). Output `postgame-aides.bin`. ⚠️ **H4 needed neither H3's Itemfinder nor a driver** — the Itemfinder only *detects*, and a hidden item is `FieldMove::CheckTrashCan`, so the reserved `FieldMove::SearchHiddenItem` / `AgentState::SearchingHiddenItem` seams are **deleted**. New and reusable: `PolicyStep::{UseFlash, SearchHiddenItem { map, item }, SweepDex { on_map, min_share, ball }}`, `GameState::map_is_dark`, **`MetaTileMap::hidden_items`** (all 54, ROM-derived, offset-corrected) and **`crate::pokemon::wild`** (the ROM's encounter tables — species, level and share per map). ⚠️ **Four shared-file bug fixes, all of them silent failures other streams could hit:** a ball thrown at a **trainer's** Pokémon loops forever; `adjacent_grass` ignored `pair_blocked`; the pacer had no stall guard, so walking into a sprite farmed zero encounters; and `MetaTile::Water` matched **impassable** shore-id tiles, putting six phantom water tiles in Viridian Forest. See §11.
 
 ---
 
@@ -2423,3 +2456,185 @@ ROM: `pokered/data/wild/maps/SafariZone*.asm`, `pokered/data/wild/probabilities.
 H4's hidden items need only H3. H5 wants 50 and is still 19 away, which is now a *catching* errand with
 no cheap source left. **G5/G6**: the remaining Nidorino→Nidorina trade's give-species is in the box.
 And the boxed-catch fix in the entry above is the one every workstream should notice.
+
+### [2026-08-03] H / H3+H4 — a hidden item needs **no Itemfinder** and no driver; the seams are deleted
+**Status:** corrected ❗ (H3 verified ✅ exactly as written)
+
+**What the plan said:** §6-H orders the three aides H3 → H4 → H5 and §9 records *"H4 needs H3's
+Itemfinder"*. §6-H4 asks for `PolicyStep::SearchHiddenItem { at }`, and task 0.8 duly reserved a
+`FieldMove::SearchHiddenItem` and an `AgentState::SearchingHiddenItem` to drive it.
+
+**What is actually true:**
+
+1. **The Itemfinder does nothing for H4.** `engine/events/hidden_items.asm` `HiddenItems` never looks
+   at the bag: it matches the tile in front of the player against `HiddenItemCoords`, tests the flag,
+   and gives the item. The Itemfinder is a *detector* — it reports whether one is within range and,
+   as its own description says, "can't pinpoint it". `can_collect_a_hidden_item` would pass without
+   H3. H3 still belongs first, but for a different reason: it is what leaves a **free bag slot**, and
+   `FoundHiddenItemText` on a full bag prints "found ESCAPE ROPE!", fails `GiveItem`, and leaves the
+   flag unset — so the pick-up silently does not happen.
+2. **There was nothing to drive.** A hidden item is `hidden_object`, dispatched by
+   `CheckForHiddenObject` when A is pressed and `CheckIfCoordsInFrontOfPlayerMatch` succeeds — the
+   same path as a Vermilion Gym trash can and a Mansion statue switch. So it is
+   `FieldMove::CheckTrashCan { target, facing: None }` and nothing else. **Both reserved seams are
+   deleted** (`FieldMove::SearchHiddenItem`, `AgentState::SearchingHiddenItem`), exactly as
+   `postgame::trades` deleted `TradePokemon`. `CheckTrashCan` now has three riders and its doc comment
+   says so; it is misnamed, not miswritten.
+3. **`PolicyStep::SearchHiddenItem` takes `{ map, item }`, not `{ at }`** — and the reason is the trap
+   below.
+
+**⚠️ The coordinate trap, which is silent.** `HiddenItemCoords` stores **raw** map coordinates.
+Outdoor maps are widened by a strip for every neighbour they connect to, so on Route 11 (`WEST | EAST`)
+raw (48,5) is tile **(49,5)** to the agent — and on a `NORTH`-connected map the y would shift too.
+Hand-copying a raw coordinate into a step does not error: the agent walks to a plausible tile, presses
+A, and nothing at all happens. The offset is therefore applied in the one place the other raw tables
+(Strength switches, floor holes) are already corrected, `MetaTileMap::new`, into a new
+**`MetaTileMap::hidden_items: Vec<(Point8, ItemId)>`** — so a policy *discovers* hidden items on the
+current map rather than being told where they are.
+
+**All 54 are ROM-derived, not transcribed.** `postgame::aides::hidden_items(map)` crosses the two
+tables that each hold half the answer: the per-map lists in `data/events/hidden_objects.asm` hold the
+**item id** but mix hidden items in with bookshelves, PCs, gym statues and the Safari scripts (the
+discriminator is the object's routine pointer being `HiddenItems`), while
+`data/events/hidden_item_coords.asm` holds only map/x/y — but its **row order is the flag numbering**
+in `wObtainedHiddenItemsFlags`. Three unit tests pin it both ways.
+
+**Two smaller corrections.** §6-H's table says the Itemfinder is at `Route11Gate2F`, which is right,
+but the gate is a building sitting *inside Route 11* — its west doors are Route 11 (49,8)/(49,9) and
+its east doors (58,8)/(58,9), both on the same map — so the whole errand stays on the Vermilion side
+and never touches Route 12. And all four of `Route11Gate1F`'s doors are `LAST_MAP` warps, two of which
+come out on the **east** side of that building, walled off from both Vermilion and the hidden item:
+name the landing with `enter_at(Route11, 50, 8)` rather than letting `enter` choose.
+
+**Evidence:** `pokered/engine/events/hidden_items.asm`, `engine/overworld/hidden_objects.asm:89`
+(`CheckIfCoordsInFrontOfPlayerMatch`), `data/events/hidden_objects.asm:620` (Route 11's Escape Rope),
+`data/maps/objects/Route11{,Gate1F}.asm`, `scripts/Route11Gate2F.asm`. Tests
+`postgame::aides::{can_get_the_itemfinder, can_collect_a_hidden_item}` and the three
+`postgame::aides::tests::*` pinning tests; probe `probe_route11_hidden_item` prints the offset
+directly. Fixtures `postgame-itemfinder.bin`, `postgame-hidden-item.bin`; the whole `slow-tests` tier
+is green (94 passed) with the `MetaTileMap` field added.
+
+**Impact on others:** **Anyone routing off a raw pokered coordinate on an outdoor map** — the
+connection strip is a silent one-tile lie, and `MetaTileMap::new` is where it gets corrected.
+`MetaTileMap::hidden_items` is free to any policy now, including 4 Nuggets, 4 Rare Candies, 5 PP Ups
+and 4 Ultra Balls nobody has picked up. **H5** is unaffected and still wants 50 owned (31 today).
+
+### [2026-08-03] H / H5 — two silent freezes on the way to a dex sweep, and where route contents really come from
+**Status:** corrected ❗
+
+**What the plan said:** §6-H5 is one line — *"Exp.All at 50 owned"* — and §3 ruled an exhaustive dex
+sweep out of scope. Both still stand; what neither says is that getting from 31 to 50 needs a **place
+to stand**, and picking those places off a walkthrough is how you end up hunting a 1.2 % slot.
+
+**What is actually true:**
+
+**1. The encounter tables are in the ROM, so read them.** `crate::pokemon::wild` decodes
+`WildDataPointers` (bank 3): per map, a grass block and a water block of ten `(level, species)` slots
+each, weighted by the **cumulative** `WildMonEncounterSlotChances`. Two things fall straight out that
+are not obvious and that change which grounds are worth visiting:
+
+- **Slot count is not rarity.** Route 11's Drowzee holds four of the ten slots and is its *rarest*
+  species (25 %); its Ekans holds three and is its commonest (40 %). Only the weights say so.
+- **A zero rate omits its ten slots entirely** (`macros/asserts.asm` asserts it), so the water block is
+  not at a fixed offset. Reading it as one would silently parse twenty bytes of the next map's table.
+
+With that, the shortlist writes itself: Diglett's Cave is **94.5 % Diglett**, Rock Tunnel is 55/25/15
+Zubat/Geodude/Machop at catch rates 255/255/180, and the Pokémon Mansion is four species at 190. It
+also settles the ball question — the party is level 71 and the targets are level 3–24, so the policy
+never weakens anything and every throw is at full HP, where a Poké Ball's second roll is 86/256 against
+a Great Ball's 128/256. **1.5× the catch for 3× the price**: buy Poké Balls.
+
+**2. ⚠️ A trainer's Pokémon can be an unowned species — and a ball thrown at one is an infinite loop.**
+The game answers with "the TRAINER blocked the BALL!" and consumes no turn, so a catch policy keyed on
+species alone re-picks the throw forever. `CatchPokemon` was safe only because it names one species;
+the moment the test became "anything the dex is missing", the first trainer whose line of sight crossed
+the grass killed the run. `pick_battle_action`'s throw block now guards on `BattleType::Wild`.
+
+**3. ⚠️ `adjacent_grass` did not check `pair_blocked`, and the failure is completely silent.** The
+pacing driver alternates between two tiles to farm per-step encounters. If the second tile is across a
+**tile-pair collision** — a ledge, an elevation boundary — the move is illegal, so the player presses
+into it forever: no step, no encounter roll, no error, and no agent state change to log. It looks
+exactly like "this route just has a low encounter rate". Route 11's western grass runs along a ledge
+row, which is where it surfaced; the artifact is a screenshot of the player standing in grass doing
+nothing. Its sibling `adjacent_pacing_pair` had the check from the start. Fixed, plus a fallback to a
+plain-tile pair when no *steppable* grass neighbour exists — the ROM rolls on the tile being stepped
+**onto**, so a grass↔plain pair still fires on every other step, which is infinitely better than never.
+
+**Evidence:** `pokered/data/wild/{grass_water.asm,probabilities.asm}`, `macros/asserts.asm:140`,
+`engine/battle/wild_encounters.asm:56`. Tests `pokemon::wild::tests::*` (four, including a water-only
+map and an indoor map). Diagnostics `probe_dex_sweep_candidates` (every unowned species, its best map
+and share) and `probe_sweep_pacing` (position per tick — the only way to tell "not encountering" from
+"not moving"). The pacing freeze cost two full 300-emulated-minute runs before the probe named it.
+
+**Impact on others:** **anything that paces for encounters** — `CatchPokemon`, `GrindUntilLevel`, E's
+Safari hunt — was one ledge away from the same silent freeze. And `crate::pokemon::wild` is free to
+anyone: it is the honest answer to "where do I catch X", and it is what a text interface for an LLM
+agent would want to expose.
+
+### [2026-08-03] H / H5 — **COMPLETE**, and the two traps that cost the most were both invisible
+**Status:** verified ✅ (with three corrections ❗ to grounds §6-H5 named)
+
+**Result.** Dex **31 → 52 owned**, Exp.All collected, `postgame-aides.bin` committed. Four legs,
+~110 s of wall clock together once the routes were right — the cost was never the emulation, it was
+finding out which grounds actually work.
+
+**⚠️ The Silph Scope must be in the *bag* for Pokémon Tower, and nothing says otherwise.**
+`IsGhostBattle` (`engine/battle/core.asm:3308`) turns every wild on `POKEMON_TOWER_1F..7F` into an
+uncatchable **GHOST** unless `IsItemInBag SILPH_SCOPE` succeeds — and **Phase 0 banked the Scope** to
+free bag space, so every chain rooted on `postgame-phase0.bin` arrives without it. The failure is
+perfectly quiet: encounters happen, balls are selected, thrown and *consumed* exactly as normal, and
+simply never catch. It burned **71 balls and 400 emulated minutes**, and what finally named it was
+counting nickname prompts — 12,137 ball-throw ticks and **zero** `name:` lines. Withdraw the Scope
+before the tower; H5c does.
+
+**⚠️ An indoor sweep collects item balls by accident.** With no grass, `SweepDex` wanders by walking to
+the farthest reachable *sprite*, and arriving at a sprite presses A — so a floor with item balls on it
+picks one up. Pokémon Mansion 1F did, which exactly cancelled the one bag slot H5d had freed, and Oak's
+aide then refused the Exp.All for want of room. Free **two** slots before an aide if a sweep runs first.
+
+**Three grounds §6-H5's shortlist wanted that do not work, all of them stalls rather than errors:**
+
+- **Route 8** has grass in the ROM and **none the agent can reach**: from either end its action list is
+  the two `Route8Gate` doors, the Underground Path and nine trainers, with no `Grass` at all. Its
+  Mankey and Growlithe come from Route 7 instead. Same shape as the Route 15 trap already in §11.
+- **Pokémon Tower 6F/7F** cannot be climbed on a save that has already *finished* the tower —
+  `enter(PokemonTower6F)` finds no route from 5F. The mainline climb works only because it passes
+  through while the Channelers are still being fought and collects the Rare Candy that unblocks 6F's
+  chokepoint. 3F is 89.5 % Gastly, which is all H5 needed.
+- **Rock Tunnel's Machop is 14.8 %, not 15 %.** A `min_share` of 15 silently drops it. Round down.
+
+**What made the working grounds findable** is `crate::pokemon::wild` plus two diagnostics worth
+keeping: `probe_dex_sweep_candidates` (every unowned species, the map where its share is fattest, and
+every map ranked by how many it offers) and `probe_sweep_grounds` (does this ground offer *reachable*
+grass — run it **before** adding a ground, not after the leg times out). `probe_timeout_artifact` and
+`probe_stall_artifact` reload whatever `target/test-artifacts/` was left holding and ask the map the
+same questions the driver did; between them they identified four of the five traps in one run each.
+
+**Impact on others:** the four shared-file fixes in the entry above and this one — the trainer-ball
+loop, `adjacent_grass`, the pacer's stall guard, and `MetaTile::Water` matching impassable tiles — are
+all on paths every workstream uses. The whole `slow-tests` tier is green with them in.
+
+### [2026-08-03] H — correction to the water fix above: **passability is the wrong test**, the tileset is
+**Status:** corrected ❗ (correcting this session's own first attempt)
+
+The entry above describes six phantom `MetaTile::Water` tiles in Viridian Forest. The first fix tried
+was *"a tile is only water if it is also in the tileset's collision list"*, on the reasoning that real
+water must be walkable or surfing could not cross it. **That is false, and it fails loudly**: Gen 1
+routes movement on water through `CollisionCheckOnWater`, a separate path from the land collision list,
+so tile `$14` is *not* in that list. Requiring it drops every genuine water tile in the game — measured,
+**12 surf and fishing legs failed** (all four Cinnabar legs, all three fishing legs, all three
+legendaries, Earth Badge, and the offline Seafoam check).
+
+The correct fix is narrower and is about the **tileset**, not the tile. The over-match is only ever the
+two *shore* ids `$32`/`$48`, which mean something else in some of the tilesets `WaterTilesets` lists —
+`ShipPort` was already excluded for exactly this reason (there `$32` is dock planks). **`Forest` needs
+the same exclusion**: its only map is Viridian Forest, which has no water at all and six impassable
+bush blocks carrying those ids. Tile `$14` stays unconditional everywhere.
+
+**Evidence:** `pokered/data/tilesets/water_tilesets.asm`, `engine/items/item_effects.asm`
+(`IsNextTileShoreOrWater`). Viridian Forest reports **0** water tiles either way, so the narrow fix
+solves the original problem completely; the whole `slow-tests` tier is green (98 passed) and the
+default tier is green (853 passed).
+
+**Impact on others:** if another tileset in `WaterTilesets` turns out to have no water, add it to the
+same exclusion — do **not** reach for passability.

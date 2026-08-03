@@ -277,6 +277,14 @@ fn probe_coverage() {
         ("postgame-flash", include_bytes!("../data/postgame-flash.bin")),
         // Workstream E, rooted on H's output — the four-area sweep that takes the dex past H3's gate.
         ("postgame-safari", include_bytes!("../data/postgame-safari.bin")),
+        // …and H again, resumed on E's output: the Itemfinder at 30 owned, then a hidden item.
+        ("postgame-itemfinder", include_bytes!("../data/postgame-itemfinder.bin")),
+        ("postgame-hidden-item", include_bytes!("../data/postgame-hidden-item.bin")),
+        // H5's sweep chain.
+        ("postgame-sweep-vermilion", include_bytes!("../data/postgame-sweep-vermilion.bin")),
+        ("postgame-sweep-viridian", include_bytes!("../data/postgame-sweep-viridian.bin")),
+        ("postgame-sweep-lavender", include_bytes!("../data/postgame-sweep-lavender.bin")),
+        ("postgame-aides", include_bytes!("../data/postgame-aides.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);

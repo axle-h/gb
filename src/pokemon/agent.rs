@@ -159,7 +159,14 @@ pub(crate) enum AgentState {
     /// Player alternates between two adjacent tiles until a wild battle triggers — grass above ground,
     /// plain cave floor underground (see `adjacent_pacing_pair`). Either way it is the per-step encounter
     /// check that does the work, so any pair of walkable tiles will do.
-    PacingForEncounters { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool },
+    ///
+    /// ⚠️ `stalled` is not optional bookkeeping. The pair is chosen from the meta-tile grid the
+    /// *instant* the walk ends, and on map entry that grid is briefly unsettled — a trainer standing
+    /// on grass can still read as plain grass, so the pacer picks its tile and then walks into the
+    /// sprite forever. Bumping is not a step, so the ROM never rolls for an encounter: no error, no
+    /// state change, no log line, just a run that quietly does nothing until its budget expires. The
+    /// counter turns that into a re-pick, by which time the sprites have settled.
+    PacingForEncounters { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool, stalled: u16 },
 
     Battle(BattleState),
 
@@ -232,8 +239,8 @@ pub(crate) enum AgentState {
     /// **Workstream F** — buying a Game Corner prize: the walk to a vendor bg-event and the bespoke
     /// prize menu. State machine in [`crate::pokemon::postgame::game_corner`].
     RedeemingPrize(crate::pokemon::postgame::game_corner::PrizeState),
-    /// **H** — searching a bg-event tile for a hidden item.
-    SearchingHiddenItem { at: Point8 },
+    // (**H** reserved a `SearchingHiddenItem` state here. It is gone: collecting a hidden item is
+    // `CheckingTrashCan` below, because the ROM dispatches both from `CheckForHiddenObject`.)
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// Checking a Vermilion Gym trash can for a hidden switch: route to a tile adjacent to `target`
@@ -316,7 +323,6 @@ impl Display for AgentState {
             AgentState::SellingToMart(s)         => write!(f, "sell:{:?}x{}", s.item.id, s.item.quantity),
             AgentState::UsingPartyScript(s)      => write!(f, "{:?}:slot{}", s.script, s.slot),
             AgentState::RedeemingPrize(s)        => write!(f, "prize:{:?}", s.prize),
-            AgentState::SearchingHiddenItem { at } => write!(f, "hidden@{at}"),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
@@ -832,7 +838,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_) | AgentState::RedeemingPrize(_) | AgentState::SearchingHiddenItem { .. } | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_) | AgentState::RedeemingPrize(_) | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -1007,13 +1013,6 @@ impl PokemonAgent {
                             self.set_state(AgentState::RedeemingPrize(PrizeState::new(prize, api)));
                             return Ok(());
                         }
-                        // Reserved seam (task 0.8): turns into its state in one line. Nothing returns
-                        // this yet — see `docs/postgame-coverage-plan.md` §6-H.
-                        Some(crate::pokemon::policy::FieldMove::SearchHiddenItem { at }) => {
-                            api.release_all_buttons();
-                            self.set_state(AgentState::SearchingHiddenItem { at });
-                            return Ok(());
-                        }
                         None => {}
                     }
                     if let Some(action) = self.policy.pick_overworld_action(&game_state, &self.world_graph) {
@@ -1070,7 +1069,7 @@ impl PokemonAgent {
                     let pos = game_state.map.player_position;
                     match adjacent_pacing_pair(&game_state.map, pos) {
                         Some((tile_a, tile_b)) => self.set_state(AgentState::PacingForEncounters {
-                            map: game_state.map.map, tile_a, tile_b, heading_to_b: false }),
+                            map: game_state.map.map, tile_a, tile_b, heading_to_b: false, stalled: 0 }),
                         None => {
                             self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination));
                             self.set_state(AgentState::Idle);
@@ -1078,10 +1077,15 @@ impl PokemonAgent {
                     }
                 } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp { .. }) {
                     if destination == MetaTile::Grass {
-                        let tile_a = game_state.map.player_position;
-                        let tile_b = adjacent_grass(&game_state.map, tile_a);
-                        if let Some(tile_b) = tile_b {
-                            self.set_state(AgentState::PacingForEncounters { map: game_state.map.map, tile_a, tile_b, heading_to_b: true });
+                        let pos = game_state.map.player_position;
+                        // Pace against a grass neighbour if there is a *steppable* one, and against any
+                        // plain neighbour if there is not. Either works: the ROM rolls for an encounter
+                        // on the tile being stepped **onto**, so a grass↔plain pair still fires on every
+                        // other step, whereas a pair the player cannot walk fires never.
+                        let pair = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
+                            .or_else(|| adjacent_pacing_pair(&game_state.map, pos));
+                        if let Some((tile_a, tile_b)) = pair {
+                            self.set_state(AgentState::PacingForEncounters { map: game_state.map.map, tile_a, tile_b, heading_to_b: true, stalled: 0 });
                         } else {
                             // TODO this should not happen, we shouldn't generate an action if this is true
                             //      the adjacent grass tile should be in the action
@@ -1541,7 +1545,12 @@ impl PokemonAgent {
                     }
                 }
             }
-            AgentState::PacingForEncounters { map, tile_a, tile_b, ref mut heading_to_b } => {
+            AgentState::PacingForEncounters { map, tile_a, tile_b, ref mut heading_to_b, ref mut stalled } => {
+                /// Overworld ticks on the same tile before the pair is declared unwalkable. One tile
+                /// step is ~13 ticks at `AGENT_RESOLUTION`, so this is several steps' worth of slack —
+                /// long enough never to fire on healthy pacing, short enough to cost nothing.
+                const STALL_TICKS: u16 = 60;
+
                 let game_state = api.game_state()?;
                 if game_state.mode == GameMode::Overworld {
                     if game_state.map.map != map {
@@ -1553,6 +1562,17 @@ impl PokemonAgent {
                     let target = if *heading_to_b { tile_b } else { tile_a };
                     if pos == target {
                         *heading_to_b = !*heading_to_b;
+                        *stalled = 0;
+                    } else {
+                        // Not there yet. Either we are mid-walk, or we are walking into something.
+                        *stalled += 1;
+                        if *stalled >= STALL_TICKS {
+                            self.event(AgentEvent::TextBox { message: format!(
+                                "pacing {tile_a}↔{tile_b} on {map} is blocked at {pos} — re-picking") });
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Idle);
+                            return Ok(());
+                        }
                     }
                     let next = if *heading_to_b { tile_b } else { tile_a };
                     if let Some(dir) = dir_to(pos, next) {
@@ -2084,7 +2104,6 @@ impl PokemonAgent {
             AgentState::SellingToMart(s) => return crate::pokemon::postgame::game_corner::sell_tick(self, api, s),
             AgentState::RedeemingPrize(s) => return crate::pokemon::postgame::game_corner::prize_tick(self, api, s),
             // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
-            AgentState::SearchingHiddenItem { at } => return crate::pokemon::postgame::aides::tick(self, api, at),
             AgentState::CheckingTrashCan { target, checked, press, facing } => {
                 // Checking a can triggers GymTrashScript, which prints a text box (leaving the
                 // overworld). Once that has appeared (`checked`), the return to the overworld means
@@ -2401,6 +2420,14 @@ fn adjacent_pacing_pair(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8
     neighbours(pos).find_map(|a| neighbours(a).find(|&b| b != pos).map(|b| (a, b)))
 }
 
+/// A grass tile next to `pos` that the player can actually **step onto**.
+///
+/// ⚠️ `pair_blocked` is not optional here, and leaving it out is a *silent* failure. A tile-pair
+/// collision (a ledge, an elevation boundary) makes the move illegal, so the pacing driver presses
+/// into it forever: the player never moves, the step counter never advances, and the ROM never rolls
+/// for an encounter — a sweep or a grind that looks busy and does nothing at all, with no error and no
+/// state change to log. Route 11's western grass runs right along a ledge row, which is where this was
+/// found. Its sibling [`adjacent_pacing_pair`] had the check from the start.
 fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<Point8> {
     let neighbors = [
         Point8 { x: pos.x,                  y: pos.y.saturating_sub(1) },
@@ -2409,9 +2436,11 @@ fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> O
         Point8 { x: pos.x.saturating_add(1),  y: pos.y                 },
     ];
     neighbors.into_iter().find(|&p| {
-        (p.x as usize) < map.width
+        p != pos
+            && (p.x as usize) < map.width
             && (p.y as usize) < map.height
             && map.meta_tiles[p.x as usize + p.y as usize * map.width] == MetaTile::Grass
+            && !map.pair_blocked(pos, p)
     })
 }
 
