@@ -434,7 +434,13 @@ user, so the Power Plant (which has one) has to come first.
       Route 9's (5,8) tree, then Route 10 — the BFS Surfs to the Power Plant door on its own. Zapdos at
       lv50 knows only Thundershock and Drill Peck, i.e. **no trapping move**, so it is the right place
       to prove the honest paralyse-then-throw loop when D2a lands.
-- [ ] **D2a — Catch an Electrode** (new) — see above. Still the unblock for the honest fights.
+- [ ] **D2a — Catch an Electrode** (new) — see above. Still the unblock for the honest fights, and
+      **attempted 2026-08-03: the route works, the fight does not.** A lv43 Electrode knows
+      Selfdestruct and uses it ~1 turn in 4; the Power Plant's disguised Poké Balls are `trainer`-
+      flagged, so losing hides them for the save. Both were lost. ~31 % per Electrode with a Great
+      Ball at full HP, ~52 % across the two — a coin flip, not a tuning problem. Full arithmetic and
+      the three things to try next are in the 2026-08-03 §11 entry;
+      `PolicyStep::electrode_steps` and an `#[ignore]`d leg are committed to test a fix against.
 - [ ] **D4 — Stock Ultra Balls.** Mewtwo is lv70 and will need them. *Observable:* balls in bag.
 - [x] **D5 + D6 — Cerulean Cave and Mewtwo.** *Observable:* Mewtwo in the dex; `postgame-legendaries.bin`.
       *Done (⚠️ Master-Ball-seeded):* `PolicyStep::mewtwo_steps()`, test `can_catch_mewtwo` (~18 s),
@@ -735,7 +741,7 @@ Phase 0 (item storage, PC locations, seams, probe)
 | A — PC boxes | claude-A-pcbox | `postgame-phase0.bin` | `postgame::pc_box` | ✅ done | A1–A7 all green. Build steps with `PolicyStep::deposit_pokemon/withdraw_pokemon/change_box/release_pokemon(.., map)` — **not** the four reserved variants, which are gone (see §11). Output `postgame-pc-box.bin`. |
 | B — Fly / Bike / Cycling Road | claude-B-flybike | `postgame-phase0.bin` | `postgame::fly_bike` | ✅ done | B1–B7 green, ~50 s wall clock for the lot. **Fly is available to everyone now: `PolicyStep::Fly { to }`, any of the 11 towns, from any outdoor map.** Start from `postgame-fly-bike.bin` (Fuchsia, Fly + Bicycle) — but heal first, Venusaur's Solarbeam is at 0 PP. Two shared-file fixes landed (see §11): field-move menu detection in `agent.rs`, and `can_surf` on Cycling Road. |
 | C — Fishing | claude-C-fishing | `postgame-fly-bike.bin` | `postgame::fishing` | ✅ done | C1–C5 green, ~31 s wall clock for the five legs. Entry fixture is **B's output, not `postgame-phase0.bin`** — the three rods are in three corners of Kanto and Fly makes each trip one step (see §11). Output `postgame-fishing.bin`: all three rods, **dex 10 owned / 113 seen**, Goldeen + Magikarp banked in box 1, Tentacool in the party. Build sessions with `PolicyStep::fish(rod, map, goal)`. |
-| D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
+| D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked — **D2a**, and the blocker is the *fight*, not the route (see the 2026-08-03 §11 entry) | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
 | E — Safari Zone | claude-E-safari | `postgame-flash.bin` | `postgame::safari` | ✅ done | E1–E4 green plus an **E5** the plan lacked (the four-area sweep) — **~7 min of wall clock across 3 legs**, output `postgame-safari.bin`: **dex 31 owned / 116 seen**, all twelve Safari species, party 6, box **18 of 20**, ¥35,564. Rooted on **H's output** (the chain head), not `postgame-phase0.bin` — same reasoning C/F/G's rows give; ⚠️ it is saved inside Rock Tunnel, so every leg opens with a `Dig`. **Three shared-file fixes, all in §11 and all of them other people's problems too:** the battle executor **could not press BALL** (only RUN was treated as terminal); the **boxed-catch wedge D reported is fixed** (START at a prompt that only takes A — so "leave a party slot free before a catch" is retired); and `can_surf` is false in the zone (Surf is refused there, and the BFS was routing across the pond). New for anyone: `GameState::safari`, `BattleState::enemy_catch_rate`, `PolicyStep::{safari_hunt_steps, safari_sweep_steps, SafariExit}`. ⚠️ **BAIT and ROCK are never thrown** — worked exactly through the ROM, both lose to a plain ball. ➡️ **H3 + H4 unblocked.** |
 | F — Game Corner | claude-F-gamecorner | `postgame-fly-bike.bin` | `postgame::game_corner` | ✅ done | F1–F4 green, **~9 s of wall clock for the four legs**. Rooted on **B's output**, not `postgame-phase0.bin` (same reasoning C's row gives). Output `postgame-game-corner.bin`: Coin Case, 20 coins, ¥43,209, **dex 8 owned**, an **Abra** in slot 4. Three things other streams can use: **`PolicyStep::SellToMart { map, item }`** — the mart's sell half, which nothing had — **`PolicyStep::RedeemPrize { prize }`** for all nine prizes, and `ItemId::is_key_item()` / `is_hm()`, pinned bit-for-bit against the ROM. Both prize branches (mon and TM) are covered; the TM one seeds **money** from the debug tier, like D's Master Ball. See §11. |
 | G — Gifts (G1–G4, G7–G8) | claude-G-gifts | `postgame-fly-bike.bin` | `postgame::gifts` | ✅ done | All of G1–G4, G7 and G8a–c green — **~57 s of wall clock across 8 legs**, output `postgame-name-rater.bin`: **dex 11 owned**, party Venusaur / Articuno / Vaporeon / Slowpoke / Aerodactyl / **Hitmonlee**, box 1 holding **Lapras** + Omanyte, bag 19/20 with TM29/TM31/TM03/TM26 and the ten Silph items. Rooted on **B's output** (same reasoning C's and F's rows give). Three things other streams can use: **`PolicyStep::PartyScript { script, slot }`**, the first driver here that can pick a slot in a **script-opened party menu** — **G5/G6's trades should be a third `PartyScript` variant, not a new driver** — a `deposit_item` fix (it **hung** on any full stack), and `probe_coverage` now printing **PC item storage**. Two shared-file bugs found, one fixed; five §11 entries. ➡️ **H1 is unblocked** (dex 11 > Flash's gate of 10). |
@@ -2638,3 +2644,59 @@ default tier is green (853 passed).
 
 **Impact on others:** if another tileset in `WaterTilesets` turns out to have no water, add it to the
 same exclusion — do **not** reach for passability.
+
+### [2026-08-03] D / D2a — the Electrode **Selfdestructs**, and there are only two of them
+**Status:** blocked 🟡 (with one real bug fixed on the way, and D2a's route fully verified)
+
+**What the plan said:** §6-D re-cut D2a as *"catch an Electrode — it is catch rate 60, i.e. an ordinary
+catch"*, and made it the unblock for honest legendary fights.
+
+**What is actually true: it is not an ordinary catch, because losing the fight destroys the target.**
+The Power Plant's eight disguised Poké Balls are `trainer`-flagged objects exactly like the birds
+(`data/maps/objects/PowerPlant.asm`), so `EndTrainerBattle` hides the object on every exit but a
+blackout — the same rule the 2026-07-30 entry established for Moltres. And a lv43 Electrode's last four
+learnt moves are **Sonicboom (17), Selfdestruct (22), Light Screen (29), Swift (40)**
+(`data/pokemon/evos_moves.asm:1638`), so about a quarter of its turns end the encounter by killing
+itself. Measured: **both** Electrodes Selfdestructed, on turns 3 and 2, and the floor was empty.
+
+**The arithmetic, which is why this is not a tuning problem.** Electrode's base speed 140 means it acts
+*before* the ball every turn. With `p` the per-ball catch chance and `q = 0.25` the Selfdestruct rate,
+`P(catch) = 0.75p / (1 − 0.75(1 − p))`. At full HP the best ball is the **Great Ball** — first roll
+`61/201 = 30 %`, second `128/256 = 50 %`, so `p = 15.2 %` (the Ultra Ball's better first roll `61/151`
+loses to its worse second roll `86/256`; the Poké Ball is 8 %). That gives **31 % per Electrode, 52 %
+across both.** This run lost both.
+
+**What I would try next, in order.**
+
+1. **Weaken to ≤25 % HP, then throw Ultra Balls.** Below a quarter HP the second roll saturates at
+   `255/256` for *every* ball, so only the first roll matters and the Ultra Ball's `61/151` becomes the
+   best in the game. That lifts `p` to ~40 % and the encounter to ~41 %, ~65 % across both. The blocker
+   is that `pick_battle_action` skips weakening when the attacker out-levels the target by 12+ (a lv71
+   Venusaur against a lv43 Electrode), and relaxing that guard touches the move-selection path every
+   leg depends on. It is also only a coin flip, not a fix.
+2. **A sleep move.** Sleep and freeze are worth −25 on the first roll *and* stop the target acting at
+   all, which removes the Selfdestruct clock entirely — this is the only change that makes the catch
+   near-certain rather than likelier. Nothing in the party has one and no mart sells one; the cheapest
+   source is a **Venusaur that kept Sleep Powder**, or a caught sleeper (Butterfree/Gastly/Jynx).
+   Worth checking against H5's chain, which now owns Gastly.
+3. **Blacking out is the only recoverable loss** — so an attempt made with a party that *cannot win but
+   can faint* keeps the Electrode alive for a second try. Perverse, but it is the ROM's own escape
+   hatch and it is what makes retries possible at all.
+
+**One real bug fixed on the way, and it is not D-specific.** `CatchPokemon`'s static-encounter branch
+matched a map sprite's name against the species name **exactly**. A map with more than one of a species
+numbers them — `Electrode 1`/`Electrode 2`, `Voltorb 1..6` — so the match found none of them and the
+step fell through to pacing for a wild encounter on a floor that has none, i.e. a silent stall.
+`sprite_is_species` now strips the number; pinned by
+`policy::policy_helper_tests::numbered_static_encounters_match_their_species`.
+
+**Everything except the fight is verified.** `PolicyStep::electrode_steps` reaches the Power Plant
+(Cerulean's trashed-house bridge, Route 9's cut tree, the BFS Surfs to the door), engages both
+Electrodes, and picks up TM45 afterwards — the leg only fails at `TeachMove`, for want of a live
+Electrode. It is kept as `#[ignore]`d `postgame::legendaries::can_catch_an_electrode` rather than
+deleted, because a future fix needs exactly this leg to test against. ⚠️ **Note the ordering it
+establishes:** TM45 is one per cartridge and a Gen 1 TM is consumed on use, so the Electrode must be
+caught **before** the TM is collected — D1a's Slowpoke version cannot simply be extended.
+
+**Impact on others:** the `sprite_is_species` fix is on `CatchPokemon`'s shared path. D's three
+legendaries remain caught-but-Master-Ball-seeded; the routes are honest and are what the tests prove.
