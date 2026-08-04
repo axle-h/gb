@@ -29,17 +29,6 @@
 //! One-line arms merge cleanly; inline bodies do not. That is the whole point of the seam — see §4.1
 //! of the plan before adding anything to a shared file.
 
-/// Landing point for the reserved `PolicyStep` seams (task 0.8) that no workstream owns yet.
-///
-/// The variants exist so that taking a workstream is a **one-line** edit to `policy.rs` — move your
-/// variant out of the grouped arm into its own arm delegating to your module — rather than an enum
-/// change plus an arm, which is what makes two agents collide in the same file.
-///
-/// Unreachable in practice: nothing constructs those variants, so no legitimate run can arrive here.
-pub fn unimplemented_seam(step: &crate::pokemon::policy::PolicyStep) -> Option<crate::pokemon::actions::OverworldAction> {
-    todo!("reserved postgame seam, not implemented yet: {step:?} — see docs/postgame-coverage-plan.md §6")
-}
-
 /// Phase 0 infrastructure, not workstreams — the debug tier (0.7) and item PC storage (0.5/0.6).
 pub mod debug;
 

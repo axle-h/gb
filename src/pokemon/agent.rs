@@ -216,10 +216,9 @@ pub(crate) enum AgentState {
     /// whole state machine lives in [`crate::pokemon::postgame::pc_box`].
     UsingPcBox(crate::pokemon::postgame::pc_box::PcBoxState),
 
-    // ── Reserved postgame seams (task 0.8 of `docs/postgame-coverage-plan.md`) ───────────────────
-    // Landed up front so a workstream adds only a match arm to this file, never a variant. Nothing
-    // constructs these yet; each arm delegates to a `todo!()` in the owning workstream's module.
-    // The shapes are drafts from §6 of the plan — reshape them when the real driver is written.
+    // ── Postgame driver states (`docs/postgame-coverage-plan.md`) ────────────────────────────────
+    // One variant per workstream driver; each arm delegates in one line to `postgame::<stream>::tick`
+    // so this file stays mergeable while several streams are open (§4.1 of the plan).
     /// **Workstream B** — driving the Fly menu chain and the bespoke town-map screen. The whole state
     /// machine lives in [`crate::pokemon::postgame::fly_bike`].
     Flying(crate::pokemon::postgame::fly_bike::FlyState),
