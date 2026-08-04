@@ -18,3 +18,5 @@ mod game_corner;
 mod gifts;
 mod trades;
 mod aides;
+mod items;
+mod maps;

@@ -66,6 +66,49 @@ fn can_walk_out_of_the_hall_of_fame() {
     fixture.save_state_named("src/pokemon/data/postgame-post-credits.bin").unwrap();
 }
 
+/// **Workstream J3** — the options the harness writes must survive a soft reset. Emulates ~3 min.
+///
+/// J2 writes `wOptions` once, at fixture load. That is not enough on its own and this is the test
+/// that says so: `wOptions` sits inside `wMainDataStart..wMainDataEnd`, the block
+/// `engine/menus/save.asm` copies to `sMainData` on a save and copies back on CONTINUE — and the
+/// Hall-of-Fame walk-out above is precisely a save followed by a soft reset and a CONTINUE. So the
+/// cartridge's own options come back over the harness's, silently, and every battle after that point
+/// pays for animations again.
+///
+/// The fix is to re-apply, which [`TestFixture::step`] does every tick. Poking the SRAM copy instead
+/// is not an option — `sMainDataCheckSum` is computed over the whole block, so a byte written into
+/// `sMainData` makes the game answer *"the file data is destroyed"* on the next load.
+///
+/// **`options_drifts > 0` is the load-bearing assertion.** Without it this test would pass on a
+/// harness that never needed to re-apply anything, and the day the drift became real nothing would
+/// notice.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn options_survive_the_hall_of_fame_reset() {
+    use crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../../data/post-hall-of-fame.bin"),
+        Duration::from_mins(20),
+        vec![],
+    );
+
+    assert_eq!(fixture.api().read_game_options().unwrap(), FAST_FIXTURE_OPTIONS,
+        "J2 should have applied the options at load");
+
+    let state = drive_out_of_hall_of_fame(&mut fixture);
+    assert_eq!(state.map.map, Map::PalletTown);
+
+    assert!(fixture.options_drifts > 0,
+        "the credits' save/soft-reset/CONTINUE should have restored the cartridge's own wOptions at \
+         least once — if this ever reads 0, the per-tick re-apply in TestFixture::step is dead code \
+         and J3's whole premise is wrong");
+    assert_eq!(fixture.api().read_game_options().unwrap(), FAST_FIXTURE_OPTIONS,
+        "…and the re-apply should have put them back");
+    println!("wOptions drifted {} times across the credits and was re-applied each time",
+        fixture.options_drifts);
+}
+
 /// The postgame root, for every Phase 0 test after 0.35.
 const POST_CREDITS: &[u8] = include_bytes!("../../data/postgame-post-credits.bin");
 

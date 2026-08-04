@@ -125,6 +125,39 @@ impl PolicyStep {
         s
     }
 
+    /// **K1** — the same trade, but with the give-species already in a **PC box** rather than in the
+    /// grass.
+    ///
+    /// [`Self::trade_steps`] assumes the give-species has to be caught, which is exactly why five of
+    /// the nine trades were skipped: their give-species are an evolution or a Safari catch away. K's
+    /// question is narrower — *can a sixth trade be done at all* — and for Ponyta → Seel the answer
+    /// needs no catching, because H5's Mansion sweep already boxed a Ponyta. So this constructor
+    /// swaps a catch for a **withdraw**, and everything after it is identical.
+    ///
+    /// `bank` is the party slot that goes into the box to make room; `box_slot` is where the
+    /// give-species is sitting in the **currently open** box. Order matters and is not interchangeable:
+    /// the deposit happens first (the party is full, so there is nowhere to put a withdrawn mon), and
+    /// it appends to the end of the box, so it cannot renumber a `box_slot` ahead of it.
+    ///
+    /// ⚠️ **The open box is the only readable one** (`postgame::pc_box`), so `box_slot` refers to
+    /// whatever `wCurrentBoxNum` is — issue a [`Self::change_box`] first if the mon is elsewhere.
+    /// Note that changing box **saves the game**, which is a thing to do at the top of a leg.
+    pub fn trade_boxed_steps(give: PokemonSpecies, box_slot: u8, bank: u8, bank_at: Map) -> Vec<Self> {
+        let trade = trade_for(give);
+        let town = town_of(bank_at);
+        let mut s = vec![
+            Self::Fly { to: town },
+            Self::enter(bank_at),
+            Self::deposit_pokemon(bank, bank_at),
+            Self::withdraw_pokemon(box_slot, bank_at),
+            Self::enter(town),
+        ];
+        s.extend(Self::to_trade_npc(trade));
+        s.push(Self::PartyScript { script: trade.script(), slot: 0 });
+        s.extend(out_of(trade.at).into_iter().map(Self::enter));
+        s
+    }
+
     /// The walk to the grass. Usually just `goto`, but a route with a **gate building** in the middle
     /// is two maps, not one, and `goto` cannot see that: it pops the moment the map matches, and
     /// `CatchPokemon` then paces on a grassless strip until the budget runs out, silently, with no
@@ -178,6 +211,17 @@ impl PolicyStep {
                 Self::enter(Map::CinnabarLab),
                 Self::enter(Map::CinnabarLabTradeRoom),
             ],
+            // ⚠️ **K1's trade is not in the trade room.** The lab's three back rooms all hang off
+            // `CinnabarLab`, and Ponyta → Seel is the **fossil** room's second scientist — the same
+            // room fossil revival happens in — not either of `CinnabarLabTradeRoom`'s two traders.
+            // The plan's warning ("the Cinnabar Lab is the Gramps and the Beauty") is about that
+            // *other* room; read the script that sets `wWhichTrade`
+            // (`scripts/CinnabarLabFossilRoom.asm:102`), never the room's name.
+            Map::CinnabarLabFossilRoom => vec![
+                Self::Fly { to: Map::CinnabarIsland },
+                Self::enter(Map::CinnabarLab),
+                Self::enter(Map::CinnabarLabFossilRoom),
+            ],
             other => panic!("no route recorded to the trade NPC on {other:?}"),
         }
     }
@@ -190,7 +234,7 @@ fn out_of(room: Map) -> Vec<Map> {
         Map::Route2TradeHouse => vec![Map::Route2],
         Map::VermilionTradeHouse => vec![Map::VermilionCity],
         Map::UndergroundPathRoute5 => vec![Map::Route5],
-        Map::CinnabarLabTradeRoom => vec![Map::CinnabarLab, Map::CinnabarIsland],
+        Map::CinnabarLabTradeRoom | Map::CinnabarLabFossilRoom => vec![Map::CinnabarLab, Map::CinnabarIsland],
         other => panic!("no exit recorded from {other:?}"),
     }
 }
@@ -244,6 +288,74 @@ mod tests {
             assert_eq!(byte(i * STRIDE + 1), trade.get as u8, "get species of trade {i}");
         }
         assert!(expected.next().is_none(), "more table rows than ROM entries");
+    }
+
+    /// **Task K2** — was "the save doesn't have the give-species in hand" really the only thing
+    /// stopping the other five trades?
+    ///
+    /// G5/G6 proved four trades and skipped five, and §8-K's table records the skip reason as the
+    /// give-species for every one of them. This checks that claim against the ROM rather than
+    /// re-asserting it: each of the nine give-species is either **catchable in the wild somewhere in
+    /// Kanto** (`WildDataPointers`, read by [`crate::pokemon::wild`]) or reachable by an evolution this
+    /// cartridge can perform, and the second list is spelled out below with *how*. Nothing here needs
+    /// a link cable, a Blue exclusive or a trade evolution — so the answer is **yes**: the obstacle was
+    /// only ever having one in hand, and K1 shipped a sixth trade by handing over a boxed mon.
+    ///
+    /// The answer is also *cheaper* than §8-K implies. **Eight of the nine give-species are plain wild
+    /// encounters**, including three the plan's framing reads as evolution grinds — see
+    /// `BY_EVOLUTION`'s warning for the three that were guessed wrong.
+    ///
+    /// This is a real net, not a comment: a give-species that stopped being obtainable — because the
+    /// table gained a row, or a ROM change moved an encounter slot — fails here in the default tier
+    /// instead of an hour into a leg.
+    #[test]
+    fn every_trade_give_species_is_obtainable() {
+        use crate::pokemon::wild::{self, Terrain};
+        use strum::IntoEnumIterator;
+        use crate::pokemon::map::Map;
+
+        /// The give-species with **no wild encounter slot in Red**, and the route to each. All four
+        /// are evolutions of something the save already owns or can catch, and none needs a trade.
+        /// The give-species with **no wild encounter slot in Red**, and the route to each.
+        ///
+        /// ⚠️ **There is exactly one, and the first draft of this list had four.** Nidorino
+        /// (`SafariZoneEast`), Slowbro (`SeafoamIslandsB2F`) and Raichu (`CeruleanCaveB1F`) were all
+        /// assumed to be evolution-only — "obviously" — and the ROM has all three wild. This test is
+        /// what caught it, three times running. Only Poliwhirl really is an evolution, and even that
+        /// is cheap: `data/wild/super_rod.asm:45` and `:50` put **Poliwag** on the Super Rod, which
+        /// workstream C already drives.
+        const BY_EVOLUTION: &[(PokemonSpecies, &str)] = &[
+            (PokemonSpecies::Poliwhirl, "Poliwag (Super Rod) at lv25"),
+        ];
+
+        let mut wrong = Vec::new();
+        for trade in TRADES {
+            let wild_home = Map::iter().find_map(|map| {
+                let wild = wild::encounters(map)?;
+                [Terrain::Grass, Terrain::Water].iter()
+                    .flat_map(|t| wild.species(*t))
+                    .any(|(s, _, _)| s == trade.give)
+                    .then_some(map)
+            });
+            let evolution = BY_EVOLUTION.iter().find(|(s, _)| *s == trade.give).map(|(_, how)| *how);
+            println!("   {:<12} → {:<12} on {:<24} — {}", format!("{:?}", trade.give),
+                format!("{:?}", trade.get), format!("{}", trade.at),
+                match (wild_home, evolution) {
+                    (Some(map), _) => format!("wild on {map}"),
+                    (None, Some(how)) => format!("evolve: {how}"),
+                    (None, None) => "❌ NO KNOWN SOURCE".to_string(),
+                });
+            match (wild_home, evolution) {
+                (Some(map), Some(_)) => wrong.push(format!(
+                    "{:?} is listed as evolution-only but the ROM has it wild on {map}", trade.give)),
+                (None, None) => wrong.push(format!(
+                    "{:?} (traded for {:?} on {}) has no wild encounter anywhere and no recorded way \
+                     to obtain it — §8-K's claim that the give-species was the only obstacle no \
+                     longer holds", trade.give, trade.get, trade.at)),
+                _ => {}
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// Every give-species is distinct, which is what makes [`trade_for`] unambiguous.

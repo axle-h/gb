@@ -395,6 +395,19 @@ impl PolicyStep {
 /// because a visit runs a party menu, a cry and four text boxes.
 const TICK_BUDGET: u32 = 1200;
 
+/// ⚠️ **A trade needs a much bigger budget than a Day Care visit, and 1200 is not it.** K1's
+/// Ponyta → Seel aborted with *"nothing changed in 1200 ticks"* — and then completed anyway, because
+/// the generic A-mash inherited a conversation whose mon had already been chosen and confirmed. It
+/// looked like a failure in the log and it *worked by fall-through*, which is worse than either.
+///
+/// The cause is that `Baseline::SpeciesGone` cannot be satisfied until the very end of
+/// `InGameTrade_DoTrade`: the give-mon does not leave the party until after the whole transfer
+/// cutscene — two cries, the send/receive animation and four text boxes — and on a **six**-mon party
+/// the cursor walk to the mon costs more ticks before any of that starts. 1200 ticks is 24 s of game
+/// time and the sequence is longer than that. Doubling it keeps the wedge detector meaningful (48 s
+/// with nothing changing is still unambiguous) without leaving the tail of a legitimate trade to luck.
+const TRADE_TICK_BUDGET: u32 = 2400;
+
 /// A one-NPC script that opens the **party menu** and needs the cursor driven to a chosen slot.
 ///
 /// Both members share a driver because they share the only hard part. Neither script resets
@@ -609,8 +622,12 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptSt
         return Ok(());
     }
 
-    if s.ticks > TICK_BUDGET {
-        abort(agent, api, format!("nothing changed in {TICK_BUDGET} ticks"));
+    let budget = match s.script {
+        PartyScript::Trade { .. } => TRADE_TICK_BUDGET,
+        _ => TICK_BUDGET,
+    };
+    if s.ticks > budget {
+        abort(agent, api, format!("nothing changed in {budget} ticks"));
         return Ok(());
     }
 

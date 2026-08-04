@@ -154,7 +154,14 @@ pub(crate) enum AgentState {
     /// The Pokémon nickname entry screen is active.
     /// `decided` is false while waiting for the policy; once true the name has been
     /// written to the naming buffer and START is toggled each tick until the screen exits.
-    NamingPokemon { species: PokemonSpecies, decided: bool },
+    /// ⚠️ `ticks` is the bound, and it is not bookkeeping. Once `decided`, the exit test is "the game
+    /// mode has left the naming/battle family" — which never becomes true if the naming screen was
+    /// never really up. `GameMode::NamingScreen` is inferred, and workstream **J** (battle animations
+    /// off) shifted the frame timing enough for it to fire spuriously **mid-battle**: the agent wrote
+    /// a nickname for the mon that was already out, then pulsed A at a battle that was waiting for a
+    /// move, for the rest of the run. Two previously-green legs died that way and neither log said
+    /// anything except `name:Venusaur`. §10's rule applies to this wait like any other.
+    NamingPokemon { species: PokemonSpecies, decided: bool, ticks: u16 },
 
     /// Player alternates between two adjacent tiles until a wild battle triggers — grass above ground,
     /// plain cave floor underground (see `adjacent_pacing_pair`). Either way it is the per-step encounter
@@ -238,6 +245,10 @@ pub(crate) enum AgentState {
     /// **Workstream F** — buying a Game Corner prize: the walk to a vendor bg-event and the bespoke
     /// prize menu. State machine in [`crate::pokemon::postgame::game_corner`].
     RedeemingPrize(crate::pokemon::postgame::game_corner::PrizeState),
+    /// **Workstream I** — using a bag item from the overworld: the START → ITEM → bag → USE chain
+    /// plus whichever menus that item opens afterwards (a party list, a move list, or neither). The
+    /// state machine lives in [`crate::pokemon::postgame::items`].
+    UsingBagItem(crate::pokemon::postgame::items::BagItemState),
     // (**H** reserved a `SearchingHiddenItem` state here. It is gone: collecting a hidden item is
     // `CheckingTrashCan` below, because the ROM dispatches both from `CheckForHiddenObject`.)
     // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -301,7 +312,7 @@ impl Display for AgentState {
             AgentState::OverworldMovement { destination, map } => write!(f, "move→{destination}@{map:?}"),
             AgentState::ReadingTextBox { .. }         => write!(f, "text"),
             AgentState::RunningScript { .. }          => write!(f, "script"),
-            AgentState::NamingPokemon { species, .. } => write!(f, "name:{:?}", species),
+            AgentState::NamingPokemon { species, ticks, .. } => write!(f, "name:{species:?}@{ticks}"),
             AgentState::PacingForEncounters { .. }    => write!(f, "wander"),
             AgentState::Battle(s) => match s {
                 BattleState::WaitingForMenu { .. } => write!(f, "battle:wait"),
@@ -322,6 +333,7 @@ impl Display for AgentState {
             AgentState::SellingToMart(s)         => write!(f, "sell:{:?}x{}", s.item.id, s.item.quantity),
             AgentState::UsingPartyScript(s)      => write!(f, "{:?}:slot{}", s.script, s.slot),
             AgentState::RedeemingPrize(s)        => write!(f, "prize:{:?}", s.prize),
+            AgentState::UsingBagItem(s)          => write!(f, "use:{:?}→{:?}", s.item, s.target),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
@@ -646,7 +658,7 @@ impl PokemonAgent {
                 // the naming screen has just opened
                 let species = api.naming_screen_species()?;
                 api.release_all_buttons();
-                self.set_state(AgentState::NamingPokemon { species, decided: false });
+                self.set_state(AgentState::NamingPokemon { species, decided: false, ticks: 0 });
             }
         } else if matches!(self.state, AgentState::NamingPokemon { decided: false, .. }) {
             // The naming screen closed before the policy reached a decision (unexpected).
@@ -837,7 +849,7 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_) | AgentState::RedeemingPrize(_) | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::PushingBoulder { .. }) {
+        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_) | AgentState::RedeemingPrize(_) | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::UsingBagItem(_) | AgentState::PushingBoulder { .. }) {
             self.assert_text_box_state(game_mode);
         }
 
@@ -855,6 +867,7 @@ impl PokemonAgent {
                         self.set_state(AgentState::NamingPokemon {
                             species: api.naming_screen_species()?,
                             decided: false,
+                            ticks: 0,
                         });
                     }
                     GameMode::WildBattle | GameMode::TrainerBattle => {
@@ -986,6 +999,12 @@ impl PokemonAgent {
                             use crate::pokemon::postgame::gifts::PartyScriptState;
                             api.release_all_buttons();
                             self.set_state(AgentState::UsingPartyScript(PartyScriptState::new(script, slot, npc, api)));
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::UseBagItem { item, target }) => {
+                            use crate::pokemon::postgame::items::BagItemState;
+                            api.release_all_buttons();
+                            self.set_state(AgentState::UsingBagItem(BagItemState::new(item, target, api)));
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::Fly { to }) => {
@@ -1303,9 +1322,19 @@ impl PokemonAgent {
                                 // in the bag drops.
                                 if let BattleAction::UseItem { item, .. } = action {
                                     use crate::pokemon::item::ItemId;
+                                    // **Workstream I3/I4** widened this list. The seven stat items and
+                                    // the Poké Doll behave exactly like a thrown ball as far as this
+                                    // driver is concerned — they are confirmed straight from the bag
+                                    // with no party menu (`data/items/use_party.asm` lists none of
+                                    // them for the in-battle path) and they are consumed on use, which
+                                    // is the completion test. Without them here the generic navigator
+                                    // takes over and backs out of the bag on CANCEL before the use
+                                    // commits, so nothing is ever spent.
                                     if matches!(item.id, ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion
                                         | ItemId::MaxPotion | ItemId::FullRestore
-                                        | ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall) {
+                                        | ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall
+                                        | ItemId::XAttack | ItemId::XDefend | ItemId::XSpeed | ItemId::XSpecial
+                                        | ItemId::XAccuracy | ItemId::GuardSpec | ItemId::DireHit | ItemId::PokeDoll) {
                                         let start_qty = game_state.bag.iter()
                                             .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
                                         let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
@@ -2102,6 +2131,7 @@ impl PokemonAgent {
             AgentState::Fishing(s) => return crate::pokemon::postgame::fishing::tick(self, api, s),
             AgentState::SellingToMart(s) => return crate::pokemon::postgame::game_corner::sell_tick(self, api, s),
             AgentState::RedeemingPrize(s) => return crate::pokemon::postgame::game_corner::prize_tick(self, api, s),
+            AgentState::UsingBagItem(s) => return crate::pokemon::postgame::items::tick(self, api, s),
             // Reserved seams (task 0.8) — one delegating line each; the bodies live with their owners.
             AgentState::CheckingTrashCan { target, checked, press, facing } => {
                 // Checking a can triggers GymTrashScript, which prints a text box (leaving the
@@ -2288,7 +2318,21 @@ impl PokemonAgent {
                 api.press_button(button);
                 self.set_state(AgentState::UsingFieldItem { item, target, press: false, entered_menu: true });
             }
-            AgentState::NamingPokemon { species, decided } => {
+            AgentState::NamingPokemon { species, decided, ticks } => {
+                /// Agent ticks (20 ms each) the *submitted* naming screen gets to close itself. A
+                /// real one — grid, cry, "was transferred to BILL's PC!" — is well under a second of
+                /// this; 30 s of game time is only reached when the screen was never there.
+                const NAMING_BUDGET: u16 = 1500;
+                if decided && ticks > NAMING_BUDGET {
+                    // The screen has not closed and it is not going to. Hand back to the ordinary
+                    // handlers rather than pulsing forever: the buffer still holds the name we wrote,
+                    // so the (buffer-is-empty) naming detection cannot immediately re-fire.
+                    self.event(AgentEvent::TextBox { message: format!(
+                        "naming screen for {species:?} never closed in {NAMING_BUDGET} ticks — giving up") });
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
                 if decided {
                     // Buffer already written; keep pulsing START until DisplayNamingScreen
                     // exits (wFontLoaded → 0, so game_mode leaves TextBox/NamingScreen).
@@ -2320,6 +2364,8 @@ impl PokemonAgent {
                     if !still_in_naming {
                         api.release_all_buttons();
                         self.set_state(AgentState::Idle);
+                    } else {
+                        self.set_state(AgentState::NamingPokemon { species, decided, ticks: ticks + 1 });
                     }
                 } else if let Some(decision) = self.policy.pick_nickname(species) {
                     // Write the nickname directly into the naming screen's string buffer,
@@ -2327,7 +2373,7 @@ impl PokemonAgent {
                     // when START is pressed.  An empty/None nickname causes AskName to
                     // fall back to the default species name.
                     api.write_naming_screen_buffer(decision.as_deref())?;
-                    self.set_state(AgentState::NamingPokemon { species, decided: true });
+                    self.set_state(AgentState::NamingPokemon { species, decided: true, ticks: 0 });
                 } else {
                     api.release_all_buttons();
                 }

@@ -350,6 +350,27 @@ pub enum PolicyStep {
     /// ([`crate::pokemon::postgame::gifts`]) walks the last tiles and owns the conversation, because
     /// these menus open on a *stale* cursor and an A-mash acts on an arbitrary mon.
     PartyScript { script: crate::pokemon::postgame::gifts::PartyScript, slot: u8 },
+    /// **I** — use bag `item` from the overworld on `target` (nothing, a party member, or one of its
+    /// moves). One variant for the whole of `ItemUsePtrTable`'s overworld half, because the chain is
+    /// always START → ITEM → the bag row → USE and only the menus *after* `USE` differ. Driver:
+    /// [`crate::pokemon::postgame::items`]; build with [`Self::use_medicine`],
+    /// [`Self::use_pp_restore`] or [`Self::use_item`].
+    ///
+    /// ⚠️ The step **pops with a reason** rather than issuing when the game would decline the use —
+    /// a potion at full HP, an Ether on a full-PP move, the Bicycle indoors. Those all print a text
+    /// box that reads like success and keep the item, so issuing them is an endless retry.
+    UseBagItem { item: ItemId, target: crate::pokemon::postgame::items::UseTarget },
+    /// **L** — like [`Self::EnterMap`], but it **gives up instead of stalling**: if the transition to
+    /// `to_map` is not reachable from where the agent is standing, the step pops with a printed
+    /// reason after a bounded wait. The whole point of workstream L is to find the rooms that cannot
+    /// be entered, so a tour has to be able to survive finding one — `EnterMap`'s deliberate hard
+    /// stall (which is right for scripted forward travel) would end the tour at the first locked door
+    /// and report nothing about the ninety rooms after it.
+    EnterMapIfReachable { to_map: Map },
+    /// **I3/I4** — pace `on_map`'s grass into a wild battle and use each of `items` once, in order.
+    /// The stat items and the Poké Doll are `wIsInBattle`-gated, so being *in* a battle is the whole
+    /// cost and one step spends the lot. ⚠️ A Poké Doll ends the battle, so it must be last.
+    UseItemsInBattle { on_map: Map, items: &'static [ItemId] },
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// Move `qty` of `item` between the bag and PC item storage, at the PC on `map` (Phase 0 tasks
@@ -577,6 +598,9 @@ pub enum FieldMove {
     /// **F** — walk to the prize vendor's bg-event tile and buy `prize` with coins. Driven by
     /// [`crate::pokemon::postgame::game_corner`].
     RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
+    /// **I** — use bag `item` on `target` from the overworld. Driven by
+    /// [`crate::pokemon::postgame::items`].
+    UseBagItem { item: ItemId, target: crate::pokemon::postgame::items::UseTarget },
     // (**H** reserved a `SearchHiddenItem` field move here. It is gone: a hidden item is collected by
     // facing its tile and pressing A, which is exactly `CheckTrashCan` — see
     // [`crate::pokemon::postgame::aides`].)
@@ -1925,6 +1949,22 @@ pub struct DeterministicPolicy {
     /// If we keep targeting the same beaten trainer from the same frozen spot (its after-battle text
     /// aborts the approach, no battle starts), the counter climbs until we mark it beaten and move on.
     gym_engage: Option<(Point8, Point8, u32)>,
+    /// Ticks an `EnterMapIfReachable` step has waited for a route (workstream L). The wait exists at
+    /// all because a map's action list is briefly empty on arrival while the sprites settle, so
+    /// "cannot reach" has to mean "still cannot reach a few seconds later".
+    enter_stuck: u32,
+    /// Bag quantity of the current `UseBagItem` step's item when the step began (workstream I), so
+    /// completion is "one of them left the bag" and a stack of four Revives spends exactly one.
+    item_use_baseline: Option<u8>,
+    /// How many times the current `UseBagItem` step has been handed to the driver. Two jobs: it is
+    /// the completion test for an item with **no observable at all** (the Itemfinder prints a text
+    /// box and changes no RAM), and it bounds a use the game silently declines for a reason
+    /// [`crate::pokemon::postgame::items::blocked`] does not model.
+    item_use_attempts: u32,
+    /// Bag quantities of a `UseItemsInBattle` step's items when it began, parallel to its list. The
+    /// step spends exactly one of each, and "spent" has to be measured against a baseline because
+    /// several of them (X Attack, Dire Hit) leave no trace once the battle ends.
+    battle_item_baseline: Option<Vec<u8>>,
 }
 
 
@@ -1959,6 +1999,24 @@ impl DeterministicPolicy {
     /// (20 ms each, so ~8 s of game time — long enough to cover a black-out warp and its dialogue).
     const MAX_GYM_ROUTE_WAIT: u32 = 400;
     const MAX_MART_ATTEMPTS: u32 = 4;
+    /// How many times to hand one `UseBagItem` step to the driver before giving up (workstream I).
+    /// A use the game declines consumes nothing, so without a bound the step retries for the whole
+    /// leg — the same shape as the full-bag trap, and just as quiet.
+    const MAX_ITEM_USE_ATTEMPTS: u32 = 4;
+    /// **Policy polls**, not ticks, that one `EnterMapIfReachable` spends before giving up.
+    ///
+    /// Polls rather than ticks because that is what the policy can count, and it is the better
+    /// measure anyway: a legitimate long walk issues *one* action and then spends hundreds of ticks
+    /// walking it, so 60 polls is 60 *attempts*, not 60 ticks — several times what any single
+    /// transition needs, while a door that bounces the player back burns a poll every few ticks.
+    ///
+    /// ⚠️ **It was 600, then 200, and both were too generous** — for opposite reasons at each end of
+    /// the map. Indoors, a sealed door (the Vermilion dock) burns polls fast, and at 600 the *second*
+    /// consecutive give-up outlasted the harness's ten-minute stall window. Outdoors it is the other
+    /// way round: one poll on Route 12 is a walk of several minutes, so 200 attempts is hours of game
+    /// time and the tour ran out of cycle budget in Lavender instead. Attempts are cheap to be wrong
+    /// about in only one direction; keep this small.
+    const MAX_ENTER_WAIT: u32 = 60;
 
     pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>) -> Self {
         Self {
@@ -1982,6 +2040,10 @@ impl DeterministicPolicy {
             interact_skip_waits: 0,
             fish_casts: 0,
             safari: Default::default(),
+            enter_stuck: 0,
+            item_use_baseline: None,
+            item_use_attempts: 0,
+            battle_item_baseline: None,
         }
     }
 
@@ -2098,6 +2160,31 @@ impl Policy for DeterministicPolicy {
                     // If it has NOT been observed this returns None and the agent stalls — the
                     // intended hard-fail for genuinely under-specified forward travel.
                     Self::route_toward(world_graph, &actions, to_map)
+                },
+                PolicyStep::EnterMapIfReachable { to_map } => {
+                    // **Workstream L.** `EnterMap`'s body, with a give-up instead of a stall.
+                    if state.map.map == to_map {
+                        self.enter_stuck = 0;
+                        self.queue.pop_front();
+                        continue;
+                    }
+                    // ⚠️ The counter runs on **every** poll, not only when there is no action to
+                    // take — because the failure this step exists to survive is not always "nowhere
+                    // to go". Vermilion's tour found the other shape: the agent stood at (18,30)
+                    // being handed a perfectly good walk to the `VermilionDock` door, over and over,
+                    // and the map never changed. An action-less counter resets on each of those and
+                    // never fires. Only "this transition has not happened in a minute of game time"
+                    // catches both.
+                    self.enter_stuck += 1;
+                    if self.enter_stuck >= Self::MAX_ENTER_WAIT {
+                        println!("[policy] TOUR: gave up entering {to_map} from {} after {} ticks",
+                            state.map.map, self.enter_stuck);
+                        self.enter_stuck = 0;
+                        self.queue.pop_front();
+                        continue;
+                    }
+                    Self::enter_map_action(&actions, to_map, None)
+                        .or_else(|| Self::route_toward(world_graph, &actions, to_map))
                 },
                 PolicyStep::Goto { map: target, strict } => {
                     if state.map.map == target {
@@ -2594,6 +2681,59 @@ impl Policy for DeterministicPolicy {
                 }
                 PolicyStep::RedeemPrize { .. } => None, // on the map — handed to `pick_field_move`
                 PolicyStep::PartyScript { .. } => None, // already routed by a preceding `enter` step
+                PolicyStep::UseBagItem { .. } => None,  // **I** — `pick_field_move` owns the menus
+                PolicyStep::UseItemsInBattle { on_map, items } => {
+                    // **I3/I4.** The same wander as `SweepDex`, with a different stop condition: every
+                    // item spent. Getting *into* a wild battle is the only reason to walk at all.
+                    if state.map.map != on_map {
+                        let action = Self::route_toward(world_graph, &actions, on_map);
+                        if action.is_none() {
+                            println!("[policy] want a battle on {on_map} to use items in, but no path there!");
+                            self.battle_item_baseline = None;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        action
+                    } else {
+                        let baseline = self.battle_item_baseline.get_or_insert_with(||
+                            items.iter().map(|&i| crate::pokemon::postgame::items::bag_quantity(&state, i)).collect());
+                        let left: Vec<ItemId> = items.iter().zip(baseline.iter())
+                            .filter(|&(&item, &was)| crate::pokemon::postgame::items::bag_quantity(&state, item) >= was)
+                            .map(|(&item, _)| item)
+                            .collect();
+                        if left.is_empty() {
+                            println!("[policy] UseItemsInBattle {on_map}: every item spent — done");
+                            self.battle_item_baseline = None;
+                            self.catch_wander_stuck = 0;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        // Nothing left in the bag to spend — say so rather than pace for ever.
+                        if left.iter().all(|&i| crate::pokemon::postgame::items::bag_quantity(&state, i) == 0) {
+                            println!("[policy] UseItemsInBattle {on_map}: none of {left:?} are in the bag — skipping");
+                            self.battle_item_baseline = None;
+                            self.catch_wander_stuck = 0;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        match actions.iter().find(|a| a.tile == MetaTile::Grass)
+                            .cloned()
+                            .or_else(|| state.map.wander_action())
+                        {
+                            Some(action) => { self.catch_wander_stuck = 0; Some(action) }
+                            None => {
+                                self.catch_wander_stuck += 1;
+                                if self.catch_wander_stuck < 400 { None } else {
+                                    println!("[policy] UseItemsInBattle {on_map}: nowhere to trigger an encounter!");
+                                    self.battle_item_baseline = None;
+                                    self.catch_wander_stuck = 0;
+                                    self.queue.pop_front();
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
                 PolicyStep::SellToMart { map, .. } | PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
                     // Routing only. Once we are standing on `map`, `pick_field_move` hands the step to
                     // the storage driver, which walks the last tiles itself so that it — and not the
@@ -2828,6 +2968,34 @@ impl Policy for DeterministicPolicy {
         if let Some(&PolicyStep::Fish { goal, .. }) = self.queue.front() {
             if let Some(action) = crate::pokemon::postgame::fishing::pick_battle_action(state, goal, &actions) {
                 return Some(action);
+            }
+        }
+
+        // **Workstream I3/I4.** A wild battle during a `UseItemsInBattle` step is the whole point of
+        // the step: spend the next unspent item in it. Placed here, before the flee/heal/catch
+        // detours, because every one of them would abandon the battle the step went looking for —
+        // and X items are `wIsInBattle`-gated, so there is no second chance out in the overworld.
+        if let Some(&PolicyStep::UseItemsInBattle { items, .. }) = self.queue.front() {
+            use crate::pokemon::postgame::items;
+            if battle_state.battle_type == BattleType::Wild {
+                if let Some(baseline) = self.battle_item_baseline.clone() {
+                    let next = items.iter().zip(baseline.iter())
+                        .find(|&(&item, &was)| items::bag_quantity(state, item) >= was && was > 0)
+                        .map(|(&item, _)| item);
+                    if let Some(item) = next {
+                        if let Some(action) = actions.iter().find(|a|
+                            matches!(a, BattleAction::UseItem { item: b, .. } if b.id == item)) {
+                            println!("[policy] UseItemsInBattle: using {item:?}");
+                            return Some(action.clone());
+                        }
+                    } else {
+                        // Everything spent and the battle is still running (no Poké Doll in the list,
+                        // or it was declined) — leave rather than fight a battle nobody wanted.
+                        if let Some(run) = actions.iter().find(|a| matches!(a, BattleAction::Run)) {
+                            return Some(*run);
+                        }
+                    }
+                }
             }
         }
 
@@ -3266,6 +3434,36 @@ impl Policy for DeterministicPolicy {
                 }
             }
         }
+        if let Some(&PolicyStep::UseBagItem { item, target }) = self.queue.front() {
+            // **Workstream I.** Re-issued each time the driver returns to `Idle`, like `UseStrength`,
+            // so an interruption costs a tick rather than the step — but bounded, because a use the
+            // game silently declines would otherwise retry for the whole leg. `items::pick` refuses
+            // the known-declinable cases up front; `MAX_ITEM_USE_ATTEMPTS` catches the rest.
+            use crate::pokemon::postgame::items;
+            let baseline = *self.item_use_baseline
+                .get_or_insert_with(|| items::baseline(state, item));
+            match items::pick(state, item, target, baseline, self.item_use_attempts) {
+                Ok(field_move) => {
+                    if self.item_use_attempts >= Self::MAX_ITEM_USE_ATTEMPTS {
+                        println!("[policy] UseBagItem: gave up on {item:?} after {} attempts",
+                            self.item_use_attempts);
+                        self.item_use_attempts = 0;
+                        self.item_use_baseline = None;
+                        self.queue.pop_front();
+                        return None;
+                    }
+                    self.item_use_attempts += 1;
+                    return Some(field_move);
+                }
+                Err(why) => {
+                    println!("[policy] UseBagItem: {why} — done");
+                    self.item_use_attempts = 0;
+                    self.item_use_baseline = None;
+                    self.queue.pop_front();
+                    return None;
+                }
+            }
+        }
         if let Some(&PolicyStep::Fly { to }) = self.queue.front() {
             // **Workstream B.** Popped on issue like `MovePokemonToFront`: the driver owns everything
             // from the START menu to the landing, and `pick_field_move` is not polled again until it
@@ -3559,6 +3757,15 @@ impl Policy for DeterministicPolicy {
                 // Walking out of the west is four map transitions on one step, and an ejection part
                 // way through restarts it from the gate — legitimately longer than the stall window.
                 | Some(PolicyStep::SafariExit)
+                // **I3/I4** — one step covers pacing for a wild encounter *and* the eight-turn battle
+                // it exists for, with the queue frozen throughout.
+                | Some(PolicyStep::UseItemsInBattle { .. })
+                // **L** — this step **carries its own bound** (`MAX_ENTER_WAIT` attempts), so the
+                // harness's 10-minute stall window is redundant and, on a route, wrong: walking out
+                // onto Route 12 and back is one poll and several minutes of game time, so a handful
+                // of legitimate attempts can outlast the window. The tour's real failsafe is the
+                // test's cycle budget.
+                | Some(PolicyStep::EnterMapIfReachable { .. })
         )
     }
 }

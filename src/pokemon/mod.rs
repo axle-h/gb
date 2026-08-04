@@ -388,6 +388,8 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             // BIT_STRENGTH_ACTIVE = bit 0 of wStatusFlags1 — set by using Strength from the party menu,
             // reset on every map change. Required before a boulder will move when pushed.
             strength_active: mmu.read_pointer(&pokered_symbols::wStatusFlags1) & 0x01 != 0,
+            repel_steps: postgame::items::repel_steps(mmu),
+            on_bicycle: postgame::items::on_bicycle(mmu),
             safari: postgame::safari::read_state(mmu),
             map,
             battle: mmu.read_battle_state(),
@@ -639,6 +641,13 @@ pub struct GameState {
     /// True while Strength is active (BIT_STRENGTH_ACTIVE in `wStatusFlags1`) — set by using Strength
     /// from the party menu, reset on every map change. A boulder only moves when pushed with this set.
     pub strength_active: bool,
+    /// **I5** — `wRepelRemainingSteps`: overworld steps left before the Repel wears off. Repel sets
+    /// 100, Super Repel 200, Max Repel 250, and the counter is decremented one per step; while it is
+    /// non-zero the ROM suppresses any wild encounter whose level is below the lead's.
+    pub repel_steps: u8,
+    /// **I6** — true while riding the Bicycle (`wWalkBikeSurfState == 1`). The bike doubles overworld
+    /// speed, and it is a *toggle*: using the item again dismounts.
+    pub on_bicycle: bool,
 }
 
 /// State of the Vermilion Gym two-switch trash-can puzzle that unlocks the door to Lt. Surge.

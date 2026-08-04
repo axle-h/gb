@@ -15,6 +15,16 @@ pub struct TestFixture {
     last_steps_remaining: Option<usize>,
     /// How long without queue progress before we declare a stall.
     stall_threshold: MachineCycles,
+    /// False until the first [`Self::step`], so the load-time write is not reported as a drift.
+    options_reapplied: bool,
+    /// **J3** — how many times the game has restored its own `wOptions` over the harness's, i.e. how
+    /// many save/reload boundaries this run has crossed. `> 0` is the evidence that re-applying every
+    /// tick is load-bearing rather than belt-and-braces; see `options_survive_the_hall_of_fame_reset`.
+    pub options_drifts: u32,
+    /// The options this fixture holds the game to. Normally
+    /// [`crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS`]; a leg pinned to the *original*
+    /// battle timing swaps it with [`Self::with_original_battle_timing`].
+    options: GameOptions,
 }
 
 impl TestFixture {
@@ -25,11 +35,15 @@ impl TestFixture {
         // The agent builds its world graph incrementally as it traverses.
         let policy = DeterministicPolicy::new(42, policy_steps);
 
-        PokemonApi::new(&mut gb)
-            .write_game_options(&GameOptions::default())
-            .expect("failed to write game options");
+        // **Workstream J2.** Applied here rather than by regenerating the 27 committed `.bin`s: one
+        // place, every tier, and no chance of a half-regenerated chain. See
+        // [`crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS`] for what the three bits are and
+        // why the plan's proposed byte was wrong.
+        let options = crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
+        PokemonApi::new(&mut gb).debug_set_options(&options);
 
         Self {
+            options,
             gb,
             map_cache: MapMetadataCache::default(),
             total_cycles: MachineCycles::ZERO,
@@ -38,14 +52,50 @@ impl TestFixture {
             last_steps_remaining: None,
             // 10 minutes of game time without a queue step change → stall
             stall_threshold: MachineCycles::from_duration(Duration::from_secs(10 * 60)),
+            options_reapplied: false,
+            options_drifts: 0,
             agent: PokemonAgent::new(Box::new(policy)),
         }
+    }
+
+    /// **J, opt-out** — hold this fixture to the options the suite used *before* workstream J, i.e.
+    /// with battle animations **on**.
+    ///
+    /// ⚠️ This is not a preference, it is a **pin to an RNG stream**. Fewer frames per battle means
+    /// the ROM samples `hRandomAdd`/`hRandomSub` at different moments, so turning animations off
+    /// changes every encounter roll and every catch roll downstream — and a leg whose *route* was
+    /// tuned against one stream can land on the wrong side of a map on another. Four mainline legs do
+    /// exactly that (`celadon::can_reach_lavender` stalls at Route 10 (12,20), unable to reach
+    /// Lavender because a differently-timed wild battle left it in the route's southern pocket; the
+    /// same shape for `saffron::can_enter_saffron`, `cinnabar::can_get_volcano_badge` and
+    /// `endgame::can_beat_elite_four`).
+    ///
+    /// Re-cutting them is not the answer: §4.2 of the plan **freezes** `complete_game_steps` and
+    /// `full_playthrough`, and §3 puts battle tactics out of scope on the grounds that in deployment
+    /// they are the LLM's decisions. So the mainline chain keeps the stream it was cut against and
+    /// the postgame chain — all 66 legs of it, cut after J — gets the 20 % .
+    pub fn with_original_battle_timing(mut self) -> Self {
+        self.options = GameOptions { battle_animations_on: true,
+                                     ..crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS };
+        PokemonApi::with_cache(&mut self.gb, &mut self.map_cache).debug_set_options(&self.options);
+        self
     }
 
     pub fn step(&mut self) {
         let cycles = self.gb.run(AGENT_RESOLUTION);
 
         let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+        // **Workstream J3.** `wOptions` is inside the block the game copies to SRAM on a save and
+        // copies back on CONTINUE, so a soft reset — which Phase 0's Hall-of-Fame walk-out performs,
+        // and `change_box` sets up — restores the cartridge's own options over the ones J2 wrote.
+        // Re-applying is a byte compare per tick and it cannot be undone by anything the game does;
+        // poking the SRAM copy instead would fail `sMainDataCheckSum`. `probe_fixture_options` is the
+        // proof.
+        if api.debug_set_options(&self.options) && self.options_reapplied {
+            self.options_drifts += 1;
+            println!("[fixture] wOptions drifted (a save/reload restored the cartridge's) — re-applied");
+        }
+        self.options_reapplied = true;
         self.agent.update(&mut api, cycles).ok();
 
         self.total_cycles += cycles;
@@ -285,6 +335,14 @@ fn probe_coverage() {
         ("postgame-sweep-viridian", include_bytes!("../data/postgame-sweep-viridian.bin")),
         ("postgame-sweep-lavender", include_bytes!("../data/postgame-sweep-lavender.bin")),
         ("postgame-aides", include_bytes!("../data/postgame-aides.bin")),
+        // Workstream K, rooted on H's output.
+        ("postgame-seel", include_bytes!("../data/postgame-seel.bin")),
+        // Workstream I's chain, also rooted on H's output: medicine → the Itemfinder and a Repel →
+        // an Ether and the hidden PP Up → the stat items and a Poké Doll.
+        ("postgame-medicine", include_bytes!("../data/postgame-medicine.bin")),
+        ("postgame-finder", include_bytes!("../data/postgame-finder.bin")),
+        ("postgame-ether", include_bytes!("../data/postgame-ether.bin")),
+        ("postgame-items", include_bytes!("../data/postgame-items.bin")),
     ];
     for (name, bytes) in FIXTURES {
         print_coverage(name, bytes);
@@ -294,6 +352,13 @@ fn probe_coverage() {
 /// The body of [`probe_coverage`] for one snapshot. Separate so a workstream can call it on a state
 /// it has just driven to, not only on a committed file.
 pub fn print_coverage(name: &str, save_state: &[u8]) {
+    // A fixture that has never been regenerated is a zero-byte placeholder — `include_bytes!` needs
+    // the file to exist before the leg that writes it can compile. Say so rather than panicking and
+    // taking the other thirty snapshots' output with it.
+    if save_state.is_empty() {
+        println!("== {name}: EMPTY placeholder — run its leg with --features regen-fixtures");
+        return;
+    }
     use crate::pokemon::bag::Bag;
     use crate::pokemon::item::ItemId;
     use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
