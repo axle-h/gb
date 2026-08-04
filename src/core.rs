@@ -5,6 +5,7 @@ use crate::mmu::MMU;
 use crate::opcode::{JumpCondition, OpCode, Register, Register16, Register16Mem, Register16Stack};
 use crate::ram::{RAM, ROM};
 use crate::registers::RegisterSet;
+use crate::savestate::{labels, SectionReader, SectionWriter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub enum CoreMode {
@@ -14,13 +15,47 @@ pub enum CoreMode {
     Crash,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Core {
     registers: RegisterSet,
     mmu: MMU,
     interrupts_enabled: bool,
     interrupts_enabled_on_next_instruction: bool,
     mode: CoreMode
+}
+
+/// Contents of the `cpu` save-state section. Append new fields at the end and bump
+/// [`CPU_SECTION_VERSION`] — see `src/savestate/mod.rs`.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct CpuSection {
+    pub registers: RegisterSet,
+    pub mode: CoreMode,
+    pub interrupts_enabled: bool,
+    pub interrupts_enabled_on_next_instruction: bool,
+}
+
+pub const CPU_SECTION_VERSION: u16 = 1;
+
+impl Core {
+    pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
+        writer.write(labels::CPU, CPU_SECTION_VERSION, &CpuSection {
+            registers: self.registers,
+            mode: self.mode,
+            interrupts_enabled: self.interrupts_enabled,
+            interrupts_enabled_on_next_instruction: self.interrupts_enabled_on_next_instruction,
+        })?;
+        self.mmu.write_sections(writer)
+    }
+
+    pub(crate) fn read_sections(&mut self, reader: &SectionReader) -> Result<(), String> {
+        if let Some((_version, section)) = reader.read::<CpuSection>(labels::CPU)? {
+            self.registers = section.registers;
+            self.mode = section.mode;
+            self.interrupts_enabled = section.interrupts_enabled;
+            self.interrupts_enabled_on_next_instruction = section.interrupts_enabled_on_next_instruction;
+        }
+        self.mmu.read_sections(reader)
+    }
 }
 
 impl Core {

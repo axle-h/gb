@@ -7,10 +7,11 @@ use crate::lcd_control::{LcdControl, ObjectSizeMode, TileDataMode, TileMapMode};
 use crate::lcd_dma::LcdDma;
 use crate::lcd_palette::{DMGColor, DMGPaletteRegister, LcdPalette};
 use crate::lcd_status::{LcdMode, LcdStatus};
+use crate::savestate::{labels, SectionReader, SectionWriter};
 use image::{ImageBuffer, Rgb, RgbImage};
 use itertools::Itertools;
 
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
+#[derive(Debug, Clone)]
 pub struct PPU {
     vram: [u8; 0x2000], // 8KB VRAM
     oam: [u8; 0xA0], // 160 bytes OAM (Object Attribute Memory)
@@ -57,6 +58,94 @@ impl WindowRenderState {
         self.is_active = false;
         self.max_y = 0;
         self.window_y = 0;
+    }
+}
+
+/// `lcd` is derived output and `scanline_sprites` is rebuilt from OAM on every scanline. Neither
+/// is machine state, so neither is serialised — which means neither may take part in equality
+/// either, or the save/load round-trip assertion in `game_boy::tests::save_and_load_state` would
+/// compare a restored frame buffer against one that was never saved. `Audio` excludes its
+/// resampler output for exactly the same reason.
+impl PartialEq for PPU {
+    fn eq(&self, other: &Self) -> bool {
+        self.vram == other.vram
+            && self.oam == other.oam
+            && self.lcd_control == other.lcd_control
+            && self.lcd_status == other.lcd_status
+            && self.vblank_interrupt_pending == other.vblank_interrupt_pending
+            && self.scroll == other.scroll
+            && self.window_position == other.window_position
+            && self.palette == other.palette
+            && self.dma == other.dma
+            && self.current_ticks == other.current_ticks
+            && self.current_x == other.current_x
+            && self.window_state == other.window_state
+    }
+}
+
+impl Eq for PPU {}
+
+/// Contents of the `ppu` save-state section. Excludes `lcd` and `scanline_sprites` (see the
+/// `PartialEq` note above) and the DMA controller, which has its own `dma` section.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct PpuSection {
+    pub vram: [u8; 0x2000],
+    pub oam: [u8; 0xA0],
+    pub lcd_control: LcdControl,
+    pub lcd_status: LcdStatus,
+    pub vblank_interrupt_pending: bool,
+    pub scroll: Point8,
+    pub window_position: Point8,
+    pub palette: LcdPalette,
+    pub current_ticks: usize,
+    pub current_x: usize,
+    pub window_state: WindowRenderState,
+}
+
+pub const PPU_SECTION_VERSION: u16 = 1;
+pub const DMA_SECTION_VERSION: u16 = 1;
+
+impl PPU {
+    pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
+        writer.write(labels::PPU, PPU_SECTION_VERSION, &PpuSection {
+            vram: self.vram,
+            oam: self.oam,
+            lcd_control: self.lcd_control.clone(),
+            lcd_status: self.lcd_status.clone(),
+            vblank_interrupt_pending: self.vblank_interrupt_pending,
+            scroll: self.scroll,
+            window_position: self.window_position,
+            palette: self.palette,
+            current_ticks: self.current_ticks,
+            current_x: self.current_x,
+            window_state: self.window_state,
+        })?;
+        writer.write(labels::DMA, DMA_SECTION_VERSION, &self.dma)
+    }
+
+    pub(crate) fn read_sections(&mut self, reader: &SectionReader) -> Result<(), String> {
+        if let Some((_version, section)) = reader.read::<PpuSection>(labels::PPU)? {
+            self.vram = section.vram;
+            self.oam = section.oam;
+            self.lcd_control = section.lcd_control;
+            self.lcd_status = section.lcd_status;
+            self.vblank_interrupt_pending = section.vblank_interrupt_pending;
+            self.scroll = section.scroll;
+            self.window_position = section.window_position;
+            self.palette = section.palette;
+            self.current_ticks = section.current_ticks;
+            self.current_x = section.current_x;
+            self.window_state = section.window_state;
+
+            // Derived state: the frame buffer is rebuilt as the PPU walks the rest of the frame,
+            // and the sprite list on the next OAM scan.
+            self.lcd = [DMGColor::White; LCD_WIDTH * LCD_HEIGHT];
+            self.scanline_sprites.clear();
+        }
+        if let Some((_version, dma)) = reader.read::<LcdDma>(labels::DMA)? {
+            self.dma = dma;
+        }
+        Ok(())
     }
 }
 

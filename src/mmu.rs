@@ -1,6 +1,4 @@
-use bincode::{BorrowDecode, Decode, Encode};
-use bincode::de::{BorrowDecoder, Decoder};
-use bincode::enc::Encoder;
+use bincode::{Decode, Encode};
 use crate::activation::Activation;
 use crate::audio::Audio;
 use crate::core::CoreMode;
@@ -12,6 +10,7 @@ use crate::joypad::JoypadRegister;
 use crate::pokemon::symbols::{DmgBank, DmgPointer};
 use crate::ppu::PPU;
 use crate::ram::{RAM, ROM};
+use crate::savestate::{labels, SectionReader, SectionWriter};
 use crate::serial::Serial;
 use crate::timer::Timer;
 
@@ -36,6 +35,100 @@ pub struct MMU {
     interrupt_request: InterruptFlags,
     joypad_register: JoypadRegister,
     audio: Audio,
+}
+
+/// Contents of the `cart` save-state section: everything that describes the cartridge and its
+/// mapper state. The ROM image itself is deliberately absent — it is supplied by the loader.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct CartSection {
+    pub header: CartHeader,
+    pub ram_banks: Vec<[u8; RAM_BANK_SIZE]>,
+    pub ram_enabled: bool,
+    pub rom_bank_register: usize,
+    pub ram_bank_register: usize,
+}
+
+/// Contents of the `irq` save-state section.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct IrqSection {
+    pub interrupt_enable: InterruptFlags,
+    pub interrupt_request: InterruptFlags,
+}
+
+/// Contents of the `timer` save-state section: everything clocked off the divider, plus serial,
+/// which shares its clock domain.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct TimerSection {
+    pub divider: Divider,
+    pub timer: Timer,
+    pub serial: Serial,
+}
+
+pub const CART_SECTION_VERSION: u16 = 1;
+pub const WRAM_SECTION_VERSION: u16 = 1;
+pub const HRAM_SECTION_VERSION: u16 = 1;
+pub const IRQ_SECTION_VERSION: u16 = 1;
+pub const TIMER_SECTION_VERSION: u16 = 1;
+pub const JOYP_SECTION_VERSION: u16 = 1;
+
+impl MMU {
+    pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
+        writer.write(labels::CART, CART_SECTION_VERSION, &CartSection {
+            header: self.header.clone(),
+            ram_banks: self.ram_banks.clone(),
+            ram_enabled: self.ram_enabled,
+            rom_bank_register: self.rom_bank_register,
+            ram_bank_register: self.ram_bank_register,
+        })?;
+        writer.write(labels::WRAM, WRAM_SECTION_VERSION, &self.work_ram)?;
+        writer.write(labels::HRAM, HRAM_SECTION_VERSION, &self.high_ram)?;
+        writer.write(labels::TIMER, TIMER_SECTION_VERSION, &TimerSection {
+            divider: self.divider,
+            timer: self.timer.clone(),
+            serial: self.serial.clone(),
+        })?;
+        writer.write(labels::IRQ, IRQ_SECTION_VERSION, &IrqSection {
+            interrupt_enable: self.interrupt_enable,
+            interrupt_request: self.interrupt_request,
+        })?;
+        writer.write(labels::JOYP, JOYP_SECTION_VERSION, &self.joypad_register)?;
+        self.ppu.write_sections(writer)?;
+        self.audio.write_sections(writer)
+    }
+
+    pub(crate) fn read_sections(&mut self, reader: &SectionReader) -> Result<(), String> {
+        if let Some((_version, section)) = reader.read::<CartSection>(labels::CART)? {
+            self.header = section.header;
+            self.ram_banks = section.ram_banks;
+            self.ram_enabled = section.ram_enabled;
+            self.rom_bank_register = section.rom_bank_register;
+            self.ram_bank_register = section.ram_bank_register;
+        }
+        if let Some((_version, work_ram)) = reader.read::<[u8; 0x2000]>(labels::WRAM)? {
+            self.work_ram = work_ram;
+        }
+        if let Some((_version, high_ram)) = reader.read::<[u8; 0x7F]>(labels::HRAM)? {
+            self.high_ram = high_ram;
+        }
+        if let Some((_version, section)) = reader.read::<TimerSection>(labels::TIMER)? {
+            self.divider = section.divider;
+            self.timer = section.timer;
+            self.serial = section.serial;
+        }
+        if let Some((_version, section)) = reader.read::<IrqSection>(labels::IRQ)? {
+            self.interrupt_enable = section.interrupt_enable;
+            self.interrupt_request = section.interrupt_request;
+        }
+        if let Some((_version, joypad_register)) = reader.read::<JoypadRegister>(labels::JOYP)? {
+            self.joypad_register = joypad_register;
+        }
+        self.ppu.read_sections(reader)?;
+        self.audio.read_sections(reader)
+    }
+
+    pub fn high_ram(&self) -> &[u8] {
+        &self.high_ram
+    }
 }
 
 impl MMU {
@@ -389,73 +482,6 @@ impl RAM for MMU {
                 // ignore
             }
         }
-    }
-}
-
-impl Encode for MMU {
-    fn encode<__E: Encoder>(&self, encoder: &mut __E) -> Result<(), bincode::error::EncodeError> {
-        // Encode::encode(&self.data, encoder)?; Do not encode the ROM data
-        Encode::encode(&self.header, encoder)?;
-        Encode::encode(&self.ram_banks, encoder)?;
-        Encode::encode(&self.ram_enabled, encoder)?;
-        Encode::encode(&self.rom_bank_register, encoder)?;
-        Encode::encode(&self.ram_bank_register, encoder)?;
-        Encode::encode(&self.work_ram, encoder)?;
-        Encode::encode(&self.high_ram, encoder)?;
-        Encode::encode(&self.ppu, encoder)?;
-        Encode::encode(&self.serial, encoder)?;
-        Encode::encode(&self.divider, encoder)?;
-        Encode::encode(&self.timer, encoder)?;
-        Encode::encode(&self.interrupt_enable, encoder)?;
-        Encode::encode(&self.interrupt_request, encoder)?;
-        Encode::encode(&self.joypad_register, encoder)?;
-        Encode::encode(&self.audio, encoder)?;
-        core::result::Result::Ok(())
-    }
-}
-
-impl<__Context> Decode<__Context> for MMU {
-    fn decode<__D: Decoder<Context=__Context>>(decoder: &mut __D) -> Result<Self, ::bincode::error::DecodeError> {
-        Ok(Self {
-            data: vec![], // temporary empty data, will be filled in from the ROM
-            header: Decode::decode(decoder)?,
-            ram_banks: Decode::decode(decoder)?,
-            ram_enabled: Decode::decode(decoder)?,
-            rom_bank_register: Decode::decode(decoder)?,
-            ram_bank_register: Decode::decode(decoder)?,
-            work_ram: Decode::decode(decoder)?,
-            high_ram: Decode::decode(decoder)?,
-            ppu: Decode::decode(decoder)?,
-            serial: Decode::decode(decoder)?,
-            divider: Decode::decode(decoder)?,
-            timer: Decode::decode(decoder)?,
-            interrupt_enable: Decode::decode(decoder)?,
-            interrupt_request: Decode::decode(decoder)?,
-            joypad_register: Decode::decode(decoder)?,
-            audio: Decode::decode(decoder)?
-        })
-    }
-}
-impl<'__de, __Context> BorrowDecode<'__de, __Context> for MMU {
-    fn borrow_decode<__D: BorrowDecoder<'__de, Context=__Context>>(decoder: &mut __D) -> Result<Self, ::bincode::error::DecodeError> {
-        Ok(Self {
-            data: vec![],
-            header: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            ram_banks: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            ram_enabled: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            rom_bank_register: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            ram_bank_register: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            work_ram: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            high_ram: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            ppu: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            serial: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            divider: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            timer: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            interrupt_enable: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            interrupt_request: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            joypad_register: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            audio: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-        })
     }
 }
 

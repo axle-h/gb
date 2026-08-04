@@ -1,7 +1,4 @@
-use bincode::{BorrowDecode, Decode, Encode};
-use bincode::de::{BorrowDecoder, Decoder};
-use bincode::enc::Encoder;
-use bincode::error::{DecodeError, EncodeError};
+use bincode::{Decode, Encode};
 use frame_sequencer::FrameSequencer;
 use blip::BlipStereo;
 use master_volume::MasterVolume;
@@ -12,6 +9,7 @@ use crate::audio::sample::AudioSample;
 use crate::audio::wave_channel::WaveChannel;
 use crate::cycles::MachineCycles;
 use crate::divider::DividerClocks;
+use crate::savestate::{labels, SectionReader, SectionWriter};
 
 pub mod panning;
 pub mod master_volume;
@@ -306,6 +304,51 @@ impl Audio {
     }
 }
 
+/// Contents of the `apu` save-state section. Excludes `output` — the resampler is a sink, not
+/// machine state.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct ApuSection {
+    pub enabled: bool,
+    pub panning: Panning,
+    pub master_volume: MasterVolume,
+    pub frame_sequencer: FrameSequencer,
+    pub channel1: SquareWaveChannel,
+    pub channel2: SquareWaveChannel,
+    pub channel3: WaveChannel,
+    pub channel4: NoiseChannel,
+}
+
+pub const APU_SECTION_VERSION: u16 = 1;
+
+impl Audio {
+    pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
+        writer.write(labels::APU, APU_SECTION_VERSION, &ApuSection {
+            enabled: self.enabled,
+            panning: self.panning,
+            master_volume: self.master_volume.clone(),
+            frame_sequencer: self.frame_sequencer.clone(),
+            channel1: self.channel1.clone(),
+            channel2: self.channel2.clone(),
+            channel3: self.channel3.clone(),
+            channel4: self.channel4.clone(),
+        })
+    }
+
+    pub(crate) fn read_sections(&mut self, reader: &SectionReader) -> Result<(), String> {
+        if let Some((_version, section)) = reader.read::<ApuSection>(labels::APU)? {
+            self.enabled = section.enabled;
+            self.panning = section.panning;
+            self.master_volume = section.master_volume;
+            self.frame_sequencer = section.frame_sequencer;
+            self.channel1 = section.channel1;
+            self.channel2 = section.channel2;
+            self.channel3 = section.channel3;
+            self.channel4 = section.channel4;
+        }
+        Ok(())
+    }
+}
+
 impl PartialEq for Audio {
     fn eq(&self, other: &Self) -> bool {
         self.enabled == other.enabled &&
@@ -321,50 +364,3 @@ impl PartialEq for Audio {
 
 impl Eq for Audio {}
 
-impl<__Context> Decode<__Context> for Audio {
-    fn decode<__D: Decoder<Context=__Context>>(decoder: &mut __D) -> Result<Self, DecodeError> {
-        Ok(Self
-        {
-            enabled: Decode::decode(decoder)?,
-            panning: Decode::decode(decoder)?,
-            master_volume: Decode::decode(decoder)?,
-            frame_sequencer: Decode::decode(decoder)?,
-            channel1: Decode::decode(decoder)?,
-            channel2: Decode::decode(decoder)?,
-            channel3: Decode::decode(decoder)?,
-            channel4: Decode::decode(decoder)?,
-            output: BlipStereo::default(),
-        })
-    }
-}
-impl<'__de, __Context> BorrowDecode<'__de, __Context> for Audio {
-    fn borrow_decode<__D: BorrowDecoder<'__de, Context=__Context>>(decoder: &mut __D) -> Result<Self, DecodeError> {
-        Ok(Self
-        {
-            enabled: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            panning: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            master_volume: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            frame_sequencer: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            channel1: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            channel2: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            channel3: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            channel4: BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
-            output: BlipStereo::default(),
-        })
-    }
-}
-
-impl Encode for Audio
-{
-    fn encode<__E: Encoder>(&self, encoder: &mut __E) -> Result<(), EncodeError> {
-        Encode::encode(&self.enabled, encoder)?;
-        Encode::encode(&self.panning, encoder)?;
-        Encode::encode(&self.master_volume, encoder)?;
-        Encode::encode(&self.frame_sequencer, encoder)?;
-        Encode::encode(&self.channel1, encoder)?;
-        Encode::encode(&self.channel2, encoder)?;
-        Encode::encode(&self.channel3, encoder)?;
-        Encode::encode(&self.channel4, encoder)?;
-        Ok(())
-    }
-}
