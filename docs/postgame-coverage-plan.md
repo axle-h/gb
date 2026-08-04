@@ -5,13 +5,16 @@ what is still open.
 
 > ## Where this stands — 2026-08-04
 >
-> **Phase 0 and workstreams A–H are done** ([§5](#5-phase-0--foundation-) and [§6](#6-workstreams-ah-)). Every mechanic
-> in the original scope has a `PolicyStep`, a driver and a test; the dex went **7 → 52 owned /
-> 111 → 117 seen** as a side effect. Chain head: `postgame-aides.bin`.
+> **Everything is done.** Phase 0 and workstreams **A–L** all have a `PolicyStep`, a driver and a test
+> ([§5](#5-phase-0--foundation-), [§6](#6-workstreams-ah-), [§8](#8-workstreams-il-)). The dex went
+> **7 → 53 owned / 111 → 117 seen** as a side effect. Chain head for A–H: `postgame-aides.bin`; I and
+> K branch off it.
 >
-> **Four workstreams are open** ([§8](#8-open--workstreams-il)), all agreed with Alex on 2026-08-04:
-> **I** the rest of the ROM's item-use table, **J** fast fixtures (options written straight to RAM),
-> **K** one of the five unproven in-game trades, **L** a visit to every visitable map.
+> The four workstreams agreed with Alex on 2026-08-04 — **I** the rest of the ROM's item-use table,
+> **J** fast fixtures, **K** one more in-game trade, **L** a visit to every visitable map — closed the
+> same day. Headline numbers: every entry in `ItemUsePtrTable` that had no driver now has one; the
+> whole test suite is **~20 % faster**; a sixth trade ships; and **220 maps are audited statically with
+> 96 toured**, with eight documented kinds of door that does not open.
 >
 > ⚠️ **Two things are closed by decision and must not be reopened**: winning the legendary fights
 > without a Master Ball, and any exhaustive sweep (dex, hidden items, gift TMs). Both are in
@@ -272,12 +275,13 @@ index — use it to plan any catching, rather than reading walkthroughs.
 
 ---
 
-## 8. Open — workstreams I–L
+## 8. Workstreams I–L ✅
 
-Agreed with Alex on 2026-08-04. Same rules as A–H: own two files, four shared lines, an archive entry
-when you finish.
+Agreed with Alex on 2026-08-04 and finished the same day. Same rules as A–H: own two files, four
+shared lines, an archive entry when you finish. The archive entries are the detail; what follows is
+the record.
 
-### I — the rest of the item-use table ☐
+### I — the rest of the item-use table ✅
 
 The checklist is the ROM's own dispatch table, `ItemUsePtrTable` in `engine/items/item_effects.asm`.
 Everything below is an entry in that table with **no driver**. Already covered, so don't redo:
@@ -290,38 +294,38 @@ All of I1/I2/I7 ride the existing START → ITEM → bag → USE chain that `Fie
 `EvolveWithStone` and `UseRareCandy` already drive — **read that driver before writing a new one**; the
 work is mostly the extra menu each item opens, not the chain.
 
-- [ ] **I1 — `ItemUseMedicine` out of battle.** Potion / status heal / Revive onto a party member.
+- [x] **I1 — `ItemUseMedicine` out of battle.** Potion / status heal / Revive onto a party member.
       New: `PolicyStep::UseMedicine { item, slot }`. Observable: that slot's HP or status changes.
       ⚠️ At full HP the ROM prints *"it won't have any effect"* — **a text box that reads exactly like
       success**, the same family as the full-bag trap. Assert on HP, never on the conversation. A Revive
       needs a fainted target, so the test has to arrange one.
-- [ ] **I2 — `ItemUsePPRestore`** (Ether / Max Ether / Elixer / Max Elixer) **and `ItemUsePPUp`**.
+- [x] **I2 — `ItemUsePPRestore`** (Ether / Max Ether / Elixer / Max Elixer) **and `ItemUsePPUp`**.
       ⚠️ Ether opens a **move submenu** after the mon is picked — one more menu than the teach chain
       has. Observable: a move's PP rises (the party read already exposes PP). This is the highest-value
       item in the workstream: a **0-PP battle deadlock** is the failure that once made grinding look
       impossible (archive, articuno/E4 work), and today the only cure is a walk to a Pokémon Center.
-- [ ] **I3 — in-battle stat items.** X Attack / X Defend / X Speed / X Special (`ItemUseXStat`),
+- [x] **I3 — in-battle stat items.** X Attack / X Defend / X Speed / X Special (`ItemUseXStat`),
       X Accuracy, Guard Spec., Dire Hit. `BattleAction::UseItem` already expresses them; what is
       missing is a policy branch that *chooses* one and a test that proves the effect — assert the
       stat-stage RAM (`wPlayerMonAttackMod` and friends), not the animation.
-- [ ] **I4 — `ItemUsePokeDoll`.** Ends a wild battle outright; a second escape route for when Run keeps
+- [x] **I4 — `ItemUsePokeDoll`.** Ends a wild battle outright; a second escape route for when Run keeps
       failing. ⚠️ It is still an **exit**, so the legendary rule applies: never against a
       `trainer`-flagged static object, or the object is hidden for good.
-- [ ] **I5 — the Repel family.** No target, no party menu; sets `wRepelRemainingSteps`. Observable is
+- [x] **I5 — the Repel family.** No target, no party menu; sets `wRepelRemainingSteps`. Observable is
       the counter plus no encounters while it lasts. Useful to any leg that has to cross grass it does
       not want battles in.
-- [ ] **I6 — ride the Bicycle** (`ItemUseBicycle`). Today the bike is owned but never mounted; only
+- [x] **I6 — ride the Bicycle** (`ItemUseBicycle`). Today the bike is owned but never mounted; only
       Cycling Road force-mounts it. It toggles `wWalkBikeSurfState`, and it **doubles overworld speed**,
       so this one may pay for itself in emulated minutes on long legs. ⚠️ Refused indoors and while
       surfing (`ItemUseNotTime`) — the driver must not wait forever on a mount that will never happen.
-- [ ] **I7 — use the Itemfinder** (`ItemUseItemfinder`). Collected in H3, never pressed. Not needed to
+- [x] **I7 — use the Itemfinder** (`ItemUseItemfinder`). Collected in H3, never pressed. Not needed to
       *collect* anything (H4); this covers the item's own effect. Observable is its text box.
 
 **Test:** one leg per sub-step, `postgame::items`. Root at `postgame-aides.bin` (it has the Itemfinder;
 its PC holds Revives, Full Restores, an X Accuracy, Carbos and Calcium — withdraw rather than buy).
 ⚠️ Bag is 20/20 there: shed rows to the PC before any purchase, or the buy silently no-ops.
 
-### J — fast fixtures: options written to RAM ☐
+### J — fast fixtures: options written to RAM ✅
 
 Alex, 2026-08-04: don't drive the OPTION menu, but **do** cut emulated time by setting the options
 directly. This is a debug-tier RAM write and is exactly what that tier is for.
@@ -331,15 +335,15 @@ From `constants/ram_constants.asm`: `wOptions` low three bits are the text delay
 **set means animations are OFF** (`engine/battle/animations.asm:422` — `bit BIT_BATTLE_ANIMATION, a` /
 `jr nz, .animationsDisabled`). So the value wanted is **`0b1000_0001`**.
 
-- [ ] **J1** `PokemonApi::debug_set_options` in `postgame/debug.rs`.
-- [ ] **J2** Apply it in the **integration-test fixture loader**, not by regenerating fixtures. One
+- [x] **J1** `PokemonApi::debug_set_options` in `postgame/debug.rs`.
+- [x] **J2** Apply it in the **integration-test fixture loader**, not by regenerating fixtures. One
       place, every tier, no churn across the 27 committed `.bin`s and no chance of a half-regenerated
       chain.
-- [ ] **J3** ⚠️ `wOptions` sits inside the SRAM-saved main data block, so a **soft reset → CONTINUE
+- [x] **J3** ⚠️ `wOptions` sits inside the SRAM-saved main data block, so a **soft reset → CONTINUE
       restores whatever was saved** — and Phase 0's Hall-of-Fame walk-out does exactly that, as does
       `change_box`. Re-apply after any reset (or write the SRAM copy too) and prove it with a probe
       that reads `wOptions` back after `can_walk_out_of_the_hall_of_fame`.
-- [ ] **J4** **Measure it.** Time the default tier and one representative slow leg before and after,
+- [x] **J4** **Measure it.** Time the default tier and one representative slow leg before and after,
       and record both numbers in the archive. If the win is not real, say so and revert — the point of
       this workstream is wall clock, so an unmeasured version of it has not been done.
 - ⚠️ **Watch the text driver.** It reads text from VRAM and mashes A; faster printing means fewer ticks
@@ -349,7 +353,7 @@ From `constants/ram_constants.asm`: `wOptions` low three bits are the text delay
   "will you switch?" prompt in trainer battles, which is a real saving but changes the battle flow every
   driver was tuned against. Only with a measured before/after and a full slow tier.
 
-### K — prove one of the five unproven in-game trades ☐
+### K — prove one of the five unproven in-game trades ✅
 
 Four of the nine trades are done (G5/G6). The other five each need a give-species the save does not
 have in hand, which is why they were skipped. Alex, 2026-08-04: prove one **can** be done; catching the
@@ -363,19 +367,19 @@ give mon or seeding it in the debug tier are both fine.
 | Raichu | Electrode | `CinnabarLabTradeRoom` |
 | Slowbro | Lickitung | `Route18Gate2F` (needs the Bicycle) |
 
-- [ ] **K1** Take **Ponyta → Seel**. It needs **no seeding at all**: `postgame-aides.bin`'s box 3 slot 2
+- [x] **K1** Take **Ponyta → Seel**. It needs **no seeding at all**: `postgame-aides.bin`'s box 3 slot 2
       already holds a lv32 Ponyta. Withdraw it (workstream A's `withdraw_pokemon`), Fly to Cinnabar,
       run `PolicyStep::trade_steps` with `PartyScript::Trade`. No new driver — a trade NPC opens the
       same stale-cursor party menu the Day Care does. Observable: dex **owned +1 (Seel)** and the slot's
       species changes. Fall back to `debug_set_party` only if that Ponyta has been spent.
-- [ ] **K2** Archive entry recording whether the give-species really was the only obstacle for the
+- [x] **K2** Archive entry recording whether the give-species really was the only obstacle for the
       other four, so the table above can be trusted or corrected.
 - ⚠️ **The trade NPC is never the one you would guess** — read the script that sets `wWhichTrade`, not
   the object list. Cinnabar Lab is the Gramps and the Beauty, not the Super Nerd.
 - ⚠️ A traded mon **cannot be renamed** by the Name Rater (it checks OT name *and* ID), and it obeys
   only at your badge level — irrelevant here, but it has surprised a leg before.
 
-### L — visit every visitable map ☐
+### L — visit every visitable map ✅
 
 Alex, 2026-08-04: *visit ALL visitable rooms to check there are no broken map mechanics we haven't
 covered in the agent.* The deliverable is as much the **list of maps that could not be entered, and
@@ -394,22 +398,22 @@ comm -13 <(grep -ohr "Map::[A-Za-z0-9_]*" src/pokemon/policy.rs src/pokemon/post
 ⚠️ That list over-reports: gyms are reached through `DefeatGymLeader` and Silph floors through
 `UseElevator`, so they never appear as a literal `Map::`. Confirm with the world graph, not the grep.
 
-- [ ] **L1 — the static audit first, no emulation.** For every visitable map assert the agent's own
+- [x] **L1 — the static audit first, no emulation.** For every visitable map assert the agent's own
       tables answer: the header resolves, the tileset is known, warps decode, and the sprite table is
       non-empty wherever the ROM has objects. Default tier, seconds, and it finds missing metadata
       without burning a single emulated minute. Do this **before** L2 — anything it catches would
       otherwise show up as a silent stall an hour into a tour.
-- [ ] **L2 — the emulated tour, sliced per Fly hub.** For each town: enter every building in the
+- [x] **L2 — the emulated tour, sliced per Fly hub.** For each town: enter every building in the
       cluster and every connected route, and per map assert the `MetaTileMap` builds, `actions()` is
       non-empty, and an exit action exists. One test per hub so a failure costs one town, not the tour.
-- [ ] **L3 — the awkward set**, which is where the real findings will be. Check reachability *before*
+- [x] **L3 — the awkward set**, which is where the real findings will be. Check reachability *before*
       budgeting: the four **Safari rest houses** (behind the ¥500 gate and the 502-step budget, and the
       zone is a chain, not a hub), **Museum 2F**, **Route 19/20** water, **Route 8 Gate**, **Cerulean
       Badge House**, the **Cinnabar Lab** rooms, and the **SS Anne**'s 15 maps — ⚠️ the ship **sails**
       once the mainline is done, so check `EVENT_SS_ANNE_LEFT` before planning a visit. Two known
       one-way doors from the archive: **Pokémon Tower 6F/7F cannot be climbed** on a save that already
       finished the tower, and the **Hall of Fame** needs another Champion run.
-- [ ] **L4** Archive entry: every map entered, every map that could not be, and every mechanic the tour
+- [x] **L4** Archive entry: every map entered, every map that could not be, and every mechanic the tour
       turned up that the agent does not model.
 - ⚠️ Expect this to be the most expensive workstream here in emulated time. Slice it, bound every wait,
   and remember that `EnterMap` with no matching action **does nothing at all** — a tour that "passes"
@@ -433,10 +437,10 @@ Claim your row before you start: `☐ unclaimed` · `🔵 in progress` · `🟡 
 | G — Gifts | `postgame-fly-bike.bin` | `postgame::gifts` | ✅ done | `postgame-name-rater.bin`. Reusable: **`PolicyStep::PartyScript { script, slot }`**. |
 | G — Trades | `postgame-name-rater.bin` | `postgame::trades` | ✅ done | `postgame-tangela.bin`, dex 19. `TRADES` is the nine-row table, ROM-pinned. |
 | H — Oak's aides | `postgame-tangela.bin` · `postgame-safari.bin` | `postgame::aides` | ✅ done | **`postgame-aides.bin`**, dex 52 — the chain head. Reusable: `SweepDex`, `SearchHiddenItem`, `UseFlash`, `MetaTileMap::hidden_items`, `crate::pokemon::wild`. |
-| **I — item-use table** | `postgame-aides.bin` | `postgame::items` | ☐ unclaimed | Medicine / PP / stat items / Poké Doll / Repel / Bicycle / Itemfinder. |
-| **J — fast fixtures** | n/a (test harness) | `postgame::phase0` or its own | ☐ unclaimed | `debug_set_options`, applied at fixture load. Must be **measured**. |
-| **K — one more trade** | `postgame-aides.bin` | `postgame::trades` | ☐ unclaimed | Ponyta → Seel; the Ponyta is already in box 3. |
-| **L — visit every map** | `postgame-aides.bin` | `postgame::maps` | ☐ unclaimed | Static audit first, then a tour per Fly hub. The unreachable list is the deliverable. |
+| **I — item-use table** | `postgame-aides.bin` | `postgame::items` | ✅ done | `postgame-items.bin` via `-medicine` → `-finder` → `-ether`. One `UseBagItem` step + one driver covers medicine / PP / Repel / Bicycle / Itemfinder; `UseItemsInBattle` covers the stat items and the Poké Doll. ⚠️ Three menus lie about themselves — see the archive. |
+| **J — fast fixtures** | n/a (test harness) | `postgame::phase0` | ✅ done | `debug_set_options` + `FAST_FIXTURE_OPTIONS`, applied at load **and re-applied every tick**. Measured: **25 %** off the default tier, **21 %** off a battle-heavy leg. |
+| **K — one more trade** | `postgame-aides.bin` | `postgame::trades` | ✅ done | `postgame-seel.bin`, dex 53. `trade_boxed_steps`. ⚠️ The trader is in the **fossil** room, and a trade needs `TRADE_TICK_BUDGET`, not `TICK_BUDGET`. |
+| **L — visit every map** | `postgame-aides.bin` | `postgame::maps` | ✅ done | No fixture — read-only. 220 maps audited statically (default tier, 0.01 s), 96 toured across 11 hubs, 8 kinds of unopenable door recorded in `maps::known_unreachable` / `maps::skip_tour`. |
 
 ---
 
@@ -472,6 +476,31 @@ The living version is the `postgame-recurring-traps` memory; the evidence for ea
   filed from this project — *"`UseRareCandy` only works on slot 0"* — was a **misdiagnosis**; the chain
   had worked and the log was the idle loop afterwards. Pinned now by
   `mechanics::rare_candy_works_on_a_late_party_slot`.
+- **A leg's inputs are its fixture *and* the RNG stream, and only the first is committed.** Anything
+  that changes frame timing re-cuts the second, silently. Workstream J cost six untouched legs that
+  way: two were a real latent bug (below) and four were routes tuned to a particular encounter path,
+  now pinned with `TestFixture::with_original_battle_timing`. Re-run the **whole** slow tier
+  (`-- pokemon::integration_tests`), not just your own module.
+- **A timing change is a fuzz test of every RAM-inference in the agent.** Workstream J turned battle
+  animations off and two untouched A–H legs died silently — because `wNamingScreenType` is aliased
+  with `wPartyMenuTypeOrMessageID` and `BATTLE_PARTY_MENU` has the **same value** as
+  `NAME_MON_SCREEN`, so every in-battle party menu read as a naming screen. The agent named the mon
+  already out and pulsed START at a battle for the rest of the run. Re-run the **whole** slow tier
+  after anything that moves frame timing, and remember this repo infers far more than it reads.
+- **A menu can lie about itself in two directions at once.** §10's "detect menus by **text**, not
+  geometry" is right and incomplete: `wTextBoxID` *lingers* from whatever was drawn last (the
+  PP-restore move list still reads `ListMenuBox` from the bag underneath it), and the geometry lingers
+  too *and* the cursor moves under you (`SelectMenuItem` decrements `wCurrentMenuItem` on the way
+  out). Match the text the ROM actually prints — and check its **case**: the prompt is *"Raise PP of
+  which technique?"*, lower-case, while the upper-case `WHICH TECHNIQUE?` string belongs to the Mimic
+  menu and is never shown here. All three failures look identical in the log, and in all three the
+  item is still used afterwards by the generic A-mash, on the wrong target (workstream I).
+- **A raw byte is not the field you think it is.** `PokemonMove::pp` is unmasked: bits 6–7 are the
+  PP-Up count. Use `items::move_pp` / `max_pp` (workstream I).
+- **Doors that open one way.** The tour in workstream L found eight distinct reasons a room will not
+  let you in, and only two of them are "the game says no" — the others are an elevator whose exit is a
+  menu, a receptionist who wants paying, a tree that grew back, a road with nine trainers on it, and a
+  hub map cut into pieces. `postgame::maps::known_unreachable` and `::skip_tour` are the list.
 - **`AGENT_RESOLUTION` (20 ms) is tuned.** Don't change it to fix a driver bug.
 - **Don't optimise the agent.** It is only ~11 % of runtime; the emulator is the cost. And
   `target-cpu=native` measured *slower*.

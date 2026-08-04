@@ -101,11 +101,15 @@ fn can_beat_elite_four() {
     println!("leads: Venusaur slot {venusaur}, Articuno slot {articuno_after} after the rotation");
 
     // 180 min covers the five rooms plus Oak's post-Champion speech and the walk to the Hall of Fame.
+    // ⚠️ Pinned to the pre-**J** battle timing — see `TestFixture::with_original_battle_timing`. The
+    // gauntlet's win is a tuned sequence of switches and Blizzards against six of Lance's dragons;
+    // shifting the RNG stream under it re-rolls every accuracy and crit check in five long fights,
+    // and §3 puts battle tactics out of scope precisely because in deployment they are the LLM's.
     let mut fixture = TestFixture::new(
         FIXTURE,
         Duration::from_mins(180),
         PolicyStep::elite_four_steps(venusaur, articuno_after),
-    );
+    ).with_original_battle_timing();
 
     // The rival's battle starts from a map script rather than from a step, and once it is won the
     // agent hands itself to `drive_post_champion_cutscene`, which stops polling the policy — so the

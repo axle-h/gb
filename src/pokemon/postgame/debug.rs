@@ -41,6 +41,25 @@ fn to_bcd(mut value: u32, bytes: usize) -> Vec<u8> {
         .collect()
 }
 
+/// **Workstream J** — the options every test fixture is loaded with.
+///
+/// Three bits, and only one of them is new:
+///
+/// - **Text speed FAST** (`wOptions & TEXT_DELAY_MASK == 1`) — already what the harness wrote.
+/// - **Battle animations OFF** (bit 7 set) — J's actual change. Every battle in the suite pays for
+///   the attack animations otherwise, and nothing in the agent watches them: the battle driver reads
+///   `wIsInBattle` and the menu geometry, never the screen.
+/// - **Battle style SET** (bit 6 set) — ⚠️ *kept*, not chosen. §8-J proposes `0b1000_0001`, which is
+///   SHIFT, and §8-J's own last bullet says battle style must be left alone. The harness has written
+///   SET since long before this workstream (`GameOptions::default`), so SET **is** what every driver
+///   was tuned against; `0b1000_0001` would have silently reintroduced the "will you switch?" prompt
+///   the whole suite has never seen. The value is therefore `0b1100_0001`.
+pub const FAST_FIXTURE_OPTIONS: crate::pokemon::options::GameOptions = crate::pokemon::options::GameOptions {
+    battle_animations_on: false,
+    battle_style: crate::pokemon::options::BattleStyle::Set,
+    text_speed: crate::pokemon::options::TextSpeed::Fast,
+};
+
 impl<'a> PokemonApi<'a> {
     /// Overwrite the player's money (capped at the game's ¥999,999).
     pub fn debug_set_money(&mut self, amount: u32) {
@@ -102,6 +121,31 @@ impl<'a> PokemonApi<'a> {
     /// Replace the whole party. Build members with `Pokemon::maxed` or `Pokemon::new`.
     pub fn debug_set_party(&mut self, party: &PokemonParty) -> Result<(), String> {
         self.mmu_mut().write_player_pokemon_party(party)
+    }
+
+    /// **Workstream J1** — force the OPTION menu's settings by writing `wOptions` directly.
+    ///
+    /// §3 of the plan rules the OPTION *menu driver* out of scope — the options are worth setting and
+    /// not worth driving — so this is where they get set. Returns `true` when the byte actually
+    /// changed, which is what lets a caller re-apply it cheaply every tick and only say so when it
+    /// had drifted.
+    ///
+    /// ⚠️ **It does drift.** `wOptions` lives inside `wMainDataStart..wMainDataEnd`, the block the
+    /// game copies to `sMainData` on a save and copies back on CONTINUE (`engine/menus/save.asm:64`,
+    /// `:220`) — so a soft reset, and anything that saves and reloads, restores whatever the
+    /// cartridge had rather than what was written here. Writing the SRAM copy instead is **not** the
+    /// fix: `sMainDataCheckSum` is computed over the whole block (`save.asm:240`), so a byte poked
+    /// into `sMainData` fails the checksum and the game answers "the file data is destroyed". Re-apply
+    /// instead; [`crate::pokemon::integration_tests::TestFixture::step`] does exactly that.
+    pub fn debug_set_options(&mut self, options: &crate::pokemon::options::GameOptions) -> bool {
+        use crate::pokemon::options::{GameOptionsReader, GameOptionsWriter};
+        // An unreadable byte (a text speed the reader has no name for, which is what a fresh boot
+        // leaves) counts as drifted — the point is to end up at `options` either way.
+        let drifted = self.mmu().read_game_options().map_or(true, |live| live != *options);
+        if drifted {
+            self.mmu_mut().write_game_options(options).ok();
+        }
+        drifted
     }
 }
 

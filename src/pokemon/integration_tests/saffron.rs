@@ -15,11 +15,12 @@ use super::*;
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_enter_saffron() {
+    // ⚠️ Pinned to the pre-**J** battle timing — see `TestFixture::with_original_battle_timing`.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-safari.bin"),
         Duration::from_mins(60),
         PolicyStep::saffron_entry_steps(),
-    );
+    ).with_original_battle_timing();
     fixture.step_until_exhausted();
     let s = fixture.game_state();
     println!("ended on {} @ {} has_water={}", s.map.map, s.map.player_position, s.bag.contains(&ItemId::FreshWater));

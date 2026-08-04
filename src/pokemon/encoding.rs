@@ -187,10 +187,29 @@ impl PokemonEncoding for MMU {
                 // still 1.  Conditions 3 (wFontLoaded) and 4 (wStringBuffer) are dropped:
                 // the naming screen's own render loop may reset wFontLoaded, and A-mashing
                 // from the battle state may have already changed wStringBuffer[0] before this
-                // tick runs.  Conditions 1+2 are specific enough in the battle context
-                // (wNamingScreenSubmitName stays 0 until START is pressed on the grid).
+                // tick runs.
+                //
+                // ⚠️ **Conditions 1+2 are NOT specific enough**, which is what the comment here used
+                // to claim. `wNamingScreenType` is aliased with `wPartyMenuTypeOrMessageID`, and
+                // `BATTLE_PARTY_MENU` is **`$02`** — the same value as `NAME_MON_SCREEN`
+                // (`constants/menu_constants.asm:70,92`). So *every* in-battle party menu — a
+                // voluntary switch, a potion's "use on which POKéMON?", the "Use next POKéMON?" after
+                // a faint — reads as a naming screen. The agent then writes a nickname for whatever
+                // is already out and pulses START at a battle waiting for a move, for ever.
+                //
+                // It was latent because it needs the agent to *sample* inside that window, and
+                // workstream J (battle animations off) shifted the frame timing enough to hit it:
+                // two previously-green legs died and the only clue in either log was `name:Venusaur`.
+                //
+                // The discriminator is the naming grid's own **geometry**. `DisplayNamingScreen`
+                // writes `wTopMenuItemY = 3`, `wTopMenuItemX = 1`
+                // (`engine/menus/naming_screen.asm:101-104`); `PartyMenuInit` writes (0,1). Unlike the
+                // aliased type byte, those two are not shared.
+                let naming_grid = self.read_pointer(&pokered_symbols::wTopMenuItemX) == 1
+                    && self.read_pointer(&pokered_symbols::wTopMenuItemY) == 3;
                 if self.read_pointer(&pokered_symbols::wNamingScreenType) == 2
                     && self.read_pointer(&pokered_symbols::wNamingScreenSubmitName) == 0
+                    && naming_grid
                 {
                     return GameMode::NamingScreen;
                 }

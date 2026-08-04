@@ -98,11 +98,12 @@ fn can_get_secret_key() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_volcano_badge() {
+    // ⚠️ Pinned to the pre-**J** battle timing — see `TestFixture::with_original_battle_timing`.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-secret-key.bin"),
         Duration::from_mins(40),
         PolicyStep::volcano_badge_steps(),
-    );
+    ).with_original_battle_timing();
     let s = fixture.run_until(|s| s.badges.contains(Badge::VolcanoBadge));
     println!("on {} @ {} — badges = {:?}", s.map.map, s.map.player_position, s.badges);
     fixture.save_state_named("src/pokemon/data/post-volcano-badge.bin").unwrap();

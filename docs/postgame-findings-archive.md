@@ -2041,3 +2041,330 @@ encounter — as do D1a and the three catch legs, which are green and unchanged.
 
 **Impact on others:** none in code beyond one added test — the working tree is otherwise back to what
 shipped. The default tier (855) and all four `postgame::legendaries` legs are green.
+
+---
+
+### [2026-08-04] J — battle animations off buys ~20–25 %, and the plan's option byte was wrong
+**Status:** verified ✅ / corrected ❗
+**What the plan said:** §8-J: set `wOptions` to **`0b1000_0001`** (text delay fast + bit 7 "animations
+off"), apply it in the fixture loader, and leave battle style alone.
+**What is actually true:** three corrections and one measurement.
+
+1. ❗ **`0b1000_0001` is battle style SHIFT.** Bit 6 (`BIT_BATTLE_SHIFT`) *set* is SET, and the harness
+   has written SET since long before this workstream — `TestFixture::new` already called
+   `write_game_options(&GameOptions::default())`, and `GameOptions::default` is
+   `{ animations on, style Set, text Fast }`. So the byte the plan asked for would have silently
+   flipped the whole suite to SHIFT and reintroduced the "will you switch?" prompt every driver has
+   been tuned against — which is the exact change §8-J's own last bullet forbids. The value shipped is
+   **`0b1100_0001`**: the only bit J actually changes is bit 7.
+2. **Only text speed was already being set, not the animations.** The pre-existing loader call was
+   doing half of J's job and no one had noticed the other half.
+3. ⚠️ **`wOptions` really does drift, twice, across the credits** — see J3 below.
+
+**Evidence (J4, measured before/after, same machine, `--release`):**
+
+| Workload | animations ON | animations OFF | saving |
+|---|---|---|---|
+| default tier (`cargo test --release`, 855 tests) | 19.88 s | 14.90 s | **25 %** |
+| `postgame::aides::can_sweep_the_viridian_grounds` (wild-battle-heavy leg) | 38.51 s | 30.42 s | **21 %** |
+
+Both numbers are the whole-process wall clock reported by `cargo test`. The saving is real and it
+scales with how battle-heavy the workload is, which is what the two rows are there to show.
+
+⚠️ **Turning animations off changes the RNG stream.** The same sweep leg reached the same dex count
+(41 owned) but with **66 balls left** before and **52** after: fewer frames per battle means different
+`hRandomAdd`/`hRandomSub` sampling, so encounters and catch rolls diverge. Nothing depends on the old
+stream — fixture writes are gated behind `regen-fixtures` — but a leg regenerated after J will not be
+byte-identical to one regenerated before it, and a leg whose assertions are tuned to an exact ball
+count would now be wrong. None are.
+
+**J3 — the drift is real and the per-tick re-apply is load-bearing.** `wOptions` ($D355) sits inside
+`wMainDataStart` ($D2F7) `..wMainDataEnd`, the block `engine/menus/save.asm:220` copies to `sMainData`
+on a save and `:64` copies back on CONTINUE. The Hall-of-Fame walk-out is a save → soft reset →
+CONTINUE, and `postgame::phase0::options_survive_the_hall_of_fame_reset` measures **two** drifts across
+it. Writing the SRAM copy instead is not the fix: `sMainDataCheckSum` (`save.asm:240`) is computed over
+the whole block, so a poked byte fails the checksum and the game answers *"the file data is
+destroyed."* `TestFixture::step` therefore re-applies every tick (a byte compare) and counts the
+drifts, and the test asserts the count is **> 0** — without that assertion the test would keep passing
+on a harness where the re-apply had become dead code.
+
+**Impact on others:** every tier is ~20 % faster, including `full-playthrough`. `TestFixture` gained
+one public field (`options_drifts`). `PokemonApi::debug_set_options` is the J1 entry point and
+`postgame::debug::FAST_FIXTURE_OPTIONS` the value; the old `write_game_options` call in the loader is
+gone. Default tier green at 855.
+
+---
+
+### [2026-08-04] K — a sixth trade, and the four "unproven" ones are cheaper than the plan says
+**Status:** verified ✅ / corrected ❗
+**What the plan said:** §8-K: prove **one** of the five unproven trades; Ponyta → Seel needs no
+seeding because `postgame-aides.bin`'s box 3 slot 2 already holds a lv32 Ponyta; the give-species is
+why the other four were skipped; ⚠️ "the Cinnabar Lab is the Gramps and the Beauty, not the Super
+Nerd."
+
+**What is actually true:**
+
+1. ✅ **K1 ships.** `postgame::trades::can_trade_a_boxed_ponyta_for_a_seel` — Fuchsia PC, bank Rhyhorn
+   (slot 5), withdraw the boxed Ponyta, Fly to Cinnabar, trade. **Dex 52 → 53**, ~5 s wall clock,
+   output `postgame-seel.bin`. New constructor `PolicyStep::trade_boxed_steps`, which is
+   `trade_steps` with the catch replaced by a deposit + withdraw; no new driver, no debug seeding.
+2. ❗ **The Ponyta trader is in `CinnabarLabFossilRoom`, not `CinnabarLabTradeRoom`.** The plan's
+   Gramps/Beauty warning is about the *other* room. `scripts/CinnabarLabFossilRoom.asm:102` sets
+   `TRADE_FOR_SAILOR` from `CINNABARLABFOSSILROOM_SCIENTIST2` at (7,6) — the room where fossils are
+   revived. `TRADES` already had this right; the prose did not. `to_trade_npc`/`out_of` gained the
+   arm.
+3. ❗ **A `PartyScript::Trade` does not fit in `TICK_BUDGET` (1200).** K1 first ran to
+   *"party-script: nothing changed in 1200 ticks"* — and then **completed anyway**, because the
+   generic A-mash inherited a conversation whose mon had already been chosen. Worked by fall-through,
+   read as a failure in the log, and would have been a real failure if the fall-through had ever
+   picked differently. `Baseline::SpeciesGone` cannot be met until the *end* of
+   `InGameTrade_DoTrade` — after both cries, the transfer animation and four text boxes — and a
+   six-mon party costs extra ticks getting the cursor there first. Fixed with a per-script
+   `TRADE_TICK_BUDGET = 2400`; the Day Care and Name Rater keep 1200. All five trade legs green
+   (21.97 s).
+4. ❗ **K2: eight of the nine give-species are plain wild encounters**, not the evolution grinds the
+   plan's framing implies. `postgame::trades::tests::every_trade_give_species_is_obtainable` (default
+   tier, ROM-derived) prints the lot:
+
+   | Give | Source |
+   |---|---|
+   | Nidorino | wild — `SafariZoneEast` |
+   | Abra | wild — Route 24 |
+   | Ponyta | wild — `PokemonMansion1F` |
+   | Spearow | wild — Route 3 |
+   | Slowbro | wild — `SeafoamIslandsB2F` |
+   | **Poliwhirl** | **the only evolution** — Poliwag on the Super Rod (`data/wild/super_rod.asm:45,50`) at lv25 |
+   | Raichu | wild — `CeruleanCaveB1F` |
+   | Venonat | wild — Route 12 |
+   | Nidoran♂ | wild — Route 22 |
+
+   ⚠️ **Three of those were guessed wrong before the test was run.** Nidorino, Slowbro and Raichu were
+   each written down as "obviously an evolution" (lv16, lv37, Thunder Stone) and the ROM has all three
+   wild; the test failed three times in a row correcting them. §8-K's table can be trusted on *what*
+   each trade wants, and should not be read as saying any of them needs a grind.
+
+**Evidence:** `can_trade_a_boxed_ponyta_for_a_seel`, `every_trade_give_species_is_obtainable`,
+`scripts/CinnabarLabFossilRoom.asm:102`, `data/maps/objects/CinnabarLabFossilRoom.asm`,
+`data/wild/super_rod.asm:45`.
+**Impact on others:** `gifts.rs` gained `TRADE_TICK_BUDGET` (behavioural, but only widens a wedge
+detector). `trades.rs` gained `trade_boxed_steps` and two match arms. New fixture `postgame-seel.bin`.
+
+---
+
+### [2026-08-04] I — the item-use table is one driver and three ways to be silently wrong
+**Status:** verified ✅ / corrected ❗
+**What the plan said:** §8-I: seven sub-steps, all of I1/I2/I7 riding the existing START → ITEM → bag
+→ USE chain, "the work is mostly the extra menu each item opens"; root at `postgame-aides.bin` and
+"withdraw rather than buy".
+
+**What is actually true.** The plan's shape was right and its *hard* part was somewhere else. One
+`PolicyStep::UseBagItem { item, target }` and one driver (`postgame::items`) cover I1, I2, I5, I6 and
+I7; `PolicyStep::UseItemsInBattle` covers I3 and I4. All seven ship green. What cost the time was
+three menus that each **look** correct from outside and each fail without an error.
+
+1. ❗ **`text_box_id` lingers, so the PP-restore move list reads as the bag.** `MoveSelectionMenu`
+   never calls `DisplayTextBoxID` (`engine/battle/core.asm:2460+`), so `wTextBoxID` still says
+   `ListMenuBox` from the bag underneath it. A driver that tests `text_box_id` first walks the move
+   list toward a *bag row number* and never presses A.
+2. ❗ **…and its geometry lingers too, so keying on that instead is worse.** `SelectMenuItem`
+   **decrements** `wCurrentMenuItem` when the move is chosen (`core.asm:2623-2625`) and leaves
+   `wTopMenuItemX/Y` at (5,7). A geometry-keyed branch sees the cursor drop 1 → 0 and spends the rest
+   of the leg pressing **Down** at a "PP was restored." prompt that only takes A.
+3. ❗ **And the prompt that *does* identify it is lower-case.** `_RaisePPWhichTechniqueText` is
+   *"Raise PP of which technique?"* (`data/text/text_6.asm:130`); the upper-case `WhichTechniqueString`
+   `SelectMenuItem` places is only for `wMoveMenuType == 1`, the **Mimic** menu. Matching `"TECHNIQUE"`
+   never fires, the driver falls through to its trailing `A`, and A on the cursor's *starting* row
+   picks **move slot 0** — which is indistinguishable from correct for as long as the caller only ever
+   asks for slot 0. The Ether test passed on it. The PP Up test, asking for slot 1, put the PP Up on
+   Solarbeam.
+
+   ⚠️ All three share a failure signature: **the item is eventually used anyway**, by the generic
+   A-mash after the driver's tick budget aborts — so the log claims a wedge that did not happen and
+   the effect lands on the wrong target. §10's "detect menus by text, never geometry" needs a sibling:
+   *and match the text the ROM actually prints.* `ITEMS_TRACE=1` now dumps every menu the chain walks.
+
+4. ❗ **`PokemonMove::pp` is the raw PP byte.** `encoding.rs:52` reads it unmasked and the ROM packs
+   the **PP Up count into bits 6–7**, so a PP-Upped move reads 64 higher than its PP and any naive
+   `pp >= max` refuses every use on it. `items::move_pp` / `pp_ups` / `max_pp` are the accessors; bits
+   6–7 moving is also the **only** observable a PP Up has.
+5. ❗ **A PP Up raises the current PP as well as the maximum** — `.PPNotMaxedOut` calls
+   `RestoreBonusPP` immediately (`item_effects.asm:2008`), bonus = `base / 5`. Razor Leaf went 25 → 30
+   on *both*. The first draft of the assertion said the opposite.
+6. ❗ **`USING_X_ACCURACY` is bit 0 of `wPlayerBattleStatus2`, not bit 6** (bit 6 is `USING_RAGE`) —
+   `constants/battle_constants.asm:92`. The run reported `$07`, all three bits set, and failed anyway.
+7. ✅ **Nothing needed debug seeding except the Ether**, and §8-I's "withdraw rather than buy" was
+   beaten by "find it and buy it": the Repel is on Vermilion's shelf, all seven stat items and the
+   Poké Doll are on Celadon Mart 5F and 4F (`data/items/marts.asm:29,32`), and the PP Up is **lying in
+   Celadon's street** as an uncollected hidden item. No Kanto mart sells an Ether and every one on the
+   floor is behind a trek, so that one is seeded and says so.
+8. ✅ **The Itemfinder is provable, but only just.** `HiddenItemNear` skips anything already flagged
+   and wants the item within x ± 5, y − 5..+ 4 (`engine/items/itemfinder.asm:11-41`). The Fly stop is
+   outside every town's window; stepping in and out of `VermilionTradeHouse` (raw (15,13)) is inside
+   it. And the item it points at — Vermilion's Max Ether at raw (14,11) — is **walled into a fence
+   block with no adjacent standable tile**, so its flag can never be set and the test is stable rather
+   than single-use. Cerulean's hidden Rare Candy is the same; Viridian's Potion and Celadon's PP Up
+   are the reachable ones. Both texts are asserted: "Yes! ITEMFINDER indicates…" in Vermilion, "Nope!
+   ITEMFINDER isn't responding" in Fuchsia, which has no hidden items at all.
+9. ✅ **The Bicycle is a toggle**, so `Effect::TogglesBicycle` completes on "the mount state changed",
+   not "we are on the bike" — with the latter a dismount step is satisfied before it starts and pops
+   without pressing anything. Measured: Celadon → Route 7 is **25.3 s walked, 15.5 s cycled**, so
+   §8-I6's "may pay for itself in emulated minutes" is true, ~39 %.
+10. ✅ **The "no effect" guard works and is tested end to end.** `items::blocked` refuses a use the
+    ROM would decline — a potion at full HP, a Revive on a living mon, an Ether on a full-PP move, the
+    Bicycle where `IsBikeRidingAllowed` says no (decoded from `BikeRidingTilesets`, not transcribed).
+    `can_revive_and_heal_a_party_member` hands it a Full Restore on a full-HP Vaporeon and asserts the
+    queue drains *and* the item stays in the bag.
+
+**Evidence:** `postgame::items` (6 legs, all green), `postgame::items::tests` (3 ROM-pinned unit
+tests), and the fixtures `postgame-medicine.bin` → `postgame-finder.bin` → `postgame-ether.bin` →
+`postgame-items.bin`.
+**Impact on others:** `GameState` gained `repel_steps` and `on_bicycle`. `agent.rs`'s in-battle item
+whitelist gained the seven stat items and the Poké Doll (without it the generic navigator backs out of
+the bag on CANCEL and nothing is ever spent). `gifts.rs` is untouched. Two new `PolicyStep` variants,
+one `FieldMove`, one `AgentState`.
+
+---
+
+### [2026-08-04] L — 220 maps audited statically, 96 toured, and eight kinds of door that do not open
+**Status:** verified ✅ / corrected ❗
+**What the plan said:** §8-L: ~220 visitable maps; L1 a static audit, L2 an emulated tour per Fly hub,
+L3 the awkward set, L4 the report. "Expect this to be the most expensive workstream here in emulated
+time."
+
+**What is actually true.** It is the *cheapest* — the whole of L1 runs in 0.01 s in the default tier
+and the four tours take 37 s of wall clock together. And it found eight distinct reasons a door does
+not open, six of them by failing.
+
+**L1 — the static audit** (`postgame::maps::tests`, default tier). 248 `Map` variants: **25
+headerless**, 2 link-cable, 4 duplicates, **220 visitable**. Every one of the 220 has a readable
+header, block data the size its header claims, a tile grid that builds, and a sprite table wherever
+the ROM has object events. **801 warps** checked; every destination resolves. Two corrections:
+
+1. ❗ **The plan's arithmetic double-counts.** Three of the four duplicate slots
+   (`CeruleanTrashedHouseCopy`, `CinnabarMartCopy`, `UndergroundPathRoute6Copy`) have **no `*_h`
+   label at all** — they are already in the headerless 25. Only `UndergroundPathRoute7Copy` is a
+   headered map that has to be struck by name. Adding the four lists gives 251 for 248 maps, which is
+   how this was found.
+2. ❗ **`SilphCoElevator` has two warps to `UnusedMapEd`** and they are not broken — the floor menu
+   rewrites the destination at runtime. Exactly the "missing metadata" L1 was written to catch, and
+   the answer is to name it (`RUNTIME_REDIRECTED_WARPS`), not to widen the check.
+
+**L2 — the tours** (4 tests, one per group of hubs). **96 rooms and roads entered** across the eleven
+Fly stops, each checked for a non-empty action list *and an exit*. Design notes that cost time:
+
+- ⚠️ **Tour by path, not by set.** The first version returned a flat room list and walked back to the
+  hub with a plain transition between rooms. From Red's bedroom, "go to Pallet Town" is not a
+  transition that exists, and the world-graph fallback only knows what the agent happens to have
+  observed — two of Pallet Town's four rooms were skipped. A tour that knows how it got in knows how
+  to get out.
+- ⚠️ **Check the room's health on the *best* tick, not the first.** The meta-tile grid is briefly
+  unsettled on arrival (§10), so a check on the tick the warp lands sees an empty action list in an
+  ordinary Pokémon Center. That failed Viridian before it had walked a step.
+- ⚠️ **Cut before every room, not once at the top.** Celadon's gym door is behind cuttable trees, and
+  a cut tree **regrows** on every map reload while `PokemonAgent::cut_tiles` is **cleared on every map
+  change** — so by the third building the trees are back and the agent has forgotten it ever cut them.
+- ⚠️ **Roads last, and never followed.** With roads first, Cerulean reported nine unenterable
+  buildings that are all perfectly enterable: the tour stepped onto a route and never got back.
+- ⚠️ **`MAX_ENTER_WAIT` is *attempts*, and both 600 and 200 were wrong at opposite ends of the map.**
+  Indoors a sealed door burns polls fast and two consecutive give-ups outlasted the harness's
+  ten-minute stall window; outdoors one poll is a walk of several minutes, so 200 attempts is hours
+  and Lavender ran out of cycle budget. 60.
+
+**L3/L4 — the doors that do not open.** Eight distinct reasons, all ROM- or run-cited:
+
+| Why | Maps |
+|---|---|
+| the S.S. Anne has sailed | the ship's 10 maps **and `VermilionDock` itself** — `VermilionCityDefaultScript` (`scripts/VermilionCity.asm:41-58`) intercepts the player facing **down** at `SSAnneTicketCheckCoords` and pushes them back once `EVENT_SS_ANNE_LEFT` is set |
+| a one-way script-gated climb | `PokemonTower6F/7F` (H5c already recorded it) |
+| needs another Champion run | `HallOfFame` |
+| the hub map is cut into sealed regions | `CeruleanCave1F/2F/B1F`, **Route 4**, **Route 7** — the last two rediscovered independently what the archive already says about Cerulean's river and Saffron's ledge-sealed Route 7 pocket |
+| only the elevator goes there | `CeladonMart4F/5F/Roof` — the ROM's warps make them one door from the lift; they are three flights of stairs from the street |
+| behind a script-opened gate | `PokemonMansionB1F` |
+| behind a receptionist who wants paying | `Museum2F` — *sometimes* enterable depending on whether the A-mash lands on YES, which is worse than never |
+| the tour must not go in | the E4 rooms (the door seals behind you), the Safari areas (¥500 and the step counter), the three elevators (**you can get in and not get out** — Saffron's tour sat in `SilphCoElevator` and reported the Pokémon Center as unenterable), **Route 8** (nine trainers on sight; the tour arrives with whatever PP the last leg left, and Lavender's run spent its entire cycle budget in a fight it could not finish) |
+
+**Evidence:** `postgame::maps::tests` (6 default-tier tests), `postgame::maps` (4 tour legs +
+`probe_tour_report` / `probe_tour_plan`).
+**Impact on others:** one new `PolicyStep::EnterMapIfReachable` (a give-up instead of a stall — no
+existing step's behaviour changes), listed in `current_step_is_long_running` because it carries its
+own bound. No fixtures; the tours are read-only and root at `postgame-aides.bin`.
+
+---
+
+### [2026-08-04] J (fallout) — the in-battle party menu reads as a naming screen, and always has
+**Status:** corrected ❗ (root-caused and fixed)
+**What the plan said:** nothing — this is a **pre-existing agent bug** that workstream J's timing
+change exposed, and it is the one thing in this whole session that would have shipped as a
+regression if the full slow tier had not been re-run.
+
+**What happened.** With battle animations off, two previously-green A–H legs failed:
+`aides::can_get_the_exp_all` (ran to its cycle cap) and `legendaries::can_catch_mewtwo` (stalled).
+Both logs were almost empty; the only clue in either was a single line — `name:Venusaur`,
+`name:Articuno` — naming a mon that was *already in the party*. Flipping `battle_animations_on` back
+to `true` made both pass, which localises it to J but does **not** make it J's bug.
+
+**What is actually true.** `read_game_mode`'s in-battle branch identified the nickname screen by
+`wNamingScreenType == 2 && wNamingScreenSubmitName == 0`, with a comment claiming those two "are
+specific enough in the battle context". They are not:
+
+- `wNamingScreenType` is **aliased with `wPartyMenuTypeOrMessageID`**, and
+- **`BATTLE_PARTY_MENU` is `$02`** — byte-identical to `NAME_MON_SCREEN`
+  (`constants/menu_constants.asm:70` and `:92`).
+
+So *every* in-battle party menu reads as a naming screen: a voluntary switch, a potion's "use on
+which POKéMON?", and — the one that killed Mewtwo — the **"Use next POKéMON?"** prompt after a faint.
+The agent then writes a nickname for whatever is already out, and `AgentState::NamingPokemon`'s exit
+test ("the mode has left the naming/battle family") can never become true, because the battle is still
+running. It pulses START at a battle waiting for a move, for the rest of the run.
+
+It was latent only because it needs the agent to *sample* inside that window. J's frame-timing change
+moved the sample.
+
+**The fix, in two parts.**
+
+1. **The discriminator.** `DisplayNamingScreen` writes `wTopMenuItemY = 3`, `wTopMenuItemX = 1`
+   (`engine/menus/naming_screen.asm:101-104`); `PartyMenuInit` writes (0,1). Unlike the aliased type
+   byte, those are not shared, so the in-battle branch now also requires the naming grid's geometry.
+2. **The bound**, because the first fix removes this instance and not the class:
+   `AgentState::NamingPokemon` gained a `ticks` counter and gives up after 1500 ticks (30 s of game
+   time) with a named event. §10 already says *every wait needs a bound*; this one did not have one,
+   and that is why the failure was silent rather than loud.
+
+**Evidence:** `postgame::legendaries` (4/4) and `postgame::aides` (7/7) green with animations **off**
+after the fix; both failed with it before.
+**Impact on others:** `read_game_mode` is shared by everything, and this makes it *stricter* in a
+branch that was over-firing — no behaviour that was correct changes. Worth knowing for anyone who
+touches battle timing: **a timing change is a fuzz test of every RAM-inference in the agent**, and
+this repo has more inferences than it has flags.
+
+---
+
+### [2026-08-04] J (fallout 2) — four mainline legs are pinned to the old RNG stream, on purpose
+**Status:** verified ✅
+**What happened.** After the naming-screen fix, the **whole** slow tier (not just `postgame`) still had
+four failures, all of them mainline legs untouched by this session: `celadon::can_reach_lavender`,
+`saffron::can_enter_saffron`, `cinnabar::can_get_volcano_badge`, `endgame::can_beat_elite_four`. All
+four pass with `battle_animations_on: true` and fail with it off, so the cause is J and only J.
+
+**Why they are not bugs.** `can_reach_lavender` stalls on **Route 10 at (12,20)** trying to enter
+Lavender: fewer frames per battle means a wild encounter interrupts the walk at a different tile, and
+the agent ends up in Route 10's *southern* pocket, from which Lavender is not reachable. That is the
+leg's **route** being tuned against a particular RNG path, not the agent misbehaving —
+`EnterMapIfReachable` would have reported it and walked on; `EnterMap` correctly hard-stalls.
+`can_beat_elite_four` is the same class one level up: the win is a tuned sequence of switches and
+Blizzards across five long fights, and shifting the stream re-rolls every accuracy and crit check in
+all of them.
+
+**Why they are not re-cut.** §4.2 **freezes** `complete_game_steps` and `full_playthrough`, and §3 puts
+battle tactics out of scope on the stated grounds that in deployment they are the **LLM's** decisions,
+not the deterministic policy's. Re-tuning four mainline routes to a new RNG stream is exactly the work
+those two decisions rule out.
+
+**What shipped instead.** `TestFixture::with_original_battle_timing()` — an explicit, documented pin to
+the pre-J options, used by those four legs and nothing else. The default stays fast, so the default
+tier and all **66** postgame legs keep the 20–25 %.
+
+⚠️ **The general lesson, and it is the expensive one:** a leg's inputs are its fixture *and* the RNG
+stream, and only the first of those is committed. Anything that changes frame timing silently re-cuts
+the second. Re-run the **whole** slow tier — `-- pokemon::integration_tests`, not just your own module
+— before believing a timing change is free.

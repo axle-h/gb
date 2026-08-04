@@ -157,6 +157,59 @@ fn can_trade_a_venonat_for_a_tangela() {
     fixture.save_state_named("src/pokemon/data/postgame-tangela.bin").unwrap();
 }
 
+/// H's output and the chain head (§9): Route 15, party of six, **box 3 slot 2 is a lv32 Ponyta**,
+/// dex 52 owned.
+const AIDES: &[u8] = include_bytes!("../../data/postgame-aides.bin");
+
+/// **Task K1** — a **sixth** in-game trade: **Ponyta → Seel** in `CinnabarLabFossilRoom`. Emulates
+/// ≤60 min (≈2½ min wall clock).
+///
+/// Four of the nine trades were done in G5/G6 and the other five were skipped for one reason: each
+/// wants a give-species the save did not have *in hand*. K asks whether that was the only obstacle,
+/// and Ponyta is the cheapest way to find out — H5's Pokémon Mansion sweep boxed one, so this leg
+/// needs no catching and no debug seeding at all, just a swap at a PC
+/// ([`PolicyStep::trade_boxed_steps`]).
+///
+/// Two things worth carrying away, both of which would have been silent failures:
+///
+/// 1. ⚠️ **The trader is in the fossil room, not the trade room.** `CinnabarLabTradeRoom` holds two
+///    trades (Raichu, Venonat) and this is neither; `scripts/CinnabarLabFossilRoom.asm:102` sets
+///    `TRADE_FOR_SAILOR` from the *second scientist* in the room where fossils are revived. Talking to
+///    the wrong NPC does not error — it just talks.
+/// 2. ⚠️ **The party is full**, so the withdraw needs a deposit first, and the deposit has to come
+///    first in the queue for the same reason.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_trade_a_boxed_ponyta_for_a_seel() {
+    /// Where H5 left the Ponyta in the open box (box 3, which is what `wCurrentBoxNum` reads).
+    const PONYTA_BOX_SLOT: u8 = 2;
+    /// Rhyhorn — a lv25 with one move, the most expendable member of a full party of six.
+    const BANK_SLOT: u8 = 5;
+
+    let trade = trade_for(PokemonSpecies::Ponyta);
+    let mut fixture = TestFixture::new(AIDES, Duration::from_mins(60),
+        PolicyStep::trade_boxed_steps(trade.give, PONYTA_BOX_SLOT, BANK_SLOT, Map::FuchsiaPokecenter));
+
+    let before = fixture.game_state();
+    assert!(!before.pokedex_owned.contains(&trade.get), "entry fixture already owns a Seel");
+    assert_eq!(before.pokemon.len(), 6, "the party is full, so the withdraw needs a deposit first");
+    assert_eq!(before.boxed_pokemon[PONYTA_BOX_SLOT as usize].species, trade.give,
+        "box slot {PONYTA_BOX_SLOT} of the open box should be the Ponyta H5 caught");
+
+    // The withdraw first — it is the half `trade_steps` normally spends a catch on.
+    let withdrawn = fixture.run_until(|s| s.pokemon.iter().any(|p| p.species == trade.give));
+    println!("Ponyta out of box {} and in the party at {:?}", withdrawn.current_box + 1, withdrawn.map.map);
+
+    let state = fixture.run_leg(|s| s.pokemon.iter().any(|p| p.species == trade.get));
+    assert!(!state.pokemon.iter().any(|p| p.species == trade.give), "the Ponyta was not handed over");
+    assert!(state.pokedex_owned.contains(&trade.get), "Seel should be in the dex");
+    assert_eq!(state.map.map, Map::CinnabarIsland, "the leg ends outdoors so the next Fly is allowed");
+    println!("traded {:?} → {:?} · dex owned {}", trade.give, trade.get,
+        state.pokedex_owned.species().len());
+
+    fixture.save_state_named("src/pokemon/data/postgame-seel.bin").unwrap();
+}
+
 /// Diagnostic for **G6c**: is there grass where Fuchsia lets you onto Route 15?
 #[test]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
