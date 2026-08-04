@@ -328,15 +328,12 @@ pub enum PolicyStep {
     /// be scripted only when using the PC is valid (e.g. after Bill's Pokémon enters the machine).
     UsePc { map: Map },
 
-    // ── Reserved postgame seams (task 0.8 of `docs/postgame-coverage-plan.md`) ───────────────────
+    // ── Postgame steps (`docs/postgame-coverage-plan.md`) ────────────────────────────────────────
     //
-    // Landed up front so a workstream never has to add a variant *and* a match arm to this file —
-    // only the arm. Each is inert until its owner implements it: nothing constructs these, and every
-    // arm delegates to a `todo!()` in the owning workstream's own module.
-    //
-    // **Treat the signatures as drafts.** They are transcribed from §6 of the plan, which was written
-    // before anyone tried the mechanic; if the real driver wants different fields, change them. The
-    // seam is the point, not the shape.
+    // Each variant's logic lives in `postgame::<stream>`; the arm here delegates in one line, which
+    // is what keeps this file mergeable when several streams are open at once (§4.1 of the plan).
+    // These landed as empty seams and were filled in by their owners; the shapes below are the ones
+    // the real drivers wanted, not the plan's drafts.
     /// **B** — Fly to `to`. ⚠️ The town map is a bespoke screen, not a `HandleMenuInput` list.
     Fly { to: Map },
     /// **H** — collect the hidden `item` on `map`. Routes itself, like `Fish`. The tile comes from
