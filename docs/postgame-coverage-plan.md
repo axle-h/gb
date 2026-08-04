@@ -1,73 +1,46 @@
 # Covering the rest of Pokémon Red — plan **and** work record
 
-The agent finishes the game. It has barely *played* it. This document closes the gap, and is written
-so that **several agents can work on it at once** without fighting over the same files or fixtures.
+The agent finishes the game. It had barely *played* it. This document closed that gap, and is now the
+record of how.
 
-> ## ⚠️ THIS DOCUMENT IS THE COORDINATION MECHANISM
+> ## Where this stands — 2026-08-04
 >
-> It is **not** a plan you read once and leave behind. It is the **shared work record**. Agents
-> coordinate through this file and nothing else — there is no other channel between you.
+> **Phase 0 and workstreams A–H are all ✅ done.** Every mechanic in [§3](#3-scope)'s "in" list has a
+> `PolicyStep`, a driver and a test, and the dex has gone **7 → 52 owned / 111 → 117 seen** as a side
+> effect. The chain head is `postgame-aides.bin`.
 >
-> **Every agent must, in this order:**
-> 1. **Read** §0 (protocol), §4 (rules of engagement), §11 (findings log) and your own workstream
->    section — *before writing any code*. §11 is where previous agents recorded what turned out to be
->    wrong. Reading it is the cheapest work you will ever do.
-> 2. **Claim** your workstream in the §9 status table before starting.
-> 3. **Update as you go** — tick sub-steps the moment they are green, not at the end.
-> 4. **Record what you learned** in §11, especially assumptions in this document that turned out to
->    be **wrong**. A corrected wrong assumption is worth more to the next agent than a finished task.
+> ⚠️ **One thing was chased for a while and is now formally out of scope: winning the legendary fights
+> without a Master Ball.** The three catches are debug-seeded on purpose — see the "Out" table in
+> [§3](#3-scope), which is where that decision now lives. Do not reopen it.
 >
-> An agent that finishes its code but leaves this document untouched **has not finished**.
+> **[§11](#11-findings-log) is the highest-value part of this file.** Everything above it was written
+> *before* anyone tried it — treat it as a hypothesis. §11 is what was actually true, and it is
+> **append-only**: never edit or delete an entry, and put new ones at the bottom.
 
 ---
 
 ## 0. Working protocol
 
-### 0.1 Claiming work
+This began as a multi-agent effort and the coordination rules are kept because they still describe how
+to work here, not because several agents are still running.
 
-Before your first edit, set your row in [§9 Status](#9-status) to `🔵 in progress` and put your
-identifier in the Owner column. If the row is already claimed, **pick a different one** — do not
-start a second effort on the same stream. If every unblocked row is claimed, say so and stop.
+- **Claim before you start.** Set your row in [§9](#9-status) to `🔵 in progress` with your identifier.
+  If a row is already claimed, pick a different one.
+- **Own two files, touch shared ones on four lines.** See [§4.1](#41-file-ownership). This is the rule
+  that made the parallelism work and it is still the rule that keeps `policy.rs` reviewable.
+- **Work in small increments.** Every sub-step is one focused change ending in something *observable* —
+  a passing test, a probe dump, a fixture — not "code written". Tick each as it goes green, not in a
+  batch at the end. If a sub-step turns out to be three, split it in this document first.
+- **Record what you learned in §11**, especially assumptions here that turned out **wrong**. A
+  corrected wrong assumption is worth more to the next agent than a finished task. An agent that ships
+  code and leaves this document untouched **has not finished**.
+- **If you get blocked:** finish everything that does not depend on the blocker, set your row to
+  `🟡 blocked` with the reason, and append a §11 entry saying what you tried and what you would try
+  next. A half-finished workstream with an accurate record beats a finished one nobody can build on.
 
-### 0.2 Editing this document without conflicting
-
-Several agents will have this file open at once. The rules that keep that safe:
-
-- **Only ever edit: your own workstream's section, your own row in §9, and by *appending* to §11.**
-- **Never** rewrite, reword, reorder or "tidy" another workstream's section, another agent's row, or
-  an existing §11 entry. If you believe another section is wrong, **append a §11 entry saying so** —
-  do not edit it yourself.
-- Append to §11, never insert into the middle. Newest entries go at the bottom.
-- Make many small edits rather than one big rewrite at the end. A small edit rarely conflicts; a
-  whole-file rewrite always does.
-
-### 0.3 The step rhythm
-
-Work in small, verifiable increments. Every sub-step in §6 is sized so that:
-
-- it is **one focused change**, typically under an hour,
-- it ends in something **observable** — a passing test, a probe dump, a fixture — not "code written",
-- and it can be ticked on its own, so a stopped agent leaves clean, resumable state.
-
-Do not batch several sub-steps and tick them together at the end. If you find a sub-step is actually
-three, split it in the document first, then do them.
-
-### 0.4 Definition of done
-
-- **A sub-step** is done when its observable result exists and its box is ticked.
-- **A workstream** is done when every sub-step is ticked, its test is green in the `slow-tests` tier,
-  its fixture is committed, its §9 row reads `✅ done`, and it has at least one §11 entry (even if
-  that entry is only "everything in the plan was accurate").
-
-### 0.5 If you get blocked
-
-Do **not** silently give up, and do **not** expand scope to route around it. Instead:
-
-1. Finish every sub-step that does *not* depend on the blocker.
-2. Set your §9 row to `🟡 blocked` and write the blocker in the Notes column.
-3. Append a §11 entry describing what you tried and what you'd try next.
-
-A half-finished workstream with an accurate record beats a finished one nobody can build on.
+**Done** means: every sub-step ticked, the test green in the `slow-tests` tier, the fixture committed,
+the §9 row reading `✅ done`, and at least one §11 entry — even if it only says "everything in the plan
+was accurate".
 
 ---
 
@@ -81,37 +54,33 @@ target — there is no exhaustive catching sweep here.
 
 ## 2. Ground truth
 
-Measured, not assumed — from `post-hall-of-fame.bin`:
+Measured, never assumed. Re-read it for any fixture with the coverage probe:
 
-```
-badges 255 (all 8) · ¥37,774 · party 4 · DEX OWNED 7 / SEEN 111
-party: Articuno 73, Venusaur 70, Vaporeon 71, Slowpoke 30
-bag:   20/20 — FULL
-       TownMap, TM34, HelixFossil, SSTicket, HM01 Cut, LiftKey, SilphScope,
-       PokeFlute, HM03 Surf, HM04 Strength, CardKey, SecretKey,
-       GreatBall×9, FullRestore×6, Revive×4
-raw:   wBoxCount=0   wCurrentBoxNum=0   wPlayerCoins=0
+```bash
+cargo test --release --bin gb -- pokemon::integration_tests::fixture::probe_coverage --exact --ignored --nocapture
 ```
 
-Two consequences drive the whole ordering of this plan:
+It prints map, badges, money, coins, dex owned/seen, `wBoxCount`/`wCurrentBoxNum`, the open box, the
+party, a **raw** bag read (`GameState::bag` silently drops every id `ItemId` cannot name, i.e. most
+TMs), PC item storage and the Safari step budget, for every committed `postgame-*.bin`.
 
-1. **The bag is full.** The agent physically cannot pick up HM02, a fishing rod, or the Itemfinder
-   until item PC storage exists. This is why item storage is Phase 0 and not a workstream.
-2. **`wBoxCount=0`.** The Pokémon storage system has never been opened, so the party can never
-   exceed 6 and no workstream can bank a caught mon.
+**Where the effort started**, from `post-hall-of-fame.bin`: badges 255, ¥37,774, party 4, **dex 7 owned
+/ 111 seen**, bag **20/20 — full**, `wBoxCount=0`. Two facts drove the whole ordering:
 
-**96 of the 248 maps are never referenced anywhere in `policy.rs`.** Regenerate that list any time
-with:
+1. **The bag was full**, so the agent physically could not pick up HM02, a rod or the Itemfinder until
+   item PC storage existed. That is why item storage is Phase 0 and not a workstream.
+2. **`wBoxCount=0`** — the storage system had never been opened, so the party could never exceed 6.
+
+**Where it ends**, from `postgame-aides.bin` (the chain head): Route 15, ¥5,894, party 6, box 3
+holding 6, **dex 52 owned / 117 seen**, bag 20/20.
+
+**96 of the 248 maps were never referenced in `policy.rs`** when this started. Regenerate that list any
+time with:
 
 ```bash
 comm -13 <(grep -o "Map::[A-Za-z0-9_]*" src/pokemon/policy.rs | sed 's/Map:://' | sort -u) \
          <(sed -n '7,300p' src/pokemon/map.rs | grep -oE "^    [A-Za-z0-9_]+ =" | sed 's/ =//;s/^ *//' | sort -u)
 ```
-
-Notable absences: `PowerPlant`, `CeruleanCave{1F,2F,B1F}`, `Route16/17/18` (all of Cycling Road),
-`BikeShop`, `PokemonFanClub`, `Route16FlyHouse`, `CinnabarLab*` (4 rooms), `FightingDojo`,
-`GameCornerPrizeRoom`, `Daycare`, `Museum1F/2F`, `NameRatersHouse`, `CopycatsHouse1F/2F`, and
-`SilphCo{2,4,6,8,10}F`.
 
 ---
 
@@ -132,16 +101,17 @@ in-game trades, gift Pokémon, and the dex-gated Oak's-aide items.
 | The MCP text interface | `CLAUDE.md` names it as the project goal and it does not exist yet. It gets its own plan; this one is about game coverage. |
 | The slot machine minigame | Coins are purchasable at the Game Corner counter (¥1000 → 50 coins), which reaches every prize without driving an RNG-heavy reel minigame. |
 | An exhaustive dex sweep | Mechanism coverage is the goal. See [§7](#7-the-dex-ceiling-for-reference) for the ceiling if this is ever revisited. |
+| **Winning the legendary fights honestly** | Decided 2026-08-04, after it had eaten a good deal of effort. The three catches use a debug-seeded **Master Ball**, and the tests prove the **routes** — which is the mechanism. Beating a catch-rate-3 encounter that must not be KO'd, fled or lost is *battle tactics*, and in deployment those are the **LLM's** decisions, not the deterministic policy's; tuning our scripted policy to win them tests the wrong thing. This retired sub-step D2a (a fast paralyser out of the Power Plant) and D4 (stocking Ultra Balls). The §11 entries that pursued it are kept as history — they are **not** a to-do list. |
 
 ### The RAM-write rule
 
-The repo's existing claim — *"no RAM-write shortcuts remain in the play path"* — **stands**. RAM
-writes are allowed, but only in an explicitly-named debug tier:
+The repo's existing claim — *"no RAM-write shortcuts remain in the play path"* — **stands**. RAM writes
+are allowed, but only in an explicitly-named debug tier:
 
-- **Play path** (anything reachable from `Policy::pick_*` during a legitimate run): button input
-  only. No exceptions.
-- **Debug tier** (`PokemonApi::debug_*`, added in Phase 0): free to write RAM. Used *only* for
-  fixture construction, test seeding, and diagnostics.
+- **Play path** (anything reachable from `Policy::pick_*` during a legitimate run): button input only.
+- **Debug tier** (`PokemonApi::debug_*`, added in Phase 0): free to write RAM. Used *only* for fixture
+  construction, test seeding and diagnostics. `postgame::debug::play_path_contains_no_debug_ram_writes`
+  greps for it and fails if it appears in `policy.rs`, `agent.rs` or `postgame/`.
 
 `PolicyStep::MovePokemonToFront` is the one pre-existing violation (it writes party order directly).
 Leave it; don't add more.
@@ -152,50 +122,35 @@ Leave it; don't add more.
 
 ### 4.1 File ownership
 
-`policy.rs` (3 114 lines) and `agent.rs` (2 286 lines) are the conflict hotspots. The seam that makes
-parallel work possible:
-
-**Each workstream owns two new files and touches shared files on exactly four lines.**
+`policy.rs` and `agent.rs` are the conflict hotspots. The seam that makes parallel work possible:
+**each workstream owns two new files and touches shared files on exactly four lines.**
 
 ```
-src/pokemon/postgame/<stream>.rs             ← owned: step-list constructors + driver logic
+src/pokemon/postgame/<stream>.rs                   ← owned: step-list constructors + driver logic
 src/pokemon/integration_tests/postgame/<stream>.rs ← owned: the tests
 ```
 
-Rust allows `impl` blocks for a type in any module of the same crate. So a workstream adds its step
-constructors as `impl PolicyStep { pub fn my_steps() -> Vec<PolicyStep> { … } }` **in its own file**,
-not in `policy.rs`.
-
-The four shared-file lines a workstream is allowed to add:
-
-| File | Allowed edit |
-|---|---|
-| `policy.rs` | one `PolicyStep` enum variant |
-| `policy.rs` | one match arm in `pick_overworld_action`/`pick_field_move`, **delegating in one line** |
-| `agent.rs` | one `AgentState` enum variant |
-| `agent.rs` | one match arm, **delegating in one line** |
-
-Delegation means literally this — no logic inline:
+Rust allows `impl` blocks for a type in any module of the same crate, so a workstream adds its step
+constructors as `impl PolicyStep { … }` **in its own file**. The four shared-file lines it may add are
+one `PolicyStep` variant, one `AgentState` variant, and one match arm for each — **delegating in one
+line, with no logic inline**:
 
 ```rust
-// policy.rs
 PolicyStep::UsePcBox { .. } => return postgame::pc_box::pick(self, state, world_graph),
-// agent.rs
-AgentState::UsingPcBox(s) => return postgame::pc_box::tick(self, api, s),
+AgentState::UsingPcBox(s)   => return postgame::pc_box::tick(self, api, s),
 ```
 
 One-line arms merge cleanly. Inline bodies do not. This is the single most important rule here.
 
 ### 4.2 Fixtures
 
-- **Root every workstream at `post-hall-of-fame.bin`.** It has all 8 badges, Surf and Strength in
-  hand, and no remaining main-quest obligations. Workstreams are siblings off that root, not a chain.
+- Workstreams root at `postgame-phase0.bin` or at another stream's output where that is cheaper — most
+  chose **B's** `postgame-fly-bike.bin`, because Fly makes every trip one step. Name your output
+  `postgame-<stream>.bin`.
 - `complete_game_steps` and `full_playthrough` are **frozen**. Do not insert side content into the
-  mainline. A later backport pass can move things earlier once each is individually green.
-- Fixture writes stay gated behind `--features regen-fixtures`. Never commit a fixture another
-  workstream owns. If a leg test fails, check `git status src/pokemon/data/` **first** — drift is the
-  usual cause, not your code.
-- Name your output fixture `postgame-<stream>.bin`.
+  mainline; a later backport pass can move things earlier once each is individually green.
+- Fixture writes stay gated behind `--features regen-fixtures`. If a leg test fails, check
+  `git status src/pokemon/data/` **first** — drift is the usual cause, not your code.
 
 ### 4.3 Tests
 
@@ -205,436 +160,211 @@ One-line arms merge cleanly. Inline bodies do not. This is the single most impor
   `cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests::postgame::pc_box --nocapture`
 - Wall clock ≈ emulated-minutes ÷ 23. Budget accordingly and say so in the test doc comment.
 
-### 4.4 Before you start a workstream
-
-Run the coverage probe (added in Phase 0) to see the live state of your entry fixture:
-
-```bash
-cargo test --release --bin gb -- pokemon::integration_tests::fixture::probe_coverage --exact --ignored --nocapture
-```
-
 ---
 
-## 5. Phase 0 — foundation (one agent, blocks everything else)
+## 5. Phase 0 — foundation ✅
 
-Nothing else can start until this lands. Keep it to **one** agent; it is almost entirely shared-file
-work, which is exactly what §4.1 exists to stop happening more than once.
+One agent, and it blocked everything else. All nine sub-steps are done: the **coverage probe** (0.1),
+the `postgame` module skeleton (0.2), `MetaTileMap::pc_locations` (0.3 — every Pokémon Center's PC is a
+hidden object at **(13,3)** facing up, one constant covering all of them), **walking out of the Hall of
+Fame** (0.35), `PolicyStep::UsePc` (0.4), `DepositItem`/`WithdrawItem` (0.5/0.6), the `debug_*` tier and
+its guard test (0.7), the reserved enum seams (0.8), and the entry fixture (0.9).
 
-Do these in order — each builds on the last, and 0.5 is the tool you'll use to check 0.3.
+⚠️ Two results everything downstream depends on:
 
-- [x] **0.1 — Coverage probe.** *Do this first: it costs 20 minutes and tells you the truth about
-      every fixture.* Add a permanent `#[ignore]`d `probe_coverage` to
-      `integration_tests/fixture.rs` printing map, badges, money, party, bag, **dex owned/seen
-      counts**, `wBoxCount`, `wCurrentBoxNum`, `wPlayerCoins`.
-      *Observable:* it reproduces the numbers in [§2](#2-ground-truth) from `post-hall-of-fame.bin`.
-- [x] **0.2 — `postgame` module skeleton.** `src/pokemon/postgame/mod.rs` and
-      `src/pokemon/integration_tests/postgame/mod.rs`, one empty file per workstream A–H, wired in.
-      *Observable:* `cargo test --release` still green, no behaviour change.
-- [x] **0.3 — Pokémon Center PC locations.** `MetaTileMap::pc_locations()` knows only `BillsHouse`
-      (1,4). Every Pokémon Center's PC is a hidden object at **(13,3)** facing up — one constant
-      covers all of them (verified across `data/events/hidden_objects.asm`; a few non-centre maps
-      differ, e.g. `RedsHouse2F` at **(0,1)**).
-      *Observable:* a unit test asserting `pc_locations()` is non-empty for a Pokémon Center map.
-- [x] **0.35 — Walk out of the Hall of Fame.** *Not in the original plan; added because 0.4 cannot be
-      tested without it.* `post-hall-of-fame.bin` is captured on **arrival** in the Hall of Fame, so it
-      is a cutscene, not a playable state — see the §11 entry. Drive the ceremony → credits → soft
-      reset → CONTINUE (a plain A-mash does all of it) and commit the result as the real postgame root.
-      *Observable:* `postgame-post-credits.bin` committed — Pallet Town (5,7), Overworld, badges/party/
-      money/dex all intact. Test `postgame::phase0::can_walk_out_of_the_hall_of_fame`, ~7 s wall clock.
-- [x] **0.4 — Reach the PC.** Get `PolicyStep::UsePc` to open the PC menu in a Pokémon Center and
-      log the on-screen text. No storage logic yet — just prove the agent can stand there and open it.
-      *Observable:* a test that asserts the PC menu text appears.
-- [x] **0.5 — Item deposit.** `PolicyStep::DepositItem { item, qty }`. Menu chain: PC →
-      `SOMEONE's PC` → `WITHDRAW ITEM` / `DEPOSIT ITEM` / `TOSS ITEM` / `LOG OFF` (indices 0–3, from
-      `engine/menus/players_pc.asm:243`). Model on `AgentState::TossingItem` — same mash +
-      navigate-then-A pattern.
-      *Observable:* bag count drops by one; the probe confirms it.
-- [x] **0.6 — Item withdraw.** `PolicyStep::WithdrawItem { item, qty }`, same driver, other branch.
-      *Observable:* the item round-trips out and back; bag count returns to where it started.
-- [x] **0.7 — Debug tier.** A `PokemonApi::debug_*` namespace for RAM writes (give item, set dex bit,
-      set money, place party mon), plus a test that greps the play path for `debug_` and fails if it
-      appears, so the boundary can't erode.
-      *Observable:* the guard test is green, and deliberately calling `debug_` from a policy fails it.
-- [x] **0.8 — Reserve the seams.** Land the `PolicyStep` / `AgentState` / `FieldMove` enum variants
-      for **all** workstreams A–H as stubs in one commit, so later agents only ever add match arms.
-      *Observable:* it compiles; each stub is `todo!()` with the owning workstream named in a comment.
-- [x] **0.9 — Ship the entry fixture.** Free enough bag space for the other streams to pick things up.
-      *Observable:* `postgame-phase0.bin` committed, bag well under 20, probe output pasted into §11.
-
-**Phase 0 is done when** every box above is ticked and `postgame-phase0.bin` exists with a bag under
-20 items. **Announce it by appending a §11 entry** — that entry is the signal other agents wait on.
+- **`post-hall-of-fame.bin` is a cutscene, not a playable state** — it is captured on *arrival* in the
+  Hall of Fame. 0.35 drives the ceremony → credits → soft reset → CONTINUE and commits
+  `postgame-post-credits.bin`; **A–H root at `postgame-phase0.bin`, never at `post-hall-of-fame.bin`.**
+- **A PC can only be used from *below***, and 0.9 banked the bag down to 14/20 — including, it turned
+  out, the **Silph Scope**, which is why every chain rooted on `postgame-phase0.bin` arrives without it
+  and every Pokémon Tower wild reads as an uncatchable GHOST (see H5's §11 entry).
 
 ---
 
 ## 6. Workstreams
 
-All are independent and can run concurrently once Phase 0 lands, except **H**, which needs dex
-count from the others.
+All ✅ done. Each entry below is the *record*: what was built, what other streams can reuse, and the
+warnings worth carrying forward. The full write-ups are in §11.
 
-**Each sub-step below is one focused change ending in something observable.** Tick as you go; append
-what you learn to §11. If a sub-step turns out to be three, split it here first.
+### A — Pokémon storage (PC boxes) ✅
 
-### A — Pokémon storage (PC boxes)
+Unblocks holding more than 6 Pokémon, which C, D, E, F and G all wanted.
 
-**Why first among equals:** unblocks holding more than 6 Pokémon, which C, D, E, F and G all want.
+- [x] **A1** read box state → `GameState::boxed_pokemon` + `.current_box`. The box data is in **WRAM**,
+      not SRAM, and only the *open* box is readable — the other eleven sit in SRAM banks the pointer
+      reader cannot reach.
+- [x] **A2** open Bill's PC → `can_open_bills_pc`. ⚠️ The parent menu's *labels* vary (`PROF.OAK's PC`
+      appears with the Pokédex, `<PKMN>LEAGUE` post-Champion) but **entry 0 is always the player's PC**.
+      Detect menus by on-screen text, never geometry.
+- [x] **A3–A6** `PolicyStep::deposit_pokemon / withdraw_pokemon / change_box / release_pokemon(.., map)`
+      — **not** the four reserved enum variants, which are gone. ⚠️ `change_box` **saves the game**.
+- [x] **A7** full round-trip test + `postgame-pc-box.bin`.
 
-- [x] **A1 — Read box state.** Expose `GameState.boxed_pokemon` (read `wBoxCount` + the SRAM box data
-      via `encoding.rs`). *Observable:* the probe prints box contents, empty at first.
-      *Done:* `GameState.boxed_pokemon` + `.current_box`, reader in `postgame::pc_box`. The box data is
-      in **WRAM**, not SRAM — see §11. Probe prints `box1: empty`; decode pinned by the default-tier
-      test `postgame::pc_box::reads_a_boxed_pokemon_out_of_wram`.
-- [x] **A2 — Open Bill's PC.** Navigate the parent PC menu to the `BILL's PC` entry. ⚠️ The parent
-      menu's entry *list varies* — `PROF.OAK's PC` only appears once the Pokédex is owned, and a
-      `<PKMN>LEAGUE` entry appears post-Champion — so **read the on-screen text, don't hard-code the
-      index**. Same trap as the forget-move menu (`menu::is_forget_move_prompt`).
-      *Observable:* a test asserting the `WITHDRAW/DEPOSIT/RELEASE` submenu text is on screen.
-      *Done:* `postgame::pc_box::can_open_bills_pc` — asserts the parent menu appears **before** the
-      submenu, so a deliberate selection is distinguished from falling into entry 0. Index 0 turns out
-      to be safe; it is the *label* that varies. See §11.
-- [x] **A3 — Deposit.** `PolicyStep::DepositPokemon { slot }`. Submenu entries are `WITHDRAW <PKMN>` /
-      `DEPOSIT <PKMN>` / `RELEASE <PKMN>` / `CHANGE BOX` / `SEE YA!`, indices 0–4
-      (`engine/pokemon/bills_pc.asm:341`). *Observable:* party count drops, `wBoxCount` rises.
-      *Done:* `PolicyStep::deposit_pokemon(slot, map)`; test `postgame::pc_box::can_deposit_a_pokemon`.
-      The submenu transcription in the plan is exactly right.
-- [x] **A4 — Withdraw.** `PolicyStep::WithdrawPokemon { box_slot }`. *Observable:* the same mon
-      round-trips back into the party.
-      *Done:* `PolicyStep::withdraw_pokemon(box_slot, map)`; test
-      `postgame::pc_box::pokemon_round_trips_through_the_box`.
-- [x] **A5 — Change box.** `PolicyStep::ChangeBox { n }`. 12 boxes of 20. ⚠️ Changing box **saves the
-      game** — expect a confirmation prompt and a pause. *Observable:* `wCurrentBoxNum` changes.
-      *Done:* `PolicyStep::change_box(n, map)`; test `postgame::pc_box::can_change_box` switches away
-      and back and finds the banked mon still there. The first change also wipes SRAM — see §11.
-- [x] **A6 — Release.** `PolicyStep::ReleasePokemon { box_slot }`. *Observable:* `wBoxCount` drops.
-      *Done:* `PolicyStep::release_pokemon(box_slot, map)`; test `postgame::pc_box::can_release_a_pokemon`.
-- [x] **A7 — Full round-trip test + fixture.** Deposit, change box, withdraw; party/box counts match
-      at every stage. *Observable:* `postgame-pc-box.bin` committed, test green.
-      *Done:* `postgame::pc_box::can_round_trip_a_pokemon_through_two_boxes` — deposit → box 2 → box 1
-      → withdraw, asserting `(party, box, open box)` between each. Fixture committed and added to
-      `probe_coverage`; it restores the party, so its value is the *capability*, not the arrangement.
+### B — Fly, the Bicycle, and Cycling Road ✅
 
-### B — Fly, the Bicycle, and Cycling Road
+The biggest quality-of-life win in the plan: **`PolicyStep::Fly { to }` reaches any of the 11 towns from
+any outdoor map**, and every later stream is built on it.
 
-The biggest quality-of-life win in the plan: Fly collapses cross-Kanto travel, which every other
-workstream pays for in emulated minutes. **Land this early if agents are scarce.**
+- [x] **B1** Bike Voucher (`PokemonFanClub` chairman) · **B2** Bicycle (`BikeShop`) · **B3** HM02
+      (`Route16FlyHouse`) · **B4** teach Fly (**Articuno is the only compatible party member**).
+      ⚠️ **B3 depends on B2**: `Route16Gate1F` is two separate corridors and the guard between them
+      wants to see the Bicycle.
+- [x] **B5** the Fly driver — [`postgame::fly_bike::tick`] + `FlyState`. ⚠️ The town map is a **bespoke
+      screen**: the cursor is not in RAM at all and there is no flag for the screen, so it is identified
+      by its **broken font**. Three §11 entries came out of this one sub-step.
+- [x] **B6** Cycling Road · **B7** the Route 16 Snorlax. Nothing has to *use* the Bicycle — owning it
+      opens the gate. The Snorlax turns out **not** to block the road (it is two tiles tall and sits on
+      one of them), so B7 is dex coverage, not a gate.
 
-- [x] **B1 — Bike Voucher.** `PokemonFanClub` (Vermilion), talk to the chairman.
-      *Observable:* voucher in bag.
-      *Done:* `PolicyStep::bike_voucher_steps()`, test `postgame::fly_bike::can_get_the_bike_voucher`
-      (~8 s). The chairman's YES/NO needs no driver — `YesNoChoice` opens on YES and the generic A-mash
-      answers it. Viridian → Vermilion goes through **Diglett's Cave**, not the Mt Moon loop.
-      Fixture `postgame-bike-voucher.bin`.
-- [x] **B2 — Bicycle.** `BikeShop` (Cerulean), trade the voucher. *Observable:* Bicycle in bag.
-      *Done:* `PolicyStep::bicycle_steps()`, test `can_trade_the_voucher_for_a_bicycle` (~4 s). One
-      `Interact`: with the voucher held the clerk gives the bike and removes it, no menu.
-      Fixture `postgame-bicycle.bin`.
-- [x] **B3 — HM02.** `Route16FlyHouse`, reached from Celadon via `Route16` (needs Cut).
-      *Observable:* HM02 in bag.
-      *Done:* `PolicyStep::hm02_steps()`, test `can_get_hm02_fly` (~5 s). ⚠️ **B3 depends on B2**, which
-      §6-B does not say: `Route16Gate1F` is two separate corridors and the guard between them wants to
-      see the Bicycle. Fixture `postgame-hm02.bin`.
-- [x] **B4 — Teach Fly.** `PolicyStep::TeachMove { item: Hm02Fly, .. }` already works — just use it.
-      *Observable:* a party mon knows Fly.
-      *Done:* test `can_teach_fly` (~1 s). **Articuno is the only compatible party member.** The plan was
-      right that this is free — and the "`TeachMove` wedges on a deep-bag HM" suspicion did **not**
-      reproduce at bag index 15; see §11.
-- [x] **B5 — The Fly driver.** `PolicyStep::Fly { to: Map }` + `AgentState::Flying`, driving
-      START → POKéMON → mon → FLY → town-map cursor. ⚠️ The town map is a **bespoke screen**, not a
-      `HandleMenuInput` list — budget real time for this one and record what you find in §11.
-      *Observable:* the agent Flies between two towns.
-      *Done:* [`postgame::fly_bike::tick`] + `FlyState`, test `can_fly_between_towns` (Route 16 → Pewter,
-      ~1 s). The warning was an understatement — the cursor is not in RAM at all and there is no flag for
-      the screen. Three §11 entries came out of it. Fixture `postgame-fly.bin`.
-- [x] **B6 — Cycling Road.** `Route17` is bike-gated; `Route16/17/18` then connect Celadon → Fuchsia.
-      *Observable:* the agent walks Celadon → Fuchsia via Cycling Road.
-      *Done:* `PolicyStep::cycling_road_steps()`, test `can_ride_cycling_road_to_fuchsia` (~16 s).
-      Nothing has to *use* the Bicycle: owning it opens the gate and Route 16 (17,10)/(17,11) mount it.
-      Two blockers found on the way — see §11 (`can_surf` on Cycling Road, and Route 18's water flanks).
-- [x] **B7 — Route 16 Snorlax.** The **second** Snorlax; `UseFieldItem { PokeFlute }` already exists.
-      *Observable:* Snorlax gone, route passable. Then commit `postgame-fly-bike.bin`.
-      *Done:* same test (the two share a map, and the Snorlax battle regrows the cut tree the Cycling
-      Road entrance is behind). It turns out the Route 16 Snorlax does **not** block the road — the road
-      is two tiles tall and it sits on only one of them — so this is dex coverage (SEEN 112), not a gate.
-      Fixture `postgame-fly-bike.bin`.
+Two shared-file fixes landed here: field-move menu detection in `agent.rs`, and `can_surf` on Cycling
+Road. Output `postgame-fly-bike.bin` — but heal first, Venusaur's Solarbeam is at 0 PP.
 
-### C — Fishing
+### C — Fishing ✅
 
-- [x] **C1 — Old Rod.** `VermilionOldRodHouse`. *Observable:* rod in bag.
-      *Done:* `PolicyStep::old_rod_steps()`, test `postgame::fishing::can_get_the_old_rod` (~1 s). One
-      `Interact`; the guru's YES/NO needs no driver, exactly like B1's chairman. ⚠️ The leg ends with an
-      extra `enter(town)` so the fixture is saved **outdoors** — see §11.
-- [x] **C2 — The fishing driver.** `PolicyStep::Fish { rod, at }` + `AgentState::Fishing`: face a
-      water tile, use the rod from the bag (same START → ITEM → USE chain as `UsingFieldItem`),
-      handle the "not even a nibble" / "hooked" text, drop into the normal battle handler on a bite.
-      *Observable:* a wild battle starts from a water tile.
-      *Done:* [`postgame::fishing::tick`] + `FishState`, test `can_fish_a_wild_battle_out_of_the_water`
-      (~2 s). The shape changed: the step is `Fish { rod, map, goal }` and the *policy* picks the water
-      tile and owns the repetition, one cast per driver invocation. ⚠️ The one real trap is that the
-      cast animation **must be mashed through, not waited out** — see §11.
-- [x] **C3 — Catch from a bite.** *Observable:* one water species in the dex.
-      *Done:* `FishGoal::Catch`, test `can_catch_a_magikarp_on_the_old_rod` (~2 s), fixture
-      `postgame-magikarp.bin`. No weakening pass: everything fishable is catch rate 155–255.
-- [x] **C4 — Good Rod.** `FuchsiaGoodRodHouse`. *Observable:* rod in bag, different encounter table.
-      *Done:* `PolicyStep::good_rod_steps()`, test `can_get_the_good_rod_and_catch_a_goldeen` (~10 s),
-      fixture `postgame-good-rod.bin`. **Goldeen** is the proof — it is in the Good Rod's table and not
-      the Old Rod's (which is Magikarp and nothing else).
-- [x] **C5 — Super Rod.** `Route12SuperRodHouse`. *Observable:* as above; commit
-      `postgame-fishing.bin`.
-      *Done:* `PolicyStep::super_rod_steps()`, test `can_get_the_super_rod_and_catch_a_tentacool`
-      (~16 s). **Tentacool** is the proof (Pallet's Super Rod group only). ⚠️ Route 12's road is
-      blocked by its gate building and the house is at (11,77), 56 tiles south of it. The party is
-      banked down to four at the Viridian PC first, to keep the catch off the boxed-catch path that
-      wedges the agent (§11, D/D5).
+- [x] **C1/C4/C5** all three rods — `old_rod_steps` / `good_rod_steps` / `super_rod_steps`.
+- [x] **C2** the driver — `PolicyStep::Fish { rod, map, goal }` + [`postgame::fishing::tick`]. The
+      *policy* picks the water tile and owns the repetition, one cast per driver invocation.
+      ⚠️ The cast animation **must be mashed through, not waited out** (its flag clears only after a
+      `prompt`) — one of the two ROM-shaped deadlocks in §10.
+- [x] **C3** catch from a bite. No weakening pass: everything fishable is catch rate 155–255.
 
-Opens the whole water encounter table — Magikarp/Goldeen/Poliwag/Tentacool/Krabby/Horsea/Staryu.
-**Dex after C: 10 owned / 113 seen** (from 7/112).
+Proof species were chosen to be table-exclusive: **Goldeen** for the Good Rod, **Tentacool** for the
+Super Rod. Output `postgame-fishing.bin`, dex 10 owned.
 
-### D — Legendaries: Zapdos, Moltres, Mewtwo
+### D — Legendaries: Zapdos, Moltres, Mewtwo ✅ (with one honest gap, below)
 
-~~Cheapest workstream by far~~ — **that assumption was wrong and the sub-steps below have been
-re-cut.** `CatchPokemon`'s static-encounter branch does route to a map sprite named after the species
-and press A, and that part is free. What is not free is the *fight*: Articuno was caught with the
-**Master Ball**, which is spent, and all three remaining legendaries have **catch rate 3**. See the
-2026-07-30 §11 entries for the arithmetic; the short version is that a status ailment is the only lever
-that matters and Thunder Wave is the only one the party can get.
+~~Cheapest workstream by far~~ — that was wrong twice over, and both corrections are the interesting
+part. The navigation *is* nearly free; the **fights** are the work.
 
-⚠️ **Read the "trapping moves and the one-shot legendary" §11 entry before touching D1b or D3.** Two
-rules it establishes, both load-bearing and both counter-intuitive:
+The catch formula (`engine/items/item_effects.asm`, `ItemUseBall`) is why:
 
-1. **Never `BattleAction::Run` against one of these.** `EndTrainerBattle` hides the object and sets its
-   event on *any* exit but a blackout. Running deletes the legendary from the save.
-2. A slower Pokémon **cannot act at all** while the target is mid-Fire-Spin, so the paralyser has to
-   **outspeed** the target.
+```text
+Rand1 ∈ [0,255] Poké Ball / [0,200] Great Ball / [0,150] Ultra Ball
+Status subtracts 12 (burn/paralysis/poison) or 25 (freeze/sleep); if that underflows, caught outright.
+Otherwise Rand1 - Status > catch rate ⇒ the ball fails, whatever the target's HP is.
+```
 
-Rule 2 is why the order below is not the order in the original plan: the party has no fast Thunder Wave
-user, so the Power Plant (which has one) has to come first.
+All three remaining legendaries are **catch rate 3**, so the status subtraction is the only lever that
+moves at all, and weakening buys a fraction of a percent while risking a once-per-cartridge encounter.
 
-- [x] **D1a — the toolkit.** TM45 Thunder Wave (a free pickup at Route 24 (10,5)) taught to Slowpoke,
-      plus the ball and potion stack every catch spends. *Observable:* `postgame-thunder-wave.bin`.
-      *Done:* `PolicyStep::arm_for_legendaries_steps()`, test
-      `postgame::legendaries::can_arm_for_the_legendaries` (~8 s). **Slowpoke is the only party member
-      TM45 is compatible with**, and TM45 is one-per-cartridge — see §11 before spending it again.
-- [ ] **D2 — Reach the Power Plant.** `PowerPlant`, entered by Surfing east off Route 10. Unvisited,
-      so the route needs `EnterMap` steps. *Observable:* the agent stands in the Power Plant.
-- [ ] **D2a — Catch an Electrode** (new). The Poké-Ball sprites on the Power Plant floor are disguised
-      Voltorbs and Electrodes; Electrode is lv43 with base speed **140**, the only obtainable Pokémon
-      that outspeeds Moltres and Zapdos *and* learns TM45. It is catch rate 60, i.e. an ordinary catch.
-      ⚠️ Its map sprite is named `Electrode 1`/`Electrode 2`, not `Electrode`, so the static-encounter
-      branch's exact-name match will not find it — engage it with `Interact` or relax that match.
-      *Observable:* Electrode in the party knowing Thunder Wave.
-- [x] **D1b — Moltres.** `VictoryRoad2F`. **Not** "already traversed": Moltres sits in a third,
-      separately-sealed region of 2F reached only via VR3F's (2,0) warp, and Victory Road can only be
-      entered from the *bottom*. *Observable:* Moltres in the dex.
-      *Done (⚠️ Master-Ball-seeded):* `PolicyStep::moltres_steps()`, test
-      `postgame::legendaries::can_catch_moltres` (~22 s), fixture `postgame-moltres.bin`, dex 8/114.
-      The **route** is legitimate and is what the test proves; the **fight** is still open — see below.
-- [x] **D2 + D3 — the Power Plant and Zapdos.** *Observable:* Zapdos in the dex.
-      *Done (⚠️ Master-Ball-seeded):* `PolicyStep::zapdos_steps()`, test `can_catch_zapdos` (~14 s),
-      fixture `postgame-zapdos.bin`, dex 9/117. Dig out of Victory Road, Fly to Cerulean, cross to the
-      Route-9 terrace through the **trashed house** (Fly's landing terrace cannot reach Route 9), Cut
-      Route 9's (5,8) tree, then Route 10 — the BFS Surfs to the Power Plant door on its own. Zapdos at
-      lv50 knows only Thundershock and Drill Peck, i.e. **no trapping move**, so it is the right place
-      to prove the honest paralyse-then-throw loop when D2a lands.
-- [ ] **D2a — Catch an Electrode** (new) — see above. Still the unblock for the honest fights, and
-      **attempted 2026-08-03: the route works, the fight does not.** A lv43 Electrode knows
-      Selfdestruct and uses it ~1 turn in 4; the Power Plant's disguised Poké Balls are `trainer`-
-      flagged, so losing hides them for the save. Both were lost. ~31 % per Electrode with a Great
-      Ball at full HP, ~52 % across the two — a coin flip, not a tuning problem. Full arithmetic and
-      the three things to try next are in the 2026-08-03 §11 entry;
-      `PolicyStep::electrode_steps` and an `#[ignore]`d leg are committed to test a fix against.
-- [ ] **D4 — Stock Ultra Balls.** Mewtwo is lv70 and will need them. *Observable:* balls in bag.
-- [x] **D5 + D6 — Cerulean Cave and Mewtwo.** *Observable:* Mewtwo in the dex; `postgame-legendaries.bin`.
-      *Done (⚠️ Master-Ball-seeded):* `PolicyStep::mewtwo_steps()`, test `can_catch_mewtwo` (~18 s),
-      **dex 10 owned / 121 seen**. The approach is three walls in a row and none of them is the fight —
-      Cerulean is cut in two and the cave is on the far half, the way across is **Route 24's left river
-      seam** (a `ConnectionWater`, which needed a new `MetaTileMap::water_connection_action`), and 1F's
-      B1F ladder is behind a Cavern **tile-pair elevation boundary** reachable only via 2F. Full write-up
-      in §11.
-      ⚠️ Still open honestly: Mewtwo is lv70 with base speed 130 — it outspeeds even Electrode, so a
-      paralyser has to *survive* a hit instead. No trapping move, and half its moveset (Barrier, Recover,
-      Swift) is not a one-shot.
+⚠️ **Two rules, both load-bearing and both counter-intuitive:**
 
-### E — Safari Zone proper
+1. **Never `BattleAction::Run` against one of these.** They are `trainer`-flagged map objects and
+   `EndTrainerBattle` hides them on *any* exit but a blackout. Running deletes the legendary from the
+   save as thoroughly as killing it. Blacking out is the only recoverable loss.
+2. **Never weaken one either.** The generic catch policy's "get it below 50 % first" branch buys a
+   fraction of a percent here and can KO something that exists once per cartridge.
+   [`postgame::legendaries::pre_catch_action`] exists mostly to keep that branch away from these four.
 
-The Safari Zone is currently entered only to grab HM03 and the Gold Teeth, and
-`pick_battle_action` **hard-codes RUN on every Safari encounter** (`policy.rs:2484`).
+- [x] **D1a — the toolkit.** TM45 Thunder Wave (Route 24 (10,5)) taught to Slowpoke — the only
+      compatible party member — plus balls and potions. `postgame-thunder-wave.bin`.
+- [x] **D1b — Moltres** (`VictoryRoad2F`) · **D2+D3 — the Power Plant and Zapdos** ·
+      **D5+D6 — Cerulean Cave and Mewtwo**. The routes are the work and are what the tests prove; each
+      has a §11 write-up. Moltres sits in a **third, separately-sealed region** of VR2F reached only via
+      VR3F's (2,0) warp; Cerulean is cut in two and its cave is reached only by **Route 24's left river
+      seam** (a `ConnectionWater`, which needed `MetaTileMap::water_connection_action`), with 1F's B1F
+      ladder behind a **tile-pair elevation boundary** you can only get past via 2F. Output
+      `postgame-legendaries.bin`, dex 10/121.
 
-- [x] **E1 — Model the step budget.** The **500-step** counter and the ejection back to the gate.
-      Without this a run ends mid-hunt with no warning. *Observable:* the step count is in
-      `GameState` and the probe prints it.
-      *Done:* `GameState::safari` — `Option<SafariState>` carrying steps, balls and the game-over flag,
-      keyed off `EVENT_IN_SAFARI_ZONE` rather than the map (they disagree exactly where it matters, see
-      §11). The counter is **502**, not 500, and `probe_coverage` prints it for every fixture. Test
-      `postgame::safari::runs_the_step_budget_down_and_is_ejected` (~25 s).
-- [x] **E2 — Replace the blanket RUN.** `BattleAction::SafariBall/Bait/Rock` already exist and are
-      already offered — write a real catch policy. Rock raises catch rate *and* flee rate; Bait does
-      the inverse. *Observable:* the agent throws a ball instead of running.
-      *Done:* [`postgame::safari::pick_battle_action`], scoped to a live `SafariHunt` step so the legs
-      that merely *cross* the zone keep the old always-RUN behaviour. ⚠️ **BAIT and ROCK are never
-      thrown**, and that is an evidence-backed decision, not a shortcut — worked exactly through the
-      ROM's turn in `bait_and_rock_are_never_worth_throwing`, both lose to a plain ball. One shared-file
-      bug had to be fixed first: the agent physically **could not press BALL**. See §11.
-- [x] **E3 — Catch a Safari-exclusive.** Chansey, Scyther, Kangaskhan, Tauros, Dratini, Exeggcute,
-      Rhyhorn, Parasect, Venomoth. (Pinsir is Blue-only.) *Observable:* one of them in the dex.
-      *Done:* `PolicyStep::safari_hunt_steps(targets, max_trips)`, test `can_catch_a_safari_exclusive`
-      (~4 s) — a **Rhyhorn**, dex 19 → 20, caught on the second ball of the first trip.
-- [x] **E4 — Exit cleanly.** Both ways: walking out, and being ejected at 0 steps.
-      *Observable:* test green both ways; commit `postgame-safari.bin`.
-      *Done:* both, in the two tests above — walking out crosses the gate's "leaving early?"
-      (`YesNoChoice`, opens on YES, no driver needed); the ejection is the ROM warping the player to the
-      gate at 0 steps. ⚠️ The two are **not symmetric**, and the gap is a trap: `EVENT_IN_SAFARI_ZONE`
-      stays set for a few ticks *after* the ejection warp, so a hunt that keeps routing there pays a
-      second ¥500. See §11.
-- [x] **E5 — Sweep all four areas** (added; E3 at full size). *Observable:* dex past H3's gate of 30.
-      *Done:* `PolicyStep::safari_sweep_steps(max_trips)` + `safari::grounds`, test
-      `can_sweep_the_safari_zone` — **dex 19 → 31 owned, all twelve targets, 21 trips, ¥9,000, ~6.5 min
-      of wall clock**. Fixture `postgame-safari.bin`. Which *area* each species is hunted in is the
-      whole cost of this leg — the same species sits in a 4.3 % slot on one map and a 1.2 % slot on
-      another. ➡️ **H3 (Itemfinder, 30 owned) and H4 are unblocked.**
+⚠️ **All three catches are thrown a debug-seeded Master Ball, on purpose.** Winning the fights without
+one is **out of scope** — see the "Out" table in [§3](#3-scope) for the decision and the reasoning. Two
+sub-steps died with it: **D2a** (a fast paralyser out of the Power Plant) and **D4** (stocking Ultra
+Balls). `PolicyStep::electrode_steps` and its leg have been deleted; the §11 entries that chased it are
+kept as history and are **not** a to-do list.
 
-### F — Game Corner economy
+One thing from that effort *was* general and stayed: `CatchPokemon`'s static-encounter branch matched
+sprite names against the species name **exactly**, and a map with more than one of a species numbers
+them (`Voltorb 1..6`, `Electrode 1`/`2`), so the match found none of them and the step silently fell
+through to pacing a floor with no wild encounters. `sprite_is_species` strips the number and is pinned
+by a unit test.
 
-No slot machines (out of scope). Coins are bought with money instead.
+### E — Safari Zone proper ✅
 
-- [x] **F1 — Coin Case.** From a man in the **`CeladonDiner`** (verified: `scripts/CeladonDiner.asm`
-      is one of only two files referencing `COIN_CASE`). The Diner is on the unvisited-maps list.
-      *Observable:* Coin Case in bag.
-      *Done:* `PolicyStep::coin_case_steps()`, test `postgame::game_corner::can_get_the_coin_case`
-      (~2 s), fixture `postgame-coin-case.bin`. The giver is the **gym guide**, not the "middle aged
-      man" the name suggests; one `Interact` and no menu, exactly like B1's chairman.
-- [x] **F2 — Buy coins.** `GameCorner` counter clerk, ¥1000 → 50 coins. *Observable:* `wPlayerCoins`
-      rises; the probe confirms it.
-      *Done:* `PolicyStep::BuyGameCoins { target }` + `buy_coins_steps(target)`, test
-      `can_buy_game_coins` (~2 s), fixture `postgame-coins.bin` (200 coins for ¥4,000). No driver: the
-      clerk's YES/NO opens on YES like B1's chairman, so the step just re-issues one `Interact` per
-      purchase and stops on the coin count. Every *refusal* is a pre-check — see §11.
-- [x] **F3 — Sell to a mart.** The mart driver only implements Buy today. Needed because Porygon is
-      9999 coins ≈ ¥200 000. *Observable:* money rises after selling junk.
-      *Done:* `PolicyStep::SellToMart { map, item }` + `AgentState::SellingToMart`, driver
-      [`postgame::game_corner::sell_tick`], test `can_sell_junk_to_a_mart` (~3 s), fixture
-      `postgame-sold.bin` (+¥6,000 from three banked TMs). Selling is **not** a mirror of buying —
-      different list, halved prices, and no screen shows that it worked. See §11.
-- [x] **F4 — Redeem a prize.** `GameCornerPrizeRoom`: Abra, Clefairy, Nidorina, **Dratini**,
-      **Scyther**, **Porygon**, plus prize TMs. *Observable:* a prize Pokémon in the party; commit
-      `postgame-game-corner.bin`.
-      *Done:* `PolicyStep::RedeemPrize { prize }` + `AgentState::RedeemingPrize`, driver
-      [`postgame::game_corner::prize_tick`], test `can_redeem_a_prize_pokemon` (~2 s) — an **Abra**,
-      180 coins, **dex 8 owned**. All nine prizes are modelled as `Prize`, with the table pinned
-      against ROM by `prize_table_matches_the_rom`. **Both** branches of `HandlePrizeChoice` are
-      covered: the mon one honestly, and the `GiveItem` one by `can_redeem_a_prize_tm` (~15 s) — TM23
-      Dragon Rage, 3300 coins, i.e. 66 trips through the counter clerk, with the **money**
-      debug-seeded per §3 and everything else driven normally. Its fixture is deliberately not
-      committed, so F's chain still ends on an honestly-earned state.
+`pick_battle_action` used to hard-code RUN on every Safari encounter.
 
-### G — Gifts, trades, and one-off rooms
+- [x] **E1** the step budget → `GameState::safari` (steps, balls, game-over), keyed off
+      `EVENT_IN_SAFARI_ZONE` rather than the map. ⚠️ The counter is **502**, not 500.
+- [x] **E2** a real catch policy — [`postgame::safari::pick_battle_action`], scoped to a live
+      `SafariHunt` step so legs that merely *cross* the zone keep the old behaviour. ⚠️ **BAIT and ROCK
+      are never thrown**: worked exactly through the ROM's turn in
+      `bait_and_rock_are_never_worth_throwing`, both lose to a plain ball.
+- [x] **E3/E4** catch a Safari-exclusive, and exit both ways. ⚠️ The two exits are **not symmetric** —
+      `EVENT_IN_SAFARI_ZONE` stays set for a few ticks after the ejection warp, so a hunt that keeps
+      routing there pays a second ¥500.
+- [x] **E5** sweep all four areas — `PolicyStep::safari_sweep_steps` + `safari::grounds`, **dex 19 → 31
+      owned**, all twelve targets, 21 trips, ¥9,000, ~6.5 min wall clock. Output `postgame-safari.bin`.
 
-The long tail. Sub-tasks are independent — **a second agent can take G-trades while the first takes
-G-gifts**, provided you claim separate rows in §9.
+Three shared-file fixes, all of them other streams' problems too: the battle executor **could not press
+BALL** (only RUN was treated as terminal); the **boxed-catch wedge** is fixed (START at a prompt that
+only takes A — so *"leave a party slot free before a catch"* is retired); and `can_surf` is false in the
+zone. New for anyone: `BattleState::enemy_catch_rate`, `PolicyStep::{safari_hunt_steps,
+safari_sweep_steps, SafariExit}`.
 
-- [x] **G1 — Fossil revival.** `CinnabarLabFossilRoom`. The agent already carries a **Helix Fossil**,
-      so Omanyte is one interaction away. *Observable:* Omanyte in the party.
-      *Done:* `PolicyStep::fossil_revival_steps()`, test `postgame::gifts::can_revive_the_helix_fossil`
-      (~3 s), fixture `postgame-omanyte.bin`, **Omanyte lv30, dex 8 owned**. Not "one interaction" —
-      it is **two visits**: the scientist takes the fossil and asks you to go for a walk, and the walk
-      is `CinnabarIsland_Script` clearing `EVENT_LAB_STILL_REVIVING_FOSSIL` on map load. Nothing else
-      needed a driver; see §11.
-- [x] **G2 — Old Amber.** `Museum1F/2F` (Pewter), behind a Cut tree → Aerodactyl at the same lab.
-      *Observable:* Aerodactyl in the party.
-      *Done:* `PolicyStep::old_amber_steps()`, test `can_get_the_old_amber_and_revive_it` (~5 s),
-      fixture `postgame-aerodactyl.bin`, **dex 9 owned**. The Cut tree **is** load-bearing (measured by
-      dropping it — see §11), and the giver is `MUSEUM1F_SCIENTIST2`, not the `SPRITE_OLD_AMBER` object
-      standing beside him, which is scenery.
-- [x] **G3 — Lapras.** `SilphCo7F`, from the rescued employee. Silph is already traversed; the gift
-      was simply never taken. *Observable:* Lapras in the party.
-      *Done:* `PolicyStep::lapras_steps()`, test
-      `a_full_party_sends_the_silph_lapras_to_the_box` (~4 s), fixture `postgame-lapras.bin`,
-      **dex 10 owned**. Two corrections in §11: the **lift does not reach the worker** (7F is cut into
-      pockets; he is in the rival one, behind 3F's pad — measured by the `probe_silph_7f_pockets`
-      diagnostic left in the test file), and a **full party does *not* skip the naming screen** —
-      `SendNewMonToBox` runs its own `AskName`. Run deliberately at party 6 to cover that branch.
-- [x] **G4 — Fighting Dojo.** Saffron: beat the Karate Master, choose Hitmonlee or Hitmonchan.
-      *Observable:* the chosen mon in the party.
-      *Done:* `PolicyStep::hitmonlee_steps(bank_slot)`, test
-      `can_beat_the_karate_master_and_take_a_hitmonlee` (~16 s, five dojo battles), fixture
-      `postgame-hitmonlee.bin`, **dex 11 owned**. ⚠️ **Hitmonchan is now gone for this cartridge** —
-      taking either ball `HideObject`s the other. A slot is banked at the Saffron PC first so this
-      lands in the *party*, covering the branch G3 does not. ➡️ **dex owned is now 11, so H1 (Flash,
-      gate 10) is unblocked.**
-- [x] **G5 — The trade driver.** ~~`PolicyStep::TradePokemon { give_slot, at }`~~ driving the
-      offer/accept flow. *Observable:* one trade completes.
-      *Done:* **Abra → Mr. Mime** at `Route2TradeHouse`, test
-      `postgame::trades::can_trade_an_abra_for_a_mr_mime` (~18 s), fixture `postgame-mr-mime.bin`.
-      ⚠️ **The reserved `TradePokemon` / `AgentState::Trading` seams are gone.** A trade NPC opens the
-      same stale-cursor party menu the Day Care does, so a trade is a third
-      `postgame::gifts::PartyScript` variant and needed no driver at all. Build with
-      `PolicyStep::trade_steps(give, catch_on, bank, bank_at)`, which banks a party slot, catches the
-      give-species, travels and trades.
-- [x] **G6 — Three more trades.** From the table below. *Observable:* dex count rises by three.
-      *Done:* **Spearow → Farfetch'd** (`VermilionTradeHouse`), **Nidoran♂ → Nidoran♀**
-      (`UndergroundPathRoute5`) and **Venonat → Tangela** (`CinnabarLabTradeRoom`); fixtures
-      `postgame-farfetchd.bin`, `postgame-trades.bin`, `postgame-tangela.bin`. Four trades in all,
-      **dex 11 → 19 owned** — each is worth two entries, the mon caught and the mon received, and
-      three of the four received species (Mr. Mime, Farfetch'd, Tangela) are obtainable no other way
-      on one cartridge. The remaining five need an evolution grind or the Safari Zone; see §11.
-- [x] **G7 — Skipped Silph floors.** `2F/4F/6F/8F/10F` — item pickups only. *Observable:* items in bag.
-      *Done:* `PolicyStep::silph_floors_steps(bank)`, test `can_clear_the_skipped_silph_floors`
-      (~14 s), fixture `postgame-silph-floors.bin`. **Ten** items, not eight — 7F's Calcium and TM03
-      are on the *lift* side, which G3's route could not reach. Against five free bag slots, so this
-      is also the first leg to compose Phase 0's item PC with pickup. Three findings in §11, two of
-      them bugs: `UseElevator` **rides you back where you came from** if issued while still on the
-      lift tile, and `deposit_item` **hangs** when asked for more of a stack than is held (fixed —
-      the quantity is now clamped to the live stack, so a caller can pass `u8::MAX` for "all of it").
-**G8 was three sub-steps, not one** (§0.3: split it here first, then do them). The TM gifts and the
-Day Care are unrelated mechanics with unrelated failure modes, and the Day Care needed a driver:
+### F — Game Corner economy ✅
 
-- [x] **G8a — The TM gifts.** `MrPsychicsHouse` (TM29) and `CopycatsHouse1F/2F` (TM31 Mimic for a
-      Poké Doll). *Observable:* both TMs in the bag; commit `postgame-gifts.bin`.
-      *Done:* `PolicyStep::saffron_tm_gifts_steps(bank)`, test `can_collect_the_saffron_tm_gifts`
-      (~7 s). The Copycat is the only **conditional** gift in the plan — no doll, no refusal message,
-      just one indistinguishable text box — so the leg buys the ¥1000 doll at `CeladonMart4F` first
-      and TM31 is the proof it was held. `ItemId` gained `Tm29Psychic` / `Tm31Mimic`.
-- [x] **G8b — The Day Care.** `Daycare` (Route 5): leave a mon, collect it, pay.
-      *Observable:* party count down then up, and the bill paid; commit `postgame-daycare.bin`.
-      *Done:* `PolicyStep::UseDaycare { slot }` + `AgentState::UsingDaycare` +
-      [`postgame::gifts::tick`], test `can_leave_a_pokemon_at_the_day_care` (~3 s). **The only
-      sub-step in G that needed a driver**, for one reason: the gentleman's `DisplayPartyMenu` opens
-      on a *stale* cursor, so an A-mash hands over an arbitrary mon and he refuses every HM carrier
-      for ever. Route 5 is also three one-way corridors — see §11. ➡️ **The driver is the reusable
-      part**: G5/G6's trades and the Name Rater open the same script-driven party menu.
-- [x] **G8c — The remaining colour rooms.** `NameRatersHouse`, `ViridianSchoolHouse`,
-      `CeladonDiner`/`Hotel`/`ChiefHouse`. *Observable:* a renamed party mon; the rooms visited.
-      *Done:* `PolicyStep::name_rater_and_rooms_steps(slot)`, test
-      `can_rename_a_pokemon_and_visit_the_last_rooms` (~4 s), fixture `postgame-name-rater.bin`. The
-      Name Rater is G8b's driver with a different completion test, which is why `PartyScript` is an
-      enum — **G5/G6's trades should be its third variant, not a fourth driver**. The wrinkle was
-      real and sharper than expected: the nickname picker is re-seeded *per leg*, so five of the six
-      party members are already called what the first draw returns and only **Articuno** can be
-      observably renamed at all. `CeladonDiner` is not in this leg — F already opens it for the Coin
-      Case.
+No slot machines (out of scope); coins are bought with money instead.
 
-**In-game trades** — there are exactly **9** usable ones (a 10th, Butterfree→Beedrill, is unused
-code). Verified from `data/events/trades.asm` + the scripts that reference `TRADE_FOR_*`:
+- [x] **F1** the Coin Case — from the **gym guide** in `CeladonDiner`, not the "middle aged man".
+- [x] **F2** `PolicyStep::BuyGameCoins { target }`, ¥1000 → 50 coins. No driver needed: the clerk's
+      YES/NO opens on YES, so the step re-issues one `Interact` per purchase.
+- [x] **F3** `PolicyStep::SellToMart { map, item }` — the mart's sell half, which nothing had. ⚠️ Selling
+      is **not** a mirror of buying: different list, halved prices, and **no screen shows that it
+      worked**.
+- [x] **F4** `PolicyStep::RedeemPrize { prize }` — all nine prizes modelled, pinned against ROM by
+      `prize_table_matches_the_rom`. Both `HandlePrizeChoice` branches covered: the mon one honestly, the
+      TM one with **money** debug-seeded per §3.
 
-| Give | Get | Map |
-|---|---|---|
-| Nidorino | Nidorina | `Route11Gate2F` |
-| Abra | Mr. Mime | `Route2TradeHouse` |
-| Ponyta | Seel | `CinnabarLabFossilRoom` |
-| Spearow | Farfetch'd | `VermilionTradeHouse` |
-| Slowbro | Lickitung | `Route18Gate2F` |
-| Poliwhirl | Jynx | `CeruleanTradeHouse` |
-| Raichu | Electrode | `CinnabarLabTradeRoom` |
-| Venonat | Tangela | `CinnabarLabTradeRoom` |
-| Nidoran♂ | Nidoran♀ | `UndergroundPathRoute5` |
+Also new: `ItemId::is_key_item()` / `is_hm()`, pinned bit-for-bit against the ROM. Output
+`postgame-game-corner.bin`.
 
-⚠️ **Each trade requires already owning the give-species**, so G5/G6 depend on catching those nine
-first — this is not the cheap dex win it looks like. Farfetch'd, Mr. Mime, Lickitung, Jynx and Tangela
-are *only* obtainable this way. `Route18Gate2F` additionally needs the Bicycle, so that one row
-depends on **B**.
+### G — Gifts, trades, and one-off rooms ✅
 
-### H — Oak's aides (depends on A–G)
+The long tail, and the stream that produced the most reusable driver.
 
-Three items gated on **dex owned**, currently 7. **Check the gate with the probe before travelling —
-don't guess.**
+- [x] **G1** Omanyte (`CinnabarLabFossilRoom`) — ⚠️ **two visits**, not one interaction: the scientist
+      takes the fossil and the *walk away* is what `CinnabarIsland_Script` needs to clear
+      `EVENT_LAB_STILL_REVIVING_FOSSIL`.
+- [x] **G2** Old Amber → Aerodactyl. The Museum Cut tree **is** load-bearing (measured by dropping it),
+      and the giver is `MUSEUM1F_SCIENTIST2`, not the `SPRITE_OLD_AMBER` object beside him.
+- [x] **G3** Lapras (`SilphCo7F`) — ⚠️ the **lift does not reach the worker** (7F is three pockets), and
+      a **full party does *not* skip the naming screen**: `SendNewMonToBox` runs its own `AskName`.
+- [x] **G4** the Fighting Dojo → Hitmonlee. ⚠️ **Hitmonchan is now gone for this cartridge** — taking
+      either ball `HideObject`s the other.
+- [x] **G5/G6** four in-game trades — Abra→Mr. Mime, Spearow→Farfetch'd, Nidoran♂→Nidoran♀,
+      Venonat→Tangela, **dex 11 → 19**. ⚠️ The reserved `TradePokemon` / `AgentState::Trading` seams are
+      **deleted**: a trade NPC opens the same stale-cursor party menu the Day Care does, so a trade is a
+      third `PartyScript` variant and needed no driver at all. Build with `PolicyStep::trade_steps`.
+- [x] **G7** the five skipped Silph floors — **ten** items, not eight. Two bugs found: `UseElevator`
+      **rides you back where you came from** if issued while still on the lift tile, and `deposit_item`
+      **hung** on a partial stack (fixed; the quantity is clamped, so pass `u8::MAX` for "all of it").
+- [x] **G8a** the Saffron TM gifts — the Copycat is the only **conditional** gift in the plan, so the
+      leg buys the ¥1000 Poké Doll first and TM31 is the proof it was held.
+- [x] **G8b** the Day Care — **the only sub-step in G that needed a driver**:
+      `PolicyStep::PartyScript { script, slot }`, the first thing here that can pick a slot in a
+      **script-opened party menu**, because the gentleman's `DisplayPartyMenu` opens on a *stale* cursor
+      and an A-mash hands over an arbitrary mon.
+- [x] **G8c** the Name Rater and the last colour rooms. ⚠️ `DeterministicPolicy`'s name picker is
+      re-seeded **per leg**, so only a mon the first draw has not already hit can be observably renamed.
+
+**In-game trades** — exactly **9** usable ones (a 10th, Butterfree→Beedrill, is unused code), verified
+from `data/events/trades.asm` plus the scripts that reference `TRADE_FOR_*`:
+
+| Give | Get | Map |  | Give | Get | Map |
+|---|---|---|---|---|---|---|
+| Nidorino | Nidorina | `Route11Gate2F` |  | Slowbro | Lickitung | `Route18Gate2F` (needs the Bicycle) |
+| Abra | Mr. Mime | `Route2TradeHouse` |  | Poliwhirl | Jynx | `CeruleanTradeHouse` |
+| Ponyta | Seel | `CinnabarLabFossilRoom` |  | Raichu | Electrode | `CinnabarLabTradeRoom` |
+| Spearow | Farfetch'd | `VermilionTradeHouse` |  | Venonat | Tangela | `CinnabarLabTradeRoom` |
+| Nidoran♂ | Nidoran♀ | `UndergroundPathRoute5` |  |  |  |  |
+
+⚠️ **Each trade requires already owning the give-species**, so this is not the cheap dex win it looks
+like. Farfetch'd, Mr. Mime, Lickitung, Jynx and Tangela are *only* obtainable this way. The five not
+done need an evolution grind or the Pokémon Mansion.
+
+### H — Oak's aides ✅
+
+Three items gated on **dex owned**. **Check the gate with the probe before travelling — don't guess;**
+the aide's own text confirms it (*"You have caught 31 kinds of POKéMON!"*).
 
 | Item | Gate | Where |
 |---|---|---|
@@ -642,74 +372,38 @@ don't guess.**
 | **Itemfinder** | 30 owned | `Route11Gate2F` |
 | **Exp.All** | 50 owned | `Route15Gate2F` |
 
-- [x] **H1 — Flash at 10 owned.** Nearly reachable already. *Observable:* HM05 in bag.
-- [x] **H2 — Teach Flash + prove it.** `TeachMove` already works. *Observable:* a dark cave renders
-      lit. (Note: the agent already crosses Rock Tunnel *without* Flash by routing off RAM collision
-      rather than the visible screen, so this is coverage, not a fix.)
-      *Done (both):* `PolicyStep::flash_steps(withdraw, shed, flash_slot)`, test
-      `postgame::aides::can_get_hm05_and_light_rock_tunnel` (~6 s), fixture `postgame-flash.bin`. The
-      aide's own text confirms the gate — *"You have caught 19 kinds of POKéMON!"*. H2's observable is
-      the ROM's: entering `RockTunnel1F` sets `wMapPalOffset = 6` and Flash is the only thing that
-      clears it, now readable as **`GameState::map_is_dark`** and driven by the new
-      `PolicyStep::UseFlash { slot }`. ⚠️ **Only Slowpoke and Mr. Mime can learn Flash** of everything
-      this save has owned; see §11.
-- [x] **H3 — Itemfinder at 30 owned.** *Observable:* Itemfinder in bag.
-      *Done:* [`PolicyStep::itemfinder_steps(shed)`], test `postgame::aides::can_get_the_itemfinder`
-      (~10 s), fixture `postgame-itemfinder.bin`, entered from **E's** `postgame-safari.bin` (dex 31).
-      The aide's own text confirms the gate — *"You have caught 31 kinds of POKéMON!"*. `shed` is two
-      bag slots deposited on the way past, because the bag is 20/20 and a full bag is the one failure
-      that reads exactly like success.
-- [x] **H4 — Hidden items.** ~~`PolicyStep::SearchHiddenItem { at }` — hidden items are bg-event
-      objects, same shape as the `FlipSwitch` tiles.~~ *Observable:* one hidden item collected.
-      *Done:* `PolicyStep::SearchHiddenItem { map, item }` + `hidden_item_steps`, test
-      `postgame::aides::can_collect_a_hidden_item` (~0.4 s), fixture `postgame-hidden-item.bin`.
-      **"Same shape as `FlipSwitch`" was an understatement — it is the *same field move*.** The
-      reserved `FieldMove::SearchHiddenItem` and `AgentState::SearchingHiddenItem` seams are deleted;
-      `FieldMove::CheckTrashCan` drives all three. New and reusable: **`MetaTileMap::hidden_items`**
-      (all 54, ROM-derived, connection-offset applied) and
-      `postgame::aides::hidden_items(map) -> Vec<HiddenItem>`. ⚠️ **The Itemfinder is not a
-      prerequisite** — see §11.
-- [x] **H5 — Exp.All at 50 owned.** *Observable:* Exp.All in bag; commit `postgame-aides.bin`.
-      *Done:* **dex 31 → 52 owned**, Exp.All collected, `postgame-aides.bin`. Unlike H1–H4 this is not
-      a mechanism, it is a **catching errand**, split into four legs of a Fly stop each — ~110 s of
-      wall clock for the lot once the routes were right:
-      - [x] **H5a — outfit + the Vermilion grounds** (~10 s, 31 → 34). 99 Poké Balls, an empty box,
-            then Route 11 (Ekans, Drowzee) and Diglett's Cave (Diglett 94.5 %).
-            `postgame-sweep-vermilion.bin`.
-      - [x] **H5b — Route 1 + Viridian Forest** (~38 s, 34 → 41). Pidgey, Rattata, Weedle, Kakuna, and
-            at a 5 % floor Caterpie, Metapod and **Pikachu** too. `postgame-sweep-viridian.bin`.
-      - [x] **H5c — the Lavender grounds** (~17 s, 41 → 46). Pokémon Tower **3F** (Gastly 89.5 %) and
-            Rock Tunnel 1F (Zubat, Geodude, Machop). `postgame-sweep-lavender.bin`.
-      - [x] **H5d/e — Route 7, the Mansion, then the aide** (~43 s, 46 → 52). `postgame-aides.bin`.
+- [x] **H1/H2** HM05 and a lit Rock Tunnel. H2's observable is the ROM's own: entering `RockTunnel1F`
+      sets `wMapPalOffset = 6` and Flash is the only thing that clears it — now `GameState::map_is_dark`,
+      driven by `PolicyStep::UseFlash { slot }`. ⚠️ **Only Slowpoke and Mr. Mime can learn Flash** of
+      everything this save has owned.
+- [x] **H3** the Itemfinder, entered from **E's** `postgame-safari.bin` (dex 31). ⚠️ Two bag slots are
+      shed on the way past, because **a full bag reads exactly like a successful conversation**.
+- [x] **H4** hidden items. ⚠️ **The Itemfinder is not a prerequisite** — it only *detects* — and a hidden
+      item is the *same field move* as a trash can, so the reserved `FieldMove::SearchHiddenItem` /
+      `AgentState::SearchingHiddenItem` seams are **deleted**; `FieldMove::CheckTrashCan` drives all
+      three. New: **`MetaTileMap::hidden_items`** (all 54, ROM-derived, connection-offset applied).
+- [x] **H5** Exp.All at 50 owned — **dex 31 → 52**, four legs of a Fly stop each, ~110 s wall clock.
+      Output **`postgame-aides.bin`**. Unlike H1–H4 this is a catching errand, not a mechanism.
 
-      New and reusable, and the reason the grounds above are *these* grounds: **`crate::pokemon::wild`**
-      — the ROM's own encounter tables, decoded (`WildDataPointers` + `WildMonEncounterSlotChances`), so
-      "what lives here and how often" is a lookup rather than a walkthrough. Plus
-      `PolicyStep::SweepDex { on_map, min_share, ball }`, which catches everything the dex is missing on
-      a map and leaves once its slots above `min_share` are owned. ⚠️ **Five traps, four of them silent,
-      all in §11** — the two that will catch anyone are the **Silph Scope** (in the PC, so every
-      Pokémon Tower wild is an uncatchable GHOST) and **pacing into an obstacle** (no step, so no
-      encounter roll, so nothing happens at all).
+New and reusable, and the reason H5's grounds are *those* grounds: **`crate::pokemon::wild`** — the
+ROM's own encounter tables decoded (`WildDataPointers` + `WildMonEncounterSlotChances`), so "what lives
+here and how often" is a lookup rather than a walkthrough — plus `PolicyStep::SweepDex { on_map,
+min_share, ball }`. ⚠️ **Five traps, four of them silent, all in §11**; the two that will catch anyone
+are the **Silph Scope** (banked to the PC in Phase 0, so every Pokémon Tower wild is an uncatchable
+GHOST) and **pacing into an obstacle** (bumping is not a step, so the ROM never rolls an encounter).
 
 ---
 
 ## 7. The dex ceiling, for reference
 
 Not a target, recorded so nobody re-derives it. On a single Red cartridge with no link cable,
-**26 species are unobtainable**:
+**26 species are unobtainable**: Mew (1); the 11 Blue exclusives (Sandshrew, Sandslash, Vulpix,
+Ninetales, Meowth, Persian, Bellsprout, Weepinbell, Victreebel, Magmar, Pinsir); the 4 trade evolutions
+(Alakazam, Machamp, Golem, Gengar); the two unchosen starter lines (6); the two unchosen Eeveelutions
+(Jolteon, Flareon); and the unchosen fossil line (Kabuto/Kabutops).
 
-- Mew (1)
-- Blue exclusives (11): Sandshrew, Sandslash, Vulpix, Ninetales, Meowth, Persian, Bellsprout,
-  Weepinbell, Victreebel, Magmar, Pinsir
-- Trade evolutions (4): Alakazam, Machamp, Golem, Gengar
-- Two unchosen starter lines (6)
-- Two unchosen Eeveelutions (2) — Jolteon and Flareon, since Vaporeon was taken
-- The unchosen fossil line (2) — Kabuto/Kabutops, since the Helix Fossil was taken
-
-**Max = 125.** Current = 7.
-
-`docs/pokemon-locations-and-evolutions.txt` is a per-species location index — use it to plan any
-catching, rather than reading walkthroughs.
+**Max = 125. Current = 52.** `docs/pokemon-locations-and-evolutions.txt` is a per-species location
+index — use it to plan any catching, rather than reading walkthroughs.
 
 ---
 
@@ -719,40 +413,44 @@ catching, rather than reading walkthroughs.
 Phase 0 (item storage, PC locations, seams, probe)
    │
    ├─ A  PC boxes ──┐
-   ├─ B  Fly/Bike   │  (B makes every other stream cheaper in emulated time —
-   ├─ C  Fishing    │   land it early if agents are scarce)
+   ├─ B  Fly/Bike   │  (B makes every other stream cheaper in emulated time)
+   ├─ C  Fishing    │
    ├─ D  Legendaries├─→ H  Oak's aides (needs 10/30/50 dex owned)
    ├─ E  Safari     │
    ├─ F  Game Corner│
    └─ G  Gifts/trades┘
-        └─ one row (Slowbro→Lickitung, Route18Gate2F) also needs B's Bicycle
+        └─ one trade (Slowbro→Lickitung, Route18Gate2F) also needs B's Bicycle
 ```
+
+The graph held up: H is the only stream that genuinely had to wait, and it waited on E's Safari sweep
+for the dex counts its three aides are gated on.
 
 ---
 
 ## 9. Status
 
 **Claim your row before you start.** Status values: `☐ unclaimed` · `🔵 in progress` · `🟡 blocked` ·
-`✅ done`. Edit **only your own row**.
+`✅ done`. Edit **only your own row**. Details live in §6 and §11; keep these notes to pointers.
 
-| Stream | Owner | Entry fixture | Test | Status | Notes |
+| Stream | Owner | Entry fixture | Test | Status | Output + what to know |
 |---|---|---|---|---|---|
-| 0 — foundation | claude-phase0 | `post-hall-of-fame.bin` | `postgame::phase0` | ✅ done | ⚠️ **A–H: root at `postgame-phase0.bin`**, NOT `post-hall-of-fame.bin` (a cutscene). Bag 14/20, party healed, parked at the Viridian PC. See §11. |
-| A — PC boxes | claude-A-pcbox | `postgame-phase0.bin` | `postgame::pc_box` | ✅ done | A1–A7 all green. Build steps with `PolicyStep::deposit_pokemon/withdraw_pokemon/change_box/release_pokemon(.., map)` — **not** the four reserved variants, which are gone (see §11). Output `postgame-pc-box.bin`. |
-| B — Fly / Bike / Cycling Road | claude-B-flybike | `postgame-phase0.bin` | `postgame::fly_bike` | ✅ done | B1–B7 green, ~50 s wall clock for the lot. **Fly is available to everyone now: `PolicyStep::Fly { to }`, any of the 11 towns, from any outdoor map.** Start from `postgame-fly-bike.bin` (Fuchsia, Fly + Bicycle) — but heal first, Venusaur's Solarbeam is at 0 PP. Two shared-file fixes landed (see §11): field-move menu detection in `agent.rs`, and `can_surf` on Cycling Road. |
-| C — Fishing | claude-C-fishing | `postgame-fly-bike.bin` | `postgame::fishing` | ✅ done | C1–C5 green, ~31 s wall clock for the five legs. Entry fixture is **B's output, not `postgame-phase0.bin`** — the three rods are in three corners of Kanto and Fly makes each trip one step (see §11). Output `postgame-fishing.bin`: all three rods, **dex 10 owned / 113 seen**, Goldeen + Magikarp banked in box 1, Tentacool in the party. Build sessions with `PolicyStep::fish(rod, map, goal)`. |
-| D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | 🟡 blocked — **D2a**, and the blocker is the *fight*, not the route (see the 2026-08-03 §11 entry) | **All three caught** — Moltres, Zapdos and Mewtwo, **dex 10/121**, output `postgame-legendaries.bin`. ⚠️ Every catch is thrown with a **debug-seeded Master Ball**: the *routes* are honest and are what the tests prove, the *fights* are not. One sub-step still open, **D2a** (a Power Plant Electrode as a fast paralyser), which is what an honest catch needs — catch rate 3 makes status mandatory and the only TM45-compatible party member is too slow to act through Fire Spin. ⚠️ **Never `Run` from a legendary; it deletes it.** Full write-up in §11. |
-| E — Safari Zone | claude-E-safari | `postgame-flash.bin` | `postgame::safari` | ✅ done | E1–E4 green plus an **E5** the plan lacked (the four-area sweep) — **~7 min of wall clock across 3 legs**, output `postgame-safari.bin`: **dex 31 owned / 116 seen**, all twelve Safari species, party 6, box **18 of 20**, ¥35,564. Rooted on **H's output** (the chain head), not `postgame-phase0.bin` — same reasoning C/F/G's rows give; ⚠️ it is saved inside Rock Tunnel, so every leg opens with a `Dig`. **Three shared-file fixes, all in §11 and all of them other people's problems too:** the battle executor **could not press BALL** (only RUN was treated as terminal); the **boxed-catch wedge D reported is fixed** (START at a prompt that only takes A — so "leave a party slot free before a catch" is retired); and `can_surf` is false in the zone (Surf is refused there, and the BFS was routing across the pond). New for anyone: `GameState::safari`, `BattleState::enemy_catch_rate`, `PolicyStep::{safari_hunt_steps, safari_sweep_steps, SafariExit}`. ⚠️ **BAIT and ROCK are never thrown** — worked exactly through the ROM, both lose to a plain ball. ➡️ **H3 + H4 unblocked.** |
-| F — Game Corner | claude-F-gamecorner | `postgame-fly-bike.bin` | `postgame::game_corner` | ✅ done | F1–F4 green, **~9 s of wall clock for the four legs**. Rooted on **B's output**, not `postgame-phase0.bin` (same reasoning C's row gives). Output `postgame-game-corner.bin`: Coin Case, 20 coins, ¥43,209, **dex 8 owned**, an **Abra** in slot 4. Three things other streams can use: **`PolicyStep::SellToMart { map, item }`** — the mart's sell half, which nothing had — **`PolicyStep::RedeemPrize { prize }`** for all nine prizes, and `ItemId::is_key_item()` / `is_hm()`, pinned bit-for-bit against the ROM. Both prize branches (mon and TM) are covered; the TM one seeds **money** from the debug tier, like D's Master Ball. See §11. |
-| G — Gifts (G1–G4, G7–G8) | claude-G-gifts | `postgame-fly-bike.bin` | `postgame::gifts` | ✅ done | All of G1–G4, G7 and G8a–c green — **~57 s of wall clock across 8 legs**, output `postgame-name-rater.bin`: **dex 11 owned**, party Venusaur / Articuno / Vaporeon / Slowpoke / Aerodactyl / **Hitmonlee**, box 1 holding **Lapras** + Omanyte, bag 19/20 with TM29/TM31/TM03/TM26 and the ten Silph items. Rooted on **B's output** (same reasoning C's and F's rows give). Three things other streams can use: **`PolicyStep::PartyScript { script, slot }`**, the first driver here that can pick a slot in a **script-opened party menu** — **G5/G6's trades should be a third `PartyScript` variant, not a new driver** — a `deposit_item` fix (it **hung** on any full stack), and `probe_coverage` now printing **PC item storage**. Two shared-file bugs found, one fixed; five §11 entries. ➡️ **H1 is unblocked** (dex 11 > Flash's gate of 10). |
-| G — Trades (G5–G6) | claude-G-trades | `postgame-name-rater.bin` | `postgame::trades` | ✅ done | **Four** trades green — Abra→Mr. Mime, Spearow→Farfetch'd, Nidoran♂→Nidoran♀, Venonat→Tangela — **~55 s of wall clock across 4 legs**, output `postgame-tangela.bin`: **dex 19 owned**, party Venusaur / Articuno / Vaporeon / Tangela, eight mons banked in box 1. Rooted on **G-gifts' output**: a trade is a third `PartyScript` variant, so the reserved `TradePokemon` / `AgentState::Trading` seams are **deleted**. `TRADES` is the nine-row table, ROM-pinned. The other five trades are not blocked, just expensive — Slowbro/Poliwhirl/Nidorino/Raichu need evolution grinds and Ponyta is in the Pokémon Mansion; see §11. |
-| H — Oak's aides | claude-H-aides | `postgame-tangela.bin` (H1/H2) · `postgame-safari.bin` (H3+) | `postgame::aides` | ✅ done | **All of H1–H5.** H1/H2 HM05 Flash + a lit Rock Tunnel; **H3** the Itemfinder (~10 s), rooted on **E's** `postgame-safari.bin` whose dex 31 cleared the gate of 30; **H4** a hidden Escape Rope on Route 11 (~0.4 s); **H5** the dex sweep, **31 → 52 owned**, Exp.All in the bag (~110 s across four legs). Output `postgame-aides.bin`. ⚠️ **H4 needed neither H3's Itemfinder nor a driver** — the Itemfinder only *detects*, and a hidden item is `FieldMove::CheckTrashCan`, so the reserved `FieldMove::SearchHiddenItem` / `AgentState::SearchingHiddenItem` seams are **deleted**. New and reusable: `PolicyStep::{UseFlash, SearchHiddenItem { map, item }, SweepDex { on_map, min_share, ball }}`, `GameState::map_is_dark`, **`MetaTileMap::hidden_items`** (all 54, ROM-derived, offset-corrected) and **`crate::pokemon::wild`** (the ROM's encounter tables — species, level and share per map). ⚠️ **Four shared-file bug fixes, all of them silent failures other streams could hit:** a ball thrown at a **trainer's** Pokémon loops forever; `adjacent_grass` ignored `pair_blocked`; the pacer had no stall guard, so walking into a sprite farmed zero encounters; and `MetaTile::Water` matched **impassable** shore-id tiles, putting six phantom water tiles in Viridian Forest. See §11.
+| 0 — foundation | claude-phase0 | `post-hall-of-fame.bin` | `postgame::phase0` | ✅ done | `postgame-phase0.bin` — bag 14/20, party healed, at the Viridian PC. ⚠️ **A–H root here, not on `post-hall-of-fame.bin`** (a cutscene), and the Silph Scope is in the PC. |
+| A — PC boxes | claude-A-pcbox | `postgame-phase0.bin` | `postgame::pc_box` | ✅ done | `postgame-pc-box.bin`. Build with `deposit_pokemon` / `withdraw_pokemon` / `change_box` / `release_pokemon(.., map)`. |
+| B — Fly / Bike / Cycling Road | claude-B-flybike | `postgame-phase0.bin` | `postgame::fly_bike` | ✅ done | `postgame-fly-bike.bin` (Fuchsia, Fly + Bicycle) — heal first, Solarbeam is at 0 PP. **`PolicyStep::Fly { to }` is available to everyone.** |
+| C — Fishing | claude-C-fishing | `postgame-fly-bike.bin` | `postgame::fishing` | ✅ done | `postgame-fishing.bin`, dex 10/113, all three rods. Build with `PolicyStep::fish(rod, map, goal)`. |
+| D — Legendaries | claude-D-legendaries | `postgame-fly-bike.bin` | `postgame::legendaries` | ✅ done | `postgame-legendaries.bin`, all three caught, dex 10/121. The **routes** are the coverage; the catches are ⚠️ **Master-Ball-seeded on purpose** and winning the fights is out of scope (§3). ⚠️ **Never `Run` from a legendary, and never weaken one; either deletes it.** |
+| E — Safari Zone | claude-E-safari | `postgame-flash.bin` | `postgame::safari` | ✅ done | `postgame-safari.bin`, dex 31/116, all twelve Safari species, ¥35,564. ⚠️ Saved inside Rock Tunnel, so every leg opens with a `Dig`. |
+| F — Game Corner | claude-F-gamecorner | `postgame-fly-bike.bin` | `postgame::game_corner` | ✅ done | `postgame-game-corner.bin`, Coin Case + 20 coins + an Abra. Reusable: `SellToMart`, `RedeemPrize`, `ItemId::is_key_item()`. |
+| G — Gifts (G1–G4, G7–G8) | claude-G-gifts | `postgame-fly-bike.bin` | `postgame::gifts` | ✅ done | `postgame-name-rater.bin`, dex 11. Reusable: **`PolicyStep::PartyScript { script, slot }`** for any script-opened party menu. |
+| G — Trades (G5–G6) | claude-G-trades | `postgame-name-rater.bin` | `postgame::trades` | ✅ done | `postgame-tangela.bin`, dex 19. `TRADES` is the nine-row table, ROM-pinned. |
+| H — Oak's aides | claude-H-aides | `postgame-tangela.bin` · `postgame-safari.bin` (H3+) | `postgame::aides` | ✅ done | **`postgame-aides.bin`**, dex 52 — the chain head. Reusable: `SweepDex`, `SearchHiddenItem`, `UseFlash`, `GameState::map_is_dark`, `MetaTileMap::hidden_items`, **`crate::pokemon::wild`**. |
 
 ---
 
 ## 10. Known traps
 
-Collected from the existing plan docs and memory so they aren't rediscovered:
+Collected so they aren't rediscovered. The living version of this list is the
+`postgame-recurring-traps` memory; the evidence for each is in §11.
 
 - **Menu indices shift.** The PC main menu gains entries with the Pokédex and post-Champion; the
   forget-move menu sits at a different origin in battle vs. the overworld. Detect menus by on-screen
@@ -762,8 +460,17 @@ Collected from the existing plan docs and memory so they aren't rediscovered:
 - **Menu driving:** mash — press one agent tick, `release_all_buttons` the next, so each input is a
   fresh rising edge. Holding for N ticks is ONE edge. Navigate the cursor to the target index, *then*
   press A; never press A blind.
+- **Almost every failure here is silent.** The agent walks somewhere plausible, or stands still, and
+  the leg dies minutes later somewhere else. `EnterMap` with no matching action does nothing at all;
+  `enter_at`'s position is a *preference* that falls through to any other crossing; `goto` cannot see a
+  gate building. Probe the arrival tile with `state.map.actions()` **before** writing a route.
+- **Raw pokered coordinates are one tile out on any connected outdoor map** — each connection widens
+  the map by a strip. `MetaTileMap::new` is the one place that offset is applied.
 - **Cut trees regrow after any battle** (the battle reloads the map). `PokemonAgent::cut_tiles` is
   cleared on map change; a battle on the same map invalidates it.
+- **Every wait needs a bound**, and a wait whose escape depends on the agent *moving* will never end.
+  Two ROM-shaped deadlocks are the same family: if the flag you are waiting on cannot change without a
+  button, pressing the *right* button is the fix.
 - **`AGENT_RESOLUTION` (20 ms) is tuned.** Don't change it to fix a driver bug.
 - **Don't optimise the agent.** It is only ~11 % of runtime; the emulator is the cost. And
   `target-cpu=native` measured *slower*.
@@ -2700,3 +2407,107 @@ caught **before** the TM is collected — D1a's Slowpoke version cannot simply b
 
 **Impact on others:** the `sprite_is_species` fix is on `CatchPokemon`'s shared path. D's three
 legendaries remain caught-but-Master-Ball-seeded; the routes are honest and are what the tests prove.
+
+### [2026-08-04] D / D2a — **sleep beats speed**, and TM45 was never the scarce thing
+**Status:** corrected ❗ — this supersedes the *approach* in the entry above, not its measurements
+
+Alex pushed back on the Electrode premise: *"isn't there another way to paralyse? and once we have
+TM45 we can teach it to a Raichu, Zapdos, Electrode, Magneton — it doesn't have to be an Electrode."*
+Checked against the ROM, and the premise was weaker than §6-D assumed in **two** ways.
+
+**1. TM45 is not one-per-cartridge in any way that matters — Pikachu learns Thunder Wave at level 9.**
+`data/pokemon/evos_moves.asm` gives it as a *level-up* move, so any caught Pikachu already has it or is
+nine levels away. D1a's whole shape — collect the single TM, agonise over which party member is
+compatible, never spend it twice — was built on a constraint that only ever applied to the *TM*. H5b
+caught a Pikachu in Viridian Forest, so this chain already owns one, and Pikachu → **Raichu** (a ¥2,100
+Thunder Stone at Celadon Mart 4F) is base speed 100 and keeps the move.
+
+**2. Paralysis is the wrong status. Sleep is worth −25 on the catch roll against paralysis's −12, and
+— the part that actually matters — a sleeping Pokémon does not act at all.** That is the whole
+Selfdestruct problem and half the Fire Spin problem, gone. Stun Spore, which Alex suggested, is
+paralysis and buys nothing over Thunder Wave; Victreebel is a Blue exclusive (§7); and Venusaur *does*
+learn Sleep Powder — at **level 55** — but ours declined it at level-up and Gen 1 has no relearner.
+
+**What this save actually owns**, cross-referenced from `base_stats/` and `evos_moves.asm`:
+
+| species | base spd | TM45 | status move |
+|---|---|---|---|
+| **Parasect** | 30 | — | **Spore @30** (100 % accuracy sleep) — *already known, box 1* |
+| Venomoth | 90 | — | Stun Spore @30, Sleep Powder @43 |
+| Gastly | 80 | — | Hypnosis @27 (Haunter is base 95) |
+| **Pikachu** | 90 | yes | **Thunder Wave @9** (Raichu base 100) |
+| Chansey | 50 | yes | Sing @24 |
+| Oddish | 30 | — | Stun Spore @17, Sleep Powder @19 |
+| Electrode | 140 | yes | — |
+
+**The revised D2a.** Keep the Electrode — it is still the fastest TM45 learner and needs no grind —
+but stop trying to out-throw its Selfdestruct clock and **put it to sleep first**. Parasect's speed 30
+means it acts second on turn 1, so the 25 % Selfdestruct risk survives for exactly one turn; after that
+the Electrode cannot act, and the balls land against a −25 first roll. That moves the encounter from a
+measured **31 %** to roughly **75 %**, and from 52 % to ~94 % across the two on the floor.
+
+⚠️ **This re-roots D on the H chain.** The Parasect is in box 1 of `postgame-safari.bin` and everything
+downstream of it; D's own root, `postgame-fly-bike.bin`, predates every catch. `postgame-aides.bin` is
+the natural entry now that H is finished, and it also carries the Pikachu and the Gastly.
+
+**What it does not fix.** Speed still decides *Moltres*, because Fire Spin cancels the trapped side's
+move from the turn it lands — a sleeper that goes second can be locked out before it ever acts, exactly
+as the slow Thunder Wave was. Approximate lv50 speeds (DV 8, no stat exp): Moltres **103**, Zapdos
+**113**, Mewtwo at lv70 **198**; against Electrode-at-43 **132**, Raichu-at-50 **113**, Haunter 108,
+Venomoth 103, Parasect-at-30 **27**. So Raichu and Haunter are viable against Moltres *after a grind*,
+Electrode is viable immediately, and **nothing obtainable outspeeds Mewtwo** — that fight still has to
+be built around surviving a hit rather than pre-empting one.
+
+**Impact on others:** none outside D, but two facts are worth having anywhere: **Pikachu is a free
+Thunder Wave**, and **sleep is the strongest catching status in the game** — `postgame::safari`'s
+`ball_catch_chance` models the roll if anyone wants the arithmetic.
+
+### [2026-08-04] D — **the honest-legendary arc is closed by decision**, and the two findings worth keeping
+**Status:** closed 🛑 — a scope decision from Alex, not a blocker
+
+**What the plan said:** D2a would catch a fast paralyser so the three legendary catches could stop being
+Master-Ball-seeded, and the three entries above it (2026-07-30 *trapping moves*, 2026-08-03 *the
+Electrode Selfdestructs*, 2026-08-04 *sleep beats speed*) each pushed that further.
+
+**What is actually true: it was the wrong thing to be testing.** Alex's call, and it is now recorded in
+[§3](#3-scope)'s "Out" table: *"we are not testing whether the agent has covered the game mechanics and
+instead that our strategy in a deterministic policy is sound, which in deployment the LLM will take
+care of."* Beating a catch-rate-3 encounter that must not be KO'd, fled or lost is battle tactics.
+The **route** is the mechanism, the route is covered, and the Master Ball seed is the right answer to
+the rest. ⚠️ **The three entries above are history, not a to-do list.** Do not resume them.
+
+**What was reverted.** `PolicyStep::electrode_steps`, `can_catch_an_electrode`, `probe_power_plant`, and
+a session's worth of unshipped work on top: a sleep-ranking rewrite of `pre_catch_action`
+(`status_move_rank` reading `PokemonMoveMetadata`, re-applying sleep at `counter == 1`, keeping a
+sleeper in rather than benching it, preferring a *healthy* statuser over a better-armed one), a
+Voltorb-based `electrode_steps`, and the `postgame-electrode.bin` fixture. `pre_catch_action` itself
+stays — it is what keeps the generic "weaken below 50 % first" branch away from a once-per-cartridge
+encounter — as do D1a and the three catch legs, which are green and unchanged.
+
+**One finding survives the revert, and one "finding" was wrong.**
+
+1. **`CatchPokemon` matches on species alone, so a wild encounter can gatecrash a static one.** The
+   Power Plant's disguised Poké-Ball Voltorbs are **lv40**; its *wild* Voltorbs are lv21/23 and fill two
+   of ten encounter slots. One interrupted the walk to the object
+   (`OverworldActionAborted { … reason: Battle }`), was caught exactly as asked, and left the leg
+   holding a lv21 it had no use for. Anything that wants a *specific* static encounter needs to check
+   the level, and note the asymmetry: fleeing a **wild** one is free, fleeing the **object** deletes it.
+2. ❗ **"`UseRareCandy` only works on party slot 0" was a misdiagnosis — there is no such bug.** It was
+   filed off a mis-read log: the leg showed a block of `teach:RareCandy` ticks and a run that ended
+   ~518 k lines later having achieved nothing, and the two were assumed to be the same event. They were
+   not. The candy chain ran for **447 ticks** — normal, and the log says
+   *"Taught the HM to party slot 5"* followed by *"UseRareCandy: consumed — done"*. The 518 k lines were
+   the idle loop *after* every step had finished, spinning out the budget because the test was waiting
+   on a dex flag that could never arrive: the Voltorb it had candied was the **wild lv21** gatecrasher
+   from finding 1, so lv21 + 1 = lv22 and it never reached its lv30 evolution. Everything worked; the
+   wrong Pokémon was in the slot.
+
+   Four probes were run before this was clear — slot 5, the candy mid-bag, the candy as the *last* bag
+   row, and the step issued on residual text — and all four drove the chain correctly.
+   `mechanics::rare_candy_works_on_a_late_party_slot` now pins it (~0.3 s, default tier) so the claim
+   cannot be re-filed. ⚠️ The lesson is the cheap one: **a spinning log is not a wedge until you have
+   counted the ticks**, and this file's own rule (§11: evidence over assertion) is what should have
+   been applied to the first report.
+
+**Impact on others:** none in code beyond one added test — the working tree is otherwise back to what
+shipped. The default tier (855) and all four `postgame::legendaries` legs are green.

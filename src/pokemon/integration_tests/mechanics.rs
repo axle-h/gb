@@ -414,3 +414,41 @@ fn strength_switches_are_exposed() {
     assert_eq!(s.map.strength_switches, vec![Point8 { x: 17, y: 13 }], "VR1F switch should be exposed");
     assert!(s.map.holes.is_empty(), "VR1F has no holes");
 }
+
+/// `UseRareCandy` on a party slot **other than 0**.
+///
+/// Pinned because it was once reported as broken — *"`UseRareCandy` only works on slot 0; asked for
+/// slot 5 it spins and burns the candy on the wrong mon"* — and that report was **wrong**. What had
+/// actually happened was a mis-read log: the leg that filed it caught a **wild lv21 Voltorb** instead
+/// of the lv40 static one it was walking to, so the candy landed on the right Pokémon and simply took
+/// it to lv22 rather than over its lv30 evolution. The menu chain took 447 ticks, which is normal.
+///
+/// So this test exists to stop that costing anyone else an afternoon. It drives the real chain —
+/// START → ITEM → scroll the bag to a **deep** row → USE → the party menu → slot 5 — against a party
+/// of six, and asserts the level went up on the mon that was asked for and on no other. ~1 s.
+#[test]
+fn rare_candy_works_on_a_late_party_slot() {
+    const SLOT: usize = 5;
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/postgame-safari.bin"),
+        Duration::from_mins(5),
+        vec![PolicyStep::UseRareCandy { slot: SLOT as u8 }],
+    );
+
+    let before: Vec<(PokemonSpecies, u8)> =
+        fixture.game_state().pokemon.iter().map(|p| (p.species, p.level)).collect();
+    assert_eq!(before.len(), 6, "the point of the test is a slot the cursor has to travel to");
+    assert!(fixture.api().bag_item_position(ItemId::RareCandy).is_some_and(|i| i > 8),
+        "and a bag row the list has to scroll to");
+
+    fixture.step_until_exhausted();
+
+    let after: Vec<(PokemonSpecies, u8)> =
+        fixture.game_state().pokemon.iter().map(|p| (p.species, p.level)).collect();
+    println!("{before:?}\n{after:?}");
+    assert_eq!(after[SLOT].1, before[SLOT].1 + 1, "slot {SLOT} should have gained exactly one level");
+    for slot in (0..before.len()).filter(|s| *s != SLOT) {
+        assert_eq!(after[slot], before[slot], "the candy must not touch slot {slot}");
+    }
+    assert!(fixture.game_state().bag.iter().all(|i| i.id != ItemId::RareCandy), "candy consumed");
+}

@@ -1,16 +1,22 @@
 //! Workstream **D — Legendaries: Zapdos, Moltres, Mewtwo**. See `docs/postgame-coverage-plan.md` §6-D.
 //!
 //! Sub-steps: D1a Thunder Wave · D1b Moltres (Victory Road 2F) · D2 reach the Power Plant · D3 Zapdos ·
-//! D4 stock Ultra Balls · D5 Cerulean Cave · D6 Mewtwo, then `postgame-legendaries.bin`.
+//! D5 Cerulean Cave · D6 Mewtwo, then `postgame-legendaries.bin`.
 //!
-//! # Why this is not "navigation only", as §6-D assumed
+//! # ⚠️ What this workstream covers, and what it deliberately does not
 //!
-//! §6-D expected the whole workstream to be nearly free, because `CatchPokemon`'s static-encounter
-//! branch already routes to a map sprite named after the species and presses A — which is how Articuno
-//! was caught. It is: Articuno was caught with the **Master Ball**, the only one in the game, and it is
-//! spent. Everything after it has to be caught with the actual Gen 1 formula
-//! (`engine/items/item_effects.asm`, `ItemUseBall`), and all three remaining legendaries have
-//! **catch rate 3** — the joint lowest in the game:
+//! It covers the **routes**: Victory Road 2F's third sealed region, the Power Plant across Route 10's
+//! lake, and Cerulean Cave behind Route 24's river seam. Those are navigation problems and the tests
+//! prove them.
+//!
+//! It does **not** cover *winning the fight*. Each of the three catches is thrown a **debug-seeded
+//! Master Ball** (plan §3, the debug tier), and that is a scope decision rather than a gap: a
+//! catch-rate-3 encounter that must not be KO'd, fled or lost comes down to battle tactics, and in
+//! deployment those are the LLM's to make, not the deterministic policy's. Do not reopen it.
+//!
+//! The formula is kept below because it is the reference for *any* hard catch, not because a better
+//! one is being chased. From `engine/items/item_effects.asm`, `ItemUseBall`, on the three remaining
+//! legendaries' **catch rate 3** — the joint lowest in the game:
 //!
 //! ```text
 //! Rand1 ∈ [0,255] Poké Ball / [0,200] Great Ball / [0,150] Ultra Ball
@@ -23,7 +29,8 @@
 //! Ultra Ball is `4/151` ≈ **2.6 %**; paralysed it is `12/151 + …` ≈ **8.6 %**, and a Poké Ball goes
 //! from 0.5 % to 5.1 %. Weakening the target — the thing the generic catch policy does — moves only the
 //! fraction of a percent that rides on the HP check, and risks killing a once-per-cartridge encounter.
-//! Hence [`pre_catch_action`]: paralyse first with Thunder Wave, then throw balls and never attack.
+//! Hence [`pre_catch_action`], which exists mainly to keep the generic policy from doing that: it
+//! paralyses if it can, and otherwise throws and never attacks.
 //!
 //! Thunder Wave is free (TM45 lies on the ground on Route 24) and **Slowpoke is the only party member
 //! that can learn it** — Venusaur, Articuno and Vaporeon are all incompatible
@@ -204,71 +211,6 @@ pub fn pre_catch_action(
 }
 
 impl PolicyStep {
-    /// **D2a** — catch an **Electrode** in the Power Plant and give it **TM45 Thunder Wave**.
-    ///
-    /// This is the sub-step the re-cut §6-D turns on, and its whole point is *speed*. A Gen 1
-    /// partial-trapping move overwrites the trapped side's chosen move with `CANNOT_MOVE`, so a
-    /// paralyser slower than Moltres never gets to act at all; the fix is a paralyser that moves
-    /// first, on turn 1, before Fire Spin can start. Of everything obtainable that learns TM45,
-    /// exactly one is fast enough: Electrode, base speed **140** against a lv50 bird's ~110.
-    ///
-    /// Ordering matters and is the reason this cannot simply be appended to
-    /// [`Self::arm_for_legendaries_steps`]: **TM45 is one per cartridge and a Gen 1 TM is consumed on
-    /// use**, so the Electrode has to be in the party *before* the TM is picked up. This step does
-    /// both, in that order, and D1a's Slowpoke version is superseded.
-    ///
-    /// Two things about the target are worth knowing before the run:
-    ///
-    /// - ⚠️ **It is one of eight disguised Poké Balls**, and the ROM numbers them — `Electrode 1` and
-    ///   `Electrode 2`, `Voltorb 1..6` (`data/maps/objects/PowerPlant.asm`). `CatchPokemon` matched
-    ///   sprite names against the species name exactly, which found neither and left it pacing a map
-    ///   with no wild encounters; `sprite_is_species` now strips the number.
-    /// - ⚠️ **A lv43 Electrode knows Selfdestruct.** Its last four learnt moves are Sonicboom (17),
-    ///   Selfdestruct (22), Light Screen (29) and Swift (40), so roughly a quarter of its turns end the
-    ///   encounter by killing the target. That is what the *second* Electrode is for — the step lists
-    ///   both, and the first is skipped in 50 polls once its sprite reads `hidden`.
-    ///
-    /// Catch rate 60 makes this an ordinary catch, and at full HP a **Great Ball** is the right one:
-    /// its second roll is `128/256` against the Ultra Ball's `86/256`, which more than pays for the
-    /// worse first roll (`61/201` vs `61/151`). The fixture carries nine, and no weakening turn is
-    /// available anyway — the lead out-levels it by nearly thirty.
-    ///
-    /// The route is [`Self::zapdos_steps`]' without the `Dig`: Cerulean is split by one-way ledges and
-    /// Fly lands on the terrace that cannot reach Route 9, so the trashed house is the bridge.
-    pub fn electrode_steps(electrode_slot: u8) -> Vec<Self> {
-        let mut steps = vec![
-            Self::Fly { to: Map::CeruleanCity },
-            Self::enter(Map::CeruleanPokecenter),
-            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-            Self::enter(Map::CeruleanCity),
-            Self::enter(Map::CeruleanTrashedHouse),   // main terrace front door
-            Self::enter_at(Map::CeruleanCity, 27, 9), // back door → the Route-9 terrace
-            Self::enter(Map::Route9),
-            Self::CutTree { map: Map::Route9 },        // the (5,8) tree boxing in the west pocket
-            Self::enter(Map::Route10),
-            Self::enter(Map::PowerPlant),
-        ];
-        // Two attempts at the same species. The first `CatchPokemon` pops on its own once the dex has
-        // an Electrode in it, so the second is a no-op on a successful run.
-        steps.extend(std::iter::repeat_n(
-            Self::CatchPokemon { species: PokemonSpecies::Electrode, on_map: Map::PowerPlant,
-                                 ball: Some(ItemId::GreatBall) }, 2));
-        steps.extend([
-            // Out on foot — the Power Plant door leads straight back to Route 10 — then Route 24 for
-            // the TM. Nugget Bridge's five trainers are between Cerulean and it; heal first.
-            Self::enter(Map::Route10),
-            Self::Fly { to: Map::CeruleanCity },
-            Self::enter(Map::CeruleanPokecenter),
-            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-            Self::enter(Map::CeruleanCity),
-            Self::enter(Map::Route24),
-            Self::CollectItem(MapSprite::ROUTE24_TM_THUNDER_WAVE),
-            Self::TeachMove { item: ItemId::Tm45ThunderWave, target_slot: electrode_slot },
-            Self::enter(Map::CeruleanCity),
-        ]);
-        steps
-    }
-
     /// **D1a** — the toolkit all three catches share: a stack of balls, plus **TM45 Thunder Wave**
     /// picked up on Route 24 and taught to Slowpoke.
     ///
@@ -366,10 +308,11 @@ impl PolicyStep {
         // be active on — but Victory Road's floor is a wild-encounter map: a lv30 Slowpoke walking
         // point met an Onix, failed to run from it, and was dead before it ever saw Moltres.
         //
-        // ⚠️ **There is exactly one attempt, and this list does not yet reliably win it.** See the §11
-        // entry: Moltres opens with Fire Spin about half the time, and Slowpoke cannot act through the
-        // trap, cannot outrun it, and must not flee. The fix is a paralyser that outspeeds it, which
-        // means doing D2/D3 (the Power Plant) first and teaching TM45 to an **Electrode** instead.
+        // ⚠️ **The fight is out of scope and the test seeds a Master Ball for it** (plan §3). Moltres
+        // opens with Fire Spin about half the time, and a slower paralyser cannot act through the trap,
+        // cannot outrun it and must not flee — so winning it honestly is a battle-tactics problem, and
+        // battle tactics are the LLM's job in deployment, not the deterministic policy's. What this
+        // list is for, and what the test proves, is the **route**.
         steps.extend([
             Self::enter_at(Map::VictoryRoad2F, 1, 1),
             Self::CatchPokemon { species: PokemonSpecies::Moltres, on_map: Map::VictoryRoad2F,
