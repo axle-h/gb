@@ -22,6 +22,7 @@ mod audio;
 mod activation;
 mod pokemon;
 mod ram;
+mod savestate;
 
 pub fn main() -> Result<(), String> {
     sdl::render::render()

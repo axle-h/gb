@@ -285,9 +285,9 @@ Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orie
 
 | ID | Task | State | Date | Notes |
 |---|---|---|---|---|
-| **A0** | **New sectioned savestate format + one-time fixture conversion** | TODO | | ⚠️ **DO THIS FIRST — before A6/A7 and all of B/C/D** |
+| **A0** | **New sectioned savestate format + one-time fixture conversion** | DONE | 2026-08-04 | Container v1, 10 live + 3 reserved sections. All 91 fixtures converted, −22.4%. Rules in `src/savestate/mod.rs` |
 | A1 | `Core::reset()` is `todo!()` — implement it | TODO | | crash-class |
-| A2 | `run()` livelocks on STOP/Crash (returns 0 cycles) | TODO | | crash-class |
+| A2 | ~~`run()` livelocks on STOP/Crash~~ → CPU keeps executing in STOP/Crash | TODO | | ⚠️ **premise corrected**, see A2 + ledger #3. No livelock exists |
 | A3 | STOP permanently kills DIV/TIMA/APU (`restart()` dead) | TODO | | crash-class |
 | A4 | Illegal opcode freezes whole machine; `println!` in hot path | TODO | | crash-class |
 | A5 | ROM bank index vs actual ROM length → panic | TODO | | crash-class |
@@ -363,7 +363,10 @@ and take the cheap accuracy wins.
 
 ### A0 — New sectioned savestate format + one-time fixture conversion ⚠️ DO THIS FIRST
 
-**State:** TODO · **Depends:** none · **Risk:** medium · **Blocks:** A6, A7, and all of B, C, D
+**State:** DONE (2026-08-04) · **Depends:** none · **Risk:** medium · **Blocks:** A6, A7, and all of B, C, D
+
+> ✅ **Landed.** The authoritative reference is now the module doc at the top of
+> `src/savestate/mod.rs`, not this task definition. See ledger `2026-08-04 (#3)`.
 
 **Why the original plan (A8) was wrong.** Savestates are positional `bincode` — field order *is* the
 schema — and **bincode has no schema-migration support whatsoever** (verified against the vendored
@@ -527,17 +530,37 @@ Plus: SRAM survives a reset.
 
 **State:** TODO · **Depends:** none · **Risk:** low
 
-**Why.** `src/core.rs:486-497`: the `CoreMode::Stop` and `CoreMode::Crash` arms both return
-`MachineCycles::ZERO`. `GameBoy::run`'s `while cycles < min_cycles` loop therefore **never
-terminates** if nothing wakes the machine. A hang with no diagnostic is the worst failure mode for
-an unattended agent.
+> ⚠️ **Premise corrected 2026-08-05 (ledger #3). There is no livelock.** The original text below
+> was wrong; the real defect is different and is described after it. Do not implement the original
+> fix — it would be a no-op.
+>
+> ~~`src/core.rs:486-497`: the `CoreMode::Stop` and `CoreMode::Crash` arms both return~~
+> ~~`MachineCycles::ZERO`, so `GameBoy::run`'s `while cycles < min_cycles` loop never terminates.~~
+>
+> Those `MachineCycles::ZERO` arms produce **`interrupt_cycles`**, which is only one *addend* of
+> what `Core::execute` returns:
+> ```rust
+> let cycles = MachineCycles::from_m(opcode.machine_cycles(condition_met));  // always >= 1
+> let interrupt_cycles = match self.mode { /* ZERO for Stop and Crash */ };
+> cycles + interrupt_cycles
+> ```
+> `OpCode::machine_cycles` has **no arm returning 0** (verified by inspection of
+> `src/opcode.rs:577-700`, including `Illegal`, `Stop` and `Halt`, which are all 1). So `execute`
+> always returns at least 1 M-cycle and `run` always terminates.
 
-**Do.** Return a non-zero cycle count (1 M-cycle is fine) from both arms so time advances and the
-loop always terminates.
+**Why (the actual defect).** Neither `GameBoy::run` nor `Core::execute` consults `self.mode` before
+fetching. In `CoreMode::Stop` **and** `CoreMode::Crash` the CPU therefore keeps fetching and
+executing instructions normally, while `self.mmu.update(cycles)` is skipped entirely — so the CPU
+runs on with **every peripheral frozen**. STOP does not stop the CPU; Crash does not halt it. This
+overlaps A3 and A4, which fix the peripheral half of the same wiring.
 
-**Verify.** A test that executes `STOP` with no pending joypad input, then calls
-`run(from_m(10_000))` and asserts it returns. Use a timeout guard so a regression fails rather than
-hangs.
+**Do.** Make `Stop` and `Crash` actually suspend instruction execution — burn the M-cycle without
+fetching — while keeping `mmu.update` running for the peripherals that hardware leaves alive (see
+A3 for STOP's DIV/TIMA/APU, A4 for Crash keeping video/audio/DIV going).
+
+**Verify.** Execute `STOP` with no pending joypad input, then `run(from_m(10_000))`: assert it
+returns (it already does — keep the guard so a future regression fails rather than hangs) **and**
+that PC has not advanced beyond the `STOP` instruction. Then the same for an illegal opcode.
 
 ---
 
@@ -719,6 +742,13 @@ against it. Without this number, Phase C cannot be evaluated.
 3. The accuracy claim "passes Blargg's cpu_instrs, dmg_sound, instr_timing" — `dmg_sound` is
    **9 of 12**; tests 09/10/12 are commented out at `src/game_boy.rs:236-246`, `:251-256` with
    placeholder expectations at `src/roms/mod.rs:41-46`. Say "dmg_sound 1–8 and 11".
+4. *(added by A0)* The "Important notes" rule **"Nothing may be added to `Audio`'s serialised
+   fields"** is obsolete and now actively misleading — it forbids something that is safe. A0
+   deleted `Audio`'s hand-written `Encode`/`Decode` entirely; adding a field means appending it to
+   `ApuSection` and bumping `APU_SECTION_VERSION`, with **no fixture churn**. Replace the note with
+   a pointer to the rules at the top of `src/savestate/mod.rs`. The save-state-format paragraph
+   above it ("serialised with `bincode` + lz4 compression … `GameBoy` implements `Encode`/`Decode`")
+   is also stale for the same reason.
 
 **Verify.** Run each documented command and confirm it does what the doc says.
 
@@ -1441,5 +1471,121 @@ counted: **41 derived `Encode`/`Decode` types across 26 files**, plus 3 hand-wri
 Note that A0 deliberately regenerates all 91 fixtures **once** — that is sanctioned and is the only
 mass regeneration in this plan; verify content equality across the conversion rather than trusting
 it.
+
+---
+
+### 2026-08-05 (#3) — A0 (+ A2 premise correction) — Sectioned savestate landed; 91 fixtures converted
+
+**State:** **A0 → `DONE`.** A6, A7, B1, C1, D2 are unblocked. **A2** kept `TODO` but its *premise*
+was corrected in place (see below). A1, A3–A14 untouched — I stopped after A0 rather than rushing
+the crash-class fixes.
+
+**Did:**
+
+- New module `src/savestate/mod.rs` (~430 lines incl. tests). Container:
+  `"GBST" | u16 container_version | lz4_prepend_size { [label\0][u32 len][payload] }`, payload =
+  `u16 section_version | bincode(value)*`. **Container version shipped: `1`.**
+- **Section list (10 written, 3 reserved):** `cpu`, `cart`, `wram`, `hram`, `ppu`, `apu`, `timer`,
+  `dma`, `irq`, **`joyp`** — plus `cgb`, `sched`, `mbc` declared as labels but not written.
+  ⚠️ `joyp` is **not** in A0's original taxonomy table; `JoypadRegister` is real machine state and
+  had nowhere else to live, so I added a section rather than smuggling it into `cpu` or `irq`.
+- Section structs live next to their owners (`CpuSection` `src/core.rs:30`, `CartSection` /
+  `IrqSection` / `TimerSection` `src/mmu.rs:43-66`, `PpuSection` `src/ppu.rs:91`, `ApuSection`
+  `src/audio/mod.rs:310`) with `write_sections`/`read_sections` methods, so no field had to be made
+  public. `GameBoy::save_state`/`load_state` just orchestrate.
+- **Dropped from serialisation** as planned: `PPU::lcd` (23,040 `DMGColor`) and
+  `PPU::scanline_sprites`. Hand-wrote `PartialEq`/`Eq` for `PPU` excluding both (`src/ppu.rs:69`),
+  mirroring `Audio`'s exclusion of `output`. `read_sections` resets `lcd` to white and clears
+  `scanline_sprites` on load.
+- **Deleted the three retired codecs**: the derived `Encode`/`Decode` on `GameBoy`, `Core` and
+  `PPU`, and the hand-written `Encode`/`Decode`/`BorrowDecode` on `MMU` and `Audio`. The emulator
+  no longer implements bincode at the aggregate level at all.
+- `load_state` now applies sections to a **clone of the target machine**, then swaps, so a failure
+  cannot leave a half-loaded machine. It also no longer copies the ROM twice.
+
+**⭐ THE RULES (this is the entry later agents need):**
+
+- **Adding a section is free, forever.** Old readers skip the label; old files just lack it and the
+  component keeps its current value. No fixture churn. Prefer this.
+- **Adding a field to an existing section:** do **not** append to the section struct. Emit it as an
+  additional *value* via `writer.write_fields(label, version, |f| { f.field(&old)?; f.field(&new) })`
+  and bump that section's `*_SECTION_VERSION` constant. Read it back with
+  `reader.section(label)?` then `fields.field::<T>()?`, which yields `None` when the payload
+  predates the field. **No fixture churn.** Both directions are covered by
+  `savestate::tests::appended_fields_are_compatible_both_ways`.
+- **Changing a shipped value's type/size or field order:** bump the section version and branch on
+  `FieldReader::version()`, or retire the label and add a new one. bincode is positional — never
+  change a shipped shape in place.
+- **`legacy_v0.rs` was never created, and the converter has been deleted.** See Surprises.
+
+**Verified:** (real output, in the order I ran it)
+
+- Baseline before any change: `cargo test --release --bin gb` →
+  `test result: ok. 866 passed; 0 failed; 121 ignored`; `git status --porcelain src/pokemon/data/`
+  → `fixtures clean`. (Plan §1.6 predicts "966+ tests" — the true figure at HEAD is **866 passing /
+  121 ignored = 987 total**. §1.6 is off; treat 866/121 as the baseline.)
+- Conversion, with per-file content equality asserted **before** each write:
+  `converted 91/91 fixtures: 1164099 -> 903368 bytes (-22.4%)`. Directory 1.4 MB → 1.2 MB. Four
+  small, mostly-blank-screen fixtures grew by 8–24 bytes (section framing exceeds the `lcd` saving
+  when `lcd` was uniform enough to compress to almost nothing); the rest shrank 8–34%.
+- Default tier, final code: `test result: ok. 874 passed; 0 failed; 121 ignored` (866 + 8 new
+  savestate tests).
+- **`cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests` →
+  `test result: ok. 111 passed; 0 failed; 28 ignored; 0 measured; 856 filtered out; finished in
+  453.25s`.** This is the real proof the converted fixtures still drive the agent. Run twice (505s
+  before a late refactor, 453s after); green both times.
+- Tolerance proven both ways by unit test, not assumed: `unknown_sections_are_skipped`,
+  `missing_sections_are_absent_not_errors`, `game_boy_tolerates_extra_and_missing_sections` (splices
+  a bogus section into a real machine's state, and strips `hram` from another).
+- Fixture bytes were **unchanged** by every test run after the conversion (`md5sum` of all 91
+  → `51c00f7f8cd299815977e84026d77c05` before and after both slow-tier runs), confirming nothing
+  silently rewrote them.
+
+**Surprises:**
+
+1. **The legacy-struct problem evaporated — no `legacy_v0.rs` was needed.** A0 assumed the converter
+   would need a verbatim `PpuV0`. It doesn't, because *the new writer is hand-written per section*:
+   at HEAD the old derived codec (which still reads `lcd`) and the new section writer (which chooses
+   not to write it) coexist with **no struct change at all**. So the converter was just
+   `decode_old(bytes) -> GameBoy -> save_state()`. It lived at `src/savestate/convert_v0.rs` as an
+   `#[ignore]`d test and **was deleted after use**, together with the derives it was the last user
+   of. Had A0's containment chain been needed it would have been *four* legacy types
+   (`GameBoyV0`/`CoreV0`/`MmuV0`/`PpuV0`), not one, because `MMU`'s hand-written decode calls
+   `PPU::decode` — worth knowing if this ever has to be redone.
+2. **"Append a field within a section" does not work for free with plain bincode structs** — a
+   struct's derived `Decode` reads fields positionally and errors with `UnexpectedEnd` on a short
+   buffer. §2.4 rule 4 promised this would be free; it only became free once I made a section
+   payload a *sequence of values* with a cursor (`write_fields` / `section()` / `field()`). If you
+   add a field by editing a section struct, you **will** invalidate all 91 fixtures. Use the cursor.
+3. **A2's premise is wrong — there is no livelock.** The `MachineCycles::ZERO` arms in
+   `src/core.rs` produce `interrupt_cycles`, an *addend*; `Core::execute` returns
+   `opcode_cycles + interrupt_cycles`, and no `OpCode::machine_cycles` arm returns 0 (checked all of
+   `src/opcode.rs:577-700`), so `run()` always terminates. The real defect is that **the CPU keeps
+   fetching and executing in both `Stop` and `Crash` while `mmu.update` is skipped**. I rewrote A2's
+   Why/Do/Verify in place and flagged the Status Board row; the task ID and its position are
+   unchanged. Implementing the *original* A2 would have been a no-op.
+4. I removed `MMU`'s hand-written codec with a blunt "cut from `impl Encode for MMU` to EOF", which
+   also took the `#[cfg(test)] mod tests` that sat after it — 6 tests, restored from `git show`.
+   Caught only because the test count dropped 873 → 867. **Watch the test count after every
+   deletion**; it is the cheapest tripwire in this repo.
+5. `dmg-acid2` never writes high RAM, so the first draft of the "missing section" test was vacuous
+   (comparing zeros to zeros). It now pokes HRAM explicitly and asserts the comparison is
+   non-trivial before relying on it.
+
+**Tree:** dirty, uncommitted, as instructed. Changed: `src/savestate/mod.rs` (**new**),
+`src/main.rs` (`mod savestate;`), `src/game_boy.rs`, `src/core.rs`, `src/mmu.rs`, `src/ppu.rs`,
+`src/audio/mod.rs`, `docs/compatibility/10-implementation-plan.md`, and **all 91
+`src/pokemon/data/*.bin`** (the sanctioned one-time conversion). **No `src/pokemon/**` source file
+was touched** — verified with `git diff --name-only src/pokemon/ | grep -v data/` → empty. A backup
+of the pre-conversion fixtures is in this session's scratchpad only; `git checkout
+src/pokemon/data/` is the real undo.
+
+**Next agent:** A0 is the gate and it is open — but **the `CLAUDE.md` note "Nothing may be added to
+`Audio`'s serialised fields" is now false and dangerous in reverse**: it forbids something that is
+now safe, and its neighbouring save-format paragraph is stale too. I did not edit `CLAUDE.md`
+because §2.2 reserves it for A10; I have added this as a fourth correction under A10, so **do A10
+early** rather than in task order. Beyond that: A1 (`Core::reset`) is the cleanest next task, and
+read A2's corrected premise before touching A2/A3/A4 — those three are all facets of the same
+`Stop`/`Crash` wiring and are probably best done together.
 
 ---

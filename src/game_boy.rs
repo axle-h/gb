@@ -1,8 +1,8 @@
-use bincode::{Decode, Encode};
 use crate::core::Core;
 use crate::cycles::MachineCycles;
+use crate::savestate::{SectionReader, SectionWriter};
 
-#[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct GameBoy {
     core: Core
 }
@@ -57,11 +57,16 @@ impl GameBoy {
         self.restore_sram(&data)
     }
 
+    /// Write every save-state section this build knows about. Exposed for tests that need to
+    /// manipulate the container; ordinary callers want [`GameBoy::save_state`].
+    pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
+        self.core.write_sections(writer)
+    }
+
     pub fn save_state(&self) -> Result<Vec<u8>, String> {
-        let serialized = bincode::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| e.to_string())?;
-        let compressed = lz4_flex::compress_prepend_size(&serialized);
-        Ok(compressed)
+        let mut writer = SectionWriter::new();
+        self.write_sections(&mut writer)?;
+        Ok(writer.finish())
     }
 
     pub fn save_state_to_file(&self, path: &str) -> Result<(), String> {
@@ -70,18 +75,18 @@ impl GameBoy {
     }
 
     pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        let decompressed = lz4_flex::decompress_size_prepended(data)
-            .map_err(|e| e.to_string())?;
-        let (game_boy, _): (GameBoy, usize) = bincode::decode_from_slice(&decompressed, bincode::config::standard())
-            .map_err(|e| e.to_string())?;
+        let reader = SectionReader::parse(data)?;
 
-        if game_boy.core.mmu().header() != self.core.mmu().header() {
-            return Err(format!("Incompatible save state, expected {:?}, got {:?}", self.core.mmu().header(), game_boy.core.mmu().header()));
+        // Applied to a copy so a failure part-way through cannot leave a half-loaded machine.
+        // The copy also carries the ROM image, which is never serialised.
+        let mut candidate = self.clone();
+        candidate.core.read_sections(&reader)?;
+
+        if candidate.core.mmu().header() != self.core.mmu().header() {
+            return Err(format!("Incompatible save state, expected {:?}, got {:?}", self.core.mmu().header(), candidate.core.mmu().header()));
         }
 
-        let current_rom = self.core.mmu().data().to_vec();
-        *self = game_boy;
-        self.core_mut().mmu_mut().set_data(&current_rom);
+        *self = candidate;
         Ok(())
     }
 
