@@ -138,10 +138,23 @@ cargo test --release --features bench --bin gb -- \
   game_boy::tests::bench_core_throughput --exact --nocapture
 ```
 
-**A test that is `#[ignore]`d should be blocked, not merely slow or not-a-test.** Tiering goes
-through a Cargo feature (`slow-tests`, `very-slow-tests`, `full-playthrough`, `bench`) so the ignored list stays a
-readable backlog. Every remaining `#[ignore]` reason names its blocker — a plan task ID where one
-exists, or why it will not be fixed.
+**A test that is `#[ignore]`d should be blocked, not merely slow or not-a-test.** Everything else
+goes behind a Cargo feature, so the ignored list stays a readable backlog:
+
+| Feature | Holds |
+|---|---|
+| `slow-tests` / `very-slow-tests` / `full-playthrough` | Tiering by emulated game time |
+| `diagnostics` | `probe_*`, `dump_fixture_states`, `capture_golden_input` — tools that print a report rather than assert. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal: two legitimately end by exhausting their cycle budget *after* printing what was asked for |
+| `bench` | `bench_core_throughput`, `bench_emulation_throughput` |
+
+With every tier feature on and the tool features off, the ignored list is **21 blocked emulator
+tests** and nothing else — 9 `oam_bug`, 9 `mem_timing`/`halt_bug`, 3 `dmg_sound` wave. Each names
+its blocker: a plan task ID, or why it will not be fixed. Keep it that way.
+
+```bash
+# The diagnostics and probes
+cargo test --release --features diagnostics,slow-tests --bin gb -- probe_ --ignored --nocapture
+```
 
 ### ⚠️ Run `full_playthrough` after every major work item, and always before pushing
 

@@ -42,6 +42,7 @@ fn can_get_poke_flute() {
 /// Rides the elevator out of Giovanni's B4F room exactly as `poke_flute_steps` does, then dumps B2F's
 /// reachable actions (both B1F landings should appear), crosses at the northern one, and dumps B1F.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "probe — run with --ignored --nocapture"]
 fn probe_hideout_b1f_halves() {
     fn dump(fixture: &mut TestFixture) {

@@ -282,6 +282,7 @@ fn can_get_the_exp_all() {
 /// encounter does not error — it paces between the two farthest tiles on the map for its whole budget.
 /// Run this before adding a ground, not after the leg times out.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_sweep_grounds() {
     use crate::pokemon::postgame::aides;
@@ -310,6 +311,7 @@ fn probe_sweep_grounds() {
 
 /// Diagnostic for **H5** — read back the state a *stalled* leg left, and dump the map around it.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_stall_artifact() {
     let path = "target/test-artifacts/test_stall_state.bin";
@@ -332,6 +334,7 @@ fn probe_stall_artifact() {
 /// it was looking at is to reload where it stopped and ask the map the same questions the driver did:
 /// which neighbours are grass, and which of those the tile-pair table actually lets you step onto.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_timeout_artifact() {
     let path = "target/test-artifacts/test_timeout_state.bin";
@@ -363,6 +366,7 @@ fn probe_timeout_artifact() {
 /// event log: `PacingForEncounters` prints one state change and then nothing for the whole budget.
 /// This prints the position each second so the two can be told apart.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_sweep_pacing() {
     let mut fixture = TestFixture::new(HIDDEN_ITEM, Duration::from_mins(60), vec![
@@ -391,6 +395,7 @@ fn probe_sweep_pacing() {
 /// this reads `WildDataPointers` instead and reports, per unowned species, the map where its summed
 /// encounter share is fattest.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_dex_sweep_candidates() {
     use crate::pokemon::wild::{self, Terrain};
@@ -450,6 +455,7 @@ fn probe_dex_sweep_candidates() {
 /// at x=48, y=5, and the question is whether the walk from Vermilion reaches either — Route 11 has
 /// ten trainers on it, and a trainer standing in the corridor is an obstacle in the block map.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_route11_hidden_item() {
     let mut fixture = TestFixture::new(SAFARI, Duration::from_mins(60), vec![

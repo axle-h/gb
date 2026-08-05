@@ -393,6 +393,7 @@ fn can_use_the_stat_items_and_a_poke_doll_in_battle() {
 /// ones, so "is it near?" is not a question to answer by eye. Run this before changing
 /// `vermilion_item_steps`' landing map.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_itemfinder_range() {
     for approach in [None, Some(Map::VermilionTradeHouse), Some(Map::PokemonFanClub),
@@ -427,6 +428,7 @@ fn probe_itemfinder_range() {
 /// fenced-off patch is unreachable — and the failure is a stall ("Can't reach trash can at …"), not
 /// an error. Dumps the neighbourhood of every hidden item on a town map.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_town_hidden_item_reachability() {
     for (fly, town) in [(Map::VermilionCity, Map::VermilionCity), (Map::ViridianCity, Map::ViridianCity),

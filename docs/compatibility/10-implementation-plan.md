@@ -1854,3 +1854,57 @@ things that are genuinely blocked, with the blocker named — the ignored list i
 backlog.
 
 ---
+
+### 2026-08-05 (#6) — test hygiene — Diagnostics gated; the ignored list is now a pure backlog
+
+**State:** No task states changed. Housekeeping, at Alex's request, after the Pokémon agent
+finished its own cleanup (`996dbf3`, `6876feb` — it fixed the four blocked leg tests and added a
+`very-slow-tests` tier).
+
+**Did:** Alex asked me to re-confirm why the remaining non-feature-gated `#[ignore]`s under
+`src/pokemon/**` exist and delete the useless ones. **I deleted none, because none was useless** —
+that is the finding, not an omission. All 24 are documented diagnostics, several explicitly written
+to be re-run ("kept runnable so the next agent can re-derive it", "run this before adding a ground,
+not after the leg times out"). I ran every one: **22 pass**; the two that fail
+(`aides::probe_sweep_grounds`, `items::probe_town_hidden_item_reachability`) do so by exhausting
+their cycle budget *after* printing their report, which is a rough edge, not deadness.
+
+So the fix was categorisation, applying the rule Alex set for benchmarks:
+
+- New **`diagnostics`** Cargo feature. All 23 `probe_*`, `dump_fixture_states` and
+  `capture_golden_input` now sit behind it. They keep `#[ignore]` on top of the gate, deliberately:
+  their pass/fail is not a signal, so they should not run as assertions.
+- `bench_emulation_throughput` moved behind the existing **`bench`** feature, matching
+  `bench_core_throughput`. Its doc quoted 23x/20x and "~11% agent overhead"; re-measured to
+  **33.6x / 28.3x, ~16%**, and it now cross-references the core-only benchmark.
+
+**Verified:**
+- Default tier `test result: ok. 899 passed; 0 failed; 117 ignored` (was 141 ignored — the 24 tools
+  are compiled out).
+- **With every tier feature on and the tool features off, the ignored list is exactly 21 tests**:
+  9 `oam_bug`, 9 `mem_timing`/`halt_bug`, 3 `dmg_sound` wave. Nothing from `src/pokemon/**` remains
+  in it. That list is now a genuine backlog, and every entry names its blocker.
+- Both gates exercised end to end: `dump_fixture_states` under `--features diagnostics` still
+  prints (`at-celadon: CeladonCity @ (42, 10) | badges Badge(7) | ¥24781`), and
+  `bench_emulation_throughput` under `--features bench` still reports (33.1x raw / 28.0x agent).
+
+**Surprises:**
+1. **"Still ignored" did not mean "still useless".** The probes had been left ignored because
+   that is the only way Rust marks a non-assertion test, not because they were spent. The listing
+   flags them identically to genuinely blocked tests, which is what made them look like debt.
+   A feature gate distinguishes the two; `#[ignore]` alone cannot.
+2. Two probes fail by design-adjacent accident — they finish their work then hit the fixture
+   harness's cycle cap. Worth someone from the Pokémon side tidying, but they still deliver output.
+3. I hit the `--exact`-needs-the-full-module-path trap **again** while diagnosing those two, having
+   fixed exactly that bug in `CLAUDE.md` as task A10. It is a genuinely easy mistake; the fix is to
+   copy the path from `--list` rather than typing a suffix.
+
+**Tree:** dirty, uncommitted: `Cargo.toml`, `CLAUDE.md`, this document,
+`src/audio/reference.rs`, `src/pokemon/integration_tests/**` (attribute-only changes plus one doc
+comment). No emulator behaviour changed; no fixture regenerated.
+
+**Next agent:** **A16** is still the only fixable ignored emulator test. When you add a test, decide
+which of the three buckets it is in — blocked (`#[ignore]` with the blocker named), tiered
+(`slow-tests` and friends), or a tool (`diagnostics`/`bench`) — and gate it accordingly.
+
+---

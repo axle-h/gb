@@ -123,6 +123,7 @@ fn a_full_party_sends_the_silph_lapras_to_the_box() {
 /// because "which pocket is the Lapras worker in" is the only question this leg has and it is worth
 /// being able to re-ask it.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_silph_7f_pockets() {
     let dump = |fixture: &mut TestFixture, label: &str| {
@@ -202,6 +203,7 @@ const HITMONLEE: &[u8] = include_bytes!("../../data/postgame-hitmonlee.bin");
 /// the same question has to be asked of every floor before writing a pickup route: are the item balls
 /// in the pocket the elevator opens onto, or behind a teleport pad? Menu index = floor − 1.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_silph_item_floors() {
     for (floor, index) in [("2F", 1u8), ("4F", 3), ("6F", 5), ("8F", 7), ("10F", 9)] {
@@ -361,6 +363,7 @@ fn can_leave_a_pokemon_at_the_day_care() {
 /// Diagnostic for **G8b**: Route 5's terraces. The Day Care door is at (10,21) and the walk in from
 /// Cerulean lands at (18,1); `enter(Daycare)` from there does nothing at all.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_route5_terraces() {
     let mut fixture = TestFixture::new(GIFTS, Duration::from_mins(60), vec![
