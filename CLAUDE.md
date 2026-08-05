@@ -2,7 +2,7 @@
 
 A Game Boy (DMG) emulator written in Rust, repurposed as a platform for an LLM agent to play Pokémon Red entirely via text — no images required.
 
-The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs, dmg_sound 1–8 and 11, instr_timing; dmg-acid2 PPU test). `dmg_sound` 09/10/12 are **not** passing — they are commented out in `src/game_boy.rs` with placeholder expectations in `src/roms/mod.rs`. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
+The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs, dmg_sound 1–8 and 11, instr_timing; dmg-acid2 PPU test). `dmg_sound` 09/10/12 are **not** passing — they are `#[ignore]`d in `src/game_boy.rs`, and their reference images in `src/roms/mod.rs` are placeholders. Task **A16** covers fixing them. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
 
 The project has been extended with a Pokémon Red-specific layer that reads game state directly from emulator RAM (using symbols extracted from the [pokered](https://github.com/pret/pokered) disassembly) and drives the game via synthesised joypad input. The goal is to expose a complete text interface over MCP so an LLM agent can play through the entire game.
 
@@ -126,9 +126,15 @@ cargo test --release --bin gb -- \
 
 # Emulator core alone — no agent, no policy, no observation. Three workloads. This is the
 # number Phase C of docs/compatibility/10-implementation-plan.md is scored against.
-cargo test --release --bin gb -- \
-  game_boy::tests::bench_core_throughput --exact --ignored --nocapture
+# Behind the `bench` feature, so benchmarks never pad the ignored-test count.
+cargo test --release --features bench --bin gb -- \
+  game_boy::tests::bench_core_throughput --exact --nocapture
 ```
+
+**A test that is `#[ignore]`d should be blocked, not merely slow or not-a-test.** Tiering goes
+through a Cargo feature (`slow-tests`, `full-playthrough`, `bench`) so the ignored list stays a
+readable backlog. Every remaining `#[ignore]` reason names its blocker — a plan task ID where one
+exists, or why it will not be fixed.
 
 **Fixtures are committed inputs.** Each leg test snapshots its end state for the next leg, but the
 write is a no-op unless `--features regen-fixtures` is on — otherwise every run silently changes the
@@ -177,11 +183,10 @@ Without it a sped-up emulator simply produces audio faster than the device drain
 backs up. The speed is derived from `cycle_duration`, not from the key pressed, so it tracks what the
 emulator actually targets — `REALTIME_CYCLE_DURATION / 5` truncates to 190 ns, which is 5.016×.
 
-For an ear check, render a few seconds to `target/test-artifacts/` (1×, 3× and 5×):
-
-```bash
-cargo test --release --bin gb -- audio::reference::tests::render_reference_wav --exact --ignored --nocapture
-```
+There is deliberately **no WAV "ear check"** any more. It rendered a few seconds to
+`target/test-artifacts/` for a listen, which is a listening aid rather than an assertion; the
+invariant tests above are the real regression net. It was removed along with `src/audio/wav.rs`
+rather than left in the ignored list looking like a test.
 
 ## Save state format
 

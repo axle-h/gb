@@ -37,13 +37,22 @@ pub mod blargg_dmg_sound {
     pub const LENGTH_COUNTER_DURING_POWER: &[u8] = include_bytes!("dmg_sound/08-len ctr during power.gb");
     pub const EXPECTED_LENGTH_COUNTER_DURING_POWER: &[u8] = include_bytes!("dmg_sound/08-len ctr during power.png");
     pub const WAVE_READ_WHILE_ON: &[u8] = include_bytes!("dmg_sound/09-wave read while on.gb");
-    pub const EXPECTED_WAVE_READ_WHILE_ON: &[u8] = EXPECTED_REGISTERS; // TODO
+    /// PLACEHOLDER — not this ROM's reference, so the test is guaranteed to fail and dump its
+    /// real output to `target/test_failure_*.png`. Promote that dump only once the wave-channel
+    /// behaviour is actually fixed (task A16); freezing it now would enshrine wrong output.
+    pub const EXPECTED_WAVE_READ_WHILE_ON: &[u8] = EXPECTED_REGISTERS;
     pub const WAVE_TRIGGER_WHILE_ON: &[u8] = include_bytes!("dmg_sound/10-wave trigger while on.gb");
-    pub const EXPECTED_WAVE_TRIGGER_WHILE_ON: &[u8] = EXPECTED_REGISTERS; // TODO
+    /// PLACEHOLDER — not this ROM's reference, so the test is guaranteed to fail and dump its
+    /// real output to `target/test_failure_*.png`. Promote that dump only once the wave-channel
+    /// behaviour is actually fixed (task A16); freezing it now would enshrine wrong output.
+    pub const EXPECTED_WAVE_TRIGGER_WHILE_ON: &[u8] = EXPECTED_REGISTERS;
     pub const REGISTERS_AFTER_POWER: &[u8] = include_bytes!("dmg_sound/11-regs after power.gb");
     pub const EXPECTED_REGISTERS_AFTER_POWER: &[u8] = include_bytes!("dmg_sound/11-regs after power.png");
     pub const WAVE_WRITE_WHILE_ON: &[u8] = include_bytes!("dmg_sound/12-wave write while on.gb");
-    pub const EXPECTED_WAVE_WRITE_WHILE_ON: &[u8] = EXPECTED_REGISTERS; // TODO
+    /// PLACEHOLDER — not this ROM's reference, so the test is guaranteed to fail and dump its
+    /// real output to `target/test_failure_*.png`. Promote that dump only once the wave-channel
+    /// behaviour is actually fixed (task A16); freezing it now would enshrine wrong output.
+    pub const EXPECTED_WAVE_WRITE_WHILE_ON: &[u8] = EXPECTED_REGISTERS;
 }
 
 pub mod acid {
@@ -89,23 +98,30 @@ pub mod roms {
 /// Source: `c-sp/game-boy-test-roms` v7.0.
 pub mod blargg_timing {
     pub const MEM_TIMING: &[u8] = include_bytes!("mem_timing/mem_timing.gb");
+    /// Hardware reference from `c-sp/game-boy-test-roms` v7.0 — what a *passing* run looks like.
+    pub const EXPECTED_MEM_TIMING: &[u8] = include_bytes!("mem_timing/expected.png");
     pub const MEM_TIMING_READ: &[u8] = include_bytes!("mem_timing/01-read_timing.gb");
     pub const MEM_TIMING_WRITE: &[u8] = include_bytes!("mem_timing/02-write_timing.gb");
     pub const MEM_TIMING_MODIFY: &[u8] = include_bytes!("mem_timing/03-modify_timing.gb");
 
     pub const MEM_TIMING_2: &[u8] = include_bytes!("mem_timing_2/mem_timing.gb");
+    pub const EXPECTED_MEM_TIMING_2: &[u8] = include_bytes!("mem_timing_2/expected.png");
     pub const MEM_TIMING_2_READ: &[u8] = include_bytes!("mem_timing_2/01-read_timing.gb");
     pub const MEM_TIMING_2_WRITE: &[u8] = include_bytes!("mem_timing_2/02-write_timing.gb");
     pub const MEM_TIMING_2_MODIFY: &[u8] = include_bytes!("mem_timing_2/03-modify_timing.gb");
 
     pub const HALT_BUG: &[u8] = include_bytes!("halt_bug.gb");
+    pub const EXPECTED_HALT_BUG: &[u8] = include_bytes!("halt_bug.png");
     pub const INTERRUPT_TIME: &[u8] = include_bytes!("interrupt_time.gb");
+    pub const EXPECTED_INTERRUPT_TIME: &[u8] = include_bytes!("interrupt_time.png");
 }
 
 /// Blargg's `oam_bug` suite — the DMG OAM corruption quirk. See [`blargg_timing`] for why these
 /// are `#[ignore]`d.
 pub mod blargg_oam_bug {
     pub const ROM: &[u8] = include_bytes!("oam_bug/oam_bug.gb");
+    /// Hardware reference from `c-sp/game-boy-test-roms` v7.0.
+    pub const EXPECTED: &[u8] = include_bytes!("oam_bug/expected.png");
     pub const LCD_SYNC: &[u8] = include_bytes!("oam_bug/1-lcd_sync.gb");
     pub const CAUSES: &[u8] = include_bytes!("oam_bug/2-causes.gb");
     pub const NON_CAUSES: &[u8] = include_bytes!("oam_bug/3-non_causes.gb");

@@ -117,10 +117,14 @@ mod tests {
     /// Phase C is scored against *this* one.
     ///
     /// ```text
-    /// cargo test --release --bin gb -- game_boy::tests::bench_core_throughput --exact --ignored --nocapture
+    /// cargo test --release --features bench --bin gb -- \
+    ///   game_boy::tests::bench_core_throughput --exact --nocapture
     /// ```
+    ///
+    /// Behind a feature rather than `#[ignore]`d, so a benchmark never shows up in the ignored
+    /// count next to tests that are actually blocked.
+    #[cfg(feature = "bench")]
     #[test]
-    #[ignore = "benchmark"]
     fn bench_core_throughput() {
         use std::time::Instant;
 
@@ -344,13 +348,13 @@ mod tests {
         }
 
         #[test]
-        #[ignore]
+        #[ignore = "A16: gb genuinely fails dmg_sound 09, and the reference image is a placeholder"]
         fn wave_read_while_on() {
             ppu_test("audio-wave-read-while-on", WAVE_READ_WHILE_ON, EXPECTED_WAVE_READ_WHILE_ON);
         }
 
         #[test]
-        #[ignore]
+        #[ignore = "A16: gb genuinely fails dmg_sound 10, and the reference image is a placeholder"]
         fn wave_trigger_while_on() {
             ppu_test("audio-wave-trigger-while-on", WAVE_TRIGGER_WHILE_ON, EXPECTED_WAVE_TRIGGER_WHILE_ON);
         }
@@ -361,7 +365,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore]
+        #[ignore = "A16: gb genuinely fails dmg_sound 12, and the reference image is a placeholder"]
         fn wave_write_while_on() {
             ppu_test("audio-wave-write-while-on", WAVE_WRITE_WHILE_ON, EXPECTED_WAVE_WRITE_WHILE_ON);
         }
@@ -461,21 +465,20 @@ mod tests {
         }
     }
 
-    /// A14: blargg's remaining DMG suites. **These are expected to fail** — they measure the gap
-    /// left by advancing peripherals once per instruction instead of per M-cycle, which
-    /// `docs/compatibility/10-implementation-plan.md` explicitly defers. They are documentation,
-    /// not a target: do not "fix" them without reading that plan first.
+    /// A14: blargg's remaining DMG suites. **All of these are expected to fail** — they exist to
+    /// quantify gaps that `docs/compatibility/10-implementation-plan.md` has deliberately left
+    /// open. Each `#[ignore]` reason names the blocker. Do not "fix" one without reading it.
     ///
-    /// **Only the four `mem_timing` ROMs actually report over serial.** They fail with useful
-    /// per-opcode detail — e.g. `01-read_timing` reports `F0:2-3 FA:2-4 CB 46:2-3 ...`, meaning
-    /// those reads take 3 M-cycles where hardware takes 2. That *is* the instruction-granularity
-    /// gap, named instruction by instruction.
+    /// Three harnesses are in play, because these ROMs report differently:
     ///
-    /// The other six here, and all nine in [`blargg_oam_bug`], emit **nothing** over serial —
-    /// they write their results to the screen. `serial_console_test` cannot score them, so they
-    /// currently fail for a harness reason rather than a fidelity one. Task A15 covers that.
+    /// * `serial_console_test` — the four `mem_timing` ROMs, the only ones here that talk over the
+    ///   link port. They give the most useful output of the lot: `01-read_timing` reports
+    ///   `F0:2-3 FA:2-4 CB 46:2-3 …`, i.e. those reads take 3 M-cycles where hardware takes 2.
+    /// * `ppu_test` — the five *combined* suite ROMs, which write to the screen and for which
+    ///   `c-sp/game-boy-test-roms` v7.0 ships a hardware reference image.
+    /// * `screenshot_pending` — the individual sub-ROMs, which write to the screen and have **no**
+    ///   reference image. See that function for how to promote one.
     ///
-    /// Run them with:
     /// ```text
     /// cargo test --release --bin gb -- game_boy::tests::blargg_timing --ignored
     /// cargo test --release --bin gb -- game_boy::tests::blargg_oam_bug --ignored
@@ -484,36 +487,68 @@ mod tests {
         use super::*;
         use crate::roms::blargg_timing::*;
 
-        // BLOCKED ON: M-cycle timing (deferred — plan §0.2).
-        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing() { serial_console_test("mem_timing", MEM_TIMING); }
-        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing_01_read() { serial_console_test("mem_timing-01", MEM_TIMING_READ); }
-        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing_02_write() { serial_console_test("mem_timing-02", MEM_TIMING_WRITE); }
-        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing_03_modify() { serial_console_test("mem_timing-03", MEM_TIMING_MODIFY); }
+        // WON'T FIX until the M-cycle timing refactor happens. Plan §0.2 defers it explicitly
+        // and forbids starting it, so there is no task ID to point at — it is a standing gap, and
+        // these ROMs are how we measure it.
 
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2() { serial_console_test("mem_timing-2", MEM_TIMING_2); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2_01_read() { serial_console_test("mem_timing-2-01", MEM_TIMING_2_READ); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2_02_write() { serial_console_test("mem_timing-2-02", MEM_TIMING_2_WRITE); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2_03_modify() { serial_console_test("mem_timing-2-03", MEM_TIMING_2_MODIFY); }
+        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
+        fn mem_timing() { ppu_test("mem_timing", MEM_TIMING, EXPECTED_MEM_TIMING); }
+        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
+        fn mem_timing_01_read() { serial_console_test("mem_timing-01", MEM_TIMING_READ); }
+        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
+        fn mem_timing_02_write() { serial_console_test("mem_timing-02", MEM_TIMING_WRITE); }
+        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
+        fn mem_timing_03_modify() { serial_console_test("mem_timing-03", MEM_TIMING_MODIFY); }
 
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn halt_bug() { serial_console_test("halt_bug", HALT_BUG); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn interrupt_time() { serial_console_test("interrupt_time", INTERRUPT_TIME); }
+        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
+        fn mem_timing_2() { ppu_test("mem_timing-2", MEM_TIMING_2, EXPECTED_MEM_TIMING_2); }
+        // No reference image ships for the sub-ROMs; promote a dump once M-cycle timing lands.
+        #[test] #[ignore = "expected failure: needs M-cycle timing (plan §0.2); no reference image yet"]
+        fn mem_timing_2_01_read() { screenshot_pending("mem_timing-2-01", MEM_TIMING_2_READ); }
+        #[test] #[ignore = "expected failure: needs M-cycle timing (plan §0.2); no reference image yet"]
+        fn mem_timing_2_02_write() { screenshot_pending("mem_timing-2-02", MEM_TIMING_2_WRITE); }
+        #[test] #[ignore = "expected failure: needs M-cycle timing (plan §0.2); no reference image yet"]
+        fn mem_timing_2_03_modify() { screenshot_pending("mem_timing-2-03", MEM_TIMING_2_MODIFY); }
+
+        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
+        fn halt_bug() { ppu_test("halt_bug", HALT_BUG, EXPECTED_HALT_BUG); }
+        /// **This one passes**, so it is not ignored.
+        ///
+        /// Read the reference image before being surprised: `interrupt_time-dmg.png` shows
+        /// `Failed` and the checksum `7F8F4AAF`. That is what *real DMG hardware* prints — the
+        /// ROM targets CGB double-speed behaviour and legitimately fails on DMG. Matching it
+        /// byte for byte, checksum included, is therefore a pass, and a fairly strong one.
+        #[test]
+        fn interrupt_time() { ppu_test("interrupt_time", INTERRUPT_TIME, EXPECTED_INTERRUPT_TIME); }
     }
 
-    /// A14: the DMG OAM corruption quirk, which `gb` does not model — and neither does gambatte.
-    /// Out of scope for this plan entirely.
+    /// A14: the DMG OAM corruption quirk. **WON'T FIX** — the plan does not schedule it in any
+    /// phase, and gambatte does not model it either, so there is nothing to compare against.
+    /// Kept because they are the only measurement of that gap we have.
     mod blargg_oam_bug {
         use super::*;
         use crate::roms::blargg_oam_bug::*;
 
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug() { serial_console_test("oam_bug", ROM); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_1_lcd_sync() { serial_console_test("oam_bug-1", LCD_SYNC); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_2_causes() { serial_console_test("oam_bug-2", CAUSES); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_3_non_causes() { serial_console_test("oam_bug-3", NON_CAUSES); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_4_scanline_timing() { serial_console_test("oam_bug-4", SCANLINE_TIMING); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_5_timing_bug() { serial_console_test("oam_bug-5", TIMING_BUG); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_6_timing_no_bug() { serial_console_test("oam_bug-6", TIMING_NO_BUG); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_7_timing_effect() { serial_console_test("oam_bug-7", TIMING_EFFECT); }
-        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_8_instr_effect() { serial_console_test("oam_bug-8", INSTR_EFFECT); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk, unscheduled in the plan; gambatte does not model it either"]
+        fn oam_bug() { ppu_test("oam_bug", ROM, EXPECTED); }
+
+        // No reference image ships for the sub-ROMs; promote a dump only if the quirk is ever done.
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_1_lcd_sync() { screenshot_pending("oam_bug-1", LCD_SYNC); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_2_causes() { screenshot_pending("oam_bug-2", CAUSES); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_3_non_causes() { screenshot_pending("oam_bug-3", NON_CAUSES); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_4_scanline_timing() { screenshot_pending("oam_bug-4", SCANLINE_TIMING); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_5_timing_bug() { screenshot_pending("oam_bug-5", TIMING_BUG); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_6_timing_no_bug() { screenshot_pending("oam_bug-6", TIMING_NO_BUG); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_7_timing_effect() { screenshot_pending("oam_bug-7", TIMING_EFFECT); }
+        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
+        fn oam_bug_8_instr_effect() { screenshot_pending("oam_bug-8", INSTR_EFFECT); }
     }
 
     fn serial_console_test(name: &str, cart: &[u8]) {
@@ -561,6 +596,25 @@ mod tests {
         }
 
         gb_test_failed_with_screenshot(last_screenshot, name, "screenshot does not match");
+    }
+
+    /// For a screen-output ROM that has **no reference image yet**. Runs it, dumps what the screen
+    /// actually shows to `target/test_failure_<name>.png`, and always fails.
+    ///
+    /// That dump is the raw material for a reference: once the feature the ROM covers is actually
+    /// implemented, run this, open the PNG, and if it reads as a pass (blargg prints `Passed`, or
+    /// per-test `OK`), move it into `src/roms/…` and switch the test to [`ppu_test`]. Promoting a
+    /// screenshot **before** the feature works would just freeze our own wrong output as the
+    /// expectation, so don't.
+    fn screenshot_pending(name: &str, cart: &[u8]) {
+        let mut gb = GameBoy::dmg(cart);
+        gb.run(MachineCycles::from_m(20_000_000));
+        gb_test_failed_with_screenshot(
+            gb.core().mmu().ppu().screenshot(),
+            name,
+            "no reference screenshot yet — inspect the dump, and promote it only once the feature \
+             under test is implemented (see the test's #[ignore] reason)",
+        );
     }
 
     fn gb_test_failed(gb: &GameBoy, name: &str, reason: &str) {
