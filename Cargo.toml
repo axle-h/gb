@@ -16,6 +16,10 @@ slow-tests = []
 # the `slow-tests` gate so the leg chain can be run without paying for it.
 #   cargo test --release --features full-playthrough full_playthrough
 full-playthrough = []
+# Benchmarks. Compiled out entirely by default rather than `#[ignore]`d, so they do not show up
+# in the ignored count alongside genuinely blocked tests.
+#   cargo test --release --features bench --bin gb -- bench_ --nocapture
+bench = []
 # Let tests overwrite the committed fixtures they snapshot. Off by default: a normal test run must
 # leave the working tree clean, or every run silently changes the next run's inputs.
 #   cargo test --release --features regen-fixtures,slow-tests
@@ -40,10 +44,9 @@ phf = { version = "0.13.1", features = ["macros"] }
 regex = "1.12.2"
 
 # The integration tests are bound by raw emulation speed — the agent's observe/policy/input work is
-# only ~11% on top of it — so these two are the only knob that makes every test faster at once.
-# Measured on the `bench_emulation_throughput` fixture: 23.8x → 29.7x realtime raw, 21.4x → 25.6x with
-# the agent (~+20%), for a full-build cost of 18s → 40s. `-C target-cpu=native` was tried on top of
-# this and made it *slower* (26.3x raw), so it is deliberately not set.
+# only ~16% on top of it — so these two are the only knob that makes every test faster at once.
+# Re-measured 2026-08-05 after Phase A: 33.6x realtime raw, 28.3x with the agent. `-C
+# target-cpu=native` was tried on top of this and made it *slower*, so it is deliberately not set.
 [profile.release]
 lto = "thin"
 codegen-units = 1

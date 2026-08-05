@@ -310,8 +310,9 @@ Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orie
 | A11 | PPU quadratic x-advance | DONE | 2026-08-05 | linear advance + flush on leaving mode 3; every screenshot test unchanged |
 | A12 | Cheap APU fixes (duty rotation, DAC click, LFSR, sweep, init flag) | DONE | 2026-08-05 | all 5; blargg dmg_sound 9/9 green after each |
 | A13 | I/O read-back masks + `0xFEA0` region | DONE | 2026-08-05 | `irq` section → **v2** (IE upper bits appended, no fixture churn) |
-| A14 | Wire 19 more blargg ROMs | DONE | 2026-08-05 | 0/19 pass, as expected. ⚠️ only 4 report over serial — see A15 |
-| A15 | Screen-output test harness (15 of A14's ROMs emit no serial) | TODO | | measurement · added 2026-08-05 |
+| A14 | Wire 19 more blargg ROMs | DONE | 2026-08-05 | **1/19 passes** (`interrupt_time`). Harnesses corrected in ledger #5 |
+| A15 | ~~Screen-output test harness~~ | SKIPPED | 2026-08-05 | **Alex decided.** The harness already existed (`ppu_test`). Row kept so references resolve |
+| A16 | `dmg_sound` 09/10/12 — wave-channel read/trigger/write while on | TODO | | accuracy · the only *fixable* ignored emulator test |
 
 ## Phase B — CGB
 
@@ -895,31 +896,45 @@ magic signature — that is his *NES* suite. Serial text is the correct mechanis
 
 ---
 
-### A15 — Screen-output harness for the remaining blargg ROMs
+### A15 — ~~Screen-output harness~~ SKIPPED
 
-**State:** TODO · **Depends:** A14 · **Risk:** low · **Added:** 2026-08-05 (ledger #4)
+**Skipped by Alex, 2026-08-05.** The premise was wrong: `ppu_test` (`src/game_boy.rs`) has always
+been a screenshot-comparison harness, and `gb_test_failed_with_screenshot` already dumps the actual
+frame on failure. Nothing needed building.
 
-**Why.** A14 assumed all 19 ROMs report over the link port and so would need *no* new harness code.
-Measured: **only the four `mem_timing` ROMs do.** The other 15 — `mem_timing-2` (4), `halt_bug`,
-`interrupt_time` and all nine `oam_bug` — emit **nothing** over serial and write their results to
-the screen instead. They currently fail through `serial_console_test` for a harness reason, not a
-fidelity one, which is exactly the kind of misleading signal A14 set out to avoid.
+What A14 actually lacked was **reference images**, and `c-sp/game-boy-test-roms` v7.0 ships them for
+the five *combined* suite ROMs — now committed and wired. The individual sub-ROMs still have none;
+they use `screenshot_pending`, which dumps their output for later promotion (see that function).
 
-**Do.** Score them from the frame buffer. Two options, cheapest first:
+Row retained so existing references resolve.
 
-1. **`LD B,B` breakpoint + register check** — the mooneye convention D10 also needs, so building it
-   here pays for both. Run until opcode `0x40` executes, then read the registers.
-2. **OCR-free screenshot compare** — blargg's screen output is a fixed font; the existing
-   `ppu_test` screenshot comparison already exists but needs a reference PNG per ROM, which this
-   repo does not have.
+---
 
-Prefer (1). Note `serial_console_test` stays correct for `cpu_instrs`, `dmg_sound` and
-`mem_timing` — do not replace it.
+### A16 — `dmg_sound` 09/10/12: wave channel read/trigger/write while on
 
-**Verify.** The four `mem_timing` ROMs must keep reporting the same failures through the serial
-path. The 15 others must produce a real pass/fail rather than a timeout.
+**State:** TODO · **Depends:** none · **Risk:** low · **Added:** 2026-08-05 (ledger #5)
 
-**Expect them to still fail** for the reasons A14 gives — the point is an honest number.
+**Why.** These three are the **only ignored emulator tests that are actually fixable today** —
+everything else in the ignored list is blocked on the deferred M-cycle refactor, is an unscheduled
+hardware quirk, or is a tool rather than a test. `gb` genuinely fails them (this is the "9 of 12"
+A10 corrected `CLAUDE.md` to admit), and none of the three needs sub-instruction timing:
+
+- `09-wave read while on` — reading wave RAM while channel 3 is playing returns the byte the
+  channel is currently fetching, not the addressed one.
+- `10-wave trigger while on` — retriggering while playing corrupts the first bytes of wave RAM.
+- `12-wave write while on` — same aperture as 09, for writes.
+
+**Note.** Alex un-commented these three and marked them `#[ignore]` in `bf9fad4`; A10's older
+description of them as "commented out" is stale.
+
+**⚠️ The reference images are placeholders.** `EXPECTED_WAVE_*_WHILE_ON` in `src/roms/mod.rs` all
+alias `EXPECTED_REGISTERS`, so the tests fail by construction and dump their real output to
+`target/test_failure_*.png`. **Fix the emulator first**, then inspect the dump, and only promote it
+to a committed reference once it reads as a pass. Promoting first would freeze wrong output as the
+expectation.
+
+**Verify.** All 12 `dmg_sound` sub-tests green, and the other 9 must not regress. `c-sp` ships a
+combined `dmg_sound-dmg.png` reference — wiring the combined ROM to `ppu_test` is a good end check.
 
 ---
 
@@ -1767,5 +1782,75 @@ top of `src/savestate/mod.rs` and the two worked examples in this entry — B2's
 `write_fields`. And the lesson that cost me the most time this session: **reproduce a bug before you
 fix it, and reintroduce it to prove your test catches it.** Three of this plan's stated premises
 turned out to be wrong when actually run.
+
+---
+
+### 2026-08-05 (#5) — A14, A15, A16 — Ignored-test audit; A14's harnesses corrected
+
+**State:** **A15 → `SKIPPED`** (Alex; its premise was wrong). **A16 → `TODO`** (new). A14 stays
+`DONE` but its harness wiring and every `#[ignore]` reason were rewritten.
+
+**Did:** Alex asked for the ignored list to be audited and categorised. Of the 144 ignored tests,
+**91 are merely tier-gated** by `slow-tests` and all pass; the real backlog was **53**.
+
+- **A15 was wrong and is skipped.** `ppu_test` has always been a screenshot-comparison harness and
+  `gb_test_failed_with_screenshot` already dumps the actual frame. Nothing needed building. What
+  was missing was *reference images*, and `c-sp/game-boy-test-roms` v7.0 ships them for the five
+  combined suite ROMs. Committed and wired.
+- **A14 rewired onto three harnesses**, chosen by how each ROM reports:
+  `serial_console_test` for the four `mem_timing` ROMs (the only ones that use the link port);
+  `ppu_test` against the c-sp reference for the five combined ROMs; and a new
+  `screenshot_pending` for the ten sub-ROMs that have no reference — it dumps their output and
+  fails with instructions for promoting it later.
+- **⭐ `interrupt_time` PASSES and is now un-ignored.** It never needed a fix, only the right
+  harness. Note before being confused by it: the DMG reference image shows **`Failed`** and
+  checksum `7F8F4AAF` — the ROM targets CGB double-speed and legitimately fails on DMG hardware, so
+  reproducing that exactly, checksum included, is a pass.
+- **Every `#[ignore]` reason now names its blocker**: a plan §, a task ID, or an explicit won't-fix.
+- **`render_reference_wav` deleted** — a WAV ear check, not an assertion. Took `src/audio/wav.rs`,
+  `render()`, `artifact_dir()` and `CAPTURE_SECONDS` with it. `capture_golden_input` **stays**: it
+  is a documented fixture generator, not an ear check.
+- **Benchmarks moved behind a new `bench` Cargo feature** rather than `#[ignore]`, so they are
+  compiled out entirely and no longer pad the ignored count.
+- **A16 added** for `dmg_sound` 09/10/12 — the only ignored *emulator* test that is fixable today.
+
+**Not touched, deliberately:** the 22 `probe_*` / diagnostic tests under `src/pokemon/**`. Alex is
+having the Pokémon agent work through them first and will ask for a cleanup pass afterwards.
+
+**Verified:**
+- Default tier: `test result: ok. 898 passed; 0 failed; 141 ignored`. Passing count up one —
+  that is `interrupt_time`.
+- Ignored list diffed before/after by name, not by count: 144 → 142 removed exactly
+  `render_reference_wav` and `bench_core_throughput`, added nothing; then 142 → 141 for
+  `interrupt_time`.
+- The 18 still-ignored blargg ROMs were run: each now fails with a *meaningful* reason —
+  `screenshot does not match` for the referenced ones, per-opcode serial detail for `mem_timing`
+  (`01-read_timing` → `F0:2-3 FA:2-4 …`), and the promote-me message for the unreferenced ones.
+  None fails for a harness reason any more.
+- Benchmark re-run through the new feature gate: 33.3x / 50.3x / 46.3x, consistent with ledger #4.
+
+**Surprises:**
+1. **A gap I invented turned out to be a test we were passing.** `interrupt_time` had been failing
+   purely because it was wired to the serial harness, which it does not use. Wiring the right
+   harness turned a "known gap" into a green test. Check the harness before believing a failure.
+2. **A reference image that says `Failed` can be the correct expectation.** c-sp's screenshots are
+   what hardware prints, not what a passing run prints. `interrupt_time-dmg.png` and the DMG
+   `oam_bug` reference differ on exactly this point — the latter says `Passed`, so our failure there
+   is real.
+3. I repeated A10's own bug in my new doc comment: `--exact` with a bare test name matches nothing.
+   Caught only by running the command I had just written. **Run every command you document.**
+4. Deleting the ear check orphaned four helpers and a whole module; a first attempt at removing
+   `render()` by line range also swallowed `encode_runs`/`rle_decode`. Same class of mistake as
+   ledger #4's surprise 4 — **cut by symbol, not by line range**, and check the test count after.
+
+**Tree:** dirty, uncommitted. Modified `src/game_boy.rs`, `src/roms/mod.rs`, `src/audio/reference.rs`,
+`src/audio/mod.rs`, `Cargo.toml`, `CLAUDE.md`, this document. Added five reference PNGs under
+`src/roms/`. Deleted `src/audio/wav.rs`. `src/pokemon/**` untouched; no fixture regenerated.
+
+**Next agent:** **A16** is the one genuinely fixable emulator test left — everything else ignored is
+blocked on the deferred M-cycle refactor, an unscheduled hardware quirk, or belongs to the Pokémon
+agent. Then **B1**. When you add a test, put tiering behind a Cargo feature and keep `#[ignore]` for
+things that are genuinely blocked, with the blocker named — the ignored list is meant to read as a
+backlog.
 
 ---

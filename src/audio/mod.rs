@@ -26,8 +26,6 @@ pub mod blip;
 mod timer;
 #[cfg(test)]
 mod reference;
-#[cfg(test)]
-mod wav;
 
 pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 

@@ -1,15 +1,16 @@
-//! Capture harness for the resampler: pulls real Pokémon Red audio out of the emulator, either as
-//! the transition stream the Blip synth sees or as a rendered WAV.
+//! Capture harness for the resampler: pulls real Pokémon Red audio out of the emulator as the
+//! transition stream the Blip synth sees.
 //!
-//! Two jobs, both `#[ignore]`d because they are generators and ear checks rather than assertions:
+//! One job, `#[ignore]`d because it is a fixture generator rather than an assertion:
+//! [`tests::capture_golden_input`] freezes 30 ms of real APU output as `data/apu_capture_in.bin`,
+//! already quantised to the synth's integer amplitude domain. That file is the realistic-signal
+//! input for both `tools/blip-golden/gen_golden.cpp` and the Rust test that checks against its
+//! output, so regenerating one means regenerating the other.
 //!
-//! 1. **Golden input.** [`tests::capture_golden_input`] freezes 30 ms of real APU output as
-//!    `data/apu_capture_in.bin`, already quantised to the synth's integer amplitude domain. That
-//!    file is the realistic-signal input for both `tools/blip-golden/gen_golden.cpp` and the Rust
-//!    test that checks against its output, so regenerating one means regenerating the other.
-//! 2. **Ear check.** [`tests::render_reference_wav`] renders a few seconds to
-//!    `target/test-artifacts/`, for listening to against `rubato-reference.wav` — which was
-//!    captured through the old resampler before it was removed.
+//! A WAV "ear check" used to live here too — it rendered a few seconds for a listen against
+//! `rubato-reference.wav`. It was a listening aid, not an assertion, and the invariant tests in
+//! `blip/tests.rs` are the real regression net, so it was removed rather than left in the ignored
+//! list pretending to be a test.
 
 use std::path::Path;
 use std::time::Duration;
@@ -20,15 +21,8 @@ use crate::game_boy::GameBoy;
 /// A mid-game fixture with overworld music playing, so the captured seconds are actually audible.
 pub const CAPTURE_FIXTURE: &[u8] = include_bytes!("../pokemon/data/at-celadon.bin");
 
-/// Emulated seconds to render into the ear-check WAV.
-pub const CAPTURE_SECONDS: u64 = 6;
-
 /// Emulated milliseconds to freeze as the golden-test input fixture.
 pub const GOLDEN_INPUT_MILLIS: u64 = 20;
-
-pub fn artifact_dir() -> &'static Path {
-    Path::new("target/test-artifacts")
-}
 
 fn load_fixture(save_state: &[u8]) -> GameBoy {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -54,29 +48,6 @@ pub fn capture_transitions(save_state: &[u8], game_time: Duration) -> Vec<(u16, 
     gb.core_mut().mmu_mut().audio_mut().output.take_capture()
 }
 
-/// Run the emulator and collect the resampled output as interleaved stereo `f32`.
-///
-/// `speed` mirrors the UI's fast-forward: at 2.0 the same span of game time yields half as many
-/// output frames, because those frames are meant to be played back in half the wall-clock time.
-pub fn render(save_state: &[u8], game_time: Duration, speed: f64) -> Vec<f32> {
-    let mut gb = load_fixture(save_state);
-    gb.core_mut().mmu_mut().audio_mut().set_emulation_speed(speed);
-    let target = MachineCycles::from_duration(game_time);
-    let mut elapsed = MachineCycles::ZERO;
-    let slice = MachineCycles::from_duration(Duration::from_millis(10));
-
-    let mut out = Vec::new();
-    let mut scratch = vec![0.0f32; 8192];
-    while elapsed < target {
-        elapsed += gb.run(slice);
-        let frames = gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut scratch);
-        out.extend_from_slice(&scratch[..frames * 2]);
-    }
-    out
-}
-
-/// Encode transitions as `u32 run_count`, then `run_count` × (`u16` clocks, `i16` left,
-/// `i16` right), all little-endian. Read back by [`rle_decode`] and by `gen_golden.cpp`.
 pub fn encode_runs(runs: &[(u16, i16, i16)]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + runs.len() * 6);
     out.extend_from_slice(&(runs.len() as u32).to_le_bytes());
@@ -107,7 +78,6 @@ pub fn rle_decode(bytes: &[u8]) -> Vec<(u16, i16, i16)> {
 mod tests {
     use super::*;
     use crate::audio::blip::AMP_SCALE;
-    use crate::audio::wav::{f32_to_i16, write_wav_i16};
 
     /// Freeze 30 ms of real APU output as the golden test's input signal.
     ///
@@ -141,33 +111,4 @@ mod tests {
         );
     }
 
-    /// Render `CAPTURE_SECONDS` of game audio for an A/B listen against `rubato-reference.wav`,
-    /// which was captured through the old resampler before it was removed.
-    ///
-    /// `cargo test --release --bin gb -- audio::reference::tests::render_reference_wav --exact --ignored --nocapture`
-    #[test]
-    #[ignore = "ear check, not a test; run with --ignored"]
-    fn render_reference_wav() {
-        let rate = crate::audio::blip::DEFAULT_SAMPLE_RATE;
-        // 1x is the A/B against rubato-reference.wav; the rest are the fast-forward speeds the UI's
-        // number keys select, which should sound like a tape being wound on.
-        for (speed, name) in [
-            (1.0, "blip-reference.wav"),
-            (3.006, "blip-speed3.wav"),
-            (5.016, "blip-speed5.wav"),
-        ] {
-            let out = render(CAPTURE_FIXTURE, Duration::from_secs(CAPTURE_SECONDS), speed);
-            let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-            let path = artifact_dir().join(name);
-            write_wav_i16(&path, rate, 2, &f32_to_i16(&out)).unwrap();
-            println!(
-                "wrote {} — {:.1}x: {} frames, {:.2}s of playback for {CAPTURE_SECONDS}s of game time, peak {:.1} dBFS",
-                path.display(),
-                speed,
-                out.len() / 2,
-                out.len() as f64 / 2.0 / rate as f64,
-                20.0 * peak.log10(),
-            );
-        }
-    }
 }
