@@ -258,8 +258,19 @@ g++ -O2 -fomit-frame-pointer -fno-exceptions -fno-rtti \
     /home/alex/projects/gambatte/libgambatte/src/mem/*.cpp \
     /home/alex/projects/gambatte/libgambatte/src/sound/*.cpp \
     /home/alex/projects/gambatte/libgambatte/src/video/*.cpp \
+    /home/alex/projects/gambatte/libgambatte/src/file/file.cpp \
     harness.cpp -o bench
 ```
+
+⚠️ **Corrected 2026-08-05 (ledger #4).** As originally written this recipe does not link. Two
+things were missing, both verified by building it:
+- `-I/home/alex/projects/gambatte/common` — `memptrs.h` includes `array.h`, `video.h` includes
+  `scoped_ptr.h`, and both live in `gambatte/common`, not under `libgambatte/`.
+- `libgambatte/src/file/file.cpp` — otherwise `gambatte::newFileInstance` is undefined. Use
+  `file.cpp`, **not** `file_zip.cpp`, which needs zlib.
+
+Also note `runFor` takes `gambatte::uint_least32_t*` (a `long unsigned int*` here), not
+`uint32_t*`; declaring the video/audio buffers as `uint32_t` fails to compile.
 
 Write `harness.cpp` yourself; it needs `GB::load(path, flags)` then a loop over
 `GB::runFor(video, 160, audio, samples)` with `samples = 35112` (one frame; 1 stereo sample =
@@ -286,20 +297,21 @@ Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orie
 | ID | Task | State | Date | Notes |
 |---|---|---|---|---|
 | **A0** | **New sectioned savestate format + one-time fixture conversion** | DONE | 2026-08-04 | Container v1, 10 live + 3 reserved sections. All 91 fixtures converted, −22.4%. Rules in `src/savestate/mod.rs` |
-| A1 | `Core::reset()` is `todo!()` — implement it | TODO | | crash-class |
-| A2 | ~~`run()` livelocks on STOP/Crash~~ → CPU keeps executing in STOP/Crash | TODO | | ⚠️ **premise corrected**, see A2 + ledger #3. No livelock exists |
-| A3 | STOP permanently kills DIV/TIMA/APU (`restart()` dead) | TODO | | crash-class |
-| A4 | Illegal opcode freezes whole machine; `println!` in hot path | TODO | | crash-class |
-| A5 | ROM bank index vs actual ROM length → panic | TODO | | crash-class |
-| A6 | Sprite-height OOB panic on mid-scanline LCDC write | TODO | | crash-class · needs A0 |
-| A7 | OAM DMA: silent drop, inverted gate, `0xA0`→`0x80` source bug | TODO | | data-loss · needs A0 |
+| A1 | `Core::reset()` is `todo!()` — implement it | DONE | 2026-08-05 | `MMU::reset()` preserves SRAM; equals fresh construction |
+| A2 | ~~`run()` livelocks on STOP/Crash~~ → no such bug | DONE | 2026-08-05 | ⚠️ **premise was wrong twice** — see A2 + ledger #4. Closed with a guard test; the real fixes were A3/A4 |
+| A3 | STOP permanently kills DIV/TIMA/APU (`restart()` dead) | DONE | 2026-08-05 | `restart()` on wake + STOP consumes its pad byte |
+| A4 | Illegal opcode freezes whole machine; `println!` in hot path | DONE | 2026-08-05 | now `IE=0` + `Halt`; peripherals keep running; `println!` gone |
+| A5 | ROM bank index vs actual ROM length → panic | DONE | 2026-08-05 | ROM padded to a power of two with `0xFF`; clamp follows the data, not `0x148` |
+| A6 | Sprite-height OOB panic on mid-scanline LCDC write | DONE | 2026-08-05 | height captured at OAM-scan time; slice lengths validated |
+| A7 | OAM DMA: silent drop, inverted gate, `0xA0`→`0x80` source bug | DONE | 2026-08-05 | incremental transfer; `dma` section → **v2**, 91 fixtures converted on read, none regenerated |
 | A8 | ~~Versioned savestate envelope~~ | SUPERSEDED | 2026-08-04 | **Replaced by A0.** Version-guarded appends alone cannot carry the plan — see ledger 2026-08-04 (#2) |
-| A9 | Core-only benchmark harness + baseline capture | TODO | | needed by Phase C |
-| A10 | Fix stale facts in `CLAUDE.md` | TODO | | docs |
-| A11 | PPU quadratic x-advance (`src/ppu.rs:230`) | TODO | | accuracy, 1 line |
-| A12 | Cheap APU fixes (duty rotation, DAC click, LFSR, sweep, init flag) | TODO | | accuracy, ~13 lines |
-| A13 | I/O read-back masks + `0xFEA0` region | TODO | | accuracy |
-| A14 | Wire 19 more blargg ROMs (zero new harness code) | TODO | | measurement |
+| A9 | Core-only benchmark harness + baseline capture | DONE | 2026-08-05 | `game_boy::tests::bench_core_throughput`; gambatte harness built too. Baselines in ledger #4 |
+| A10 | Fix stale facts in `CLAUDE.md` | DONE | 2026-08-05 | 5 corrections; both bench commands verified to run |
+| A11 | PPU quadratic x-advance | DONE | 2026-08-05 | linear advance + flush on leaving mode 3; every screenshot test unchanged |
+| A12 | Cheap APU fixes (duty rotation, DAC click, LFSR, sweep, init flag) | DONE | 2026-08-05 | all 5; blargg dmg_sound 9/9 green after each |
+| A13 | I/O read-back masks + `0xFEA0` region | DONE | 2026-08-05 | `irq` section → **v2** (IE upper bits appended, no fixture churn) |
+| A14 | Wire 19 more blargg ROMs | DONE | 2026-08-05 | 0/19 pass, as expected. ⚠️ only 4 report over serial — see A15 |
+| A15 | Screen-output test harness (15 of A14's ROMs emit no serial) | TODO | | measurement · added 2026-08-05 |
 
 ## Phase B — CGB
 
@@ -526,47 +538,57 @@ Plus: SRAM survives a reset.
 
 ---
 
-### A2 — `run()` livelocks on STOP / Crash
+### A2 — ~~`run()` livelocks on STOP / Crash~~ — NO SUCH BUG
 
-**State:** TODO · **Depends:** none · **Risk:** low
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** low
 
-> ⚠️ **Premise corrected 2026-08-05 (ledger #3). There is no livelock.** The original text below
-> was wrong; the real defect is different and is described after it. Do not implement the original
-> fix — it would be a no-op.
->
-> ~~`src/core.rs:486-497`: the `CoreMode::Stop` and `CoreMode::Crash` arms both return~~
-> ~~`MachineCycles::ZERO`, so `GameBoy::run`'s `while cycles < min_cycles` loop never terminates.~~
->
-> Those `MachineCycles::ZERO` arms produce **`interrupt_cycles`**, which is only one *addend* of
-> what `Core::execute` returns:
-> ```rust
-> let cycles = MachineCycles::from_m(opcode.machine_cycles(condition_met));  // always >= 1
-> let interrupt_cycles = match self.mode { /* ZERO for Stop and Crash */ };
-> cycles + interrupt_cycles
-> ```
-> `OpCode::machine_cycles` has **no arm returning 0** (verified by inspection of
-> `src/opcode.rs:577-700`, including `Illegal`, `Stop` and `Halt`, which are all 1). So `execute`
-> always returns at least 1 M-cycle and `run` always terminates.
+> ⚠️ **This task's premise was wrong, and the first correction to it was also wrong.** Both
+> readings are recorded here because the next person to read `Core::execute` will have the same
+> two thoughts. See ledger `2026-08-05 (#4)`.
 
-**Why (the actual defect).** Neither `GameBoy::run` nor `Core::execute` consults `self.mode` before
-fetching. In `CoreMode::Stop` **and** `CoreMode::Crash` the CPU therefore keeps fetching and
-executing instructions normally, while `self.mmu.update(cycles)` is skipped entirely — so the CPU
-runs on with **every peripheral frozen**. STOP does not stop the CPU; Crash does not halt it. This
-overlaps A3 and A4, which fix the peripheral half of the same wiring.
+**Claim 1 (original, wrong).** *"The `CoreMode::Stop` and `CoreMode::Crash` arms both return
+`MachineCycles::ZERO`, so `GameBoy::run`'s `while cycles < min_cycles` loop never terminates."*
 
-**Do.** Make `Stop` and `Crash` actually suspend instruction execution — burn the M-cycle without
-fetching — while keeping `mmu.update` running for the peripherals that hardware leaves alive (see
-A3 for STOP's DIV/TIMA/APU, A4 for Crash keeping video/audio/DIV going).
+Those `ZERO`s are **`interrupt_cycles`**, only one *addend* of what `execute` returns:
 
-**Verify.** Execute `STOP` with no pending joypad input, then `run(from_m(10_000))`: assert it
-returns (it already does — keep the guard so a future regression fails rather than hangs) **and**
-that PC has not advanced beyond the `STOP` instruction. Then the same for an illegal opcode.
+```rust
+let cycles = MachineCycles::from_m(opcode.machine_cycles(condition_met));  // always >= 1
+let interrupt_cycles = match self.mode { /* ZERO for Stop and Crash */ };
+cycles + interrupt_cycles
+```
+
+`OpCode::machine_cycles` has **no arm returning 0** — `Illegal`, `Stop` and `Halt` are all 1. So
+`execute` always returns at least one M-cycle and `run` always terminates.
+
+**Claim 2 (first correction, also wrong).** *"The CPU keeps fetching and executing instructions in
+Stop and Crash."* It does not. `Core::fetch` (`src/core.rs:178-186`) already returns a **virtual
+`Nop` without touching PC** whenever the mode is not `Normal`:
+
+```rust
+pub fn fetch(&mut self) -> OpCode {
+    if self.mode == CoreMode::Normal { OpCode::parse(self) } else { OpCode::Nop }
+}
+```
+
+**What was actually wrong** was only the peripheral half — `mmu.update` is skipped in `Stop` and
+`Crash`, freezing PPU, APU, serial and DIV. That is exactly what **A3** and **A4** fix, and they
+have. A2 has no separate content.
+
+**Done:** closed with a regression guard, `game_boy::tests::run_terminates_after_stop`, which
+executes `STOP` with no joypad input and asserts `run(from_m(10_000))` returns and the machine is
+still in `CoreMode::Stop`. It would hang, rather than fail, if anyone ever did make `execute`
+return zero.
+
+**Lesson for later tasks.** Two successive readings of this code produced two confident and wrong
+conclusions. The guides in this directory were written by reading, not by running. **Reproduce a
+claimed bug before fixing it** — for A6 that meant deliberately reintroducing the bug to confirm
+the new test caught it, which is what showed the first draft of that test was exercising nothing.
 
 ---
 
 ### A3 — STOP permanently kills DIV / TIMA / APU
 
-**State:** TODO · **Depends:** A2 · **Risk:** low
+**State:** DONE (2026-08-05) · **Depends:** A2 · **Risk:** low
 
 **Why.** `MMU::stop()` (`src/mmu.rs:205-208`) disables the divider and timer. The wake path
 (`src/core.rs:486-493`) only sets `CoreMode::Normal` — **`MMU::restart()` is never called from
@@ -591,7 +613,7 @@ advanced by 2.
 
 ### A4 — Illegal opcodes freeze the whole machine
 
-**State:** TODO · **Depends:** none · **Risk:** low
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** low
 
 **Why.** `src/core.rs:472-476` sets `CoreMode::Crash` **and** calls `self.mmu.stop()`, and the
 `Crash` arm never calls `mmu.update` again — so PPU, APU and serial stop dead. Gambatte freezes only
@@ -611,7 +633,7 @@ sufficient.
 
 ### A5 — ROM bank index vs actual ROM length → panic
 
-**State:** TODO · **Depends:** none · **Risk:** low · **Blocks:** D1
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** low · **Blocks:** D1
 
 **Why.** `set_rom_bank_register` (`src/mmu.rs:80-85`) clamps against `header.rom_banks()` — cart
 byte `0x0148` — **not** `self.data.len()`, and `MMU::from_rom` never cross-checks. A ROM claiming 64
@@ -635,7 +657,7 @@ Confirm `pokered.gbc` (32 banks, `0x148 = 0x05`) still boots and the full defaul
 
 ### A6 — Sprite-height OOB panic
 
-**State:** TODO · **Depends:** A0 (adds a field inside the serialised `Vec<Sprite>`) · **Risk:** low
+**State:** DONE (2026-08-05) · **Depends:** A0 · **Risk:** low
 
 **Why.** `scanline_sprites` is filtered at OAM-scan time using `object_size()` *then*
 (`src/ppu.rs:210-217`), but `sprite_pixel` re-reads it at draw time (`src/ppu.rs:409-410`). A guest
@@ -659,7 +681,7 @@ not panic in release. Also validate `offset + length` in `read_vram_slice`/`read
 
 ### A7 — OAM DMA: silent drop, inverted gate, source mask
 
-**State:** TODO · **Depends:** A0 (adds `pos` to `LcdDmaState`) · **Risk:** medium
+**State:** DONE (2026-08-05) · **Depends:** A0 · **Risk:** medium
 
 **Why.** Three separate defects in one small subsystem:
 
@@ -705,7 +727,7 @@ changes and restructuring, which appends cannot express. See **A0** and ledger e
 
 ### A9 — Core-only benchmark harness
 
-**State:** TODO · **Depends:** none · **Risk:** low · **Blocks:** all of Phase C
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** low · **Blocks:** all of Phase C
 
 **Why.** Alex wants Phase C measured on **the emulator alone, with the Pokémon agent excluded**. The
 existing `bench_emulation_throughput` reports a full-`agent.step()` number (~24× realtime) and lives
@@ -733,7 +755,7 @@ against it. Without this number, Phase C cannot be evaluated.
 
 ### A10 — Fix stale facts in `CLAUDE.md`
 
-**State:** TODO · **Depends:** A9 (so you can quote the right command) · **Risk:** none
+**State:** DONE (2026-08-05) · **Depends:** A9 (so you can quote the right command) · **Risk:** none
 
 **Do.** Three corrections:
 1. The `bench_emulation_throughput` command matches **zero** tests — `--exact` needs the full module
@@ -756,7 +778,7 @@ against it. Without this number, Phase C cannot be evaluated.
 
 ### A11 — PPU quadratic x-advance
 
-**State:** TODO · **Depends:** none · **Risk:** medium (visual regression surface)
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** medium (visual regression surface)
 
 **Why.** `src/ppu.rs:230` mixes a *relative* base with an *absolute* offset:
 
@@ -794,7 +816,7 @@ changed frame means something real changed, not that the fixture is stale.
 
 ### A12 — Cheap APU fixes
 
-**State:** TODO · **Depends:** none · **Risk:** low
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** low
 
 **Why.** ~13 lines total, each independently verifiable against the blargg suite already wired up.
 
@@ -823,7 +845,7 @@ each change. Add a unit test asserting the four duty rows.
 
 ### A13 — I/O read-back masks and the `0xFEA0` region
 
-**State:** TODO · **Depends:** none · **Risk:** low
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** low
 
 **Do.** In `src/mmu.rs:310-336`:
 - `0xFF41` → `0x80 | stat()` (STAT bit 7 always reads 1)
@@ -849,7 +871,7 @@ The `0xFEA0` value is settled by gambatte's committed hardware dump
 
 ### A14 — Wire 19 more blargg ROMs
 
-**State:** TODO · **Depends:** A1–A7 (so failures reflect real gaps, not known crashes) · **Risk:** none
+**State:** DONE (2026-08-05) · **Depends:** A1–A7 (so failures reflect real gaps, not known crashes) · **Risk:** none
 
 **Why.** `serial_console_test` (`src/game_boy.rs:352-378`) already implements blargg's convention
 correctly. These ROMs need **zero new harness code** and will produce a named, measurable list of
@@ -870,6 +892,34 @@ rather than noise.
 magic signature — that is his *NES* suite. Serial text is the correct mechanism.
 
 **Ledger note.** Record the pass/fail split. It is the honest baseline for the accuracy claim.
+
+---
+
+### A15 — Screen-output harness for the remaining blargg ROMs
+
+**State:** TODO · **Depends:** A14 · **Risk:** low · **Added:** 2026-08-05 (ledger #4)
+
+**Why.** A14 assumed all 19 ROMs report over the link port and so would need *no* new harness code.
+Measured: **only the four `mem_timing` ROMs do.** The other 15 — `mem_timing-2` (4), `halt_bug`,
+`interrupt_time` and all nine `oam_bug` — emit **nothing** over serial and write their results to
+the screen instead. They currently fail through `serial_console_test` for a harness reason, not a
+fidelity one, which is exactly the kind of misleading signal A14 set out to avoid.
+
+**Do.** Score them from the frame buffer. Two options, cheapest first:
+
+1. **`LD B,B` breakpoint + register check** — the mooneye convention D10 also needs, so building it
+   here pays for both. Run until opcode `0x40` executes, then read the registers.
+2. **OCR-free screenshot compare** — blargg's screen output is a fixed font; the existing
+   `ppu_test` screenshot comparison already exists but needs a reference PNG per ROM, which this
+   repo does not have.
+
+Prefer (1). Note `serial_console_test` stays correct for `cpu_instrs`, `dmg_sound` and
+`mem_timing` — do not replace it.
+
+**Verify.** The four `mem_timing` ROMs must keep reporting the same failures through the serial
+path. The 15 others must produce a real pass/fail rather than a timeout.
+
+**Expect them to still fail** for the reasons A14 gives — the point is an honest number.
 
 ---
 
@@ -1587,5 +1637,135 @@ because §2.2 reserves it for A10; I have added this as a fourth correction unde
 early** rather than in task order. Beyond that: A1 (`Core::reset`) is the cleanest next task, and
 read A2's corrected premise before touching A2/A3/A4 — those three are all facets of the same
 `Stop`/`Crash` wiring and are probably best done together.
+
+---
+
+### 2026-08-05 (#4) — A1–A7, A9–A14 — Phase A complete except A15 (new)
+
+**State:** **A1, A2, A3, A4, A5, A6, A7, A9, A10, A11, A12, A13, A14 → `DONE`.** New **A15** added
+(`TODO`). Phase A's exit criteria are met: no `todo!()` or `println!` in the core hot path, every
+crash-class and data-loss bug fixed, sectioned savestates in place, core-only benchmark recorded.
+
+**Did:**
+
+- **A1** `Core::reset()` (was `todo!()`). New `MMU::reset()` (`src/mmu.rs:177`) restores power-on
+  state but keeps `data`, `header` and `ram_banks` — battery-backed SRAM survives, per gambatte.
+- **A2** No bug. See the rewritten A2 — its premise was wrong *twice*. Closed with a guard test.
+- **A3** `mmu.restart()` on STOP wake (`src/core.rs`), and STOP now consumes its pad byte
+  (`src/opcode.rs:653`) so PC no longer lands on it.
+- **A4** Illegal opcode → `IE = 0` + `CoreMode::Halt` instead of `CoreMode::Crash` + `mmu.stop()`.
+  The CPU locks; PPU, APU, serial and DIV keep running. `println!` deleted from the hot path.
+- **A5** `pad_rom` (`src/mmu.rs:24`) rounds every ROM up to a power-of-two bank count filling with
+  `0xFF`; `rom_bank_count()` derives from the data, so the clamp no longer trusts header `0x148`.
+- **A6** `Sprite` carries the `height` it was **selected** under, so a mid-scanline LCDC flip can no
+  longer index past a 16-byte tile. Also range-checked the *length* in `read_vram_slice` /
+  `read_wram_slice`, which only checked the base address.
+- **A7** `LcdDma` rewritten: incremental (1 byte per M-cycle over 160), `is_active()` true
+  throughout, privileged `PPU::write_oam_dma` bypassing the mode gate, `|| dma.is_active()` removed
+  from the four CPU-facing accessors and `&& !dma.is_active()` added to OAM, source page classified
+  rather than `& 0xDF`-masked, and `FF46` reads back.
+- **A9** `game_boy::tests::bench_core_throughput` — core only, three workloads, 60 warm-up frames.
+- **A10** Five corrections to `CLAUDE.md` (see below).
+- **A11** Linear pixel clock via a new `PPU::draw_pixels_to`, and leaving mode 3 now flushes the
+  rest of the scanline — that branch previously drew nothing.
+- **A12** All five APU fixes, one at a time with blargg re-run between each.
+- **A13** Read-back masks for `FF00/FF02/FF07/FF0F/FF41`, IE's upper three bits, and `FEA0-FEFF`
+  → `0x00`. Updated five tests that encoded the old values (four `ldh` tests plus the joypad one
+  A13 names).
+- **A14** 19 ROMs from `c-sp/game-boy-test-roms` v7.0 wired and `#[ignore]`d.
+
+**⭐ Two section-version bumps, and neither regenerated a fixture** — the A0 mechanism working as
+designed, on one shape change and one pure append:
+
+| Section | v | Change | How |
+|---|---|---|---|
+| `dma` | 1 → 2 | **Shape change** (A7): `address: u16` → `page: u8`, plus `pos` and `register` | `LcdDmaV1` + `From` conversion, selected on `FieldReader::version()` (`src/ppu.rs:130`) |
+| `irq` | 1 → 2 | **Append** (A13): IE's upper 3 bits | `write_fields` / `fields.field()`; absent in v1 reads as `None` |
+
+**Verified:**
+
+- Default tier: `test result: ok. 897 passed; 0 failed; 141 ignored` (866 at session start, +31
+  new tests; ignored 121 → 141 = 19 blargg + the core benchmark).
+- Slow tier, run twice — after A7 (the highest-risk change) and again on the final tree:
+  `test result: ok. 111 passed; 0 failed; 28 ignored; finished in 499.89s` and
+  `test result: ok. 111 passed; 0 failed; 28 ignored; finished in 388.23s`.
+- blargg `dmg_sound` **9/9 after every single A12 change**, run five times.
+- **A6 and A11 were verified by reintroducing the bug**, not just by passing. The first draft of the
+  A6 test passed *with the bug present* — it never reached the draw path, because a single large
+  `update` takes the `>= drawing_ticks` branch. Rewritten to step the PPU one M-cycle at a time, it
+  fails with `index out of bounds: the len is 16 but the index is 24`, which is the A6 panic exactly.
+- dmg-acid2 and all 8 `button_test` screenshots are **byte-identical** after A11, as that task
+  predicted.
+
+**⭐ A9 BASELINE — Phase C is scored against this table.** Ryzen 9 7900X, `--release`, 600 measured
+frames after 60 warm-up, three runs each. `gb` spread <1%; gambatte <3%.
+
+| Workload | `gb` realtime | `gb` t-cycles/s | gambatte realtime | gambatte t-cycles/s | Ratio |
+|---|---|---|---|---|---|
+| Pokémon Red (mid-game fixture) | **33.6x** | 141.0M | 602x † | 2.53G † | — † |
+| `cpu_instrs.gb` (never HALTs) | **51.8x** | 217.3M | 333x | 1.40G | **6.4x** |
+| `dmg-acid2.gb` (PPU-heavy) | **48.6x** | 204.0M | 605x | 2.54G | **12.4x** |
+
+† **Not comparable.** `gb` runs from a mid-game save state; the gambatte harness has no save-state
+loading and so boots from scratch, sitting in the title/intro where it HALTs heavily. Use the
+`cpu_instrs` and `dmg-acid2` rows for the real gap. The plan's §2.5 table (457x / 428x / 622x) was
+measured differently again — prefer these numbers, which come from one harness on one machine.
+
+Agent-inclusive, for the record: 33.6x raw / **28.3x** through `agent.step()`, so the agent costs
+~16%, not the ~11% `CLAUDE.md` claimed.
+
+**⭐ A14 RESULT — 0 of 19 pass**, which is the expected and useful answer. But the split matters:
+
+- **4 report over serial** (`mem_timing`) and fail with per-instruction detail, e.g. `01-read_timing`
+  → `F0:2-3 FA:2-4 CB 46:2-3 CB 4E:2-3 ...` — those reads take 3 M-cycles where hardware takes 2.
+  That is the instruction-granularity gap named instruction by instruction, and it is exactly what
+  A14 was for.
+- **15 emit nothing over serial** (`mem_timing-2` x4, `halt_bug`, `interrupt_time`, `oam_bug` x9).
+  They write to the screen. So they currently fail for a *harness* reason. **A14's claim that all 19
+  need "zero new harness code" is wrong for 15 of them** — hence new task **A15**.
+
+**Surprises:**
+
+1. **A2's premise was wrong twice, and I published the first wrong correction.** Reading #1 (the
+   guides'): "returns 0 cycles, so `run()` livelocks" — no; that `ZERO` is one addend. Reading #2
+   (mine, in ledger #3): "the CPU keeps executing instructions in Stop/Crash" — also no; `fetch`
+   already returns a virtual `Nop` without touching PC when the mode is not `Normal`
+   (`src/core.rs:178`). The only real defect was the peripheral half, which A3 and A4 fix. **Both
+   readings came from reading the code rather than running it.** Corrected in A2 in full.
+2. **A6's first test passed with the bug reintroduced** — it drove the PPU with one large `update`,
+   which takes the `>= drawing_ticks` branch and draws nothing at all. That branch not drawing was
+   itself A11's second defect, so one bug hid the test for another. **Reintroduce the bug to prove a
+   regression test works**; two of mine were vacuous until I did.
+3. **§2.5's gambatte build recipe does not link** — missing `-I gambatte/common` (for `array.h`,
+   `scoped_ptr.h`) and `libgambatte/src/file/file.cpp` (for `newFileInstance`), and `runFor` needs
+   `gambatte::uint_least32_t*`, not `uint32_t*`. Corrected in §2.5 with a working command.
+4. `MMU::reset` has to mirror `MMU::from_rom` field for field. There is no compiler check on that;
+   if someone adds a field to `MMU` and forgets `reset`, only
+   `game_boy::tests::reset_matches_fresh_construction` will catch it. Keep that test.
+5. Four `ldh` unit tests asserted `0x3F` from `FF00`, encoding the same bug A13 called out in
+   `src/joypad.rs`. Grep for a *value*, not just the file the task names.
+
+**A10 — what changed in `CLAUDE.md`:** blargg claim narrowed to "dmg_sound 1-8 and 11"; the
+`bench_emulation_throughput` command given its full module path (it matched zero tests) plus the new
+core benchmark; the save-state section rewritten around the sectioned container with the
+add-a-field/add-a-section rules; **the "nothing may be added to `Audio`'s serialised fields" rule
+deleted** (it forbade something now safe) and replaced with the derived-state-excluded-from-`PartialEq`
+note; throughput figures re-measured (~34x core, ~28x with agent). "27 fixtures" is gone; it now says
+91.
+
+**Tree:** dirty, uncommitted. Modified: `src/core.rs`, `src/mmu.rs`, `src/ppu.rs`, `src/lcd_dma.rs`,
+`src/opcode.rs`, `src/game_boy.rs`, `src/joypad.rs`, `src/audio/{square_channel,noise_channel,sweep}.rs`,
+`src/roms/mod.rs`, `CLAUDE.md`, this document. Added: `src/roms/{mem_timing,mem_timing_2,oam_bug}/`,
+`src/roms/halt_bug.gb`, `src/roms/interrupt_time.gb` (19 ROMs, ~1 MB, from `c-sp/game-boy-test-roms`
+v7.0). **No `src/pokemon/**` source touched and no fixture regenerated** — `src/pokemon/data/` is
+byte-identical to the A0 commit. gambatte tree verified clean (`git status --porcelain` → empty).
+
+**Next agent:** Phase A is done bar **A15**, which is small and worth doing before Phase B so the
+accuracy baseline is honest. Then **B1**. Before you touch serialised state, read the rules at the
+top of `src/savestate/mod.rs` and the two worked examples in this entry — B2's VRAM/WRAM resize is a
+**shape change** like `dma` was, not an append, so it needs the `FieldReader::version()` branch, not
+`write_fields`. And the lesson that cost me the most time this session: **reproduce a bug before you
+fix it, and reintroduce it to prove your test catches it.** Three of this plan's stated premises
+turned out to be wrong when actually run.
 
 ---

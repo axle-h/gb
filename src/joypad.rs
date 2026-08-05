@@ -122,7 +122,8 @@ mod tests {
     #[test]
     fn to_byte() {
         let mut joypad = JoypadRegister::default();
-        assert_eq!(joypad.get(), 0x3F); // All buttons released
+        // A13: bits 6-7 are unused and read as 1 on hardware; the MMU ORs in 0xC0.
+        assert_eq!(joypad.get(), 0x3F); // All buttons released (before the 0xC0 mask)
         joypad.set(0x10); // Select buttons
         assert_eq!(joypad.get(), 0x1F); // none pressed
         joypad.press_button(A);

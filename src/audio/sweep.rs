@@ -39,9 +39,9 @@ impl Sweep {
         self.subtraction = (value & 0x08) != 0; // Bit 3
         self.individual_step = value & 0x07; // Bits 0-2
 
-        if self.sweep_timer == 0 {
-            self.reset_sweep_timer();
-        }
+        // No reload here. Gambatte has no counterpart, and reloading on an NR10 write can re-arm
+        // a sweep that had already run down — hardware only reloads the timer on trigger and when
+        // the sweep itself clocks.
 
         if self.calculated_with_negate_since_trigger && !self.subtraction {
             // If the negate flag is cleared after frequency was calculated with it set at least

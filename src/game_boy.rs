@@ -105,8 +105,112 @@ impl GameBoy {
 #[cfg(test)]
 mod tests {
     use image::RgbImage;
+    use crate::ram::RAM;
     use crate::roms::roms::parse_png;
     use super::*;
+
+    /// A9: throughput of the **emulator core alone**. The Pokémon agent, its policy and all
+    /// observation are excluded — this loop calls nothing but [`GameBoy::run`].
+    ///
+    /// The existing `pokemon::integration_tests::fixture::bench_emulation_throughput` measures a
+    /// full `agent.step()` instead, which is a different number and lives in the wrong module.
+    /// Phase C is scored against *this* one.
+    ///
+    /// ```text
+    /// cargo test --release --bin gb -- game_boy::tests::bench_core_throughput --exact --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_core_throughput() {
+        use std::time::Instant;
+
+        /// One frame: 154 scanlines x 456 T-cycles.
+        const FRAME: MachineCycles = MachineCycles::from_t(70_224);
+        const WARM_UP_FRAMES: usize = 60;
+        const MEASURED_FRAMES: usize = 600;
+
+        fn pokemon_in_game() -> GameBoy {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data/at-celadon.bin");
+            let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+            gb.load_state(&std::fs::read(path).expect("fixture")).expect("load fixture");
+            gb
+        }
+
+        let workloads: Vec<(&str, Box<dyn Fn() -> GameBoy>)> = vec![
+            // The representative case: a real game, mid-play, HALTing as games do.
+            ("pokemon-red (fixture)", Box::new(pokemon_in_game)),
+            // Never HALTs, so it isolates raw dispatch from idle-skipping.
+            ("cpu_instrs.gb", Box::new(|| GameBoy::dmg(crate::roms::blargg_cpu::ROM))),
+            // PPU-heavy.
+            ("dmg-acid2.gb", Box::new(|| GameBoy::dmg(crate::roms::acid::ROM))),
+        ];
+
+        println!("\n{:<24} {:>12} {:>16} {:>10}", "workload", "realtime", "t-cycles/s", "frames");
+        println!("{}", "-".repeat(66));
+
+        for (name, build) in &workloads {
+            let mut gb = build();
+            for _ in 0..WARM_UP_FRAMES {
+                gb.run(FRAME);
+            }
+
+            let start = Instant::now();
+            let mut cycles = MachineCycles::ZERO;
+            for _ in 0..MEASURED_FRAMES {
+                cycles += gb.run(FRAME);
+            }
+            let elapsed = start.elapsed();
+
+            let t_cycles_per_sec = cycles.t_cycles() as f64 / elapsed.as_secs_f64();
+            let realtime = t_cycles_per_sec / MachineCycles::CPU_FREQ as f64;
+            println!(
+                "{name:<24} {realtime:>11.1}x {:>16.0} {MEASURED_FRAMES:>10}",
+                t_cycles_per_sec
+            );
+        }
+        println!();
+    }
+
+    /// A1: `reset()` used to be `todo!()`, so any caller panicked.
+    #[test]
+    fn reset_matches_fresh_construction() {
+        let mut a = GameBoy::dmg(crate::roms::acid::ROM);
+        a.run(MachineCycles::from_m(500_000));
+        assert_ne!(a, GameBoy::dmg(crate::roms::acid::ROM), "test is vacuous if running changed nothing");
+
+        a.reset();
+        assert_eq!(a, GameBoy::dmg(crate::roms::acid::ROM));
+    }
+
+    /// Battery-backed cartridge RAM does not lose its contents when the console is reset.
+    #[test]
+    fn reset_preserves_sram() {
+        let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+        let sram: Vec<u8> = (0..gb.dump_sram().len()).map(|i| (i % 251) as u8).collect();
+        gb.restore_sram(&sram).expect("restore sram");
+
+        gb.reset();
+
+        assert_eq!(gb.dump_sram(), sram);
+    }
+
+    /// A2: the `Stop` and `Crash` arms of `Core::execute` return `MachineCycles::ZERO`, which was
+    /// reported as making `run()` livelock. It does not — that value is only one addend of what
+    /// `execute` returns, and the opcode's own cost is always at least one M-cycle. Kept as a
+    /// guard so that if anyone ever does make `execute` return zero, this fails instead of hanging.
+    #[test]
+    fn run_terminates_after_stop() {
+        let mut gb = GameBoy::dmg_hello_world();
+        // STOP, then a pad byte, in work RAM — ROM ignores writes.
+        gb.core_mut().mmu_mut().write(0xC000, 0x10);
+        gb.core_mut().mmu_mut().write(0xC001, 0x00);
+        gb.core_mut().registers_mut().pc = 0xC000;
+
+        let cycles = gb.run(MachineCycles::from_m(10_000));
+
+        assert!(cycles >= MachineCycles::from_m(10_000));
+        assert_eq!(gb.core().mode(), crate::core::CoreMode::Stop, "nothing should have woken it");
+    }
 
     #[test]
     fn save_and_load_state() {
@@ -352,6 +456,61 @@ mod tests {
                 gb_test_failed_with_screenshot(result, "ppu", "screenshot does not match");
             }
         }
+    }
+
+    /// A14: blargg's remaining DMG suites. **These are expected to fail** — they measure the gap
+    /// left by advancing peripherals once per instruction instead of per M-cycle, which
+    /// `docs/compatibility/10-implementation-plan.md` explicitly defers. They are documentation,
+    /// not a target: do not "fix" them without reading that plan first.
+    ///
+    /// **Only the four `mem_timing` ROMs actually report over serial.** They fail with useful
+    /// per-opcode detail — e.g. `01-read_timing` reports `F0:2-3 FA:2-4 CB 46:2-3 ...`, meaning
+    /// those reads take 3 M-cycles where hardware takes 2. That *is* the instruction-granularity
+    /// gap, named instruction by instruction.
+    ///
+    /// The other six here, and all nine in [`blargg_oam_bug`], emit **nothing** over serial —
+    /// they write their results to the screen. `serial_console_test` cannot score them, so they
+    /// currently fail for a harness reason rather than a fidelity one. Task A15 covers that.
+    ///
+    /// Run them with:
+    /// ```text
+    /// cargo test --release --bin gb -- game_boy::tests::blargg_timing --ignored
+    /// cargo test --release --bin gb -- game_boy::tests::blargg_oam_bug --ignored
+    /// ```
+    mod blargg_timing {
+        use super::*;
+        use crate::roms::blargg_timing::*;
+
+        // BLOCKED ON: M-cycle timing (deferred — plan §0.2).
+        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing() { serial_console_test("mem_timing", MEM_TIMING); }
+        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing_01_read() { serial_console_test("mem_timing-01", MEM_TIMING_READ); }
+        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing_02_write() { serial_console_test("mem_timing-02", MEM_TIMING_WRITE); }
+        #[test] #[ignore = "needs M-cycle timing"] fn mem_timing_03_modify() { serial_console_test("mem_timing-03", MEM_TIMING_MODIFY); }
+
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2() { serial_console_test("mem_timing-2", MEM_TIMING_2); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2_01_read() { serial_console_test("mem_timing-2-01", MEM_TIMING_2_READ); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2_02_write() { serial_console_test("mem_timing-2-02", MEM_TIMING_2_WRITE); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn mem_timing_2_03_modify() { serial_console_test("mem_timing-2-03", MEM_TIMING_2_MODIFY); }
+
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn halt_bug() { serial_console_test("halt_bug", HALT_BUG); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15)"] fn interrupt_time() { serial_console_test("interrupt_time", INTERRUPT_TIME); }
+    }
+
+    /// A14: the DMG OAM corruption quirk, which `gb` does not model — and neither does gambatte.
+    /// Out of scope for this plan entirely.
+    mod blargg_oam_bug {
+        use super::*;
+        use crate::roms::blargg_oam_bug::*;
+
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug() { serial_console_test("oam_bug", ROM); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_1_lcd_sync() { serial_console_test("oam_bug-1", LCD_SYNC); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_2_causes() { serial_console_test("oam_bug-2", CAUSES); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_3_non_causes() { serial_console_test("oam_bug-3", NON_CAUSES); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_4_scanline_timing() { serial_console_test("oam_bug-4", SCANLINE_TIMING); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_5_timing_bug() { serial_console_test("oam_bug-5", TIMING_BUG); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_6_timing_no_bug() { serial_console_test("oam_bug-6", TIMING_NO_BUG); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_7_timing_effect() { serial_console_test("oam_bug-7", TIMING_EFFECT); }
+        #[test] #[ignore = "no serial output — needs a screen-based harness (A15); quirk also not modelled"] fn oam_bug_8_instr_effect() { serial_console_test("oam_bug-8", INSTR_EFFECT); }
     }
 
     fn serial_console_test(name: &str, cart: &[u8]) {

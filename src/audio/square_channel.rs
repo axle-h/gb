@@ -7,6 +7,19 @@ use crate::audio::timer::PulseTimer;
 use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
 
+/// Duty waveforms, one bitmask per duty setting: bit `n` is the output level at phase `n`.
+///
+/// These are gambatte's packed `0x7EE18180` (`duty_unit.cpp:28-30`) unpacked LSB-first. The
+/// previous hand-written comparisons were each **rotated one step**: duty 1 gave {6,7} instead of
+/// {7,0}, duty 2 {4,5,6,7} instead of {0,5,6,7}, and duty 3 {0..5} instead of {1..6}. Duty 0 was
+/// already correct.
+const DUTY_WAVEFORMS: [u8; 4] = [
+    0b1000_0000, // 12.5% — high at phase 7
+    0b1000_0001, // 25%   — high at phases 7, 0
+    0b1110_0001, // 50%   — high at phases 5, 6, 7, 0
+    0b0111_1110, // 75%   — high at phases 1..=6
+];
+
 #[derive(Debug, Clone, Decode, Eq, PartialEq, Encode)]
 pub struct SquareWaveChannel {
     /// NR10 (channel 1 only)
@@ -50,7 +63,9 @@ impl SquareWaveChannel {
             period: 0,
 
             active: false,
-            initialised: true,
+            // Starting `true` made the power-on quirk below dead code: duty clocking is disabled
+            // until the first trigger, so this must start `false`.
+            initialised: false,
             // Just after powering on, the first duty step of the square waves after they are triggered for the first time is played as if it were 0
             frequency_timer: PulseTimer::default(),
             output: 0,
@@ -138,11 +153,14 @@ impl SquareWaveChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if self.envelope_function.dac_enabled() && self.active {
-            dac_sample(self.output)
-        } else {
-            0.0
+        if !self.envelope_function.dac_enabled() {
+            // DAC off: the channel really is disconnected from the mixer.
+            return 0.0;
         }
+        // DAC on but the channel disabled: hardware holds the level for digital 0, which is *not*
+        // analogue zero. Snapping to 0.0 here put a full-scale step on every note-off. The wave
+        // channel already gets this right (`wave_channel.rs:152-164`).
+        dac_sample(if self.active { self.output } else { 0 })
     }
 
     fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
@@ -216,14 +234,8 @@ impl SquareWaveChannel {
     }
 
     fn waveform_bit(&self) -> bool {
-        let bit = 7 - self.frequency_timer.phase();
-        match self.wave_duty_cycle {
-            0 => bit == 0, // 12.5% duty cycle
-            1 => bit < 2, // 25% duty cycle
-            2 => bit < 4, // 50% duty cycle
-            3 => bit > 1, // 75% duty cycle
-            _ => unreachable!(), // Should never happen
-        }
+        let phase = self.frequency_timer.phase();
+        DUTY_WAVEFORMS[(self.wave_duty_cycle & 0x03) as usize] & (1 << phase) != 0
     }
 
     fn update_sweep(&mut self) {
@@ -237,6 +249,31 @@ impl SquareWaveChannel {
                     self.period = next_sweep.value & 0x07FF;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A12: the four duty rows, as phases at which the output is high. Each of these except duty
+    /// 0 used to be rotated one step. Values come from gambatte's packed `0x7EE18180`
+    /// (`duty_unit.cpp:28-30`).
+    #[test]
+    fn duty_waveforms_match_hardware() {
+        let high_phases = |duty: usize| -> Vec<u8> {
+            (0..8u8).filter(|&phase| DUTY_WAVEFORMS[duty] & (1 << phase) != 0).collect()
+        };
+
+        assert_eq!(high_phases(0), vec![7], "12.5%");
+        assert_eq!(high_phases(1), vec![0, 7], "25%");
+        assert_eq!(high_phases(2), vec![0, 5, 6, 7], "50%");
+        assert_eq!(high_phases(3), vec![1, 2, 3, 4, 5, 6], "75%");
+
+        // Duty cycles are what their names say.
+        for (duty, expected_high) in [(0, 1), (1, 2), (2, 4), (3, 6)] {
+            assert_eq!(high_phases(duty).len(), expected_high, "duty {duty} width");
         }
     }
 }
