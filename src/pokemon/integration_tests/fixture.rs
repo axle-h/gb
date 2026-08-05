@@ -25,6 +25,8 @@ pub struct TestFixture {
     /// [`crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS`]; a leg pinned to the *original*
     /// battle timing swaps it with [`Self::with_original_battle_timing`].
     options: GameOptions,
+    /// How many policy steps the run was handed, so a failure can report how far it got.
+    steps_at_start: Option<usize>,
 }
 
 impl TestFixture {
@@ -33,6 +35,7 @@ impl TestFixture {
         gb.load_state(save_state).expect("failed to load save state");
 
         // The agent builds its world graph incrementally as it traverses.
+        let steps_at_start = Some(policy_steps.len());
         let policy = DeterministicPolicy::new(42, policy_steps);
 
         // **Workstream J2.** Applied here rather than by regenerating the 27 committed `.bin`s: one
@@ -44,6 +47,7 @@ impl TestFixture {
 
         Self {
             options,
+            steps_at_start,
             gb,
             map_cache: MapMetadataCache::default(),
             total_cycles: MachineCycles::ZERO,
@@ -121,13 +125,28 @@ impl TestFixture {
             self.stall_cycles += cycles;
             if self.stall_cycles >= threshold {
                 self.save_failure_artifacts("test_stall");
-                panic!("policy stalled — queue unchanged for {:?} of game time", threshold);
+                panic!("policy stalled — queue unchanged for {:?} of game time{}",
+                    threshold, self.progress_note());
             }
         }
 
         if self.total_cycles >= self.max_cycles {
             self.save_failure_artifacts("test_timeout");
-            panic!("exceeded max cycles ({:?} game time)", self.max_cycles);
+            panic!("exceeded max cycles ({:?} game time){}", self.max_cycles, self.progress_note());
+        }
+    }
+
+    /// How far the run got, appended to every failure panic.
+    ///
+    /// A bare "policy stalled" says nothing about whether the run died on its first step or its last,
+    /// and for a long run that is the difference between a typo and a regression. `full_playthrough`
+    /// sat broken for a long time partly because its failure looked identical at 40 % and at 99 %.
+    fn progress_note(&self) -> String {
+        match (self.steps_at_start, self.agent.policy_steps_remaining()) {
+            (Some(total), Some(left)) if total > 0 => format!(
+                " — completed {}/{} policy steps ({}%); resume with RESUME_QUEUE_LEN={left}",
+                total - left, total, (total - left) * 100 / total),
+            _ => String::new(),
         }
     }
 
@@ -181,9 +200,27 @@ impl TestFixture {
     /// `Interact` and `CollectItem` pop the moment they *issue* the walk, so the queue routinely
     /// empties while the effect it was queued for — an item landing in the bag, an NPC's text box —
     /// is still in flight. This is the "exhaust, then wait for the effect" idiom.
+    ///
+    /// ⚠️ **This is the one harness call that can hide a mainline bug**, so it reports its own slack.
+    /// A leg test ends when the queue empties; `complete_game_steps` does not — it moves straight on to
+    /// the next leg's steps. So a leg that only reaches `done` because the agent kept acting *after*
+    /// exhaustion is green here and wedges in [`super::playthrough::full_playthrough`], which is
+    /// exactly what happened with the Poké Flute: `Interact(MRFUJISHOUSE_MR_FUJI)` popped before the
+    /// conversation, `run_leg` waited and the agent finished it unprompted, and the mainline instead
+    /// walked away without the Flute and stalled 200 steps later. The slack is printed rather than
+    /// asserted because a handful of ticks is the normal in-flight case; a *large* number means the
+    /// step list is leaning on the agent's autonomy and will not survive composition.
     pub fn run_leg(&mut self, done: impl Fn(&GameState) -> bool) -> GameState {
         self.step_until_exhausted();
-        self.run_until(done)
+        let before = self.total_cycles;
+        let state = self.run_until(done);
+        let slack = (self.total_cycles - before).to_duration();
+        if slack > Duration::from_secs(5) {
+            println!("[fixture] ⚠️  run_leg waited {slack:?} of game time AFTER the queue emptied — \
+                      the step list does not actually finish this leg, and `complete_game_steps` \
+                      will not wait. See the run_leg doc comment.");
+        }
+        state
     }
 
     pub fn pimp_pokemon(&mut self) {

@@ -1,14 +1,15 @@
 //! End-to-end tests that boot the emulator and drive the real agent.
 //!
 //! These are tiered by how much **game time** they emulate, because that is what they cost: the
-//! emulator runs at roughly 23× realtime and the agent adds only ~11% on top of it (see
-//! [`fixture::bench_emulation_throughput`]), so wall clock is almost exactly emulated-minutes ÷ 23.
+//! emulator core runs at ~34× realtime and the agent costs ~16% on top, giving **~28×** end to end
+//! (measured 2026-08-05 by `game_boy::tests::bench_core_throughput` and
+//! [`fixture::bench_emulation_throughput`]), so wall clock ≈ emulated-minutes ÷ 28.
 //!
 //! | Tier | How to run | Contents |
 //! |---|---|---|
 //! | default | `cargo test --release` | [`mechanics`] + the two navigation smoke tests in [`early_game`] |
 //! | leg chain | `cargo test --release --features slow-tests` | one test per `PolicyStep::*_steps()` leg, each seeded from a committed snapshot |
-//! | full game | `cargo test --release --features full-playthrough` | [`playthrough`] — a fresh save played to the Hall of Fame |
+//! | full game | `cargo test --release --features full-playthrough` | [`playthrough`] — a fresh save played to all 8 badges + Victory Road 2F. **Run it before pushing** |
 //!
 //! The leg tests form a linear pipeline: each consumes the snapshot the previous one produces, and
 //! together they cover the same ground as [`playthrough`] but in parallel and from disk. Those
@@ -16,27 +17,28 @@
 //! when `--features regen-fixtures` is on (see [`fixture::TestFixture::save_state_named`]), so an
 //! ordinary run leaves the working tree clean.
 //!
-//! # Known failures
+//! ⚠️ **Keep the chain's order matching `complete_game_steps`' `extend` order.** When they disagree,
+//! the leg fixtures quietly encode the *older* order and the failure surfaces somewhere else entirely
+//! — as an unwinnable fight, or as a mon in the wrong party slot. Two tests sat `#[ignore]`d on that:
+//! `can_get_silph_card_key` was seeded from `at-saffron.bin` while the mainline fetches Vaporeon first,
+//! so `can_beat_silph_giovanni` met the 7F rival with no Vaporeon. The endgame chain still has the same
+//! divergence — `post-volcano-lone.bin` predates `seafoam_articuno_steps` — which is why
+//! [`endgame::can_solve_victory_road_1f`] seeds its Articuno rather than earning it.
 //!
-//! Four tests are `#[ignore]`d for a *named* reason rather than because they are slow. Each doc
-//! comment carries the diagnosis; the short version:
+//! # Naming party members
 //!
-//! | Test | Cause |
-//! |---|---|
-//! | [`fuchsia::can_get_poke_flute`] | leg bug — wedges on the Rocket Hideout elevator exit; fails identically before this module was split up |
-//! | [`endgame::can_solve_victory_road_1f`] | `TeachMove` never completes for an HM deep in the bag |
-//! | [`saffron::can_get_vaporeon`] | `at-saffron.bin` predates the lone-starter plan, so its slot 1 is a Pidgey and the slot-addressed evolve/teach hits the wrong mon |
-//! | [`saffron::can_beat_silph_giovanni`] | same stale chain — `silph-card-key.bin` has no Vaporeon for the 7F rival |
-//!
-//! The two `saffron` ones share a root cause worth stating once: `PolicyStep` addresses party members
-//! by **slot**, and every committed fixture from `post-cascade.bin` onward still carries the early
-//! Route-1 Pidgey that `complete_game_steps` no longer catches. Regenerating a single snapshot cannot
-//! fix that — it needs a fresh [`playthrough::full_playthrough`] to re-cut the chain, or party
-//! references moved from slot to species.
+//! Steps that act on a particular **mon** — `TeachMove`, `EvolveWithStone`, `UseStrength` — take a
+//! [`crate::pokemon::policy::PartyRef`] and should name it by `Species`, not by `Slot`. A slot index is
+//! a guess about how many members the party happened to hold when the run reached that step, and the
+//! leg-chain fixtures do not carry the same party the mainline does: every snapshot from
+//! `post-cascade.bin` onward still has the early Route-1 Pidgey that `complete_game_steps` no longer
+//! catches. Three tests sat `#[ignore]`d on that for a long time, none of them naming it: two blamed a
+//! stale fixture and one blamed deep-bag menu scrolling. `Slot` is right only when the *position* is
+//! the point — `CuttingTree` always asks slot 0, so Cut goes to `Slot(0)`.
 
 use std::time::Duration;
 use crate::cycles::MachineCycles;
-use crate::pokemon::policy::{DeterministicPolicy, PolicyStep};
+use crate::pokemon::policy::{DeterministicPolicy, PartyRef, PolicyStep};
 use crate::pokemon::*;
 use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason, PokemonAgent, AGENT_RESOLUTION};
 use crate::pokemon::battle::BattleType;

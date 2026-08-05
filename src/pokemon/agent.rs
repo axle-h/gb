@@ -733,6 +733,20 @@ impl PokemonAgent {
                 if let Some(item) = self.policy.pick_mart_purchase(&game_state) {
                     api.release_all_buttons();
 
+                    // **Trim the order to the wallet before ordering.** Gen 1 does not sell you as many
+                    // as you can afford — an unaffordable quantity gets "You don't have enough money!"
+                    // and hands over *nothing*. From outside the menu that is indistinguishable from a
+                    // dropped YES-confirm, so the policy retries, hits `MAX_MART_ATTEMPTS`, prints "gave
+                    // up" and the leg walks on with an empty bag. `silph_co_card_key_steps` had been
+                    // asking for 15 Hyper Potions (¥18,000) on ¥7,838 and buying zero of them every run
+                    // since it was written, which is what left `can_beat_silph_giovanni` blacking out on
+                    // Silph 11F. The price comes from the ROM's own `ItemPrices` table.
+                    let item = item.map(|item| match api.item_price(item.id) {
+                        Some(price) => BagItem::new(item.id, item.quantity.min((game_state.money / price) as u8)),
+                        // Not in the price table (a key item, or a mart-specific TM): order as asked.
+                        None => item,
+                    }).filter(|item| item.quantity > 0);
+
                     if let Some(item) = item {
                         self.set_state(AgentState::PokemartShopping(PokemartState::ChoosingBuyOption(item)));
                     } else {
@@ -904,10 +918,18 @@ impl PokemonAgent {
             AgentState::AwaitingOverworldAction { ref mut delay } => {
                 if delay.tick(delta_cycles) {
                     let game_state = self.observe_state(api)?;
-                    // Incrementally build the world graph: the first time we settle on a new map,
-                    // record that section's live (sprite-resolved) reachable warps/connections,
-                    // keyed by the raw landing coords (the space warp `to_position`s use). The
-                    // player is stationary here so the raw coords are the landing position.
+                    // Incrementally build the world graph: every time we settle in the overworld,
+                    // record this section's live (sprite-resolved) reachable warps/connections, keyed
+                    // by the raw landing coords (the space warp `to_position`s use). The player is
+                    // stationary here so the raw coords are the landing position.
+                    //
+                    // ⚠️ **On arrival only, deliberately.** Re-observing on every settle looks like an
+                    // improvement — a Strength puzzle opens a ladder the graph never learns about — but
+                    // `observe` *overwrites* the node, and what is reachable depends on where the player
+                    // is standing. On a map split by one-way ledges (Cerulean is the documented one) a
+                    // re-observation from a terrace replaces the landing's rich edge set with that
+                    // terrace's poor one, and cross-map routing that used to work stops working. Tried
+                    // and reverted 2026-08-05; see the archive entry.
                     if self.last_map != Some(game_state.map.map) {
                         self.last_map = Some(game_state.map.map);
                         self.world_graph.observe(game_state.map.map, api.raw_player_coords(), &game_state.map);

@@ -42,7 +42,7 @@ use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::move_name::PokemonMoveName;
-use crate::pokemon::policy::PolicyStep;
+use crate::pokemon::policy::{PartyRef, PolicyStep};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::GameState;
@@ -246,7 +246,7 @@ impl PolicyStep {
             Self::enter(Map::CeruleanCity),
             Self::enter(Map::Route24),
             Self::CollectItem(MapSprite::ROUTE24_TM_THUNDER_WAVE),
-            Self::TeachMove { item: ItemId::Tm45ThunderWave, target_slot: PARALYSER_SLOT },
+            Self::TeachMove { item: ItemId::Tm45ThunderWave, target: PartyRef::Slot(PARALYSER_SLOT) },
             Self::Fly { to: Map::CinnabarIsland },
             Self::BuyFromMart { item: BagItem::new(ItemId::UltraBall, 10), map: Map::CinnabarMart },
             Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 10), map: Map::CinnabarMart },
@@ -293,11 +293,11 @@ impl PolicyStep {
             Self::enter(Map::Route23),
             Self::goto(Map::VictoryRoad1F),
             // VR1F: a boulder onto the (17,13) switch opens the (1,1) ladder up to 2F.
-            Self::UseStrength { slot: PARALYSER_SLOT },
+            Self::UseStrength { target: PartyRef::Slot(PARALYSER_SLOT) },
             Self::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
             Self::enter(Map::VictoryRoad2F),
             // VR2F west: the (1,16) switch opens the corridor east to the (23,7) stairs.
-            Self::UseStrength { slot: PARALYSER_SLOT },
+            Self::UseStrength { target: PartyRef::Slot(PARALYSER_SLOT) },
             Self::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
             Self::enter(Map::VictoryRoad3F),
         ];

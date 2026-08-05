@@ -92,14 +92,16 @@ const FLY_SLOT: u8 = 1;
 /// with its own observable and this isolates it for under a second.
 ///
 /// The plan expected this to be free ("`TeachMove` already works — just use it") and it was, which is
-/// worth recording: HM02 lands at bag **index 15 of 16**, and three tests are `#[ignore]`d blaming
-/// `TeachMove` for wedging on "an HM deep in the bag" (HM04 at index 11). It taught first try in 0.6 s,
-/// so bag depth is not what ails those tests. See the §11 entry.
+/// worth recording: HM02 lands at bag **index 15 of 16**, and three tests were `#[ignore]`d at the time
+/// blaming `TeachMove` for wedging on "an HM deep in the bag". It taught first try in 0.6 s, so bag
+/// depth was never what ailed them — and this test is what ruled it out. The real cause was the party
+/// *slot* the teach was aimed at, which is why `TeachMove` now takes a
+/// [`crate::pokemon::policy::PartyRef`] and all three tests pass. See the 2026-08-05 archive entry.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_teach_fly() {
     let mut fixture = TestFixture::new(HM02, Duration::from_mins(10), vec![
-        PolicyStep::TeachMove { item: ItemId::Hm02Fly, target_slot: FLY_SLOT },
+        PolicyStep::TeachMove { item: ItemId::Hm02Fly, target: PartyRef::Slot(FLY_SLOT) },
     ]);
 
     let state = fixture.game_state();

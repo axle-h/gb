@@ -96,6 +96,12 @@ pub trait PokemonApiTrait {
     /// `wBagItems` so it matches the on-screen list exactly (unlike `read_bag`, which drops item ids
     /// not in the `ItemId` enum and so shifts every later index). Used to navigate the bag cursor.
     fn bag_item_position(&self, item: ItemId) -> Option<u8>;
+    /// What a mart charges for `item`, read straight out of the ROM's `ItemPrices` table
+    /// (`data/items/prices.asm` — three BCD bytes per item, in item-id order). `None` for an id the
+    /// table prices at zero, i.e. one no mart sells. Used to size a purchase to the wallet: the game
+    /// answers an unaffordable quantity with "You don't have enough money" and gives *nothing*, which
+    /// from outside is indistinguishable from a dropped confirm.
+    fn item_price(&self, item: ItemId) -> Option<u32>;
     /// How many of `item` the bag holds (0 if absent), read from raw `wBagItems`.
     fn bag_item_quantity(&self, item: ItemId) -> u8;
     /// The same two reads against **PC item storage** (`wNumBoxItems`/`wBoxItems`), which the
@@ -513,6 +519,23 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
     fn bag_item_quantity(&self, item: ItemId) -> u8 {
         inventory_quantity(self.mmu(), &pokered_symbols::wNumBagItems, &pokered_symbols::wBagItems, item)
+    }
+
+    fn item_price(&self, item: ItemId) -> Option<u32> {
+        /// Entries in `ItemPrices` — MASTER_BALL (id 1) through FLOOR_B4F (id 97). **TMs and HMs are
+        /// not in it**: their ids start at `$C4`, far past the end, and the TM prices live in their own
+        /// `TMPrices` table (`data/items/tm_prices.asm`, one nibble each). Without this bound an HM
+        /// reads 3 bytes of whatever follows the table and decodes them as a BCD price.
+        const ITEM_PRICES_LEN: u8 = 97;
+
+        // `table_width 3`, indexed by (item id - 1): the table starts at MASTER_BALL, which is id 1.
+        let id = item as u8;
+        if id > ITEM_PRICES_LEN { return None; }
+        let entry = pokered_symbols::ItemPrices + (id.checked_sub(1)? as u16) * 3;
+        match encoding::reverse_bcd(self.mmu().read_pointer_u24_be(&entry)) {
+            0 => None,
+            price => Some(price),
+        }
     }
 
     fn pc_box_item_position(&self, item: ItemId) -> Option<u8> {

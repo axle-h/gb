@@ -452,3 +452,30 @@ fn rare_candy_works_on_a_late_party_slot() {
     }
     assert!(fixture.game_state().bag.iter().all(|i| i.id != ItemId::RareCandy), "candy consumed");
 }
+
+/// `PokemonApiTrait::item_price` decodes the ROM's `ItemPrices` table, which the mart driver uses to
+/// size a purchase to the wallet. The table is `table_width 3` BCD **indexed from item id 1**
+/// (MASTER_BALL), so an off-by-one reads the neighbouring item's price and is otherwise invisible —
+/// it would just buy a slightly wrong number of things. Values from `data/items/prices.asm`.
+#[test]
+fn item_prices_match_the_rom_table() {
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(1), vec![]);
+    let api = fixture.api();
+
+    // First and last of the ball block, to catch an index slipped either way.
+    assert_eq!(api.item_price(ItemId::UltraBall), Some(1200));
+    assert_eq!(api.item_price(ItemId::GreatBall), Some(600));
+    assert_eq!(api.item_price(ItemId::PokeBall), Some(200));
+    // The potions the mainline's restocks actually buy.
+    assert_eq!(api.item_price(ItemId::HyperPotion), Some(1500));
+    assert_eq!(api.item_price(ItemId::SuperPotion), Some(700));
+    assert_eq!(api.item_price(ItemId::WaterStone), Some(2100));
+    // Priced at 0 in the table = no mart sells it; the driver must order these as asked rather than
+    // divide by zero or trim to nothing.
+    assert_eq!(api.item_price(ItemId::MasterBall), None);
+    assert_eq!(api.item_price(ItemId::TownMap), None);
+    // Past the end of the table entirely — HM/TM ids start at $C4 and are priced elsewhere. Without
+    // the length bound this decoded three bytes of the *next* ROM table as a price.
+    assert_eq!(api.item_price(ItemId::Hm01Cut), None);
+    assert_eq!(api.item_price(ItemId::Tm14Blizzard), None);
+}

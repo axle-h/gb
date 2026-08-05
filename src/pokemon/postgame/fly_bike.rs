@@ -321,7 +321,7 @@ impl PolicyStep {
         vec![
             Self::enter(Map::ViridianCity),
             // Venusaur is the only Cut holder; the Cut executor only ever asks slot 0.
-            Self::MovePokemonToFront { slot: 1 },
+            Self::MovePokemonToFront { target: crate::pokemon::policy::PartyRef::Slot(1) },
             Self::enter(Map::Route2),
             Self::CutTree { map: Map::Route2 },
             Self::enter(Map::Route2Gate),
@@ -426,7 +426,8 @@ impl PolicyStep {
     /// mashing at "Can't use FLY here!".
     pub fn teach_and_use_fly_steps(to: Map) -> Vec<Self> {
         vec![
-            Self::TeachMove { item: crate::pokemon::item::ItemId::Hm02Fly, target_slot: 1 },
+            Self::TeachMove { item: crate::pokemon::item::ItemId::Hm02Fly,
+                             target: crate::pokemon::policy::PartyRef::Slot(1) },
             Self::enter(Map::Route16), // outside, so the town map will open
             Self::Fly { to },
         ]

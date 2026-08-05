@@ -12,8 +12,10 @@ edition = "2024"
 # committed `src/pokemon/data/*.bin` snapshot.
 #   cargo test --release --features slow-tests
 slow-tests = []
-# `full_playthrough` alone — a fresh save played to the Hall of Fame, ~20 min of wall clock. Kept off
-# the `slow-tests` gate so the leg chain can be run without paying for it.
+# `full_playthrough` alone — a fresh save played to all 8 badges and Victory Road 2F (NOT the Hall of
+# Fame: the Elite Four is proved separately), ~20 min of wall clock. Kept off the `slow-tests` gate so
+# the leg chain can be run without paying for it. Run it after every major work item and before pushing
+# — it is the only test that proves the legs compose. See CLAUDE.md.
 #   cargo test --release --features full-playthrough full_playthrough
 full-playthrough = []
 # Benchmarks. Compiled out entirely by default rather than `#[ignore]`d, so they do not show up

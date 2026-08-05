@@ -21,7 +21,7 @@ use crate::geometry::Point8;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::map_metadata::PlayerFacingDirection;
-use crate::pokemon::policy::{FieldMove, PolicyStep};
+use crate::pokemon::policy::{FieldMove, PartyRef, PolicyStep};
 use crate::pokemon::roms;
 use crate::pokemon::symbols::{pokered_symbols, DmgBank, DmgPointer};
 use crate::pokemon::GameState;
@@ -207,7 +207,7 @@ impl PolicyStep {
         s.extend(std::iter::repeat_n(Self::Interact(MapSprite::ROUTE2GATE_OAKS_AIDE), 3));
         s.extend([
             Self::enter(Map::Route2),
-            Self::TeachMove { item: ItemId::Hm05Flash, target_slot: flash_slot },
+            Self::TeachMove { item: ItemId::Hm05Flash, target: PartyRef::Slot(flash_slot) },
             // …and prove it. Rock Tunnel is the game's one genuinely dark map: entering 1F sets
             // `wMapPalOffset = 6` and only Flash clears it.
             Self::Fly { to: Map::LavenderTown },
