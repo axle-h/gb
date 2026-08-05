@@ -2368,3 +2368,255 @@ tier and all **66** postgame legs keep the 20–25 %.
 stream, and only the first of those is committed. Anything that changes frame timing silently re-cuts
 the second. Re-run the **whole** slow tier — `-- pokemon::integration_tests`, not just your own module
 — before believing a timing change is free.
+
+---
+
+### [2026-08-05] mainline legs — the four `#[ignore]`d tests, and why three of the four diagnoses were wrong
+**Status:** corrected ❗
+**What the plan said:** `src/pokemon/integration_tests/mod.rs` carried a "Known failures" table naming
+four blocked tests: `fuchsia::can_get_poke_flute` (Rocket Hideout elevator), `saffron::can_get_vaporeon`
+and `saffron::can_beat_silph_giovanni` (stale fixtures, fixable by regeneration), and
+`endgame::can_solve_victory_road_1f` (`TeachMove` wedging on an HM deep in the bag).
+
+**What is actually true:** only the elevator one was even in the right *area*, and it was still wrong.
+
+- **`can_get_poke_flute` — the elevator works; B1F is two disconnected halves.** A full-width wall at
+  row 16 splits `RocketHideoutB1F`, and B2F has a staircase into each: (21,22) → B1F (21,24) in the
+  south, (27,8) → B1F (23,2) in the north. Only the north half holds the Game Corner stairs out; the
+  south half's only other exit is the elevator, behind the still-shut Rocket-5 door. `enter()` picks
+  the *nearest* warp, which off the elevator is the southern one — 10 steps against 33. So the run
+  reached B1F fine and stalled on `EnterMap { GameCorner }` with no Game Corner warp on the map. ⚠️
+  **A map is one node in the world graph, so the graph cannot see an intra-map partition** — only an
+  explicit `to_position` can. Fixed by naming the landing; the leg then passed in 32 s and ended on
+  `MrFujisHouse (3,2)`, byte-identical ground to the committed `post-poke-flute.bin`.
+- **Regenerating a fixture could never have fixed the saffron pair.** The lv4 Route-1 Pidgey that
+  displaced the gift Eevee enters at `post-cascade.bin` — a committed **root** no test produces — so
+  every downstream snapshot inherits it and re-deriving `at-saffron.bin` re-derives the Pidgey too.
+  The defect was `eevee_vaporeon_surf_steps` hard-coding `target_slot: 1` when the Eevee appends at 2.
+  Fixed by `PartyRef { Slot, Species }` (below).
+- **"Deep-bag item-menu scrolling" was already disproven in this file** (the 2026-07-30 B entry: HM02
+  at bag index 15 of 16, taught first try in 0.6 s). That entry's *guess* — "my guess is the party
+  slot" — was right. `victory_road_1f_steps` took the slave's index as a parameter and its two callers
+  disagreed: `complete_game_steps` passed 4, the leg test passed 2. On a party where 2 is not the
+  Machop the teach aims at a mon that cannot learn Strength, and because the completion check reads
+  that same slot it can never finish. With `PartyRef::Species(Machop)` the teach lands in ~20 ticks.
+
+**Two bugs found underneath, both of the same "silent failure" family:**
+
+1. ⚠️ **`BuyFromMart` was buying nothing whenever the wallet could not cover the whole order.** Gen 1
+   answers an unaffordable quantity with "You don't have enough money!" and hands over *nothing* — it
+   does not sell you as many as you can afford. From outside the menu that is indistinguishable from a
+   dropped YES-confirm, so the policy retried, hit `MAX_MART_ATTEMPTS`, printed "gave up" and the leg
+   walked on empty-handed. `silph_co_card_key_steps` had been ordering **15 Hyper Potions (¥18,000) on
+   ¥7,838** and buying **zero** every run since it was written — which is what left
+   `can_beat_silph_giovanni` blacking out on Silph 11F. Now trimmed to what the wallet covers in
+   `agent.rs` before ordering, from the ROM's own `ItemPrices` table; the leg buys 3 and wins.
+   This is the *same shape* as the already-documented bag-full failure, and worth checking for
+   wherever a step asks the game for a quantity.
+2. **`item_price` past the end of `ItemPrices`.** The table is 97 entries (MASTER_BALL id 1 →
+   FLOOR_B4F id 97); HM/TM ids start at `$C4` and are priced in a separate `TMPrices` table. Unbounded,
+   an HM decoded three bytes of the *next* ROM table as a BCD price. Caught by
+   `mechanics::item_prices_match_the_rom_table`, which is why that test asserts on `Hm01Cut`.
+
+**What shipped:** `PartyRef { Slot(u8), Species(PokemonSpecies) }`, resolved against the live
+`GameState` **every tick** (a step may name a mon the party does not hold yet — the Celadon Eevee is
+still a Poké Ball on the floor when `eevee_vaporeon_surf_steps` is composed). `TeachMove`,
+`EvolveWithStone` and `UseStrength` take one; the `machop_slot` parameter is gone from both Victory
+Road builders. `Slot` is kept where the *position* is the point — `CuttingTree` only ever asks slot 0.
+
+⚠️ **A second chain divergence, still open.** The saffron pair failed because the leg chain had
+`can_get_silph_card_key` seeded from `at-saffron.bin` while `complete_game_steps` fetches Vaporeon
+first — re-pointing it at `vaporeon-ready.bin` fixed that. The endgame chain has the *same* divergence
+and it is not fixed: `complete_game_steps` runs `seafoam_articuno_steps` between the Volcano and Earth
+badges, but `post-volcano-lone.bin` predates that leg and is explicitly the two-mon "lone" party, so
+`can_solve_victory_road_1f` is asked to clear Victory Road's nine trainers with a lv56 Venusaur, a lv30
+Vaporeon and a lv24 Machop, and blacks out around the last cooltrainer — twice out of two, on either
+RNG stream (`with_original_battle_timing` makes no difference, so this is not J fallout). The test
+seeds the Articuno instead (`seed_seafoam_articuno`, the `seed_master_ball` device). **The honest fix
+is to re-cut `post-volcano-lone.bin` from a Seafoam-era `full_playthrough`** — note it, like
+`at-saffron-post-silph.bin` and `at-mansion-blizzard.bin`, is an orphan root that no test produces.
+
+**General lesson:** when a leg list and `complete_game_steps` disagree about *ordering*, the leg
+fixtures quietly encode the older order, and the failure surfaces somewhere else entirely — as an
+unwinnable fight, or as a mon in the wrong slot. Check the leg chain against `complete_game_steps`'
+`extend` order before believing any leg-test diagnosis.
+
+**Evidence:** `fuchsia::probe_hideout_b1f_halves` (dumps both B1F halves and both landings);
+`dump_fixture_states` before/after; `mechanics::item_prices_match_the_rom_table`; full `slow-tests`
+tier **115 passed / 1 failed** (only `can_solve_victory_road_1f`, pre-seeding) / 25 ignored, against
+25 → 21 ignores after. `git status src/pokemon/data/` shows exactly the three intended saffron
+fixtures.
+**Impact on others:** anyone writing a step that buys, teaches, evolves or pushes with a named mon —
+use `PartyRef::Species`, and expect `BuyFromMart` to buy fewer than you asked for rather than none.
+
+---
+
+### [2026-08-05] `full_playthrough` — it does not reach the end, and had not before this session either
+**Status:** blocked 🟡
+**What the plan said:** `playthrough::full_playthrough`'s doc comment (and §9, and CLAUDE.md) describe
+it as playing a fresh save to all 8 badges and on to Victory Road 2F.
+
+**What is actually true:** it stalls partway, on both RNG streams, and **this predates the 2026-08-05
+`PartyRef` pass** — provably, not by inference: `complete_game_steps` contains `poke_flute_steps`,
+whose leg test carried `#[ignore = "…also fails at HEAD"]`, so the run could not have got past the
+Rocket Hideout exit. Fixing that leg moved this run strictly forward rather than breaking it.
+
+Measured after the fix, 800-minute budget, `--features full-playthrough`:
+
+- **Default (fast) stream:** stalls in **Rock Tunnel**, on `EnterMap { RockTunnel1F, (37,17) }` with
+  `queue_len=306`. Wild encounters abort the walk repeatedly (`OverworldActionAborted … reason: Battle`)
+  while the party wears down to `HP critical, no heal/switch — fleeing to RockTunnelPokecenter`, and the
+  queue sits unchanged past the 10-game-minute stall threshold.
+- **Pinned with `with_original_battle_timing()`:** Rock Tunnel is **cleared** — the run goes on through
+  Lavender, Celadon, the Rocket Hideout (out via the fixed B1F north staircase) and reaches **Mr Fuji's
+  House**, where it stalls on `Interact(MRFUJISHOUSE_MR_FUJI)` at (2,7) with `queue_len=233`. Note the
+  leg test `fuchsia::can_get_poke_flute` runs *unpinned* and finishes this same stretch cleanly, ending
+  at (3,2) with the Flute — so the pinned stream arrives in a different state at the same door.
+
+So both failures are the same shape as the four legs already pinned: **a route tuned against one RNG
+stream**, and neither stream is one this run was tuned against. `celadon::can_reach_lavender` covers
+the Rock Tunnel stretch, is pinned, and passes.
+
+**Why it was not fixed here:** re-tuning mainline routes to an RNG stream is exactly the work §4.2
+(`complete_game_steps` and `full_playthrough` are **frozen**) and §3 (battle tactics are the LLM's in
+deployment) rule out, and it is not what the four `#[ignore]`d leg tests needed. The leg tier is green —
+**116 passed, 0 failed** — and covers the same ground.
+
+**What I would try next:** pin `full_playthrough` the way the four legs are pinned and chase the Mr Fuji
+`Interact` first, since the pinned stream demonstrably gets 200+ steps further. The stall artifact
+(`target/test-artifacts/test_stall_screenshot.png`) is the thing to read before theorising — it
+identified the Rocket Hideout half-map in one look.
+**Evidence:** two 800-minute runs on 2026-08-05 (unpinned, 273 s wall → Rock Tunnel; pinned, 370 s wall
+→ Mr Fuji's House); `fuchsia::can_get_poke_flute` green unpinned; full `slow-tests` tier 116/0.
+**Impact on others:** ⚠️ do not treat `full_playthrough` as a green baseline — it is not one, and has
+not been for some time. Use the leg tier.
+
+---
+
+### [2026-08-05] `full_playthrough` — fixed, and the four bugs between 40 % and 100 % were all "silent skip"
+**Status:** verified ✅ — supersedes the "blocked 🟡" entry above
+**What that entry said:** the run stalled in Rock Tunnel on the default stream and at Mr Fuji's House
+when pinned, and both looked like routes tuned against one RNG stream (workstream-J fallout).
+
+**What is actually true:** the RNG stream was a red herring — pinning changed *where* it died, not
+*that* it died. Four distinct bugs sat between 40 % and the end, and **every one of them was something
+failing without saying so**, then surfacing tens or hundreds of steps later:
+
+1. **`complete_game_steps` never bought a single healing item.** Not one, in 515 steps. The
+   `HP critical — using healing item` branch works; it simply had nothing to reach for, so Rock Tunnel
+   and Pokémon Tower — both Pokémon-Center-less, both crossed by a **lone** starter — ended the run by
+   attrition. Fixed with Super Potions at **Vermilion** (the first mart on the route that stocks them —
+   Cerulean sells only the +20 Potion) and a top-up at **Lavender** before the tower. Rock Tunnel then
+   cleared on the *default* stream, no pin needed.
+2. **`Interact` pops when it issues its walk, so the Poké Flute was never collected.** Mr Fuji's tower
+   script warps the player into his house *standing on the door tile*; the queued
+   `Interact(MRFUJISHOUSE_MR_FUJI)` popped while the warp was still resolving, the run walked away
+   without the Flute and wedged on the next step. ⚠️ **The leg test cannot see this**:
+   `fuchsia::can_get_poke_flute` uses `run_leg`, which keeps stepping after the queue empties until the
+   Flute appears — the agent finishes the conversation unprompted and the leg goes green. The mainline
+   gives it no such grace. `run_leg` now prints a ⚠️ when its post-exhaustion wait is long; treat that
+   as a failure in waiting. Fixed by repeating the interact, the `silph_giovanni_steps` idiom.
+3. **A full bag silently ate the Master Ball.** The Silph President's thank-you speech ends
+   "You have no room for this." and the `Interact` completes looking exactly like a success — a *gift*
+   has no "gave up" to detect, unlike a purchase. The Master Ball never arrived, and 100 steps later
+   `CatchPokemon { ball: Some(MasterBall) }` fell back to the best ball in the bag, threw a **Great
+   Ball at a lv50 Articuno** and lost the party. Fixed by tossing TM34 Bide before the President.
+   ⚠️ This was *triggered* by (1): one extra item type is all it took to reach 20/20.
+4. **`BuyFromMart` bought nothing it could not fully afford** — see the entry above. Visible in the
+   mainline as `mart:buy(HyperPotion×9)` where the step asked for 20; before the fix that was zero.
+
+**The through-line worth carrying:** every one of these is a step that *completed* while its effect did
+not happen. None threw, none logged an error, and each cost between 100 and 300 steps of distance
+between cause and symptom. When a long run wedges, the question is not "what is wrong here" but
+"which earlier step lied about succeeding" — `RESUME_QUEUE_LEN` + `probe_resume_playthrough` exists to
+answer that in seconds rather than 10-minute re-runs.
+
+**Also shipped, so this cannot rot the same way again:** failures now report how far they got
+(`completed 488/515 policy steps (94%)`) instead of a bare stall; `run_leg` warns when it is papering
+over an unfinished step list; CLAUDE.md now requires a `full_playthrough` run after every major work
+item and before any push; and the "played to the Hall of Fame" claim is corrected everywhere it
+appeared (its real end point is **Victory Road 2F** — the Elite Four is proved separately).
+
+---
+
+### [2026-08-05] agent — **a black-out looks exactly like a completed warp**, and that is why runs die far from the cause
+**Status:** verified ✅
+**What is actually true:** `AgentState::OverworldMovement` calls a warp done when the **map changes**
+(`agent.rs`, the `game_state.map.map != expected_map` arm). A black-out changes the map — it teleports
+the player to the last Pokémon Center — so a party wiping mid-walk is reported as
+`OverworldActionCompleted { destination: Warp { to_map: VictoryRoad2F, .. } }` *while standing in
+Viridian City*. Nothing in the event stream says the run lost; the very next line is the policy
+re-issuing the same step from four maps away.
+
+That is the single most misleading log line in this project, and it cost real time twice in one
+session: once reading `endgame::can_solve_victory_road_1f` (where the same "completed" line is
+immediately followed by `map=ViridianCity`) and once in `full_playthrough`. ⚠️ **When a run's last
+event is a completed warp and the next map is a town with a Pokémon Center, it did not warp — it
+died.** Cross-check `grep -c "blacked out"`, and do not trust its absence either: the text driver can
+miss the message entirely if the fade starts before it reads the box, as it did in `f4.log`.
+
+**The mitigation that shipped**, rather than changing the completion rule (a warp genuinely *is* done
+when the map changes, and every other caller relies on that): the mainline no longer leaves a
+single-hop `enter` as the step a black-out has to be recovered from. `victory_road_1f_steps` now ends
+`goto(VictoryRoad1F)` → `enter(VictoryRoad2F)`, and `poke_flute_steps` has the same `goto` before the
+Mr Fuji rescue. `goto` re-routes across maps; `enter` cannot, so it re-issues forever. **Anywhere a
+leg's next step is unreachable from the last Pokémon Center, a black-out is terminal — put a `goto`
+in front of it.** The climb back is cheap: beaten trainers stay beaten and solved boulders stay solved.
+**Evidence:** `f4.log` lines around the VictoryRoad1F → ViridianCity transition (`OverworldActionCompleted`
+for the VR2F warp, then `queue_len=1` in Viridian for the rest of the budget); the same shape in the
+pre-fix `vr1f2.log`.
+
+---
+
+### [2026-08-05] `full_playthrough` — **green**, and the last two bugs were both "which mon is slot 1?"
+**Status:** verified ✅ — supersedes both "blocked 🟡" entries above
+**What is actually true:** a fresh save now plays to **all 8 badges and Victory Road 2F** in one run —
+`1 passed; 0 failed`, 591 s wall, 516 policy steps, ending Venusaur lv58 / Articuno lv51 / Slowpoke lv30
+/ Vaporeon lv26 / Machop lv24 with ¥13,873. `git status src/pokemon/data/` shows only the three
+intended saffron fixtures.
+
+Beyond the four "silent skip" bugs in the entry above, two more sat between 94 % and the end, and both
+were the **same slot-vs-species mistake** the `PartyRef` pass was created for:
+
+5. **`MovePokemonToFront { slot: 1 }` did not lead Venusaur.** The comment says "Venusaur leads the
+   rival (Alakazam nemesis)" and it was true when written, with a two-mon party. By Victory Road the
+   run also carries the Seafoam Slowpoke and Articuno, whose arrival order is not fixed — so the step
+   could put a **lv30 HM-slave** at the front of every fight. That is why a party which comfortably
+   beats VR1F's nine trainers kept blacking out on the walk to the ladder, and it is why the leg looked
+   like a party-strength problem when it was a targeting problem. `MovePokemonToFront` now takes a
+   `PartyRef` and the mainline names Venusaur by species. Fixing it removed the black-out entirely.
+6. **The final `enter(VictoryRoad2F)` could not be recovered from.** Now `goto`, which re-routes every
+   tick — see the "a black-out looks exactly like a completed warp" entry.
+
+⚠️ **One fix tried and reverted, so nobody repeats it:** re-observing the world graph on *every* settle
+rather than only on arrival. The motivation is real — `SolveBoulders` opens the VR1F (1,1) ladder and
+the graph never learns the edge, so `Goto { VictoryRoad2F }` cannot route back after a black-out. But
+`WorldGraph::observe` **overwrites** the node (deliberately — that is how the maze solver recognises
+dead-ends), and what is reachable depends on where the player stands. On a map split by one-way ledges
+— **Cerulean**, the documented one — a re-observation from a terrace replaces the landing's rich edge
+set with that terrace's poor one, and the run stalled at 15 % on `enter(Route5)`. Keying the
+re-observation to the arrival entry did not help: the second observation still clobbers the first. If
+someone wants this, it has to *union* new edges into the node, and it needs its own test run against
+the ledge maps. The comment at the `observe` call site records this.
+
+**Evidence:** `full_playthrough` green (attempt 9); the eight preceding attempts are the record of the
+six bugs, each caught by the new `completed N/516 policy steps (P%)` progress note — 40 % → 54 % →
+94 % → 99 % → 100 %. That number is what made this tractable; a bare "policy stalled" looks identical
+at every one of those points.
+
+**Determinism confirmed (2026-08-05).** Five runs — one sequential under `cargo test`, then **four
+concurrently** from the same test binary in separate working directories — all passed, and their
+`--nocapture` logs are **byte-identical**: 30,015 lines, one MD5 across all five, `diff` clean pairwise.
+So the run is reproducible and CPU contention does not perturb it, which is what makes a
+`full_playthrough` failure meaningful rather than a coin flip. To repeat it, run the test binary
+directly rather than four `cargo test`s (they serialise on the build lock):
+
+```bash
+BIN=$(cargo test --release --features full-playthrough --bin gb --no-run --message-format=json \
+      | jq -r 'select(.profile.test and .executable) | .executable')
+for i in 1 2 3 4; do (mkdir -p /tmp/pt$i && cd /tmp/pt$i && \
+  $BIN pokemon::integration_tests::playthrough::full_playthrough --exact --nocapture > log$i.txt) & done; wait
+```
+⚠️ `--exact` needs the **full module path**; `-- full_playthrough --exact` matches zero tests and
+reports a cheerful `0 passed`. Separate working directories keep each run's `target/test-artifacts/`
+from clobbering the others on failure.

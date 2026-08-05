@@ -33,16 +33,16 @@ fn can_enter_saffron() {
 /// what reaches Cinnabar — so this leg is what makes the back half of the game possible at all. Ends
 /// back in Saffron for Silph Co.
 ///
-/// **Blocked on a stale fixture, not on the leg.** `eevee_vaporeon_surf_steps` addresses the party by
-/// *slot*: it evolves slot 1 and teaches Surf to slot 1, on the assumption that the gift Eevee appends
-/// right after the lone starter. But `at-saffron.bin` was snapshotted before the run dropped the early
-/// Route-1 Pidgey, so its slot 1 is a **lv4 Pidgey** — the Water Stone evolves nothing and `TeachMove`
-/// then spins forever trying to teach Surf to a Pidgey, which cannot learn it. Every committed fixture
-/// from `post-cascade.bin` onward carries that Pidgey, so this cannot be fixed by regenerating one
-/// snapshot; it needs a fresh `full_playthrough` to re-cut the chain (or `PolicyStep` party references
-/// moved from slot to species).
+/// This was `#[ignore]`d for a long time on the theory that the fixture was stale and a regeneration
+/// would fix it. It would not have. `eevee_vaporeon_surf_steps` used to address the party by *slot* —
+/// evolve slot 1, teach Surf to slot 1 — assuming the gift Eevee appends right after the lone starter.
+/// `at-saffron.bin` still carries the early Route-1 Pidgey at slot 1, so the Water Stone evolved
+/// nothing and `TeachMove` spun forever on a Pidgey, which cannot learn Surf. But the Pidgey enters the
+/// chain at `post-cascade.bin`, a committed **root** no test produces, so re-deriving `at-saffron.bin`
+/// would have re-derived the Pidgey with it. The fix was [`PartyRef::Species`]: the leg now names the
+/// Eevee and the Vaporeon it becomes, and does not care what else is in the party or where.
 #[test]
-#[ignore = "at-saffron.bin predates the lone-starter plan (slot 1 is a Pidgey, not Eevee) — see the doc comment"]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_vaporeon() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/at-saffron.bin"),
@@ -75,11 +75,16 @@ fn can_get_vaporeon() {
 /// `enter(9F)` (walk to the reachable (9,15) pad → 9F(17,15)) then `enter(5F)` (step back onto (17,15)
 /// → arrive standing on 5F(9,15), now adjacent to the pocket) — expressed directly as `enter()` steps,
 /// no new maze-routing machinery needed.
+///
+/// Seeded from `vaporeon-ready.bin`, not `at-saffron.bin`: `complete_game_steps` fetches Vaporeon
+/// *before* Silph so its Surf can answer the 7F rival, and this leg used to start one step upstream of
+/// that — which is why `silph-card-key.bin` reached [`can_beat_silph_giovanni`] with no Vaporeon in it
+/// and left that test unwinnable. The leg chain now matches the mainline ordering.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_silph_card_key() {
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/at-saffron.bin"),
+        include_bytes!("../data/vaporeon-ready.bin"),
         Duration::from_mins(30),
         PolicyStep::silph_co_card_key_steps(),
     );
@@ -96,13 +101,13 @@ fn can_get_silph_card_key() {
 /// is queued repeatedly because a plain `Interact` pops the moment it issues the walk and cannot resume
 /// after the Rocket in the path interrupts it. Ends back in Saffron City, healed.
 ///
-/// **Blocked on the same stale chain as [`can_get_vaporeon`].** `complete_game_steps` gets Vaporeon
-/// *before* Silph precisely so its Surf can answer the 7F rival's Alakazam and Charizard, but
-/// `silph-card-key.bin` was snapshotted under the older ordering and holds Venusaur + the lv4 Pidgey.
-/// The navigation works — the run reaches 11F — and then the rival fight is unwinnable. Regenerating
-/// this fixture depends on `can_get_vaporeon` running first.
+/// This was `#[ignore]`d because the navigation worked — the run reached 11F — and then the 7F rival
+/// fight was unwinnable: `silph-card-key.bin` had been cut under an older leg ordering that put Silph
+/// before Vaporeon, so it arrived with Venusaur alone against an Alakazam and a Charizard. Nothing was
+/// wrong with the leg. Re-pointing [`can_get_silph_card_key`] at `vaporeon-ready.bin` put the chain
+/// back in `complete_game_steps`' own order and the Vaporeon back in the party.
 #[test]
-#[ignore = "silph-card-key.bin has no Vaporeon (older leg ordering) — see the doc comment"]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_beat_silph_giovanni() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/silph-card-key.bin"),

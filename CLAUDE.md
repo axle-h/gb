@@ -136,6 +136,33 @@ through a Cargo feature (`slow-tests`, `full-playthrough`, `bench`) so the ignor
 readable backlog. Every remaining `#[ignore]` reason names its blocker — a plan task ID where one
 exists, or why it will not be fixed.
 
+### ⚠️ Run `full_playthrough` after every major work item, and always before pushing
+
+```bash
+cargo test --release --features full-playthrough full_playthrough   # ~20 min
+```
+
+**This is not optional and the leg tier is not a substitute for it.** The leg tests each start from a
+committed fixture, so they prove the legs *individually*; only `full_playthrough` proves they still
+**compose**, and the two come apart in ways nothing else catches:
+
+- **A leg test can be green for a reason the mainline does not give it.** `run_leg` keeps stepping
+  after the queue empties until the effect lands, so a leg whose `Interact` pops before its
+  conversation still passes — while `complete_game_steps` walks straight on without the item. That is
+  exactly how the Poké Flute broke. `run_leg` now prints a ⚠️ when its post-exhaustion wait is long;
+  **treat that warning as a failure in waiting.**
+- **A fixture pins a party and a bag; the mainline earns them.** A leg seeded with 20 Hyper Potions
+  says nothing about whether the run that reaches it can afford them.
+- **Anything that changes frame timing re-rolls the RNG stream** (see `with_original_battle_timing`),
+  and only a full run crosses every route that stream feeds.
+
+Because it is opt-in and slow, it rotted once already: it sat broken while its own doc comment, this
+file and the plan all claimed it played to all 8 badges. When it fails it now reports how far it got
+(`completed 488/516 policy steps (94%)`) and drops a save state + screenshot in
+`target/test-artifacts/`; `playthrough::probe_resume_playthrough` replays from there in seconds
+instead of re-running the 20 minutes up to the stall. **If you cannot make it pass, say so explicitly
+in the hand-off — do not leave a doc comment claiming it works.**
+
 **Fixtures are committed inputs.** Each leg test snapshots its end state for the next leg, but the
 write is a no-op unless `--features regen-fixtures` is on — otherwise every run silently changes the
 next run's inputs, and a leg "fails" only because an earlier one re-saved its fixture. To regenerate

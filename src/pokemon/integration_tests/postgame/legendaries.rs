@@ -77,10 +77,10 @@ fn probe_route_to_moltres() {
         PolicyStep::Interact(MapSprite::ROUTE22GATE_GUARD),
         PolicyStep::enter(Map::Route23),
         PolicyStep::goto(Map::VictoryRoad1F),
-        PolicyStep::UseStrength { slot: 3 },
+        PolicyStep::UseStrength { target: PartyRef::Slot(3) },
         PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
         PolicyStep::enter(Map::VictoryRoad2F),
-        PolicyStep::UseStrength { slot: 3 },
+        PolicyStep::UseStrength { target: PartyRef::Slot(3) },
         PolicyStep::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
         // Moltres is not in the (1,16)-opened region either — the north strip that holds it, Super
         // Nerd 2 (4,2) and the Guard Spec (11,0) is entered only through VR2F's own (1,1) ladder,

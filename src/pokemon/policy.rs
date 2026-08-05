@@ -307,6 +307,39 @@ fn all_damaging_moves_low_pp(actions: &[BattleAction]) -> bool {
 }
 
 
+/// How a step names a party member.
+///
+/// `Slot` is positional and is right whenever the position is the *point* — Cut always uses the lead,
+/// so `MovePokemonToFront { slot: 1 }` means "the second one, whatever it is". `Species` is resolved
+/// against the live [`GameState`] every tick, and is what to use when the step means a particular
+/// **mon**: a slot index is a guess about how many members the party happened to have when the run
+/// reached this step, and it silently addresses the wrong mon the moment that guess is off. That is
+/// what broke `eevee_vaporeon_surf_steps` (slot 1 was a Pidgey, not the gift Eevee) and what made
+/// `victory_road_1f_steps` need a `machop_slot` argument its two callers disagreed about.
+///
+/// Resolution is deliberately *late*: a step may name a mon the party does not hold yet (the Eevee is
+/// still a Poké Ball on the floor when `eevee_vaporeon_surf_steps` is composed), so an unresolved
+/// `Species` means "keep waiting", not "skip".
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PartyRef {
+    /// The member at this party index.
+    Slot(u8),
+    /// The first member of this species.
+    Species(PokemonSpecies),
+}
+
+impl PartyRef {
+    /// The party index this reference currently points at, or `None` if the party holds no such mon.
+    pub fn resolve(&self, state: &GameState) -> Option<u8> {
+        match *self {
+            Self::Slot(slot) => (usize::from(slot) < state.pokemon.len()).then_some(slot),
+            Self::Species(species) => state.pokemon.iter()
+                .position(|p| p.species == species)
+                .map(|i| i as u8),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PolicyStep {
     Goto { map: Map, strict: bool },
@@ -455,21 +488,22 @@ pub enum PolicyStep {
     /// Reorder the party so the member in `slot` becomes the lead (slot 0), written straight to RAM
     /// (no menu navigation). Makes a trained bench mon the battle lead so it fights — and earns XP —
     /// from the start of every battle, with no in-battle switch-in needed.
-    MovePokemonToFront { slot: u8 },
+    MovePokemonToFront { target: PartyRef },
     /// Walk in grass until the party member in `slot` reaches at least `target_level`. During grind
     /// battles the policy switches that slot in so it earns the XP (usually `slot: 0`, the lead; use a
     /// higher slot to train a bench mon, e.g. a freshly-evolved Vaporeon).
     GrindUntilLevel { target_level: u8, on_map: Map, slot: u8 },
     /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
     BuyFromMart { map: Map, item: BagItem },
-    /// Teach an HM/TM `item` (e.g. HM01 Cut) to the party member in `target_slot`, from the
-    /// overworld. Drives the START → ITEM → use → choose-Pokémon menus; the move-replace menu (if the
-    /// mon already knows 4 moves) is handled by the global forget-move handler. Persists until the
-    /// target knows the move.
-    TeachMove { item: ItemId, target_slot: u8 },
-    /// Use an evolution `stone` (e.g. Water Stone) from the bag on the party member in `target_slot`
-    /// to evolve it (e.g. Eevee → Vaporeon). Persists until that slot's species changes.
-    EvolveWithStone { stone: ItemId, target_slot: u8 },
+    /// Teach an HM/TM `item` (e.g. HM01 Cut) to the party member `target` names, from the overworld.
+    /// Drives the START → ITEM → use → choose-Pokémon menus; the move-replace menu (if the mon already
+    /// knows 4 moves) is handled by the global forget-move handler. Persists until the target knows the
+    /// move — so a [`PartyRef::Slot`] aimed at a mon that *cannot* learn it never completes. Prefer
+    /// [`PartyRef::Species`] unless the position is genuinely what is meant.
+    TeachMove { item: ItemId, target: PartyRef },
+    /// Use an evolution `stone` (e.g. Water Stone) from the bag on the party member `target` names, to
+    /// evolve it (e.g. Eevee → Vaporeon). Persists until that mon's species changes.
+    EvolveWithStone { stone: ItemId, target: PartyRef },
     /// Use a Rare Candy from the bag on the party member in `slot` (levels it up and, crucially, frees
     /// a bag slot). Drives the same START → ITEM → USE → choose-Pokémon menus as teaching a move;
     /// persists until the Rare Candy is consumed (no longer in the bag).
@@ -490,10 +524,10 @@ pub enum PolicyStep {
     /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge). Routes to face a
     /// `MetaTile::CutTree`, then uses the Cut field move. Persists until no reachable tree remains.
     CutTree { map: Map },
-    /// Activate Strength using the party mon at `slot` (an HM-slave that knows it). Completes once
+    /// Activate Strength using the party mon `target` names (an HM-slave that knows it). Completes once
     /// `BIT_STRENGTH_ACTIVE` is set. Strength resets on every map change, so re-issue it per floor
     /// before pushing boulders. Only meaningful once a party member knows Strength.
-    UseStrength { slot: u8 },
+    UseStrength { target: PartyRef },
     /// Push a boulder onto the Strength switch at `switch` (a cave floor coordinate), solving the
     /// current floor's boulder puzzle. Requires `BIT_STRENGTH_ACTIVE` already armed (issue `UseStrength`
     /// first). The agent runs `MetaTileMap::solve_boulder_push(switch)` to plan the pushes and drives
@@ -655,6 +689,12 @@ pub(crate) fn field_move_index_of(mon: &crate::pokemon::pokemon::Pokemon, want: 
 }
 
 impl PolicyStep {
+    /// The Victory Road boulder slave, named by species because it is caught *inside*
+    /// [`Self::victory_road_1f_steps`] — the slot it lands in depends on how many mons the run arrived
+    /// with, which is exactly what the old `machop_slot` argument was guessing at (and `complete_game_steps`
+    /// and the leg test guessed differently: 4 versus 2).
+    const MACHOP: PartyRef = PartyRef::Species(PokemonSpecies::Machop);
+
     pub const fn goto(map: Map) -> Self {
         Self::Goto { map, strict: true }
     }
@@ -825,7 +865,7 @@ impl PolicyStep {
     pub fn thunder_badge_steps() -> Vec<Self> {
         let mut s = Self::heal_at_vermilion();
         s.extend([
-            Self::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 },
+            Self::TeachMove { item: ItemId::Hm01Cut, target: PartyRef::Slot(0) }, // the lead: `CuttingTree` only ever asks slot 0
             Self::CutTree { map: Map::VermilionCity },
             Self::enter(Map::VermilionGym),
             Self::SolveTrashCans,
@@ -846,6 +886,16 @@ impl PolicyStep {
         ];
         s.extend(Self::heal_at_vermilion());
         s.extend([
+            // **Stock healing items before leaving Vermilion.** Everything from here to Celadon —
+            // Rock Tunnel's encounter-dense maze, then seven floors of Pokémon Tower — is
+            // Pokémon-Center-less and fought by a *lone* starter, and the run used to carry no healing
+            // items at all: `pick_battle_action`'s "HP critical — using healing item" branch works, it
+            // simply had nothing to reach for, so attrition ended the run rather than costing it a
+            // detour. Vermilion is the **first mart on the route that stocks Super Potions**
+            // (`data/items/marts.asm:17`); Cerulean, the next one, sells only the +20 Potion.
+            Self::enter(Map::VermilionMart),
+            Self::BuyFromMart { item: BagItem::new(ItemId::SuperPotion, 10), map: Map::VermilionMart },
+            Self::enter(Map::VermilionCity),
             Self::enter(Map::Route6),
             Self::enter(Map::UndergroundPathRoute6),
             Self::enter(Map::UndergroundPathNorthSouth),
@@ -1037,7 +1087,14 @@ impl PolicyStep {
             // out to the Game Corner, into Celadon; then heal.
             Self::enter(Map::RocketHideoutElevator),
             Self::UseElevator { panel: Point8 { x: 1, y: 1 }, floor: 1 }, // B2F = menu index 1
-            Self::enter(Map::RocketHideoutB1F),
+            // **B1F is two disconnected halves**, split by the full-width wall at row 16, and B2F has a
+            // staircase into each: (21,22) → B1F (21,24) in the south half, (27,8) → B1F (23,2) in the
+            // north. Only the north half holds the Game Corner staircase (21,2). A bare
+            // `enter(RocketHideoutB1F)` takes the *nearest* warp, which off the elevator is the southern
+            // one at 10 steps against the northern one's 33 — and the south half's only other exit is
+            // the elevator, behind the still-shut Rocket-5 door at column 23. So name the landing.
+            // (`fuchsia::probe_hideout_b1f_halves` dumps both halves and the two landings.)
+            Self::EnterMap { to_map: Map::RocketHideoutB1F, to_position: Some(Point8 { x: 23, y: 2 }) },
             Self::enter(Map::GameCorner),
             Self::enter(Map::CeladonCity),
             Self::enter(Map::CeladonPokecenter),
@@ -1060,6 +1117,15 @@ impl PolicyStep {
             // makes Lavender the nearest respawn if it does black out. (Same rule as Rock Tunnel.)
             Self::enter(Map::LavenderPokecenter),
             Self::Interact(MapSprite::LAVENDERPOKECENTER_NURSE),
+            // Top the Super Potions back up at the Lavender mart before climbing — full HP at the door
+            // is not enough on its own. The tower is the single longest unbroken fight in the run for a
+            // lone starter (7 floors of Channelers, the ghost Marowak, then three Rockets, no Center
+            // inside), and a Rocket's **Drowzee sleeps the lead and kills it through the sleep**: with
+            // an empty bag there is no answer to that, because a sleeping mon cannot attack but the
+            // *player* can still use an item. That black-out is what stalled `full_playthrough` at
+            // Mr Fuji's House — see the note on the rescue steps below.
+            Self::enter(Map::LavenderMart),
+            Self::BuyFromMart { item: BagItem::new(ItemId::SuperPotion, 10), map: Map::LavenderMart },
             Self::enter(Map::LavenderTown),
         ]);
         // Climb the tower. Each up-warp is at the same corner on consecutive floors; Channelers engage
@@ -1083,9 +1149,27 @@ impl PolicyStep {
             Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET1),
             Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET2),
             Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET3),
+            // ⚠️ **Re-assert the floor before the rescue, so a black-out is survivable.** `Interact`
+            // pops the moment it issues its walk, and an `OverworldActionAborted { reason: WrongMap }`
+            // pops it too — so if the party faints up here, the respawn in Lavender silently *skips*
+            // the rescue and the run wedges on the next step instead, in Mr Fuji's house, staring at a
+            // Mr Fuji who is still `hidden` because he is still in the tower. That failure is 200 steps
+            // and ten minutes of game time away from its cause, which is what made it expensive to
+            // diagnose. `goto` re-climbs (the Channelers stay beaten, so it is quick) and is a no-op
+            // when we are already standing here.
+            Self::goto(Map::PokemonTower7F),
             Self::Interact(MapSprite::POKEMONTOWER7F_MR_FUJI),
-            Self::Interact(MapSprite::MRFUJISHOUSE_MR_FUJI),
         ]);
+        // ⚠️ **Talk to Mr Fuji at home more than once.** His tower script warps the player into his
+        // house *standing on the door tile*, and a plain `Interact` pops the moment it issues its walk
+        // — so the first one pops while the warp is still resolving and the Flute is never collected.
+        // The leg test `fuchsia::can_get_poke_flute` cannot see this: it uses `run_leg`, which keeps
+        // stepping after the queue empties until the Flute appears, and the agent gets there on its own.
+        // `full_playthrough` has no such tolerance — its queue moves straight on to `enter(LavenderTown)`
+        // with the player still parked on the door, and the run wedged there for the whole budget.
+        // Repeating is the same idiom `silph_giovanni_steps` uses for Giovanni; each extra one is a
+        // no-op once the conversation has happened.
+        for _ in 0..4 { s.push(Self::Interact(MapSprite::MRFUJISHOUSE_MR_FUJI)); }
         s
     }
 
@@ -1289,6 +1373,14 @@ impl PolicyStep {
         // pops after a bounded wait instead of hanging forever (plain Interact never gives up).
         for _ in 0..14 { s.push(Self::InteractIfReachable(MS::SILPHCO11F_GIOVANNI)); }
         s.extend([
+            // ⚠️ **Free a bag slot before the President reaches into his pocket.** A gift is not a
+            // purchase: there is no "you gave up" to detect, the ROM just prints "You have no room for
+            // this." inside his thank-you speech and the `Interact` completes looking exactly like a
+            // success. The Master Ball then never arrives, and the failure surfaces 100 steps later in
+            // the Seafoam Islands, where `CatchPokemon { ball: MasterBall }` silently falls back to the
+            // best ball in the bag, throws a Great Ball at a lv50 Articuno and loses the party.
+            // TM34 Bide is the deadest weight the run carries — picked up in Cerulean, never taught.
+            Self::TossItem { item: ItemId::Tm34Bide },
             Self::Interact(MS::SILPHCO11F_SILPH_PRESIDENT),             // Master Ball + Rockets leave Saffron
             Self::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 7 }) },   // 11F(3,2) pad
             Self::EnterMap { to_map: Map::SilphCo3F, to_position: Some(Point8 { x: 11, y: 11 }) }, // 7F(5,3) pad
@@ -1315,8 +1407,7 @@ impl PolicyStep {
 
     /// From Saffron: fetch the free **Eevee** (Celadon Mansion roof house), buy a **Water Stone** (Celadon
     /// Dept Store 4F), evolve Eevee → **Vaporeon** and teach it **Surf** — the lone Grass starter can't
-    /// learn Surf, and Surf is needed to reach Cinnabar. Ends back in Celadon. Eevee is the gift Poké Ball
-    /// so it appends to the party at **slot 1** (after the lone Venusaur).
+    /// learn Surf, and Surf is needed to reach Cinnabar. Ends back in Celadon.
     pub fn eevee_vaporeon_surf_steps() -> Vec<Self> {
         use crate::pokemon::map::MapSprite as MS;
         vec![
@@ -1347,11 +1438,13 @@ impl PolicyStep {
             Self::BuyFromMart { item: BagItem::new(ItemId::WaterStone, 1), map: Map::CeladonMart4F },
             Self::enter(Map::CeladonMart1F),
             Self::enter(Map::CeladonCity),
-            // Evolve Eevee (slot 1) → Vaporeon and teach it Surf. Vaporeon is the answer to the Silph
+            // Evolve the Eevee → Vaporeon and teach it Surf. Vaporeon is the answer to the Silph
             // rival's Alakazam (Surf ignores its huge Special wall better than Venusaur's resisted Razor
             // Leaf) and to Blaine's Fire team, plus it carries Surf for the Cinnabar crossing.
-            Self::EvolveWithStone { stone: ItemId::WaterStone, target_slot: 1 },
-            Self::TeachMove { item: ItemId::Hm03Surf, target_slot: 1 },
+            // Both name the mon by **species**: where the gift Eevee lands depends on how many members
+            // the party already has, and the fixture chain's parties are not the mainline's.
+            Self::EvolveWithStone { stone: ItemId::WaterStone, target: PartyRef::Species(PokemonSpecies::Eevee) },
+            Self::TeachMove { item: ItemId::Hm03Surf, target: PartyRef::Species(PokemonSpecies::Vaporeon) },
             // Back to Saffron for Silph Co (Celadon → Route 7 → Saffron).
             Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
             Self::enter(Map::Route7Gate),
@@ -1440,7 +1533,7 @@ impl PolicyStep {
             Self::enter(Map::CinnabarIsland),
             // Lead with Vaporeon for Blaine — his all-Fire team takes 2× from Surf, and Venusaur (Grass)
             // is 2× weak to Fire. Party is [Venusaur, Vaporeon] here, so slot 1 → front puts Vaporeon up.
-            Self::MovePokemonToFront { slot: 1 },
+            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Venusaur) },
             Self::enter(Map::CinnabarGym),
             Self::DefeatGymLeader { leader: MapSprite::CINNABARGYM_BLAINE, badge: Badge::VolcanoBadge },
         ]
@@ -1533,7 +1626,9 @@ impl PolicyStep {
     pub fn seafoam_articuno_steps() -> Vec<Self> {
         // Strength is armed per floor: `BIT_STRENGTH_ACTIVE` is cleared on every map change, and the
         // route leaves and re-enters each boulder floor.
-        let slave = 2u8;   // the Slowpoke caught below, appended after Vaporeon + Venusaur
+        // The HM slave is named by species, not by slot: it is caught *inside* this step list, so any
+        // slot index would be an assumption about how big the party was on arrival.
+        const SLAVE: PartyRef = PartyRef::Species(PokemonSpecies::Slowpoke);
         vec![
             // Heal and stock balls first: Route 20's swimmer gauntlet is fought on the way over, and
             // there is no Pokémon Center inside Seafoam (its wilds are fled — `in_center_less_dungeon`).
@@ -1559,9 +1654,9 @@ impl PolicyStep {
             // The HM slave, before anything needs pushing.
             Self::CatchPokemon { species: PokemonSpecies::Slowpoke, on_map: Map::SeafoamIslands1F,
                                  ball: Some(ItemId::GreatBall) },
-            Self::TeachMove { item: ItemId::Hm04Strength, target_slot: slave },
+            Self::TeachMove { item: ItemId::Hm04Strength, target: SLAVE },
             // TM28 is dead weight in the bag and the way home in the slave's move list.
-            Self::TeachMove { item: ItemId::Tm28Dig, target_slot: slave },
+            Self::TeachMove { item: ItemId::Tm28Dig, target: SLAVE },
             // Down the east side, one walled pocket at a time, then across to B3F's west half.
             Self::enter_at(Map::SeafoamIslandsB1F, 23, 15),
             Self::enter_at(Map::SeafoamIslandsB2F, 25, 11),
@@ -1570,7 +1665,7 @@ impl PolicyStep {
             Self::enter_at(Map::SeafoamIslandsB3F, 8, 6),
             // ── SEAFOAM4: two of B3F's four boulders into its two holes. The planner moves (5,14) out
             // of the corridor first — it is the only tile from which (3,15) can be reached at all.
-            Self::UseStrength { slot: slave },
+            Self::UseStrength { target: SLAVE },
             Self::DropBoulderInHole { hole: Point8 { x: 3, y: 16 } },
             Self::DropBoulderInHole { hole: Point8 { x: 6, y: 16 } },
             // Fall through the (6,16) hole into the west lake, already surfing, and Master-Ball the bird.
@@ -1580,11 +1675,11 @@ impl PolicyStep {
             // The bird arrives with Peck and Ice Beam — 10 PP of Ice for five Elite Four rooms. TM14
             // (taken in the Mansion) adds Blizzard: same STAB, 120 power, and five more Ice attacks.
             // Skipped harmlessly if this run never collected the TM.
-            Self::TeachMove { item: ItemId::Tm14Blizzard, target_slot: 3 },
+            Self::TeachMove { item: ItemId::Tm14Blizzard, target: PartyRef::Species(PokemonSpecies::Articuno) },
             // Out with DIG: there is no walkable way back east (see the doc above), and it lands on
             // Cinnabar Island because that is where the Pokémon Center at the top of this list set
             // `wLastBlackoutMap`.
-            Self::Dig { slot: slave },
+            Self::Dig { slot: 2 }, // the Slowpoke: caught after Vaporeon + Venusaur, so slot 2 (`Dig` is still slot-addressed)
             Self::enter(Map::CinnabarIsland),
         ]
     }
@@ -1615,7 +1710,7 @@ impl PolicyStep {
     /// solve the 1F boulder puzzle (push a boulder onto the (17,13) switch) and climb the now-open (1,1)
     /// ladder to VR2F. Reliable from a fresh run; folded into `complete_game_steps`. The deeper VR2F/VR3F
     /// puzzle is `victory_road_2f_3f_steps` (PP-marginal from a fresh run — see its note).
-    pub fn victory_road_1f_steps(machop_slot: u8) -> Vec<Self> {
+    pub fn victory_road_1f_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::ViridianCity),          // out of the gym
             // The Route-22 rival is a Silph-rival redux (Alakazam + Charizard). Beat it like Silph: heal
@@ -1630,7 +1725,12 @@ impl PolicyStep {
             // used to sit here walked in, failed four times and walked out. The stack is bought on
             // Cinnabar instead, in `seafoam_articuno_steps`, at the last mart on the route that
             // stocks them.)
-            Self::MovePokemonToFront { slot: 1 },    // Venusaur leads the rival (Alakazam nemesis)
+            // ⚠️ **By species.** This used to be `slot: 1`, written when the party was Venusaur +
+            // Vaporeon and slot 1 *was* Venusaur. By Victory Road the run also carries the Seafoam
+            // Slowpoke and Articuno, and their arrival order is not fixed — so the "lead the bulky
+            // Venusaur" comment could put the lv30 HM-slave in front instead, which is how a party
+            // that should beat VR1F's nine trainers ended up blacked out on the way to the ladder.
+            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Venusaur) },
             Self::enter(Map::Route22),
             Self::enter(Map::Route22Gate),           // walk west → rival ambush → gate to Route 23
             Self::Interact(MapSprite::ROUTE22GATE_GUARD), // walk to (5,2): badge check + flips the dynamic warp
@@ -1638,11 +1738,22 @@ impl PolicyStep {
             Self::goto(Map::VictoryRoad1F),
             // Catch a wild Machop (learns Strength) as the boulder HM-slave — Master Ball, thrown at once.
             Self::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F, ball: None },
-            Self::TeachMove { item: ItemId::Hm04Strength, target_slot: machop_slot }, // Machop appends after the party
+            Self::TeachMove { item: ItemId::Hm04Strength, target: Self::MACHOP }, // caught just above
             // VR1F: push a boulder onto (17,13), climb to VR2F.
-            Self::UseStrength { slot: machop_slot },
+            Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
-            Self::enter(Map::VictoryRoad2F),
+            // ⚠️ **`goto`, not `enter`, because a black-out on this last walk is otherwise terminal.**
+            // VR1F has ~9 mandatory trainers and no Pokémon Center, and the party can lose the last of
+            // them on the way to the ladder. When it does, the respawn is in Viridian — and worse, the
+            // *agent reads it as success*: a warp is "done" when the map changes, and a black-out
+            // changes the map, so the run logs `OverworldActionCompleted { Warp → VictoryRoad2F }`
+            // while standing in Viridian City. A single-hop `enter` then re-issues forever, because it
+            // cannot cross four maps. Strict `Goto` re-runs `route_toward` every tick until the player
+            // is *actually* on VR2F, so it walks back (Route 22 → 23 → VR1F → ladder) instead — and the
+            // second climb is cheap, because beaten trainers stay beaten and the boulder stays on the
+            // switch. Putting the recovery *in front of* the fragile step does not work; it has to
+            // **be** the fragile step.
+            Self::goto(Map::VictoryRoad2F),
         ]
     }
 
@@ -1651,20 +1762,20 @@ impl PolicyStep {
     /// VR3F fixture). NB: chaining this onto a *fresh* run is PP-marginal — VR's ~9 mandatory trainers
     /// plus the Route-22 rival drain Venusaur past its ~50 damaging PP in some RNG lines (there is no
     /// Pokémon Center inside VR), so it is NOT yet in `complete_game_steps`; that needs a stronger team.
-    pub fn victory_road_2f_3f_steps(machop_slot: u8) -> Vec<Self> {
+    pub fn victory_road_2f_3f_steps() -> Vec<Self> {
         vec![
             // VR2F: switch1 (1,16) → up the (23,7) stairs to VR3F.
-            Self::UseStrength { slot: machop_slot },
+            Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
             Self::enter(Map::VictoryRoad3F),
             // VR3F: switch (3,5) opens the hole barrier; drop a boulder into the hole (23,15) to reveal 2F's
             // hidden boulder, then fall through the hole to VR2F's east side.
-            Self::UseStrength { slot: machop_slot },
+            Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 3, y: 5 } },
             Self::DropBoulderInHole { hole: Point8 { x: 23, y: 15 } },
             Self::enter_at(Map::VictoryRoad2F, 22, 16),
             // VR2F east: push the revealed boulder onto switch2 (9,16); this leaves the player in the west.
-            Self::UseStrength { slot: machop_slot },
+            Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 9, y: 16 } },
             // Return trip: climb back to VR3F and fall through the hole again → back east with switch2 open.
             Self::enter(Map::VictoryRoad3F),
@@ -1702,14 +1813,14 @@ impl PolicyStep {
             Self::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
             Self::Interact(MapSprite::INDIGOPLATEAULOBBY_NURSE),   // revive + restore all PP
             // Venusaur leads: Razor Leaf is 2× on all of Lorelei's Water types and 4× on Bruno's Onix.
-            Self::MovePokemonToFront { slot: lead },
+            Self::MovePokemonToFront { target: PartyRef::Slot(lead) },
             Self::enter(Map::LoreleisRoom),
             Self::BattleTrainer { trainer: MapSprite::LORELEISROOM_LORELEI },
             Self::enter(Map::BrunosRoom),
             Self::BattleTrainer { trainer: MapSprite::BRUNOSROOM_BRUNO },
             Self::enter(Map::AgathasRoom),
             Self::BattleTrainer { trainer: MapSprite::AGATHASROOM_AGATHA },
-            Self::MovePokemonToFront { slot: ice_lead },
+            Self::MovePokemonToFront { target: PartyRef::Slot(ice_lead) },
             Self::enter(Map::LancesRoom),
             Self::BattleTrainer { trainer: MapSprite::LANCESROOM_LANCE },
             Self::enter(Map::ChampionsRoom),
@@ -1868,7 +1979,7 @@ impl PolicyStep {
         // ── Victory Road 1F: catch a Strength HM-slave, solve the boulder puzzle, climb to VR2F ──
         // (The full VR2F/VR3F puzzle works — `can_solve_victory_road_2f_3f` — but chaining it here is
         // PP-marginal for this team; see `victory_road_2f_3f_steps`.)
-        steps.extend(Self::victory_road_1f_steps(4)); // starter + Vaporeon + Slowpoke + Articuno → Machop at slot 4
+        steps.extend(Self::victory_road_1f_steps());
 
         steps
     }
@@ -1932,6 +2043,9 @@ pub struct DeterministicPolicy {
     /// once the count drops (a boulder was pushed onto the hole and fell to the floor below), so exactly
     /// one boulder is dropped rather than every boulder that can reach the hole.
     boulder_drop_baseline: Option<usize>,
+    /// The `EvolveWithStone` target the baseline below belongs to, so a later step aimed at a
+    /// different mon starts its own baseline rather than inheriting this one.
+    evolve_baseline: Option<(PartyRef, PokemonSpecies)>,
     /// Positions of gym trainers already beaten during the current `DefeatGymLeader` step (Cinnabar's
     /// quiz-gate maze): a defeated trainer stays on the map as a sprite, so once we detect we're
     /// standing in its line of sight with no battle starting, we record it here to avoid re-targeting.
@@ -2033,6 +2147,7 @@ impl DeterministicPolicy {
             mansion_flip_baseline: None,
             hidden_item_baseline: None,
             boulder_drop_baseline: None,
+            evolve_baseline: None,
             gym_beaten: HashSet::new(),
             gym_engage: None,
             train_slot: None,
@@ -3472,7 +3587,12 @@ impl Policy for DeterministicPolicy {
             self.queue.pop_front();
             return Some(FieldMove::Fly { to });
         }
-        if let Some(&PolicyStep::MovePokemonToFront { slot }) = self.queue.front() {
+        if let Some(&PolicyStep::MovePokemonToFront { target }) = self.queue.front() {
+            let Some(slot) = target.resolve(state) else {
+                println!("[policy] MovePokemonToFront: {target:?} is not in the party — skipping");
+                self.queue.pop_front();
+                return None;
+            };
             self.queue.pop_front();
             return Some(FieldMove::ReorderParty { slot });
         }
@@ -3486,12 +3606,16 @@ impl Policy for DeterministicPolicy {
             }
             return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Flash) });
         }
-        if let Some(&PolicyStep::UseStrength { slot }) = self.queue.front() {
+        if let Some(&PolicyStep::UseStrength { target }) = self.queue.front() {
             if state.strength_active {
                 println!("[policy] UseStrength: BIT_STRENGTH_ACTIVE set — done");
                 self.queue.pop_front();
                 return None;
             }
+            let Some(slot) = target.resolve(state) else {
+                println!("[policy] UseStrength: {target:?} is not in the party — waiting");
+                return None;
+            };
             return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Strength) });
         }
         if let Some(&PolicyStep::SolveBoulders { switch }) = self.queue.front() {
@@ -3521,13 +3645,17 @@ impl Policy for DeterministicPolicy {
             // Plan toward the hole tile (the solver accepts a hole as a push target) and emit one push.
             return Self::next_boulder_push(state, hole);
         }
-        if let Some(&PolicyStep::TeachMove { item, target_slot }) = self.queue.front() {
+        if let Some(&PolicyStep::TeachMove { item, target }) = self.queue.front() {
+            // Resolve every tick, not once: a `Species` target may still be a Poké Ball on the floor
+            // when the step reaches the front of the queue (the Celadon gift Eevee is), and the party
+            // it indexes into is re-read here anyway.
+            let resolved = target.resolve(state);
             let already_knows = hm_move(item).map_or(false, |mv| {
-                state.pokemon.get(target_slot as usize)
+                resolved.and_then(|slot| state.pokemon.get(slot as usize))
                     .map_or(false, |p| p.moves.iter().flatten().any(|m| m.name == mv))
             });
             if already_knows {
-                println!("[policy] TeachMove: slot {target_slot} already knows the move — done");
+                println!("[policy] TeachMove: {target:?} already knows the move — done");
                 self.queue.pop_front();
                 return None;
             }
@@ -3539,6 +3667,10 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
+            let Some(target_slot) = resolved else {
+                println!("[policy] TeachMove: {target:?} is not in the party — waiting");
+                return None;
+            };
             return Some(FieldMove::TeachMove { item, target_slot });
         }
         if let Some(&PolicyStep::UseRareCandy { slot }) = self.queue.front() {
@@ -3576,20 +3708,32 @@ impl Policy for DeterministicPolicy {
             }
             return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Dig) });
         }
-        if let Some(&PolicyStep::EvolveWithStone { stone, target_slot }) = self.queue.front() {
-            let current = state.pokemon.get(target_slot as usize).map(|p| p.species);
-            match current {
-                // Already evolved (species differs from the stone's input mon) — done. We detect this by
-                // the slot no longer holding an Eevee (the only stone-evolver we use); generalise if
-                // more stone-evolvers are added.
-                Some(sp) if sp != PokemonSpecies::Eevee => {
-                    println!("[policy] EvolveWithStone: slot {target_slot} is now {sp:?} — done");
-                    self.queue.pop_front();
-                    return None;
-                }
-                Some(evolve_from) => return Some(FieldMove::EvolveWithStone { stone, target_slot, evolve_from }),
-                None => { self.queue.pop_front(); return None; }
+        if let Some(&PolicyStep::EvolveWithStone { stone, target }) = self.queue.front() {
+            // "Evolved" = the species we started against is no longer at the target. Captured as a
+            // baseline on the first tick rather than compared to a hardcoded input mon, so this works
+            // for any stone-evolver and for a `Slot` target as well as a `Species` one.
+            let current = target.resolve(state).and_then(|slot| state.pokemon.get(slot as usize))
+                .map(|p| p.species);
+            let Some(current) = current else {
+                // A `Species` target that no longer resolves has itself evolved away; a `Slot` target
+                // that does not resolve is off the end of the party and nothing can be done with it.
+                println!("[policy] EvolveWithStone: {target:?} is not in the party — done");
+                self.evolve_baseline = None;
+                self.queue.pop_front();
+                return None;
+            };
+            if self.evolve_baseline.map_or(true, |(who, _)| who != target) {
+                self.evolve_baseline = Some((target, current));
             }
+            let evolve_from = self.evolve_baseline.expect("just set").1;
+            if current != evolve_from {
+                println!("[policy] EvolveWithStone: {target:?} is now {current:?} — done");
+                self.evolve_baseline = None;
+                self.queue.pop_front();
+                return None;
+            }
+            let target_slot = target.resolve(state).expect("resolved just above");
+            return Some(FieldMove::EvolveWithStone { stone, target_slot, evolve_from });
         }
         if let Some(&PolicyStep::SolveTrashCans) = self.queue.front() {
             if let Some(puzzle) = &state.trash_cans {
@@ -3701,7 +3845,10 @@ impl Policy for DeterministicPolicy {
             Some(PolicyStep::BuyFromMart { item, .. }) => {
                 // Count this shop-open as an attempt. The `BuyFromMart` overworld arm pops the step
                 // once the bag reflects the purchase (or after MAX_MART_ATTEMPTS), so we do NOT pop
-                // here — a dropped YES-confirm re-opens the shop and retries.
+                // here — a dropped YES-confirm re-opens the shop and retries. The quantity here is the
+                // one the step *asked* for; the agent trims it to what the wallet can cover (see
+                // `AgentState::PokemartShopping`), because Gen 1 answers an unaffordable quantity by
+                // selling nothing at all.
                 self.mart_attempts += 1;
                 println!("[policy] BuyFromMart: {:?} (attempt {})", item, self.mart_attempts);
                 Some(*item)

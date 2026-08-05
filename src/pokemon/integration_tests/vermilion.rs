@@ -32,7 +32,7 @@ fn can_teach_cut() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-ss-anne.bin"),
         Duration::from_mins(5),
-        vec![PolicyStep::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 }],
+        vec![PolicyStep::TeachMove { item: ItemId::Hm01Cut, target: PartyRef::Slot(0) }],
     );
     fixture.step_until_exhausted();
     let s = fixture.game_state();

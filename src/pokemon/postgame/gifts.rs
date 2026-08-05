@@ -33,7 +33,7 @@ use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::map_metadata::PlayerFacingDirection;
-use crate::pokemon::policy::{FieldMove, PolicyStep};
+use crate::pokemon::policy::{FieldMove, PartyRef, PolicyStep};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::tile::MetaTile;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
@@ -124,7 +124,7 @@ impl PolicyStep {
         let mut s = vec![
             Self::Fly { to: Map::PewterCity },
             // Venusaur leads, because `CuttingTree` only ever asks party slot 0.
-            Self::MovePokemonToFront { slot: 0 },
+            Self::MovePokemonToFront { target: PartyRef::Slot(0) },
             Self::CutTree { map: Map::PewterCity },
             Self::enter_at(Map::Museum1F, 16, 7),
         ];
@@ -325,7 +325,7 @@ impl PolicyStep {
             // top row is connection tiles, so the corridor is chosen by *which one you ask for*.
             Self::enter_at(Map::Route5, 10, 0),
             Self::enter(Map::Daycare),
-            Self::MovePokemonToFront { slot: hm_free_slot },
+            Self::MovePokemonToFront { target: PartyRef::Slot(hm_free_slot) },
             Self::PartyScript { script: PartyScript::Daycare, slot: 0 }, // deposit the lead
             Self::enter(Map::Route5),
             Self::enter(Map::Daycare),

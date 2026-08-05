@@ -2,6 +2,43 @@
 
 use super::*;
 
+/// Append the **Articuno** that `seafoam_articuno_steps` catches, at the level it is caught (50), with
+/// the moves it is caught with.
+///
+/// ⚠️ **Seeded state, not earned state** — the same device as
+/// [`postgame::legendaries::seed_master_ball`], and it is here because the endgame leg chain has
+/// *diverged from the mainline*. `complete_game_steps` runs `seafoam_articuno_steps` between the
+/// Volcano and Earth badges, so it reaches Victory Road with four party members; but
+/// `post-volcano-lone.bin` — the root this chain hangs off, and one no test produces — was cut before
+/// that leg existed and is explicitly the two-mon "lone" party. Asking a lv56 Venusaur, a lv30 Vaporeon
+/// and the lv24 Machop it catches on arrival to clear Victory Road's nine trainers with no Pokémon
+/// Center inside is asking for something the mainline never asks: it blacks out to Viridian around the
+/// last cooltrainer, twice out of two, on either RNG stream.
+///
+/// Seeding the bird is the cheap half of re-cutting the chain. The honest fix is to re-cut
+/// `post-volcano-lone.bin` out of a Seafoam-era `full_playthrough`; until someone does, this keeps the
+/// leg testing what it is *for* — the Machop catch, the HM04 teach and the boulder puzzle — rather than
+/// a party-strength accident of its seed. Note it is a *generous* Articuno: [`Pokemon::maxed`] gives
+/// max IVs/EVs and the level is then wound back to 50, so it is stronger than one actually caught.
+/// That is deliberate — the point here is to stop the gauntlet deciding the test, not to model the
+/// mainline's bird exactly.
+fn seed_seafoam_articuno(fixture: &mut TestFixture) {
+    use crate::pokemon::pokemon::Pokemon;
+    let mut party = fixture.game_state().pokemon;
+    if party.iter().any(|p| p.species == PokemonSpecies::Articuno) { return; }
+
+    let mut articuno = Pokemon::maxed(PokemonSpecies::Articuno, "ARTICUNO",
+        [PokemonMoveName::Peck, PokemonMoveName::IceBeam, PokemonMoveName::Agility,
+         PokemonMoveName::Mist],
+        fixture.game_state().name.clone(), fixture.game_state().player_id);
+    articuno.experience = PokemonSpecies::Articuno.metadata().experience_group.experience_for_level(50);
+    articuno.recalculate();
+    articuno.current_hp = articuno.stats.hp;
+
+    party.push(articuno);
+    fixture.api().debug_set_party(&party).expect("the lone party has room for another mon");
+}
+
 /// From `post-volcano-lone.bin` (in Blaine's gym after the Volcano Badge, the full-playthrough party —
 /// Venusaur + Vaporeon, 7 badges): Surf back to Pallet and up to Viridian, then clear Giovanni's
 /// **Viridian Gym** spinner-tile maze for the **Earth Badge**, the 8th and final gym badge. Exercises
@@ -23,21 +60,29 @@ fn can_get_earth_badge() {
 /// HM-slave, teach it HM04, then push a boulder onto the (17,13) switch to open the (1,1) ladder and
 /// climb to VR2F. This is the half that is folded into `complete_game_steps`.
 ///
-/// **Known failure.** The Machop *is* caught and lands at slot 2 as the step list expects, but the
-/// following `TeachMove { item: Hm04Strength, target_slot: 2 }` never completes — it re-enters the bag
-/// menu forever, and the run then walks into "This requires STRENGTH to move!" at every boulder until
-/// the cycle budget fires. `vermilion::can_teach_cut` passes teaching HM01 from bag index 7, so the
-/// suspicion is the item-menu **scrolling** for an HM deeper in the bag (HM04 sits at index 11 of 16
-/// here); `saffron::can_get_vaporeon` wedges the same way on HM03 at index 12. Note the committed
-/// `vr1f-strength.bin` proves the leg worked at some point, so this is a regression, not a dead end.
+/// This was `#[ignore]`d blaming the bag: `TeachMove { Hm04Strength }` never completed, and the
+/// standing theory was item-menu **scrolling** for an HM deep in the bag. That theory was already
+/// disproven in the tree — `postgame::fly_bike::can_teach_fly` teaches HM02 from bag index 15 of 16 in
+/// 0.6 s. The real cause was the `machop_slot` argument: the leg took the slave's party index as a
+/// *parameter*, and its two callers disagreed about it (`complete_game_steps` passed 4, this test
+/// passed 2), so on some parties the teach was aimed at a mon that cannot learn Strength — and since
+/// the step's completion check reads that same slot, it could never finish. Naming the Machop by
+/// species removed the argument and the guess with it; the teach now lands in ~20 ticks.
+///
+/// Fixing that exposed a second blocker underneath, which is why this test is **party-seeded** — see
+/// [`seed_seafoam_articuno`], and read it before touching the seed. Its budget is also **180 emulated
+/// minutes**, not the 120 it had while ignored: `CatchPokemon` waits out Victory Road's wild table for
+/// a Machop and is exempt from stall detection, so an under-sized budget fails as a bare *timeout*
+/// with no clue in it.
 #[test]
-#[ignore = "TeachMove(HM04, slot 2) never completes — suspect deep-bag item-menu scrolling; see the doc comment"]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_solve_victory_road_1f() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-earth-badge.bin"),
-        Duration::from_mins(120),
-        PolicyStep::victory_road_1f_steps(2),
+        Duration::from_mins(180),
+        PolicyStep::victory_road_1f_steps(),
     );
+    seed_seafoam_articuno(&mut fixture);
     fixture.step_until_exhausted();
     let s = fixture.game_state();
     let has_strength = s.pokemon.iter()
@@ -61,11 +106,11 @@ fn can_solve_victory_road_1f() {
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_solve_victory_road_2f_3f() {
     let mut steps = vec![
-        PolicyStep::UseStrength { slot: 2 },
+        PolicyStep::UseStrength { target: PartyRef::Species(PokemonSpecies::Machop) },
         PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
         PolicyStep::enter(Map::VictoryRoad2F),
     ];
-    steps.extend(PolicyStep::victory_road_2f_3f_steps(2));
+    steps.extend(PolicyStep::victory_road_2f_3f_steps());
     let mut fixture = TestFixture::new(
         include_bytes!("../data/vr1f-strength.bin"),
         Duration::from_mins(60),
