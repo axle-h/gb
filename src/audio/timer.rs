@@ -42,6 +42,26 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
         self.counter = self.period;
     }
 
+    /// Ticks remaining until the next phase advance. One tick is `1 / SPEED_MULTIPLIER` of an
+    /// M-cycle, so for [`WavetableTimer`] it is 2 T-cycles — the resolution the DMG wave-RAM
+    /// access aperture is defined at (see [`crate::audio::wave_channel::WaveChannel::wave_ram`]).
+    pub fn counter(&self) -> u16 {
+        self.counter
+    }
+
+    /// Ticks between phase advances.
+    pub fn period(&self) -> u16 {
+        self.period
+    }
+
+    /// Trigger, but hold the first phase advance back by `delay` extra ticks. The wave channel
+    /// needs this: on DMG its first sample fetch after a trigger comes `period + 3` ticks later,
+    /// not `period` (gambatte `channel3.cpp:69`).
+    pub fn trigger_after(&mut self, delay: u16) {
+        self.trigger();
+        self.counter = self.period + delay;
+    }
+
     pub fn phase(&self) -> u8 {
         self.phase
     }

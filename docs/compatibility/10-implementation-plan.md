@@ -277,6 +277,28 @@ Write `harness.cpp` yourself; it needs `GB::load(path, flags)` then a loop over
 2 t-cycles). Do 60 warm-up frames before timing. ⚠️ gambatte writes battery saves from its
 destructor — **copy the ROM and `.sav` into the scratch dir** so it cannot write into the project.
 
+### Using gambatte as a reference-screenshot source
+
+⭐ **Added 2026-08-05 (ledger #7).** The same harness, with the loop body replaced by a dump of the
+video buffer, is the cheapest way to obtain a **reference image for a test ROM that ships none** —
+which is what A16 needed and what **B10** (`cgb-acid2`) will need:
+
+```cpp
+FILE *out = std::fopen(argv[2], "wb");                 // binary PGM: greys, no dependencies
+std::fprintf(out, "P5\n160 144\n255\n");
+for (int i = 0; i < 160 * 144; ++i)
+    std::fputc(static_cast<int>((video[i] >> 8) & 0xFF), out);   // 0x00RRGGBB -> one channel
+```
+
+Gambatte's DMG greys come out equal to gb's `FF/AA/55/00`, so the two frames compare byte for byte
+after `convert('L')` — A16 confirmed that on three ROMs. **Check the frame reads as a pass before
+promoting it**, and say in the constant's doc comment where it came from.
+
+Patching a *copy* of the gambatte sources (`cp -r libgambatte common` into scratch, then edit) is
+also the fastest way to answer "what does the reference actually do here?" — A16 found its real bug
+by printing `cc`/`lastReadTime_`/`wavePos_` from `Channel3::waveRamRead` and diffing that trace
+against gb's.
+
 Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orientation:
 
 | Core | Workload | Realtime |
@@ -312,7 +334,8 @@ Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orie
 | A13 | I/O read-back masks + `0xFEA0` region | DONE | 2026-08-05 | `irq` section → **v2** (IE upper bits appended, no fixture churn) |
 | A14 | Wire 19 more blargg ROMs | DONE | 2026-08-05 | **1/19 passes** (`interrupt_time`). Harnesses corrected in ledger #5 |
 | A15 | ~~Screen-output test harness~~ | SKIPPED | 2026-08-05 | **Alex decided.** The harness already existed (`ppu_test`). Row kept so references resolve |
-| A16 | `dmg_sound` 09/10/12 — wave-channel read/trigger/write while on | TODO | | accuracy · the only *fixable* ignored emulator test |
+| A16 | `dmg_sound` 09/10/12 — wave-channel read/trigger/write while on | DONE | 2026-08-05 | all 12 green; screens byte-identical to gambatte. Needed a bus-access *placement* hint, not M-cycle timing |
+| A17 | ~~Combined suite ROMs never terminate~~ | SUPERSEDED | 2026-08-05 | root-caused to **D1**'s bank *mask* vs gb's *clamp*. `cpu_instrs` was never broken — it needed a bigger budget, and is now wired and green. See ledger #8 |
 
 ## Phase B — CGB
 
@@ -346,7 +369,7 @@ Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orie
 
 | ID | Task | State | Date | Notes |
 |---|---|---|---|---|
-| D1 | ROM padding + bank masking (prereq for all MBCs) | TODO | | |
+| D1 | ROM padding + bank masking (prereq for all MBCs) | TODO | | ⭐ has a **failing acceptance test already**: `blargg_dmg_sound::all`. Mask width is per-mapper — see A17 |
 | D2 | `trait Mbc` + dispatch on `CartType` | TODO | | |
 | D3 | MBC1 (+ multicart) | TODO | | |
 | D4 | MBC2 | TODO | | |
@@ -912,29 +935,93 @@ Row retained so existing references resolve.
 
 ### A16 — `dmg_sound` 09/10/12: wave channel read/trigger/write while on
 
-**State:** TODO · **Depends:** none · **Risk:** low · **Added:** 2026-08-05 (ledger #5)
+**State:** DONE (2026-08-05) · **Depends:** none · **Risk:** low · **Added:** 2026-08-05 (ledger #5)
 
-**Why.** These three are the **only ignored emulator tests that are actually fixable today** —
-everything else in the ignored list is blocked on the deferred M-cycle refactor, is an unscheduled
-hardware quirk, or is a tool rather than a test. `gb` genuinely fails them (this is the "9 of 12"
-A10 corrected `CLAUDE.md` to admit), and none of the three needs sub-instruction timing:
+> ✅ **Landed.** All twelve `dmg_sound` sub-tests pass, and gb's frame for each of the three is
+> **byte-identical to gambatte's**. References promoted, tests un-ignored. See ledger #7.
 
-- `09-wave read while on` — reading wave RAM while channel 3 is playing returns the byte the
-  channel is currently fetching, not the addressed one.
+**Why.** These three were the only ignored emulator tests fixable today — everything else in the
+ignored list is blocked on the deferred M-cycle refactor, is an unscheduled hardware quirk, or is a
+tool rather than a test.
+
+- `09-wave read while on` — reading wave RAM while channel 3 plays.
 - `10-wave trigger while on` — retriggering while playing corrupts the first bytes of wave RAM.
 - `12-wave write while on` — same aperture as 09, for writes.
 
-**Note.** Alex un-commented these three and marked them `#[ignore]` in `bf9fad4`; A10's older
-description of them as "commented out" is stale.
+⚠️ **Correction to this task's premise (§1.3).** It claimed "none of the three needs sub-instruction
+timing", and that the read "returns the byte the channel is currently fetching". Both are wrong as
+written:
 
-**⚠️ The reference images are placeholders.** `EXPECTED_WAVE_*_WHILE_ON` in `src/roms/mod.rs` all
-alias `EXPECTED_REGISTERS`, so the tests fail by construction and dump their real output to
-`target/test_failure_*.png`. **Fix the emulator first**, then inspect the dump, and only promote it
-to a committed reference once it reads as a pass. Promoting first would freeze wrong output as the
-expectation.
+- On **DMG** the read returns **`0xFF`** unless it lands on the *exact tick* the channel fetches its
+  next sample — a window one tick (2 T-cycles) wide. Returning the current byte unconditionally, as
+  gb did, is the **CGB** behaviour (gambatte `channel3.h:47-56`).
+- A one-tick window cannot be resolved by "somewhere in this instruction". These tests **do** need
+  the bus access placed inside the instruction — but *only its placement*, not a scheduler.
+  Peripherals are still advanced once per instruction, so §0.2 holds and no part of the M-cycle
+  refactor was started.
 
-**Verify.** All 12 `dmg_sound` sub-tests green, and the other 9 must not regress. `c-sp` ships a
-combined `dmg_sound-dmg.png` reference — wiring the combined ROM to `ppu_test` is a good end check.
+**What it actually took** — four defects, of which only the first two were in the task:
+
+1. **No aperture.** `wave_ram`/`set_wave_ram` ignored timing entirely.
+2. **No trigger corruption**, and the first fetch after a trigger was `period` ticks out rather than
+   `period + 3`.
+3. **The bus-access placement hint.** `Core::execute` now tells the APU the instruction's length
+   (`Audio::set_instruction_length`); hardware puts a load's or store's memory access in the final
+   M-cycle, so the access sits `(len - 1)` M-cycles in. Verified against gambatte's `cpu.cpp`
+   macros, where `LDH A,(n)` reads at `cc + 8` T of a 12 T instruction.
+4. **⭐ The one that actually blocked test 09, and was in nobody's list: gb latched the wave period
+   at trigger and never looked again.** Hardware reloads the frequency timer from NR33/NR34 at every
+   overflow. Test 09 triggers at a long period and then writes `NR33 = 0xFE` (period 2) *before*
+   reading — so gb kept fetching at the old rate and every read after the first missed the window.
+
+**Verify.** All 12 `dmg_sound` sub-tests green, and the other 9 must not regress. Done, plus a
+gambatte cross-check: gb's frame for 09/10/12 is pixel-identical to gambatte's.
+
+⚠️ **Wiring the combined ROM as an end check does not work** — it never terminates. That is
+**A17**, not a sound bug.
+
+---
+
+### A17 — ~~The combined blargg suite ROMs never terminate~~ SUPERSEDED BY D1
+
+**State:** SUPERSEDED (2026-08-05) · **Added:** 2026-08-05 (ledger #7) · **Root-caused:** ledger #8
+
+⚠️ **This task was raised on a wrong reading, and the correction is the useful part.** Both of its
+claims were investigated properly and neither survived:
+
+**`cpu_instrs.gb` was never broken.** It does not stall at test 11 — it needs about **2.5x** the
+default cycle budget, because the eleven sub-tests run back to back and `11-op a,(hl)` is most of
+the total. At 40M M-cycles it stops after `10:ok  11`; at 60M it prints `11:ok` and `Passed all
+tests`. It is now wired as `game_boy::tests::blargg_cpu::all` and **passes**. A budget shortfall and
+a hang look identical from outside — check by *raising the budget* before concluding "stall".
+
+**`dmg_sound.gb` is a real bug, and it is exactly the bank `clamp` vs `mask` that A5 deferred to
+D1.** Traced on both emulators. Blargg's runner walks its sub-tests by writing the test index to
+the bank register, and the ROM is 64 KB / 4 banks:
+
+| Write to `0x2000` | gambatte | gb |
+|---|---|---|
+| 1, 2, 3 | banks 1, 2, 3 | banks 1, 2, 3 ✅ |
+| **4** | **bank 0** — `adjustedRombank(4) & (4-1)` | **bank 3** — `min(rom_bank_count()-1)` ❌ |
+
+Bank 0 in the switchable slot is where the runner's terminator lives. gb clamps to 3, re-runs bank
+3's test, and loops forever printing `NN:ok` past 12, past 99, into ASCII. Applying gambatte's mask
+to gb reproduces its bank trace exactly — `1, 2, 3, 0`, one write, done — and
+`blargg_dmg_sound::all` **passes against the committed reference**.
+
+**Why the earlier "not the bank clamp — tested" note was wrong.** That experiment was run against
+`cpu_instrs`, which never had the bug, so it could not have shown a difference. Right experiment,
+wrong ROM.
+
+**⚠️ Do not "just apply the mask" — it is mapper-specific, which is why it is D1 and not a
+one-liner.** MBC1 masks the bank register to **5 bits**; `pokered.gbc` is **MBC3** (`0x147 = 0x13`)
+with **64 banks**, needing 6. A universal `& 0x1F` fails 8 tests in the default tier immediately.
+Verified, then reverted. The mask width has to come from the mapper, which is precisely what
+**D1**/**D2** are for.
+
+**Where the work now lives:** D1. Its acceptance test already exists —
+`game_boy::tests::blargg_dmg_sound::all`, `#[ignore]`d with a correct committed reference, green the
+moment D1 lands.
 
 ---
 
@@ -1906,5 +1993,172 @@ comment). No emulator behaviour changed; no fixture regenerated.
 **Next agent:** **A16** is still the only fixable ignored emulator test. When you add a test, decide
 which of the three buckets it is in — blocked (`#[ignore]` with the blocker named), tiered
 (`slow-tests` and friends), or a tool (`diagnostics`/`bench`) — and gate it accordingly.
+
+---
+
+### 2026-08-05 (#7) — A16, A17 — All 12 `dmg_sound` tests pass; Phase A closed
+
+**State:** **A16 → `DONE`.** New **A17** added (`TODO`). Phase A now has no `TODO` left except A17,
+which A16 discovered and which is not on Phase A's exit criteria — **Phase B (B1) is next.**
+
+**Did:** four defects in the wave channel, of which the task named two.
+
+1. **The DMG wave-RAM aperture** (`src/audio/wave_channel.rs`). While channel 3 plays, a CPU read
+   returns `0xFF` unless it lands on the **exact tick** the channel fetches its next sample; a write
+   outside that tick is dropped, and inside it lands on the byte being fetched rather than the
+   addressed one. gb previously returned the current byte unconditionally and always accepted the
+   write — which is the **CGB** behaviour, not DMG.
+2. **Trigger** (`trigger`): the DMG wave-RAM corruption quirk, plus the first fetch after a trigger
+   is `period + 3` ticks out, not `period` (`PhaseTimer::trigger_after`).
+3. **A bus-access placement hint.** `Core::execute` now hands the APU the instruction's length
+   (`MMU::set_instruction_length` → `Audio::set_instruction_length`); the access is placed in the
+   final M-cycle, so it sits `(len - 1)` M-cycles in. **Peripherals are still advanced once per
+   instruction — no part of the M-cycle refactor was started** (§0.2 intact).
+4. **⭐ The one that actually blocked test 09, and was in nobody's list.** gb latched the wave period
+   into the frequency timer at trigger and never looked at NR33/NR34 again. Hardware reloads from
+   them at every overflow. Test 09 triggers at period 103..0 and then writes `NR33 = 0xFE` (period 2)
+   **before** reading — so gb kept fetching at the old rate and every read after the first missed.
+   Fixed by `WaveChannel::reload_period`, which updates the period without disturbing the interval
+   in flight.
+
+Then: promoted the three reference images (`src/roms/dmg_sound/*.png`), un-ignored the three tests,
+added 7 unit tests in `src/audio/wave_channel.rs`, and wired the combined ROM as `blargg_dmg_sound::all`.
+
+**Verified:**
+
+- `cargo test --release --bin gb` → `909 passed; 0 failed; 115 ignored` (was 899/117: +7 unit tests,
+  +3 un-ignored wave ROMs, −3 from ignored, +1 new ignored `all`).
+- **All 12 `dmg_sound` sub-tests green**, and — the check that actually settles it — **gb's frame for
+  09, 10 and 12 is byte-identical to gambatte's**, compared pixel by pixel, not eyeballed. That is
+  what made the dumps safe to promote as references.
+- Slow tier: `115 passed; 0 failed; 2 ignored; finished in 120.20s`.
+- `full_playthrough`: `1 passed; 0 failed; finished in 602.21s`. Run because this changes emulator
+  behaviour the game exercises — pokered writes wave RAM, and those writes are now droppable. It
+  does **not** change any cycle count, so the RNG stream is untouched, which is why the leg
+  fixtures still line up.
+- Ignored list re-listed by name with every tier feature on: **19**, exactly the expected
+  9 `oam_bug` + 9 `mem_timing`/`halt_bug` + the new A17 entry. The 3 wave tests are gone.
+- **Each of the four fixes was reintroduced as a bug and the tests re-run** (ledger #4's lesson).
+  All four are caught: dropping `reload_period` fails 4 tests, dropping the aperture 3, dropping the
+  trigger corruption 2, dropping the `+3` delay 9. My first attempt at the third check had a Python
+  quoting error and silently patched nothing — it "passed", which is exactly the vacuous result the
+  exercise exists to catch. **Read the patch output, not just the test result.**
+
+**Benchmark.** The per-instruction store costs ~2-3% on the CPU-bound workloads. Measured against
+the same tree with only that one line removed, three runs each, so this is the change and not
+machine drift:
+
+| Workload | with the hint | without it |
+|---|---|---|
+| Pokémon Red (fixture) | 31.9 / 32.0 / 31.9x | 31.1 / 31.4 / 31.7x |
+| `cpu_instrs.gb` | 51.0 / 51.0 / 50.4x | 52.5 / 52.2 / 51.9x |
+| `dmg-acid2.gb` | 46.9 / 46.1 / 47.0x | 47.9 / 48.4 / 48.2x |
+
+Both columns sit ~4% below ledger #4's baseline table, on the same machine, so **compare within this
+table, not across sessions**. A u8-store variant (store the length, derive the offset at the use
+site) measured identically to a u16-store one, so the cost is hoisting `machine_cycles` rather than
+the store; it is C7's territory.
+
+**Surprises:**
+
+1. **A16's own premise was wrong, and this is the fourth plan task where that has happened.** It
+   said "none of the three needs sub-instruction timing" and that a read returns the byte currently
+   being fetched. The window is *one tick* wide, and unconditional-return is CGB behaviour. Both
+   corrected in A16.
+2. **The bug that mattered was not in the task at all.** Three of the four defects I fixed are the
+   ones A16 describes; the fourth — the latched period — is what actually kept test 09 red, and I
+   only found it by printing gambatte's `NR33`/`NR34` writes beside gb's. Two emulators disagreeing
+   about a *register value* was the tell.
+3. **Instrumenting a copy of gambatte was worth far more than reading it.** Every wrong theory I had
+   (offset parity, mask-vs-clamp, "the test sweeps the period") died in one run of a patched
+   `Channel3::waveRamRead`. §2.5 now documents both that and the screenshot-dump harness, because
+   **B10 will need reference images for `cgb-acid2` and this is how to get them**.
+4. **A17: the combined suite ROMs do not terminate.** ⚠️ **Half of this bullet is wrong — see
+   ledger #8, which root-caused it.** `cpu_instrs.gb` was never broken; it needed a bigger cycle
+   budget, and is now wired and green. `dmg_sound.gb` is real, and it **is** the bank clamp after
+   all: my "swapping the clamp for a mask changes nothing" experiment was run against `cpu_instrs`,
+   the ROM that did not have the bug.
+
+**Tree:** dirty, uncommitted. Modified `src/audio/{mod,timer,wave_channel}.rs`, `src/core.rs`,
+`src/mmu.rs`, `src/game_boy.rs`, `src/roms/mod.rs`, `CLAUDE.md`, this document. Added four PNGs
+under `src/roms/dmg_sound/` (three promoted from gb's own output, `dmg_sound.png` captured from
+gambatte). **No `src/pokemon/**` source touched and no fixture regenerated** — `git status
+--porcelain src/pokemon/data/` is empty. gambatte tree verified clean; all reference work was done
+on a copy in scratch.
+
+**Next agent:** **B1.** Phase A's exit criteria are met and A17 is not one of them — treat it as a
+standalone bug, and note it may be masking a second failure mode in the other combined ROMs
+(`mem_timing`, `oam_bug`), which are ignored for unrelated reasons. Two things from this session
+will save you time in Phase B: §2.5 now tells you how to get a reference screenshot out of gambatte
+(you need one for `cgb-acid2`), and `Audio::set_instruction_length` is the precedent for "the
+peripheral needs to know where in the instruction the access was" — B3's mode-3 palette blocking is
+the same shape of question, and the plan already defers it.
+
+---
+
+### 2026-08-05 (#8) — A17 → `SUPERSEDED`, D1 — Root-caused the combined-ROM failure; half of #7's A17 note was wrong
+
+**State:** **A17 → `SUPERSEDED`** by **D1**, which now carries the work and has a ready-made failing
+acceptance test. `blargg_cpu::all` added and **passing**. Ledger #7's surprise 4 corrected in place.
+
+**Did:** Alex asked why the combined `cpu_instrs` ROM fails when the individual ones pass. It does
+not fail. Two separate findings:
+
+**1. `cpu_instrs.gb` was never broken — it needed 2.5x the cycle budget.** The sub-tests run back to
+back and `11-op a,(hl)` dominates. Stepping the budget in 20M increments:
+
+| Budget | Serial output |
+|---|---|
+| 40M M-cycles | `… 09:ok  10:ok  11` ← what #7 called a stall |
+| 60M M-cycles | `… 10:ok  11:ok`, `Passed all tests` |
+
+`serial_console_test` defaults to 25M, so it never had a chance. Now wired as
+`game_boy::tests::blargg_cpu::all` via a new `serial_console_test_within`, budget 60M. **A budget
+shortfall and a hang are indistinguishable from outside** — raise the budget before saying "stall".
+
+**2. `dmg_sound.gb` is real, and it is exactly the `clamp` vs `mask` A5 deferred to D1.** Blargg's
+runner selects each sub-test by writing its index to `0x2000`. The ROM is 64 KB / 4 banks. Traced on
+both emulators:
+
+| Write | gambatte (`cartridge.cpp:148`) | gb (`mmu.rs:228`) |
+|---|---|---|
+| 1, 2, 3 | banks 1, 2, 3 | banks 1, 2, 3 ✅ |
+| **4** | `adjustedRombank(4) & 3` = **bank 0**, then the ROM stops | `min(count-1)` = **bank 3** ❌ |
+
+Bank 0 in the switchable slot holds the runner's terminator. gb re-runs bank 3's test forever,
+printing `NN:ok` past 12, past 99, into ASCII. Applying gambatte's mask to gb reproduces its trace
+exactly (`1, 2, 3, 0`, one write, done) and `blargg_dmg_sound::all` **passes against the committed
+reference**.
+
+**⭐ But the mask cannot just be applied, and that is the finding that matters for D1.** MBC1 masks
+the bank register to **5 bits**. `pokered.gbc` is **MBC3** (`0x147 = 0x13`, 1 MB, **64 banks**) and
+needs 6. A universal `& 0x1F` fails **8 tests in the default tier** immediately. Verified, then
+reverted — the mask width has to come from the mapper, which is what D1/D2 exist to build.
+
+**Verified:**
+- `cargo test --release --bin gb` → `910 passed; 0 failed; 115 ignored` (+1: `blargg_cpu::all`).
+- `blargg_cpu` module: `13 passed; 0 failed`, combined ROM included.
+- Bank traces captured from **both** emulators and compared line by line, not reasoned about.
+- The mask fix was applied, shown to make `blargg_dmg_sound::all` pass, shown to break Pokémon,
+  and reverted. `mmu.rs` is byte-identical to before the experiment.
+- Fixtures clean; no `src/pokemon/**` source touched; gambatte tree clean (work done on a copy).
+
+**Surprises:**
+1. **I ruled out the right cause with the wrong ROM.** #7 recorded "not the bank clamp — tested",
+   which sounded rigorous and was worthless: the experiment ran against `cpu_instrs`, which had no
+   bug to fix. **A negative result is only as good as the case you ran it on** — state which one.
+2. **The "obvious" fix is a trap that the default tier catches in 70 seconds.** Masking to MBC1's
+   5 bits silently truncates pokered's 64 banks. Anyone reading only A17's summary would have
+   written that one-liner; A17 now says so explicitly, with the mapper byte.
+3. Two ROMs failing the same way at a glance had two unrelated explanations. Worth remembering
+   the next time a class of tests "all fail for the same reason".
+
+**Tree:** dirty, uncommitted. Since #7: `src/game_boy.rs` (combined `cpu_instrs` test +
+`serial_console_test_within`, and `blargg_dmg_sound::all`'s ignore reason now names D1),
+`CLAUDE.md`, this document. `src/mmu.rs` restored to its pre-experiment state.
+
+**Next agent:** still **B1**. When you reach **D1**, `blargg_dmg_sound::all` is your acceptance
+test and A17 has the whole trace — including the mapper-width trap, which will otherwise cost you
+the default tier.
 
 ---

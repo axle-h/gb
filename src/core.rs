@@ -204,6 +204,12 @@ impl Core {
     }
 
     pub fn execute(&mut self, opcode: OpCode) -> MachineCycles {
+        // Peripherals are still advanced once per instruction, after this returns — but the DMG
+        // wave-RAM aperture is a single 2-T tick wide, so it needs to know where inside the
+        // instruction the bus access sits. See `Audio::set_instruction_length`; nothing else
+        // reads it.
+        let base_cycles = opcode.machine_cycles(false);
+        self.mmu.set_instruction_length(base_cycles as u8);
         if self.interrupts_enabled_on_next_instruction {
             self.interrupts_enabled = true;
             self.interrupts_enabled_on_next_instruction = false;
@@ -532,7 +538,9 @@ impl Core {
             }
         }
 
-        let cycles = MachineCycles::from_m(opcode.machine_cycles(condition_met));
+        let cycles = MachineCycles::from_m(
+            if condition_met { opcode.machine_cycles(true) } else { base_cycles },
+        );
 
         let interrupt_cycles = match self.mode {
             CoreMode::Normal | CoreMode::Halt => {

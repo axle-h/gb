@@ -2,7 +2,7 @@
 
 A Game Boy (DMG) emulator written in Rust, repurposed as a platform for an LLM agent to play Pokémon Red entirely via text — no images required.
 
-The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs, dmg_sound 1–8 and 11, instr_timing; dmg-acid2 PPU test). `dmg_sound` 09/10/12 are **not** passing — they are `#[ignore]`d in `src/game_boy.rs`, and their reference images in `src/roms/mod.rs` are placeholders. Task **A16** covers fixing them. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
+The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs — including the combined ROM — all 12 of dmg_sound, instr_timing; dmg-acid2 PPU test). The one exception is the **combined** `dmg_sound.gb`, which needs MBC bank *masking* where gb still *clamps*, so its runner never reaches its terminator; that is task **D1**. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
 
 The project has been extended with a Pokémon Red-specific layer that reads game state directly from emulator RAM (using symbols extracted from the [pokered](https://github.com/pret/pokered) disassembly) and drives the game via synthesised joypad input. The goal is to expose a complete text interface over MCP so an LLM agent can play through the entire game.
 
@@ -147,9 +147,10 @@ goes behind a Cargo feature, so the ignored list stays a readable backlog:
 | `diagnostics` | `probe_*`, `dump_fixture_states`, `capture_golden_input` — tools that print a report rather than assert. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal: two legitimately end by exhausting their cycle budget *after* printing what was asked for |
 | `bench` | `bench_core_throughput`, `bench_emulation_throughput` |
 
-With every tier feature on and the tool features off, the ignored list is **21 blocked emulator
-tests** and nothing else — 9 `oam_bug`, 9 `mem_timing`/`halt_bug`, 3 `dmg_sound` wave. Each names
-its blocker: a plan task ID, or why it will not be fixed. Keep it that way.
+With every tier feature on and the tool features off, the ignored list is **19 blocked emulator
+tests** and nothing else — 9 `oam_bug`, 9 `mem_timing`/`halt_bug`, and the combined `dmg_sound`
+suite ROM (D1). Each names its blocker: a plan task ID, or why it will not be fixed. Keep it that
+way.
 
 ```bash
 # The diagnostics and probes

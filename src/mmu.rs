@@ -371,6 +371,13 @@ impl MMU {
         self.timer.enable();
     }
 
+    /// Record how long the instruction now executing is. Forwarded to the APU, which is the only
+    /// peripheral modelled finely enough to care where inside it the bus access falls — see
+    /// [`Audio::set_instruction_length`].
+    pub fn set_instruction_length(&mut self, machine_cycles: u8) {
+        self.audio.set_instruction_length(machine_cycles);
+    }
+
     /// update internal state of the MMU, should be called every CPU cycle
     pub fn update(&mut self, delta_machine_cycles: MachineCycles) {
         if delta_machine_cycles == MachineCycles::ZERO {

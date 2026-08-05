@@ -42,6 +42,10 @@ pub struct Audio {
     /// Band-limited synthesis and resampling to the sink's rate. Also supplies the DC blocker that
     /// used to be a separate `CapacitanceFilter` — see [`blip::DEFAULT_BASS_HZ`].
     output: BlipStereo,
+    /// Length in M-cycles of the instruction the CPU is executing. Set once per instruction; see
+    /// [`Audio::set_instruction_length`]. Transient, so it is excluded from `PartialEq` and from the
+    /// `apu` save-state section, exactly as `output` is.
+    access_machine_cycles: u8,
 }
 
 impl Default for Audio {
@@ -56,6 +60,7 @@ impl Default for Audio {
             channel3: WaveChannel::default(),
             channel4: NoiseChannel::default(),
             output: BlipStereo::default(),
+            access_machine_cycles: 0,
         }
     }
 }
@@ -224,7 +229,7 @@ impl Audio {
             0xFF24 => self.nr50_master_volume(), // NR50: Sound volume register
             0xFF25 => self.nr51_panning(), // NR51: Sound panning register
             0xFF26 => self.nr52_master_control(), // NR52: Sound control register
-            0xFF30..=0xFF3F => self.channel3().wave_ram((address - 0xFF30) as usize), // Wave RAM (0xFF30-0xFF3F)
+            0xFF30..=0xFF3F => self.channel3().wave_ram((address - 0xFF30) as usize, self.access_offset()), // Wave RAM (0xFF30-0xFF3F)
             _ => {
                 // ignore other audio registers for now
                 0xFF
@@ -253,7 +258,7 @@ impl Audio {
                 0xFF1B => self.channel3.set_nr31_length_timer(value), // NR31: Channel 3 length timer
                 0xFF1C => self.channel3.set_nr32_output_level(value), // NR32: Channel 3 output level
                 0xFF1D => self.channel3.set_nr33_period_low(value), // NR33: Channel 3 frequency low
-                0xFF1E => self.channel3.set_nr34_period_high_and_control(value, &self.frame_sequencer), // NR34: Channel 3 frequency high and control
+                0xFF1E => self.channel3.set_nr34_period_high_and_control(value, &self.frame_sequencer, self.access_offset()), // NR34: Channel 3 frequency high and control
                 0xFF20 => self.channel4.set_nr41_length_timer(value), // NR41: Channel 4 length register
                 0xFF21 => self.channel4.set_nr42_volume_and_envelope_mut(value), // NR42: Channel 4 volume and envelope register
                 0xFF22 => self.channel4.set_nr43_frequency_and_randomness(value), // NR43: Channel 4 frequency and randomness
@@ -261,12 +266,30 @@ impl Audio {
                 0xFF24 => self.set_nr50_master_volume(value), // NR50: Sound volume register
                 0xFF25 => self.set_nr51_panning_mut(value), // NR51: Sound panning register
                 0xFF26 => self.set_nr52_master_control(value), // NR52: Sound control register
-                0xFF30..=0xFF3F => self.channel3_mut().set_wave_ram((address - 0xFF30) as usize, value), // Wave RAM (0xFF30-0xFF3F)
+                0xFF30..=0xFF3F => { let offset = self.access_offset(); self.channel3_mut().set_wave_ram((address - 0xFF30) as usize, value, offset) } // Wave RAM (0xFF30-0xFF3F)
                 _ => {
                     // ignore other audio registers for now
                 }
             }
         }
+    }
+
+    /// Tell the APU how long, in M-cycles, the instruction now executing is.
+    ///
+    /// Peripherals are still advanced once per instruction — this changes nothing about *when*
+    /// they run. It only lets the APU work out *where* the CPU's bus access sits inside the
+    /// instruction it is about to be advanced over, which is the one thing DMG's wave-RAM
+    /// aperture depends on: that window is a single tick wide, so "somewhere in this instruction"
+    /// is not good enough. Only [`WaveChannel`] reads it.
+    pub fn set_instruction_length(&mut self, machine_cycles: u8) {
+        self.access_machine_cycles = machine_cycles;
+    }
+
+    /// Where in the current instruction the CPU's bus access falls, in wave-timer ticks (2
+    /// T-cycles each). Hardware puts a load's or store's memory access in the instruction's final
+    /// M-cycle, so it is one M-cycle short of the whole instruction.
+    fn access_offset(&self) -> u16 {
+        (self.access_machine_cycles.saturating_sub(1) as u16) * 2
     }
 
     pub fn channel1(&self) -> &SquareWaveChannel {
