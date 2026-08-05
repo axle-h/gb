@@ -103,7 +103,8 @@ pub struct PpuSection {
 }
 
 pub const PPU_SECTION_VERSION: u16 = 1;
-pub const DMA_SECTION_VERSION: u16 = 1;
+/// Bumped to 2 by A7: incremental transfer, source page instead of address, `FF46` read-back.
+pub const DMA_SECTION_VERSION: u16 = 2;
 
 impl PPU {
     pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
@@ -121,6 +122,27 @@ impl PPU {
             window_state: self.window_state,
         })?;
         writer.write(labels::DMA, DMA_SECTION_VERSION, &self.dma)
+    }
+
+    /// The `dma` section's shape changed in version 2 (A7: incremental transfer, page instead of
+    /// address, `FF46` read-back). Version 1 payloads are converted rather than regenerated —
+    /// this is the escape hatch documented in `src/savestate/mod.rs` for a shape change.
+    fn read_dma_section(&mut self, reader: &SectionReader) -> Result<(), String> {
+        let Some(mut fields) = reader.section(labels::DMA)? else {
+            return Ok(());
+        };
+        self.dma = if fields.version() >= 2 {
+            match fields.field::<LcdDma>()? {
+                Some(dma) => dma,
+                None => return Ok(()),
+            }
+        } else {
+            match fields.field::<crate::lcd_dma::LcdDmaV1>()? {
+                Some(old) => old.into(),
+                None => return Ok(()),
+            }
+        };
+        Ok(())
     }
 
     pub(crate) fn read_sections(&mut self, reader: &SectionReader) -> Result<(), String> {
@@ -142,10 +164,7 @@ impl PPU {
             self.lcd = [DMGColor::White; LCD_WIDTH * LCD_HEIGHT];
             self.scanline_sprites.clear();
         }
-        if let Some((_version, dma)) = reader.read::<LcdDma>(labels::DMA)? {
-            self.dma = dma;
-        }
-        Ok(())
+        self.read_dma_section(reader)
     }
 }
 
@@ -176,7 +195,7 @@ impl PPU {
     }
 
     pub fn read_vram(&self, address: u16) -> u8 {
-        if self.lcd_status.mode().vram_accessible() || self.dma.is_active() {
+        if self.lcd_status.mode().vram_accessible() {
             self.vram[address as usize]
         } else {
             // garbage data https://gbdev.io/pandocs/Rendering.html
@@ -188,14 +207,22 @@ impl PPU {
         &self.vram
     }
 
+    /// Raw OAM, bypassing the CPU's mode gate. For the DMA controller, debugging and tests.
+    pub fn oam(&self) -> &[u8] {
+        &self.oam
+    }
+
     pub fn write_vram(&mut self, address: u16, value: u8) {
-        if self.lcd_status.mode().vram_accessible() || self.dma.is_active() {
+        if self.lcd_status.mode().vram_accessible() {
             self.vram[address as usize] = value;
         }
     }
 
+    /// CPU-facing OAM read. Blocked by the PPU mode, **and** while an OAM DMA holds the bus — the
+    /// old code had `|| dma.is_active()`, which made OAM *more* accessible during a transfer,
+    /// the opposite of hardware.
     pub fn read_oam(&self, address: u16) -> u8 {
-        if self.lcd_status.mode().oam_accessible() || self.dma.is_active() {
+        if self.lcd_status.mode().oam_accessible() && !self.dma.is_active() {
             self.oam[address as usize]
         } else {
             // garbage data https://gbdev.io/pandocs/Rendering.html
@@ -203,10 +230,18 @@ impl PPU {
         }
     }
 
+    /// CPU-facing OAM write. See [`PPU::read_oam`]; use [`PPU::write_oam_dma`] for the transfer
+    /// itself.
     pub fn write_oam(&mut self, address: u16, value: u8) {
-        if self.lcd_status.mode().oam_accessible() || self.dma.is_active() {
+        if self.lcd_status.mode().oam_accessible() && !self.dma.is_active() {
             self.oam[address as usize] = value;
         }
+    }
+
+    /// Privileged OAM write used by the DMA controller, which owns the bus for the duration of a
+    /// transfer and is not subject to the CPU's mode gate.
+    pub fn write_oam_dma(&mut self, address: u16, value: u8) {
+        self.oam[address as usize] = value;
     }
 
     pub fn lcd_control(&self) -> &LcdControl {
@@ -297,10 +332,10 @@ impl PPU {
                     self.current_ticks -= OAM_TICKS;
 
                     let y = self.lcd_status.ly() as isize;
-                    let sprite_height = self.lcd_control.object_size().height() as isize;
+                    let sprite_height = self.lcd_control.object_size().height();
                     self.scanline_sprites = if self.lcd_control.objects_enabled() {
-                        self.sprites().into_iter()
-                            .filter(|sprite| y >= sprite.y && y < sprite.y + sprite_height)
+                        self.sprites(sprite_height).into_iter()
+                            .filter(|sprite| y >= sprite.y && y < sprite.y + sprite_height as isize)
                             .take(MAX_SPRITES_PER_SCANLINE)
                             .collect()
                     } else {
@@ -312,53 +347,24 @@ impl PPU {
                 let drawing_ticks = INITIAL_FIFO_LOAD_TICKS + LCD_WIDTH;
 
                 if self.current_ticks >= drawing_ticks {
+                    // Flush whatever is still outstanding before leaving mode 3. Previously this
+                    // branch drew nothing at all — masked only by the x-advance bug below, which
+                    // had already emitted every pixel far too early.
+                    self.draw_pixels_to(LCD_WIDTH);
                     self.lcd_status.set_mode(LcdMode::HBlank); // drawing done
                     self.current_ticks -= drawing_ticks;
-                } else if self.current_ticks >= INITIAL_FIFO_LOAD_TICKS {
-                    let start_x = self.current_x;
-                    let end_x = start_x + self.current_ticks - INITIAL_FIFO_LOAD_TICKS + 1;
-                    let y = self.lcd_status.ly() as usize;
-
-                    if self.lcd_status.ly() == self.window_position.y && !self.window_state.is_active {
-                        self.window_state.activate(y, self.window_position);
-                    }
-
-                    let mut row_in_window = false;
-                    for x in start_x..end_x {
-                        if x < LCD_WIDTH {
-                            let pixel_in_window = self.in_window(x, y);
-                            if pixel_in_window && !row_in_window {
-                                row_in_window = true;
-                                self.window_state.update_if_active(y);
-                            }
-
-                            let bg_color_index = if pixel_in_window {
-                                self.window_pixel(x)
-                            } else if self.lcd_control.background_enabled() {
-                                self.bg_pixel(x, y)
-                            } else {
-                                0
-                            } as usize;
-                            let bg_color = self.palette.background()[bg_color_index];
-
-                            let color = self.scanline_sprites.iter()
-                                .filter(|sprite| sprite.x <= x as isize && sprite.x + TILE_PIXELS as isize > x as isize)
-                                .map(|sprite| (sprite, self.sprite_pixel(sprite, x, y)))
-                                .filter(|&(_, sprite_color)| sprite_color != 0) // filter out transparent pixels
-                                .sorted_by_key(|&(sprite, _)| sprite.x) // overlapping sprites are sorted by x position
-                                .next()
-                                .map_or(bg_color, |(sprite, sprite_color)| {
-                                    if sprite_color == 0 || sprite.bg_priority && bg_color_index != 0 {
-                                        bg_color
-                                    } else {
-                                        sprite.palette(&self.palette)[sprite_color as usize]
-                                    }
-                                });
-
-                            self.lcd[y * LCD_WIDTH + x] = color;
-                        }
-                    }
-                    self.current_x = end_x;
+                } else {
+                    // `current_ticks` is an *absolute* offset into mode 3 and is not reset within
+                    // it, so the old `start_x + current_ticks - INITIAL_FIFO_LOAD_TICKS + 1` added
+                    // the offset afresh every call and advanced x quadratically: 1, 6, 15, 28, 45,
+                    // ... all 160 pixels were emitted ~36 T into mode 3 instead of over 160 T.
+                    // Nothing looked broken because an `x < LCD_WIDTH` guard swallowed the
+                    // overshoot — but every register write landing more than ~36 cycles into
+                    // mode 3 was a no-op for that scanline.
+                    let target_x = self.current_ticks
+                        .saturating_sub(INITIAL_FIFO_LOAD_TICKS)
+                        .min(LCD_WIDTH);
+                    self.draw_pixels_to(target_x);
                 }
             }
             LcdMode::HBlank => {
@@ -488,24 +494,71 @@ impl PPU {
     }
 
 
+    /// Emit pixels for the current scanline up to (but excluding) `target_x`, then leave
+    /// `current_x` there. A no-op if the pixel clock has not moved.
+    fn draw_pixels_to(&mut self, target_x: usize) {
+        let y = self.lcd_status.ly() as usize;
+
+        if self.lcd_status.ly() == self.window_position.y && !self.window_state.is_active {
+            self.window_state.activate(y, self.window_position);
+        }
+
+        if target_x <= self.current_x {
+            return;
+        }
+
+        let mut row_in_window = false;
+        for x in self.current_x..target_x {
+            let pixel_in_window = self.in_window(x, y);
+            if pixel_in_window && !row_in_window {
+                row_in_window = true;
+                self.window_state.update_if_active(y);
+            }
+
+            let bg_color_index = if pixel_in_window {
+                self.window_pixel(x)
+            } else if self.lcd_control.background_enabled() {
+                self.bg_pixel(x, y)
+            } else {
+                0
+            } as usize;
+            let bg_color = self.palette.background()[bg_color_index];
+
+            let color = self.scanline_sprites.iter()
+                .filter(|sprite| sprite.x <= x as isize && sprite.x + TILE_PIXELS as isize > x as isize)
+                .map(|sprite| (sprite, self.sprite_pixel(sprite, x, y)))
+                .filter(|&(_, sprite_color)| sprite_color != 0) // filter out transparent pixels
+                .sorted_by_key(|&(sprite, _)| sprite.x) // overlapping sprites are sorted by x position
+                .next()
+                .map_or(bg_color, |(sprite, sprite_color)| {
+                    if sprite_color == 0 || sprite.bg_priority && bg_color_index != 0 {
+                        bg_color
+                    } else {
+                        sprite.palette(&self.palette)[sprite_color as usize]
+                    }
+                });
+
+            self.lcd[y * LCD_WIDTH + x] = color;
+        }
+
+        self.current_x = target_x;
+    }
+
     fn sprite_pixel(&self, sprite: &Sprite, x: usize, y: usize) -> u8 {
-        let object_size = self.lcd_control.object_size();
+        // Use the height this sprite was *selected* under, not the current LCDC — see `Sprite`.
         let sprite_x = (x as isize - sprite.x) as usize;
         let pixel_x = if sprite.flip_x { TILE_PIXELS - 1 - sprite_x } else { sprite_x };
         let sprite_y = (y as isize - sprite.y) as usize;
-        let pixel_y = if sprite.flip_y { object_size.height() - 1 - sprite_y } else { sprite_y };
+        let pixel_y = if sprite.flip_y { sprite.height - 1 - sprite_y } else { sprite_y };
 
-        match object_size {
-            ObjectSizeMode::Single => self.tile(TileDataMode::Lower, sprite.tile_index).pixel(pixel_x, pixel_y),
-            ObjectSizeMode::Double => {
-                if pixel_y < TILE_PIXELS {
-                    self.tile(TileDataMode::Lower, sprite.tile_index & 0xFE)
-                        .pixel(pixel_x, pixel_y)
-                } else {
-                    self.tile(TileDataMode::Lower, sprite.tile_index | 0x01)
-                        .pixel(pixel_x, pixel_y - TILE_PIXELS)
-                }
-            }
+        if sprite.height <= TILE_PIXELS {
+            self.tile(TileDataMode::Lower, sprite.tile_index).pixel(pixel_x, pixel_y)
+        } else if pixel_y < TILE_PIXELS {
+            self.tile(TileDataMode::Lower, sprite.tile_index & 0xFE)
+                .pixel(pixel_x, pixel_y)
+        } else {
+            self.tile(TileDataMode::Lower, sprite.tile_index | 0x01)
+                .pixel(pixel_x, pixel_y - TILE_PIXELS)
         }
     }
 
@@ -515,11 +568,11 @@ impl PPU {
         tile.pixel(x % TILE_PIXELS, y % TILE_PIXELS)
     }
 
-    fn sprites(&self) -> Vec<Sprite> {
+    fn sprites(&self, height: usize) -> Vec<Sprite> {
         let mut sprites = Vec::with_capacity(SPRITE_COUNT);
         for i in 0..SPRITE_COUNT {
             let start = i * SPRITE_BYTES;
-            sprites.push(Sprite::new(&self.oam[start..start + SPRITE_BYTES]));
+            sprites.push(Sprite::new(&self.oam[start..start + SPRITE_BYTES], height));
         }
         sprites
     }
@@ -597,6 +650,11 @@ impl<'a> Tile<'a> {
 struct Sprite {
     y: isize,
     x: isize,
+    /// Height in pixels, **captured during the OAM scan that selected this sprite**. LCDC bit 2
+    /// is re-readable by the guest mid-scanline, so re-deriving the height at draw time can
+    /// disagree with the height the sprite was selected under — an 8x16 sprite selected on rows
+    /// 8..15 and then drawn as 8x8 indexes past its 16-byte tile. See A6.
+    height: usize,
     tile_index: u8,
     bg_priority: bool, // bit 7 - 0 = No, 1 = BG and Window color indices 1–3 are drawn over this OBJ
     flip_y: bool, // bit 6 - 0 = Normal, 1 = Entire OBJ is vertically mirrored
@@ -605,11 +663,12 @@ struct Sprite {
 }
 
 impl Sprite {
-    pub fn new(data: &[u8]) -> Self {
+    pub fn new(data: &[u8], height: usize) -> Self {
         debug_assert!(data.len() == SPRITE_BYTES, "Sprite data must be exactly 4 bytes");
         Self {
             y: data[0] as isize - 16, // Y coordinate is offset by 16 pixels
             x: data[1] as isize - 8, // X coordinate is offset by 8 pixels
+            height,
             tile_index: data[2],
             bg_priority: (data[3] & 0x80) != 0,
             flip_y: (data[3] & 0x40) != 0,
@@ -632,6 +691,86 @@ impl Sprite {
 mod tests {
     use DMGColor::*;
     use super::*;
+
+    /// A11: `current_ticks` is an absolute offset into mode 3, but the old x-advance re-added it
+    /// on every call, so `current_x` went 1, 6, 15, 28, 45, 66, 91, 120, 153, 190 — every pixel
+    /// emitted ~36 T in, instead of spread across 160. The frame looked fine (an `x < LCD_WIDTH`
+    /// guard swallowed the overshoot) but any register write past ~36 T into mode 3 was ignored
+    /// for that scanline.
+    #[test]
+    fn pixel_clock_advances_linearly_through_mode_3() {
+        let mut ppu = PPU::default();
+        ppu.lcd_control.set(0b1000_0001); // LCD on, background on
+        ppu.lcd_status.set_mode(LcdMode::Drawing);
+
+        let mut observed = Vec::new();
+        for _ in 0..10 {
+            ppu.update(MachineCycles::ONE); // 4 T
+            observed.push(ppu.current_x);
+        }
+
+        // 4 T per step, minus the 12 T FIFO warm-up: 0, 0, 0, 4, 8, 12, ...
+        let expected: Vec<usize> = (1..=10)
+            .map(|step| (step * 4usize).saturating_sub(INITIAL_FIFO_LOAD_TICKS).min(LCD_WIDTH))
+            .collect();
+        assert_eq!(observed, expected);
+    }
+
+    /// Leaving mode 3 must flush the rest of the scanline. That branch used to draw nothing at
+    /// all — harmless only because the quadratic advance had already over-drawn everything.
+    #[test]
+    fn leaving_mode_3_flushes_the_rest_of_the_scanline() {
+        let mut ppu = PPU::default();
+        ppu.lcd_control.set(0b1000_0001);
+        ppu.lcd_status.set_mode(LcdMode::Drawing);
+
+        while ppu.lcd_status.mode() == LcdMode::Drawing {
+            ppu.update(MachineCycles::ONE);
+        }
+        assert_eq!(ppu.lcd_status.mode(), LcdMode::HBlank);
+        // current_x is reset at the end of HBlank, not on leaving mode 3, so the whole scanline
+        // must have been emitted by the time the mode changed.
+        assert_eq!(ppu.current_x, LCD_WIDTH);
+    }
+
+    /// A6: `scanline_sprites` is filtered at OAM-scan time using the *then* object size, but
+    /// `sprite_pixel` used to re-read LCDC at draw time. A guest write between the two flips
+    /// 8x16 -> 8x8, so `sprite_y` reaches 8..15 against a 16-byte tile: index up to 31 on a
+    /// 16-element slice, which is an out-of-bounds panic in release (the only guard was a
+    /// `debug_assert!`). Flipped sprites underflowed `8 - 1 - 15` on a `usize` instead.
+    #[test]
+    fn lcdc_flip_mid_scanline_does_not_read_past_a_sprite_tile() {
+        for flip_y in [false, true] {
+            let mut ppu = PPU::default();
+            // LCD on, objects on, 8x16.
+            ppu.lcd_control.set(0b1000_0110);
+
+            // Place the sprite so that scanline 0 lands 12 rows down it — a row that only exists
+            // while objects are 8x16.
+            ppu.oam[0] = 4; // y = -12
+            ppu.oam[1] = 8; // x = 0
+            ppu.oam[2] = 0x02; // tile
+            ppu.oam[3] = if flip_y { 0x40 } else { 0x00 };
+
+            // Scan OAM for this scanline.
+            ppu.lcd_status.set_mode(LcdMode::OAM);
+            ppu.update(MachineCycles::from_t(OAM_TICKS));
+            assert_eq!(ppu.scanline_sprites.len(), 1, "the sprite should have been selected");
+            assert_eq!(ppu.scanline_sprites[0].height, 16, "selected as 8x16");
+
+            // The guest now shrinks objects to 8x8, mid-scanline.
+            ppu.lcd_control.set(0b1000_0010);
+            assert_eq!(ppu.lcd_control.object_size(), ObjectSizeMode::Single);
+
+            // Step through mode 3 rather than jumping it in one update: a single large update
+            // takes the `>= drawing_ticks` branch and never draws a pixel at all.
+            assert_eq!(ppu.lcd_status.mode(), LcdMode::Drawing);
+            while ppu.lcd_status.mode() == LcdMode::Drawing {
+                ppu.update(MachineCycles::ONE); // must not panic
+            }
+            assert!(ppu.current_x > 0, "the scanline must actually have been drawn");
+        }
+    }
 
     #[test]
     fn parse_tile() {

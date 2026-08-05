@@ -103,11 +103,12 @@ impl NoiseChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if !self.envelope_function.dac_enabled() || !self.active {
-            0.0
-        } else {
-            dac_sample(self.output)
+        if !self.envelope_function.dac_enabled() {
+            return 0.0;
         }
+        // See `SquareWaveChannel::output_f32`: a disabled channel with a live DAC holds the
+        // digital-0 level rather than snapping to analogue zero.
+        dac_sample(if self.active { self.output } else { 0 })
     }
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
@@ -132,6 +133,13 @@ impl NoiseChannel {
 
         if events.is_volume_envelope() {
             self.envelope_function.clock();
+        }
+
+        // Clock shifts 14 and 15 are not used by hardware: the LFSR simply stops advancing. Left
+        // running, `compute_clock_period` shifts the divisor far enough to make the channel emit
+        // a stuck DC level rather than falling silent.
+        if self.clock_shift >= 14 {
+            return;
         }
 
         for _ in 0..delta.m_cycles() {

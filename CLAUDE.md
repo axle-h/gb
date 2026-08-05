@@ -2,7 +2,7 @@
 
 A Game Boy (DMG) emulator written in Rust, repurposed as a platform for an LLM agent to play Pokémon Red entirely via text — no images required.
 
-The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs, dmg_sound, instr_timing; dmg-acid2 PPU test). It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
+The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs, dmg_sound 1–8 and 11, instr_timing; dmg-acid2 PPU test). `dmg_sound` 09/10/12 are **not** passing — they are commented out in `src/game_boy.rs` with placeholder expectations in `src/roms/mod.rs`. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
 
 The project has been extended with a Pokémon Red-specific layer that reads game state directly from emulator RAM (using symbols extracted from the [pokered](https://github.com/pret/pokered) disassembly) and drives the game via synthesised joypad input. The goal is to expose a complete text interface over MCP so an LLM agent can play through the entire game.
 
@@ -102,8 +102,9 @@ The crate has **no lib target** — everything lives in the `gb` binary, so it i
 `--lib`.
 
 `src/pokemon/integration_tests/` is tiered by how much **game time** a test emulates, which is what it
-costs: the emulator runs at ~23× realtime and the agent adds only ~11% on top (measured by
-`bench_emulation_throughput`), so wall clock ≈ emulated-minutes ÷ 23.
+costs: the emulator core runs at **~34× realtime** on Pokémon Red and the agent costs **~16%** on
+top, giving **~28×** end to end (measured 2026-08-05 on a Ryzen 9 7900X by `bench_core_throughput`
+and `bench_emulation_throughput` respectively), so wall clock ≈ emulated-minutes ÷ 28.
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests. ~22s, 800+ tests.
@@ -118,8 +119,15 @@ cargo test --release --features full-playthrough full_playthrough
 # A single test with output (file module included in the path).
 cargo test --release --bin gb -- pokemon::integration_tests::mechanics::test_debouncing --exact --nocapture
 
-# The throughput benchmark (ignored by default).
-cargo test --release --bin gb -- bench_emulation_throughput --exact --ignored --nocapture
+# Agent throughput (emulator + agent.step). `--exact` needs the full module path, or this
+# matches zero tests.
+cargo test --release --bin gb -- \
+  pokemon::integration_tests::fixture::bench_emulation_throughput --exact --ignored --nocapture
+
+# Emulator core alone — no agent, no policy, no observation. Three workloads. This is the
+# number Phase C of docs/compatibility/10-implementation-plan.md is scored against.
+cargo test --release --bin gb -- \
+  game_boy::tests::bench_core_throughput --exact --ignored --nocapture
 ```
 
 **Fixtures are committed inputs.** Each leg test snapshots its end state for the next leg, but the
@@ -177,7 +185,23 @@ cargo test --release --bin gb -- audio::reference::tests::render_reference_wav -
 
 ## Save state format
 
-The emulator state is serialised with `bincode` + lz4 compression. `GameBoy` implements `Encode`/`Decode`. Test fixture snapshots live in `src/pokemon/data/*.bin` and are `include_bytes!`'d at compile time. `pokemon-red.sav` is the SRAM save loaded/written at runtime by the SDL2 UI.
+Save states use a **labelled, sectioned container** — see the module documentation at the top of
+`src/savestate/mod.rs`, which is the authoritative reference:
+
+```
+"GBST" | u16 container_version | lz4 { [label\0][u32 len][payload] }
+```
+
+An unknown section is skipped and a missing one is not an error, so the format tolerates change in
+both directions. **Adding a section is free. Adding a field means appending it as an extra value
+within its section and bumping that section's version** — neither churns fixtures. Never reorder or
+retype an already-shipped value without bumping the section version: bincode is positional and has
+no schema migration.
+
+The **91** committed fixture snapshots live in `src/pokemon/data/*.bin` and are `include_bytes!`'d at
+compile time. `every_committed_fixture_decodes` in the default test tier fails in seconds if a
+layout change breaks them. `pokemon-red.sav` is raw SRAM, not a save state — it is loaded/written at
+runtime by the SDL2 UI.
 
 ## Important notes
 
@@ -185,12 +209,15 @@ The emulator state is serialised with `bincode` + lz4 compression. `GameBoy` imp
 - `AGENT_RESOLUTION` (20 ms) is a tuned constant — too long and the player overshoots on the overworld, too short and the game state doesn't settle between frames.
 - `DelayContext` post-script delay is 2500 ms — tuned to cover the worst-case pre-battle animation gap observed in practice.
 - The SDL2 UI renders at 4× scale (640×576) and targets 60 fps with a 600-frame rolling FPS window.
-- **Nothing may be added to `Audio`'s serialised fields.** Its hand-written `Encode`/`Decode` in
-  `src/audio/mod.rs` deliberately skips the resampler, and `PartialEq` excludes it. Adding a field
-  would change the bincode layout and make all 27 committed fixtures in `src/pokemon/data/*.bin`
-  undecodable. This is why the output sample rate is applied by `Audio::set_output_sample_rate` from
-  the UI rather than stored — a caller that loads a save state must re-apply it (see the `F9` handler
-  in `render.rs`).
+- **`Audio` and `PPU` exclude derived state from `PartialEq`** — the resampler output, and the
+  frame buffer plus the per-scanline sprite list respectively. None of it is serialised, so none of
+  it may take part in equality, or `game_boy::tests::save_and_load_state` would compare restored
+  state against state that was never saved.
+- Adding a field to `Audio` (or any other serialised type) **is** safe now — append it to the
+  relevant section and bump that section's version. The old "nothing may be added to `Audio`" rule
+  died with the sectioned save-state format. The output sample rate is still applied by
+  `Audio::set_output_sample_rate` from the UI rather than stored, so a caller that loads a save
+  state must re-apply it (see the `F9` handler in `render.rs`).
 - `src/audio/blip/` is a translation of LGPL 2.1+ code (blargg's Blip_Buffer 0.4.0). The original C++
   and its licence live in `tools/blip-golden/vendor/`. The repo has no top-level `LICENSE`; if one is
   ever added, this is the constraint to check.

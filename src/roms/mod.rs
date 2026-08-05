@@ -78,3 +78,40 @@ pub mod roms {
             .to_rgb8()
     }
 }
+/// Blargg's remaining DMG suites, wired by task A14 of `docs/compatibility/10-implementation-plan.md`.
+///
+/// These are **expected to fail** and are `#[ignore]`d — they exist to quantify the gap left by
+/// advancing peripherals once per instruction rather than per M-cycle. Do not "fix" them without
+/// reading that plan: `mem_timing`, `halt_bug` and `interrupt_time` need the deferred M-cycle
+/// timing refactor, and `oam_bug` needs the DMG OAM corruption quirk, which gambatte does not
+/// model either.
+///
+/// Source: `c-sp/game-boy-test-roms` v7.0.
+pub mod blargg_timing {
+    pub const MEM_TIMING: &[u8] = include_bytes!("mem_timing/mem_timing.gb");
+    pub const MEM_TIMING_READ: &[u8] = include_bytes!("mem_timing/01-read_timing.gb");
+    pub const MEM_TIMING_WRITE: &[u8] = include_bytes!("mem_timing/02-write_timing.gb");
+    pub const MEM_TIMING_MODIFY: &[u8] = include_bytes!("mem_timing/03-modify_timing.gb");
+
+    pub const MEM_TIMING_2: &[u8] = include_bytes!("mem_timing_2/mem_timing.gb");
+    pub const MEM_TIMING_2_READ: &[u8] = include_bytes!("mem_timing_2/01-read_timing.gb");
+    pub const MEM_TIMING_2_WRITE: &[u8] = include_bytes!("mem_timing_2/02-write_timing.gb");
+    pub const MEM_TIMING_2_MODIFY: &[u8] = include_bytes!("mem_timing_2/03-modify_timing.gb");
+
+    pub const HALT_BUG: &[u8] = include_bytes!("halt_bug.gb");
+    pub const INTERRUPT_TIME: &[u8] = include_bytes!("interrupt_time.gb");
+}
+
+/// Blargg's `oam_bug` suite — the DMG OAM corruption quirk. See [`blargg_timing`] for why these
+/// are `#[ignore]`d.
+pub mod blargg_oam_bug {
+    pub const ROM: &[u8] = include_bytes!("oam_bug/oam_bug.gb");
+    pub const LCD_SYNC: &[u8] = include_bytes!("oam_bug/1-lcd_sync.gb");
+    pub const CAUSES: &[u8] = include_bytes!("oam_bug/2-causes.gb");
+    pub const NON_CAUSES: &[u8] = include_bytes!("oam_bug/3-non_causes.gb");
+    pub const SCANLINE_TIMING: &[u8] = include_bytes!("oam_bug/4-scanline_timing.gb");
+    pub const TIMING_BUG: &[u8] = include_bytes!("oam_bug/5-timing_bug.gb");
+    pub const TIMING_NO_BUG: &[u8] = include_bytes!("oam_bug/6-timing_no_bug.gb");
+    pub const TIMING_EFFECT: &[u8] = include_bytes!("oam_bug/7-timing_effect.gb");
+    pub const INSTR_EFFECT: &[u8] = include_bytes!("oam_bug/8-instr_effect.gb");
+}

@@ -17,6 +17,18 @@ use crate::timer::Timer;
 pub const RAM_BANK_SIZE: usize = 0x2000; // 8KB
 pub const ROM_BANK_SIZE: usize = 0x4000; // 16KB
 
+/// Round a ROM image up to a whole power-of-two number of 16 KB banks, filling with `0xFF` — the
+/// value an unmapped bus reads back. Gambatte does the same (`cartridge.cpp:638-652`) and for the
+/// same reason: it makes every in-range bank index land on real memory, so a cartridge whose
+/// header over-states its size can no longer index past the buffer.
+fn pad_rom(data: &[u8]) -> Vec<u8> {
+    let banks = (data.len().div_ceil(ROM_BANK_SIZE)).max(2).next_power_of_two();
+    let mut padded = Vec::with_capacity(banks * ROM_BANK_SIZE);
+    padded.extend_from_slice(data);
+    padded.resize(banks * ROM_BANK_SIZE, 0xFF);
+    padded
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MMU {
     data: Vec<u8>,
@@ -32,6 +44,8 @@ pub struct MMU {
     divider: Divider,
     timer: Timer,
     interrupt_enable: InterruptFlags,
+    /// Bits 5-7 of IE. Not wired to any interrupt, but hardware still stores and returns them.
+    interrupt_enable_upper: u8,
     interrupt_request: InterruptFlags,
     joypad_register: JoypadRegister,
     audio: Audio,
@@ -67,7 +81,8 @@ pub struct TimerSection {
 pub const CART_SECTION_VERSION: u16 = 1;
 pub const WRAM_SECTION_VERSION: u16 = 1;
 pub const HRAM_SECTION_VERSION: u16 = 1;
-pub const IRQ_SECTION_VERSION: u16 = 1;
+/// Bumped to 2 by A13, which appended IE's upper three bits.
+pub const IRQ_SECTION_VERSION: u16 = 2;
 pub const TIMER_SECTION_VERSION: u16 = 1;
 pub const JOYP_SECTION_VERSION: u16 = 1;
 
@@ -87,9 +102,12 @@ impl MMU {
             timer: self.timer.clone(),
             serial: self.serial.clone(),
         })?;
-        writer.write(labels::IRQ, IRQ_SECTION_VERSION, &IrqSection {
-            interrupt_enable: self.interrupt_enable,
-            interrupt_request: self.interrupt_request,
+        writer.write_fields(labels::IRQ, IRQ_SECTION_VERSION, |fields| {
+            fields.field(&IrqSection {
+                interrupt_enable: self.interrupt_enable,
+                interrupt_request: self.interrupt_request,
+            })?;
+            fields.field(&self.interrupt_enable_upper) // appended in v2
         })?;
         writer.write(labels::JOYP, JOYP_SECTION_VERSION, &self.joypad_register)?;
         self.ppu.write_sections(writer)?;
@@ -115,9 +133,15 @@ impl MMU {
             self.timer = section.timer;
             self.serial = section.serial;
         }
-        if let Some((_version, section)) = reader.read::<IrqSection>(labels::IRQ)? {
-            self.interrupt_enable = section.interrupt_enable;
-            self.interrupt_request = section.interrupt_request;
+        if let Some(mut fields) = reader.section(labels::IRQ)? {
+            if let Some(section) = fields.field::<IrqSection>()? {
+                self.interrupt_enable = section.interrupt_enable;
+                self.interrupt_request = section.interrupt_request;
+            }
+            // Absent in v1 payloads, which is not an error — see src/savestate/mod.rs.
+            if let Some(upper) = fields.field::<u8>()? {
+                self.interrupt_enable_upper = upper;
+            }
         }
         if let Some((_version, joypad_register)) = reader.read::<JoypadRegister>(labels::JOYP)? {
             self.joypad_register = joypad_register;
@@ -139,7 +163,7 @@ impl MMU {
 
         let ram_banks = Vec::from_iter((0..header.ram_banks()).map(|_| [0; RAM_BANK_SIZE]));
         Ok(Self {
-            data: data.to_vec(),
+            data: pad_rom(data),
             header,
             ram_banks,
             ram_enabled: false,
@@ -149,6 +173,7 @@ impl MMU {
             high_ram: [0; 0x7F],
             ppu: PPU::default(),
             interrupt_enable: InterruptFlags::default(),
+            interrupt_enable_upper: 0,
             interrupt_request: InterruptFlags::default(),
             joypad_register: JoypadRegister::default(),
             serial: Serial::default(),
@@ -156,6 +181,29 @@ impl MMU {
             timer: Timer::default(),
             audio: Audio::default(),
         })
+    }
+
+    /// Return to power-on state, **preserving the cartridge and its battery-backed RAM** — the
+    /// same contract as gambatte's `GB::reset` (`gambatte.cpp:79-89`). Everything reset here must
+    /// match what [`MMU::from_rom`] constructs, or `Core::reset` will not produce a machine equal
+    /// to a fresh one.
+    pub fn reset(&mut self) {
+        self.ram_enabled = false;
+        self.rom_bank_register = 1;
+        self.ram_bank_register = 0;
+        self.work_ram = [0; 0x2000];
+        self.high_ram = [0; 0x7F];
+        self.ppu = PPU::default();
+        self.serial = Serial::default();
+        self.divider = Divider::default();
+        self.timer = Timer::default();
+        self.interrupt_enable = InterruptFlags::default();
+        self.interrupt_enable_upper = 0;
+        self.interrupt_request = InterruptFlags::default();
+        self.joypad_register = JoypadRegister::default();
+        self.audio = Audio::default();
+        // `data`, `header` and `ram_banks` are deliberately untouched: the cartridge does not
+        // leave the slot, and its RAM is battery-backed.
     }
 
     pub fn header(&self) -> &CartHeader {
@@ -172,9 +220,19 @@ impl MMU {
 
     pub fn set_rom_bank_register(&mut self, value: usize) {
         // TODO MBC1 should mask to 0x1F
+        // Clamp against the ROM actually loaded, not against header byte 0x148 — a cartridge that
+        // claims more banks than its file contains would otherwise index past the buffer and
+        // panic on the first high-bank read. D1 replaces this clamp with hardware's wrapping mask.
         self.rom_bank_register = (value & 0x7F)
-            .min(self.header.rom_banks() - 1)
+            .min(self.rom_bank_count() - 1)
             .max(1);
+    }
+
+    /// Banks actually backed by data. Derived from the loaded image rather than from header byte
+    /// `0x148`, which cartridges are free to lie about. [`MMU::set_data`] keeps the image padded
+    /// to a whole power-of-two number of banks, so this is always exact and at least 2.
+    pub fn rom_bank_count(&self) -> usize {
+        (self.data.len() / ROM_BANK_SIZE).max(2)
     }
 
     pub fn rom_data<L: Into<Option<usize>>>(&self, bank: usize, index: usize, length: L) -> &[u8] {
@@ -217,7 +275,10 @@ impl MMU {
             let offset = (address - 0x8000) as usize;
             let vram = self.ppu.vram();
             if let Some(length) = length.into() {
-                Ok(&vram[offset..(offset + length)])
+                // The base address is range-checked above, but the *end* was not — a long read
+                // near 0x9FFF sliced past the array and panicked.
+                vram.get(offset..(offset + length))
+                    .ok_or_else(|| format!("VRAM read of {length} bytes at {address:04X} runs past the end of VRAM"))
             } else {
                 Ok(&vram[offset..])
             }
@@ -230,7 +291,8 @@ impl MMU {
         if address >= 0xC000 && address <= 0xDFFF {
             let offset = (address - 0xC000) as usize;
             if let Some(length) = length.into() {
-                Ok(&self.work_ram[offset..(offset + length)])
+                self.work_ram.get(offset..(offset + length))
+                    .ok_or_else(|| format!("WRAM read of {length} bytes at {address:04X} runs past the end of work RAM"))
             } else {
                 Ok(&self.work_ram[offset..])
             }
@@ -264,7 +326,7 @@ impl MMU {
 
     /// replace rom data, only intended for reloading save states without rom data
     pub fn set_data(&mut self, data: &[u8]) {
-        self.data = data.to_vec();
+        self.data = pad_rom(data);
     }
 
     pub fn joypad(&self) -> &JoypadRegister {
@@ -285,6 +347,10 @@ impl MMU {
 
     pub fn audio_mut(&mut self) -> &mut Audio {
         &mut self.audio
+    }
+
+    pub fn divider(&self) -> &Divider {
+        &self.divider
     }
 
     pub fn serial(&self) -> &Serial {
@@ -312,10 +378,11 @@ impl MMU {
         }
 
         if let Some(transfer) = self.ppu.dma_mut().update(delta_machine_cycles) {
-            // DMA transfer is in progress, we need to copy data from ROM to OAM
-            for i in 0..0xA0 {
-                let value = self.read(transfer.address + i);
-                self.ppu.write_oam(i, value);
+            // The DMA controller owns the OAM bus, so it writes through the privileged path
+            // rather than the CPU-facing, mode-gated one.
+            for (source, offset) in transfer.bytes() {
+                let value = self.read(source);
+                self.ppu.write_oam_dma(offset, value);
             }
         }
 
@@ -400,29 +467,35 @@ impl ROM for MMU {
             0xC000..=0xDFFF => self.work_ram[(address - 0xC000) as usize], // work ram
             0xE000..=0xFDFF => self.work_ram[(address - 0xE000) as usize], // echo ram
             0xFE00..=0xFE9F => self.ppu.read_oam(address - 0xFE00), // OAM (Object Attribute Memory)
-            0xFF00 => self.joypad_register.get(), // joypad register
+            // The unusable region. DMG returns 0x00 here, not 0xFF — settled by gambatte's
+            // committed hardware dump `test/hwtests/fexx_ffxx_dumper_dmg08.bin`, which is all
+            // zeros at offsets 0xA0..0xFF. CGB differs; revisit in B9.
+            0xFEA0..=0xFEFF => 0x00,
+            0xFF00 => 0xC0 | self.joypad_register.get(), // joypad register — bits 6-7 unused, read 1
             0xFF01 => self.serial.get_data(), // serial data register
-            0xFF02 => self.serial.control(), // serial control register
+            0xFF02 => 0x7E | self.serial.control(), // serial control register — bits 1-6 read 1
             0xFF04 => self.divider.value(), // DIV register
             0xFF05 => self.timer.value(), // TIMA register
             0xFF06 => self.timer.modulo(), // TMA register
-            0xFF07 => self.timer.control(), // TAC register
-            0xFF0F => self.interrupt_request.get(), // IF register (interrupt request flags)
+            0xFF07 => 0xF8 | self.timer.control(), // TAC register — bits 3-7 read 1
+            0xFF0F => 0xE0 | self.interrupt_request.get(), // IF register — bits 5-7 read 1
             0xFF10..=0xFF3F => self.audio.read(address),
             0xFF40 => self.ppu.lcd_control().get(), // LCD control register
-            0xFF41 => self.ppu.lcd_status().stat(), // LCD status register
+            0xFF41 => 0x80 | self.ppu.lcd_status().stat(), // LCD status register — bit 7 always 1
             0xFF42 => self.ppu.scroll().y, // SCY register
             0xFF43 => self.ppu.scroll().x, // SCX register
             0xFF44 => self.ppu.lcd_status().ly(), // LY register (read-only)
             0xFF45 => self.ppu.lcd_status().lyc(), // LYC register
-            0xFF46 => 0, // DMA register (write-only, returns 0 when read)
+            0xFF46 => self.ppu.dma().register(), // DMA register reads back the last value written
             0xFF47 => self.ppu.palette().background().to_byte(), // BGP register
             0xFF48 => self.ppu.palette().object0().to_byte(), // OBP0 register
             0xFF49 => self.ppu.palette().object1().to_byte(), // OBP1 register
             0xFF4A => self.ppu.window_position().y, // WY register
             0xFF4B => self.ppu.window_position().x, // WX register
             0xFF80..=0xFFFE => self.high_ram[(address - 0xFF80) as usize], // high ram
-            0xFFFF => self.interrupt_enable.get(),
+            // IE is fully readable and writable, including its top three bits, which are not
+            // wired to any interrupt but still hold what was written.
+            0xFFFF => self.interrupt_enable.get() | self.interrupt_enable_upper,
             _ => {
                 // ignore
                 0xFF
@@ -438,7 +511,7 @@ impl RAM for MMU {
                 // https://gbdev.io/pandocs/MBC1.html#00001fff--ram-enable-write-only
                 self.ram_enabled = value & 0xF == 0xA;
             }
-            0x2000..=0x3FFF if self.header.rom_banks() > 2 => {
+            0x2000..=0x3FFF if self.rom_bank_count() > 2 => {
                 // https://gbdev.io/pandocs/MBC1.html#20003fff--rom-bank-number-write-only
                 self.set_rom_bank_register(value as usize);
             }
@@ -477,7 +550,10 @@ impl RAM for MMU {
             0xFF4A => self.ppu.window_position_mut().y = value, // WY register
             0xFF4B => self.ppu.window_position_mut().x = value, // WX register
             0xFF80..=0xFFFE => self.high_ram[(address - 0xFF80) as usize] = value, // high ram
-            0xFFFF => self.interrupt_enable.set(value),
+            0xFFFF => {
+                self.interrupt_enable.set(value);
+                self.interrupt_enable_upper = value & 0xE0;
+            }
             _ => {
                 // ignore
             }
@@ -489,6 +565,141 @@ impl RAM for MMU {
 mod tests {
     use crate::roms::blargg_cpu::ROM;
     use super::*;
+
+    /// A13: unused register bits read as 1 on hardware. `gb` returned them as 0, so guest code
+    /// testing them saw the wrong answer.
+    #[test]
+    fn unused_io_bits_read_as_one() {
+        let mut mmu = MMU::from_rom(crate::roms::blargg_cpu::ROM).unwrap();
+
+        mmu.write(0xFF02, 0x00);
+        assert_eq!(mmu.read(0xFF02) & 0x7E, 0x7E, "SC bits 1-6");
+
+        mmu.write(0xFF07, 0x00);
+        assert_eq!(mmu.read(0xFF07) & 0xF8, 0xF8, "TAC bits 3-7");
+
+        mmu.write(0xFF0F, 0x00);
+        assert_eq!(mmu.read(0xFF0F) & 0xE0, 0xE0, "IF bits 5-7");
+
+        assert_eq!(mmu.read(0xFF41) & 0x80, 0x80, "STAT bit 7");
+        assert_eq!(mmu.read(0xFF00) & 0xC0, 0xC0, "P1 bits 6-7");
+    }
+
+    /// IE is unusual: all eight bits are readable and writable, even the three that are not wired
+    /// to an interrupt.
+    #[test]
+    fn interrupt_enable_keeps_its_upper_bits() {
+        let mut mmu = MMU::from_rom(crate::roms::blargg_cpu::ROM).unwrap();
+
+        mmu.write(0xFFFF, 0xFF);
+        assert_eq!(mmu.read(0xFFFF), 0xFF);
+
+        mmu.write(0xFFFF, 0xE0); // only the unwired bits
+        assert_eq!(mmu.read(0xFFFF), 0xE0);
+
+        mmu.write(0xFFFF, 0x00);
+        assert_eq!(mmu.read(0xFFFF), 0x00);
+    }
+
+    /// The unusable region reads 0x00 on DMG, not 0xFF — gambatte's committed hardware dump
+    /// `test/hwtests/fexx_ffxx_dumper_dmg08.bin` is all zeros across 0xA0..0xFF.
+    #[test]
+    fn unusable_region_reads_zero_on_dmg() {
+        let mmu = MMU::from_rom(crate::roms::blargg_cpu::ROM).unwrap();
+        for address in 0xFEA0..=0xFEFF {
+            assert_eq!(mmu.read(address), 0x00, "{address:04X}");
+        }
+    }
+
+    /// A7: the transfer used to run through the mode-gated `write_oam` using the PPU mode from
+    /// the *previous* step, so a DMA started while the PPU was in mode 2 or 3 had all 160 bytes
+    /// silently discarded. Pokémon Red only DMAs during VBlank, which is why it never surfaced.
+    #[test]
+    fn oam_dma_delivers_during_mode_3() {
+        use crate::lcd_status::LcdMode;
+
+        let mut mmu = MMU::from_rom(crate::roms::blargg_cpu::ROM).unwrap();
+
+        // Source pattern in work RAM.
+        for i in 0..0xA0u16 {
+            mmu.write(0xC000 + i, (i as u8).wrapping_mul(3).wrapping_add(1));
+        }
+        // Put the PPU in the most restrictive mode there is.
+        mmu.ppu.lcd_status_mut().set_mode(LcdMode::Drawing);
+
+        mmu.write(0xFF46, 0xC0);
+        assert!(mmu.ppu.dma().is_active());
+        assert_eq!(mmu.read(0xFF46), 0xC0, "FF46 should read back");
+
+        // OAM is unreadable by the CPU while the controller holds the bus.
+        assert_eq!(mmu.read(0xFE00), 0xFF);
+
+        for _ in 0..0xA0 {
+            mmu.update(MachineCycles::ONE);
+        }
+
+        assert!(!mmu.ppu.dma().is_active(), "the transfer should have finished");
+        let expected: Vec<u8> = (0..0xA0u16).map(|i| (i as u8).wrapping_mul(3).wrapping_add(1)).collect();
+        assert_eq!(mmu.ppu.oam(), expected.as_slice(), "OAM did not receive the transfer");
+    }
+
+    /// The gate on VRAM/OAM used to be `|| dma.is_active()`, which made them *more* accessible
+    /// during a transfer — the opposite of hardware.
+    #[test]
+    fn oam_dma_blocks_cpu_access_rather_than_granting_it() {
+        use crate::lcd_status::LcdMode;
+
+        let mut mmu = MMU::from_rom(crate::roms::blargg_cpu::ROM).unwrap();
+        mmu.ppu.lcd_status_mut().set_mode(LcdMode::HBlank); // OAM normally accessible here
+        assert_ne!(mmu.read(0xFE00), 0xFF, "sanity: OAM is readable outside a transfer");
+
+        mmu.write(0xFF46, 0xC0);
+        assert_eq!(mmu.read(0xFE00), 0xFF, "OAM must be blocked during a transfer");
+
+        // ...and CPU writes are dropped rather than corrupting the transfer.
+        mmu.write(0xFE00, 0x42);
+        assert_eq!(mmu.ppu.oam()[0], 0x00);
+    }
+
+    /// A5: `set_rom_bank_register` used to clamp against header byte `0x148`, not against the
+    /// bytes actually loaded. A cartridge claiming 64 banks with 32 KB on disk hard-panicked on
+    /// the first high-bank read.
+    #[test]
+    fn truncated_rom_does_not_panic() {
+        let full = crate::pokemon::roms::POKERED;
+        assert_eq!(full[0x148], 0x05, "pokered's header claims 64 banks");
+
+        // Same header, a thirty-second of the data.
+        let truncated = &full[..2 * ROM_BANK_SIZE];
+        let mut mmu = MMU::from_rom(truncated).unwrap();
+        assert_eq!(mmu.header().rom_banks(), 64, "the header still lies");
+        assert_eq!(mmu.rom_bank_count(), 2, "but the bank count follows the data");
+
+        mmu.set_rom_bank_register(63);
+        for address in (0x4000..=0x7FFF).step_by(0x400) {
+            let _ = mmu.read(address); // must not panic
+        }
+    }
+
+    /// A ROM that is not a whole power-of-two number of banks is padded with `0xFF`, so every
+    /// in-range bank index lands on real memory.
+    #[test]
+    fn rom_is_padded_to_a_power_of_two() {
+        let full = crate::pokemon::roms::POKERED;
+        // Two and a half banks -> padded up to four.
+        let ragged = &full[..2 * ROM_BANK_SIZE + ROM_BANK_SIZE / 2];
+        let mut mmu = MMU::from_rom(ragged).unwrap();
+        assert_eq!(mmu.rom_bank_count(), 4);
+
+        // The tail of the half-filled bank, and the two banks beyond it, read as 0xFF.
+        mmu.set_rom_bank_register(2);
+        assert_eq!(mmu.read(0x4000 + ROM_BANK_SIZE as u16 / 2), 0xFF);
+        mmu.set_rom_bank_register(3);
+        assert_eq!(mmu.read(0x4000), 0xFF);
+
+        // Real data is untouched.
+        assert_eq!(mmu.read(0x0100), full[0x0100]);
+    }
 
     #[test]
     fn mmu_enable_ram() {

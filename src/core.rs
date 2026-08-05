@@ -73,8 +73,26 @@ impl Core {
         }
     }
 
+    /// Return to power-on state without dropping the cartridge. Equivalent to reconstructing via
+    /// [`Core::dmg`] with the same ROM, except that battery-backed SRAM survives.
     pub fn reset(&mut self) {
-        todo!()
+        self.registers = RegisterSet::dmg();
+        self.interrupts_enabled = false;
+        self.interrupts_enabled_on_next_instruction = false;
+        self.mode = CoreMode::Normal;
+        self.mmu.reset();
+    }
+
+    pub fn mode(&self) -> CoreMode {
+        self.mode
+    }
+
+    pub fn registers(&self) -> &RegisterSet {
+        &self.registers
+    }
+
+    pub fn registers_mut(&mut self) -> &mut RegisterSet {
+        &mut self.registers
     }
 
     pub fn mmu(&self) -> &MMU {
@@ -505,9 +523,12 @@ impl Core {
                 self.interrupts_enabled_on_next_instruction = true;
             }
             OpCode::Illegal { .. } => {
-                println!("Illegal opcode encountered: {:?}", opcode);
-                self.mode = CoreMode::Crash;
-                self.mmu.stop();
+                // Hardware locks up the *CPU*, not the machine: video, audio, DIV and serial all
+                // keep running. Gambatte models this by disabling interrupts and halting
+                // (`memory.cpp:344-351`) — so nothing can ever wake it — rather than by stopping
+                // the world. No logging: this is the hot path.
+                self.mmu.write(0xFFFF, 0);
+                self.mode = CoreMode::Halt;
             }
         }
 
@@ -523,6 +544,9 @@ impl Core {
                 if self.mmu.joypad().is_activation_pending() {
                     // stop is interrupted by any joypad input
                     self.mode = CoreMode::Normal;
+                    // ...and the clocks STOP switched off have to come back, or DIV, TIMA and
+                    // every APU length/envelope/sweep stay dead for the rest of the run.
+                    self.mmu.restart();
                 }
                 MachineCycles::ZERO
             }
@@ -948,7 +972,8 @@ mod tests {
             // this is the joypad register at 0xFF00, only the 5th and 6th bits are writeable
             core.mmu.write(0xFF00, 0x30);
             core.execute(OpCode::LoadHighAccumulatorIndirect);
-            assert_eq!(core.registers.a, 0x3F); // all buttons released
+            // A13: 0xFF, not 0x3F — bits 6-7 of FF00 are unused and read as 1 on hardware.
+            assert_eq!(core.registers.a, 0xFF); // all buttons released
         }
 
         #[test]
@@ -958,7 +983,7 @@ mod tests {
             core.registers.a = 0x30;
             core.mmu.write(0xFF00, 0x00);
             core.execute(OpCode::LoadHighIndirectAccumulator);
-            assert_eq!(core.mmu.read(0xFF00), 0x3F); // all buttons released
+            assert_eq!(core.mmu.read(0xFF00), 0xFF); // all buttons released
         }
 
         #[test]
@@ -967,7 +992,7 @@ mod tests {
             core.registers.a = 0x42;
             core.mmu.write(0xFF00, 0x30);
             core.execute(OpCode::LoadHighAccumulatorDirect { lsb: 0x00 });
-            assert_eq!(core.registers.a, 0x3F); // all buttons released
+            assert_eq!(core.registers.a, 0xFF); // all buttons released
         }
 
         #[test]
@@ -976,7 +1001,7 @@ mod tests {
             core.registers.a = 0x30;
             core.mmu.write(0xFF00, 0x00);
             core.execute(OpCode::LoadHighDirectAccumulator { lsb: 0x00});
-            assert_eq!(core.mmu.read(0xFF00), 0x3F); // all buttons released
+            assert_eq!(core.mmu.read(0xFF00), 0xFF); // all buttons released
         }
 
 
@@ -2103,6 +2128,73 @@ mod tests {
             core.mmu.joypad_mut().press_button(JoypadButton::A);
             core.execute(OpCode::Nop); // update core state
             assert_eq!(core.mode, CoreMode::Normal);
+        }
+
+        /// A3: `MMU::stop` switches the divider and timer off, and before this fix nothing ever
+        /// switched them back on — so a single STOP killed DIV, TIMA and every APU
+        /// length/envelope/sweep for the rest of the run.
+        #[test]
+        fn stop_wake_restarts_the_clocks() {
+            let mut core = Core::dmg_hello_world();
+            core.execute(OpCode::Stop);
+            assert!(!core.mmu.divider().is_enabled(), "STOP should stop the divider");
+
+            core.mmu.joypad_mut().press_button(JoypadButton::A);
+            core.execute(OpCode::Nop);
+            assert_eq!(core.mode, CoreMode::Normal);
+            assert!(core.mmu.divider().is_enabled(), "waking from STOP must restart the divider");
+
+            // ...and it must actually tick again.
+            let before = core.mmu.divider().value();
+            for _ in 0..1000 {
+                let opcode = core.fetch();
+                core.execute(opcode);
+            }
+            assert_ne!(core.mmu.divider().value(), before, "DIV is frozen after STOP+wake");
+        }
+
+        /// A3: STOP is a two-byte instruction. Fetching only the opcode leaves PC on the pad byte,
+        /// which then gets executed as an instruction.
+        #[test]
+        fn stop_consumes_its_pad_byte() {
+            let mut core = Core::dmg_hello_world();
+            // Execute from work RAM — ROM ignores writes.
+            let start = 0xC000u16;
+            core.registers.pc = start;
+            core.mmu.write(start, 0x10); // STOP
+            core.mmu.write(start + 1, 0x00); // its pad byte
+
+            let opcode = core.fetch();
+            assert_eq!(opcode, OpCode::Stop);
+            assert_eq!(core.registers.pc, start + 2, "STOP must consume its pad byte");
+        }
+
+        /// A4: an illegal opcode locks the CPU, but the rest of the machine keeps running.
+        /// Previously this set `CoreMode::Crash` and called `mmu.stop()`, freezing PPU, APU,
+        /// serial and DIV along with it.
+        #[test]
+        fn illegal_opcode_locks_the_cpu_but_not_the_machine() {
+            let mut core = Core::dmg_hello_world();
+            core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
+            core.interrupts_enabled = true;
+
+            core.execute(OpCode::Illegal { raw: 0xD3 });
+
+            assert_eq!(core.mode, CoreMode::Halt);
+            assert_eq!(core.mmu.read(0xFFFF) & 0x1F, 0, "IE must be cleared so nothing can wake it");
+
+            // The machine keeps time: DIV advances and the PPU keeps drawing scanlines.
+            let div_before = core.mmu.divider().value();
+            let ly_before = core.mmu.read(0xFF44);
+            for _ in 0..5000 {
+                let opcode = core.fetch();
+                core.execute(opcode);
+            }
+            assert_ne!(core.mmu.divider().value(), div_before, "DIV froze after an illegal opcode");
+            assert_ne!(core.mmu.read(0xFF44), ly_before, "the PPU froze after an illegal opcode");
+
+            // ...but the CPU never resumes.
+            assert_eq!(core.mode, CoreMode::Halt);
         }
     }
 

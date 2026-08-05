@@ -650,7 +650,9 @@ impl OpCode {
             0x2F => OpCode::ComplementAccumulator, // 0x2F CPL
             0x37 => OpCode::SetCarryFlag, // 0x37 SCF
             0x3F => OpCode::ComplementCarryFlag, // 0x3F CCF
-            0x10 => OpCode::Stop, // 0x10 STOP
+            // STOP is two bytes: the pad byte after 0x10 is consumed and ignored, or PC is left
+            // sitting on it and it gets executed as an instruction on wake.
+            0x10 => { fetch.fetch_u8(); OpCode::Stop } // 0x10 STOP
             0x76 => OpCode::Halt, // 0x76 HALT
             0xF3 => OpCode::DisableInterrupts, // 0xF3 DI
             0xFB => OpCode::EnableInterrupts, // 0xFB EI
