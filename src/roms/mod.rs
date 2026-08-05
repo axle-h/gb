@@ -19,6 +19,10 @@ pub mod blargg_cpu {
 
 pub mod blargg_dmg_sound {
     pub const ROM: &[u8] = include_bytes!("dmg_sound/dmg_sound.gb");
+    /// The combined suite's own screen: `01:ok` through `12:ok`, then `Passed`. All twelve
+    /// sub-tests in one assertion. Captured from gambatte (see `10-implementation-plan.md` §2.5);
+    /// gb reproduces it pixel for pixel.
+    pub const EXPECTED_ALL: &[u8] = include_bytes!("dmg_sound/dmg_sound.png");
 
     pub const REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.gb");
     pub const EXPECTED_REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.png");
@@ -37,22 +41,19 @@ pub mod blargg_dmg_sound {
     pub const LENGTH_COUNTER_DURING_POWER: &[u8] = include_bytes!("dmg_sound/08-len ctr during power.gb");
     pub const EXPECTED_LENGTH_COUNTER_DURING_POWER: &[u8] = include_bytes!("dmg_sound/08-len ctr during power.png");
     pub const WAVE_READ_WHILE_ON: &[u8] = include_bytes!("dmg_sound/09-wave read while on.gb");
-    /// PLACEHOLDER — not this ROM's reference, so the test is guaranteed to fail and dump its
-    /// real output to `target/test_failure_*.png`. Promote that dump only once the wave-channel
-    /// behaviour is actually fixed (task A16); freezing it now would enshrine wrong output.
-    pub const EXPECTED_WAVE_READ_WHILE_ON: &[u8] = EXPECTED_REGISTERS;
+    /// Promoted by A16 once the wave channel was fixed, and only after checking the frame
+    /// against gambatte's — the two are byte-identical.
+    pub const EXPECTED_WAVE_READ_WHILE_ON: &[u8] = include_bytes!("dmg_sound/09-wave read while on.png");
     pub const WAVE_TRIGGER_WHILE_ON: &[u8] = include_bytes!("dmg_sound/10-wave trigger while on.gb");
-    /// PLACEHOLDER — not this ROM's reference, so the test is guaranteed to fail and dump its
-    /// real output to `target/test_failure_*.png`. Promote that dump only once the wave-channel
-    /// behaviour is actually fixed (task A16); freezing it now would enshrine wrong output.
-    pub const EXPECTED_WAVE_TRIGGER_WHILE_ON: &[u8] = EXPECTED_REGISTERS;
+    /// Promoted by A16 once the wave channel was fixed, and only after checking the frame
+    /// against gambatte's — the two are byte-identical.
+    pub const EXPECTED_WAVE_TRIGGER_WHILE_ON: &[u8] = include_bytes!("dmg_sound/10-wave trigger while on.png");
     pub const REGISTERS_AFTER_POWER: &[u8] = include_bytes!("dmg_sound/11-regs after power.gb");
     pub const EXPECTED_REGISTERS_AFTER_POWER: &[u8] = include_bytes!("dmg_sound/11-regs after power.png");
     pub const WAVE_WRITE_WHILE_ON: &[u8] = include_bytes!("dmg_sound/12-wave write while on.gb");
-    /// PLACEHOLDER — not this ROM's reference, so the test is guaranteed to fail and dump its
-    /// real output to `target/test_failure_*.png`. Promote that dump only once the wave-channel
-    /// behaviour is actually fixed (task A16); freezing it now would enshrine wrong output.
-    pub const EXPECTED_WAVE_WRITE_WHILE_ON: &[u8] = EXPECTED_REGISTERS;
+    /// Promoted by A16 once the wave channel was fixed, and only after checking the frame
+    /// against gambatte's — the two are byte-identical.
+    pub const EXPECTED_WAVE_WRITE_WHILE_ON: &[u8] = include_bytes!("dmg_sound/12-wave write while on.png");
 }
 
 pub mod acid {

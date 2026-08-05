@@ -297,6 +297,17 @@ mod tests {
             serial_console_test("cpu-11", OP_A_HL_11);
         }
 
+        /// The whole suite in one run, off the combined 64 KB ROM — so unlike the eleven
+        /// sub-tests above, this one actually exercises MBC bank switching.
+        ///
+        /// It needs roughly **2.5x** the default budget: the sub-tests run back to back, and
+        /// `11-op a,(hl)` alone is most of it. Under a 40M budget it stops after `10:ok  11` and
+        /// looks exactly like a hang, which is what it was mistaken for once already.
+        #[test]
+        fn all() {
+            serial_console_test_within("cpu-all", ROM, MachineCycles::from_m(60_000_000));
+        }
+
         #[test]
         fn instruction_timing() {
             serial_console_test("instruction-timing", INSTRUCTION_TIMING);
@@ -306,6 +317,23 @@ mod tests {
     mod blargg_dmg_sound {
         use crate::roms::blargg_dmg_sound::*;
         use super::*;
+
+        /// The whole suite in one run, off the combined 64 KB ROM — so unlike the twelve
+        /// sub-tests below, this one exercises MBC bank switching, and that is what it fails on.
+        ///
+        /// Blargg's runner selects each sub-test by writing its index to the bank register. On the
+        /// fourth write hardware *masks* `4` down to bank 0, where the runner's terminator lives;
+        /// gb *clamps* it to 3 and re-runs bank 3's test forever, printing `NN:ok` past 12 and on
+        /// past 99. Applying the mask makes this pass — but the mask width is per-mapper (MBC1 is
+        /// 5 bits, pokered's MBC3 needs 6), so the fix is **D1**, not a one-liner here.
+        ///
+        /// The reference is gambatte's own frame and is correct, so this goes green the day D1
+        /// lands. The budget is ~50 s of emulated time, which is what the ROM needs to finish.
+        #[test]
+        #[ignore = "D1: needs hardware's per-mapper bank mask; gb clamps, so the runner never reaches its terminator"]
+        fn all() {
+            ppu_test_within("audio-all", ROM, EXPECTED_ALL, MachineCycles::from_m(60_000_000));
+        }
 
         #[test]
         fn registers() {
@@ -347,14 +375,16 @@ mod tests {
             ppu_test("audio-length-counter-during-power", LENGTH_COUNTER_DURING_POWER, EXPECTED_LENGTH_COUNTER_DURING_POWER);
         }
 
+        /// A16. Reading wave RAM while channel 3 plays: `0xFF` unless the read lands on the exact
+        /// tick the channel fetches its next sample.
         #[test]
-        #[ignore = "A16: gb genuinely fails dmg_sound 09, and the reference image is a placeholder"]
         fn wave_read_while_on() {
             ppu_test("audio-wave-read-while-on", WAVE_READ_WHILE_ON, EXPECTED_WAVE_READ_WHILE_ON);
         }
 
+        /// A16. Retriggering channel 3 one tick before a sample fetch corrupts the start of wave
+        /// RAM — a DMG-only quirk.
         #[test]
-        #[ignore = "A16: gb genuinely fails dmg_sound 10, and the reference image is a placeholder"]
         fn wave_trigger_while_on() {
             ppu_test("audio-wave-trigger-while-on", WAVE_TRIGGER_WHILE_ON, EXPECTED_WAVE_TRIGGER_WHILE_ON);
         }
@@ -364,8 +394,9 @@ mod tests {
             ppu_test("audio-registers-after-power", REGISTERS_AFTER_POWER, EXPECTED_REGISTERS_AFTER_POWER);
         }
 
+        /// A16. Writing wave RAM while channel 3 plays, under the same one-tick aperture as
+        /// [`wave_read_while_on`].
         #[test]
-        #[ignore = "A16: gb genuinely fails dmg_sound 12, and the reference image is a placeholder"]
         fn wave_write_while_on() {
             ppu_test("audio-wave-write-while-on", WAVE_WRITE_WHILE_ON, EXPECTED_WAVE_WRITE_WHILE_ON);
         }
@@ -552,10 +583,17 @@ mod tests {
     }
 
     fn serial_console_test(name: &str, cart: &[u8]) {
+        serial_console_test_within(name, cart, MachineCycles::from_m(25_000_000));
+    }
+
+    /// [`serial_console_test`] with an explicit cycle budget, for ROMs that need longer than the
+    /// default. Only a *failing* run spends the whole budget — a pass returns as soon as the ROM
+    /// says so.
+    fn serial_console_test_within(name: &str, cart: &[u8], budget: MachineCycles) {
         let mut gb = GameBoy::dmg(cart);
         gb.core.mmu_mut().serial_mut().enable_buffer();
 
-        let mut max_cycles = MachineCycles::from_m(25_000_000);
+        let mut max_cycles = budget;
         let mut cycles = MachineCycles::ZERO;
         let mut serial_output = String::new();
         let mut failed = false;
@@ -579,10 +617,16 @@ mod tests {
         gb_test_failed(&gb, name, &serial_output);
     }
 
+
     fn ppu_test(name: &str, cart: &[u8], expected_screenshot: &[u8]) {
+        ppu_test_within(name, cart, expected_screenshot, MachineCycles::from_m(20_000_000));
+    }
+
+    /// [`ppu_test`] with an explicit cycle budget, for ROMs that need longer than the default.
+    /// Only the budget for a *failing* run costs anything — a match returns immediately.
+    fn ppu_test_within(name: &str, cart: &[u8], expected_screenshot: &[u8], max_cycles: MachineCycles) {
         let expected_screenshot = parse_png(expected_screenshot);
         let mut gb = GameBoy::dmg(cart);
-        let max_cycles = MachineCycles::from_m(20_000_000);
         let mut cycles = MachineCycles::ZERO;
         let mut last_screenshot = gb.core().mmu().ppu().screenshot();
 
