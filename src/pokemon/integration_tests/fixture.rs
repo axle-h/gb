@@ -4,6 +4,19 @@
 
 use super::*;
 
+/// Why a run stopped early. Carries the message `step` would have panicked with, so the panicking
+/// and non-panicking paths report identically.
+struct RunFailure(String);
+
+impl RunFailure {
+    /// Which `target/test-artifacts/` pair to write. A stall and a timeout are debugged
+    /// differently, so they are kept apart — `probe_stall_artifact` and `probe_timeout_artifact`
+    /// each read one of them.
+    fn artifact_name(&self) -> &'static str {
+        if self.0.starts_with("policy stalled") { "test_stall" } else { "test_timeout" }
+    }
+}
+
 pub struct TestFixture {
     pub gb: GameBoy,
     map_cache: MapMetadataCache,
@@ -85,7 +98,18 @@ impl TestFixture {
         self
     }
 
+    /// Advance one agent tick, failing the test if the run stalls or exhausts its budget.
     pub fn step(&mut self) {
+        if let Err(failure) = self.try_step() {
+            self.save_failure_artifacts(failure.artifact_name());
+            panic!("{}", failure.0);
+        }
+    }
+
+    /// [`Self::step`] without the panic. Diagnostics that sweep several targets use this so that
+    /// one unreachable target reports itself and the sweep carries on, instead of taking the whole
+    /// probe down with it.
+    fn try_step(&mut self) -> Result<(), RunFailure> {
         let cycles = self.gb.run(AGENT_RESOLUTION);
 
         let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
@@ -124,16 +148,17 @@ impl TestFixture {
         } else if !long_running && steps.map_or(false, |n| n > 1) {
             self.stall_cycles += cycles;
             if self.stall_cycles >= threshold {
-                self.save_failure_artifacts("test_stall");
-                panic!("policy stalled — queue unchanged for {:?} of game time{}",
-                    threshold, self.progress_note());
+                return Err(RunFailure(format!(
+                    "policy stalled — queue unchanged for {:?} of game time{}",
+                    threshold, self.progress_note())));
             }
         }
 
         if self.total_cycles >= self.max_cycles {
-            self.save_failure_artifacts("test_timeout");
-            panic!("exceeded max cycles ({:?} game time){}", self.max_cycles, self.progress_note());
+            return Err(RunFailure(format!(
+                "exceeded max cycles ({:?} game time){}", self.max_cycles, self.progress_note())));
         }
+        Ok(())
     }
 
     /// How far the run got, appended to every failure panic.
@@ -192,6 +217,34 @@ impl TestFixture {
                 if done(&state) { return state; }
             }
             self.step();
+        }
+    }
+
+    /// [`Self::run_until`] without the panic: `None` means the run stalled or ran out of budget
+    /// before `done` was satisfied, and the reason has already been printed.
+    ///
+    /// For diagnostics only. A *test* wants `run_until`, so that a route that stops working fails
+    /// loudly instead of quietly reporting nothing.
+    pub fn try_run_until(&mut self, done: impl Fn(&GameState) -> bool) -> Option<GameState> {
+        let mut last_map = None;
+        loop {
+            let state = {
+                let api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+                api.game_state()
+            };
+            if let Ok(state) = state {
+                if last_map != Some(state.map.map) {
+                    last_map = Some(state.map.map);
+                    println!("  → {} @ {}", state.map.map, state.map.player_position);
+                }
+                if done(&state) {
+                    return Some(state);
+                }
+            }
+            if let Err(failure) = self.try_step() {
+                println!("  ✗ gave up: {}", failure.0);
+                return None;
+            }
         }
     }
 

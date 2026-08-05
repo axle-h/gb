@@ -438,7 +438,11 @@ fn probe_town_hidden_item_reachability() {
         let mut steps = vec![PolicyStep::Fly { to: fly }];
         if fly != town { steps.push(PolicyStep::goto(town)); }
         let mut fixture = TestFixture::new(MEDICINE, Duration::from_mins(60), steps);
-        fixture.run_until(|s| s.map.map == town);
+        // A town the walk cannot reach is a finding — report it and keep sweeping the rest.
+        if fixture.try_run_until(|s| s.map.map == town).is_none() {
+            println!("== {town} NOT REACHED — Fly/goto never arrived");
+            continue;
+        }
         for _ in 0..60 { fixture.step(); }
         let state = fixture.game_state();
         println!("== {town} @ {} — hidden {:?}", state.map.player_position, state.map.hidden_items);

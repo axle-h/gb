@@ -299,7 +299,12 @@ fn probe_sweep_grounds() {
     ];
     for (name, steps, map) in grounds {
         let mut fixture = TestFixture::new(SWEEP_VIRIDIAN, Duration::from_mins(90), steps.clone());
-        fixture.run_until(|s| s.map.map == *map);
+        // A ground this probe cannot even walk to is a finding, not a crash — report it and carry
+        // on to the next one, rather than taking the other three down with it.
+        if fixture.try_run_until(|s| s.map.map == *map).is_none() {
+            println!("== {name} ({map:?}) NOT REACHED — navigation never arrived");
+            continue;
+        }
         for _ in 0..60 { fixture.step(); }
         let s2 = fixture.game_state();
         let grass = s2.map.actions().into_iter().find(|a| a.tile == MetaTile::Grass);
