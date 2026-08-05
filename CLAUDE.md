@@ -111,7 +111,14 @@ and `bench_emulation_throughput` respectively), so wall clock ≈ emulated-minut
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.
+# ~80s, 115 tests — every one of them ≤65s (measured 2026-08-05).
 cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
+
+# The one leg that costs more game time than the whole leg chain combined: the Safari dex sweep,
+# 381s of wall clock for ~190 min of emulated game time (21 paid ¥500 trips chasing 4.3%-slot
+# species). Split out because it, alone, set the leg tier's wall clock at six minutes — with libtest
+# printing nothing until it finished, so there was no way to see what was still running.
+cargo test --release --features very-slow-tests --bin gb -- can_sweep_the_safari_zone --exact
 
 # The whole game from a fresh save, ~20 min of wall clock.
 cargo test --release --features full-playthrough full_playthrough
@@ -132,7 +139,7 @@ cargo test --release --features bench --bin gb -- \
 ```
 
 **A test that is `#[ignore]`d should be blocked, not merely slow or not-a-test.** Tiering goes
-through a Cargo feature (`slow-tests`, `full-playthrough`, `bench`) so the ignored list stays a
+through a Cargo feature (`slow-tests`, `very-slow-tests`, `full-playthrough`, `bench`) so the ignored list stays a
 readable backlog. Every remaining `#[ignore]` reason names its blocker — a plan task ID where one
 exists, or why it will not be fixed.
 
