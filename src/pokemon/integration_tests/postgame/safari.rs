@@ -183,12 +183,31 @@ fn can_catch_a_safari_exclusive() {
 /// [`safari::grounds`] take **dex 19 → 31 owned**, which clears H3's Itemfinder gate of 30 — and four
 /// of them (Chansey, Scyther, Kangaskhan, Tauros) exist nowhere else on a single Red cartridge.
 ///
-/// **~6.5 minutes of wall clock — the longest leg in the `slow-tests` tier.** Measured: 21 paid trips
-/// and ¥9,000, and where the time goes is entirely the four species in 4.3 % encounter slots at 18–22 %
-/// per encounter (centre 10 trips for Scyther, east 1, north 7 for Chansey, west 3 for Tauros). It is
-/// bounded three ways — `max_trips` per area, the wallet, and the test's own cycle cap.
+/// ⚠️ **Its own tier (`very-slow-tests`), because it emulates more game time than the whole of
+/// `slow-tests` put together.** Re-measured 2026-08-05: **381 s** standalone against **65 s** for the
+/// next slowest leg (`early_game::can_reach_vermilion`) and ≤65 s for all 115 others — so on the leg
+/// tier's 24-way run it *was* the wall clock, six minutes of it, with nothing on screen to say which
+/// test was still going. ~190 min of emulated game time: 21 paid trips and ¥9,000, spent almost
+/// entirely on the four species in 4.3 % encounter slots at 18–22 % per encounter (centre 10 trips for
+/// Scyther, east 1, north 7 for Chansey, west 3 for Tauros).
+///
+/// **There is no waste to reclaim** — the pacing pair is grass↔grass so every safari step rolls for an
+/// encounter, animations are off and text is Fast via [`FAST_FIXTURE_OPTIONS`], each species is hunted
+/// where its slot is fattest ([`safari::grounds`]), and BAIT/ROCK are worked out to be losing plays in
+/// [`safari::pick_battle_action`]. It is long because the game is: the only lever left is agent-side
+/// battle latency, and changing that re-rolls every RNG stream in the suite (see
+/// `TestFixture::with_original_battle_timing`), which is not a trade worth making for test wall clock.
+///
+/// Nothing else in the tier depends on it running: `postgame-safari.bin` is committed, and every
+/// *mechanism* it uses — paying, pacing, throwing balls, a catch that overflows to the box, ejection
+/// at zero steps and the deliberate walk-out — is covered in `slow-tests` by
+/// [`can_catch_a_safari_exclusive`] (10 s) and [`runs_the_step_budget_down_and_is_ejected`] (22 s).
+/// What moves out with it is the *route* claim: that the twelve grounds add up to dex 30.
+///
+/// It is bounded three ways — `max_trips` per area, the wallet, and the test's own cycle cap.
 #[test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+#[cfg_attr(not(feature = "very-slow-tests"), ignore = "very slow (381 s, 6× the leg tier's next \
+    slowest) — run with --features very-slow-tests")]
 fn can_sweep_the_safari_zone() {
     /// Per area, not for the sweep — and the binding one is the centre's, where **Scyther** took ten
     /// (4.3 % of encounters, 21 % per encounter). Sixty trips would be ¥30,000 of a ~¥44,000 wallet;

@@ -12,6 +12,13 @@ edition = "2024"
 # committed `src/pokemon/data/*.bin` snapshot.
 #   cargo test --release --features slow-tests
 slow-tests = []
+# The legs that cost more game time than the rest of `slow-tests` combined, so one of them does not
+# silently become the tier's wall clock. Currently one: `postgame::safari::can_sweep_the_safari_zone`
+# at 381 s, against 65 s for the next slowest leg and ≤65 s for the other 114 — it emulates ~190 min
+# of game time buying 21 ¥500 Safari trips to chase 4.3 %-slot species, and there is no waste in it to
+# reclaim. Its siblings in `slow-tests` still cover every Safari *mechanism*; see the test's docs.
+#   cargo test --release --features very-slow-tests --bin gb -- can_sweep_the_safari_zone --exact
+very-slow-tests = []
 # `full_playthrough` alone — a fresh save played to all 8 badges and Victory Road 2F (NOT the Hall of
 # Fame: the Elite Four is proved separately), ~20 min of wall clock. Kept off the `slow-tests` gate so
 # the leg chain can be run without paying for it. Run it after every major work item and before pushing
