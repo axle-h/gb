@@ -86,6 +86,7 @@ mod tests {
     ///
     /// `cargo test --release --bin gb -- audio::reference::tests::capture_golden_input --exact --ignored --nocapture`
     #[test]
+    #[cfg(feature = "diagnostics")]
     #[ignore = "fixture generator, not a test; run with --ignored"]
     fn capture_golden_input() {
         let runs = capture_transitions(CAPTURE_FIXTURE, Duration::from_millis(GOLDEN_INPUT_MILLIS));

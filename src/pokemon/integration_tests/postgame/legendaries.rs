@@ -65,6 +65,7 @@ fn dump_map(fixture: &mut TestFixture, x0: u8, x1: u8, y0: u8, y1: u8) {
 /// So Victory Road has to be entered from the bottom, the long way, exactly as `victory_road_1f_steps`
 /// does it. This run walks that and asks what VR2F looks like from the 1F ladder.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "probe — run with --ignored --nocapture"]
 fn probe_route_to_moltres() {
     let mut fixture = TestFixture::new(FLY_BIKE, Duration::from_mins(120), vec![
@@ -191,6 +192,7 @@ fn can_catch_moltres() {
 /// Scratch probe: load the artifact a failed run leaves in `target/test-artifacts/` and dump what the
 /// pathfinder can see from where it stalled.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "probe — run with --ignored --nocapture"]
 fn probe_stall_artifact() {
     let Ok(bytes) = std::fs::read("target/test-artifacts/test_stall_state.bin") else {
@@ -298,6 +300,7 @@ fn can_catch_mewtwo() {
 ///
 /// Prints the reachable set at each stage.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "probe — run with --ignored --nocapture"]
 fn probe_route_to_cerulean_cave() {
     let mut fixture = TestFixture::new(ZAPDOS, Duration::from_mins(90), PolicyStep::mewtwo_steps());

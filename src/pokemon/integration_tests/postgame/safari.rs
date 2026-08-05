@@ -43,6 +43,7 @@ const KANGASKHAN: &[PokemonSpecies] = &[PokemonSpecies::Kangaskhan];
 /// whole budget. The dump prints the reachable action set and the meta-tile grid around the player, so
 /// "is the grass on our side of the water" is answerable in ~25 s instead of a 90-minute timeout.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_safari_centre_from_the_entrance() {
     let mut fixture = TestFixture::new(FLASH, Duration::from_mins(60), vec![
@@ -86,6 +87,7 @@ fn probe_safari_centre_from_the_entrance() {
 /// it reports `grass: None` — a Tauros hunt there would stand still on a bare shelf for its whole
 /// budget — against `grass: Some(((6, 20), 44))` from the (26,0) pair this drives.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_safari_areas() {
     let mut fixture = TestFixture::new(FLASH, Duration::from_mins(120), vec![

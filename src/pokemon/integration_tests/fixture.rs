@@ -259,6 +259,7 @@ impl TestFixture {
 /// slot, a missing HM, an empty wallet). Run with
 /// `cargo test --release --bin gb -- dump_fixture_states --exact --ignored --nocapture`.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
 fn dump_fixture_states() {
     // Every fixture some leg reads, in chain order.
@@ -319,6 +320,7 @@ fn dump_fixture_states() {
 /// Run with
 /// `cargo test --release --bin gb -- probe_coverage --exact --ignored --nocapture`.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
 fn probe_coverage() {
     // Postgame entry fixtures. Append each `postgame-*.bin` here as its workstream commits one.
@@ -482,11 +484,20 @@ pub fn print_coverage(name: &str, save_state: &[u8]) {
 }
 
 /// Micro-benchmark, not a test: raw emulation throughput vs. the full agent step, from a mid-game
-/// fixture. Establishes which half of the loop to optimise — as of writing, **23× realtime raw and
-/// 20× with the agent**, i.e. the emulator is the cost and the agent's observe/policy/input work is
-/// only ~11% on top. Run with
-/// `cargo test --release --bin gb -- bench_emulation_throughput --exact --ignored --nocapture`.
+/// fixture. Establishes which half of the loop to optimise — re-measured 2026-08-05 on a Ryzen 9
+/// 7900X at **33.6× realtime raw and 28.3× with the agent**, i.e. the emulator is the cost and the
+/// agent's observe/policy/input work is only ~16% on top.
+///
+/// For the emulator core measured *alone*, which is what Phase C of
+/// `docs/compatibility/10-implementation-plan.md` is scored against, see
+/// `game_boy::tests::bench_core_throughput`.
+///
+/// ```text
+/// cargo test --release --features bench --bin gb -- \
+///   pokemon::integration_tests::fixture::bench_emulation_throughput --exact --ignored --nocapture
+/// ```
 #[test]
+#[cfg(feature = "bench")]
 #[ignore = "benchmark, not a test; run with --ignored --nocapture"]
 fn bench_emulation_throughput() {
     let mut fixture = TestFixture::new(

@@ -25,6 +25,12 @@ very-slow-tests = []
 # — it is the only test that proves the legs compose. See CLAUDE.md.
 #   cargo test --release --features full-playthrough full_playthrough
 full-playthrough = []
+# Diagnostics and probes: tools that print a report about the game or the agent, not assertions.
+# Compiled out by default so the ignored-test list stays a readable backlog of genuinely blocked
+# work. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal — several
+# legitimately end by exhausting their cycle budget after printing what they were asked for.
+#   cargo test --release --features diagnostics,slow-tests --bin gb -- probe_ --ignored --nocapture
+diagnostics = []
 # Benchmarks. Compiled out entirely by default rather than `#[ignore]`d, so they do not show up
 # in the ignored count alongside genuinely blocked tests.
 #   cargo test --release --features bench --bin gb -- bench_ --nocapture

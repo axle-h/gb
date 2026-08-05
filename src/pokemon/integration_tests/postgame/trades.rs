@@ -212,6 +212,7 @@ fn can_trade_a_boxed_ponyta_for_a_seel() {
 
 /// Diagnostic for **G6c**: is there grass where Fuchsia lets you onto Route 15?
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_route15_grass() {
     let mut fixture = TestFixture::new(NIDORAN, Duration::from_mins(60), vec![
@@ -244,6 +245,7 @@ fn probe_route15_grass() {
 /// Diagnostic for **G5**: Route 2's north half. The trade house door is at (15,19) and neither end of
 /// the route can reach it — the same "stands still" failure `postgame::gifts` records for Route 5.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_route2_trade_house() {
     let mut fixture = TestFixture::new(NAME_RATER, Duration::from_mins(60), vec![

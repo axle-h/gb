@@ -139,6 +139,7 @@ fn can_tour_the_southern_islands() {
 /// — dungeon interiors, the Silph floors, Victory Road — is reached by the workstreams that had a
 /// reason to go there, and this says which is which rather than implying the tour covers Kanto.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_tour_report() {
     use std::collections::HashSet;
@@ -185,6 +186,7 @@ fn probe_tour_report() {
 /// [`maps::rooms_off`] walks the ROM's warp tables, and a tour that plans the wrong rooms wastes
 /// emulated minutes before it says so. Run this first when adding a hub or changing `TOUR_DEPTH`.
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_tour_plan() {
     let mut total = 0;

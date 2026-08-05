@@ -17,6 +17,7 @@ use super::*;
 ///   probe_resume_playthrough --exact --ignored --nocapture
 /// ```
 #[test]
+#[cfg(feature = "diagnostics")]
 #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
 fn probe_resume_playthrough() {
     let Ok(bytes) = std::fs::read("target/test-artifacts/test_stall_state.bin") else {
