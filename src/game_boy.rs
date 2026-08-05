@@ -342,27 +342,30 @@ mod tests {
         fn length_counter_during_power() {
             ppu_test("audio-length-counter-during-power", LENGTH_COUNTER_DURING_POWER, EXPECTED_LENGTH_COUNTER_DURING_POWER);
         }
-/*
+
         #[test]
+        #[ignore]
         fn wave_read_while_on() {
             ppu_test("audio-wave-read-while-on", WAVE_READ_WHILE_ON, EXPECTED_WAVE_READ_WHILE_ON);
         }
 
         #[test]
+        #[ignore]
         fn wave_trigger_while_on() {
             ppu_test("audio-wave-trigger-while-on", WAVE_TRIGGER_WHILE_ON, EXPECTED_WAVE_TRIGGER_WHILE_ON);
         }
-*/
+
         #[test]
         fn registers_after_power() {
             ppu_test("audio-registers-after-power", REGISTERS_AFTER_POWER, EXPECTED_REGISTERS_AFTER_POWER);
         }
-/*
+
         #[test]
+        #[ignore]
         fn wave_write_while_on() {
             ppu_test("audio-wave-write-while-on", WAVE_WRITE_WHILE_ON, EXPECTED_WAVE_WRITE_WHILE_ON);
         }
-*/
+
     }
 
     mod joypad {
