@@ -86,6 +86,24 @@ impl Serial {
         self.data
     }
 
+    /// **D9.** `SB` as the guest sees it *during* a transfer.
+    ///
+    /// The byte shifts out a bit at a time, and with no link cable attached a `1` shifts in behind
+    /// each one — so a guest that reads `SB` mid-transfer sees the top bits already replaced. `gb`
+    /// used to hold the written value flat and then jump to `0xFF` at completion, which is
+    /// observable to anything that polls.
+    ///
+    /// ⚠️ **This is a read-side view and must stay one.** [`Serial::complete_transfer`] still
+    /// buffers `self.data`, the byte the guest actually wrote — that is how blargg's output is
+    /// captured (`serial_console_test`), and shifting the stored copy would corrupt it.
+    pub fn data_at(&self, now: u64, fast: bool) -> u8 {
+        let Some(started) = self.started else { return self.data };
+        let bits = ((now.saturating_sub(started)) * 8 / Self::period(fast)).min(8) as u32;
+        // `(data + 1) << n - 1` fills the vacated low bits with ones in one step. Widened to u32
+        // because `0xFF` at eight bits shifted would overflow a u16.
+        (((self.data as u32 + 1) << bits).wrapping_sub(1)) as u8
+    }
+
     pub fn control(&self) -> u8 {
         let mut control = 0;
         if self.transfer_enable { control |= 0x80; }

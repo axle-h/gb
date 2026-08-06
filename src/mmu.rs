@@ -4,7 +4,7 @@ use crate::audio::Audio;
 use crate::core::CoreMode;
 use crate::cycles::MachineCycles;
 use crate::divider::Divider;
-use crate::header::CartHeader;
+use crate::header::{CartHeader, LoadError};
 use crate::mbc::{BankCounts, Mapper, Mbc, RamTarget};
 use crate::hdma::{Hdma, HdmaRequest};
 use crate::interrupt::{InterruptFlags, InterruptFlagsSnapshot, InterruptType};
@@ -325,14 +325,18 @@ impl MMU {
 }
 
 impl MMU {
-    pub fn from_rom(data: &[u8]) -> Result<Self, String> {
+    pub fn from_rom(data: &[u8]) -> Result<Self, LoadError> {
         Self::new(data, Model::Dmg)
     }
 
-    pub fn new(data: &[u8], model: Model) -> Result<Self, String> {
+    pub fn new(data: &[u8], model: Model) -> Result<Self, LoadError> {
         let header = CartHeader::parse(data)?;
 
-        println!("{:?}", header);
+        // D8: advisory, never fatal — `gb` runs no boot ROM, and plenty of homebrew and test ROMs
+        // ship a wrong checksum and run fine on hardware with a flash cart.
+        if !CartHeader::checksum_valid(data) {
+            eprintln!("warning: header checksum mismatch in {:?}", header.title());
+        }
 
         let color_mode = ColorMode::of(model, &header);
         // MBC2's 512 nibbles live on the mapper, and its header declares no banks at all — so it
@@ -998,7 +1002,8 @@ impl MMU {
                 if self.model.is_cgb() { self.unusable[unusable_offset(address)] } else { 0x00 }
             }
             0xFF00 => 0xC0 | self.joypad_register.get(), // joypad register — bits 6-7 unused, read 1
-            0xFF01 => self.serial.get_data(), // serial data register
+            // D9: mid-transfer, `SB` shows the bits already shifted out. See `Serial::data_at`.
+            0xFF01 => self.serial.data_at(self.now, self.serial_fast),
             // SC: bits 1-6 read 1 on DMG. On CGB bit 1 is the 32x clock-speed select and is
             // real, so only bits 2-6 are stuck high there.
             0xFF02 => {

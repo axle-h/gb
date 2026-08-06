@@ -114,10 +114,9 @@ pub enum Mapper {
 impl Mapper {
     /// Select the mapper a cartridge header asks for.
     ///
-    /// ⚠️ Cartridge types `gb` cannot emulate — MMM01, MBC6, MBC7, the Pocket Camera, TAMA5 and
-    /// HuC3 — are **not** rejected here; that is **D7**, which introduces the typed load error.
-    /// They currently fall back to MBC1's layout, which is what `gb` did for every cartridge
-    /// before D2 and is no worse than it was.
+    /// Cartridge types `gb` cannot emulate never reach here — [`CartHeader::parse`] rejects them
+    /// with [`crate::header::LoadError::UnsupportedMbc`] (D7/D8), rather than running them as
+    /// something else and looking like it worked.
     pub fn new(cart_type: CartType, banks: BankCounts) -> Self {
         use CartType::*;
         match cart_type {

@@ -410,10 +410,10 @@ control.
 | D4 | MBC2 | DONE | 2026-08-06 | `& 0x6100` decode (A8), built-in RAM bank allocated despite `0x149 = 0` |
 | D5 | MBC3 + RTC | PARTIAL | 2026-08-06 | MBC3 done and it is the **live pokered path**. **RTC not built** — `RamTarget::Rtc` is plumbed, no clock behind it |
 | D6 | MBC5 | DONE | 2026-08-06 | 9-bit register across two ranges; **no bank-0 remap**, the one mapper where that is right |
-| D7 | HuC1 + unsupported-mapper errors | PARTIAL | 2026-08-06 | HuC1 done. **Typed `LoadError` not done** — belongs with D8's `Result<_, LoadError>` refactor |
-| D8 | Header parsing robustness | TODO | | |
-| D9 | Serial + joypad fidelity | TODO | | |
-| D10 | MBC test-ROM adoption (mooneye `emulator-only/`) | TODO | | |
+| D7 | HuC1 + unsupported-mapper errors | DONE | 2026-08-06 | HuC1 + `LoadError::UnsupportedMbc`, landed with D8's error refactor |
+| D8 | Header parsing robustness | DONE | 2026-08-06 | 3 valid-cartridge rejections fixed; `LoadError`; `try_dmg`/`try_cgb`; checksum warning; `println!` gone |
+| D9 | Serial + joypad fidelity | DONE | 2026-08-06 | `SB` shifts progressively (read-side only); joypad IRQ on a **register-line** edge. ⚠️ changed STOP-wake — see ledger #16 |
+| D10 | MBC test-ROM adoption (mooneye `emulator-only/`) | BLOCKED | 2026-08-06 | ⛔ **the ROMs are not on this machine** and need an external download — Alex's call. See ledger #16 |
 
 ---
 
@@ -1760,7 +1760,7 @@ Port notes for whoever finishes them; the details are tabulated in
 
 ### D8 — Header parsing robustness
 
-**State:** TODO · **Depends:** D1
+**State:** DONE (2026-08-06) · **Depends:** D1
 
 **Do.** Two real bugs that reject valid cartridges:
 1. **Non-UTF-8 titles are rejected** (`src/header.rs:57`). Real headers place the manufacturer code
@@ -1782,7 +1782,13 @@ warning. Replace `Result<_, String>` with a `LoadError` enum, and add
 
 ### D9 — Serial and joypad fidelity
 
-**State:** TODO · **Depends:** none
+**State:** DONE (2026-08-06) · **Depends:** none
+
+⚠️ **The joypad half changed STOP-wake behaviour, and the change is correct.** A wake needs one of
+`P10-P13` to go low, which a button can only do while `P14`/`P15` selects its group — so STOP with
+**both groups deselected cannot be woken by the joypad at all**, which is the documented hardware
+quirk. Two `core::tests::control_flow` tests pressed a button with neither group selected and had to
+select one; a third now pins the quirk. DIV alignment was left approximate, as this task permits.
 
 **Do.**
 - **Serial:** add the `0x7E` read-back mask to `control()`; shift SB left by elapsed bit-periods
@@ -1797,7 +1803,13 @@ warning. Replace `Result<_, String>` with a `LoadError` enum, and add
 
 ### D10 — MBC test-ROM adoption
 
-**State:** TODO · **Depends:** D3–D7
+**State:** BLOCKED (2026-08-06) · **Depends:** D3–D7
+
+⛔ **Blocked on ROMs that are not on this machine.** mooneye's `emulator-only/mbc*` is not in the
+repo, not anywhere under `/home/alex/projects`, and gambatte ships only its own `hwtests`. Fetching
+`c-sp/game-boy-test-roms` v7.0 is an external download and therefore **Alex's call** — ask before
+doing it. Until then the three gambatte/Pan Docs divergences in ledger #15 are **unadjudicated** and
+Phase D must not be called complete.
 
 **Do.** Wire mooneye `emulator-only/mbc1` (13), `mbc2` (7), `mbc5` (8) — 28 ROMs, MIT, prebuilt in
 `c-sp/game-boy-test-roms` v7.0.
@@ -3361,3 +3373,85 @@ divergences in surprise 3 are **unadjudicated**. Do not mark Phase D complete wh
 as opposed to robustness work, and the plan's guidance is good: model it as a `base_time` offset
 with an **injectable** time source, never `SystemTime::now()` directly, or every fixture-driven
 test becomes non-deterministic.
+
+### 2026-08-06 (#16) — D7, D8, D9 — Header robustness, typed load errors, serial/joypad fidelity
+
+**State:** **D7, D8, D9 → `DONE`. D10 → `BLOCKED`** (its ROMs are not on this machine). The only
+work left in Phase D is **D5's RTC** and D10.
+
+**Did.**
+
+- **D8** — `CartHeader::parse` rewritten. Three separate paths were rejecting *valid* cartridges,
+  and each was found by trying to run somebody else's test ROM:
+  1. **The title was decoded as UTF-8.** `0x134..=0x142` holds the title *and* the manufacturer
+     code, so high bytes land in it and the whole cartridge was refused. It is a fixed-width byte
+     field — now filtered to printable ASCII, not decoded.
+  2. **ROM-size bytes `0x52`/`0x53`/`0x54` were rejected.** All three are legal.
+  3. **An unknown RAM size was rejected.** Now defaults to 4 banks.
+- **D8** — `LoadError` replaces `Result<_, String>`; `GameBoy::try_new`/`try_dmg`/`try_cgb` and
+  `Core::try_new` added beside the panicking constructors (§2.3 item 2), so `Core::new`'s
+  `.expect()` is no longer the only path. `CartHeader::checksum_valid` is reported as a **warning**,
+  never enforced — `gb` runs no boot ROM and plenty of homebrew ships a wrong one. The `println!`
+  in `MMU::new` is gone.
+- **D7** — `CartType::is_emulated`; MMM01/MBC6/MBC7/PocketCamera/TAMA5/HuC3 now fail with
+  `LoadError::UnsupportedMbc` instead of silently running as MBC1.
+- **D9 serial** — `Serial::data_at` returns `SB` as the guest sees it *mid*-transfer: the bits
+  already shifted out, with `1`s shifted in behind them. ⚠️ **Deliberately a read-side view.**
+  `complete_transfer` still buffers the byte the guest wrote, which is how blargg's output is
+  captured; shifting the stored copy would corrupt `serial_console_test`.
+- **D9 joypad** — the interrupt now fires on a high-to-low edge of a **register line** rather than
+  on a button press.
+
+**Verified.** All on the final tree:
+
+```
+cargo test --release --bin gb -- game_boy::tests::blargg
+  → 27 passed; 0 failed          ← serial capture intact, both combined suite ROMs green
+cargo test --release --bin gb
+  → 1005 passed; 0 failed; 114 ignored   (6.14s)
+cargo test --release --features slow-tests --bin gb
+  → 1099 passed; 0 failed; 20 ignored    (49.7s)
+cargo test --release --features full-playthrough --bin gb -- full_playthrough
+  → 1 passed; 0 failed                   (261.3s)
+git status --porcelain src/pokemon/data/  → empty
+```
+
+**Surprises.**
+
+1. ⭐ **The joypad fix changed STOP-wake, and the new behaviour is the correct one.**
+   `core::tests::control_flow::stop` and `stop_wake_restarts_the_clocks` both failed, because they
+   pressed `A` with **neither** button group selected. That is not a test artefact: a wake needs one
+   of `P10-P13` to go low, and a button can only pull its line low while `P14`/`P15` selects its
+   group — so STOP with both groups deselected genuinely cannot be woken by the joypad, which is a
+   documented hardware quirk. Both tests now select a group first and
+   `stop_is_not_woken_while_both_joypad_groups_are_deselected` pins the quirk. **A test failing
+   after an accuracy fix is not automatically a regression — check which side hardware is on.**
+2. ⭐ **The obvious joypad implementation would have broken all 91 fixtures.** Detecting an edge
+   wants the previous nibble stored on `JoypadRegister` — which is serialised *whole* into the
+   `joyp` section, so a new field changes an already-shipped shape. Computing the "before" value
+   inside each mutator needs no stored state at all and the section never moves. **When a fix seems
+   to need a new field on a serialised type, check whether the value is derivable first.**
+3. **D9's `0x7E` read-back mask was already done**, by A13, in `MMU::read_uncommon` rather than in
+   `Serial::control` where this task looks for it. Left where it is — it also handles the CGB case,
+   where bit 1 is a real register and only bits 2-6 are stuck high.
+4. **The header checksum implementation is confirmed by five independent ROMs.** pokered
+   (`0x20`), `cpu_instrs` (`0x3B`), `dmg_sound` (`0x21`), `dmg-acid2` (`0x9F`) and `tetris` (`0x0A`)
+   all agree with the computed value, so the new warning stays quiet on everything committed.
+   Five agreeing is not a coincidence; it is a cheap oracle, and `the_committed_roms_all_checksum`
+   keeps it.
+
+**`src/pokemon/**` touched, as §2.3 requires logging:** `src/pokemon/encoding.rs`, **two lines**, both
+in `#[cfg(test)]` code — `MMU::from_rom(ROM)?` → `.map_err(|e| e.to_string())?`, forced by
+`MMU::from_rom` returning `LoadError` instead of `String`. No behaviour change.
+
+**Tree:** committed. `src/sdl/render.rs` remains dirty and is **still not this session's change**
+(ledger #14 surprise 4).
+
+**Next agent:** **D5's RTC** is the last missing *hardware* in the plan. `RamTarget::Rtc` is already
+plumbed and the MBC3 latch is a no-op waiting for it. Model it as a `base_time` offset with an
+**injectable** time source — never `SystemTime::now()` directly, or every fixture-driven test in
+this repo becomes non-deterministic — and persist gambatte's 4-byte big-endian `.rtc` format.
+
+⚠️ **Then stop and get D10's ROMs before declaring Phase D done.** Three deliberate divergences from
+gambatte (ledger #15 surprise 3) are unadjudicated without mooneye, and D10 is the only thing that
+can settle them. It needs an external download, which is Alex's call.

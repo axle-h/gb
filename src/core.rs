@@ -1,6 +1,7 @@
 use bincode::{Decode, Encode};
 use crate::activation::Activation;
 use crate::cycles::MachineCycles;
+use crate::header::LoadError;
 use crate::mmu::MMU;
 use crate::model::Model;
 use crate::opcode::{JumpCondition, OpCode, Register, Register16, Register16Mem, Register16Stack};
@@ -72,15 +73,21 @@ impl Core {
         Self::new(cart, Model::Cgb)
     }
 
+    /// Panics if the cartridge cannot be loaded. Use [`Core::try_new`] for anything that takes a
+    /// ROM from a user rather than from `include_bytes!`.
     pub fn new(cart: &[u8], model: Model) -> Self {
-        let mmu = MMU::new(cart, model).expect("could not load ROM");
-        Self {
+        Self::try_new(cart, model).expect("could not load ROM")
+    }
+
+    pub fn try_new(cart: &[u8], model: Model) -> Result<Self, LoadError> {
+        let mmu = MMU::new(cart, model)?;
+        Ok(Self {
             registers: RegisterSet::boot(mmu.color_mode(), cart),
             mmu,
             interrupts_enabled: false,
             mode: CoreMode::Normal,
             interrupts_enabled_on_next_instruction: false,
-        }
+        })
     }
 
     /// Return to power-on state without dropping the cartridge. Equivalent to reconstructing via
@@ -2187,10 +2194,28 @@ mod tests {
             core.execute(OpCode::Stop);
             assert_eq!(core.mode, CoreMode::Stop);
 
-            // joypad input wakes it up
+            // ⚠️ **D9: the group has to be selected first.** A wake needs one of `P10-P13` to go
+            // low, and a button can only pull its line low while `P14`/`P15` selects its group —
+            // which is the documented hardware quirk that STOP with *both* groups deselected
+            // cannot be woken by the joypad at all. Before D9 `gb` woke on any press.
+            core.mmu.joypad_mut().set(0x10); // select the buttons
             core.mmu.joypad_mut().press_button(JoypadButton::A);
             core.execute(OpCode::Nop); // update core state
             assert_eq!(core.mode, CoreMode::Normal);
+        }
+
+        /// The other half of D9's quirk: with neither group selected, no button moves a line, so
+        /// STOP is not woken by one.
+        #[test]
+        fn stop_is_not_woken_while_both_joypad_groups_are_deselected() {
+            let mut core = Core::dmg_hello_world();
+            core.execute(OpCode::Stop);
+            core.mmu.joypad_mut().set(0x30); // deselect both groups
+            for button in [JoypadButton::A, JoypadButton::Start, JoypadButton::Up] {
+                core.mmu.joypad_mut().press_button(button);
+            }
+            core.execute(OpCode::Nop);
+            assert_eq!(core.mode, CoreMode::Stop, "no line moved, so nothing woke it");
         }
 
         /// A3: `MMU::stop` switches the divider and timer off, and before this fix nothing ever
@@ -2202,6 +2227,7 @@ mod tests {
             core.execute(OpCode::Stop);
             assert!(!core.mmu.divider().is_enabled(), "STOP should stop the divider");
 
+            core.mmu.joypad_mut().set(0x10); // D9: select the buttons, or no line moves
             core.mmu.joypad_mut().press_button(JoypadButton::A);
             core.execute(OpCode::Nop);
             assert_eq!(core.mode, CoreMode::Normal);
