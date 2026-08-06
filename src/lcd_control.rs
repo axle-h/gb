@@ -50,6 +50,13 @@ impl LcdControl {
         self.window_enabled && self.bg_window_enabled
     }
 
+    /// LCDC bit 5 alone. On DMG the window is additionally gated by bit 0 (see
+    /// [`LcdControl::window_enabled`]); on CGB bit 0 means something else entirely — see
+    /// [`LcdControl::background_enabled`] — so the window is gated by this bit alone.
+    pub fn window_display_enabled(&self) -> bool {
+        self.window_enabled
+    }
+
     pub fn tile_data_mode(&self) -> TileDataMode {
         TileDataMode::from_value(self.bg_tile_data)
     }
@@ -66,6 +73,10 @@ impl LcdControl {
         self.obj_enabled
     }
 
+    /// LCDC bit 0. **Its meaning depends on the machine.** On DMG, clear means the background and
+    /// window are not drawn at all. On CGB it is a *master priority* bit: the background is always
+    /// drawn, but when this is clear every sprite pixel wins over it regardless of the per-tile
+    /// and per-sprite priority flags (gambatte `video/ppu.cpp`, `bgEnable`).
     pub fn background_enabled(&self) -> bool {
         self.bg_window_enabled
     }

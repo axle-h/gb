@@ -61,6 +61,22 @@ pub mod acid {
     pub const EXPECTED_DMG: &[u8] = include_bytes!("dmg-acid2/reference-dmg.png");
 }
 
+/// `cgb-acid2` v1.1 — the CGB counterpart of `dmg-acid2`, and Phase B's acceptance test. It
+/// covers BG map attributes, the eight-palette BG and OBJ banks, sprite priority by OAM index,
+/// LCDC bit 0 as a master priority override, and 8x16 sprites out of VRAM bank 1.
+///
+/// Unlike the audio suites this one ships its own reference image, so nothing had to be promoted
+/// from `gb`'s own output. The upstream README specifies the 5-bit to 8-bit expansion as
+/// `(c << 3) | (c >> 2)`, which is what [`crate::lcd_palette::LcdColor::from_rgb555`] does, so the
+/// PNG compares byte for byte with no colour-correction curve in the way.
+///
+/// Source: <https://github.com/mattcurrie/cgb-acid2> (ROM from the v1.1 release,
+/// `img/reference.png` from `master`, both fetched 2026-08-05).
+pub mod cgb_acid {
+    pub const ROM: &[u8] = include_bytes!("cgb-acid2/cgb-acid2.gbc");
+    pub const EXPECTED: &[u8] = include_bytes!("cgb-acid2/reference.png");
+}
+
 pub mod button_test {
     pub const ROM: &[u8] = include_bytes!("button_test/rom.gb");
     pub const EXPECTED_A: &[u8] = include_bytes!("button_test/a.png");

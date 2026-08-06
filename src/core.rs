@@ -2,6 +2,7 @@ use bincode::{Decode, Encode};
 use crate::activation::Activation;
 use crate::cycles::MachineCycles;
 use crate::mmu::MMU;
+use crate::model::Model;
 use crate::opcode::{JumpCondition, OpCode, Register, Register16, Register16Mem, Register16Stack};
 use crate::ram::{RAM, ROM};
 use crate::registers::RegisterSet;
@@ -64,9 +65,18 @@ impl Core {
     }
 
     pub fn dmg(cart: &[u8]) -> Self {
+        Self::new(cart, Model::Dmg)
+    }
+
+    pub fn cgb(cart: &[u8]) -> Self {
+        Self::new(cart, Model::Cgb)
+    }
+
+    pub fn new(cart: &[u8], model: Model) -> Self {
+        let mmu = MMU::new(cart, model).expect("could not load ROM");
         Self {
-            registers: RegisterSet::dmg(),
-            mmu: MMU::from_rom(cart).expect("could not load ROM"),
+            registers: RegisterSet::boot(mmu.color_mode(), cart),
+            mmu,
             interrupts_enabled: false,
             mode: CoreMode::Normal,
             interrupts_enabled_on_next_instruction: false,
@@ -74,9 +84,11 @@ impl Core {
     }
 
     /// Return to power-on state without dropping the cartridge. Equivalent to reconstructing via
-    /// [`Core::dmg`] with the same ROM, except that battery-backed SRAM survives.
+    /// [`Core::new`] with the same ROM and model, except that battery-backed SRAM survives.
     pub fn reset(&mut self) {
-        self.registers = RegisterSet::dmg();
+        // `mmu.data()` is the padded image, but the header bytes the boot register file
+        // depends on are all inside the first bank, so padding is irrelevant here.
+        self.registers = RegisterSet::boot(self.mmu.color_mode(), &self.mmu.data().to_vec());
         self.interrupts_enabled = false;
         self.interrupts_enabled_on_next_instruction = false;
         self.mode = CoreMode::Normal;
@@ -518,8 +530,15 @@ impl Core {
                 self.mode = CoreMode::Halt;
             }
             OpCode::Stop => {
-                self.mode = CoreMode::Stop;
-                self.mmu.stop();
+                // On CGB, a STOP with the KEY1 prepare bit set is not a stop at all: it performs
+                // the speed switch and execution continues. Only an unprepared STOP halts.
+                if self.mmu.try_speed_switch() {
+                    // The switch costs ~2050 M-cycles of stalled CPU on hardware. Not modelled;
+                    // nothing observable depends on it and it would need the M-cycle work.
+                } else {
+                    self.mode = CoreMode::Stop;
+                    self.mmu.stop();
+                }
             }
             OpCode::Nop => {}
             OpCode::DisableInterrupts => {

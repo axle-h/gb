@@ -308,6 +308,22 @@ Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orie
 | gambatte | `dmg-acid2.gb` | **622×** |
 | gb | core + agent | **~24×** |
 
+⚠️ **Benchmarking methodology — read this before quoting any number in this document**
+(added 2026-08-05, ledger #9). This machine has fast and slow states that differ by **~15%**: the
+same unmodified binary measured `cpu_instrs` at **43.5×** and **53.2×** twenty minutes apart. A
+figure taken on its own therefore means nothing, and neither does one taken minutes after its
+control.
+
+- Compare only **adjacent paired runs** of the two builds you are comparing.
+- **Alternate which build runs first** and report both orders. A block that always runs the
+  baseline first will manufacture a regression out of ordinary drift — that nearly happened in
+  ledger #9, and it took an accidental control to catch.
+- Keep a `git`-clean copy of the comparison point built with the same toolchain (`rsync` the tree
+  excluding `target`, `git checkout -- .`) rather than trusting a number from an earlier session.
+- **Also diff hot-function sizes**: `nm -S --size-sort -C target/release/deps/gb-*`. Growth in
+  `MMU::update` (called once per instruction) cost more in Phase B than any algorithmic change,
+  and it is invisible to bisection.
+
 ---
 
 # 3. STATUS BOARD
@@ -341,16 +357,17 @@ Reference numbers already measured on this machine (AMD Ryzen 9 7900X), for orie
 
 | ID | Task | State | Date | Notes |
 |---|---|---|---|---|
-| B1 | Machine model plumbing (`Model` enum, `GameBoy::cgb`) | TODO | | depends A0 |
-| B2 | WRAM banking (SVBK) + VRAM banking (VBK) | TODO | | |
-| B3 | CGB palette RAM (BCPS/BCPD/OCPS/OCPD) | TODO | | |
-| B4 | Framebuffer pixel type → RGB555 | TODO | | API change, §2.3 |
-| B5 | **DMG-compatibility palette (the Pokémon Red colour path)** | TODO | | ⭐ the headline deliverable |
-| B6 | BG map attributes + CGB sprite priority | TODO | | |
-| B7 | KEY1 double-speed | TODO | | |
-| B8 | HDMA / GDMA | TODO | | |
-| B9 | CGB post-boot state + remaining CGB registers | TODO | | |
-| B10 | CGB test-ROM adoption (cgb-acid2) | TODO | | |
+| B1 | Machine model plumbing (`Model` enum, `GameBoy::cgb`) | DONE | 2026-08-05 | `Model` + `ColorMode` in `src/model.rs`; `dmg()` unchanged |
+| B2 | WRAM banking (SVBK) + VRAM banking (VBK) | DONE | 2026-08-05 | appended to the `wram`/`ppu` sections → **v2**, no fixture churn |
+| B3 | CGB palette RAM (BCPS/BCPD/OCPS/OCPD) | DONE | 2026-08-05 | `src/cgb_palette.rs`, raw + expanded mirror. Mode-3 blocking deferred |
+| B4 | Framebuffer pixel type → RGB555 | DONE | 2026-08-05 | **24-bit, not RGB555** — `0xAA` has no 5-bit form. See ledger #9 |
+| B5 | **DMG-compatibility palette (the Pokémon Red colour path)** | DONE | 2026-08-05 | ⭐ combination **13** for checksum `0x14`. Tables in `src/boot_palette/` |
+| B6 | BG map attributes + CGB sprite priority | DONE | 2026-08-05 | attributes from VRAM bank 1; OAM-index priority gated on `OPRI` |
+| B7 | KEY1 double-speed | DONE | 2026-08-05 | done **before** C1: halved video clock + carry bit, DIV undivided |
+| B8 | HDMA / GDMA | DONE | 2026-08-05 | `src/hdma.rs`; HDMA at the mode-3→0 edge, GDMA has no CPU stall |
+| B9 | CGB post-boot state + remaining CGB registers | DONE | 2026-08-06 | `FF72-75`, `FEA0` CGB pattern, 32× serial. **Two** boot register files (ledger #10). DMG boot state **untouched** |
+| B10 | CGB test-ROM adoption (cgb-acid2) | DONE | 2026-08-05 | **passes byte-for-byte** against the ROM's own reference image |
+| B11 | DMG post-boot register/IO table | TODO | | split out of B9 — **needs Alex's call**, it can move fixtures |
 
 ## Phase C — Performance (emulator core alone)
 
@@ -1030,12 +1047,12 @@ moment D1 lands.
 **Goal:** full Game Boy Color support, with the **DMG-compatibility boot-ROM palette** as the
 headline deliverable so Pokémon Red renders in colour.
 
-**Exit criteria:**
-- `GameBoy::cgb(cart)` exists; `GameBoy::dmg(cart)` is unchanged in behaviour.
-- Pokémon Red runs in CGB compatibility mode with the **correct boot-ROM palette**, verified against
-  a reference screenshot.
-- `cgb-acid2` passes, or its failures are documented and understood.
-- The full DMG test suite **still passes** — no DMG regressions.
+**Exit criteria — all met, 2026-08-05 (ledger #9):**
+- ✅ `GameBoy::cgb(cart)` exists; `GameBoy::dmg(cart)` is unchanged in behaviour.
+- ✅ Pokémon Red runs in CGB compatibility mode with the **correct boot-ROM palette**, asserted
+  pixel by pixel against the DMG frame at three points through the intro.
+- ✅ `cgb-acid2` passes — **byte-for-byte** against the reference image the ROM ships.
+- ✅ The full DMG test suite still passes: default tier, `slow-tests`, and `full_playthrough`.
 
 ## ⚠️ Sequencing note for whoever starts Phase B
 
@@ -1047,11 +1064,20 @@ rather than a peripheral rewrite. This costs nothing now and saves real rework l
 
 **⚠️ A0 must be `DONE` before starting B1.** CGB changes the *shape* of serialised state (VRAM/WRAM sizes, framebuffer type, new palette RAM), not merely appending to it.
 
+> ⚠️ **Corrected 2026-08-05 (ledger #9).** The premise of that last sentence turned out to be
+> wrong, in a way worth knowing before Phase C repeats the reasoning. A0 removed the framebuffer
+> from serialisation entirely, so B4 was not a save-format concern at all; and the VRAM/WRAM size
+> changes were expressible as **appends** — keep the shipped array as field 1 (bank 0, or banks 0
+> and 1) and append the new banks as field 2. Phase B therefore needed **no legacy struct and no
+> fixture regeneration**: two section-version bumps and one new section. A0 was still the enabling
+> work — none of that is possible without the sectioned container — but "a size change forces a
+> shape change" is not true when you can re-cut where the boundary falls.
+
 ---
 
 ### B1 — Machine model plumbing
 
-**State:** TODO · **Depends:** A0
+**State:** DONE (2026-08-05) · **Depends:** A0
 
 **Do.** Introduce `Model { Dmg, Cgb }` (leave room for `Mgb`/`Sgb`). Add `GameBoy::cgb(cart)` and
 `GameBoy::new(cart, Model)`; **keep `GameBoy::dmg(cart)` byte-identical in behaviour** — 89 call
@@ -1069,7 +1095,7 @@ is a **DMG-only game** that runs on CGB hardware in *compatibility* mode. That d
 
 ### B2 — WRAM and VRAM banking
 
-**State:** TODO · **Depends:** B1
+**State:** DONE (2026-08-05) · **Depends:** B1
 
 **Do.**
 - **SVBK (`FF70`)**: 8 WRAM banks on CGB, 2 on DMG. **Bank 0 selects bank 1** — gambatte does this
@@ -1085,7 +1111,7 @@ masks.
 
 ### B3 — CGB palette RAM
 
-**State:** TODO · **Depends:** B2
+**State:** DONE (2026-08-05) · **Depends:** B2
 
 **Do.** `BCPS/BCPD` (`FF68/69`) and `OCPS/OCPD` (`FF6A/6B`): 64 bytes each, auto-increment on write
 when bit 7 of the index is set. Read-back masks: BCPS `data | 0x40`, OCPS `data | 0x40`.
@@ -1102,7 +1128,15 @@ Ledger.
 
 ### B4 — Framebuffer pixel type → RGB555
 
-**State:** TODO · **Depends:** B3 · **API change — see §2.3**
+**State:** DONE (2026-08-05) · **Depends:** B3 · **API change — see §2.3**
+
+> ⚠️ **Shipped as 24-bit colour, not RGB555, and the difference is not cosmetic.** `gb`'s DMG
+> shades are `FF/AA/55/00`, and **`0xAA` is not expressible as a 5-bit channel widened back to 8**
+> — `(21 << 3) | (21 >> 2)` is `0xAD`. Storing RGB555 would therefore have shifted every committed
+> reference screenshot by three units. The task text allows this ("`Rgb555` (or `u32`)"); taking
+> the option is what made "verify, don't assume" come out clean. `LcdColor` is `0x00RRGGBB`, DMG
+> shades are written into it exactly, and CGB colours go through `from_rgb555`. Blast radius
+> outside the core was the one line §2.3 predicted, `src/sdl/render.rs:273`.
 
 **Why.** `DMGColor` is a 2-bit shade. CGB needs 15-bit colour.
 
@@ -1123,7 +1157,7 @@ DMG mapping is wrong.
 
 ### B5 — DMG-compatibility palette ⭐ THE HEADLINE DELIVERABLE
 
-**State:** TODO · **Depends:** B4
+**State:** DONE (2026-08-05) · **Depends:** B4
 
 **Why.** Pokémon Red has `0x143 = 0x00`, so on real CGB hardware the **boot ROM** picks a palette
 from the cartridge title and writes it into CGB palette RAM before handing over. That is why
@@ -1172,11 +1206,30 @@ combinations selects one of ~12 alternates). Implement only if cheap; log the de
 **Ledger note.** Record the palette index you resolved for checksum `0x14`/`'E'`, your source, and
 paste the screenshot path. The next agent should not have to re-derive this.
 
+> ✅ **Resolved 2026-08-05.** Checksum `0x14` is at index **22** of `TitleChecksums`, which is
+> *before* `FirstChecksumWithDuplicate` (65) — so the 4th letter `'E'` is **not** consulted, and
+> this document's step 3 does not apply to Pokémon Red. `PalettePerChecksum[22]` is combination
+> **13** = `palette_comb 3, 4, 4`: OBJ0 from pool palette 3 (white / yellow-green / dark / black),
+> OBJ1 and BG from palette 4 (`7FFF 421F 1CF2 0000` — white / salmon / dark red / black). Source:
+> SameBoy `BootROMs/cgb_boot.asm` on `master`, fetched 2026-08-05; the tables are generated from
+> it mechanically rather than transcribed, see `src/boot_palette/tables.rs`.
+>
+> One more precondition the task text omits: the boot ROM only colours **first-party** cartridges.
+> `GetPaletteIndex` requires old licensee `0x01`, or `0x33` with new licensee `"01"`. Pokémon Red
+> is the second case. A third-party cartridge falls through to combination 0 whatever its title.
+>
+> **Button-combination overrides: not implemented.** `gb` starts the cartridge directly, so there
+> is no boot window in which a combination could be held. It is a user convenience, not accuracy.
+>
+> Screenshots: `target/pokered-cgb-*.png` from `game_boy::tests::ppu` (regenerate by running that
+> module); the assertion itself is `pokemon_red_boots_in_colour_on_a_cgb`, which compares the CGB
+> frame against the DMG frame shade by shade rather than eyeballing a colour.
+
 ---
 
 ### B6 — BG map attributes and CGB sprite priority
 
-**State:** TODO · **Depends:** B5
+**State:** DONE (2026-08-05) · **Depends:** B5
 
 **Do.** For true CGB games (not needed by Pokémon Red, but required for `cgb-acid2`):
 - BG tile-map attributes from **VRAM bank 1** at the same tile-map offset (gambatte:
@@ -1194,7 +1247,7 @@ sprite handling is correct and is *not* to be "fixed".
 
 ### B7 — KEY1 double-speed
 
-**State:** TODO · **Depends:** B6 · **Risk:** high
+**State:** DONE (2026-08-05) · **Depends:** B6 · **Risk:** high
 
 **Why this is the risky one.** `MachineCycles` is currently *the* clock
 (`src/cycles.rs:11`, a hard `CPU_FREQ` constant). In double-speed the CPU runs at 2× while the PPU
@@ -1211,6 +1264,15 @@ and APU do **not**. There is no speed concept anywhere in `gb`.
 it — it will be far cleaner. **If C1 is not done, consider deferring B7 until after C1 and say so in
 the Ledger.** This is a legitimate reordering; log it rather than forcing it.
 
+> ✅ **Done before C1, deliberately.** The deferral was considered and turned down: without the
+> scheduler the change is *smaller*, not larger, because there is exactly one place where CPU time
+> becomes peripheral time — `MMU::update`. Double speed halves the M-cycles handed to the PPU and
+> APU there, with a one-bit carry so an odd cycle is not rounded away, and leaves DIV, the timer
+> and serial on the CPU clock. That is the hardware relationship: DIV is CPU-clocked, so the APU
+> frame sequencer that hangs off it stays at 512 Hz in real time without any extra work.
+> `MachineCycles` did **not** need to change. The ~2050-M-cycle CPU stall during the switch is not
+> modelled. When C1 lands, `video_cycles` is the one line that moves.
+
 **Verify.** DMG unaffected. A CGB ROM that switches speed runs at the right rate (a timer-based
 assertion, not a visual one).
 
@@ -1218,7 +1280,7 @@ assertion, not a visual one).
 
 ### B8 — HDMA / GDMA
 
-**State:** TODO · **Depends:** B7
+**State:** DONE (2026-08-05) · **Depends:** B7
 
 **Do.** `FF51-FF55`. GDMA transfers the full length at once; HDMA transfers `0x10` bytes per HBlank.
 Source reads return `0xFF` for VRAM and `>= 0xFE00`. Destination wrap sets the done bit. `FF55`
@@ -1229,11 +1291,17 @@ read-back: bit 7 = done.
 ordering, approximate in cycle placement. **Document this limitation in the Ledger.** HDMA/OAM-DMA
 interleaving is out of scope.
 
+> ✅ **Implemented exactly as described**, at the mode-3→mode-0 edge, via a latch the PPU sets and
+> `MMU::update` consumes in the same call. Two limitations beyond the one above, both recorded in
+> `src/hdma.rs`: **GDMA does not stall the CPU** (the copy is instantaneous, so a guest that times
+> its own code against a GDMA sees it finish for free), and OAM-DMA interleaving is not modelled.
+> Both need the M-cycle work §0.2 defers.
+
 ---
 
 ### B9 — CGB post-boot state and remaining registers
 
-**State:** TODO · **Depends:** B8
+**State:** DONE (2026-08-05) · **Depends:** B8
 
 **Do.**
 - CGB post-boot register values (differs from DMG: A=`0x11`, and the whole I/O block).
@@ -1249,14 +1317,134 @@ BGP/OBP=`FC/FF/FF` not `00/00/00`, SRAM filled `0xFF`) — see
 and may shift fixtures.** If it does, treat it as its own task, log it, and get Alex's call before
 regenerating.
 
+> ⚠️ **The DMG post-boot table was deliberately NOT touched** (2026-08-05). It is the one change
+> in Phase B that could move the 91 committed fixtures and re-roll Pokémon Red's RNG stream, and
+> the task itself says to make it a separate task with Alex's call. It is now **B11**, `TODO`.
+> `RegisterSet::boot(Model::Dmg)` returns `gb`'s original values unchanged and says so in its doc
+> comment; only the CGB arm is new.
+>
+> ⚠️ **Corrected 2026-08-06 (ledger #10): CGB hardware has *two* boot register files.** The first
+> version of B9 shipped one — the CGB-mode file — for both CGB and compatibility mode. A CGB
+> running a DMG-only cartridge takes the boot ROM's `EmulateDMG` path, which ends `ld de, 8` /
+> `ld l, $7C` and then loads `hTitleChecksum` into `B`, so four registers differ:
+>
+> | | CGB (CGB mode) | CGB (DMG-compat mode) |
+> |---|---|---|
+> | `A` / `F` | `0x11` / `0x80` | `0x11` / `0x80` |
+> | `B` | `0x00` | **title checksum** (`0x14` for Pokémon Red), or `0x00` if not first-party |
+> | `C` | `0x00` | `0x00` |
+> | `DE` | `0xFF56` | **`0x0008`** |
+> | `HL` | `0x000D` | **`0x007C`** — or `0x991A` when `B` is `0x43`/`0x58` |
+>
+> `RegisterSet::boot` now takes the `ColorMode` **and the cartridge**, and all three files are
+> pinned by tests. ⚠️ **gambatte is not the reference for this** — `initstate.cpp:1174-1181` uses
+> the DMG values for CGB with only `A` and `B` changed, which contradicts both Pan Docs and the
+> boot ROM. Two independent sources were used instead and agree exactly: SameBoy's `cgb_boot.asm`
+> traced by hand through `Preboot`/`EmulateDMG`, and Pan Docs' "Power-Up Sequence" table (itself
+> confirmed against mooneye's `misc/boot_regs-cgb`).
+>
+> ✅ Done here: `A = 0x11` and the rest of the CGB register file (the byte every CGB game
+> branches on); `FF72`-`FF74` as plain RW and `FF75` masked to `0x8F | data`, CGB only;
+> `0xFEA0..=0xFEFF` as three 8-byte blocks of ordinary RAM mirrored 4x, taken byte for byte from
+> `test/hwtests/fexx_ffxx_dumper_cgb.bin`; and `SC` bit 1 as the 32x serial clock, with `SC`'s
+> read mask widened from `0x7E` to `0x7C` on CGB because bit 1 is real there. `FF76`/`FF77`
+> (PCM12/34) are **not** implemented — gambatte does not either, and the task marks them
+> optional.
+
+---
+
+### B11 — DMG post-boot register and I/O table
+
+**State:** TODO · **Depends:** none · **Risk:** medium · **Added 2026-08-05, split out of B9**
+
+**Why it is its own task.** B9 says to "consider the DMG post-boot table too" and then warns that
+doing so may shift the committed fixtures and needs Alex's call. It does not belong inside a CGB
+task, because it is the only part of Phase B that can change what a **DMG** does — and therefore
+the only part that can re-roll Pokémon Red's RNG stream and break the leg-fixture chain.
+
+**Do.** Apply hardware's DMG post-boot state (see
+[`05-mmu-cartridge.md` §7](05-mmu-cartridge.md#7-boot-state)):
+
+| | `gb` today | hardware |
+|---|---|---|
+| `F` | `0x80` (Z only) | **`0xB0` or `0x80` — conditional, see below** |
+| `LCDC` | `0x80` | `0x91` |
+| `BGP` / `OBP0` / `OBP1` | `0x00` / `0x00` / `0x00` | `0xFC` / `0xFF` / `0xFF` |
+| SRAM | zero-filled | `0xFF`-filled |
+
+⚠️ **`F` is a function of the cartridge header, and everything written about it here before
+2026-08-06 was wrong — including Pan Docs' own footnote.** See ledger #12 for the derivation. The
+rule is:
+
+```rust
+// The DMG boot ROM's last flag-affecting instruction is `add a, [hl]` against the stored
+// header checksum, and it locks up unless the 8-bit result is zero.
+let checksum = rom[0x14D];
+FlagsRegister { z: true, n: false, h: checksum & 0x0F != 0, c: checksum != 0 }
+```
+
+| `rom[0x14D]` | `F` | how many of 256 |
+|---|---|---|
+| `0x00` | `0x80` | 1 |
+| non-zero multiple of `0x10` | **`0x90`** | 15 |
+| anything else | `0xB0` | 240 |
+
+⚠️ **Pan Docs says `H` and `C` are either both clear or both set.** That is wrong for the middle
+row: `C` is set iff the checksum is non-zero, but `H` is set iff its *low nibble* is non-zero, and
+those are different questions. ⚠️ **And `pokered`'s header checksum is `0x20`** — so Pokémon Red,
+the cartridge this whole project runs, is one of the fifteen: it boots with **`F = 0x90`**, not
+`0xB0`. `cpu_instrs` (`0x3B`), `dmg-acid2` (`0x9F`), `cgb-acid2` (`0xEB`), `button_test` (`0x1D`)
+and `tetris` (`0x0A`) all want `0xB0`.
+
+⚠️ **gambatte hardcodes `0xB0`** (`initstate.cpp:1179`), so it models none of this; it is not the
+reference here (ledger #10).
+
+**The other models, while you are in there.** `Model` deliberately has room for `Mgb`/`Sgb` and the
+full table is one row each — from Pan Docs, same source:
+
+| | DMG0 | DMG | MGB | SGB | SGB2 |
+|---|---|---|---|---|---|
+| `A` | `$01` | `$01` | `$FF` | `$01` | `$FF` |
+| `F` | `$00` | conditional | conditional | `$00` | `$00` |
+| `B` | `$FF` | `$00` | `$00` | `$00` | `$00` |
+| `C` | `$13` | `$13` | `$13` | `$14` | `$14` |
+| `D` | `$00` | `$00` | `$00` | `$00` | `$00` |
+| `E` | `$C1` | `$D8` | `$D8` | `$00` | `$00` |
+| `HL` | `$8403` | `$014D` | `$014D` | `$C060` | `$C060` |
+
+Adding a model is only worth it if something will run against it — none of these have test ROMs in
+the repo today. The CGB and CGB-compat files are already implemented and pinned; see
+`registers::tests::the_boot_register_file_matches_the_boot_rom`.
+
+**⚠️ Get Alex's call before running with `--features regen-fixtures`.** Run the default tier and
+the `slow-tests` tier first and report exactly what moves. `full_playthrough` is the real check —
+anything that changes frame timing re-rolls the RNG stream (see §2.4 and `CLAUDE.md`).
+
+`F = 0xB0` is the cheap half and probably moves nothing; the `LCDC`/`BGP` half is what changes the
+first frames a game sees.
+
 ---
 
 ### B10 — CGB test-ROM adoption
 
-**State:** TODO · **Depends:** B9
+**State:** DONE (2026-08-05) · **Depends:** B9
 
 **Do.** Wire up `cgb-acid2` (PNG-compared, same harness shape as dmg-acid2). Optionally
 `cgb_sound`. Record the pass/fail split honestly — full CGB APU differences are not in scope.
+
+> ✅ **`cgb-acid2` v1.1 passes, byte for byte.** No pass/fail split to report: 0 differing pixels
+> against the reference image, with all 8 of its distinct colours present. Unlike the audio suites
+> this ROM **ships its own reference**, so nothing had to be promoted from `gb`'s own output — the
+> gambatte screenshot-dump recipe in §2.5 was not needed after all. Committed at
+> `src/roms/cgb-acid2/`; the test is `game_boy::tests::ppu::cgb_ppu`.
+>
+> Its README pins the 5-bit to 8-bit expansion as `(c << 3) | (c >> 2)` — the plain widening, not
+> a colour-correction curve. Confirmed independently against the PNG before trusting it: its
+> palette resolves to `0x6B/0xBD/0xFF/0x9C/0x73/0xAD`, which is exactly that formula on 13, 23,
+> 31, 19, 14 and 21. **Do not adopt gambatte's `gbcToRgb32` correction** — it would break this.
+>
+> `cgb_sound` is **not** wired up. It is a CGB-APU suite and the plan puts CGB APU differences out
+> of scope; adding it would only add ignored tests, which §A14's hygiene rules argue against.
 
 ---
 
@@ -2160,5 +2348,364 @@ reverted — the mask width has to come from the mapper, which is what D1/D2 exi
 **Next agent:** still **B1**. When you reach **D1**, `blargg_dmg_sound::all` is your acceptance
 test and A17 has the whole trace — including the mapper-width trap, which will otherwise cost you
 the default tier.
+
+---
+
+### 2026-08-05 (#9) — B1–B10 — **Phase B complete.** CGB support; Pokémon Red boots in colour; `cgb-acid2` passes byte-for-byte
+
+**State:** **B1–B10 all → `DONE`.** New **B11** added (`TODO`): the DMG post-boot register/IO
+table, split out of B9 because it is the one change in this phase that could move the committed
+fixtures, and B9 itself says to get Alex's call first. **Phase C (C1) is next.**
+
+**Did:** the whole phase, in the plan's order. New files: `src/model.rs` (`Model`, `ColorMode`),
+`src/cgb_palette.rs`, `src/boot_palette/` (`mod.rs` + a generated `tables.rs`), `src/hdma.rs`.
+Six things worth knowing beyond the task text:
+
+1. **`ColorMode` is the type that made this tractable** (`src/model.rs`). `Model` alone is not
+   enough, because a CGB running a DMG cartridge is a third thing: colour hardware drives the
+   screen, but the *cartridge* sees the DMG register set. `ColorMode::{Dmg, CgbCompat, Cgb}`, with
+   `cgb_features()` meaning "the cartridge can see CGB hardware", is the predicate every branch
+   keys off. The PPU is not forked (§B1's warning respected) — `map_pixel` reads an all-zero
+   attribute byte on DMG, which is exactly "palette 0, bank 0, no flips, no priority", so the two
+   paths converge without a per-pixel branch.
+2. **The frame buffer is 24-bit, not RGB555** — see the corrected B4. `0xAA` has no 5-bit form.
+3. **B5's palette tables are generated, not transcribed** (`src/boot_palette/tables.rs`), from
+   SameBoy's `BootROMs/cgb_boot.asm` on `master`. The generator asserted the invariants as it ran
+   (94 checksums = 94 combination indexes, 29 duplicates = 29 disambiguating letters, every
+   combination in range). **Pokémon Red resolves to combination 13** via checksum `0x14` at table
+   index 22 — *before* the ambiguous tail, so the 4th letter `'E'` is never consulted. SameBoy's
+   four "exclusive" combinations and two extra palettes are dropped: they are SameBoy additions,
+   not boot-ROM data.
+4. **B7 was done before C1 rather than deferred**, and it is 15 lines. See the note on B7.
+5. **B9 grew `SC`'s CGB read mask** from `0x7E` to `0x7C`, because bit 1 is a real register there
+   (the 32x serial clock). The `0xFEA0` region on CGB is three 8-byte RAM blocks mirrored 4x, from
+   gambatte's `fexx_ffxx_dumper_cgb.bin`.
+6. **`src/sdl/**` was not touched at all** (§2.2). The UI still constructs a DMG; `GameBoy::cgb`
+   is one line away in `render.rs` if Alex wants colour on screen, but that is a UI decision, not
+   a compatibility one.
+
+**Verified:**
+
+- Default tier: **`954 passed; 0 failed; 115 ignored`** (was 910/115 — +44 tests, no new ignores).
+- `slow-tests`: `115 passed; 0 failed; 2 ignored; finished in 125.96s`.
+- **`cgb-acid2` passes byte for byte** — not "looks right": the frame was dumped and diffed
+  against the committed reference pixel by pixel, **0 differing pixels**, with all 8 of the
+  reference's distinct colours present in the output. It passed on the first run, which is the
+  kind of result that deserves suspicion, so it was checked this way before being believed.
+- **Pokémon Red in colour**, asserted rather than eyeballed: at three points through the intro,
+  every pixel of the CGB frame equals the DMG frame's shade put through the boot palette's BG
+  ramp or its OBJ0 ramp. Screenshots: `target/pokered-cgb-*.png`. It is the real thing — black on
+  white copyright screen, salmon stars and a green spark under the GAME FREAK logo, dark-red
+  Nidorino against green Gengar.
+- Ignored list with every tier feature on: **19**, name for name identical to ledger #7's. Phase B
+  added no ignored tests.
+- `full_playthrough`: **passes**, `finished in 654.85s` on the final tree (and again at 631.82s
+  before the hot-path inlining work). Run because Phase B changes the pixel path
+  and the memory map that Pokémon Red exercises every frame; it changes no cycle count, which is
+  why the RNG stream and the leg fixtures still line up.
+- Fixtures: `git status --porcelain src/pokemon/data/` is empty. **None regenerated, none needed
+  to be** — see the correction under the Phase B sequencing note.
+- ⭐ **Mutation-tested, 27 mutants, all caught.** Each Phase B mechanism was deliberately broken
+  and the suite re-run (ledger #4's lesson, applied up front rather than after a scare). This is
+  the part of the session that paid for itself — see Surprises 2.
+
+**⚠️ Phase B costs core throughput. Measured, not guessed:**
+
+| Workload | HEAD (`28a237c`) | Phase B | Δ |
+|---|---|---|---|
+| Pokémon Red (fixture) | 31.6x | 29.5x | **−6.6%** |
+| `cpu_instrs.gb` | 51.3x | 45.3x | **−11.7%** |
+| `dmg-acid2.gb` | 47.1x | 42.6x | **−9.6%** |
+
+Six paired runs, **alternating which build goes first**, both trees built from the same toolchain
+on the same machine minutes apart. Read the methodology note below before comparing these to any
+other session's numbers.
+
+Roughly a third of the original regression was recovered before landing, by pushing cold paths out
+of `MMU::update` — see Surprise 3. What remains is real and unexplained at the line level; it is
+**Phase C's to reclaim**, and C5 (whole-scanline rendering) rewrites the exact code involved.
+
+**Surprises:**
+
+1. ⭐⭐ **My benchmarking methodology was wrong, and it nearly produced a fabricated bisection.**
+   This machine has fast and slow states that differ by **~15%** — the *same unmodified binary*
+   measured 43.5x and 53.2x on `cpu_instrs` twenty minutes apart. My first "interleaved" runs put
+   the baseline first and the candidate second every time, so a within-block drift would have been
+   indistinguishable from a real regression. It took an accidental control — a build measuring
+   *faster than the baseline's typical figure* — to notice. **Alternate the order (ABBA) and
+   report both directions**; a single ordering is not a controlled experiment. Ledger #7's "compare
+   within this table, not across sessions" was right and did not go far enough: you cannot compare
+   across *minutes* either, only across adjacent paired runs.
+2. **Six plausible causes were measured and eliminated at ≤2% each**, which is worth recording so
+   nobody re-runs them: the 24-bit frame buffer (**~0%** — B4 is not the cost), the array growth to
+   32 KB WRAM / 16 KB VRAM (**0%**), the `SVBK` indexing arithmetic (0%), missing bounds-check
+   elision (~1.4%), the ~15 guarded match arms added to `MMU::read`/`write` (~0%, though they are
+   now out of line anyway), the per-instruction HDMA hook (~1%), and the per-pixel `ColorMode`
+   branches (**~0%** — const-folding them away changed nothing). Each was a fair adjacent pair.
+3. ⭐ **The cause is code growth in the hot path, and `nm` found it when bisection could not.**
+   `MMU::update` is called once per instruction, and Phase B grew it **60%**, from 3052 to 4893
+   bytes, by inlining the CGB pixel path and three DMA loops into it — while `Core::execute` barely
+   moved. Marking `draw_pixels_to`, `run_oam_dma`, `run_hblank_dma` and `run_general_dma`
+   `#[inline(never)]`/`#[cold]` brought it back to 3268 bytes and recovered **+3% to +4.5%** across
+   all three workloads. That is why nothing bisected: the cost is emergent, threshold-like, and
+   spread over every added line rather than sitting in one of them. **`nm -S --size-sort` on the
+   two binaries is the tool for this class of regression** — it took two minutes and half a dozen
+   failed hypotheses had not.
+4. **`cgb-acid2` passed first try, and that is the only reason to distrust it.** Ledger #7's
+   Python-quoting incident is the precedent: a green run proves nothing until you have seen the
+   thing you changed actually matter. Mutation testing is what settled it — six separate
+   Phase B mechanisms each make `cgb_ppu` fail when broken, so the pass is load-bearing.
+5. ⭐ **The mutation sweep found a real hole that every other check missed.** Dropping the `BGP`
+   indirection in compatibility mode — rendering the raw colour index straight into CGB palette 0
+   — left **the entire suite green**, `cgb-acid2` and the Pokémon Red colour test included.
+   `cgb-acid2` never uses a non-identity `BGP` (it is a CGB-mode ROM; `BGP` is dead there), and
+   Pokémon Red's intro happens to use `BGP = 0xE4`, which *is* the identity. A game that inverts
+   `BGP` — which Pokémon Red does on every screen fade — would have rendered inside out. Closed by
+   `ppu::tests::cgb`, which drives a reversed `BGP`/`OBP` through a known tile. **A reference ROM
+   only tests what it happens to exercise.**
+6. **The plan's own premise about savestates was wrong, and in the useful direction** — a size
+   change did not force a shape change. Corrected in place under the Phase B sequencing note,
+   because Phase C's `MachineCycles` widening will face the same question and the answer is
+   probably the same.
+7. **A CGB register block is mostly about what stays *off*.** More of B1-B9's bugs were "this
+   register answered in compatibility mode when it should not have" than anything to do with
+   colour. `cgb_registers_are_unmapped_without_cgb_features` covers all twelve at once.
+
+**Tree:** dirty, uncommitted, and now also carries Phase B. New: `src/model.rs`,
+`src/cgb_palette.rs`, `src/hdma.rs`, `src/boot_palette/{mod,tables}.rs`,
+`src/roms/cgb-acid2/{cgb-acid2.gbc,reference.png}`. Modified: `src/{core,game_boy,mmu,ppu,
+registers,serial,lcd_control,lcd_palette,main}.rs`, `src/roms/mod.rs`, `src/savestate/mod.rs`,
+`CLAUDE.md`, this document. `CLAUDE.md`'s throughput figure was corrected from ~34x to ~30x core /
+~25x end-to-end and now carries the benchmarking warning. **No `src/pokemon/**` source touched, no `src/sdl/**` touched, no
+fixture regenerated.** gambatte tree untouched (it has no CGB-compat palette to reference anyway,
+so the only thing read from it was the `fexx_ffxx_dumper_cgb.bin` hardware dump).
+
+**Next agent:** **C1**, and you inherit a **6-12% deficit from Phase B** on top of the gap you
+were already chasing — the table above is the new starting line, so re-measure it yourself before
+attributing anything. Four things from this session bear on Phase C directly:
+
+1. ⭐ **Fix your benchmarking before you trust a single number.** Surprise 1 is not a footnote —
+   this machine's fast/slow states are as large as most of the wins you will be measuring. Run
+   ABBA, report both orders, and treat any unpaired comparison as worthless.
+2. **`nm -S --size-sort -C` on the two binaries, every time.** Hot-path code growth is invisible to
+   bisection and cost more here than every algorithmic change put together. `MMU::update` is the
+   function to watch; keep it under ~3 KB.
+3. `MMU::update` now has exactly one line where CPU time becomes peripheral time (`video_cycles`,
+   the double-speed divisor) — that is the seam C1 replaces, and B7 was written to put it there.
+   The `catch_up(now)` shape §5 asks for was **not** adopted: nothing added in Phase B accumulates
+   its own clock, they all still take a delta, so C1 changes signatures rather than semantics.
+4. Before you widen `MachineCycles`, read the savestate correction above — the append trick that
+   saved Phase B may save you too.
+
+---
+
+### 2026-08-06 (#10) — B9 — CGB hardware has **two** boot register files; gb shipped one
+
+**State:** **B9 stays `DONE`**, with a correction folded into its task body. No task changed state.
+
+**Did:** Alex asked whether the CGB post-boot register values were right, given that the DMG ones
+in this codebase are known to be wrong. They were right for a CGB-aware cartridge and **wrong for
+compatibility mode** — which is the mode Pokémon Red, the whole point of Phase B, runs in.
+
+A CGB running a DMG-only cartridge takes the boot ROM's `EmulateDMG` path. That routine ends
+`ld de, 8` / `ld l, $7C`, and the shared final block then does `ldh a, [hTitleChecksum]` / `ld b, a`
+— so `B`, `D`, `E` and `L` all differ from the CGB-mode file that B9 originally used for both:
+
+| | CGB (CGB mode) | CGB (DMG-compat mode) |
+|---|---|---|
+| `B` | `0x00` | **title checksum** — `0x14` for Pokémon Red; `0x00` if not first-party |
+| `DE` | `0xFF56` | **`0x0008`** |
+| `HL` | `0x000D` | **`0x007C`**, or `0x991A` when `B` is `0x43`/`0x58` |
+
+`RegisterSet::boot` now takes `(ColorMode, cart)` rather than `Model`, and the licensee rule lives
+with the palette code it shares (`boot_palette::compatibility_b_register`) rather than being
+duplicated. The `0x991A` case is the two cartridges whose palette entry carries SameBoy's `$80`
+flag: loading the DMG boot tilemap leaves `HL` pointing into VRAM. Those are exactly the entries
+with title checksum `0x43` and `0x58`, both unambiguous, which is why Pan Docs can state the rule
+on `B`.
+
+**Verified:** `cargo test --release --bin gb` → `956 passed; 0 failed; 115 ignored` (+2). Four new
+tests in `registers::tests` pin all three register files, the licensee rule, the `0x991A` case, and
+that the file survives a reset. Fixtures clean.
+
+**Surprises:**
+
+1. ⭐ **gambatte is wrong here, and it is this plan's designated reference.** `initstate.cpp:1174-1181`
+   uses the DMG values for CGB with only `A` and `B` changed — `C = 0x13`, `E = 0xD8`, `F = 0xB0`,
+   `HL = 0x014D` — which matches neither Pan Docs nor the boot ROM. Had I checked B9 against
+   gambatte, as §2.5 encourages for everything else, I would have "confirmed" a *different* wrong
+   answer. **§1.5's prime directive 4 says the reference emulator is read-only; it does not say it
+   is right.** For boot state, the boot ROM disassembly and Pan Docs are the sources, and B5's task
+   text already said as much for palettes — the same caveat applies to registers.
+2. **The bug was invisible to every test I had, including the mutation sweep.** Ledger #9's sweep
+   mutated `A` (caught) but nothing else in the file, because nothing observable depends on `B`/`DE`/
+   `HL`: Pokémon Red's entry point is `nop; jp Start` and it never reads them. A mutation sweep only
+   probes the behaviours you already assert. **"No test caught it" and "it does not matter" are
+   different claims** — this one was simply wrong, cheaply, and would have mattered to some other
+   cartridge.
+3. The correction cost nothing in risk precisely because it is unobservable to Pokémon Red — but
+   that is luck, not design. It is also why it survived a full playthrough and 956 tests.
+
+**Tree:** dirty, uncommitted, unchanged in scope from #9 plus `src/registers.rs`, `src/core.rs`
+(`Core::new`/`reset` now pass the colour mode and cartridge) and `src/boot_palette/mod.rs` (the new
+`compatibility_b_register`). No `src/pokemon/**`, no `src/sdl/**`, no fixture regenerated.
+
+**Next agent:** still **C1**. If you touch boot state at all — **B11** is where that lives — treat
+gambatte's `initstate.cpp` as a *hardware dump* for RAM contents (which it is, and a good one) but
+**not** as authority for the CPU register file.
+
+---
+
+### 2026-08-06 (#11) — B11 (definition), `05-mmu-cartridge.md` §7 — DMG boot `F` is conditional, not `0xB0`
+
+**State:** No task changed state. **B11's definition corrected**, and a factual error corrected in
+`05-mmu-cartridge.md` §7 — logged here as §1.3 requires.
+
+**Did:** Alex supplied Pan Docs' Power-Up Sequence register tables. My three implemented files —
+DMG, CGB, CGB-compat — match them exactly, and the CGB pair is pinned by
+`registers::tests::the_boot_register_file_matches_the_boot_rom` (ledger #10). But the table carries
+a footnote on DMG `F` that this plan and the research doc had both flattened:
+
+**Old claim** (`05-mmu-cartridge.md` §7 table and task list, and B11 as I wrote it yesterday):
+"real DMG leaves `F` at `0xB0` (Z, H and C set)".
+
+**New claim:** `F` is `Z=1 N=0 H=? C=?`, where *"if the header checksum is `$00`, then the carry and
+half-carry flags are clear; otherwise, they are both set."* The boot ROM's last flag-affecting
+operation is the header-checksum verification, so `H` and `C` carry its result:
+`F = if rom[0x14D] == 0 { 0x80 } else { 0xB0 }`.
+
+`gb`'s current flat `0x80` is therefore **correct** for a cartridge whose header sums to zero, and
+wrong for every other. Checked every ROM committed here — `pokered` `0x20`, `cpu_instrs` `0x3B`,
+`dmg-acid2` `0x9F`, `cgb-acid2` `0xEB`, `button_test` `0x1D`, `tetris` `0x0A` — all non-zero, so all
+of them want `0xB0`. The zero case is reachable in principle (a real cartridge must have a *correct*
+checksum to boot, and a correct checksum can legitimately be `0x00`), which is why mooneye ships
+`boot_regs-dmg0` alongside `boot_regs-dmgABC`.
+
+Also folded the rest of the table into B11 — DMG0 / MGB / SGB / SGB2 rows — so whoever takes it has
+the data rather than a pointer.
+
+**Verified:** documentation only; no code changed in this entry. Header-checksum bytes read directly
+from the committed ROMs rather than assumed.
+
+**Surprises:**
+
+1. ⭐ **gambatte hardcodes `0xB0` too** (`initstate.cpp:1179`), so it does not model the condition
+   either. That is the *second* boot-state detail in two days where gambatte is not the authority —
+   see ledger #10. Both times the answer came from Pan Docs plus a boot-ROM disassembly. **For boot
+   state specifically, stop reaching for gambatte first.**
+2. **A one-line summary in a research doc lost the condition, and I then propagated it into a task
+   definition.** The §7 table said "gambatte `0xB0` / gb `0x80`", which is a true statement about
+   *gambatte* and reads as a statement about *hardware*. B11 would have been implemented as a
+   constant. The guides in this directory were written by reading, not running (ledger #4's lesson)
+   — this is the documentation-shaped version of the same failure mode.
+
+**Tree:** dirty, uncommitted. This entry touched `docs/compatibility/10-implementation-plan.md` and
+`docs/compatibility/05-mmu-cartridge.md` only.
+
+**Next agent:** still **C1**. If you take **B11**, implement `F` as a function of `rom[0x14D]`, not
+as a constant — and note that changing DMG `F` at all is the low-risk half of that task; the `DIV`
+and RAM-fill half is what re-rolls Pokémon Red's RNG.
+
+---
+
+### 2026-08-06 (#12) — B11 (definition) — DMG boot `F`: derived from the boot ROM, and Pan Docs is wrong too
+
+**State:** No task changed state. **B11's `F` rule replaced** with one derived from the boot ROM
+source; ledger #11's version (which repeated Pan Docs) superseded.
+
+**Did:** Alex pushed back on #11 with the right question — *"won't the header checksum always be the
+result it needs to be to pass?"* — and then found the Pan Docs sentence that confirms it: the boot
+ROM **locks up** if the checksum does not match, so control only ever reaches a cartridge whose
+check passed.
+
+That is exactly the point, and it is what makes the flags well-defined rather than what makes them
+constant. Fetched the DMG boot ROM disassembly (`ISSOtm/gb-bootroms`, `src/dmg.asm`) rather than
+reasoning about it further:
+
+```asm
+    ld b, HeaderChecksum - HeaderTitle   ; $19
+    ld a, b
+.computeChecksum
+    add a, [hl]                          ; 0x134..0x14C
+    inc hl
+    dec b
+    jr nz, .computeChecksum
+    add a, [hl]                          ; <- the stored checksum at 0x14D
+.checksumFailure
+    jr nz, .checksumFailure               ; lock up unless A == 0
+    ld a, BOOTUP_A_DMG                    ; `ld`/`ldh` do not touch flags
+    ldh [rBANK], a                        ; ...so F at handoff is that `add`'s
+```
+
+The check always passes — but the *arithmetic that reaches zero* differs. Let `c = rom[0x14D]`; the
+running sum must be `(-c) & 0xFF`. Then:
+
+- `C` is set iff the 9-bit sum reached `0x100`, i.e. iff **`c != 0`**.
+- `H` is set iff the low nibbles carried, i.e. iff **`c & 0x0F != 0`**.
+
+Those are *different questions*, so:
+
+| `rom[0x14D]` | `F` | count |
+|---|---|---|
+| `0x00` | `0x80` | 1 |
+| non-zero multiple of `0x10` | **`0x90`** | 15 |
+| anything else | `0xB0` | 240 |
+
+**Verified:** derivation brute-forced over all 256 checksum values, and the boot ROM's two variant
+blocks (`dmg.asm:57-65` and `:277-286`) confirmed to have identical structure, so this holds for
+DMG, DMG0 and MGB. Checksum bytes read from the committed ROMs.
+
+**Surprises:**
+
+1. ⭐⭐ **Pan Docs is wrong here, and `pokered` is one of the cases it gets wrong.** The footnote
+   says `H` and `C` are either both clear or both set; that fails for the 15 non-zero multiples of
+   `0x10`, where `C=1` and `H=0`. **`pokered`'s header checksum is `0x20`** — so the single most
+   important cartridge in this repo boots with `F = 0x90` on real DMG hardware, a value neither
+   Pan Docs' table, gambatte, nor either of my two previous ledger entries would have produced.
+2. **Three sources, three different wrong answers, and the code was right there.** gambatte
+   hardcodes `0xB0`; Pan Docs gives a two-case rule; ledger #11 copied Pan Docs. The boot ROM
+   disassembly is 322 lines and took one `curl`. **When a value is *derived* rather than *dumped*,
+   go to the code that derives it** — dumps (like `fexx_ffxx_dumper_cgb.bin`) are authoritative for
+   RAM contents, but a register left over from a computation is only as good as your model of the
+   computation.
+3. **The user's "wrong" intuition was the key.** "The checksum always passes" is true, and I had
+   treated the footnote's condition as being about pass/fail. It is not — it is about *how* the sum
+   reaches zero. Following the objection instead of defending the citation is what produced the
+   right rule.
+
+**Tree:** dirty, uncommitted. Documentation only in this entry:
+`docs/compatibility/{10-implementation-plan,05-mmu-cartridge}.md`.
+
+**Next agent:** still **C1**. **B11** now has a precise, tested-in-principle rule for `F`; implement
+it as a function of `rom[0x14D]`, and remember it is the *low-risk* half of B11 — `DIV` and the RAM
+fills are what re-roll Pokémon Red's RNG.
+
+---
+
+### 2026-08-06 (#13) — housekeeping — Phase B committed to `main`; Pan Docs report declined
+
+**State:** No task changed state. Recorded here because two things every earlier entry says are no
+longer true.
+
+**Did:**
+
+1. **Alex authorised committing and pushing to `main`**, so §0.2's "no committing, pushing or
+   branching unless Alex asks in that session" was satisfied for this session. **The tree is no
+   longer dirty** — ledger entries #7 through #12 all end with "dirty, uncommitted", and that is
+   now historical. Phases A and B are both in `main`.
+2. **Alex declined raising the Pan Docs correction upstream.** Ledger #12 found a genuine defect in
+   Pan Docs' Power-Up Sequence footnote (DMG boot `F`; see that entry). Offered to file it against
+   `gbdev/pandocs`; **Alex said no.** Do not re-raise it — the finding is recorded here and in
+   `05-mmu-cartridge.md` §7, which is where this project needs it.
+
+**Verified:** `cargo test --release --bin gb` → `956 passed; 0 failed; 115 ignored`; `slow-tests`
+`115 passed`; `full_playthrough` `1 passed ... 667.34s`; `git status --porcelain src/pokemon/data/`
+empty. Nothing under `src/pokemon/**` or `src/sdl/**` was modified.
+
+**Tree:** clean, committed and pushed to `origin/main`.
+
+**Next agent:** **C1**, and you now start from a committed baseline rather than someone else's
+uncommitted work — `git log` is a usable history again. Read ledger #9's benchmarking warning
+before you measure anything.
 
 ---

@@ -58,10 +58,17 @@ impl Serial {
         }
     }
 
-    pub fn update(&mut self, delta_cycles: MachineCycles) {
+    /// `fast` is the CGB's `SC` bit 1: a 32x faster shift clock. It lives in the MMU rather than
+    /// here so the shipped `timer` save-state section keeps its shape — see `MMU::serial_fast`.
+    pub fn update(&mut self, delta_cycles: MachineCycles, fast: bool) {
+        let period = if fast {
+            MachineCycles::from_m(MachineCycles::PER_SERIAL_BYTE_TRANSFER.m_cycles() / 32)
+        } else {
+            MachineCycles::PER_SERIAL_BYTE_TRANSFER
+        };
         if let SerialState::Transferring { cycles } = self.state {
             let cycles = cycles + delta_cycles;
-            self.state = if cycles >= MachineCycles::PER_SERIAL_BYTE_TRANSFER {
+            self.state = if cycles >= period {
                 if let Some(buffer) = self.buffer.as_mut() {
                     buffer.push(self.data);
                 }

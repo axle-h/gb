@@ -322,7 +322,7 @@ mod tests {
     use super::*;
     use crate::cycles::MachineCycles;
     use crate::game_boy::GameBoy;
-    use crate::ram::RAM;
+    use crate::ram::{RAM, ROM};
 
     #[derive(Debug, PartialEq, Eq, Encode, Decode)]
     struct Probe {
@@ -475,6 +475,105 @@ mod tests {
             }
             let payload = &reader.sections[label];
             stream.extend_from_slice(label.as_bytes());
+            stream.push(0);
+            stream.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            stream.extend_from_slice(payload);
+        }
+        let compressed = lz4_flex::compress_prepend_size(&stream);
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&CONTAINER_VERSION.to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    /// Phase B added a `cgb` section and grew `wram` and `ppu` by appending a field to each. All
+    /// three have to survive a round trip, or a CGB save state silently loses its banking.
+    #[test]
+    fn a_cgb_machine_round_trips_its_extra_state() {
+        let mut gb = GameBoy::cgb(crate::roms::cgb_acid::ROM);
+        gb.run(MachineCycles::from_m(400_000));
+
+        // Touch every Phase B register so none of them can round-trip by being at its default.
+        for (address, value) in [
+            (0xFF70u16, 0x05), // SVBK
+            (0xFF4F, 0x01),    // VBK
+            (0xFF6C, 0x01),    // OPRI
+            (0xFF4D, 0x01),    // KEY1, armed
+            (0xFF72, 0xA5),
+            (0xFF68, 0x80),    // BCPS, auto-increment
+        ] {
+            gb.core_mut().mmu_mut().write(address, value);
+        }
+        for i in 0..64u8 {
+            gb.core_mut().mmu_mut().write(0xFF69, i ^ 0x3C); // fill BG palette RAM
+        }
+        gb.core_mut().mmu_mut().write(0xD800, 0x9E); // WRAM bank 5
+        gb.core_mut().mmu_mut().write(0x8100, 0x7B); // VRAM bank 1
+        gb.core_mut().mmu_mut().write(0xFEA0, 0x11); // the CGB-only unusable RAM
+
+        let saved = gb.save_state().expect("save");
+        let reader = SectionReader::parse(&saved).unwrap();
+        assert!(reader.contains(labels::CGB), "a CGB state must carry a cgb section");
+
+        let mut loaded = GameBoy::cgb(crate::roms::cgb_acid::ROM);
+        loaded.load_state(&saved).expect("load");
+        assert_eq!(gb, loaded);
+
+        // ...and spot-check through the bus, so this cannot pass by both sides being wrong.
+        assert_eq!(loaded.core().mmu().read(0xFF70), 0xF8 | 5);
+        assert_eq!(loaded.core().mmu().read(0xD800), 0x9E);
+        assert_eq!(loaded.core().mmu().read(0x8100), 0x7B);
+        assert_eq!(loaded.core().mmu().read(0xFEA0), 0x11);
+        assert_eq!(loaded.core().mmu().read(0xFF4D) & 0x01, 1, "the armed speed switch survives");
+    }
+
+    /// The `wram` and `ppu` sections grew by *appending*, so a state written before Phase B must
+    /// still load — with the banks it never had left at zero. `every_committed_fixture_decodes`
+    /// proves the 91 real fixtures do; this proves the mechanism, by synthesising a v1 payload.
+    #[test]
+    fn a_pre_cgb_state_loads_with_its_missing_banks_zeroed() {
+        use crate::mmu::{WRAM_WINDOW, WRAM_SECTION_VERSION};
+
+        let mut gb = GameBoy::dmg_hello_world();
+        gb.run(MachineCycles::from_m(200_000));
+        gb.core_mut().mmu_mut().write(0xD000, 0x5C);
+
+        // Re-emit the container with `wram` written the way a v1 build would have: one value,
+        // the 8 KB window, and nothing after it.
+        let mut writer = SectionWriter::new();
+        gb.write_sections(&mut writer).unwrap();
+        let full = SectionReader::parse(&writer.finish()).unwrap();
+        let mut fields = full.section(labels::WRAM).unwrap().unwrap();
+        assert_eq!(fields.version(), WRAM_SECTION_VERSION, "v2 today");
+        let window = fields.field::<[u8; WRAM_WINDOW]>().unwrap().unwrap();
+
+        let mut spliced = SectionWriter::new();
+        gb.write_sections(&mut spliced).unwrap();
+        let rewritten = replace_section(spliced.finish(), labels::WRAM, 1, &window);
+
+        let mut loaded = GameBoy::dmg_hello_world();
+        loaded.load_state(&rewritten).expect("a v1 wram payload must still load");
+        assert_eq!(loaded.core().mmu().read(0xD000), 0x5C, "the window came back");
+        assert_eq!(gb, loaded, "and banks 2-7, which a v1 state never had, default to zero");
+    }
+
+    /// Rewrite a container with one section replaced by a differently-versioned payload.
+    fn replace_section<T: Encode>(container: Vec<u8>, label: &str, version: u16, value: &T) -> Vec<u8> {
+        let reader = SectionReader::parse(&container).unwrap();
+        let mut replacement = SectionWriter::new();
+        replacement.write(label, version, value).unwrap();
+        let replacement_stream =
+            lz4_flex::decompress_size_prepended(&replacement.finish()[MAGIC.len() + 2..]).unwrap();
+
+        let mut stream = Vec::new();
+        for existing in reader.labels() {
+            if existing == label {
+                stream.extend_from_slice(&replacement_stream);
+                continue;
+            }
+            let payload = &reader.sections[existing];
+            stream.extend_from_slice(existing.as_bytes());
             stream.push(0);
             stream.extend_from_slice(&(payload.len() as u32).to_le_bytes());
             stream.extend_from_slice(payload);

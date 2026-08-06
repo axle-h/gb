@@ -1,19 +1,25 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use bincode::{Decode, Encode};
+use crate::cgb_palette::{PaletteBank, PaletteBankState};
 use crate::cycles::MachineCycles;
 use crate::geometry::Point8;
 use crate::activation::Activation;
 use crate::lcd_control::{LcdControl, ObjectSizeMode, TileDataMode, TileMapMode};
 use crate::lcd_dma::LcdDma;
-use crate::lcd_palette::{DMGColor, DMGPaletteRegister, LcdPalette};
+use crate::lcd_palette::{DMGColor, DMGPaletteRegister, LcdColor, LcdPalette};
 use crate::lcd_status::{LcdMode, LcdStatus};
+use crate::model::ColorMode;
 use crate::savestate::{labels, SectionReader, SectionWriter};
 use image::{ImageBuffer, Rgb, RgbImage};
 use itertools::Itertools;
 
 #[derive(Debug, Clone)]
 pub struct PPU {
-    vram: [u8; 0x2000], // 8KB VRAM
+    /// Two 8 KB banks. A DMG only ever uses bank 0, and both [`PPU::vram`] and the CPU-facing
+    /// accessors keep that indistinguishable from the old single-bank array.
+    vram: [u8; VRAM_BANK_SIZE * VRAM_BANKS],
+    /// `VBK` (`FF4F`), 0 or 1. Always 0 on DMG and in CGB compatibility mode.
+    vram_bank: usize,
     oam: [u8; 0xA0], // 160 bytes OAM (Object Attribute Memory)
     lcd_control: LcdControl,
     lcd_status: LcdStatus,
@@ -21,9 +27,23 @@ pub struct PPU {
     scroll: Point8,
     window_position: Point8,
     palette: LcdPalette,
+    /// CGB background palette RAM (`BCPS`/`BCPD`). Unused on DMG; in compatibility mode it is
+    /// pre-loaded by the boot ROM and read-only to the cartridge.
+    cgb_background: PaletteBank,
+    /// CGB object palette RAM (`OCPS`/`OCPD`).
+    cgb_object: PaletteBank,
+    /// `OPRI` (`FF6C`): bit 0 set selects DMG sprite priority (lowest X wins) instead of CGB's
+    /// (lowest OAM index wins). The boot ROM sets it in compatibility mode (`EmulateDMG`).
+    object_priority: u8,
     dma: LcdDma,
-    lcd: [DMGColor; LCD_WIDTH * LCD_HEIGHT],
+    lcd: [LcdColor; LCD_WIDTH * LCD_HEIGHT],
     current_ticks: usize, // Current machine cycles
+    /// Set on each mode 3 -> mode 0 transition and consumed by the MMU in the same `update` call,
+    /// which is what paces HDMA. Never observable at rest, so it is neither serialised nor part
+    /// of equality.
+    hblank_started: bool,
+    /// Which palette hardware drives the screen. A construction-time property, not guest state.
+    color_mode: ColorMode,
 
     // TODO move all these into a separate struct for the current frame state
     current_x: usize,
@@ -69,6 +89,7 @@ impl WindowRenderState {
 impl PartialEq for PPU {
     fn eq(&self, other: &Self) -> bool {
         self.vram == other.vram
+            && self.vram_bank == other.vram_bank
             && self.oam == other.oam
             && self.lcd_control == other.lcd_control
             && self.lcd_status == other.lcd_status
@@ -76,8 +97,12 @@ impl PartialEq for PPU {
             && self.scroll == other.scroll
             && self.window_position == other.window_position
             && self.palette == other.palette
+            && self.cgb_background == other.cgb_background
+            && self.cgb_object == other.cgb_object
+            && self.object_priority == other.object_priority
             && self.dma == other.dma
             && self.current_ticks == other.current_ticks
+            && self.color_mode == other.color_mode
             && self.current_x == other.current_x
             && self.window_state == other.window_state
     }
@@ -102,26 +127,69 @@ pub struct PpuSection {
     pub window_state: WindowRenderState,
 }
 
-pub const PPU_SECTION_VERSION: u16 = 1;
+/// Bumped to 2 by B2, which appended VRAM bank 1. The first field keeps its v1 shape — bank 0 —
+/// so every fixture written before CGB support still decodes without conversion.
+pub const PPU_SECTION_VERSION: u16 = 2;
 /// Bumped to 2 by A7: incremental transfer, source page instead of address, `FF46` read-back.
 pub const DMA_SECTION_VERSION: u16 = 2;
+/// Phase B's own section: everything that only exists on a Game Boy Color.
+pub const CGB_SECTION_VERSION: u16 = 1;
+
+/// Contents of the PPU's half of the `cgb` save-state section. The MMU appends its own fields
+/// after these — see [`crate::mmu::MMU::write_sections`].
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct CgbVideoSection {
+    pub vram_bank: usize,
+    pub background: PaletteBankState,
+    pub object: PaletteBankState,
+    pub object_priority: u8,
+}
 
 impl PPU {
     pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
-        writer.write(labels::PPU, PPU_SECTION_VERSION, &PpuSection {
-            vram: self.vram,
-            oam: self.oam,
-            lcd_control: self.lcd_control.clone(),
-            lcd_status: self.lcd_status.clone(),
-            vblank_interrupt_pending: self.vblank_interrupt_pending,
-            scroll: self.scroll,
-            window_position: self.window_position,
-            palette: self.palette,
-            current_ticks: self.current_ticks,
-            current_x: self.current_x,
-            window_state: self.window_state,
+        let mut bank_0 = [0u8; VRAM_BANK_SIZE];
+        bank_0.copy_from_slice(&self.vram[..VRAM_BANK_SIZE]);
+        let mut bank_1 = [0u8; VRAM_BANK_SIZE];
+        bank_1.copy_from_slice(&self.vram[VRAM_BANK_SIZE..]);
+
+        writer.write_fields(labels::PPU, PPU_SECTION_VERSION, |fields| {
+            fields.field(&PpuSection {
+                vram: bank_0,
+                oam: self.oam,
+                lcd_control: self.lcd_control.clone(),
+                lcd_status: self.lcd_status.clone(),
+                vblank_interrupt_pending: self.vblank_interrupt_pending,
+                scroll: self.scroll,
+                window_position: self.window_position,
+                palette: self.palette,
+                current_ticks: self.current_ticks,
+                current_x: self.current_x,
+                window_state: self.window_state,
+            })?;
+            fields.field(&bank_1) // appended in v2
         })?;
         writer.write(labels::DMA, DMA_SECTION_VERSION, &self.dma)
+    }
+
+    /// The PPU's contribution to the `cgb` section. Written unconditionally so that a DMG state
+    /// and a CGB state have the same shape; on DMG every value here is its default.
+    pub(crate) fn write_cgb_fields(&self, fields: &mut crate::savestate::FieldWriter) -> Result<(), String> {
+        fields.field(&CgbVideoSection {
+            vram_bank: self.vram_bank,
+            background: (&self.cgb_background).into(),
+            object: (&self.cgb_object).into(),
+            object_priority: self.object_priority,
+        })
+    }
+
+    pub(crate) fn read_cgb_fields(&mut self, fields: &mut crate::savestate::FieldReader) -> Result<(), String> {
+        if let Some(section) = fields.field::<CgbVideoSection>()? {
+            self.vram_bank = section.vram_bank & (VRAM_BANKS - 1);
+            self.cgb_background = section.background.into();
+            self.cgb_object = section.object.into();
+            self.object_priority = section.object_priority;
+        }
+        Ok(())
     }
 
     /// The `dma` section's shape changed in version 2 (A7: incremental transfer, page instead of
@@ -146,8 +214,16 @@ impl PPU {
     }
 
     pub(crate) fn read_sections(&mut self, reader: &SectionReader) -> Result<(), String> {
-        if let Some((_version, section)) = reader.read::<PpuSection>(labels::PPU)? {
-            self.vram = section.vram;
+        let Some(mut fields) = reader.section(labels::PPU)? else {
+            return self.read_dma_section(reader);
+        };
+        if let Some(section) = fields.field::<PpuSection>()? {
+            self.vram[..VRAM_BANK_SIZE].copy_from_slice(&section.vram);
+            // Absent in v1 payloads, which is not an error — the fixture predates CGB support and
+            // its bank 1 was never anything but zeroes.
+            self.vram[VRAM_BANK_SIZE..].copy_from_slice(
+                &fields.field::<[u8; VRAM_BANK_SIZE]>()?.unwrap_or([0; VRAM_BANK_SIZE]),
+            );
             self.oam = section.oam;
             self.lcd_control = section.lcd_control;
             self.lcd_status = section.lcd_status;
@@ -161,7 +237,7 @@ impl PPU {
 
             // Derived state: the frame buffer is rebuilt as the PPU walks the rest of the frame,
             // and the sprite list on the next OAM scan.
-            self.lcd = [DMGColor::White; LCD_WIDTH * LCD_HEIGHT];
+            self.lcd = [LcdColor::WHITE; LCD_WIDTH * LCD_HEIGHT];
             self.scanline_sprites.clear();
         }
         self.read_dma_section(reader)
@@ -171,7 +247,8 @@ impl PPU {
 impl Default for PPU {
     fn default() -> Self {
         Self {
-            vram: [0; 0x2000],
+            vram: [0; VRAM_BANK_SIZE * VRAM_BANKS],
+            vram_bank: 0,
             oam: [0; 0xA0],
             lcd_control: LcdControl::default(),
             lcd_status: LcdStatus::default(),
@@ -179,9 +256,14 @@ impl Default for PPU {
             scroll: Point8::default(),
             window_position: Point8::default(),
             palette: LcdPalette::default(),
+            cgb_background: PaletteBank::default(),
+            cgb_object: PaletteBank::default(),
+            object_priority: 0,
             dma: LcdDma::default(),
-            lcd: [DMGColor::White; LCD_WIDTH * LCD_HEIGHT],
+            lcd: [LcdColor::WHITE; LCD_WIDTH * LCD_HEIGHT],
             current_ticks: 0,
+            hblank_started: false,
+            color_mode: ColorMode::Dmg,
             current_x: 0,
             window_state: WindowRenderState::default(),
             scanline_sprites: vec![],
@@ -190,21 +272,78 @@ impl Default for PPU {
 }
 
 impl PPU {
-    pub fn lcd(&self) -> &[DMGColor; LCD_WIDTH * LCD_HEIGHT] {
+    pub fn lcd(&self) -> &[LcdColor; LCD_WIDTH * LCD_HEIGHT] {
         &self.lcd
+    }
+
+    /// Which palette hardware drives the screen. Set once at construction from the console model
+    /// and the cartridge header; see [`ColorMode`].
+    pub fn color_mode(&self) -> ColorMode {
+        self.color_mode
+    }
+
+    pub fn set_color_mode(&mut self, color_mode: ColorMode) {
+        self.color_mode = color_mode;
     }
 
     pub fn read_vram(&self, address: u16) -> u8 {
         if self.lcd_status.mode().vram_accessible() {
-            self.vram[address as usize]
+            self.vram[self.vram_offset(address)]
         } else {
             // garbage data https://gbdev.io/pandocs/Rendering.html
             0xff
         }
     }
 
+    /// **VRAM bank 0.** The Pokémon layer reads tile data through this and a DMG has no other
+    /// bank, so it deliberately does not follow `VBK`. Use [`PPU::vram_banked`] for the bank the
+    /// CPU currently sees.
     pub fn vram(&self) -> &[u8] {
-        &self.vram
+        &self.vram[..VRAM_BANK_SIZE]
+    }
+
+    pub fn vram_banked(&self, bank: usize) -> &[u8] {
+        let base = (bank & (VRAM_BANKS - 1)) * VRAM_BANK_SIZE;
+        &self.vram[base..base + VRAM_BANK_SIZE]
+    }
+
+    /// `VBK` (`FF4F`) read-back: only bit 0 exists, and the rest read 1.
+    pub fn vram_bank_register(&self) -> u8 {
+        0xFE | self.vram_bank as u8
+    }
+
+    pub fn set_vram_bank_register(&mut self, value: u8) {
+        self.vram_bank = (value & 0x01) as usize;
+    }
+
+    pub fn cgb_background_palettes(&self) -> &PaletteBank {
+        &self.cgb_background
+    }
+
+    pub fn cgb_background_palettes_mut(&mut self) -> &mut PaletteBank {
+        &mut self.cgb_background
+    }
+
+    pub fn cgb_object_palettes(&self) -> &PaletteBank {
+        &self.cgb_object
+    }
+
+    pub fn cgb_object_palettes_mut(&mut self) -> &mut PaletteBank {
+        &mut self.cgb_object
+    }
+
+    /// True once per scanline, on entering HBlank. See [`PPU::hblank_started`].
+    pub fn consume_hblank_started(&mut self) -> bool {
+        std::mem::take(&mut self.hblank_started)
+    }
+
+    /// `OPRI` (`FF6C`) read-back: only bit 0 exists.
+    pub fn object_priority_register(&self) -> u8 {
+        0xFE | self.object_priority
+    }
+
+    pub fn set_object_priority_register(&mut self, value: u8) {
+        self.object_priority = value & 0x01;
     }
 
     /// Raw OAM, bypassing the CPU's mode gate. For the DMA controller, debugging and tests.
@@ -214,8 +353,27 @@ impl PPU {
 
     pub fn write_vram(&mut self, address: u16, value: u8) {
         if self.lcd_status.mode().vram_accessible() {
-            self.vram[address as usize] = value;
+            let offset = self.vram_offset(address);
+            self.vram[offset] = value;
         }
+    }
+
+    /// Where a `0x8000`-relative address lands in the two-bank array, following `VBK`.
+    ///
+    /// Masked so the index is provably in range: `vram_bank` is a plain `usize`, and without the
+    /// mask every VRAM access — the hottest read in the machine — carries a bounds check. Same
+    /// reasoning as [`crate::mmu::MMU::work_ram_offset`].
+    #[inline]
+    fn vram_offset(&self, address: u16) -> usize {
+        (self.vram_bank * VRAM_BANK_SIZE + address as usize) & (VRAM_BANK_SIZE * VRAM_BANKS - 1)
+    }
+
+    /// Privileged VRAM write for the HDMA/GDMA controller, which owns the bus for the duration of
+    /// a block and is not subject to the CPU's mode gate. Like OAM DMA (see
+    /// [`PPU::write_oam_dma`]), the transfer targets the bank `VBK` currently selects.
+    pub fn write_vram_dma(&mut self, address: u16, value: u8) {
+        let offset = self.vram_offset(address & 0x1FFF);
+        self.vram[offset] = value;
     }
 
     /// CPU-facing OAM read. Blocked by the PPU mode, **and** while an OAM DMA holds the bus — the
@@ -292,7 +450,10 @@ impl PPU {
         &mut self.dma
     }
 
-    /// Generate a screenshot of the current PPU state as an in-memory RGB image
+    /// Generate a screenshot of the current PPU state as an in-memory RGB image.
+    ///
+    /// Still an `RgbImage` after B4 widened the frame buffer, so every screenshot test is
+    /// unaffected; on DMG the bytes are identical to what they always were.
     pub fn screenshot(&self) -> RgbImage {
         let mut img = ImageBuffer::new(LCD_WIDTH as u32, LCD_HEIGHT as u32);
         for y in 0..LCD_HEIGHT {
@@ -305,11 +466,10 @@ impl PPU {
     }
 
     pub fn dump_tilemap(&self, tile_map_mode: TileMapMode, data_mode: TileDataMode) -> RgbImage {
-        let tile_map = self.tile_map(tile_map_mode);
         let mut img = ImageBuffer::new(TILE_MAP_PIXELS as u32, TILE_MAP_PIXELS as u32);
         for y in 0..TILE_MAP_PIXELS {
             for x in 0..TILE_MAP_PIXELS {
-                let color_index = self.pixel(&tile_map, data_mode, x, y);
+                let (color_index, _) = self.map_pixel(tile_map_mode, data_mode, x, y);
                 let pixel_color = DMGColor::from_repr(color_index).unwrap_or(DMGColor::White).to_rgb();
                 img.put_pixel(x as u32, y as u32, pixel_color);
             }
@@ -352,6 +512,7 @@ impl PPU {
                     // had already emitted every pixel far too early.
                     self.draw_pixels_to(LCD_WIDTH);
                     self.lcd_status.set_mode(LcdMode::HBlank); // drawing done
+                    self.hblank_started = true; // paces HDMA — see MMU::update
                     self.current_ticks -= drawing_ticks;
                 } else {
                     // `current_ticks` is an *absolute* offset into mode 3 and is not reset within
@@ -401,7 +562,14 @@ impl PPU {
     }
 
     fn tile(&self, mode: TileDataMode, index: u8) -> Tile {
-        let address = mode.tile_address(index) as usize - VRAM_BASE_ADDRESS;
+        self.banked_tile(mode, index, 0)
+    }
+
+    fn banked_tile(&self, mode: TileDataMode, index: u8, bank: usize) -> Tile {
+        // Masked for the same reason as `vram_offset`: a slice whose bounds the compiler cannot
+        // prove costs a check per pixel here.
+        let address = (bank * VRAM_BANK_SIZE + mode.tile_address(index) as usize - VRAM_BASE_ADDRESS)
+            & (VRAM_BANK_SIZE * VRAM_BANKS - 1);
         Tile::new(&self.vram[address..address + TILE_BYTES])
     }
 
@@ -414,16 +582,23 @@ impl PPU {
     ///     Bit 5 of the LCDC register is set to 1
     ///     The condition WY = LY has been true at any point in the currently rendered frame.
     ///     The current X-position of the shifter is greater than or equal to WX - 7
-    fn in_window(&self, x: usize, y: usize) -> bool {
-        self.lcd_control.window_enabled() &&
+    ///
+    /// LCDC bit 0 gates the window on DMG but not on CGB, where it means something else entirely
+    /// — see [`LcdControl::background_enabled`].
+    fn in_window(&self, x: usize, _y: usize) -> bool {
+        let enabled = if self.color_mode.cgb_features() {
+            self.lcd_control.window_display_enabled()
+        } else {
+            self.lcd_control.window_enabled()
+        };
+        enabled &&
             self.window_state.is_active &&
             x >= self.window_position.x.saturating_sub(7) as usize
     }
 
-    fn window_pixel(&self, x: usize) -> u8 {
-        let tile_map = self.tile_map(self.lcd_control.window_tile_map());
-        self.pixel(
-            &tile_map,
+    fn window_pixel(&self, x: usize) -> (u8, TileAttributes) {
+        self.map_pixel(
+            self.lcd_control.window_tile_map(),
             self.lcd_control.tile_data_mode(),
             // x+7 because window starts at x position - 7
             x + 7 - self.window_position.x as usize,
@@ -432,14 +607,40 @@ impl PPU {
         )
     }
 
-    fn bg_pixel(&self, x: usize, y: usize) -> u8 {
-        let tile_map = self.tile_map(self.lcd_control.background_tile_map());
-        self.pixel(
-            &tile_map,
+    fn bg_pixel(&self, x: usize, y: usize) -> (u8, TileAttributes) {
+        self.map_pixel(
+            self.lcd_control.background_tile_map(),
             self.lcd_control.tile_data_mode(),
             (x as u8).wrapping_add(self.scroll.x) as usize,
             (y as u8).wrapping_add(self.scroll.y) as usize
         )
+    }
+
+    /// One pixel of a background or window tile map, in 256x256 map space.
+    ///
+    /// On CGB the tile map at `0x9800`/`0x9C00` is shadowed at the same offset in **VRAM bank 1**
+    /// by a byte of per-tile attributes (gambatte `video/ppu.cpp:617`): palette, tile bank, X and
+    /// Y flip, and BG-over-OBJ priority. On DMG, and in CGB compatibility mode, no such byte
+    /// exists and the attributes are all-zero — which happens to be exactly "palette 0, bank 0,
+    /// no flips, no priority", so the two paths converge without a branch per pixel.
+    fn map_pixel(&self, map: TileMapMode, data_mode: TileDataMode, x: usize, y: usize) -> (u8, TileAttributes) {
+        let entry = map.base_address() as usize - VRAM_BASE_ADDRESS
+            + (y / TILE_PIXELS % TILE_MAP_SIZE) * TILE_MAP_SIZE
+            + (x / TILE_PIXELS % TILE_MAP_SIZE);
+        let index = self.vram[entry];
+        let attributes = if self.color_mode.cgb_features() {
+            TileAttributes(self.vram[VRAM_BANK_SIZE + entry])
+        } else {
+            TileAttributes::NONE
+        };
+
+        let mut pixel_x = x % TILE_PIXELS;
+        let mut pixel_y = y % TILE_PIXELS;
+        if attributes.flip_x() { pixel_x = TILE_PIXELS - 1 - pixel_x; }
+        if attributes.flip_y() { pixel_y = TILE_PIXELS - 1 - pixel_y; }
+
+        let color = self.banked_tile(data_mode, index, attributes.bank()).pixel(pixel_x, pixel_y);
+        (color, attributes)
     }
 
     pub fn tile_indexes_of_vram_addresses(&self, address: u16, length: usize) -> Vec<u8> {
@@ -496,6 +697,11 @@ impl PPU {
 
     /// Emit pixels for the current scanline up to (but excluding) `target_x`, then leave
     /// `current_x` there. A no-op if the pixel clock has not moved.
+    ///
+    /// **Deliberately not inlined.** `PPU::update` is inlined into `MMU::update`, which the CPU
+    /// calls once per instruction; letting the whole pixel path in there grew that function by
+    /// 60% and cost several percent of core throughput to instruction-cache pressure alone.
+    #[inline(never)]
     fn draw_pixels_to(&mut self, target_x: usize) {
         let y = self.lcd_status.ly() as usize;
 
@@ -507,6 +713,11 @@ impl PPU {
             return;
         }
 
+        // On CGB, LCDC bit 0 does not switch the background off — it drops its *priority*.
+        let cgb = self.color_mode.cgb_features();
+        let bg_drawn = cgb || self.lcd_control.background_enabled();
+        let bg_has_priority = self.lcd_control.background_enabled();
+
         let mut row_in_window = false;
         for x in self.current_x..target_x {
             let pixel_in_window = self.in_window(x, y);
@@ -515,26 +726,26 @@ impl PPU {
                 self.window_state.update_if_active(y);
             }
 
-            let bg_color_index = if pixel_in_window {
+            let (bg_color_index, bg_attributes) = if !bg_drawn {
+                (0, TileAttributes::NONE)
+            } else if pixel_in_window {
                 self.window_pixel(x)
-            } else if self.lcd_control.background_enabled() {
-                self.bg_pixel(x, y)
             } else {
-                0
-            } as usize;
-            let bg_color = self.palette.background()[bg_color_index];
+                self.bg_pixel(x, y)
+            };
+            let bg_color = self.background_color(bg_color_index, bg_attributes);
 
-            let color = self.scanline_sprites.iter()
-                .filter(|sprite| sprite.x <= x as isize && sprite.x + TILE_PIXELS as isize > x as isize)
-                .map(|sprite| (sprite, self.sprite_pixel(sprite, x, y)))
-                .filter(|&(_, sprite_color)| sprite_color != 0) // filter out transparent pixels
-                .sorted_by_key(|&(sprite, _)| sprite.x) // overlapping sprites are sorted by x position
-                .next()
+            let color = self.top_sprite(x, y)
                 .map_or(bg_color, |(sprite, sprite_color)| {
-                    if sprite_color == 0 || sprite.bg_priority && bg_color_index != 0 {
+                    // The background wins when it is opaque *and* either the sprite yields to it
+                    // or (CGB only) the tile claims priority. LCDC bit 0 overrides both on CGB.
+                    let bg_wins = bg_color_index != 0
+                        && (sprite.bg_priority || bg_attributes.priority())
+                        && (!cgb || bg_has_priority);
+                    if bg_wins {
                         bg_color
                     } else {
-                        sprite.palette(&self.palette)[sprite_color as usize]
+                        self.sprite_color(sprite, sprite_color)
                     }
                 });
 
@@ -544,28 +755,67 @@ impl PPU {
         self.current_x = target_x;
     }
 
+    /// The highest-priority non-transparent sprite covering `x`, if any.
+    ///
+    /// DMG breaks ties by X coordinate, then by OAM index. CGB uses OAM index alone — the order
+    /// `scanline_sprites` is already in — unless `OPRI` bit 0 asks for the DMG rule, which is
+    /// what the boot ROM does in compatibility mode (gambatte `video/ppu.cpp:853-884`).
+    fn top_sprite(&self, x: usize, y: usize) -> Option<(&Sprite, u8)> {
+        let candidates = self.scanline_sprites.iter()
+            .filter(|sprite| sprite.x <= x as isize && sprite.x + TILE_PIXELS as isize > x as isize)
+            .map(|sprite| (sprite, self.sprite_pixel(sprite, x, y)))
+            .filter(|&(_, sprite_color)| sprite_color != 0); // transparent pixels do not compete
+
+        let mut candidates = candidates;
+        if self.color_mode.cgb_features() && self.object_priority & 0x01 == 0 {
+            candidates.next() // already in OAM order
+        } else {
+            // `sorted_by_key` is stable, so equal X keeps OAM order — the DMG tie-break.
+            candidates.sorted_by_key(|&(sprite, _)| sprite.x).next()
+        }
+    }
+
+    fn background_color(&self, color_index: u8, attributes: TileAttributes) -> LcdColor {
+        match self.color_mode {
+            ColorMode::Dmg => self.palette.background()[color_index as usize].to_lcd(),
+            // Compatibility mode still runs the index through `BGP`; the shade that comes out is
+            // then a *palette index* into CGB BG palette 0.
+            ColorMode::CgbCompat => {
+                let shade = self.palette.background()[color_index as usize] as u8;
+                self.cgb_background.color(0, shade)
+            }
+            ColorMode::Cgb => self.cgb_background.color(attributes.palette(), color_index),
+        }
+    }
+
+    fn sprite_color(&self, sprite: &Sprite, color_index: u8) -> LcdColor {
+        match self.color_mode {
+            ColorMode::Dmg => sprite.palette(&self.palette)[color_index as usize].to_lcd(),
+            ColorMode::CgbCompat => {
+                let shade = sprite.palette(&self.palette)[color_index as usize] as u8;
+                self.cgb_object.color(sprite.alt_palette as u8, shade)
+            }
+            ColorMode::Cgb => self.cgb_object.color(sprite.cgb_palette, color_index),
+        }
+    }
+
     fn sprite_pixel(&self, sprite: &Sprite, x: usize, y: usize) -> u8 {
         // Use the height this sprite was *selected* under, not the current LCDC — see `Sprite`.
         let sprite_x = (x as isize - sprite.x) as usize;
         let pixel_x = if sprite.flip_x { TILE_PIXELS - 1 - sprite_x } else { sprite_x };
         let sprite_y = (y as isize - sprite.y) as usize;
         let pixel_y = if sprite.flip_y { sprite.height - 1 - sprite_y } else { sprite_y };
+        let bank = if self.color_mode.cgb_features() { sprite.vram_bank as usize } else { 0 };
 
         if sprite.height <= TILE_PIXELS {
-            self.tile(TileDataMode::Lower, sprite.tile_index).pixel(pixel_x, pixel_y)
+            self.banked_tile(TileDataMode::Lower, sprite.tile_index, bank).pixel(pixel_x, pixel_y)
         } else if pixel_y < TILE_PIXELS {
-            self.tile(TileDataMode::Lower, sprite.tile_index & 0xFE)
+            self.banked_tile(TileDataMode::Lower, sprite.tile_index & 0xFE, bank)
                 .pixel(pixel_x, pixel_y)
         } else {
-            self.tile(TileDataMode::Lower, sprite.tile_index | 0x01)
+            self.banked_tile(TileDataMode::Lower, sprite.tile_index | 0x01, bank)
                 .pixel(pixel_x, pixel_y - TILE_PIXELS)
         }
-    }
-
-    fn pixel(&self, tile_map: &TileMap, data_mode: TileDataMode, x: usize, y: usize) -> u8 {
-        let tile_index = tile_map.tile_index(x / TILE_PIXELS, y / TILE_PIXELS);
-        let tile = self.tile(data_mode, tile_index);
-        tile.pixel(x % TILE_PIXELS, y % TILE_PIXELS)
     }
 
     fn sprites(&self, height: usize) -> Vec<Sprite> {
@@ -580,6 +830,10 @@ impl PPU {
 
 
 const VRAM_BASE_ADDRESS: usize = 0x8000;
+pub const VRAM_BANK_SIZE: usize = 0x2000;
+/// Both banks are allocated even on DMG, as gambatte does — it keeps the save-state shape and
+/// every index calculation identical across models, and 8 KB is not worth a branch.
+pub const VRAM_BANKS: usize = 2;
 pub const LCD_WIDTH: usize = 160;
 pub const LCD_HEIGHT: usize = 144;
 pub const TILE_BYTES: usize = 16;
@@ -646,6 +900,33 @@ impl<'a> Tile<'a> {
     }
 }
 
+/// A background or window tile's CGB attribute byte, from VRAM bank 1.
+///
+/// [`TileAttributes::NONE`] is what DMG and CGB compatibility mode use — no attribute byte exists
+/// there, and all-zero is the right answer for every field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TileAttributes(u8);
+
+impl TileAttributes {
+    const NONE: Self = Self(0);
+
+    /// Bits 0-2: which of the eight CGB background palettes.
+    #[inline]
+    fn palette(self) -> u8 { self.0 & 0x07 }
+    /// Bit 3: which VRAM bank holds the tile's pixels.
+    #[inline]
+    fn bank(self) -> usize { ((self.0 >> 3) & 0x01) as usize }
+    /// Bit 5.
+    #[inline]
+    fn flip_x(self) -> bool { self.0 & 0x20 != 0 }
+    /// Bit 6.
+    #[inline]
+    fn flip_y(self) -> bool { self.0 & 0x40 != 0 }
+    /// Bit 7: this tile is drawn over sprites, unless LCDC bit 0 says otherwise.
+    #[inline]
+    fn priority(self) -> bool { self.0 & 0x80 != 0 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 struct Sprite {
     y: isize,
@@ -660,6 +941,11 @@ struct Sprite {
     flip_y: bool, // bit 6 - 0 = Normal, 1 = Entire OBJ is vertically mirrored
     flip_x: bool, // bit 5 - 0 = Normal, 1 = Entire OBJ is horizontally mirrored
     alt_palette: bool, // bit 4 (DMG only) - 0 = Use OBJ palette 0, 1 = Use OBJ palette 1
+    /// Bit 3 (CGB only): which VRAM bank holds the sprite's tile. A `u8` rather than a `usize`
+    /// because `scanline_sprites` is walked once per pixel — the record's size is hot.
+    vram_bank: u8,
+    /// Bits 0-2 (CGB only): which of the eight CGB object palettes.
+    cgb_palette: u8,
 }
 
 impl Sprite {
@@ -674,6 +960,8 @@ impl Sprite {
             flip_y: (data[3] & 0x40) != 0,
             flip_x: (data[3] & 0x20) != 0,
             alt_palette: (data[3] & 0x10) != 0,
+            vram_bank: (data[3] >> 3) & 0x01,
+            cgb_palette: data[3] & 0x07,
         }
     }
 
@@ -769,6 +1057,139 @@ mod tests {
                 ppu.update(MachineCycles::ONE); // must not panic
             }
             assert!(ppu.current_x > 0, "the scanline must actually have been drawn");
+        }
+    }
+
+    /// Phase B's pixel path, at the level `cgb-acid2` cannot reach: that ROM only ever uses an
+    /// identity `BGP`, so it says nothing about whether compatibility mode really indirects
+    /// through the DMG palette registers. (Verified by mutation: dropping that indirection left
+    /// every other Phase B test green.)
+    mod cgb {
+        use super::*;
+        use crate::lcd_palette::LcdColor;
+
+        /// Four distinguishable RGB555 colours, so a mix-up cannot go unnoticed.
+        const PALETTE: [u16; 4] = [0x7C1F, 0x03E0, 0x001F, 0x7FE0];
+
+        /// A PPU showing tile 0 at the top-left of the background, whose first row is the colour
+        /// indexes `0, 1, 2, 3, 0, 1, 2, 3`.
+        fn ppu_with_tile(color_mode: ColorMode) -> PPU {
+            let mut ppu = PPU::default();
+            ppu.set_color_mode(color_mode);
+            ppu.lcd_control.set(0b1001_0001); // LCD on, tile data at 0x8000, BG on
+            ppu.vram[0] = 0b0101_0101; // low bits
+            ppu.vram[1] = 0b0011_0011; // high bits
+            ppu
+        }
+
+        fn set_palette(ppu: &mut PPU, bank: usize, palette: usize, colors: [u16; 4]) {
+            let bytes = std::array::from_fn(|i| {
+                let color = colors[i / 2];
+                if i % 2 == 0 { color as u8 } else { (color >> 8) as u8 }
+            });
+            if bank == 0 {
+                ppu.cgb_background.set_palette(palette, bytes);
+            } else {
+                ppu.cgb_object.set_palette(palette, bytes);
+            }
+        }
+
+        /// Render scanline 0 and return its first eight pixels.
+        fn scanline(ppu: &mut PPU) -> Vec<LcdColor> {
+            ppu.lcd_status.set_mode(LcdMode::OAM);
+            while ppu.lcd_status.mode() != LcdMode::HBlank {
+                ppu.update(MachineCycles::ONE);
+            }
+            ppu.lcd[..8].to_vec()
+        }
+
+        fn expected(colors: [u16; 4], order: [usize; 4]) -> Vec<LcdColor> {
+            (0..8).map(|x| LcdColor::from_rgb555(colors[order[x % 4]])).collect()
+        }
+
+        /// ⭐ In compatibility mode the colour index goes through `BGP` **first**, and the shade
+        /// that comes out is what indexes CGB palette 0. Skip that step and a game that inverts
+        /// `BGP` — which Pokémon Red does, on every screen fade — renders inside out.
+        #[test]
+        fn compatibility_mode_indirects_the_background_through_bgp() {
+            let mut ppu = ppu_with_tile(ColorMode::CgbCompat);
+            set_palette(&mut ppu, 0, 0, PALETTE);
+            ppu.palette.background_mut().set_from_byte(0b00_01_10_11); // reverse the shades
+
+            assert_eq!(scanline(&mut ppu), expected(PALETTE, [3, 2, 1, 0]));
+        }
+
+        /// The same for sprites, through `OBP0`/`OBP1` and into CGB object palette 0 or 1
+        /// according to the OAM bit that means "alternate palette" on DMG.
+        #[test]
+        fn compatibility_mode_indirects_sprites_through_obp() {
+            for (alt, cgb_palette) in [(false, 0usize), (true, 1)] {
+                let mut ppu = ppu_with_tile(ColorMode::CgbCompat);
+                ppu.lcd_control.set(0b1001_0011); // ...and objects on
+                set_palette(&mut ppu, 0, 0, [0x0000; 4]);      // background: black, so it cannot be mistaken
+                set_palette(&mut ppu, 1, cgb_palette, PALETTE);
+                ppu.palette.object0_mut().set_from_byte(0b00_01_10_11);
+                ppu.palette.object1_mut().set_from_byte(0b00_01_10_11);
+
+                ppu.oam[0] = 16; // y = 0
+                ppu.oam[1] = 8;  // x = 0
+                ppu.oam[2] = 0;  // tile 0
+                ppu.oam[3] = if alt { 0x10 } else { 0x00 };
+
+                // Index 0 is transparent for a sprite, so the background shows through there.
+                let mut want = expected(PALETTE, [3, 2, 1, 0]);
+                want[0] = LcdColor::from_rgb555(0x0000);
+                want[4] = LcdColor::from_rgb555(0x0000);
+                assert_eq!(scanline(&mut ppu), want, "alt_palette = {alt}");
+            }
+        }
+
+        /// A real CGB game does not go through `BGP` at all: the colour index addresses palette
+        /// RAM directly. Setting `BGP` to something perverse must change nothing.
+        #[test]
+        fn cgb_mode_ignores_the_dmg_palette_registers() {
+            let mut ppu = ppu_with_tile(ColorMode::Cgb);
+            set_palette(&mut ppu, 0, 0, PALETTE);
+            ppu.palette.background_mut().set_from_byte(0b00_01_10_11);
+
+            assert_eq!(scanline(&mut ppu), expected(PALETTE, [0, 1, 2, 3]));
+        }
+
+        /// B6. The attribute byte in VRAM bank 1 picks the palette, and X-flips the tile.
+        #[test]
+        fn bg_attributes_select_the_palette_and_flip_the_tile() {
+            let mut ppu = ppu_with_tile(ColorMode::Cgb);
+            set_palette(&mut ppu, 0, 5, PALETTE);
+            // Tile-map entry 0 lives at 0x9800 = VRAM offset 0x1800; its attribute byte is at the
+            // same offset in bank 1.
+            ppu.vram[VRAM_BANK_SIZE + 0x1800] = 0x05 | 0x20; // palette 5, X flip
+
+            // Flipped, the row reads 3, 2, 1, 0, 3, 2, 1, 0.
+            assert_eq!(scanline(&mut ppu), expected(PALETTE, [3, 2, 1, 0]));
+        }
+
+        /// ...and the tile-data bank, which is a different bit of the same byte.
+        #[test]
+        fn bg_attributes_select_the_tile_data_bank() {
+            let mut ppu = ppu_with_tile(ColorMode::Cgb);
+            set_palette(&mut ppu, 0, 0, PALETTE);
+            // A different tile 0 in bank 1: every pixel colour index 3.
+            ppu.vram[VRAM_BANK_SIZE] = 0xFF;
+            ppu.vram[VRAM_BANK_SIZE + 1] = 0xFF;
+            ppu.vram[VRAM_BANK_SIZE + 0x1800] = 0x08; // attribute: tile data from bank 1
+
+            assert_eq!(scanline(&mut ppu), vec![LcdColor::from_rgb555(PALETTE[3]); 8]);
+        }
+
+        /// DMG rendering must be untouched by any of this: no CGB palette, whatever is in RAM.
+        #[test]
+        fn dmg_still_renders_through_its_shades_alone() {
+            let mut ppu = ppu_with_tile(ColorMode::Dmg);
+            set_palette(&mut ppu, 0, 0, PALETTE); // must be ignored entirely
+            ppu.palette.background_mut().set_from_byte(0b11_10_01_00); // identity
+
+            let shades = [White, LightGray, DarkGray, Black].map(DMGColor::to_lcd);
+            assert_eq!(scanline(&mut ppu), (0..8).map(|x| shades[x % 4]).collect::<Vec<_>>());
         }
     }
 
