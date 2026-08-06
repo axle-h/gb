@@ -356,7 +356,10 @@ impl MMU {
         } else {
             header.ram_banks()
         };
-        let ram_banks = Vec::from_iter((0..ram_bank_count).map(|_| [0; RAM_BANK_SIZE]));
+        // **B11.** Battery-backed RAM powers up as `0xFF`, not zeroes — an erased or never-written
+        // cell reads high. A game that checks SRAM for a valid save sees a different pattern
+        // either way, so this is the state a fresh cartridge actually presents.
+        let ram_banks = Vec::from_iter((0..ram_bank_count).map(|_| [0xFF; RAM_BANK_SIZE]));
         let data = pad_rom(data);
         let mapper = Mapper::new(header.cart_type(), BankCounts {
             rom: (data.len() / ROM_BANK_SIZE).max(2),
@@ -412,6 +415,19 @@ impl MMU {
     /// else the boot ROM does — the logo check, the intro animation, the register block — either
     /// has no observable effect here or is already covered by [`crate::registers::RegisterSet`].
     fn apply_boot_state(&mut self) {
+        // **B11.** The I/O registers every boot ROM leaves behind, DMG and CGB alike. `gb` started
+        // with `LCDC = 0x80` (the LCD on and nothing else) and all three palettes zeroed, which is
+        // a **white** background palette — so the first frames a game saw were wrong until it
+        // wrote its own. `0xFC` maps colour 0 to white and 1-3 to black, which is what the boot
+        // ROM sets to draw the Nintendo logo.
+        self.ppu.lcd_control_mut().set(0x91);
+        self.ppu.palette_mut().background_mut().set_from_byte(0xFC);
+        // ⚠️ The object palettes are genuinely *uninitialised* on hardware — the boot ROM never
+        // writes them. `0xFF` is what Pan Docs' power-up table records and what the DMG usually
+        // powers up with; no game reads them before writing them.
+        self.ppu.palette_mut().object0_mut().set_from_byte(0xFF);
+        self.ppu.palette_mut().object1_mut().set_from_byte(0xFF);
+
         if self.color_mode != ColorMode::CgbCompat {
             return;
         }
