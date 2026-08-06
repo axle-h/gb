@@ -396,7 +396,7 @@ control.
 | C3 | Closed-form APU timers | DONE | 2026-08-06 | `PhaseTimer` + noise LFSR. ⚠️ needs the one-advance fast path or the divisions cost more than the loop |
 | C4 | Mix-on-change in `Audio::update` | DONE | 2026-08-06 | Packed level word; the resampler is fed only on a real transition. All-DACs-off exit must stay **ahead** of it |
 | C5 | Whole-scanline rendering + hoist sprite search | DONE | 2026-08-06 | Sprite hoist, fixed arrays, **per-tile fetch + palette, sprite column mask**. Whole-scanline rendering deliberately **not** needed — see ledger #13 |
-| C6 | Memory page table | TODO | | |
+| C6 | Memory page table | PARTIAL | 2026-08-06 | Inline fast path + out-of-line remainder (**+2-4%**). The **pointer table is not worth it** — measured ceiling ~5%, and VRAM lives in `PPU`. See ledger #13 |
 | C7 | Cheap decode + drop per-instruction IRQ poll | PARTIAL | 2026-08-06 | IRQ poll done (`InterruptFlags` is a bitmask). Cheap decode **not** done — the premise is half wrong, see ledger #11 |
 | C8 | Optional headless mode | TODO | | ⚠️ skipping the pixel loop diverges `window_state`, which *is* serialised state — see ledger #11 |
 
@@ -3063,7 +3063,17 @@ regression — `MMU::update` got *smaller* (3764 → 3483 bytes) across the chan
    access. C2's HALT skip already proves the principle here — it is bit-identical over a bounded
    span. Doing it for the non-halted path needs catch-up on every `FF10-FF3F` access; the 12
    `dmg_sound` tests are the acceptance test, and they are cheap to run.
-4. **C6 last, and possibly never.** The measured ceiling is ~5%.
+4. ~~**C6 last, and possibly never.**~~ **Done as far as it is worth doing.** `ROM::read` and
+   `RAM::write` now resolve ROM/WRAM/HRAM `#[inline(always)]` and send everything else to an
+   `#[inline(never)]` remainder — gambatte's shape (`memory.h:76`) without moving VRAM out of
+   `PPU`. `read` went 1081 → 89 bytes, `write` 909 → 195. Worth **+1.9% Pokémon, +3.6%
+   `cpu_instrs`, +1.5% acid2**.
+   ⚠️ `#[inline]` alone was worth *nothing* — LLVM declined it at ~89 bytes across that many call
+   sites, and only `#[inline(always)]` moved the numbers. `MMU::update` did not grow (3483 bytes
+   either way).
+   **Do not build the `[u32; 16]` pointer table.** The plan guesses 5-10%; `perf` measures the
+   whole of `read` + `write` at 6.6%, most of which is the memory access itself and cannot go
+   away. It would also require VRAM to move out of `PPU`, which owns it.
 
 Before you start, read surprises 2, 3 and 4: **three of one session's four "obvious" optimisations
 were net-negative until the cheap case was special-cased**, and the paired benchmark is the only

@@ -874,7 +874,34 @@ impl MMU {
 }
 
 impl ROM for MMU {
+    /// **C6.** The four regions almost every access lands in, resolved inline; everything else
+    /// behind one out-of-line call.
+    ///
+    /// This is the shape gambatte's `Memory::read` has (`memory.h:76`) —
+    /// `rmem(p >> 12) ? rmem(p >> 12)[p] : nontrivial_read(p, cc)` — reached without moving VRAM
+    /// out of [`PPU`], which owns it. `perf` measured the old single 25-arm `match` at 5.1% of the
+    /// emulator, and a quarter of *that* was the call and return: it was too big to inline, so
+    /// every memory access the CPU made was a real function call.
+    #[inline(always)]
     fn read(&self, address: u16) -> u8 {
+        match address {
+            0x0000..=0x3FFF => self.data[address as usize],
+            0x4000..=0x7FFF => {
+                self.data[self.rom_bank_register * ROM_BANK_SIZE + (address as usize - 0x4000)]
+            }
+            // Work RAM, but *not* its echo, which is rare enough to leave out of line.
+            0xC000..=0xDFFF => self.work_ram[self.work_ram_offset(address)],
+            0xFF80..=0xFFFE => self.high_ram[(address - 0xFF80) as usize],
+            _ => self.read_uncommon(address),
+        }
+    }
+}
+
+impl MMU {
+    /// Everything [`ROM::read`] does not resolve inline: VRAM, cartridge RAM, OAM, the whole I/O
+    /// block. Out of line on purpose — see that method.
+    #[inline(never)]
+    fn read_uncommon(&self, address: u16) -> u8 {
         // https://gbdev.io/pandocs/Memory_Map.html
         match address {
             // rom bank 0
@@ -949,7 +976,26 @@ impl ROM for MMU {
 }
 
 impl RAM for MMU {
+    /// The write-side twin of [`ROM::read`] — same reasoning, same shape. Only work RAM and high
+    /// RAM are resolved inline: a write to anything else is either a mapper command or a
+    /// peripheral register, and none of those are hot.
+    #[inline(always)]
     fn write(&mut self, address: u16, value: u8) {
+        match address {
+            0xC000..=0xDFFF => {
+                let offset = self.work_ram_offset(address);
+                self.work_ram[offset] = value;
+            }
+            0xFF80..=0xFFFE => self.high_ram[(address - 0xFF80) as usize] = value,
+            _ => self.write_uncommon(address, value),
+        }
+    }
+}
+
+impl MMU {
+    /// Everything [`RAM::write`] does not resolve inline. Out of line on purpose.
+    #[inline(never)]
+    fn write_uncommon(&mut self, address: u16, value: u8) {
         match address {
             0x0000..=0x1FFF => {
                 // https://gbdev.io/pandocs/MBC1.html#00001fff--ram-enable-write-only
