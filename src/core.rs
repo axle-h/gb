@@ -1721,6 +1721,9 @@ mod tests {
         #[test]
         fn rotate_left_accumulator() {
             let mut core = Core::dmg_hello_world();
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
+            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            core.registers.flags.c = false;
             core.registers.a = 0b10101010;
             core.execute(OpCode::RotateLeftAccumulator);
             assert_eq!(core.registers.a, 0b01010100);
@@ -1740,6 +1743,9 @@ mod tests {
         #[test]
         fn rotate_right_accumulator() {
             let mut core = Core::dmg_hello_world();
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
+            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            core.registers.flags.c = false;
             core.registers.a = 0b10101001;
             core.execute(OpCode::RotateRightAccumulator);
             assert_eq!(core.registers.a, 0b01010100);
@@ -1797,6 +1803,9 @@ mod tests {
         #[test]
         fn rotate_left_register() {
             let mut core = Core::dmg_hello_world();
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
+            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            core.registers.flags.c = false;
             core.registers.b = 0b10101010;
             core.execute(OpCode::RotateLeft { register: Register::B });
             assert_eq!(core.registers.b, 0b01010100);
@@ -1816,6 +1825,9 @@ mod tests {
         #[test]
         fn rotate_right_register() {
             let mut core = Core::dmg_hello_world();
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
+            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            core.registers.flags.c = false;
             core.registers.b = 0b10101001;
             core.execute(OpCode::RotateRight { register: Register::B });
             assert_eq!(core.registers.b, 0b01010100);
