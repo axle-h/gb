@@ -103,12 +103,20 @@ impl NoiseChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if !self.envelope_function.dac_enabled() {
-            return 0.0;
+        match self.digital_level() {
+            None => 0.0,
+            Some(level) => dac_sample(level),
         }
-        // See `SquareWaveChannel::output_f32`: a disabled channel with a live DAC holds the
-        // digital-0 level rather than snapping to analogue zero.
-        dac_sample(if self.active { self.output } else { 0 })
+    }
+
+    /// See [`crate::audio::square_channel::SquareWaveChannel::digital_level`]: a disabled channel
+    /// with a live DAC holds the digital-0 level rather than snapping to analogue zero.
+    #[inline]
+    pub fn digital_level(&self) -> Option<u8> {
+        if !self.envelope_function.dac_enabled() {
+            return None;
+        }
+        Some(if self.active { self.output } else { 0 })
     }
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
@@ -142,11 +150,27 @@ impl NoiseChannel {
             return;
         }
 
-        for _ in 0..delta.m_cycles() {
-            self.counter -= 1;
-            if self.counter == 0 {
-                self.counter = compute_clock_period(self.clock_divider, self.clock_shift);
-
+        // C3: count the LFSR steps in closed form rather than walking the window one M-cycle at a
+        // time. The shift itself is inherently sequential, but the *counting* was the cost — the
+        // old loop ran once per M-cycle whether or not the divisor had elapsed, and the shortest
+        // divisor here is two M-cycles.
+        let ticks = delta.m_cycles() as u32;
+        if ticks < self.counter {
+            self.counter -= ticks;
+        } else {
+            let period = compute_clock_period(self.clock_divider, self.clock_shift);
+            debug_assert!(period > 0, "a zero divisor would never reload");
+            let past_first = ticks - self.counter;
+            // See `PhaseTimer::update`: the one-step case is the only one the emulator's M-cycle
+            // driving reaches, and taking the divisions on it costs more than the loop did.
+            let steps = if past_first < period {
+                self.counter = period - past_first;
+                1
+            } else {
+                self.counter = period - past_first % period;
+                1 + past_first / period
+            };
+            for _ in 0..steps {
                 let new_bit = (self.lfsr ^ (self.lfsr >> 1)) & 0x01;
                 self.lfsr = (self.lfsr >> 1) | (new_bit << 14);
 
@@ -162,6 +186,18 @@ impl NoiseChannel {
         } else {
             0
         };
+    }
+}
+
+impl NoiseChannel {
+    /// M-cycles until the LFSR next shifts, or `None` if it is not clocking — including the
+    /// clock-shift 14/15 case, where hardware stops the LFSR dead. See
+    /// [`crate::audio::Audio::next_event`].
+    pub fn next_event(&self) -> Option<u64> {
+        if !self.active || self.clock_shift >= 14 {
+            return None;
+        }
+        Some(u64::from(self.counter))
     }
 }
 

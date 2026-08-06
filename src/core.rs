@@ -588,6 +588,42 @@ impl Core {
         cycles + interrupt_cycles
     }
 
+    /// **C2: the HALT fast-path.** Sleep straight through to the next scheduled event instead of
+    /// executing a virtual `Nop` — and a full [`MMU::update`] over every peripheral — for each of
+    /// the M-cycles in between.
+    ///
+    /// This is finding **F2**: *81.2% of `gb`'s CPU dispatches and 65.0% of its emulated M-cycles
+    /// were HALT*, each one paying full price. Gambatte skips the whole idle span with one addition
+    /// (`cpu.cpp:521-525`).
+    ///
+    /// The span is safe precisely because [`MMU::schedule`] is complete: a halted CPU cannot write
+    /// a register, so nothing inside the machine can change between now and the next scheduled
+    /// event except the peripherals, and every one of them either has an entry or is only
+    /// observable at one that does. It is clamped to `budget` so the skip can never run past the
+    /// end of the caller's slice, and to at least one M-cycle so the loop always advances even
+    /// when something is already overdue.
+    ///
+    /// Callers that drive `fetch`/`execute` directly still get the old cycle-at-a-time behaviour,
+    /// which remains correct — only slower.
+    pub fn skip_halt(&mut self, budget: MachineCycles) -> MachineCycles {
+        debug_assert_eq!(self.mode, CoreMode::Halt, "skip_halt is only valid in HALT");
+
+        let now = self.mmu.now();
+        let span = self.mmu.schedule().next()
+            .saturating_sub(now)
+            .clamp(1, budget.m_cycles().max(1));
+
+        // What the virtual `Nop` used to leave behind, for the DMG wave-RAM access aperture. No
+        // bus access happens during the skip, but the next real instruction sets its own.
+        self.mmu.set_instruction_length(1);
+
+        let cycles = MachineCycles::from_m(span);
+        self.mmu.update(cycles);
+        let interrupt_cycles = self.interrupt();
+        self.mmu.update(interrupt_cycles);
+        cycles + interrupt_cycles
+    }
+
     fn interrupt(&mut self) -> MachineCycles {
         if let Some(interrupt) = self.mmu.interrupt_pending() {
             if self.mode == CoreMode::Halt {

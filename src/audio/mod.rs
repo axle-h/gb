@@ -46,6 +46,15 @@ pub struct Audio {
     /// [`Audio::set_instruction_length`]. Transient, so it is excluded from `PartialEq` and from the
     /// `apu` save-state section, exactly as `output` is.
     access_machine_cycles: u8,
+    /// The mixer's current output level (C4). Derived from the channels, the panning and the
+    /// master volume, so — like `output` — it is neither serialised nor part of equality; a
+    /// restored `Audio` recomputes it on its first update because `mix_dirty` starts set.
+    mixed: AudioSample,
+    /// The packed channel levels [`Audio::mixed`] was computed from. Derived, like `mixed`.
+    levels: u32,
+    /// Something the levels cannot show has moved — panning, master volume, the power switch — so
+    /// [`Audio::mixed`] is stale. Set by every register write, which is cheap and cannot be wrong.
+    mix_dirty: bool,
 }
 
 impl Default for Audio {
@@ -61,6 +70,10 @@ impl Default for Audio {
             channel4: NoiseChannel::default(),
             output: BlipStereo::default(),
             access_machine_cycles: 0,
+            mixed: AudioSample::ZERO,
+            levels: 0,
+            // Nothing has been mixed yet, so the first update must not trust `mixed`.
+            mix_dirty: true,
         }
     }
 }
@@ -108,8 +121,21 @@ impl Audio {
         // on its own; throwing away audio the sink has not read yet would just add a click.
     }
 
+    /// Advance the APU by `delta` and hand the resampler whatever the mixer is putting out.
+    ///
+    /// **C4: the mix is recomputed only when something feeding it moves.** This runs once per CPU
+    /// instruction, and the four `output_f32()`s, four pans, multiply and divide below were
+    /// measured at 10.5% of the whole emulator — spent, overwhelmingly, arriving at a number
+    /// identical to last time. Each channel now reports whether its digital level changed, and
+    /// [`Audio::mix_dirty`] covers everything the channels cannot see: panning, master volume and
+    /// the power switch, all of which only move on a register write.
+    ///
+    /// The output is bit-identical either way: `mixed` is exactly the value the old code would
+    /// have recomputed, and the resampler still gets a call every instruction so the 16.16 time
+    /// cursor advances as before.
     pub fn update(&mut self, delta: MachineCycles, div_clocks: DividerClocks) {
         if !self.enabled {
+            self.mixed = AudioSample::ZERO;
             self.push_sample(delta, AudioSample::ZERO);
             return;
         }
@@ -120,20 +146,84 @@ impl Audio {
         self.channel3.update(delta, events);
         self.channel4.update(delta, events);
 
-        if !self.channel1.dac_enabled() && !self.channel2.dac_enabled() && !self.channel3.dac_enabled() && !self.channel4.dac_enabled() {
-            // When all four channel DACs are off, the master volume units are disconnected from the sound output and the output level becomes 0
+        // When all four channel DACs are off, the master volume units are disconnected from the
+        // sound output and the output level becomes 0.
+        //
+        // ⚠️ Kept **ahead of `digital_levels`**, not folded into it. It asks the same question far
+        // more cheaply, and it is the state a test ROM sits in for its whole run — blargg's power
+        // the APU on and never play a note. Computing the packed levels there instead cost 10% of
+        // `cpu_instrs`, buying a mix-skip that this branch already gives for free.
+        if !self.channel1.dac_enabled() && !self.channel2.dac_enabled()
+            && !self.channel3.dac_enabled() && !self.channel4.dac_enabled() {
+            self.mixed = AudioSample::ZERO;
             self.push_sample(delta, AudioSample::ZERO);
             return;
         }
 
+        let levels = self.digital_levels();
+        if levels != self.levels || self.mix_dirty {
+            self.levels = levels;
+            self.mix_dirty = false;
+            self.mixed = self.mix();
+        }
+        self.push_sample(delta, self.mixed);
+    }
+
+    /// How many **video** M-cycles the APU can be left alone for, or `None` if nothing is
+    /// clocking. This is the bound C2's HALT skip must respect on the audio side.
+    ///
+    /// Only the four phase timers are in here, and that is the whole story: everything else that
+    /// moves a channel's level — length counters, volume envelopes, the sweep — hangs off the
+    /// frame sequencer, which hangs off DIV, and DIV is [`Ev::Divider`](crate::schedule::Ev). The
+    /// rest only moves on a register write, which a halted CPU cannot make.
+    ///
+    /// **One M-cycle short of the clock, deliberately.** [`Audio::push_sample`] reports a level as
+    /// changing at the *start* of the window it is given, so a skip that swallowed the clock would
+    /// backdate the transition by the whole span — audible jitter, since HALT is 65% of Pokémon's
+    /// cycles. Stopping a cycle early leaves the transition to a one-cycle step, which is exactly
+    /// what the per-instruction driver used to produce.
+    pub fn next_event(&self) -> Option<u64> {
+        if !self.enabled {
+            return None;
+        }
+        let soonest = [
+            self.channel1.next_event(),
+            self.channel2.next_event(),
+            self.channel3.next_event(),
+            self.channel4.next_event(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()?;
+        Some(soonest.saturating_sub(1).max(1))
+    }
+
+    /// All four channels' DAC inputs packed into one word, so "has anything moved?" is a single
+    /// comparison. `0xFF` marks a disconnected DAC — no channel can produce it, levels being 4-bit.
+    ///
+    /// Asking the channels once here beat having each `update` report its own change: that needed
+    /// the level computed twice per channel and split every `update` in two, and measured *slower*
+    /// than the mixing it saved.
+    #[inline]
+    fn digital_levels(&self) -> u32 {
+        fn packed(level: Option<u8>) -> u32 {
+            level.unwrap_or(0xFF) as u32
+        }
+        packed(self.channel1.digital_level())
+            | packed(self.channel2.digital_level()) << 8
+            | packed(self.channel3.digital_level()) << 16
+            | packed(self.channel4.digital_level()) << 24
+    }
+
+    /// Unreachable with every DAC off — [`Audio::update`] returns before it.
+    fn mix(&self) -> AudioSample {
         let channel1 = self.panning.channel1.pan(self.channel1.output_f32());
         let channel2 = self.panning.channel2.pan(self.channel2.output_f32());
         let channel3 = self.panning.channel3.pan(self.channel3.output_f32());
         let channel4 = self.panning.channel4.pan(self.channel4.output_f32());
 
         let volume = self.master_volume.volume_sample();
-        let sample = volume * (channel1 + channel2 + channel3 + channel4) / 4.0;
-        self.push_sample(delta, sample);
+        volume * (channel1 + channel2 + channel3 + channel4) / 4.0
     }
 
     /// Hand the mixed output level to the resampler and advance its clock by `delta`.
@@ -242,6 +332,10 @@ impl Audio {
 
     pub fn write(&mut self, address: u16, value: u8) {
         // println!("Write to audio register: {:04X} = {:02X}", address, value);
+        // Any APU register write can move the mixer's output, and several do so without the
+        // channels seeing it at all (NR50/NR51/NR52). Marking it here rather than per register is
+        // both cheaper and impossible to get wrong — see `Audio::update`.
+        self.mix_dirty = true;
         let write_allowed = self.enabled || matches!(address, 0xFF11 | 0xFF16 | 0xFF1B | 0xFF20 | 0xFF26 | 0xFF30..=0xFF3F);
         if write_allowed {
             match address {
@@ -365,6 +459,9 @@ impl Audio {
             self.channel2 = section.channel2;
             self.channel3 = section.channel3;
             self.channel4 = section.channel4;
+            // `mixed` is derived and not in the section, so the restored machine must recompute it
+            // before trusting it — see `Audio::update`.
+            self.mix_dirty = true;
         }
         Ok(())
     }

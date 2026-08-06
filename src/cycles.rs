@@ -2,55 +2,64 @@ use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
 use std::time::Duration;
 use bincode::{Decode, Encode};
 
+/// A count of machine (M-) cycles. **`u64`, not `usize`** — C1 made the emulator's clock absolute,
+/// and an absolute m-cycle count has to be the same width on every host: a 32-bit `usize` wraps
+/// after 34 minutes of emulated time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Ord, PartialOrd, Decode, Encode)]
-pub struct MachineCycles(usize);
+pub struct MachineCycles(u64);
 
 impl MachineCycles {
     pub const ZERO: Self = Self(0);
     pub const ONE: Self = Self(1);
-    pub const CPU_FREQ: usize = 4194304; // 4.194304 MHz t-cycles/s
+    pub const CPU_FREQ: u64 = 4194304; // 4.194304 MHz t-cycles/s
     pub const PER_SERIAL_BYTE_TRANSFER: MachineCycles = MachineCycles::from_hz(8192 / 8); // 8192 Hz serial transfer rate
     pub const PER_DIVIDER_TICK: MachineCycles = MachineCycles::from_hz(16384);
 
-    pub const fn from_m(cycles: usize) -> Self {
+    pub const fn from_m(cycles: u64) -> Self {
         Self(cycles)
     }
-    
-    pub fn m_cycles(self) -> usize {
+
+    pub const fn m_cycles(self) -> u64 {
         self.0
     }
 
-    pub fn t_cycles(self) -> usize {
+    pub const fn t_cycles(self) -> u64 {
         self.0 * 4 // 1 tick = 4 machine cycles
     }
 
     pub const fn from_duration(duration: Duration) -> Self {
         let nanos = duration.as_nanos(); // u128 — avoids overflow for durations up to ~years
         let t_cycles = (nanos * Self::CPU_FREQ as u128) / 1_000_000_000;
-        let m_cycles = (t_cycles / 4) as usize;
+        let m_cycles = (t_cycles / 4) as u64;
         Self(m_cycles)
     }
 
-    pub const fn from_hz(hz: usize) -> Self {
+    pub const fn from_hz(hz: u64) -> Self {
         MachineCycles::from_t(Self::CPU_FREQ / hz)
     }
-    
-    pub fn to_hz(self) -> usize {
+
+    pub const fn to_hz(self) -> u64 {
         Self::CPU_FREQ / self.t_cycles()
     }
 
-    pub const fn from_t(ticks: usize) -> Self {
+    pub const fn from_t(ticks: u64) -> Self {
         Self(ticks / 4) // 4 tick = 1 machine cycle
     }
 
     pub const fn to_duration(self) -> Duration {
-        Duration::from_nanos((self.0 as u64 * 4_000_000_000) / Self::CPU_FREQ as u64)
+        Duration::from_nanos((self.0 * 4_000_000_000) / Self::CPU_FREQ)
+    }
+
+    /// Subtraction that clamps at zero. The plain [`Sub`] impl deliberately does **not** do this —
+    /// see its comment — so the two callers that genuinely want a floor ask for it by name.
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
     }
 }
 
 
-impl From<usize> for MachineCycles {
-    fn from(cycles: usize) -> Self {
+impl From<u64> for MachineCycles {
+    fn from(cycles: u64) -> Self {
         Self(cycles)
     }
 }
@@ -69,24 +78,29 @@ impl AddAssign for MachineCycles {
     }
 }
 
+/// ⚠️ **Not saturating.** It used to be, which silently turned every cycle-ordering bug into a
+/// timing skew instead of a panic (finding F11). A `debug_assert` catches the ordering bug in the
+/// test suite while release builds keep the wrapping-free single `sub`; callers that legitimately
+/// want a floor use [`MachineCycles::saturating_sub`].
 impl Sub for MachineCycles {
     type Output = Self;
 
     fn sub(self, other: Self) -> Self {
-        Self(self.0.saturating_sub(other.0))
+        debug_assert!(self.0 >= other.0, "MachineCycles underflow: {} - {}", self.0, other.0);
+        Self(self.0.wrapping_sub(other.0))
     }
 }
 
 impl SubAssign for MachineCycles {
     fn sub_assign(&mut self, other: Self) {
-        self.0 = self.0.saturating_sub(other.0);
+        *self = *self - other;
     }
 }
 
-impl Mul<usize> for MachineCycles {
+impl Mul<u64> for MachineCycles {
     type Output = Self;
 
-    fn mul(self, rhs: usize) -> Self {
+    fn mul(self, rhs: u64) -> Self {
         Self(self.0 * rhs)
     }
 }

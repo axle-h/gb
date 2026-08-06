@@ -21,7 +21,8 @@ src/
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)
 ├── core.rs              — CPU + MMU wiring
 ├── opcode.rs            — full SM83 instruction set
-├── mmu.rs               — memory map, bank switching
+├── mmu.rs               — memory map, bank switching, the absolute clock (`now`)
+├── schedule.rs          — event schedule: when each peripheral next does something (Phase C)
 ├── ppu.rs               — pixel processing unit (LCD rendering)
 ├── model.rs             — Model (Dmg/Cgb) + ColorMode (Dmg/CgbCompat/Cgb)
 ├── cgb_palette.rs       — CGB palette RAM (BCPS/BCPD, OCPS/OCPD)
@@ -113,30 +114,44 @@ The crate has **no lib target** — everything lives in the `gb` binary, so it i
 `--lib`.
 
 `src/pokemon/integration_tests/` is tiered by how much **game time** a test emulates, which is what it
-costs: the emulator core runs at **~30× realtime** on Pokémon Red and the agent costs **~16%** on
-top, giving **~25×** end to end (measured 2026-08-06 on a Ryzen 9 7900X by `bench_core_throughput`
-and `bench_emulation_throughput` respectively), so wall clock ≈ emulated-minutes ÷ 25.
+costs: the emulator core runs at **~87× realtime** on Pokémon Red and the agent costs **~35%** on
+top, giving **~48×** end to end (measured 2026-08-06 on a Ryzen 9 7900X by `bench_core_throughput`
+and `bench_emulation_throughput` respectively), so wall clock ≈ emulated-minutes ÷ 48.
+
+Those numbers are **post-Phase-C**: the core was 29× and the agent-inclusive figure 24× before
+`docs/compatibility/10-implementation-plan.md`'s C1–C5, which made it 3.0× faster (ledger #13). The
+agent's share grew from ~16% to ~35% for the obvious reason — it did not get slower, the emulator
+under it got faster — so **it is now worth profiling and it was not before.**
 
 ⚠️ **Do not trust a single benchmark reading on this machine.** It has fast and slow states ~15%
 apart — the same unmodified binary has measured `cpu_instrs` at 43.5× and 53.2× twenty minutes
 apart. Compare only adjacent paired runs of the two builds, **alternate which one runs first**, and
-report both orders. See `docs/compatibility/10-implementation-plan.md` §2.5.
+report both orders. `docs/compatibility/compare.sh` does exactly that; see
+`docs/compatibility/10-implementation-plan.md` §2.5.
+
+**`perf` works, and needs no `sudo`** (`perf_event_paranoid` is 2). Build with
+`RUSTFLAGS="-C debuginfo=2"` into a scratch `CARGO_TARGET_DIR`, then drive the benchmark with
+`BENCH_FRAMES=40000 BENCH_ONLY=pokemon` so there is enough wall clock to sample and only one
+workload in the profile. ⚠️ Watch for sampling skid: a hot instruction is often paying for the
+*load* feeding it, not for itself — §2.5 has a worked example that cost an hour.
 
 ```bash
-# Default tier: all unit tests + agent mechanics + two navigation smoke tests. ~22s, 800+ tests.
+# Default tier: all unit tests + agent mechanics + two navigation smoke tests. ~7s, 975 tests.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.
-# ~80s, 115 tests — every one of them ≤65s (measured 2026-08-05).
+# ~58s, 119 tests (measured 2026-08-06, after Phase C; it was ~131s before).
 cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
 
 # The one leg that costs more game time than the whole leg chain combined: the Safari dex sweep,
-# 381s of wall clock for ~190 min of emulated game time (21 paid ¥500 trips chasing 4.3%-slot
-# species). Split out because it, alone, set the leg tier's wall clock at six minutes — with libtest
-# printing nothing until it finished, so there was no way to see what was still running.
-cargo test --release --features very-slow-tests --bin gb -- can_sweep_the_safari_zone --exact
+# 171s of wall clock for ~190 min of emulated game time (21 paid ¥500 trips chasing 4.3%-slot
+# species; it was 381s before Phase C). Split out because it, alone, set the leg tier's wall clock
+# at six minutes — with libtest printing nothing until it finished, so there was no way to see what
+# was still running. ⚠️ `very-slow-tests` does not imply `slow-tests`, and the test's module is
+# behind that gate, so pass **both** features or this matches zero tests.
+cargo test --release --features slow-tests,very-slow-tests --bin gb -- can_sweep_the_safari_zone
 
-# The whole game from a fresh save, ~20 min of wall clock.
+# The whole game from a fresh save, ~5 min of wall clock (was ~11 min before Phase C).
 cargo test --release --features full-playthrough full_playthrough
 
 # A single test with output (file module included in the path).
@@ -176,7 +191,7 @@ cargo test --release --features diagnostics,slow-tests --bin gb -- probe_ --igno
 ### ⚠️ Run `full_playthrough` after every major work item, and always before pushing
 
 ```bash
-cargo test --release --features full-playthrough full_playthrough   # ~20 min
+cargo test --release --features full-playthrough full_playthrough   # ~5 min
 ```
 
 **This is not optional and the leg tier is not a substitute for it.** The leg tests each start from a
@@ -295,10 +310,12 @@ runtime by the SDL2 UI.
 - `AGENT_RESOLUTION` (20 ms) is a tuned constant — too long and the player overshoots on the overworld, too short and the game state doesn't settle between frames.
 - `DelayContext` post-script delay is 2500 ms — tuned to cover the worst-case pre-battle animation gap observed in practice.
 - The SDL2 UI renders at 4× scale (640×576) and targets 60 fps with a 600-frame rolling FPS window.
-- **`Audio` and `PPU` exclude derived state from `PartialEq`** — the resampler output, and the
-  frame buffer plus the per-scanline sprite list respectively. None of it is serialised, so none of
-  it may take part in equality, or `game_boy::tests::save_and_load_state` would compare restored
-  state against state that was never saved.
+- **`Audio` and `PPU` exclude derived state from `PartialEq`** — the resampler output and the
+  cached mix (`mixed`/`levels`/`mix_dirty`), and the frame buffer plus the per-scanline sprite list
+  respectively. None of it is serialised, so none of it may take part in equality, or
+  `game_boy::tests::save_and_load_state` would compare restored state against state that was never
+  saved. `Schedule` is derived the same way and is not serialised at all — only the clock it is
+  built from (`MMU::now`, the `sched` section) is.
 - Adding a field to `Audio` (or any other serialised type) **is** safe now — append it to the
   relevant section and bump that section's version. The old "nothing may be added to `Audio`" rule
   died with the sectioned save-state format. The output sample rate is still applied by
@@ -308,7 +325,8 @@ runtime by the SDL2 UI.
   purpose.** `MMU::update` runs once per CPU instruction, and letting those inline into it grew it
   60% (3052 → 4893 bytes) and cost several percent of core throughput to instruction-cache pressure
   alone. If you touch them, check with `nm -S --size-sort -C target/release/deps/gb-*` that
-  `MMU::update` is still around 3 KB.
+  `MMU::update` is still around 3-4 KB (Phase C left it at 3764 bytes). `Serial::complete_transfer`
+  and the APU's `mix()` fell to the same rule — see ledger #13.
 - `src/audio/blip/` is a translation of LGPL 2.1+ code (blargg's Blip_Buffer 0.4.0). The original C++
   and its licence live in `tools/blip-golden/vendor/`. The repo has no top-level `LICENSE`; if one is
   ever added, this is the constraint to check.

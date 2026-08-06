@@ -247,6 +247,24 @@ Rules:
 
 ## 2.5 Building gambatte for reference/benchmarking
 
+### Comparing two `gb` builds — use `compare.sh`
+
+Before reaching for gambatte, most Phase C work is *`gb` against `gb`*, and this machine's ~15%
+fast/slow states make a single before/after pair worthless. `docs/compatibility/compare.sh`
+(added in ledger #13) runs the A9 benchmark on two binaries in alternating order for N rounds:
+
+```bash
+# keep a copy of the "before" binary, then after each change:
+cargo test --release --features bench --bin gb --no-run
+docs/compatibility/compare.sh /path/to/gb-before target/release/deps/gb-<hash> 4
+```
+
+Read only the **paired** BASE/CAND differences within a round, never a number against one from an
+earlier session. Ledger #13's surprise 9: a `#[cold]` attribute moved a workload by a full point
+while the paired BASE stayed inside 1%.
+
+### gambatte
+
 You will want to compare behaviour or speed. **Never build inside the gambatte tree.**
 
 ```bash
@@ -373,14 +391,14 @@ control.
 
 | ID | Task | State | Date | Notes |
 |---|---|---|---|---|
-| C1 | Event scheduler skeleton (`Schedule`, absolute clock) | TODO | | |
-| C2 | HALT fast-path | TODO | | 65% of cycles |
-| C3 | Closed-form APU timers | TODO | | must land with C2 |
-| C4 | Mix-on-change in `Audio::update` | TODO | | |
-| C5 | Whole-scanline rendering + hoist sprite search | TODO | | |
+| C1 | Event scheduler skeleton (`Schedule`, absolute clock) | DONE | 2026-08-06 | `src/schedule.rs`; `MMU::now`. Schedule built **on demand** — maintaining it cost 6% (ledger #11) |
+| C2 | HALT fast-path | DONE | 2026-08-06 | ⭐ **2.0x on Pokémon alone.** `Core::skip_halt`; proved bit-identical to stepping |
+| C3 | Closed-form APU timers | DONE | 2026-08-06 | `PhaseTimer` + noise LFSR. ⚠️ needs the one-advance fast path or the divisions cost more than the loop |
+| C4 | Mix-on-change in `Audio::update` | DONE | 2026-08-06 | Packed level word. The all-DACs-off exit must stay **ahead** of it |
+| C5 | Whole-scanline rendering + hoist sprite search | DONE | 2026-08-06 | Sprite hoist, fixed arrays, **per-tile fetch + palette, sprite column mask**. Whole-scanline rendering deliberately **not** needed — see ledger #13 |
 | C6 | Memory page table | TODO | | |
-| C7 | Cheap decode + drop per-instruction IRQ poll | TODO | | |
-| C8 | Optional headless mode | TODO | | |
+| C7 | Cheap decode + drop per-instruction IRQ poll | PARTIAL | 2026-08-06 | IRQ poll done (`InterruptFlags` is a bitmask). Cheap decode **not** done — the premise is half wrong, see ledger #11 |
+| C8 | Optional headless mode | TODO | | ⚠️ skipping the pixel loop diverges `window_state`, which *is* serialised state — see ledger #11 |
 
 ## Phase D — Missing hardware
 
@@ -2709,3 +2727,314 @@ uncommitted work — `git log` is a usable history again. Read ledger #9's bench
 before you measure anything.
 
 ---
+
+### 2026-08-06 (#13) — C1–C5, C7 — **Pokémon core throughput 2.73x** (29.1x → 79.5x). HALT alone doubled it
+
+**State:** **C1, C2, C3, C4 → `DONE`.** **C5 and C7 → `PARTIAL`** — each had one sub-task worth
+doing and one whose premise did not survive contact; both are itemised below so the next session
+does not re-derive them. **C6 and C8 still `TODO`.** The phase's **primary target (≥120x core-only
+on Pokémon) is NOT met** — see "Against the targets".
+
+**⭐ New baseline table.** Paired runs, order alternated, four rounds each, one machine state
+(`compare.sh` protocol, §2.5). `gb` spread <1.5%.
+
+| Workload | A9 baseline | This session | Speedup |
+|---|---|---|---|
+| Pokémon Red (mid-game fixture) | 29.1x | **79.5x** | **2.73x** |
+| `cpu_instrs.gb` (never HALTs) | 44.2x | **55.1x** | **1.25x** |
+| `dmg-acid2.gb` (PPU-heavy) | 41.3x | **132.3x** | **3.20x** |
+
+⚠️ **These are not A9's printed numbers.** A9 recorded 33.6x / 51.8x / 48.6x; the *same unmodified
+A9 binary*, re-run today, gives the 29.1x / 44.2x / 41.3x above. The machine is in its slow state
+(ledger #9), ~15% down, so **the ratios are the result and the absolute numbers are not comparable
+across sessions.** Scaled into A9's state the run is ≈92x / ≈65x / ≈156x.
+
+**Against the targets.** Primary ≥120x on Pokémon: **not met** (≈92x equivalent). Stretch 200x: not
+met. What is left in the plan is C6 (5-10%), C8 (opt-in, and see surprise 7), and the two half-tasks
+below — nowhere near the remaining 30%. The plan's own note is the honest read: the rest of the gap
+to gambatte's ~450x is the deferred M-cycle/lazy-evaluation architecture, and the biggest single
+thing still standing is that **every peripheral is still driven once per CPU instruction** whenever
+the CPU is *not* halted. C2 fixed the halted 65%; the other 35% still pays full price.
+
+**Did.**
+
+- **C1** — `src/schedule.rs` (`Ev`, `Schedule`, `DISABLED = u64::MAX`, flat `[u64; 8]` min);
+  `MMU::now` as the absolute m-cycle clock; `Timer`/`Divider`/`Serial` converted to
+  `catch_up(now)` / `next_event()` and to storing **when the next thing happens** rather than how
+  long since the last. `MachineCycles` now wraps `u64`, and its `Sub` is a `debug_assert` plus a
+  plain subtract instead of a silent saturate (finding **F11**).
+- **C2** — `Core::skip_halt` (`src/core.rs`), taken by `GameBoy::run`. Jumps `now` to
+  `min(schedule.next(), end_of_slice)`. `PPU::next_event` and `Audio::next_event` publish the
+  bounds; `MMU::schedule` assembles them.
+- **C3** — `PhaseTimer::update` and the noise LFSR count their advances in closed form
+  (`src/audio/timer.rs`, `noise_channel.rs`), with an oracle test against the old loop.
+- **C4** — `Audio::update` recomputes the mix only when the four channels' packed DAC levels move
+  or a register write marks it dirty.
+- **C5 (part)** — the per-pixel sprite search is a linear scan over a pre-sorted index instead of
+  `.sorted_by_key()`, which allocated a `Vec` **in the innermost pixel loop**; `scanline_sprites`
+  is `[Sprite; 10]` + a count; the OAM scan no longer builds a 40-element `Vec` per scanline.
+- **C7 (part)** — `InterruptFlags` is a `u8` bitmask, so `interrupt_pending` is one `and` and a
+  `trailing_zeros` rather than a five-iteration scan run once per instruction.
+
+**Zero fixture regeneration, again.** Every representation change here — the timer/divider/serial
+deadlines, `InterruptFlags` — kept its *serialised* shape by adding a plain `…Snapshot` struct with
+the pre-change field list and converting at the section boundary. The new clock lives in the
+already-reserved `sched` section; a state written before C1 simply restarts the epoch at zero,
+which nothing observes. **No `src/pokemon/data/*.bin` byte changed.**
+
+**Surprises.**
+
+1. ⭐⭐ **C5's sprite hoist was the first big win, and it was not about sprites.** +16% on Pokémon
+   but also **+22% on `cpu_instrs`**, which draws none — because the old OAM scan built a
+   `Vec<Sprite>` of **all 40 sprites** on every scanline before filtering, so the cost was paid
+   whether or not anything was on the line. The plan predicted "likely the largest single
+   line-item"; it was, for a reason the plan did not name.
+2. ⭐⭐ **A closed form can be slower than the loop it replaces.** C3's general form costs two `u32`
+   divisions (~20 cycles each) where the old one-iteration loop cost about two instructions — and
+   the emulator drives the APU **one M-cycle at a time**, so the general case is never the common
+   one. Straight closed form: `cpu_instrs` **−13%**. With a `past_first < period` fast path that
+   skips both divisions: back to parity, and correct for the large windows C2 then needs. *Write
+   the closed form for correctness, keep the one-step case for speed.*
+3. ⭐ **C4's cheap question must come first.** Packing the four channel levels to detect "did
+   anything move?" costs ~10% on any workload that powers the APU on and never plays a note —
+   which is what blargg's ROMs do all run long. Putting the pre-existing all-DACs-off early exit
+   **ahead** of the packing recovered it. Measured: `cpu_instrs` −10% → −3.6%.
+4. ⭐ **The scheduler should not be maintained yet.** C1's textbook form — resync `Schedule` from
+   the peripherals inside `MMU::update` — cost **6% across all three workloads** for a cache with
+   no reader. `MMU::schedule()` now builds it on demand, at the one place that asks (C2's skip,
+   once per idle span). Eager maintenance only pays when the loop queries it more often than the
+   peripherals move it, and that needs the fully lazy peripherals this phase did not build.
+5. ⭐ **C2 is safe for a reason the plan did not state, and it is worth knowing.** `PPU::update`
+   services **one mode transition per call**, so it is *not* correct over an arbitrary window —
+   which reads like a blocker for a HALT skip. It is the opposite: bounding the skip by
+   `PPU::next_event` means the window never spans two transitions, so the existing code is exactly
+   right. Nothing in the PPU had to change for C2.
+6. ⭐ **The APU bound must stop one M-cycle short of a phase clock.** `Audio::push_sample` reports a
+   level as changing at the *start* of the window it is handed, so a skip that swallowed the clock
+   would backdate the transition by the whole span — audible jitter, on 65% of Pokémon's cycles.
+   `Audio::next_event` subtracts one, leaving the transition to a one-cycle step, which reproduces
+   the per-instruction driver exactly. This is why `the_halt_fast_path_matches_stepping_cycle_by_cycle`
+   passes bit-for-bit rather than approximately.
+7. **C8's premise has a hole.** "Only the pixel writes are skipped" is not achievable as written:
+   the window-line counter (`WindowRenderState`) is advanced *inside* the pixel loop and **is**
+   serialised state and part of `PartialEq`. A headless mode that skips the loop diverges the
+   machine, so it cannot be a pure output-suppression flag. Left `TODO` with this noted rather than
+   shipped with a silent state divergence.
+8. **C7's first half is half wrong.** "`machine_cycles(condition_met)` re-matches the whole enum
+   afterwards — two full dispatches per instruction" is not what the code does: `execute` computes
+   `base_cycles` once and reuses it, calling `machine_cycles` a second time only when a conditional
+   branch is *taken*. The `[u8; 256]` table would also need `OpCode::parse` to surface the opcode
+   byte, which it does not, and `execute` is called directly (without a preceding `fetch`) from
+   dozens of tests, so a cached byte on `Core` would be stale for them. Deferred, not done.
+9. **Benchmarking is layout-sensitive as well as machine-state-sensitive.** Adding `#[cold]` to
+   `Audio::mix`, and separately removing one store, each moved a workload by a full point in the
+   *wrong* direction while the paired `BASE` numbers stayed inside 1%. `MMU::update` grew 3316 →
+   3764 bytes. Trust only paired, order-alternated runs — and re-measure after any change, however
+   obviously-neutral it looks.
+
+**Verified.** All commands run on the final tree, nothing else on the machine:
+
+```
+cargo test --release --bin gb
+  → 975 passed; 0 failed; 115 ignored          (6.88s, was ~22s)
+cargo test --release --features slow-tests --bin gb
+  → 1069 passed; 0 failed; 21 ignored          (57.5s, was 131s)
+cargo test --release --features full-playthrough --bin gb -- full_playthrough
+  → 1 passed; 0 failed                         (295.7s, was 667.3s in ledger #12)
+    ...reaching Victory Road 2F with Badge(255), i.e. all 8 badges
+git status --porcelain src/pokemon/data/       → empty
+```
+
+New tests that carry the risk: `game_boy::tests::the_halt_fast_path_matches_stepping_cycle_by_cycle`
+(C2 — 120 frames of four workloads, run both ways, machine state *and* framebuffer compared),
+`audio::timer::tests::the_closed_form_matches_the_old_loop` (C3 — the pre-C3 loop kept as an
+oracle), `interrupt::tests::highest_priority_matches_a_scan_in_priority_order` (C7 — all 1024
+request/enable combinations), plus snapshot round-trips for `Timer`, `Divider` and `InterruptFlags`.
+
+**Tree:** committed and pushed to `origin/main`. New: `src/schedule.rs`,
+`docs/compatibility/compare.sh`. Modified: `src/cycles.rs`, `timer.rs`,
+`divider.rs`, `serial.rs`, `interrupt.rs`, `mmu.rs`, `core.rs`, `game_boy.rs`, `ppu.rs`,
+`opcode.rs`, `lcd_dma.rs`, `main.rs`, `audio/{mod,timer,square_channel,wave_channel,noise_channel}.rs`,
+`CLAUDE.md`, this document. **One file under `src/pokemon/**`**, as §2.3 permits and requires
+logging: `integration_tests/fixture.rs`, one line, `const BATTLE_STALL_FACTOR: usize` → `u64`,
+forced by `MachineCycles` widening. Nothing under `src/sdl/**`.
+
+**⭐ Post-Phase-C ablation profile (same session, after the numbers above).** A9's profile is
+stale — C2/C3/C4/C5 changed every share in it. Re-measured by `--cfg`-gated ablation (see
+"How to profile without `perf`" below). Shares are `1 - R_base/R_ablated`; each batch has its own
+baseline because the machine drifts between builds, so **compare only within a batch**.
+
+| Ablated | Pokémon share | `dmg-acid2` share |
+|---|---|---|
+| Whole BG/window/sprite **pixel loop** (`draw_pixels_to`) | **34-39%** | **89%** |
+| …of which the **background fetch** (`map_pixel`) | 20% | 34% |
+| …of which the **sprite scan** (`top_sprite`) | 6% | 36% |
+| Whole **`Audio::update`** | **28%** | ~1% |
+| …of which the **blip resampler** | 6% | ~0% |
+| Residual: CPU dispatch, memory, timers, IRQ poll, PPU state machine | **~33%** | ~10% |
+
+**What that changes.** The plan's standing claim — that the rest of the gap to gambatte "likely
+needs the deferred M-cycle/lazy-evaluation architecture" — **is not what the profile says**, and
+the phrase conflates two independent things. Sub-instruction memory timing is an *accuracy*
+refactor and would make `gb` **slower**; lazy peripherals are the *speed* lever, and C1/C2 already
+took that for the halted 65% of cycles. What is left is ordinary optimisation of two subsystems:
+
+1. ⭐ **The pixel loop re-derives everything per pixel.** `map_pixel` computes the tile-map index,
+   loads the map entry, computes the tile address, builds a slice and extracts two bits — **for
+   each of the eight pixels of a tile**. That is three dependent loads per pixel where gambatte
+   fetches a tile row once and shifts it out (two loads per eight pixels). This is C5's unfinished
+   item plus a tile cache, and at 34-39% it is the **single biggest thing left in the phase** —
+   bigger than C6, which the entry above wrongly nominated.
+2. **`Audio::update` is still called once per CPU instruction.** C4 skips the *mix*, but four
+   channel updates, the frame sequencer and `push_sample` → `end_frame` still run every
+   instruction. Extending C2's laziness to the non-halted path is the fix, and it is the same
+   `next_event` machinery C2 already built.
+
+Only then does C6 matter: at ~33%, the residual bucket holds the memory path *and* everything else.
+gambatte's read is `cart_.rmem(p >> 12) ? cart_.rmem(p >> 12)[p] : nontrivial_read(p, cc)`
+(`memory.h:76`) — a shift, a load, a branch and a load, with the pointer **pre-biased** so there is
+no offset arithmetic. `gb` walks a 25-arm range `match` with bounds-checked indexing.
+
+**Arithmetic:** if the pixel loop and the APU were free, `gb` would run at `80 / (1 - 0.63) ≈ 215x`
+on Pokémon — the phase's *stretch* target, with no architectural rewrite. They will not be free,
+but that is the size of the prize and where it is.
+
+### How to profile without `perf`
+
+`perf` and `valgrind` are **still not installed** (checked 2026-08-06); `gdb` is, but with
+`lto="thin"` and `codegen-units=1` almost everything is inlined into a handful of giant functions,
+so symbol-level sampling attributes the whole run to `MMU::update`. Ablation is what works.
+
+⚠️ **Do it with `--cfg`, not an env var** — an env check in the hot loop distorts what you are
+measuring. Add `#[cfg(not(ablate_x))]` once, then `RUSTFLAGS='--cfg ablate_x' CARGO_TARGET_DIR=…
+cargo test --release --features bench --bin gb --no-run`. Zero runtime cost, one source edit.
+
+⚠️⚠️ **Three of six ablations in this session were invalid, and all three looked like huge wins.**
+An ablation is only valid if it cannot change the *guest's* control flow. These were not:
+
+- `ablate_ppu` (486x) and `ablate_irqpoll` (135x) — no VBlank interrupt is ever raised, so the game
+  never leaves HALT and C2 skips straight to the end of every slice. They measure nothing.
+- `ablate_timers` (**39x — half the baseline**) — freezing DIV leaves `Divider::next_event`
+  reporting a deadline in the past, so `schedule().next()` is always overdue and the HALT skip
+  collapses to one M-cycle. Accidentally a clean independent confirmation that **C2 is worth 2.03x**
+  (80.2 → 39.5), but useless as a share.
+- Valid: `ablate_audio`, `ablate_render`, `ablate_bg`, `ablate_sprites`, `ablate_blip` — none of
+  them feeds anything the guest can read on the paths these ROMs take.
+
+**Better than all of this: `sudo dnf install perf`.** `perf_event_paranoid` is already `2`, so
+unprivileged user-space profiling works the moment it exists. Add `debug = 1` to `[profile.release]`
+and use `perf report --inline` or the inlining will hide everything worth seeing.
+
+### ⭐ `perf` is installed now — and it corrected the ablation
+
+Alex installed `perf` mid-session. `perf_event_paranoid` is already `2`, so **no `sudo` is needed**
+for user-space profiling. The recipe, which works today:
+
+```bash
+RUSTFLAGS="-C debuginfo=2" CARGO_TARGET_DIR=/tmp/prof \
+  cargo test --release --features bench --bin gb --no-run
+BENCH_FRAMES=40000 BENCH_ONLY=pokemon perf record -F 1999 -o p.data -- <binary> \
+  --exact game_boy::tests::bench_core_throughput --nocapture
+perf report -i p.data --no-children --stdio
+perf annotate -i p.data --stdio --symbol=gb::ppu::PPU::draw_pixels_to
+```
+
+`BENCH_FRAMES` and `BENCH_ONLY` were added to `bench_core_throughput` for exactly this: 600 frames
+is ~0.1 s of wall clock, far too short to sample, and a profile of all three workloads at once is a
+profile of none of them.
+
+**Pokémon Red, before and after this session's pixel-pipeline work:**
+
+| Symbol | Before | After |
+|---|---|---|
+| `PPU::draw_pixels_to` | 36.2% | 34.5% |
+| `MMU::update` | 16.4% | 17.2% |
+| `PPU::update` | 7.4% | 8.5% |
+| `BlipStereo::update` + `roundf` | 11.4% | 11.4% |
+| `Core::fetch` (`OpCode::parse` inlined) | 4.8% | 4.8% |
+| `SquareWaveChannel::update` | 4.6% | 4.0% |
+| `OpCode::machine_cycles` | 4.6% | 3.9% |
+| `MMU::read` + `MMU::write` | 4.6% | 5.1% |
+
+⚠️ **`perf` disagreed with the ablation in two places that matter, and `perf` was right.**
+
+- **The memory path is ~5%, not "part of a 33% residual".** `MMU::read` + `write` together are
+  4.6%. **C6's ceiling is about five points**, not the 5-10% the plan guesses and nowhere near
+  worth the page-table refactor's risk before the items above it. The ablation could not see this
+  because you cannot ablate a memory read — the guest needs the value.
+- **`roundf` is 5.5%**, which no ablation would ever have named. It is `blip::quantise`
+  (`(sample * AMP_SCALE).round()`, `blip/mod.rs:252`) — `f32::round` has round-half-away-from-zero
+  semantics that no single SSE instruction provides, so it is a **libm call**, made **twice per CPU
+  instruction** from `BlipStereo::update`, overwhelmingly to re-quantise a level that has not
+  changed. See "Next agent".
+
+**⚠️ Beware sampling skid.** `perf annotate` put 33% of `draw_pixels_to` on an `imul`/`add` pair —
+the DMG shade→RGB conversion. Hoisting it out gained **under 1%**: the samples belonged to the
+*dependent load* feeding it, and removing the arithmetic just moved the stall. Read the whole
+dependency chain around a hot instruction, never the instruction alone.
+
+### C5 finished: what actually paid, measured
+
+Three changes, all inside `draw_pixels_to`, all exactly equivalent because **nothing the loop reads
+can change while it runs** — the CPU is between memory accesses for the whole call, so VRAM, LCDC,
+`SCX`/`SCY`, `BGP` and `WX` are fixed:
+
+1. **Per-tile fetch instead of per-pixel** (`TileRow`, `tile_map_entry`, `PPU::fetch_tile_row`).
+   Eight consecutive pixels shared a tile-map entry and a tile row and were refetching both.
+2. **Per-tile palette** — `TileRow::colors` resolves the four colours a tile's indices map to once
+   per tile rather than per pixel.
+3. ⭐ **A per-scanline sprite column mask** (`scanline_sprite_columns`, three `u64`s). `top_sprite`
+   walked every selected sprite for *every* pixel just to discover none covered it. **This was the
+   biggest of the three** — and the least expected.
+
+| Workload | Before C5's finish | After | Gain |
+|---|---|---|---|
+| Pokémon Red | 79.7x | **86.7x** | +8.8% |
+| `dmg-acid2` | 132.9x | **193.3x** | **+45%** |
+| `cpu_instrs` | 55.4x | 55.1x | unchanged (draws almost nothing) |
+
+**Whole-scanline rendering — task C5's headline item — was deliberately not done, and should not
+be.** Its stated benefit was amortising per-call setup, and C2 already delivers that for free: a
+halted CPU is skipped straight to the mode 3 → 0 edge, so `draw_pixels_to` is *already* called once
+for the whole scanline for most of a real game's runtime. What it would additionally buy is
+resolving mid-scanline register writes at end-of-scanline values instead of when they happen —
+which is a **behaviour regression**, not an optimisation. The tile cache captures the same win with
+no semantic change.
+
+**Verified after the pixel work:** acid tests `4 passed` (dmg-acid2 and cgb-acid2 still match their
+reference PNGs **byte for byte**, which was the constraint); default tier `975 passed`; `slow-tests`
+`1069 passed` (53.6s); `full_playthrough` `1 passed` (276.6s); no fixture drift.
+
+**Cumulative for the session: Pokémon 29.1x → 86.7x, a 2.98x speedup.**
+
+**Next agent:** in this order, with the profile above as the justification.
+
+1. ⭐ **Stop re-quantising an unchanged sample** (~8-11%, low risk, and it does **not** require
+   making the APU lazy). `Audio::push_sample` calls `BlipStereo::update` every instruction, which
+   calls `quantise` (a libm `roundf`) twice before `BlipSynth::update` discovers the amplitude has
+   not moved. C4 already tracks whether the mixed sample changed — gate the call on it. The output
+   is bit-identical, because the value being recomputed is the same value.
+   ⚠️ `BlipStereo::update` has a `#[cfg(test)]` capture log that records *every* call; check
+   `audio::reference::tests` and `blip::tests` before changing the call count.
+2. **`OpCode::machine_cycles` at 3.9%** — higher than ledger #13 predicted when it deferred C7's
+   first half. Worth revisiting; see that entry for why the `[u8; 256]` table needs `OpCode::parse`
+   to surface the opcode byte first.
+3. **The remaining ~34% in `draw_pixels_to`** now has no single hot chain — it is the irreducible
+   per-pixel work. Getting further means compositing sprites in a **second pass** over their own
+   x-ranges instead of testing every pixel, so the background can be shifted out eight at a time.
+   That is a real restructure; the acid2 reference images are the acceptance test, and they are
+   byte-exact, so they will catch any priority mistake immediately.
+4. **`Audio::update` per instruction (still ~10% in the channels).** ⚠️ Alex's caution here is
+   right: blargg's `dmg_sound` depends on APU state being correct *relative to the instruction
+   stream* — the DMG wave-RAM aperture is one 2-T tick wide, which is why `set_instruction_length`
+   exists. But the requirement is "correct at every observation point", not "advanced every
+   instruction": gambatte passes the same suites with a lazy PSG by catching up on every register
+   access. C2's HALT skip already proves the principle here — it is bit-identical over a bounded
+   span. Doing it for the non-halted path needs catch-up on every `FF10-FF3F` access; the 12
+   `dmg_sound` tests are the acceptance test, and they are cheap to run.
+5. **C6 last, and possibly never.** The measured ceiling is ~5%.
+
+Before you start, read surprises 2, 3 and 4: **three of one session's four "obvious" optimisations
+were net-negative until the cheap case was special-cased**, and the paired benchmark is the only
+thing that caught it. Also read surprise 9 and use §2.5's protocol — a single reading proves
+nothing on this machine.

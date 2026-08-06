@@ -27,6 +27,7 @@ mod activation;
 mod pokemon;
 mod ram;
 mod savestate;
+mod schedule;
 
 pub fn main() -> Result<(), String> {
     sdl::render::render()

@@ -134,7 +134,7 @@ impl TestFixture {
         // rival or an Elite Four room needs far more than the usual threshold — but a fight can also
         // deadlock outright (an attacker out of PP, healing itself forever against a mon it cannot KO),
         // and that has to keep failing fast instead of running to the cycle cap.
-        const BATTLE_STALL_FACTOR: usize = 8;
+        const BATTLE_STALL_FACTOR: u64 = 8;
         let steps = self.agent.policy_steps_remaining();
         let long_running = self.agent.policy_current_step_is_long_running();
         let threshold = if self.agent.in_battle() {
