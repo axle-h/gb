@@ -24,7 +24,7 @@ const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
 const REALTIME_CYCLE_DURATION: Duration = MachineCycles::from_m(1).to_duration();
 
 pub fn render() -> Result<(), String> {
-    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+    let mut gb = GameBoy::cgb(crate::pokemon::roms::POKERED);
     let mut map_cache = MapMetadataCache::default();
     let mut pokemon_agent = PokemonAgent::new(Box::new(ConsolePolicy::default()));
 
