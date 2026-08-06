@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn test_full_pokemon_encoding() -> Result<(), String> {
-        let mut mmu = MMU::from_rom(ROM)?;
+        let mut mmu = MMU::from_rom(ROM).map_err(|e| e.to_string())?;
 
         let mut party = PokemonParty::default();
         party.push(
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_partial_pokemon_encoding() -> Result<(), String> {
-        let mut mmu = MMU::from_rom(ROM)?;
+        let mut mmu = MMU::from_rom(ROM).map_err(|e| e.to_string())?;
 
         let mut party = PokemonParty::default();
         party.push(

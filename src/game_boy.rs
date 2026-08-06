@@ -1,4 +1,5 @@
 use crate::core::Core;
+use crate::header::LoadError;
 use crate::cycles::MachineCycles;
 use crate::model::Model;
 use crate::savestate::{SectionReader, SectionWriter};
@@ -26,6 +27,23 @@ impl GameBoy {
         Self {
             core: Core::new(cart, model)
         }
+    }
+
+    /// **D8.** The fallible constructor. [`GameBoy::dmg`] and friends panic, which is right for the
+    /// `include_bytes!`'d ROMs the tests use and wrong for anything that loads a file a user
+    /// chose — a bad cartridge should be a message, not a crash.
+    pub fn try_new(cart: &[u8], model: Model) -> Result<Self, LoadError> {
+        Ok(Self { core: Core::try_new(cart, model)? })
+    }
+
+    /// A Game Boy (DMG) from a cartridge that may not load. See [`GameBoy::try_new`].
+    pub fn try_dmg(cart: &[u8]) -> Result<Self, LoadError> {
+        Self::try_new(cart, Model::Dmg)
+    }
+
+    /// A Game Boy Color from a cartridge that may not load. See [`GameBoy::try_new`].
+    pub fn try_cgb(cart: &[u8]) -> Result<Self, LoadError> {
+        Self::try_new(cart, Model::Cgb)
     }
 
     pub fn dmg_hello_world() -> Self {
