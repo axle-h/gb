@@ -6,6 +6,7 @@ use crate::cycles::MachineCycles;
 use crate::divider::Divider;
 use crate::header::{CartHeader, LoadError};
 use crate::mbc::{BankCounts, Mapper, Mbc, RamTarget};
+use crate::rtc::{Rtc, TimeSource};
 use crate::hdma::{Hdma, HdmaRequest};
 use crate::interrupt::{InterruptFlags, InterruptFlagsSnapshot, InterruptType};
 use crate::joypad::JoypadRegister;
@@ -78,6 +79,9 @@ pub struct MMU {
     ram_enabled: bool,
     rom_bank_register: usize,
     ram_bank_register: usize,
+    /// What `0xA000..=0xBFFF` addresses. Derived from `mapper`, refreshed with the rest of the
+    /// cache; not serialised, because the mapper it comes from is.
+    ram_target: RamTarget,
     /// Eight 4 KB banks. A DMG only ever addresses the first two, so `work_ram[..0x2000]` is
     /// exactly the old flat array — see [`MMU::work_ram`].
     work_ram: [u8; WRAM_BANK_SIZE * WRAM_BANKS],
@@ -364,6 +368,7 @@ impl MMU {
             ram_enabled: false,
             rom_bank_register: 1,
             ram_bank_register: 0,
+            ram_target: RamTarget::None,
             work_ram: [0; WRAM_BANK_SIZE * WRAM_BANKS],
             work_ram_bank: 1,
             high_ram: [0; 0x7F],
@@ -432,6 +437,7 @@ impl MMU {
         self.ram_enabled = false;
         self.rom_bank_register = 1;
         self.ram_bank_register = 0;
+        self.ram_target = RamTarget::None;
         self.work_ram = [0; WRAM_BANK_SIZE * WRAM_BANKS];
         self.work_ram_bank = 1;
         self.high_ram = [0; 0x7F];
@@ -491,12 +497,29 @@ impl MMU {
     fn refresh_bank_cache(&mut self) {
         self.rom_bank_register = self.mapper.rom_bank();
         self.ram_enabled = self.mapper.ram_enabled();
-        // `ram_bank_register` is only meaningful when RAM is what is mapped; `ram_enabled` is the
-        // flag the read/write paths gate on, so an RTC selection simply leaves the bank alone.
-        match self.mapper.ram_target() {
-            RamTarget::Bank(bank) => self.ram_bank_register = bank,
-            RamTarget::Rtc(_) => self.ram_enabled = false, // D5: no clock behind them yet
-            RamTarget::None => {}
+        self.ram_target = self.mapper.ram_target();
+        // `ram_bank_register` is what the `cart` save-state section carries, so it only tracks a
+        // real bank; an RTC selection leaves it where it was.
+        if let RamTarget::Bank(bank) = self.ram_target {
+            self.ram_bank_register = bank;
+        }
+    }
+
+    /// The cartridge's real-time clock, if it has one (D5). `None` for Pokémon Red, whose MBC3
+    /// declares no timer.
+    pub fn rtc(&self) -> Option<&Rtc> {
+        self.mapper.rtc()
+    }
+
+    /// Pin the clock to a fixed instant.
+    ///
+    /// ⚠️ **Anything that has to replay identically must call this.** The default source is the
+    /// host clock, so two runs of the same input produce different register values — which would
+    /// make a fixture-driven test flaky in a way that only shows up sometimes. See
+    /// [`crate::rtc::TimeSource`].
+    pub fn set_rtc_time_source(&mut self, source: TimeSource) {
+        if let Some(rtc) = self.mapper.rtc_mut() {
+            rtc.set_time_source(source);
         }
     }
 
@@ -986,12 +1009,15 @@ impl MMU {
             }
             // vram
             0x8000..=0x9FFF => self.ppu.read_vram(address - 0x8000),
-            // external ram
-            0xA000..=0xBFFF if self.ram_enabled && !self.ram_banks.is_empty() => {
-                // https://gbdev.io/pandocs/MBC1.html#a000bfff--ram-bank-0003-if-any
-                let ram_bank = &self.ram_banks[self.ram_bank_register];
-                ram_bank[(address - 0xA000) as usize]
-            }
+            // External RAM — or, on an MBC3 with a timer, the clock registers in its place (D5).
+            0xA000..=0xBFFF => match self.ram_target {
+                RamTarget::Bank(bank) => self.ram_banks[bank][(address - 0xA000) as usize],
+                RamTarget::Rtc(register) => {
+                    self.mapper.rtc().map_or(0xFF, |rtc| rtc.read(register))
+                }
+                // Disabled, or a cartridge with no RAM: an open bus reads high.
+                RamTarget::None => 0xFF,
+            },
             // Work RAM, and its echo — which mirrors the *banked* window, SVBK included.
             0xC000..=0xDFFF | 0xE000..=0xFDFF => self.work_ram[self.work_ram_offset(address)],
             0xFE00..=0xFE9F => self.ppu.read_oam(address - 0xFE00), // OAM (Object Attribute Memory)
@@ -1077,10 +1103,15 @@ impl MMU {
             }
             // vram
             0x8000..=0x9FFF => self.ppu.write_vram(address - 0x8000, value),
-            0xA000..=0xBFFF if self.ram_enabled && !self.ram_banks.is_empty() => {
-                let ram_bank = &mut self.ram_banks[self.ram_bank_register];
-                ram_bank[(address - 0xA000) as usize] = value;
-            }
+            0xA000..=0xBFFF => match self.ram_target {
+                RamTarget::Bank(bank) => self.ram_banks[bank][(address - 0xA000) as usize] = value,
+                RamTarget::Rtc(register) => {
+                    if let Some(rtc) = self.mapper.rtc_mut() {
+                        rtc.write(register, value);
+                    }
+                }
+                RamTarget::None => {}
+            },
             0xC000..=0xDFFF | 0xE000..=0xFDFF => {
                 let offset = self.work_ram_offset(address);
                 self.work_ram[offset] = value;
@@ -1336,6 +1367,44 @@ mod tests {
         mmu.write(0x2000, 0x00);
         assert_eq!(mmu.rom_bank_register, 0, "MBC5 maps bank 0 at 0x4000");
         assert_eq!(mmu.read(0x4000), mmu.read(0x0000), "...so the two halves show the same bank");
+    }
+
+    /// **D5** end to end: on an MBC3 with a timer, `0x08..=0x0C` swaps the clock registers into
+    /// the cartridge-RAM window in place of a bank.
+    ///
+    /// No MBC3+timer cartridge is committed, so this re-badges pokered — only header byte `0x147`
+    /// decides. The clock is pinned, because the default source is the host clock and this test
+    /// must replay identically.
+    #[test]
+    fn an_mbc3_timer_maps_its_clock_over_cartridge_ram() {
+        let mut rom = crate::pokemon::roms::POKERED.to_vec();
+        rom[0x0147] = 0x10; // MBC3+timer+RAM+battery
+        let mut mmu = MMU::from_rom(&rom).unwrap();
+        mmu.set_rtc_time_source(crate::rtc::TimeSource::Fixed(0));
+        assert!(mmu.rtc().is_some());
+
+        mmu.write(0x0000, 0x0A); // unlock
+        mmu.write(0x4000, 0x00); // a real RAM bank
+        mmu.write(0xA000, 0x11);
+        assert_eq!(mmu.read(0xA000), 0x11);
+
+        mmu.write(0x4000, 0x08); // now the seconds register
+        mmu.write(0xA000, 42);
+        mmu.write(0x6000, 0x00); // latch
+        mmu.write(0x6000, 0x01);
+        assert_eq!(mmu.read(0xA000), 42, "the clock, not RAM");
+
+        mmu.write(0x4000, 0x00); // back to the RAM bank
+        assert_eq!(mmu.read(0xA000), 0x11, "...and RAM was never touched");
+    }
+
+    /// ⭐ Pokémon Red is `0x13` — MBC3 with **no** timer — so none of the clock code runs on the
+    /// live path, and `0x08` is just another RAM-bank selection.
+    #[test]
+    fn pokemon_red_has_no_clock() {
+        let mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+        assert_eq!(mmu.header().cart_type(), crate::header::CartType::MBC3RamBattery);
+        assert!(mmu.rtc().is_none());
     }
 
     /// D1/D2: the RAM-bank register wraps too. `dmg_sound.gb` is MBC1 and declares one bank, and

@@ -27,6 +27,7 @@ mod audio;
 mod activation;
 mod pokemon;
 mod ram;
+mod rtc;
 mod savestate;
 mod schedule;
 

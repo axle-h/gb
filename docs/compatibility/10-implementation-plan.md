@@ -408,7 +408,7 @@ control.
 | D2 | `trait Mbc` + dispatch on `CartType` | DONE | 2026-08-06 | `src/mbc.rs`. ⚠️ an **enum**, not `Box<dyn Mbc>` — `MMU` needs `Clone`/`PartialEq`/`Encode`/`Decode`. New `mbc` section, zero fixture churn |
 | D3 | MBC1 (+ multicart) | DONE | 2026-08-06 | mode select, bank2→ROM/RAM routing, `0x20` aliasing. **Multicart skipped** — logged, ledger #15 |
 | D4 | MBC2 | DONE | 2026-08-06 | `& 0x6100` decode (A8), built-in RAM bank allocated despite `0x149 = 0` |
-| D5 | MBC3 + RTC | PARTIAL | 2026-08-06 | MBC3 done and it is the **live pokered path**. **RTC not built** — `RamTarget::Rtc` is plumbed, no clock behind it |
+| D5 | MBC3 + RTC | DONE | 2026-08-06 | MBC3 (the **live pokered path**) + `src/rtc.rs`. Base-offset model, injectable clock, gambatte `.rtc` interop |
 | D6 | MBC5 | DONE | 2026-08-06 | 9-bit register across two ranges; **no bank-0 remap**, the one mapper where that is right |
 | D7 | HuC1 + unsupported-mapper errors | DONE | 2026-08-06 | HuC1 + `LoadError::UnsupportedMbc`, landed with D8's error refactor |
 | D8 | Header parsing robustness | DONE | 2026-08-06 | 3 valid-cartridge rejections fixed; `LoadError`; `try_dmg`/`try_cgb`; checksum warning; `println!` gone |
@@ -1732,10 +1732,8 @@ pass all of it. Each divergence is commented at the site and has a test:
 | MBC2 bank-0 selection | no remap at all | **remapped to 1** |
 | HuC1 RAM while "disabled" | readable (the register switches the IR port in, not RAM out) | not readable — [`Mbc::ram_enabled`] is one flag for read and write, a known gap |
 
-**Still open:** D5's **RTC** (`RamTarget::Rtc` is plumbed so the registers cannot alias onto a RAM
-bank, but there is no counter behind them and the latch is a no-op) and D7's **typed
-`LoadError`** (unsupported types still fall back to MBC1's layout, exactly as every cartridge did
-before D2). **MBC1 multicart (`Mbc1Multi64`) is skipped**, as this task permits.
+**All done bar multicart.** D5's RTC is `src/rtc.rs` and D7's typed `LoadError` landed with D8.
+**MBC1 multicart (`Mbc1Multi64`) is skipped**, as this task permits.
 
 Port notes for whoever finishes them; the details are tabulated in
 [`05-mmu-cartridge.md` §1](05-mmu-cartridge.md#1-mbc-support-matrix).
@@ -3455,3 +3453,64 @@ this repo becomes non-deterministic — and persist gambatte's 4-byte big-endian
 ⚠️ **Then stop and get D10's ROMs before declaring Phase D done.** Three deliberate divergences from
 gambatte (ledger #15 surprise 3) are unadjudicated without mooneye, and D10 is the only thing that
 can settle them. It needs an external download, which is Alex's call.
+
+### 2026-08-06 (#17) — D5 — The MBC3 real-time clock. **Phase D is complete except D10**
+
+**State:** **D5 → `DONE`.** Every Phase D task is now `DONE` except **D10**, which is `BLOCKED` on
+ROMs that are not on this machine. MBC1 multicart remains deliberately skipped.
+
+**Did.** `src/rtc.rs`: the clock as a **base offset** — the Unix second at which the counter read
+zero — decomposed into the five registers on demand, with hardware's latch (`0`→`1` edge at
+`0x6000..=0x7FFF`) freezing the register file so a guest can read all five without one rolling over
+underneath it. Nine-bit day counter, sticky carry, halt bit, and gambatte's 4-byte big-endian
+`.rtc` sidecar for interop. Wired into `Mbc3` (only the two cartridge types that declare a timer
+get one) and into the MMU's `0xA000..=0xBFFF` window via the cached `RamTarget`.
+
+**Surprises.** Both of these were in the first draft and both would have shipped.
+
+1. ⭐⭐ **My own tests passed vacuously, and the API shape is why.** `set_time_source` *rebases* so
+   the counter reads the same across the swap — which is correct for pinning a running clock, and
+   means that "advancing time" by setting a later `Fixed` instant **moves nothing at all**. Seven
+   tests asserted against a clock that had never moved. Pinning a clock and making time pass are
+   different operations and are now `set_time_source` and `advance`, with the trap documented on
+   both. **If a test suite for new code goes green first time, check that it can fail.**
+2. ⭐ **`base` has to be signed, and only the end-to-end test found it.** A guest may set the clock
+   to a time *later than the host's own*, which puts the zero instant before the epoch. With
+   `base: u64` and a saturating subtraction that clamps to zero and **the write is silently
+   discarded**. Every unit test passed; it surfaced only on the first read through
+   `MMU` with a clock pinned near zero. Now `i64`, with `a_time_later_than_the_host_clock_survives`
+   pinning it. The gambatte sidecar cannot express a negative base and clamps — noted at the site,
+   and unreachable with a system clock.
+3. **The injectable time source is not a nicety.** The default is the host clock; a fixture-driven
+   repo with any RTC cartridge in it would have flaky tests that only fail sometimes.
+   `MMU::set_rtc_time_source` is the seam, and every test uses it. ⭐ **Nothing committed has an
+   RTC** — `pokered.gbc` is `0x13`, MBC3 with *no* timer — so none of this code runs on the live
+   path. `pokemon_red_has_no_clock` pins that.
+
+**Verified.**
+
+```
+cargo test --release --bin gb -- game_boy::tests::blargg  → 27 passed; 0 failed
+cargo test --release --bin gb                             → 1018 passed; 0 failed; 114 ignored
+cargo test --release --features slow-tests --bin gb       → 1112 passed; 0 failed; 20 ignored (49.0s)
+cargo test --release --features full-playthrough --bin gb -- full_playthrough
+                                                          → 1 passed; 0 failed (263.2s)
+git status --porcelain src/pokemon/data/                  → empty
+```
+
+**Tree:** committed. `src/sdl/render.rs` remains dirty and is **still not this session's change**
+(ledger #14 surprise 4).
+
+**Next agent: there is nothing left in this plan that can be finished without Alex.**
+
+- **D10 is the only open task** and it needs mooneye's `emulator-only/mbc1|mbc2|mbc5` (28 ROMs) —
+  **not in this repo, not under `/home/alex/projects`**, and gambatte ships only its own
+  `hwtests`. Fetching `c-sp/game-boy-test-roms` v7.0 is an external download: **ask.**
+- ⚠️ **Do not mark Phase D complete until it runs.** Three deliberate divergences from gambatte
+  (ledger #15 surprise 3) are unadjudicated, and D10 is the only thing that can settle them. If the
+  ROMs contradict any of them, **the ROMs win.**
+- **B11 is still `TODO` and still needs Alex's call** — it can move the fixture chain. It is now the
+  only other open task in the whole plan.
+- The remaining *optional* work, in rough value order: MBC1 multicart; Phase C's `OpCode::machine_cycles`
+  table and the `draw_pixels_to` sprite second-pass (ledger #13's handoff); C8, whose premise has a
+  hole.
