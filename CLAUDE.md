@@ -4,7 +4,9 @@ A Game Boy (DMG **and CGB**) emulator written in Rust, repurposed as a platform 
 
 The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs and dmg_sound — **including both combined suite ROMs** — instr_timing; dmg-acid2 **and cgb-acid2** PPU tests). It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
 
-**Real MBC support** lives in `src/mbc.rs` — `RomOnly`, MBC1, MBC2, MBC3, MBC5 and HuC1, dispatched from `CartType`. It replaced one hardcoded pseudo-mapper (MBC1's register layout with MBC3's width) that served every cartridge and silently dropped `0x6000-0x7FFF`. **Still missing: the MBC3 real-time clock**, a typed error for the mappers `gb` cannot emulate (they fall back to MBC1's layout), and MBC1 multicart. See Phase D of `docs/compatibility/10-implementation-plan.md`.
+**Real MBC support** lives in `src/mbc.rs` — `RomOnly`, MBC1, MBC2, MBC3, MBC5 and HuC1, dispatched from `CartType`, with the MBC3 real-time clock in `src/rtc.rs`. It replaced one hardcoded pseudo-mapper (MBC1's register layout with MBC3's width) that served every cartridge and silently dropped `0x6000-0x7FFF`. Mappers `gb` cannot emulate now fail with a typed `LoadError` rather than running as something else. **Still missing: MBC1 multicart, and the mooneye MBC test ROMs** (`D10` — they are not on this machine). See Phase D of `docs/compatibility/10-implementation-plan.md`.
+
+⚠️ **The RTC's time source is injectable and anything replayable must pin it** (`MMU::set_rtc_time_source`) — the default is the host clock, so an RTC cartridge under a fixture-driven test would fail only sometimes. Nothing committed has an RTC: `pokered.gbc` is `0x13`, MBC3 with *no* timer.
 
 ⚠️ **Every mapper resolves its bank register differently and the differences are not decoration.** MBC1 remaps a zero selection *then* wraps, so a wrap can reach bank 0; MBC3 wraps *then* remaps, so it never can; MBC2/MBC5/HuC1 have their own rules again. Same two operations, opposite order, different answer — and it is what makes blargg's combined `dmg_sound.gb` terminate. `src/mbc.rs`'s module docs have the table.
 
