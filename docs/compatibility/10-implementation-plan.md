@@ -385,7 +385,7 @@ control.
 | B8 | HDMA / GDMA | DONE | 2026-08-05 | `src/hdma.rs`; HDMA at the mode-3→0 edge, GDMA has no CPU stall |
 | B9 | CGB post-boot state + remaining CGB registers | DONE | 2026-08-06 | `FF72-75`, `FEA0` CGB pattern, 32× serial. **Two** boot register files (ledger #10). DMG boot state **untouched** |
 | B10 | CGB test-ROM adoption (cgb-acid2) | DONE | 2026-08-05 | **passes byte-for-byte** against the ROM's own reference image |
-| B11 | DMG post-boot register/IO table | TODO | | split out of B9 — **needs Alex's call**, it can move fixtures |
+| B11 | DMG post-boot register/IO table | DONE | 2026-08-06 | Alex authorised. Conditional `F`, `LCDC=0x91`, `BGP=0xFC`, `OBP=0xFF`, `0xFF` SRAM. **Zero fixture churn** |
 
 ## Phase C — Performance (emulator core alone)
 
@@ -1373,7 +1373,15 @@ regenerating.
 
 ### B11 — DMG post-boot register and I/O table
 
-**State:** TODO · **Depends:** none · **Risk:** medium · **Added 2026-08-05, split out of B9**
+**State:** DONE (2026-08-06) · **Depends:** none · **Risk:** medium · **Added 2026-08-05, split out of B9**
+
+**Done in two commits, deliberately**, so that any movement was attributable to one half:
+the conditional `F` first (predicted to move nothing, and did not), then `LCDC`/`BGP`/`OBP`/SRAM.
+**Neither half moved a fixture** — `regen-fixtures` was never run. See ledger #19 for why that is
+weaker evidence than it looks.
+
+The other console models (DMG0/MGB/SGB/SGB2) were **not** added, as this task allows: nothing in
+the repo runs against them.
 
 **Why it is its own task.** B9 says to "consider the DMG post-boot table too" and then warns that
 doing so may shift the committed fixtures and needs Alex's call. It does not belong inside a CGB
@@ -3598,3 +3606,67 @@ C8, whose premise has a hole.
 ⭐ **If you take anything from this entry, take this:** D3-D7 were written by porting gambatte and
 cross-checking Pan Docs, and looked complete. **Three of the six mappers were wrong**, and only the
 hardware test ROMs said so. Wire the test ROMs *before* believing a port.
+
+### 2026-08-06 (#19) — B11 — DMG post-boot state. **Zero fixture churn — but read the caveat**
+
+**State:** **B11 → `DONE`.** Alex authorised it. **Every task in this plan is now `DONE` or
+`SKIPPED`.**
+
+**Did.** Two commits, split so that movement would be attributable:
+
+1. **The conditional `F`** (`RegisterSet::dmg`, which now takes the cartridge). `F` is
+   `z=1, n=0, h=(checksum & 0x0F != 0), c=(checksum != 0)` — `0x80` / `0x90` / `0xB0` depending on
+   header byte `0x14D`. ⭐ pokered's is `0x20`, so it boots `0x90`.
+2. **The I/O table** (`MMU::apply_boot_state`, which now runs for every model, not just
+   `CgbCompat`): `LCDC 0x80 → 0x91`, `BGP 0x00 → 0xFC`, `OBP0`/`OBP1` → `0xFF`, and cartridge RAM
+   allocated `0xFF`-filled instead of zeroed.
+
+**Verified.** Each half separately, on its own tree:
+
+| | default | blargg | acid2 | slow-tests | full_playthrough | fixtures |
+|---|---|---|---|---|---|---|
+| half 1 (`F`) | 1019 | 27 | 4, byte-exact | 1113 | ✅ 263.3s | clean |
+| half 2 (I/O + SRAM) | 1019 | 27 | 4, byte-exact | 1113 | ✅ 265.0s | clean |
+
+**`--features regen-fixtures` was never run. No `src/pokemon/data/*.bin` byte changed.**
+
+**Surprises.**
+
+1. ⚠️⚠️ **"Zero fixture churn" is weaker evidence here than it looks, and the next agent should
+   know exactly how weak.** Every Pokémon test — including `full_playthrough` — starts from a
+   **save state**, and a save state carries `LCDC`, the palettes and SRAM. So none of them ever
+   executes a cold boot with the new values; they restore over them. What *does* cold-boot is the
+   test-ROM suite (`GameBoy::dmg(ROM)` in blargg and acid2), and that is the real evidence this
+   half is right — both acid2 reference screens still match **byte for byte** with a different
+   `LCDC` and `BGP` at power-on. **Do not read the green playthrough as proof that a fresh
+   Pokémon boot is unaffected; it does not test that.** The one thing that would is playing from
+   `GameBoy::dmg(POKERED)` with no state loaded, which nothing does.
+2. ⭐ **The cheap half was not cheap in test-maintenance terms, and the failures were a real
+   finding.** Four `core::tests::rotate_shift_bit` tests used `Core::dmg_hello_world()` and never
+   set the carry — but `RLA`/`RRA` rotate **through** carry, so they had been silently reading
+   whatever the boot state left behind. Changing boot `F` broke them. They now set the carry
+   explicitly. **A test that depends on an emulator's power-on state without saying so is a
+   latent tripwire**, and there may be others.
+3. **`the_boot_register_file_matches_the_boot_rom` asserted "the DMG path must be untouched".**
+   That guard existed *because* B11 was outstanding, so it was correct to delete rather than work
+   around — but it is worth noting that a passing test asserted the wrong thing on purpose, and
+   only this task's description said so.
+4. **The object palettes are genuinely uninitialised on hardware** — the boot ROM never writes
+   `OBP0`/`OBP1`. `0xFF` is Pan Docs' recorded power-up value, not a derived one. Commented as
+   such at the site so nobody later "corrects" it to a computed value.
+
+**Tree:** committed and pushed. Clean.
+
+**Next agent: the plan is finished.** Every task is `DONE` or `SKIPPED`. What remains is optional
+and none of it is blocked:
+
+- **MBC1 multicart** — `mbc1/multicart_rom_8Mb` is a ready-made failing acceptance test, already
+  wired and explicitly skipped in `game_boy::tests::mooneye::SKIPPED`.
+- **Phase C leftovers** — `OpCode::machine_cycles` as a `[u8; 256]` table (3.9% of profile), and
+  the `draw_pixels_to` sprite second-pass (~35%). Ledger #13's handoff has the detail.
+- **C8** (headless mode), whose premise has a hole — ledger #13 surprise 7.
+- **Two unadjudicated mapper judgement calls** — MBC1 mode-0 RAM banking and HuC1
+  read-while-disabled. mooneye covers neither; only new test ROMs would settle them.
+- **The gap the profile actually names** — ledger #13's arithmetic: the pixel loop and the APU are
+  63% of Pokémon's runtime, and the plan's stretch target is reachable without an architectural
+  rewrite.
