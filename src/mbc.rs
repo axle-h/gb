@@ -36,6 +36,7 @@
 use bincode::{Decode, Encode};
 
 use crate::header::CartType;
+use crate::rtc::Rtc;
 
 /// What `0xA000..=0xBFFF` currently addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +44,8 @@ pub enum RamTarget {
     /// Cartridge RAM, at this bank. Already wrapped against the banks that exist.
     Bank(usize),
     /// One of MBC3's real-time-clock registers, selected by writing `0x08..=0x0C` to
-    /// `0x4000..=0x5FFF`. **The clock itself is D5**; until then the MMU reads these as `0xFF`
-    /// and drops writes, which is what a cartridge with no RTC chip does.
+    /// `0x4000..=0x5FFF`. The clock is [`crate::rtc::Rtc`]; only the two cartridge types that
+    /// declare a timer ever report this, so on Pokémon Red it never occurs.
     Rtc(u8),
     /// Nothing is mapped: RAM is disabled, or the cartridge has none.
     None,
@@ -72,6 +73,15 @@ pub trait Mbc {
     /// Adopt the effective bank/enable state of a save state written before the `mbc` section
     /// existed. See [`Mapper::restore_effective`].
     fn restore_effective(&mut self, rom_bank: usize, ram_bank: usize, ram_enabled: bool);
+
+    /// The cartridge's real-time clock, if it has one. Only MBC3's two timer types do (D5).
+    fn rtc(&self) -> Option<&Rtc> {
+        None
+    }
+
+    fn rtc_mut(&mut self) -> Option<&mut Rtc> {
+        None
+    }
 }
 
 /// How many banks a mapper wraps against. Always a power of two of at least 1, so the wrap is a
@@ -186,6 +196,14 @@ impl Mbc for Mapper {
 
     fn restore_effective(&mut self, rom_bank: usize, ram_bank: usize, ram_enabled: bool) {
         self.as_mbc_mut().restore_effective(rom_bank, ram_bank, ram_enabled)
+    }
+
+    fn rtc(&self) -> Option<&Rtc> {
+        self.as_mbc().rtc()
+    }
+
+    fn rtc_mut(&mut self) -> Option<&mut Rtc> {
+        self.as_mbc_mut().rtc_mut()
     }
 }
 
@@ -378,18 +396,13 @@ impl Mbc for Mbc2 {
     }
 }
 
-/// **D5 (partial).** MBC3: a 7-bit ROM-bank register, four RAM banks, and — on the `0x0F`/`0x10`
-/// cartridge types — a real-time clock whose five registers replace RAM at `0xA000` when
-/// `0x08..=0x0C` is selected.
+/// **D5.** MBC3: a 7-bit ROM-bank register, four RAM banks, and — on the `0x0F`/`0x10` cartridge
+/// types — a real-time clock whose five registers replace RAM at `0xA000` when `0x08..=0x0C` is
+/// selected. The clock itself lives in [`crate::rtc::Rtc`].
 ///
 /// ⭐ **This is Pokémon Red's mapper and therefore the live path.** `pokered.gbc` is `0x13`
-/// (MBC3+RAM+battery, *no* timer), 64 banks, 4 RAM banks.
-///
-/// **The clock is not implemented.** `has_rtc` is honoured to the extent of reporting
-/// [`RamTarget::Rtc`] so the registers do not alias onto a RAM bank, but there is no counter
-/// behind them and the latch at `0x6000..=0x7FFF` is a no-op. Finishing it — a `base_time` offset
-/// with an injectable time source, and gambatte's 4-byte big-endian `.rtc` file — is the rest of
-/// D5.
+/// (MBC3+RAM+battery, *no* timer), 64 banks, 4 RAM banks — so `rtc` is `None` for it and none of
+/// the clock code runs.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc3 {
     banks: BankCounts,
@@ -398,12 +411,19 @@ pub struct Mbc3 {
     /// selects a clock register rather than a RAM bank.
     ram_bank: usize,
     ram_enabled: bool,
-    has_rtc: bool,
+    /// `Some` only for the two cartridge types that declare a timer.
+    rtc: Option<Rtc>,
 }
 
 impl Mbc3 {
     fn new(banks: BankCounts, has_rtc: bool) -> Self {
-        Self { banks, rom_bank: 1, ram_bank: 0, ram_enabled: false, has_rtc }
+        Self {
+            banks,
+            rom_bank: 1,
+            ram_bank: 0,
+            ram_enabled: false,
+            rtc: has_rtc.then(Rtc::default),
+        }
     }
 }
 
@@ -413,8 +433,11 @@ impl Mbc for Mbc3 {
             0 => self.ram_enabled = unlocks_ram(value),
             1 => self.rom_bank = value as usize & 0x7F,
             2 => self.ram_bank = value as usize,
-            // The clock latch. D5.
-            _ => {}
+            _ => {
+                if let Some(rtc) = self.rtc.as_mut() {
+                    rtc.write_latch(value);
+                }
+            }
         }
     }
 
@@ -427,7 +450,7 @@ impl Mbc for Mbc3 {
         if !self.ram_enabled {
             return RamTarget::None;
         }
-        if self.has_rtc && (0x08..=0x0C).contains(&self.ram_bank) {
+        if self.rtc.is_some() && (0x08..=0x0C).contains(&self.ram_bank) {
             return RamTarget::Rtc(self.ram_bank as u8);
         }
         match self.banks.wrap_ram(self.ram_bank) {
@@ -444,6 +467,14 @@ impl Mbc for Mbc3 {
         self.rom_bank = rom_bank;
         self.ram_bank = ram_bank;
         self.ram_enabled = ram_enabled;
+    }
+
+    fn rtc(&self) -> Option<&Rtc> {
+        self.rtc.as_ref()
+    }
+
+    fn rtc_mut(&mut self) -> Option<&mut Rtc> {
+        self.rtc.as_mut()
     }
 }
 
