@@ -3055,14 +3055,41 @@ regression — `MMU::update` got *smaller* (3764 → 3483 bytes) across the chan
    x-ranges instead of testing every pixel, so the background can be shifted out eight at a time.
    That is a real restructure; the acid2 reference images are the acceptance test, and they are
    byte-exact, so they will catch any priority mistake immediately.
-3. **`Audio::update` per instruction (still ~5% in the channels).** ⚠️ Alex's caution here is
-   right: blargg's `dmg_sound` depends on APU state being correct *relative to the instruction
-   stream* — the DMG wave-RAM aperture is one 2-T tick wide, which is why `set_instruction_length`
-   exists. But the requirement is "correct at every observation point", not "advanced every
-   instruction": gambatte passes the same suites with a lazy PSG by catching up on every register
-   access. C2's HALT skip already proves the principle here — it is bit-identical over a bounded
-   span. Doing it for the non-halted path needs catch-up on every `FF10-FF3F` access; the 12
-   `dmg_sound` tests are the acceptance test, and they are cheap to run.
+3. ⛔ **Lazy peripherals on the non-halted path — ATTEMPTED AND REVERTED. Do not retry it in this
+   shape.** ⚠️⚠️ **Alex was right to flag this, and the reason is sharper than "the audio tests are
+   fussy".**
+
+   *The idea.* Extend C2's skip to the running CPU: `MMU::update` advances `now` and returns unless
+   an event is due, so peripherals are driven ~10-20x less often. The justification is that between
+   two scheduled events nothing a peripheral *shows the guest* can change — `LY`, `STAT`'s mode,
+   `DIV`, `TIMA`, a channel's level and every interrupt line move only at their own events — so a
+   stale read is still a correct read. Writes are the exception and flush first, which
+   `write_uncommon` makes a single chokepoint. It was built: ~120 lines, `caught_up_to` + `due`
+   fields, flushes on I/O write and on `STOP`/speed-switch, a catch-up at the end of `GameBoy::run`
+   so the outside world never sees a half-advanced machine.
+
+   *Why it cannot work as `read` is shaped.* **The premise is false for two observables, and both
+   are read through `&self`, so there is nowhere to put the flush.**
+   - ⭐ **The DMG wave-RAM aperture.** `WaveChannel::next_fetch_after` (`wave_channel.rs:202`) reads
+     `frequency_timer.counter()` — the raw countdown, which changes every *tick*, not at events. A
+     wave-RAM read between two events therefore computes the aperture against a stale counter.
+     `blargg_dmg_sound::wave_read_while_on` fails, exactly as Alex predicted, and no schedule entry
+     fixes it short of an event every 2 T-cycles, which is no laziness at all.
+   - **OAM DMA progress.** The controller copies a byte per M-cycle and the guest can watch the
+     result; `mmu::tests::oam_dma_delivers_during_mode_3` fails because the transfer never advances
+     between events. Same shape: continuous, and observable.
+
+   `ROM::read` takes `&self` and **cannot be changed to `&mut self`** without rewriting how the
+   whole Pokémon layer reads memory, which §1.5's prime directive puts out of bounds. That is the
+   blocker, not the audio semantics.
+
+   *If someone does retry it*, the only honest routes are (a) make the wave channel's aperture a
+   function of an absolute stamp rather than a live countdown, and give OAM DMA the same treatment,
+   then re-test; or (b) leave the APU and the DMA eager and defer only the PPU, timers and the
+   interrupt poll — worth perhaps 5-8%, for a large increase in the number of ways to be wrong.
+   Neither looked worth it against the measured numbers. The four failures (`wave_read_while_on`,
+   `length_counter`, `oam_dma_delivers_during_mode_3`, and the C2 equivalence test, whose oracle
+   also became lazy) reproduce in minutes if you want to see them.
 4. ~~**C6 last, and possibly never.**~~ **Done as far as it is worth doing.** `ROM::read` and
    `RAM::write` now resolve ROM/WRAM/HRAM `#[inline(always)]` and send everything else to an
    `#[inline(never)]` remainder — gambatte's shape (`memory.h:76`) without moving VRAM out of
