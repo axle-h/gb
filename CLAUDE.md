@@ -114,12 +114,12 @@ The crate has **no lib target** — everything lives in the `gb` binary, so it i
 `--lib`.
 
 `src/pokemon/integration_tests/` is tiered by how much **game time** a test emulates, which is what it
-costs: the emulator core runs at **~87× realtime** on Pokémon Red and the agent costs **~35%** on
-top, giving **~48×** end to end (measured 2026-08-06 on a Ryzen 9 7900X by `bench_core_throughput`
+costs: the emulator core runs at **~91× realtime** on Pokémon Red and the agent costs **~35%** on
+top, giving **~50×** end to end (measured 2026-08-06 on a Ryzen 9 7900X by `bench_core_throughput`
 and `bench_emulation_throughput` respectively), so wall clock ≈ emulated-minutes ÷ 48.
 
 Those numbers are **post-Phase-C**: the core was 29× and the agent-inclusive figure 24× before
-`docs/compatibility/10-implementation-plan.md`'s C1–C5, which made it 3.0× faster (ledger #13). The
+`docs/compatibility/10-implementation-plan.md`'s C1–C5, which made it 3.1× faster (ledger #13). The
 agent's share grew from ~16% to ~35% for the obvious reason — it did not get slower, the emulator
 under it got faster — so **it is now worth profiling and it was not before.**
 

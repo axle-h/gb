@@ -165,8 +165,17 @@ impl Audio {
             self.levels = levels;
             self.mix_dirty = false;
             self.mixed = self.mix();
+            // ⭐ Only *now* is there a transition to report. `BlipStereo::update` quantises with a
+            // libm `roundf` per channel before `BlipSynth` discovers the amplitude has not moved —
+            // `perf` put 5.5% of the whole emulator in `roundf` alone, essentially all of it
+            // arriving at last instruction's answer. The resampler's clock still advances every
+            // instruction, so the output is bit-identical.
+            self.output.update(self.mixed);
         }
-        self.push_sample(delta, self.mixed);
+        // ⚠️ The two early returns above hand the resampler a literal `ZERO` instead, and must keep
+        // doing so: leaving either state needs a register write, and `Audio::write` sets
+        // `mix_dirty`, so this branch is guaranteed to re-report `mixed` on the way back.
+        self.output.end_frame(delta.m_cycles() as u32);
     }
 
     /// How many **video** M-cycles the APU can be left alone for, or `None` if nothing is

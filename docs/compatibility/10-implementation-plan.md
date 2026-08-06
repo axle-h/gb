@@ -394,7 +394,7 @@ control.
 | C1 | Event scheduler skeleton (`Schedule`, absolute clock) | DONE | 2026-08-06 | `src/schedule.rs`; `MMU::now`. Schedule built **on demand** — maintaining it cost 6% (ledger #11) |
 | C2 | HALT fast-path | DONE | 2026-08-06 | ⭐ **2.0x on Pokémon alone.** `Core::skip_halt`; proved bit-identical to stepping |
 | C3 | Closed-form APU timers | DONE | 2026-08-06 | `PhaseTimer` + noise LFSR. ⚠️ needs the one-advance fast path or the divisions cost more than the loop |
-| C4 | Mix-on-change in `Audio::update` | DONE | 2026-08-06 | Packed level word. The all-DACs-off exit must stay **ahead** of it |
+| C4 | Mix-on-change in `Audio::update` | DONE | 2026-08-06 | Packed level word; the resampler is fed only on a real transition. All-DACs-off exit must stay **ahead** of it |
 | C5 | Whole-scanline rendering + hoist sprite search | DONE | 2026-08-06 | Sprite hoist, fixed arrays, **per-tile fetch + palette, sprite column mask**. Whole-scanline rendering deliberately **not** needed — see ledger #13 |
 | C6 | Memory page table | TODO | | |
 | C7 | Cheap decode + drop per-instruction IRQ poll | PARTIAL | 2026-08-06 | IRQ poll done (`InterruptFlags` is a bitmask). Cheap decode **not** done — the premise is half wrong, see ledger #11 |
@@ -3007,24 +3007,55 @@ reference PNGs **byte for byte**, which was the constraint); default tier `975 p
 
 **Cumulative for the session: Pokémon 29.1x → 86.7x, a 2.98x speedup.**
 
+### Follow-up: feeding the resampler only on a real transition (done)
+
+Item 1 of the handoff below, done in the same session. `Audio::update` now calls
+`BlipStereo::update` **only inside the branch that recomputed the mix** — if the packed levels have
+not moved, the amplitude has not moved either, and the resampler's clock still advances every
+instruction via `end_frame`, so the output is bit-identical.
+
+| Workload | Before | After |
+|---|---|---|
+| Pokémon Red | 86.5x | **90.6x** (+4.7%) |
+| `dmg-acid2` | 192.4x | 191.1x |
+| `cpu_instrs` | 55.1x | 53.6x |
+
+`roundf` **disappears from the profile entirely** and `BlipStereo::update` falls from 5.5% to 0.58%.
+
+⚠️ **Two failed attempts, both instructive:**
+
+1. **Caching the last sample inside `BlipStereo::update`** — the obvious place — cost `cpu_instrs`
+   4%. That workload powers the APU on and never plays a note, so it takes `Audio::update`'s
+   all-DACs-off early return, which hands over a **literal `AudioSample::ZERO`**: the compiler
+   constant-folds `quantise(0.0)` and the whole call away. Adding a comparison put work back into a
+   path that was already free. **Gate at the caller, which knows whether anything changed; do not
+   make the callee defensive.** (Third time this session that a check in the wrong place cost more
+   than it saved — see surprises 2, 3 and 4.)
+2. **Making `BlipSynth::update`'s `last_amp` store conditional** — provably equivalent, saves two
+   stores per instruction on the silent path, and measured **nothing**. Reverted: `src/audio/blip/`
+   is a faithful translation pinned by golden vectors, and an unmeasurable divergence from the
+   original C++ is a maintenance cost with no return.
+
+`cpu_instrs` drifting 1-3% on changes that provably do not touch its path is layout noise, not a
+regression — `MMU::update` got *smaller* (3764 → 3483 bytes) across the change that cost it 2.7%.
+
+**Verified:** acid tests `4 passed` (still byte-exact); `blargg` `26 passed` including all 12
+`dmg_sound`; default `975 passed`; `slow-tests` `1069 passed` (50.2s); `full_playthrough` `1 passed`
+(272.0s); no fixture drift.
+
+**Session total: Pokémon 29.1x → 90.6x, a 3.11x speedup.** `dmg-acid2` 41.3x → 191.1x (4.63x).
+
 **Next agent:** in this order, with the profile above as the justification.
 
-1. ⭐ **Stop re-quantising an unchanged sample** (~8-11%, low risk, and it does **not** require
-   making the APU lazy). `Audio::push_sample` calls `BlipStereo::update` every instruction, which
-   calls `quantise` (a libm `roundf`) twice before `BlipSynth::update` discovers the amplitude has
-   not moved. C4 already tracks whether the mixed sample changed — gate the call on it. The output
-   is bit-identical, because the value being recomputed is the same value.
-   ⚠️ `BlipStereo::update` has a `#[cfg(test)]` capture log that records *every* call; check
-   `audio::reference::tests` and `blip::tests` before changing the call count.
-2. **`OpCode::machine_cycles` at 3.9%** — higher than ledger #13 predicted when it deferred C7's
+1. **`OpCode::machine_cycles` at 3.9%** — higher than ledger #13 predicted when it deferred C7's
    first half. Worth revisiting; see that entry for why the `[u8; 256]` table needs `OpCode::parse`
    to surface the opcode byte first.
-3. **The remaining ~34% in `draw_pixels_to`** now has no single hot chain — it is the irreducible
+2. **The remaining ~36% in `draw_pixels_to`** now has no single hot chain — it is the irreducible
    per-pixel work. Getting further means compositing sprites in a **second pass** over their own
    x-ranges instead of testing every pixel, so the background can be shifted out eight at a time.
    That is a real restructure; the acid2 reference images are the acceptance test, and they are
    byte-exact, so they will catch any priority mistake immediately.
-4. **`Audio::update` per instruction (still ~10% in the channels).** ⚠️ Alex's caution here is
+3. **`Audio::update` per instruction (still ~5% in the channels).** ⚠️ Alex's caution here is
    right: blargg's `dmg_sound` depends on APU state being correct *relative to the instruction
    stream* — the DMG wave-RAM aperture is one 2-T tick wide, which is why `set_instruction_length`
    exists. But the requirement is "correct at every observation point", not "advanced every
@@ -3032,7 +3063,7 @@ reference PNGs **byte for byte**, which was the constraint); default tier `975 p
    access. C2's HALT skip already proves the principle here — it is bit-identical over a bounded
    span. Doing it for the non-halted path needs catch-up on every `FF10-FF3F` access; the 12
    `dmg_sound` tests are the acceptance test, and they are cheap to run.
-5. **C6 last, and possibly never.** The measured ceiling is ~5%.
+4. **C6 last, and possibly never.** The measured ceiling is ~5%.
 
 Before you start, read surprises 2, 3 and 4: **three of one session's four "obvious" optimisations
 were net-negative until the cheap case was special-cased**, and the paired benchmark is the only
