@@ -67,13 +67,12 @@ impl RegisterSet {
     /// `misc/boot_regs-cgb`. Note that **gambatte is wrong here** — `initstate.cpp:1174-1181` uses
     /// the DMG values for CGB with only `A` and `B` changed — so it is not the reference for this.
     ///
-    /// ⚠️ The **DMG** values are `gb`'s originals, not hardware's — real DMG leaves `F` at `0xB0`
-    /// (Z, H and C set), not `0x80`. Correcting that changes DMG boot behaviour and could move the
-    /// committed Pokémon fixtures, so plan task **B11** owns it and needs Alex's call.
+    /// The **DMG** values are hardware's as of B11 — see [`RegisterSet::dmg`], whose `F` depends on
+    /// the cartridge header and is *not* the flat `0xB0` most sources claim.
     pub fn boot(color_mode: crate::model::ColorMode, cart: &[u8]) -> Self {
         use crate::model::ColorMode;
         match color_mode {
-            ColorMode::Dmg => Self::dmg(),
+            ColorMode::Dmg => Self::dmg(cart),
             // A CGB-aware cartridge: the boot ROM's own final block, untouched by `EmulateDMG`.
             ColorMode::Cgb => Self {
                 a: 0x11,
@@ -112,14 +111,34 @@ impl RegisterSet {
         }
     }
 
-    pub fn dmg() -> Self {
+    /// **B11.** The DMG boot ROM's final register block.
+    ///
+    /// ⚠️ **`F` is a function of the cartridge header, and almost every source states it wrong.**
+    /// The boot ROM's last flag-affecting instruction is `add a, [hl]` against the stored header
+    /// checksum at `0x14D`, and it locks up unless the 8-bit result is zero — so:
+    ///
+    /// | `rom[0x14D]` | `F` | of 256 |
+    /// |---|---|---|
+    /// | `0x00` | `0x80` | 1 |
+    /// | non-zero multiple of `0x10` | **`0x90`** | 15 |
+    /// | anything else | `0xB0` | 240 |
+    ///
+    /// ⚠️ **Pan Docs claims `H` and `C` are either both clear or both set.** That is wrong for the
+    /// middle row: `C` is set iff the checksum is non-zero, `H` iff its *low nibble* is — different
+    /// questions. ⚠️ **Gambatte hardcodes `0xB0`** (`initstate.cpp:1179`) and models none of this.
+    ///
+    /// ⭐ `pokered`'s checksum is `0x20`, so Pokémon Red — the cartridge this whole project runs —
+    /// is one of the fifteen and boots with **`F = 0x90`**. `cpu_instrs` (`0x3B`), `dmg-acid2`
+    /// (`0x9F`), `cgb-acid2` (`0xEB`) and `tetris` (`0x0A`) all want `0xB0`.
+    pub fn dmg(cart: &[u8]) -> Self {
+        let checksum = cart.get(0x014D).copied().unwrap_or(0);
         Self {
             a: 0x01,
             flags: FlagsRegister {
                 z: true,
                 n: false,
-                h: false,
-                c: false,
+                h: checksum & 0x0F != 0,
+                c: checksum != 0,
             },
             b: 0x00,
             c: 0x13,
@@ -226,7 +245,8 @@ mod tests {
 
     #[test]
     fn register_set_initialization() {
-        let registers = RegisterSet::dmg();
+        // A zero checksum is the one header that leaves H and C clear.
+        let registers = RegisterSet::dmg(&[0; 0x0150]);
         assert_eq!(registers.a, 0x01);
         assert_eq!(registers.flags.z, true);
         assert_eq!(registers.flags.n, false);
@@ -239,9 +259,33 @@ mod tests {
         assert_eq!(registers.h, 0x01);
     }
 
+    /// **B11.** `F` follows header byte `0x14D`, in three cases — and the middle one is the one
+    /// Pan Docs gets wrong, because `H` tests the low nibble while `C` tests the whole byte.
+    #[test]
+    fn the_boot_flags_follow_the_header_checksum() {
+        fn flags_for(checksum: u8) -> u8 {
+            let mut rom = [0u8; 0x0150];
+            rom[0x014D] = checksum;
+            RegisterSet::dmg(&rom).flags.to_byte()
+        }
+
+        assert_eq!(flags_for(0x00), 0x80, "zero checksum: Z only");
+        assert_eq!(flags_for(0x20), 0x90, "⭐ pokered — non-zero multiple of 0x10, so H stays clear");
+        assert_eq!(flags_for(0x10), 0x90);
+        assert_eq!(flags_for(0x3B), 0xB0, "cpu_instrs");
+        assert_eq!(flags_for(0x9F), 0xB0, "dmg-acid2");
+        assert_eq!(flags_for(0x0A), 0xB0, "tetris");
+
+        // ...and the real cartridges agree with the table.
+        let f = |rom: &[u8]| RegisterSet::dmg(rom).flags.to_byte();
+        assert_eq!(f(crate::pokemon::roms::POKERED), 0x90);
+        assert_eq!(f(crate::roms::blargg_cpu::ROM), 0xB0);
+        assert_eq!(f(crate::roms::acid::ROM), 0xB0);
+    }
+
     #[test]
     fn register_set_hl() {
-        let mut registers = RegisterSet::dmg();
+        let mut registers = RegisterSet::dmg(&[0; 0x0150]);
         registers.set_hl(0x1234);
         assert_eq!(registers.hl(), 0x1234);
         assert_eq!(registers.h, 0x12);
@@ -250,7 +294,7 @@ mod tests {
 
     #[test]
     fn register_set_bc() {
-        let mut registers = RegisterSet::dmg();
+        let mut registers = RegisterSet::dmg(&[0; 0x0150]);
         registers.set_bc(0x5678);
         assert_eq!(registers.bc(), 0x5678);
         assert_eq!(registers.b, 0x56);
@@ -259,7 +303,7 @@ mod tests {
 
     #[test]
     fn register_set_de() {
-        let mut registers = RegisterSet::dmg();
+        let mut registers = RegisterSet::dmg(&[0; 0x0150]);
         registers.set_de(0x9ABC);
         assert_eq!(registers.de(), 0x9ABC);
         assert_eq!(registers.d, 0x9A);
@@ -268,7 +312,7 @@ mod tests {
 
     #[test]
     fn register_set_af() {
-        let mut registers = RegisterSet::dmg();
+        let mut registers = RegisterSet::dmg(&[0; 0x0150]);
         registers.set_af(0x1234);
         assert_eq!(registers.af(), 0x1230);
         assert_eq!(registers.a, 0x12);
@@ -277,7 +321,7 @@ mod tests {
 
     #[test]
     fn register_set_increment_hl() {
-        let mut registers = RegisterSet::dmg();
+        let mut registers = RegisterSet::dmg(&[0; 0x0150]);
         registers.set_hl(0x1234);
         let value = registers.hl_increment();
         assert_eq!(value, 0x1234);
@@ -309,8 +353,11 @@ mod tests {
         use crate::model::ColorMode;
 
         let dmg = RegisterSet::boot(ColorMode::Dmg, crate::pokemon::roms::POKERED);
-        assert_eq!(dmg, RegisterSet::dmg(), "the DMG path must be untouched");
+        assert_eq!(dmg, RegisterSet::dmg(crate::pokemon::roms::POKERED));
         assert_eq!(dmg.a, 0x01);
+        // B11: `F` is header-derived, and pokered's checksum of 0x20 makes it 0x90 — see
+        // `the_boot_flags_follow_the_header_checksum`. It was a flat 0x80 before B11.
+        assert_eq!(dmg.flags.to_byte(), 0x90);
 
         // A CGB-aware cartridge: the boot ROM's own final block.
         let cgb = RegisterSet::boot(ColorMode::Cgb, crate::roms::cgb_acid::ROM);
@@ -396,7 +443,7 @@ mod tests {
 
     #[test]
     fn register_set_decrement_hl() {
-        let mut registers = RegisterSet::dmg();
+        let mut registers = RegisterSet::dmg(&[0; 0x0150]);
         registers.set_hl(0x1234);
         let value = registers.hl_decrement();
         assert_eq!(value, 0x1234);
