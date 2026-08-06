@@ -593,7 +593,7 @@ it. DIV is not stored as a byte — it is derived on read, and with `divLastUpda
 | Item | gambatte (DMG) | gb | gb ref |
 |---|---|---|---|
 | A / C / D / E / H / L / SP / PC | 01 / 13 / 00 / D8 / 01 / 4D / FFFE / 0100 | **identical** ✅ | `registers.rs:53-71` |
-| **F** | **0xB0** (Z,H,C) | **0x80** (Z only) | `registers.rs:56-61` |
+| **F** | **0xB0** (Z,H,C) [^f-cond] | **0x80** (Z only) | `registers.rs:56-61` |
 | F low nibble on `POP AF` | forced 0 | forced 0 ✅ | `registers.rs:21-35` |
 | **DIV at handoff** | **0xAB** | **0x00** | `divider.rs:11-19` |
 | **LCDC** | **0x91** | **0x80** | `lcd_control.rs:74-87` |
@@ -624,7 +624,16 @@ Two consequences beyond test scores:
       160-byte OAM array, and the I/O defaults. **The concrete bytes can be transcribed straight
       out of `test/hwtests/fexx_ffxx_dumper_dmg08.bin`** — a committed, hardware-verified dump of
       exactly `0xFE00-0xFFFF`.
-- [ ] Fix F to `0xB0`, LCDC to `0x91`, BGP/OBP to `FC/FF/FF`.
+- [ ] Fix F, LCDC to `0x91`, BGP/OBP to `FC/FF/FF`.
+
+[^f-cond]: ⚠️ **Corrected 2026-08-06 (ledger #11, refined in #12).** `F` is **not** unconditionally
+      `0xB0`; gambatte's flat `0xB0` (`initstate.cpp:1179`) does not model it, and neither does Pan
+      Docs' footnote, which claims `H` and `C` are always both clear or both set. The DMG boot ROM's
+      last flag-affecting instruction is `add a, [hl]` against the stored header checksum, and it
+      locks up unless the 8-bit result is zero — so `C` is set iff the checksum is non-zero and `H`
+      is set iff its **low nibble** is non-zero. That gives `0x80` / `0x90` / `0xB0` for 1 / 15 /
+      240 of the 256 possible checksums. **`pokered`'s checksum is `0x20`, so Pokémon Red is one of
+      the fifteen: `F = 0x90`.** See plan task B11.
 - [ ] Fill SRAM with `0xFF` at allocation.
 - [ ] Apply the table in `Core::dmg` **and** implement `Core::reset()` from it (currently
       `todo!()` — see [`06-features-and-robustness.md`](06-features-and-robustness.md)).

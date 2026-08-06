@@ -1,8 +1,15 @@
 # gb — Game Boy Emulator / Pokémon Red LLM Agent
 
-A Game Boy (DMG) emulator written in Rust, repurposed as a platform for an LLM agent to play Pokémon Red entirely via text — no images required.
+A Game Boy (DMG **and CGB**) emulator written in Rust, repurposed as a platform for an LLM agent to play Pokémon Red entirely via text — no images required.
 
-The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs — including the combined ROM — all 12 of dmg_sound, instr_timing; dmg-acid2 PPU test). The one exception is the **combined** `dmg_sound.gb`, which needs MBC bank *masking* where gb still *clamps*, so its runner never reaches its terminator; that is task **D1**. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
+The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs — including the combined ROM — all 12 of dmg_sound, instr_timing; dmg-acid2 **and cgb-acid2** PPU tests). The one exception is the **combined** `dmg_sound.gb`, which needs MBC bank *masking* where gb still *clamps*, so its runner never reaches its terminator; that is task **D1**. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
+
+**Game Boy Color is supported** — `GameBoy::cgb(cart)` beside `GameBoy::dmg(cart)`, with VRAM/WRAM
+banking, CGB palette RAM, BG map attributes, OAM-index sprite priority, KEY1 double speed and
+HDMA/GDMA. A DMG-only cartridge run on a CGB gets **compatibility mode**, including the boot ROM's
+title-derived palette — which is why `GameBoy::cgb(POKERED)` comes out red-tinted exactly as
+Pokémon Red does on real Game Boy Color hardware. The SDL UI still boots a DMG; colour is reachable
+through the API and the tests. See `docs/compatibility/10-implementation-plan.md` Phase B.
 
 The project has been extended with a Pokémon Red-specific layer that reads game state directly from emulator RAM (using symbols extracted from the [pokered](https://github.com/pret/pokered) disassembly) and drives the game via synthesised joypad input. The goal is to expose a complete text interface over MCP so an LLM agent can play through the entire game.
 
@@ -16,11 +23,15 @@ src/
 ├── opcode.rs            — full SM83 instruction set
 ├── mmu.rs               — memory map, bank switching
 ├── ppu.rs               — pixel processing unit (LCD rendering)
+├── model.rs             — Model (Dmg/Cgb) + ColorMode (Dmg/CgbCompat/Cgb)
+├── cgb_palette.rs       — CGB palette RAM (BCPS/BCPD, OCPS/OCPD)
+├── boot_palette/        — the CGB boot ROM's DMG-compatibility palette tables
+├── hdma.rs              — CGB VRAM DMA (GDMA + HBlank-paced HDMA)
 ├── audio/               — APU (4-channel Game Boy audio)
 │   └── blip/            — band-limited synthesis + resampling to the sink's rate (Blip_Buffer port)
 ├── sdl/                 — SDL2 UI: renders LCD at 4× scale, drives audio, keyboard input
 │   └── render.rs        — main render loop; instantiates GameBoy + PokemonAgent
-├── roms/                — bundled test ROMs (cpu_instrs, dmg-acid2, etc.)
+├── roms/                — bundled test ROMs (cpu_instrs, dmg-acid2, cgb-acid2, etc.)
 └── pokemon/             — Pokémon Red layer (everything below)
     ├── mod.rs            — PokemonApi / PokemonApiTrait / GameState
     ├── agent.rs          — PokemonAgent: drives joypad each frame, emits AgentEvents
@@ -102,9 +113,14 @@ The crate has **no lib target** — everything lives in the `gb` binary, so it i
 `--lib`.
 
 `src/pokemon/integration_tests/` is tiered by how much **game time** a test emulates, which is what it
-costs: the emulator core runs at **~34× realtime** on Pokémon Red and the agent costs **~16%** on
-top, giving **~28×** end to end (measured 2026-08-05 on a Ryzen 9 7900X by `bench_core_throughput`
-and `bench_emulation_throughput` respectively), so wall clock ≈ emulated-minutes ÷ 28.
+costs: the emulator core runs at **~30× realtime** on Pokémon Red and the agent costs **~16%** on
+top, giving **~25×** end to end (measured 2026-08-06 on a Ryzen 9 7900X by `bench_core_throughput`
+and `bench_emulation_throughput` respectively), so wall clock ≈ emulated-minutes ÷ 25.
+
+⚠️ **Do not trust a single benchmark reading on this machine.** It has fast and slow states ~15%
+apart — the same unmodified binary has measured `cpu_instrs` at 43.5× and 53.2× twenty minutes
+apart. Compare only adjacent paired runs of the two builds, **alternate which one runs first**, and
+report both orders. See `docs/compatibility/10-implementation-plan.md` §2.5.
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests. ~22s, 800+ tests.
@@ -200,6 +216,16 @@ Failure artifacts (a save state + screenshot at the point of a stall or timeout)
 
 The `src/roms/` directory contains standard GB test ROMs. These are exercised by unit tests and do not require the pokered submodule.
 
+`cgb-acid2` is the Game Boy Color one, and unlike the blargg audio suites it **ships its own
+reference image**, so nothing in it was promoted from `gb`'s own output. Its README pins the 5-bit
+to 8-bit colour expansion as `(c << 3) | (c >> 2)` — the plain widening, **not** a colour-correction
+curve — which is what `LcdColor::from_rgb555` implements. Adopting gambatte's `gbcToRgb32`
+correction instead would break the comparison.
+
+```bash
+cargo test --release --bin gb -- game_boy::tests::ppu     # dmg-acid2, cgb-acid2, Pokémon Red in colour
+```
+
 ### Audio / resampler tests
 
 `src/audio/blip/tests.rs` checks the resampler two independent ways, and they fail differently.
@@ -251,6 +277,13 @@ within its section and bumping that section's version** — neither churns fixtu
 retype an already-shipped value without bumping the section version: bincode is positional and has
 no schema migration.
 
+Phase B is the worked example of why this format was built. CGB support doubled VRAM, quadrupled
+work RAM and added a whole register block — and cost **zero fixture regeneration**: the `wram` and
+`ppu` sections kept their shipped first value (bank 0, or banks 0 and 1) and **appended** the new
+banks as a second value, and everything genuinely new went into the reserved `cgb` section. If you
+find yourself about to write a legacy struct, check first whether you can re-cut the boundary
+instead.
+
 The **91** committed fixture snapshots live in `src/pokemon/data/*.bin` and are `include_bytes!`'d at
 compile time. `every_committed_fixture_decodes` in the default test tier fails in seconds if a
 layout change breaks them. `pokemon-red.sav` is raw SRAM, not a save state — it is loaded/written at
@@ -271,6 +304,11 @@ runtime by the SDL2 UI.
   died with the sectioned save-state format. The output sample rate is still applied by
   `Audio::set_output_sample_rate` from the UI rather than stored, so a caller that loads a save
   state must re-apply it (see the `F9` handler in `render.rs`).
+- ⚠️ **`PPU::draw_pixels_to` and the three DMA transfer loops are `#[inline(never)]`/`#[cold]` on
+  purpose.** `MMU::update` runs once per CPU instruction, and letting those inline into it grew it
+  60% (3052 → 4893 bytes) and cost several percent of core throughput to instruction-cache pressure
+  alone. If you touch them, check with `nm -S --size-sort -C target/release/deps/gb-*` that
+  `MMU::update` is still around 3 KB.
 - `src/audio/blip/` is a translation of LGPL 2.1+ code (blargg's Blip_Buffer 0.4.0). The original C++
   and its licence live in `tools/blip-golden/vendor/`. The repo has no top-level `LICENSE`; if one is
   ever added, this is the constraint to check.

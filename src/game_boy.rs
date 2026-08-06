@@ -1,5 +1,6 @@
 use crate::core::Core;
 use crate::cycles::MachineCycles;
+use crate::model::Model;
 use crate::savestate::{SectionReader, SectionWriter};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -8,9 +9,22 @@ pub struct GameBoy {
 }
 
 impl GameBoy {
+    /// A Game Boy (DMG). **89 call sites depend on this behaving exactly as it always has** —
+    /// add constructors beside it rather than changing it.
     pub fn dmg(cart: &[u8]) -> Self {
+        Self::new(cart, Model::Dmg)
+    }
+
+    /// A Game Boy Color. A cartridge with CGB header support gets the full colour hardware; a
+    /// DMG-only cartridge — Pokémon Red among them — runs in compatibility mode with the
+    /// boot ROM's title-derived palette. See [`crate::model::ColorMode`].
+    pub fn cgb(cart: &[u8]) -> Self {
+        Self::new(cart, Model::Cgb)
+    }
+
+    pub fn new(cart: &[u8], model: Model) -> Self {
         Self {
-            core: Core::dmg(cart)
+            core: Core::new(cart, model)
         }
     }
 
@@ -184,6 +198,21 @@ mod tests {
 
         a.reset();
         assert_eq!(a, GameBoy::dmg(crate::roms::acid::ROM));
+    }
+
+    /// A1's guarantee has to hold for a CGB too — including re-applying the boot palette, which
+    /// a fresh compatibility-mode machine has and a naively reset one would not.
+    #[test]
+    fn cgb_reset_matches_fresh_construction() {
+        for cart in [crate::roms::cgb_acid::ROM, crate::pokemon::roms::POKERED] {
+            let mut a = GameBoy::cgb(cart);
+            a.run(MachineCycles::from_m(500_000));
+            assert_ne!(a, GameBoy::cgb(cart), "test is vacuous if running changed nothing");
+
+            a.reset();
+            assert_eq!(a, GameBoy::cgb(cart));
+            assert_eq!(a.core().registers().a, 0x11, "and it still reports a CGB");
+        }
     }
 
     /// Battery-backed cartridge RAM does not lose its contents when the console is reset.
@@ -494,6 +523,98 @@ mod tests {
                 gb_test_failed_with_screenshot(result, "ppu", "screenshot does not match");
             }
         }
+
+        /// B10 — Phase B's acceptance test. `cgb-acid2` on a Game Boy Color, against the
+        /// reference image that ships with the ROM (see [`crate::roms::cgb_acid`]).
+        #[test]
+        fn cgb_ppu() {
+            cgb_ppu_test("cgb-acid2", crate::roms::cgb_acid::ROM, crate::roms::cgb_acid::EXPECTED);
+        }
+
+        /// ⭐ B5, the headline deliverable: Pokémon Red is a DMG-only cartridge, so on a Game Boy
+        /// Color the **boot ROM** picks its palette from the title checksum. Booting it through
+        /// [`GameBoy::cgb`] must therefore come out red-tinted rather than grey, and the same ROM
+        /// through [`GameBoy::dmg`] must be untouched.
+        ///
+        /// The palette lookup itself is pinned in `boot_palette::tests`; what this adds is that
+        /// it reaches the screen — the *same picture*, shade for shade, recoloured. Several
+        /// checkpoints through the intro, because a single one can easily land on a fade frame
+        /// that is entirely black or entirely white and prove nothing.
+        #[test]
+        fn pokemon_red_boots_in_colour_on_a_cgb() {
+            use crate::lcd_palette::LcdColor;
+            use crate::model::ColorMode;
+
+            fn ramp(colors: [u16; 4]) -> [image::Rgb<u8>; 4] {
+                colors.map(LcdColor::from_rgb555).map(|c| c.to_rgb())
+            }
+            // Combination 13: BG and OBJ1 from pool palette 4 (red), OBJ0 from palette 3 (green).
+            let background = ramp([0x7FFF, 0x421F, 0x1CF2, 0x0000]);
+            let object0 = ramp([0x7FFF, 0x1BEF, 0x0200, 0x0000]);
+            let shades = [0xFFu8, 0xAA, 0x55, 0x00];
+
+            let mut cgb = GameBoy::cgb(crate::pokemon::roms::POKERED);
+            let mut dmg = GameBoy::dmg(crate::pokemon::roms::POKERED);
+            assert_eq!(cgb.core().mmu().color_mode(), ColorMode::CgbCompat);
+            assert_eq!(dmg.core().mmu().color_mode(), ColorMode::Dmg);
+
+            let mut saw_colour = false;
+            // The copyright screen, the Game Freak logo, and the Nidorino/Gengar intro.
+            for checkpoint in [3_000_000usize, 8_000_000, 12_000_000] {
+                let step = MachineCycles::from_m(checkpoint) - cgb_elapsed(checkpoint);
+                cgb.run(step);
+                dmg.run(step);
+                let colour = cgb.core().mmu().ppu().screenshot();
+                let grey = dmg.core().mmu().ppu().screenshot();
+
+                for (x, y, pixel) in grey.enumerate_pixels() {
+                    // The DMG path is untouched: still exactly gb's four greys.
+                    assert_eq!(pixel.0[0], pixel.0[1], "DMG pixel ({x},{y}) is not grey");
+                    let shade = shades.iter().position(|&s| s == pixel.0[0])
+                        .unwrap_or_else(|| panic!("DMG pixel ({x},{y}) = {pixel:?} is not a gb shade"));
+
+                    // ...and the CGB frame is the same shade, through the background ramp or —
+                    // for a sprite pixel — the object ramp.
+                    let actual = *colour.get_pixel(x, y);
+                    assert!(
+                        actual == background[shade] || actual == object0[shade],
+                        "pixel ({x},{y}) at {checkpoint}M: shade {shade} rendered as {actual:?}, \
+                         expected {:?} (BG) or {:?} (OBJ0)", background[shade], object0[shade]
+                    );
+                    saw_colour |= actual.0[0] != actual.0[1];
+                }
+            }
+            assert!(saw_colour, "test is vacuous unless some CGB frame is actually coloured");
+        }
+
+        /// The checkpoints in [`pokemon_red_boots_in_colour_on_a_cgb`] are absolute, but `run`
+        /// takes a delta; this turns one into the other. `run` overshoots by at most one
+        /// instruction, and both machines execute the same instruction stream, so they stay in
+        /// lockstep.
+        fn cgb_elapsed(checkpoint: usize) -> MachineCycles {
+            const CHECKPOINTS: [usize; 3] = [3_000_000, 8_000_000, 12_000_000];
+            let index = CHECKPOINTS.iter().position(|&c| c == checkpoint).expect("a known checkpoint");
+            MachineCycles::from_m(if index == 0 { 0 } else { CHECKPOINTS[index - 1] })
+        }
+
+        /// The same ROM on a **DMG**, where it is supposed to say so and stop. It is a
+        /// CGB-exclusive cartridge (`0x143 = 0xC0`), and gb must not pretend otherwise: this
+        /// asserts `GameBoy::dmg` still reports a DMG in `A` and does not silently gain colour.
+        #[test]
+        fn cgb_acid2_on_a_dmg_stays_monochrome() {
+            use crate::model::ColorMode;
+
+            let mut gb = GameBoy::dmg(crate::roms::cgb_acid::ROM);
+            gb.run(MachineCycles::from_m(2_000_000));
+
+            assert_eq!(gb.core().mmu().color_mode(), ColorMode::Dmg);
+            let shades: std::collections::HashSet<_> =
+                gb.core().mmu().ppu().screenshot().pixels().copied().collect();
+            assert!(
+                shades.iter().all(|p| p.0[0] == p.0[1] && p.0[1] == p.0[2]),
+                "a DMG must only ever emit greys, got {shades:?}"
+            );
+        }
     }
 
     /// A14: blargg's remaining DMG suites. **All of these are expected to fail** — they exist to
@@ -620,6 +741,23 @@ mod tests {
 
     fn ppu_test(name: &str, cart: &[u8], expected_screenshot: &[u8]) {
         ppu_test_within(name, cart, expected_screenshot, MachineCycles::from_m(20_000_000));
+    }
+
+    /// [`ppu_test`] on a Game Boy Color.
+    fn cgb_ppu_test(name: &str, cart: &[u8], expected_screenshot: &[u8]) {
+        let expected_screenshot = parse_png(expected_screenshot);
+        let mut gb = GameBoy::cgb(cart);
+        let mut cycles = MachineCycles::ZERO;
+        let mut last_screenshot = gb.core().mmu().ppu().screenshot();
+
+        while cycles < MachineCycles::from_m(20_000_000) {
+            cycles += gb.run(MachineCycles::from_m(1000));
+            last_screenshot = gb.core().mmu().ppu().screenshot();
+            if last_screenshot == expected_screenshot {
+                return;
+            }
+        }
+        gb_test_failed_with_screenshot(last_screenshot, name, "screenshot does not match");
     }
 
     /// [`ppu_test`] with an explicit cycle budget, for ROMs that need longer than the default.
