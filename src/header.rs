@@ -33,44 +33,23 @@ pub enum CartType {
 }
 
 impl CartType {
-    /// How many bits of a write to `0x2000..=0x3FFF` reach the ROM-bank register.
+    /// Whether the cartridge carries a real-time clock chip.
     ///
-    /// **This is per-mapper and that is the whole reason D1 is not a one-liner** (see the plan's
-    /// A17). A universal `& 0x1F` — MBC1's width — fails eight tests in the default tier, because
-    /// `pokered.gbc` is MBC3 with 64 banks and needs six.
-    ///
-    /// A `RomOnly` cartridge has no register at all; a mask of zero, combined with
-    /// [`CartType::remaps_rom_bank_zero`], leaves bank 1 permanently in the switchable slot, which
-    /// is what the hardware does.
-    pub fn rom_bank_register_mask(self) -> usize {
-        use CartType::*;
-        match self {
-            RomOnly => 0x00,
-            MBC2 | MBC2Battery => 0x0F,
-            MBC1 | MBC1Ram | MBC1RamBattery | MMM01 | MMM01Ram | MMM01RamBattery => 0x1F,
-            HuC1RamBattery => 0x3F,
-            // MBC5's register is nine bits wide, split across `0x2000-0x2FFF` and
-            // `0x3000-0x3FFF`. Only the low eight are wired today; the ninth is **D6**.
-            MBC5 | MBC5Ram | MBC5RamBattery | MBC5Rumble | MBC5RumbleRam | MBC5RumbleRamBattery => 0xFF,
-            // MBC3 and everything D7 will reject outright.
-            _ => 0x7F,
-        }
+    /// Only two types declare one, and it matters because the clock's registers replace cartridge
+    /// RAM at `0xA000` when `0x08..=0x0C` is selected — so on a cartridge *without* a timer, that
+    /// same selection is an ordinary RAM-bank number and wraps. `pokered.gbc` is `0x13`, which has
+    /// no timer.
+    pub fn has_rtc(self) -> bool {
+        matches!(self, CartType::NBC3TimerBattery | CartType::MBC3TimerRamBattery)
     }
 
-    /// Whether selecting bank 0 in the switchable slot is remapped to bank 1.
+    /// Whether the RAM this cartridge addresses is built into the mapper rather than described by
+    /// header byte `0x149`.
     ///
-    /// Every mapper does this except **MBC5**, where bank 0 is a legal selection and genuinely
-    /// maps bank 0 at `0x4000`.
-    ///
-    /// ⚠️ The remap happens **before** the mask against the banks that exist, not after — which is
-    /// what lets blargg's `dmg_sound.gb` runner reach its terminator: it writes `4` to a four-bank
-    /// cartridge, `4 & 0x1F` is non-zero so nothing is remapped, and `4 & (4 - 1)` selects bank 0.
-    pub fn remaps_rom_bank_zero(self) -> bool {
-        use CartType::*;
-        !matches!(
-            self,
-            MBC5 | MBC5Ram | MBC5RamBattery | MBC5Rumble | MBC5RumbleRam | MBC5RumbleRamBattery
-        )
+    /// MBC2 is the only one: it has 512 nibbles on the chip and declares **zero** banks, so a
+    /// bank has to be allocated for it regardless of what the header says.
+    pub fn has_builtin_ram(self) -> bool {
+        matches!(self, CartType::MBC2 | CartType::MBC2Battery)
     }
 }
 

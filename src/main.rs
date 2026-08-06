@@ -7,6 +7,7 @@ mod roms;
 mod joypad;
 mod interrupt;
 mod header;
+mod mbc;
 mod hdma;
 mod model;
 mod boot_palette;
