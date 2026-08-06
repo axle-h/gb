@@ -4,7 +4,7 @@ A Game Boy (DMG **and CGB**) emulator written in Rust, repurposed as a platform 
 
 The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs and dmg_sound — **including both combined suite ROMs** — instr_timing; dmg-acid2 **and cgb-acid2** PPU tests). It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
 
-**Real MBC support** lives in `src/mbc.rs` — `RomOnly`, MBC1, MBC2, MBC3, MBC5 and HuC1, dispatched from `CartType`, with the MBC3 real-time clock in `src/rtc.rs`. It replaced one hardcoded pseudo-mapper (MBC1's register layout with MBC3's width) that served every cartridge and silently dropped `0x6000-0x7FFF`. Mappers `gb` cannot emulate now fail with a typed `LoadError` rather than running as something else. **Still missing: MBC1 multicart, and the mooneye MBC test ROMs** (`D10` — they are not on this machine). See Phase D of `docs/compatibility/10-implementation-plan.md`.
+**Real MBC support** lives in `src/mbc.rs` — `RomOnly`, MBC1, MBC2, MBC3, MBC5 and HuC1, dispatched from `CartType`, with the MBC3 real-time clock in `src/rtc.rs`. It replaced one hardcoded pseudo-mapper (MBC1's register layout with MBC3's width) that served every cartridge and silently dropped `0x6000-0x7FFF`. Mappers `gb` cannot emulate now fail with a typed `LoadError` rather than running as something else. **27 of mooneye's 28 MBC test ROMs pass** (`--features hwtests`); the one skip is MBC1 multicart, which is not implemented. See Phase D of `docs/compatibility/10-implementation-plan.md`.
 
 ⚠️ **The RTC's time source is injectable and anything replayable must pin it** (`MMU::set_rtc_time_source`) — the default is the host clock, so an RTC cartridge under a fixture-driven test would fail only sometimes. Nothing committed has an RTC: `pokered.gbc` is `0x13`, MBC3 with *no* timer.
 
@@ -184,6 +184,7 @@ goes behind a Cargo feature, so the ignored list stays a readable backlog:
 | `slow-tests` / `very-slow-tests` / `full-playthrough` | Tiering by emulated game time |
 | `diagnostics` | `probe_*`, `dump_fixture_states`, `capture_golden_input` — tools that print a report rather than assert. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal: two legitimately end by exhausting their cycle budget *after* printing what was asked for |
 | `bench` | `bench_core_throughput`, `bench_emulation_throughput` |
+| `hwtests` | The mooneye MBC suite and its ROMs. 22 MB raw, committed lz4-compressed (149 KB) and decompressed in memory by the fixture, so a default build carries none of it |
 
 With every tier feature on and the tool features off, the ignored list is **18 blocked emulator
 tests** and nothing else — 9 `oam_bug` and 9 `mem_timing`/`halt_bug`. (It was 19 until D1 fixed the

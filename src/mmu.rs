@@ -82,6 +82,11 @@ pub struct MMU {
     /// What `0xA000..=0xBFFF` addresses. Derived from `mapper`, refreshed with the rest of the
     /// cache; not serialised, because the mapper it comes from is.
     ram_target: RamTarget,
+    /// The bank at `0x0000..=0x3FFF`. Zero on every mapper but MBC1 in mode 1 — see
+    /// [`Mbc::rom_bank_low`]. Cached as a byte offset so the read path is one add.
+    rom_bank_low_offset: usize,
+    /// MBC2's 512-nibble RAM needs mirroring and masking; see [`Mbc::ram_is_nibble_wide`].
+    ram_is_nibble_wide: bool,
     /// Eight 4 KB banks. A DMG only ever addresses the first two, so `work_ram[..0x2000]` is
     /// exactly the old flat array — see [`MMU::work_ram`].
     work_ram: [u8; WRAM_BANK_SIZE * WRAM_BANKS],
@@ -369,6 +374,8 @@ impl MMU {
             rom_bank_register: 1,
             ram_bank_register: 0,
             ram_target: RamTarget::None,
+            rom_bank_low_offset: 0,
+            ram_is_nibble_wide: false,
             work_ram: [0; WRAM_BANK_SIZE * WRAM_BANKS],
             work_ram_bank: 1,
             high_ram: [0; 0x7F],
@@ -438,6 +445,7 @@ impl MMU {
         self.rom_bank_register = 1;
         self.ram_bank_register = 0;
         self.ram_target = RamTarget::None;
+        self.rom_bank_low_offset = 0;
         self.work_ram = [0; WRAM_BANK_SIZE * WRAM_BANKS];
         self.work_ram_bank = 1;
         self.high_ram = [0; 0x7F];
@@ -496,13 +504,25 @@ impl MMU {
     /// set here is derived — the mapper is the source of truth.
     fn refresh_bank_cache(&mut self) {
         self.rom_bank_register = self.mapper.rom_bank();
+        self.rom_bank_low_offset = self.mapper.rom_bank_low() * ROM_BANK_SIZE;
         self.ram_enabled = self.mapper.ram_enabled();
         self.ram_target = self.mapper.ram_target();
+        self.ram_is_nibble_wide = self.mapper.ram_is_nibble_wide();
         // `ram_bank_register` is what the `cart` save-state section carries, so it only tracks a
         // real bank; an RTC selection leaves it where it was.
         if let RamTarget::Bank(bank) = self.ram_target {
             self.ram_bank_register = bank;
         }
+    }
+
+    /// Where an address in `0xA000..=0xBFFF` lands in the selected cartridge-RAM bank.
+    ///
+    /// ⚠️ MBC2's RAM is **512 bytes mirrored across the whole 8 KB window**, so it needs its own
+    /// wrap; every other mapper's is the flat offset.
+    #[inline]
+    fn cart_ram_offset(&self, address: u16) -> usize {
+        let offset = (address - 0xA000) as usize;
+        if self.ram_is_nibble_wide { offset & 0x1FF } else { offset }
     }
 
     /// The cartridge's real-time clock, if it has one (D5). `None` for Pokémon Red, whose MBC3
@@ -977,7 +997,7 @@ impl ROM for MMU {
     #[inline(always)]
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x3FFF => self.data[address as usize],
+            0x0000..=0x3FFF => self.data[self.rom_bank_low_offset + address as usize],
             0x4000..=0x7FFF => {
                 self.data[self.rom_bank_register * ROM_BANK_SIZE + (address as usize - 0x4000)]
             }
@@ -996,11 +1016,8 @@ impl MMU {
     fn read_uncommon(&self, address: u16) -> u8 {
         // https://gbdev.io/pandocs/Memory_Map.html
         match address {
-            // rom bank 0
-            0x0000..=0x3FFF => {
-                // https://gbdev.io/pandocs/MBC1.html#00003fff--rom-bank-x0-read-only
-                self.data[address as usize]
-            }
+            // The low bank — usually 0, but MBC1 mode 1 slides it. See `Mbc::rom_bank_low`.
+            0x0000..=0x3FFF => self.data[self.rom_bank_low_offset + address as usize],
             // rom bank 1-n
             0x4000..=0x7FFF => {
                 // https://gbdev.io/pandocs/MBC1.html#40007fff--rom-bank-01-7f-read-only
@@ -1011,7 +1028,11 @@ impl MMU {
             0x8000..=0x9FFF => self.ppu.read_vram(address - 0x8000),
             // External RAM — or, on an MBC3 with a timer, the clock registers in its place (D5).
             0xA000..=0xBFFF => match self.ram_target {
-                RamTarget::Bank(bank) => self.ram_banks[bank][(address - 0xA000) as usize],
+                RamTarget::Bank(bank) => {
+                    let value = self.ram_banks[bank][self.cart_ram_offset(address)];
+                    // MBC2 stores half-bytes; the upper nibble is not there to read.
+                    if self.ram_is_nibble_wide { 0xF0 | (value & 0x0F) } else { value }
+                }
                 RamTarget::Rtc(register) => {
                     self.mapper.rtc().map_or(0xFF, |rtc| rtc.read(register))
                 }
@@ -1104,7 +1125,14 @@ impl MMU {
             // vram
             0x8000..=0x9FFF => self.ppu.write_vram(address - 0x8000, value),
             0xA000..=0xBFFF => match self.ram_target {
-                RamTarget::Bank(bank) => self.ram_banks[bank][(address - 0xA000) as usize] = value,
+                RamTarget::Bank(bank) => {
+                    let offset = self.cart_ram_offset(address);
+                    self.ram_banks[bank][offset] = if self.ram_is_nibble_wide {
+                        value & 0x0F
+                    } else {
+                        value
+                    };
+                }
                 RamTarget::Rtc(register) => {
                     if let Some(rtc) = self.mapper.rtc_mut() {
                         rtc.write(register, value);

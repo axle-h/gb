@@ -889,6 +889,96 @@ mod tests {
         );
     }
 
+    /// **D10.** The mooneye MBC suite, from `c-sp/game-boy-test-roms` v7.0 (MIT).
+    ///
+    /// A mooneye test signals its result by sending the Fibonacci bytes `3 5 8 13 21 34` over the
+    /// link port on success, or `0x42` six times on failure. `gb` already captures serial, so —
+    /// as the plan predicted — **no `LD B,B` CPU hook is needed at all**.
+    ///
+    /// The ROMs are committed lz4-compressed; see [`crate::roms::mooneye`].
+    #[cfg(feature = "hwtests")]
+    mod mooneye {
+        use super::*;
+
+        const PASS: [u8; 6] = [3, 5, 8, 13, 21, 34];
+
+        /// Run one ROM and return its verdict, or `Err` with what it did instead.
+        fn run(compressed: &[u8]) -> Result<(), String> {
+            let cart = crate::roms::mooneye::rom(compressed);
+            let mut gb = GameBoy::try_dmg(&cart).map_err(|e| format!("would not load: {e}"))?;
+            gb.core.mmu_mut().serial_mut().enable_buffer();
+
+            let budget = MachineCycles::from_m(25_000_000);
+            let mut cycles = MachineCycles::ZERO;
+            while cycles < budget {
+                cycles += gb.run(MachineCycles::from_m(10_000));
+                let out = gb.core.mmu().serial().buffered_bytes().unwrap_or_default();
+                if out.len() >= PASS.len() {
+                    return if out[..PASS.len()] == PASS {
+                        Ok(())
+                    } else {
+                        Err(format!("reported failure, sent {:?}", &out[..PASS.len()]))
+                    };
+                }
+            }
+            Err("never reported a result".to_string())
+        }
+
+        /// The one ROM `gb` is **not** expected to pass.
+        ///
+        /// MBC1 multicart is a separate mapper variant (gambatte's `Mbc1Multi64`) that reads the
+        /// bank register differently on a cartridge holding several games; the plan makes it
+        /// optional. ⚠️ **Skipping it is stated here rather than silently filtered** — a suite that
+        /// quietly drops a ROM reads as "27 passed" when it means "27 of 28 were run".
+        const SKIPPED: &[&str] = &["mbc1-multicart_rom_8Mb"];
+
+        /// Run every ROM whose name starts with `mapper`, reporting **all** failures at once —
+        /// with 28 ROMs, stopping at the first one hides how much is broken.
+        fn suite(mapper: &str) {
+            let roms: Vec<_> = crate::roms::mooneye::ALL
+                .iter()
+                .filter(|(name, _)| name.starts_with(mapper))
+                .filter(|(name, _)| {
+                    if SKIPPED.contains(name) {
+                        println!("skipping {name}: MBC1 multicart is not implemented");
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            assert!(!roms.is_empty(), "no ROMs matched {mapper}");
+
+            let failures: Vec<String> = roms
+                .iter()
+                .filter_map(|(name, rom)| run(rom).err().map(|why| format!("  {name}: {why}")))
+                .collect();
+
+            assert!(
+                failures.is_empty(),
+                "{}/{} mooneye {mapper} tests failed:\n{}",
+                failures.len(),
+                roms.len(),
+                failures.join("\n")
+            );
+        }
+
+        #[test]
+        fn mbc1() {
+            suite("mbc1");
+        }
+
+        #[test]
+        fn mbc2() {
+            suite("mbc2");
+        }
+
+        #[test]
+        fn mbc5() {
+            suite("mbc5");
+        }
+    }
+
     fn gb_test_failed(gb: &GameBoy, name: &str, reason: &str) {
         let image = gb.core().mmu().ppu().screenshot();
         gb_test_failed_with_screenshot(image, name, reason);
