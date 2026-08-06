@@ -5,6 +5,7 @@ use crate::core::CoreMode;
 use crate::cycles::MachineCycles;
 use crate::divider::Divider;
 use crate::header::CartHeader;
+use crate::mbc::{BankCounts, Mapper, Mbc, RamTarget};
 use crate::hdma::{Hdma, HdmaRequest};
 use crate::interrupt::{InterruptFlags, InterruptFlagsSnapshot, InterruptType};
 use crate::joypad::JoypadRegister;
@@ -70,6 +71,10 @@ pub struct MMU {
     data: Vec<u8>,
     header: CartHeader,
     ram_banks: Vec<[u8; RAM_BANK_SIZE]>,
+    /// **D2.** The cartridge's memory bank controller — the source of truth for the three cached
+    /// fields below, which exist only to keep the mapper off the read path. See
+    /// [`MMU::refresh_bank_cache`].
+    mapper: Mapper,
     ram_enabled: bool,
     rom_bank_register: usize,
     ram_bank_register: usize,
@@ -182,6 +187,9 @@ pub const JOYP_SECTION_VERSION: u16 = 1;
 /// New in C1. Absent from every state written before it, in which case the clock restarts at zero
 /// — which is not observable: nothing depends on the epoch, only on the intervals between events.
 pub const SCHED_SECTION_VERSION: u16 = 1;
+/// New in D2. Absent from every state written before it, in which case the mapper is rebuilt from
+/// the effective bank numbers in the `cart` section — see [`MMU::read_sections`].
+pub const MBC_SECTION_VERSION: u16 = 1;
 
 impl MMU {
     pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
@@ -192,6 +200,10 @@ impl MMU {
             rom_bank_register: self.rom_bank_register,
             ram_bank_register: self.ram_bank_register,
         })?;
+        // **D2.** The mapper's *raw* registers, which the `cart` section cannot carry: it has
+        // always held the effective bank numbers, and an MBC1 mode bit or MBC5 ninth bit does not
+        // survive that projection. New section, so nothing already shipped changes shape.
+        writer.write(labels::MBC, MBC_SECTION_VERSION, &self.mapper)?;
         let mut window = [0u8; WRAM_WINDOW];
         window.copy_from_slice(&self.work_ram[..WRAM_WINDOW]);
         let mut upper = [0u8; WRAM_BANK_SIZE * WRAM_BANKS - WRAM_WINDOW];
@@ -240,6 +252,19 @@ impl MMU {
             self.rom_bank_register = section.rom_bank_register;
             self.ram_bank_register = section.ram_bank_register;
         }
+        // **D2.** Absent from all 91 committed fixtures, and from every state written before this
+        // section existed — in which case the mapper adopts the effective bank numbers the `cart`
+        // section does carry. That is exact for Pokémon Red's MBC3, whose register is its
+        // effective bank; see [`Mapper::restore_effective`].
+        match reader.read::<Mapper>(labels::MBC)? {
+            Some((_version, mapper)) => self.mapper = mapper,
+            None => self.mapper.restore_effective(
+                self.rom_bank_register,
+                self.ram_bank_register,
+                self.ram_enabled,
+            ),
+        }
+        self.refresh_bank_cache();
         if let Some(mut fields) = reader.section(labels::WRAM)? {
             if let Some(window) = fields.field::<[u8; WRAM_WINDOW]>()? {
                 self.work_ram[..WRAM_WINDOW].copy_from_slice(&window);
@@ -310,14 +335,28 @@ impl MMU {
         println!("{:?}", header);
 
         let color_mode = ColorMode::of(model, &header);
-        let ram_banks = Vec::from_iter((0..header.ram_banks()).map(|_| [0; RAM_BANK_SIZE]));
+        // MBC2's 512 nibbles live on the mapper, and its header declares no banks at all — so it
+        // is the one cartridge whose RAM is not described by byte `0x149`. See
+        // [`CartType::has_builtin_ram`].
+        let ram_bank_count = if header.cart_type().has_builtin_ram() {
+            1
+        } else {
+            header.ram_banks()
+        };
+        let ram_banks = Vec::from_iter((0..ram_bank_count).map(|_| [0; RAM_BANK_SIZE]));
+        let data = pad_rom(data);
+        let mapper = Mapper::new(header.cart_type(), BankCounts {
+            rom: (data.len() / ROM_BANK_SIZE).max(2),
+            ram: ram_bank_count,
+        });
         let mut ppu = PPU::default();
         ppu.set_color_mode(color_mode);
 
         let mut mmu = Self {
-            data: pad_rom(data),
+            data,
             header,
             ram_banks,
+            mapper,
             ram_enabled: false,
             rom_bank_register: 1,
             ram_bank_register: 0,
@@ -384,6 +423,8 @@ impl MMU {
     /// match what [`MMU::from_rom`] constructs, or `Core::reset` will not produce a machine equal
     /// to a fresh one.
     pub fn reset(&mut self) {
+        // The mapper powers up with the machine; its RAM does not, and is restored below.
+        self.mapper = Mapper::new(self.header.cart_type(), self.bank_counts());
         self.ram_enabled = false;
         self.rom_bank_register = 1;
         self.ram_bank_register = 0;
@@ -427,36 +468,32 @@ impl MMU {
         self.rom_bank_register
     }
 
-    /// **D1.** Select the ROM bank at `0x4000..=0x7FFF`, the way hardware does: mask the write to
-    /// the mapper's register width, apply the mapper's bank-0 remap, then **wrap** around the banks
-    /// that actually exist.
+    /// Select the ROM bank at `0x4000..=0x7FFF` directly, bypassing the mapper.
     ///
-    /// The three steps are in that order for a reason, and the order is observable — see
-    /// [`CartType::remaps_rom_bank_zero`].
-    ///
-    /// ⚠️ This used to `.min(rom_bank_count() - 1).max(1)`. **Saturating is not a safe
-    /// approximation of wrapping**: it silently aliases every out-of-range bank to the top one, and
-    /// it kept blargg's combined `dmg_sound.gb` running forever because the runner's terminator
-    /// lives in bank 0 and gb handed it bank 3 instead. The final mask is against the *loaded*
-    /// image, never header byte `0x148`, which cartridges are free to lie about — [`pad_rom`]
-    /// guarantees it is a power of two of at least 2, so the mask is always exact.
+    /// This exists for tests and for the Pokémon layer's ROM reads. **The guest never reaches it**
+    /// — a cartridge write goes to [`Mapper::rom_write`], which is where the per-mapper register
+    /// widths and bank-0 rules live (D2). The value is still wrapped, never clamped (D1).
     pub fn set_rom_bank_register(&mut self, value: usize) {
-        let cart_type = self.header.cart_type();
-        let mut bank = value & cart_type.rom_bank_register_mask();
-        if bank == 0 && cart_type.remaps_rom_bank_zero() {
-            bank = 1;
-        }
-        self.rom_bank_register = bank & (self.rom_bank_count() - 1);
+        self.rom_bank_register = value & (self.rom_bank_count() - 1);
     }
 
-    /// Wrap a RAM-bank selection around the banks that exist, as hardware does.
+    /// Adopt whatever the mapper now says the memory map looks like.
     ///
-    /// Every legal value of header byte `0x149` gives a power-of-two bank count (1, 4, 8 or 16), so
-    /// this is a mask in practice; the `%` arm exists only so that D8's "default an unknown size to
-    /// something sensible" cannot turn into an out-of-bounds index here.
-    fn wrap_ram_bank(&self, value: usize) -> usize {
-        let banks = self.ram_banks.len();
-        if banks.is_power_of_two() { value & (banks - 1) } else { value % banks }
+    /// ⚠️ **This cache is why the mapper never sees a read.** `MMU::read` resolves
+    /// `0x4000..=0x7FFF` inline off `rom_bank_register` (C6, and `perf`-critical); routing that
+    /// through a mapper would put a match on the hottest path in the emulator. Writes to
+    /// `0x0000..=0x7FFF` are rare, so refreshing three fields after each one is free. Every field
+    /// set here is derived — the mapper is the source of truth.
+    fn refresh_bank_cache(&mut self) {
+        self.rom_bank_register = self.mapper.rom_bank();
+        self.ram_enabled = self.mapper.ram_enabled();
+        // `ram_bank_register` is only meaningful when RAM is what is mapped; `ram_enabled` is the
+        // flag the read/write paths gate on, so an RTC selection simply leaves the bank alone.
+        match self.mapper.ram_target() {
+            RamTarget::Bank(bank) => self.ram_bank_register = bank,
+            RamTarget::Rtc(_) => self.ram_enabled = false, // D5: no clock behind them yet
+            RamTarget::None => {}
+        }
     }
 
     /// Banks actually backed by data. Derived from the loaded image rather than from header byte
@@ -464,6 +501,12 @@ impl MMU {
     /// to a whole power-of-two number of banks, so this is always exact and at least 2.
     pub fn rom_bank_count(&self) -> usize {
         (self.data.len() / ROM_BANK_SIZE).max(2)
+    }
+
+    /// What the mapper wraps against. Both counts come from what was actually allocated, never
+    /// from the header.
+    fn bank_counts(&self) -> BankCounts {
+        BankCounts { rom: self.rom_bank_count(), ram: self.ram_banks.len() }
     }
 
     pub fn rom_data<L: Into<Option<usize>>>(&self, bank: usize, index: usize, length: L) -> &[u8] {
@@ -940,7 +983,7 @@ impl MMU {
             // vram
             0x8000..=0x9FFF => self.ppu.read_vram(address - 0x8000),
             // external ram
-            0xA000..=0xBFFF if self.ram_enabled && self.header.ram_banks() > 0 => {
+            0xA000..=0xBFFF if self.ram_enabled && !self.ram_banks.is_empty() => {
                 // https://gbdev.io/pandocs/MBC1.html#a000bfff--ram-bank-0003-if-any
                 let ram_bank = &self.ram_banks[self.ram_bank_register];
                 ram_bank[(address - 0xA000) as usize]
@@ -1019,23 +1062,17 @@ impl MMU {
     #[inline(never)]
     fn write_uncommon(&mut self, address: u16, value: u8) {
         match address {
-            0x0000..=0x1FFF => {
-                // https://gbdev.io/pandocs/MBC1.html#00001fff--ram-enable-write-only
-                self.ram_enabled = value & 0xF == 0xA;
-            }
-            0x2000..=0x3FFF if self.rom_bank_count() > 2 => {
-                // https://gbdev.io/pandocs/MBC1.html#20003fff--rom-bank-number-write-only
-                self.set_rom_bank_register(value as usize);
-            }
-            0x4000..=0x5FFF if self.header.ram_banks() > 0 => {
-                // https://gbdev.io/pandocs/MBC1.html#40005fff--ram-bank-number--or--upper-bits-of-rom-bank-number-write-only
-                // D1: wrap, do not clamp. The `& 0x03` is MBC1/MBC3's register width; MBC3's
-                // RTC-register selections (`0x08-0x0C`) are D5.
-                self.ram_bank_register = self.wrap_ram_bank((value & 0x03) as usize);
+            // **D2.** The whole cartridge-register space, decoded by the mapper rather than here.
+            // This used to be three hardcoded arms — MBC1's register layout with MBC3's width —
+            // and `0x6000..=0x7FFF` was silently dropped, so MBC1 mode-select and the MBC3 RTC
+            // latch were both no-ops.
+            0x0000..=0x7FFF => {
+                self.mapper.rom_write(address, value);
+                self.refresh_bank_cache();
             }
             // vram
             0x8000..=0x9FFF => self.ppu.write_vram(address - 0x8000, value),
-            0xA000..=0xBFFF if self.ram_enabled && self.header.ram_banks() > 0 => {
+            0xA000..=0xBFFF if self.ram_enabled && !self.ram_banks.is_empty() => {
                 let ram_bank = &mut self.ram_banks[self.ram_bank_register];
                 ram_bank[(address - 0xA000) as usize] = value;
             }
@@ -1254,8 +1291,13 @@ mod tests {
         assert_eq!(mmu.rom_bank_register, 1);
     }
 
-    /// D1: the register width comes from the mapper. pokered is MBC3 with 64 banks, so it needs
+    /// D1/D2: the register width comes from the mapper. pokered is MBC3 with 64 banks, so it needs
     /// **seven** bits — masking everything to MBC1's five would break the live path.
+    ///
+    /// ⚠️ **D1 asserted bank 0 for the write of 64 here and that was wrong.** D1 applied one
+    /// uniform remap-then-wrap to every mapper, which is MBC1's order; gambatte's MBC3 is
+    /// `max(reg & (n-1), 1)` — wrap **then** remap — so no MBC3 selection can reach bank 0. D2
+    /// gave each mapper its own rule and this expectation moved with it.
     #[test]
     fn the_rom_bank_register_width_is_per_mapper() {
         let mut mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
@@ -1266,12 +1308,11 @@ mod tests {
         mmu.write(0x2000, 0x3F);
         assert_eq!(mmu.rom_bank_register, 0x3F);
 
-        // Seven bits, then wrap: 64 is one past the top bank and comes back round to 0.
+        // Seven bits, then wrap, then the remap: 64 comes round to 0 and is pushed back to 1.
         mmu.write(0x2000, 64);
-        assert_eq!(mmu.rom_bank_register, 0);
+        assert_eq!(mmu.rom_bank_register, 1);
 
-        // Bank 0 in the switchable slot is remapped to 1 — and the eighth bit is not wired, so
-        // `0x80` is a zero selection.
+        // The eighth bit is not wired, so `0x80` is a zero selection too.
         mmu.write(0x2000, 0x00);
         assert_eq!(mmu.rom_bank_register, 1);
         mmu.write(0x2000, 0x80);
@@ -1292,14 +1333,18 @@ mod tests {
         assert_eq!(mmu.read(0x4000), mmu.read(0x0000), "...so the two halves show the same bank");
     }
 
-    /// D1: the RAM-bank register wraps too. `dmg_sound.gb` declares one bank and its runner is
-    /// free to select four.
+    /// D1/D2: the RAM-bank register wraps too. `dmg_sound.gb` is MBC1 and declares one bank, and
+    /// its runner is free to select four.
+    ///
+    /// The `0x6000` write matters: MBC1 only routes its 2-bit register to RAM in **mode 1**, so
+    /// without it this would be selecting ROM bank bits and testing nothing.
     #[test]
     fn an_out_of_range_ram_bank_wraps() {
         let mut mmu = MMU::from_rom(crate::roms::blargg_dmg_sound::ROM).unwrap();
         assert_eq!(mmu.header().ram_banks(), 1);
 
         mmu.write(0x0000, 0x0A); // enable RAM
+        mmu.write(0x6000, 0x01); // mode 1: the 2-bit register is the RAM bank
         for bank in 0..=3 {
             mmu.write(0x4000, bank);
             assert_eq!(mmu.ram_bank_register, 0, "one bank, so every selection is bank 0");

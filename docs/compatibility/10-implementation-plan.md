@@ -405,12 +405,12 @@ control.
 | ID | Task | State | Date | Notes |
 |---|---|---|---|---|
 | D1 | ROM padding + bank masking (prereq for all MBCs) | DONE | 2026-08-06 | `blargg_dmg_sound::all` **passes**, un-`#[ignore]`d. Mask width + bank-0 remap now come from `CartType` |
-| D2 | `trait Mbc` + dispatch on `CartType` | TODO | | |
-| D3 | MBC1 (+ multicart) | TODO | | |
-| D4 | MBC2 | TODO | | |
-| D5 | MBC3 + RTC | TODO | | |
-| D6 | MBC5 | TODO | | |
-| D7 | HuC1 + unsupported-mapper errors | TODO | | |
+| D2 | `trait Mbc` + dispatch on `CartType` | DONE | 2026-08-06 | `src/mbc.rs`. ⚠️ an **enum**, not `Box<dyn Mbc>` — `MMU` needs `Clone`/`PartialEq`/`Encode`/`Decode`. New `mbc` section, zero fixture churn |
+| D3 | MBC1 (+ multicart) | DONE | 2026-08-06 | mode select, bank2→ROM/RAM routing, `0x20` aliasing. **Multicart skipped** — logged, ledger #15 |
+| D4 | MBC2 | DONE | 2026-08-06 | `& 0x6100` decode (A8), built-in RAM bank allocated despite `0x149 = 0` |
+| D5 | MBC3 + RTC | PARTIAL | 2026-08-06 | MBC3 done and it is the **live pokered path**. **RTC not built** — `RamTarget::Rtc` is plumbed, no clock behind it |
+| D6 | MBC5 | DONE | 2026-08-06 | 9-bit register across two ranges; **no bank-0 remap**, the one mapper where that is right |
+| D7 | HuC1 + unsupported-mapper errors | PARTIAL | 2026-08-06 | HuC1 done. **Typed `LoadError` not done** — belongs with D8's `Result<_, LoadError>` refactor |
 | D8 | Header parsing robustness | TODO | | |
 | D9 | Serial + joypad fidelity | TODO | | |
 | D10 | MBC test-ROM adoption (mooneye `emulator-only/`) | TODO | | |
@@ -1681,7 +1681,23 @@ could not pass without per-mapper knowledge, not as a rival abstraction.
 
 ### D2 — `trait Mbc` + dispatch
 
-**State:** TODO · **Depends:** D1, A0
+**State:** DONE (2026-08-06) · **Depends:** D1, A0
+
+**Done, with one deliberate deviation.** `src/mbc.rs` has `trait Mbc` as specified, but storage is
+an **`enum Mapper`, not `Box<dyn Mbc>`** — because `MMU` derives `Clone` and `PartialEq` and the
+save state needs `Encode`/`Decode`, and a trait object supplies none of the four. The enum derives
+all of them and costs no vtable on a path that runs per cartridge write. The trait survives as the
+interface each mapper implements. ⚠️ The serialisation warning in this task was the *reason* to
+deviate, not a step to follow.
+
+**Reads never reach the mapper.** `MMU` caches `rom_bank_register`/`ram_bank_register`/`ram_enabled`
+and refreshes them after each `0x0000..=0x7FFF` write (`MMU::refresh_bank_cache`). Routing reads
+through a mapper would put a match on C6's inlined fast path — the hottest code in the emulator.
+
+**Zero fixture regeneration.** The `cart` section keeps its exact shipped shape; the mapper's raw
+registers go in the reserved `mbc` section, which all 91 fixtures simply lack. A state without it
+rebuilds the mapper from the effective bank numbers `cart` has always carried
+(`Mapper::restore_effective`) — exact for MBC3, whose register *is* its effective bank.
 
 **Do.**
 ```rust
@@ -1702,7 +1718,26 @@ Store `Box<dyn Mbc>` selected from `CartType`. Gambatte decodes uniformly as `sw
 
 ### D3–D7 — The mappers
 
-**Depends:** D2. Port each `romWrite` body from `mem/cartridge.cpp`; the details are tabulated in
+**State:** D3, D4, D6 `DONE`; D5 and D7 `PARTIAL` (2026-08-06). All six live in `src/mbc.rs` and
+landed with D2 — a placeholder mapper reproducing the old behaviour would have been code written
+only to be deleted, and no test could have distinguished it from the status quo.
+
+⚠️ **Three places where gambatte and Pan Docs disagree, and this port follows Pan Docs.** Phase D's
+exit criterion is **mooneye**, which tests hardware rather than gambatte, and gambatte does not
+pass all of it. Each divergence is commented at the site and has a test:
+
+| | gambatte | here (Pan Docs) |
+|---|---|---|
+| MBC1 RAM bank in mode 0 | keeps whatever mode 1 last set | **bank 0** — the mode bit *routes* the register |
+| MBC2 bank-0 selection | no remap at all | **remapped to 1** |
+| HuC1 RAM while "disabled" | readable (the register switches the IR port in, not RAM out) | not readable — [`Mbc::ram_enabled`] is one flag for read and write, a known gap |
+
+**Still open:** D5's **RTC** (`RamTarget::Rtc` is plumbed so the registers cannot alias onto a RAM
+bank, but there is no counter behind them and the latch is a no-op) and D7's **typed
+`LoadError`** (unsupported types still fall back to MBC1's layout, exactly as every cartridge did
+before D2). **MBC1 multicart (`Mbc1Multi64`) is skipped**, as this task permits.
+
+Port notes for whoever finishes them; the details are tabulated in
 [`05-mmu-cartridge.md` §1](05-mmu-cartridge.md#1-mbc-support-matrix).
 
 - **D3 — MBC1** (`cartridge.cpp:91-148`). The `0x20/0x40/0x60` aliasing is
@@ -3207,3 +3242,122 @@ fix it when the dispatch lands, not before, or you will change behaviour with no
 Note also that gambatte decodes uniformly as `p >> 13 & 3` **except MBC2**, which uses
 `p & 0x6100` because it decodes A8 as well (`cartridge.cpp:232`); a uniform `match addr >> 13 & 3`
 across all mappers would silently mis-decode MBC2.
+
+### 2026-08-06 (#15) — D2, D3, D4, D5, D6, D7 — Real MBC support. ⚠️ **D1 shipped a wrong MBC3 bank rule; fixed here**
+
+**State:** **D2, D3, D4, D6 → `DONE`. D5, D7 → `PARTIAL`** (MBC3 yes / RTC no; HuC1 yes / typed
+error no). D8, D9, D10 still `TODO`. All six mappers landed in one change rather than D2-then-D3-7,
+because a placeholder mapper reproducing the old behaviour would have been code written only to be
+deleted, and **no test could have distinguished it from the status quo**.
+
+**⚠️⚠️ Correction to ledger #14 (D1), and it is the most important line in this entry.** D1 applied
+**one uniform remap-then-wrap to every mapper**. That is MBC1's rule. It is **not** MBC3's:
+
+| | resolve | can a wrap reach bank 0? |
+|---|---|---|
+| MBC1 | `adjust(reg) & (n-1)` | **yes** — this is what makes `dmg_sound.gb` terminate |
+| MBC3 | `max(reg & (n-1), 1)` | **no** |
+
+Same two operations, opposite order, different answer — and MBC3 is Pokémon Red's mapper, i.e. the
+live path. D1's own test `the_rom_bank_register_width_is_per_mapper` **asserted the wrong value**
+(bank 0 for a write of 64; gambatte's `setRombank` gives 1) and it is corrected here. No practical
+effect — pokered never selects out of range — but D1 was pushed with it, so anyone bisecting
+between `1710138` and this commit should know. `mbc1_and_mbc3_disagree_about_the_same_write` now
+fails if the two orders are ever collapsed back together.
+
+**Did.**
+
+- **`src/mbc.rs`** — `trait Mbc` (`rom_write` / `rom_bank` / `ram_target` / `ram_enabled`),
+  `enum Mapper` dispatching to `RomOnly`, `Mbc1`, `Mbc2`, `Mbc3`, `Mbc5`, `HuC1`, and `BankCounts`
+  which owns the wrap. 17 unit tests.
+- **`MMU`** — the three hardcoded cartridge-register arms collapse to one `0x0000..=0x7FFF` arm
+  that hands the write to the mapper. `0x6000..=0x7FFF` is no longer dropped, so MBC1 mode-select
+  works. `CartType::rom_bank_register_mask`/`remaps_rom_bank_zero` (D1's stopgap) are **deleted** —
+  absorbed into the mappers exactly as ledger #14 said they should be — and replaced by
+  `has_rtc`/`has_builtin_ram`.
+- **MBC2's RAM is allocated despite the header** (`0x149 = 0`), because its 512 nibbles are on the
+  mapper chip. The RAM guards moved from `header.ram_banks() > 0` to `!self.ram_banks.is_empty()`
+  so they follow what was actually allocated.
+- **Save state:** new `mbc` section holding the raw registers; `cart` keeps its exact shipped
+  shape. **Zero fixture regeneration** — see below.
+
+**Verified.** All on the final tree:
+
+```
+cargo test --release --bin gb -- game_boy::tests::blargg
+  → 27 passed; 0 failed         ← both combined suite ROMs still green
+cargo test --release --bin gb
+  → 993 passed; 0 failed; 114 ignored    (6.13s)
+cargo test --release --features slow-tests --bin gb
+  → 1087 passed; 0 failed; 20 ignored    (50.1s)
+cargo test --release --features full-playthrough --bin gb -- full_playthrough
+  → 1 passed; 0 failed                   (265.5s)
+cargo test --release --features slow-tests,very-slow-tests,full-playthrough --bin gb
+  → 1089 passed; 0 failed; 18 ignored    (285.6s)  ← ignored list unchanged
+git status --porcelain src/pokemon/data/  → empty
+```
+
+**Paired benchmark** (`compare.sh`, 4 rounds, order alternated; baseline = commit `1710138`):
+
+| Workload | Baseline | This change | Δ |
+|---|---|---|---|
+| Pokémon Red | 92.1x | 91.9x | −0.2% (noise) |
+| `dmg-acid2` | 193.1x | 193.0x | −0.04% (noise) |
+| `cpu_instrs` | 55.5x | 54.6x | **−1.6%** |
+
+⚠️ `cpu_instrs` is **lower in all four rounds**, so unlike the 1-3% swings ledger #13 saw it is
+probably real rather than layout. It is the only workload that bank-switches hard (MBC1, four
+banks, the runner walking them), and it now pays a mapper dispatch plus a three-field cache refresh
+per cartridge write. **The live path is flat**, which is the number that mattered.
+
+**Surprises.**
+
+1. ⭐⭐ **See the correction above.** The general lesson: when a plan says "the mask is
+   mapper-specific", check whether the *order of operations* is mapper-specific too. D1 read A17's
+   warning, correctly concluded the width varies, and did not notice that the same sentence's
+   worked example encodes an ordering that only MBC1 uses.
+2. ⭐ **`Box<dyn Mbc>` is the wrong shape here and the plan's own warning says why.** D2 flags that
+   a boxed trait object needs a hand-written `Encode`/`Decode`. It also needs `clone_box` and a
+   snapshot-comparing `PartialEq`, because `MMU` derives `Clone` and `PartialEq`. An `enum Mapper`
+   derives all four, costs no vtable, and loses nothing — the mapper set is closed by hardware.
+   **Deviation logged under §1.3.**
+3. ⭐ **Gambatte is a porting aid, not the acceptance criterion, and they come apart in three
+   places.** Phase D's exit criterion is *mooneye*, which tests hardware; gambatte does not pass
+   all of it. Where they disagree this follows Pan Docs — MBC1's mode-0 RAM bank (gambatte keeps
+   whatever mode 1 set; hardware routes the register, so mode 0 is bank 0), MBC2's bank-0 remap
+   (gambatte has none), HuC1's read-while-disabled (gambatte keeps reads enabled; `Mbc::ram_enabled`
+   is one flag for both directions and cannot express it — a logged gap). Each is commented at the
+   site with a test. **If D10's ROMs contradict any of these, the ROMs win.**
+4. **The mapper must never see a read.** `MMU::read` resolves `0x4000..=0x7FFF` inline off a cached
+   bank number (C6, `perf`-critical). Routing that through a match would put mapper dispatch on the
+   hottest path in the emulator. `refresh_bank_cache` after each cartridge *write* keeps the
+   answers fresh for free — writes there are rare, reads are not.
+5. **Behaviour genuinely changed for two-bank MBC1 cartridges,** and it is correct: the old
+   `0x2000..=0x3FFF if rom_bank_count() > 2` guard meant a 32 KB MBC1 cartridge could never switch,
+   where hardware wraps its register onto the two banks it has and *can* put bank 0 at `0x4000`.
+   `instr_timing.gb` is exactly such a cartridge and still passes.
+
+**Fixtures: zero regeneration, for the third phase running.** The `cart` section kept its shipped
+five values; the raw mapper registers went into the **reserved `mbc` label**, which no committed
+state has. A state without it rebuilds the mapper from the effective bank numbers `cart` has always
+carried (`Mapper::restore_effective`) — exact for MBC3, whose register *is* its effective bank
+below 64. This is the fourth worked example of §2.4's "re-cut the boundary rather than write a
+legacy struct".
+
+**Tree:** committed. `src/sdl/render.rs` is **still dirty and still not this session's change** —
+`GameBoy::dmg` → `GameBoy::cgb`, see ledger #14 surprise 4. Left alone, not committed.
+
+**Next agent:** **D8** (header robustness) is the highest value and is nearly free — two real bugs
+that reject valid cartridges, and it is what unblocks reusing gambatte's own test ROMs. Then **D9**
+(serial/joypad), then **D10**.
+
+⚠️ **D10 is blocked on ROMs that are not on this machine.** mooneye's `emulator-only/mbc*` is not
+in the repo, not in `/home/alex/projects`, and gambatte ships only its own `hwtests`. They need
+downloading from `c-sp/game-boy-test-roms` v7.0 — **ask Alex before fetching anything external.**
+Until they exist, D3-D7 rest on unit tests plus the gambatte/Pan Docs cross-check, and the three
+divergences in surprise 3 are **unadjudicated**. Do not mark Phase D complete while that is true.
+
+**And do the RTC (D5) before D10, not after** — it is the only *missing hardware* left in the phase
+as opposed to robustness work, and the plan's guidance is good: model it as a `base_time` offset
+with an **injectable** time source, never `SystemTime::now()` directly, or every fixture-driven
+test becomes non-deterministic.
