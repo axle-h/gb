@@ -64,11 +64,26 @@ pub trait Mbc {
     /// The bank mapped at `0x4000..=0x7FFF`, already wrapped to a bank that exists.
     fn rom_bank(&self) -> usize;
 
+    /// The bank mapped at **`0x0000..=0x3FFF`**, which is not always 0.
+    ///
+    /// ⚠️ Only MBC1 moves it, and only in mode 1 on a cartridge big enough to use `BANK2` — but
+    /// that is exactly what mooneye's `mbc1/rom_8Mb` and `rom_16Mb` check, and gambatte does not
+    /// model it at all (`DefaultMbc::isAddressWithinAreaRombankCanBeMappedTo` hardcodes bank 0).
+    fn rom_bank_low(&self) -> usize {
+        0
+    }
+
     /// What `0xA000..=0xBFFF` addresses right now.
     fn ram_target(&self) -> RamTarget;
 
     /// Whether the guest has unlocked cartridge RAM by writing `0x?A` to `0x0000..=0x1FFF`.
     fn ram_enabled(&self) -> bool;
+
+    /// Whether cartridge RAM is MBC2's 512 half-bytes rather than ordinary 8-bit banks. The MMU
+    /// mirrors it every 512 bytes and returns the upper nibble as `1`s.
+    fn ram_is_nibble_wide(&self) -> bool {
+        false
+    }
 
     /// Adopt the effective bank/enable state of a save state written before the `mbc` section
     /// existed. See [`Mapper::restore_effective`].
@@ -186,6 +201,14 @@ impl Mbc for Mapper {
         self.as_mbc().rom_bank()
     }
 
+    fn rom_bank_low(&self) -> usize {
+        self.as_mbc().rom_bank_low()
+    }
+
+    fn ram_is_nibble_wide(&self) -> bool {
+        self.as_mbc().ram_is_nibble_wide()
+    }
+
     fn ram_target(&self) -> RamTarget {
         self.as_mbc().ram_target()
     }
@@ -262,29 +285,37 @@ impl Mbc for RomOnly {
     }
 }
 
-/// **D3.** MBC1: a 5-bit ROM-bank register plus a 2-bit register that is *either* the top two ROM
-/// bank bits or the RAM bank, depending on the mode bit at `0x6000..=0x7FFF`.
+/// **D3.** MBC1: a 5-bit `BANK1` register, a 2-bit `BANK2` register, and a mode bit that decides
+/// what `BANK2` is wired to.
+///
+/// ⚠️ **`BANK2` always supplies the top two bits of the bank at `0x4000`.** The mode bit does not
+/// take it away — it only decides whether `BANK2` *additionally* applies to `0x0000..=0x3FFF` and
+/// to the RAM bank:
+///
+/// | | `0x0000-0x3FFF` | `0x4000-0x7FFF` | RAM bank |
+/// |---|---|---|---|
+/// | mode 0 | bank 0 | `BANK2 << 5 \| BANK1` | 0 |
+/// | mode 1 | `BANK2 << 5` | `BANK2 << 5 \| BANK1` | `BANK2` |
+///
+/// ⚠️ **Gambatte models neither the low-bank mapping nor the mode-independence**: its mode-1 path
+/// is `rombank_ = data & 0x1F`, dropping `BANK2` from the high bank, and its `0x0000-0x3FFF` is
+/// always bank 0. Both are invisible below 512 KB and both fail mooneye's `rom_8Mb`/`rom_16Mb`.
+/// This follows Pan Docs, and those two ROMs are the adjudication.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc1 {
     banks: BankCounts,
-    /// The assembled 7-bit bank: low five bits from `0x2000`, bits 5-6 from `0x4000` in mode 0.
-    rom_bank: usize,
-    ram_bank: usize,
+    /// The 5-bit register at `0x2000..=0x3FFF`. Stored raw; the 0-to-1 remap happens on use.
+    bank1: usize,
+    /// The 2-bit register at `0x4000..=0x5FFF`.
+    bank2: usize,
     ram_enabled: bool,
-    /// The `0x6000..=0x7FFF` mode bit. `false` routes the 2-bit register to ROM, `true` to RAM.
+    /// The `0x6000..=0x7FFF` mode bit.
     ram_bank_mode: bool,
 }
 
 impl Mbc1 {
     fn new(banks: BankCounts) -> Self {
-        Self { banks, rom_bank: 1, ram_bank: 0, ram_enabled: false, ram_bank_mode: false }
-    }
-
-    /// ⚠️ **The aliasing tests the low five bits, not the whole register**, so `0x20` becomes
-    /// `0x21` and not `0x01` — the classic MBC1 hole where banks `0x00/0x20/0x40/0x60` are
-    /// unreachable at `0x4000`. Getting this wrong silently swaps a 1 MB cartridge's banks.
-    fn adjusted(bank: usize) -> usize {
-        if bank & 0x1F != 0 { bank } else { bank | 1 }
+        Self { banks, bank1: 1, bank2: 0, ram_enabled: false, ram_bank_mode: false }
     }
 }
 
@@ -292,40 +323,29 @@ impl Mbc for Mbc1 {
     fn rom_write(&mut self, address: u16, value: u8) {
         match region(address) {
             0 => self.ram_enabled = unlocks_ram(value),
-            // In mode 1 the write replaces the whole register; in mode 0 it keeps bits 5-6.
-            1 => {
-                let low = value as usize & 0x1F;
-                self.rom_bank = if self.ram_bank_mode { low } else { (self.rom_bank & 0x60) | low };
-            }
-            2 => {
-                if self.ram_bank_mode {
-                    self.ram_bank = value as usize & 0x03;
-                } else {
-                    self.rom_bank = ((value as usize) << 5 & 0x60) | (self.rom_bank & 0x1F);
-                }
-            }
+            // ⚠️ A zero write becomes 1 — and it is `BANK1` alone that is tested, which is why
+            // banks 0x00/0x20/0x40/0x60 are unreachable at 0x4000 on a large MBC1 cartridge.
+            1 => self.bank1 = (value as usize & 0x1F).max(1),
+            2 => self.bank2 = value as usize & 0x03,
             _ => self.ram_bank_mode = value & 1 != 0,
         }
     }
 
     fn rom_bank(&self) -> usize {
-        // Remap **then** wrap — the order that lets a wrap reach bank 0. See the module docs.
-        self.banks.wrap_rom(Self::adjusted(self.rom_bank))
+        self.banks.wrap_rom(self.bank2 << 5 | self.bank1)
+    }
+
+    fn rom_bank_low(&self) -> usize {
+        // Mode 1 slides the low half of the address space up by BANK2 as well.
+        self.banks.wrap_rom(if self.ram_bank_mode { self.bank2 << 5 } else { 0 })
     }
 
     fn ram_target(&self) -> RamTarget {
         if !self.ram_enabled {
             return RamTarget::None;
         }
-        // The 2-bit register only reaches RAM in mode 1; in mode 0 RAM is stuck on bank 0.
-        //
-        // ⚠️ **Divergence from gambatte, on purpose.** Its `setRambank` uses `rambank_`
-        // regardless of mode and simply never *writes* it outside mode 1, so a cartridge that
-        // selects RAM bank 2 in mode 1 and then returns to mode 0 keeps bank 2 there. On hardware
-        // the mode bit routes the register, so mode 0 is bank 0. Observable only across a mode
-        // switch, which is why it has survived in gambatte; Phase D is scored against mooneye,
-        // which tests the hardware, so this follows Pan Docs.
-        let bank = if self.ram_bank_mode { self.ram_bank } else { 0 };
+        // BANK2 only reaches RAM in mode 1; in mode 0 RAM is stuck on bank 0.
+        let bank = if self.ram_bank_mode { self.bank2 } else { 0 };
         match self.banks.wrap_ram(bank) {
             Some(bank) => RamTarget::Bank(bank),
             None => RamTarget::None,
@@ -337,18 +357,25 @@ impl Mbc for Mbc1 {
     }
 
     fn restore_effective(&mut self, rom_bank: usize, ram_bank: usize, ram_enabled: bool) {
-        self.rom_bank = rom_bank;
-        self.ram_bank = ram_bank;
+        self.bank1 = (rom_bank & 0x1F).max(1);
+        self.bank2 = rom_bank >> 5 & 0x03;
         self.ram_enabled = ram_enabled;
+        let _ = ram_bank; // mode 0 is the restored default, where BANK2 is the RAM bank's source
     }
 }
 
-/// **D4.** MBC2: a 4-bit ROM-bank register and 512 nibbles of built-in RAM.
+/// **D4.** MBC2: a 4-bit ROM-bank register and 512 **nibbles** of RAM built into the mapper.
 ///
-/// ⚠️ **Two things here are unlike every other mapper.** The register select is `address & 0x6100`
-/// — A8 takes part, so `0x2100` selects the bank register while `0x2000` does nothing at all. And
-/// the RAM is on the chip: the header says zero banks, so [`crate::mmu::MMU`] allocates one
-/// regardless, and only the low nibble of each byte is real.
+/// ⚠️ **Two things here are unlike every other mapper.**
+///
+/// 1. **Only A8 decodes the register.** Within `0x0000..=0x3FFF`, A8 clear is the RAM-enable
+///    register and A8 set is the bank register — so `0x2000` enables RAM and `0x0100` selects a
+///    bank, which is the opposite of what the address ranges suggest. Gambatte's `p & 0x6100`
+///    catches only `0x0000` and `0x2100` and does nothing at all for the rest; mooneye's
+///    `mbc2/bits_romb` is the adjudication.
+/// 2. **The RAM is on the chip**: 512 half-bytes, mirrored throughout `0xA000..=0xBFFF`, with the
+///    upper nibble reading as `1`s. The header says zero banks, so [`crate::mmu::MMU`] allocates
+///    one regardless and masks through [`Mbc::ram_is_nibble_wide`].
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc2 {
     banks: BankCounts,
@@ -364,18 +391,18 @@ impl Mbc2 {
 
 impl Mbc for Mbc2 {
     fn rom_write(&mut self, address: u16, value: u8) {
-        match address & 0x6100 {
-            0x0000 => self.ram_enabled = unlocks_ram(value),
-            0x2100 => self.rom_bank = value as usize & 0x0F,
-            _ => {}
+        if address >= 0x4000 {
+            return;
+        }
+        if address & 0x0100 == 0 {
+            self.ram_enabled = unlocks_ram(value);
+        } else {
+            self.rom_bank = value as usize & 0x0F;
         }
     }
 
     fn rom_bank(&self) -> usize {
-        // ⚠️ **Divergence from gambatte, on purpose.** Its MBC2 `setRombank` is a bare
-        // `rombank_ & (rombanks - 1)` with no bank-0 remap at all, so a zero selection maps bank 0
-        // at `0x4000`. Pan Docs is explicit that MBC2 treats 0 as 1, and mooneye's `mbc2` ROMs —
-        // Phase D's exit criterion — test the hardware, not gambatte.
+        // Pan Docs: a zero selection is bank 1. Gambatte has no remap here at all.
         self.banks.wrap_rom(self.rom_bank.max(1))
     }
 
@@ -388,6 +415,10 @@ impl Mbc for Mbc2 {
 
     fn ram_enabled(&self) -> bool {
         self.ram_enabled
+    }
+
+    fn ram_is_nibble_wide(&self) -> bool {
+        true
     }
 
     fn restore_effective(&mut self, rom_bank: usize, _ram_bank: usize, ram_enabled: bool) {

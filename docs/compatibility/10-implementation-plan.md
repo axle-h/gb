@@ -413,7 +413,7 @@ control.
 | D7 | HuC1 + unsupported-mapper errors | DONE | 2026-08-06 | HuC1 + `LoadError::UnsupportedMbc`, landed with D8's error refactor |
 | D8 | Header parsing robustness | DONE | 2026-08-06 | 3 valid-cartridge rejections fixed; `LoadError`; `try_dmg`/`try_cgb`; checksum warning; `println!` gone |
 | D9 | Serial + joypad fidelity | DONE | 2026-08-06 | `SB` shifts progressively (read-side only); joypad IRQ on a **register-line** edge. ⚠️ changed STOP-wake — see ledger #16 |
-| D10 | MBC test-ROM adoption (mooneye `emulator-only/`) | BLOCKED | 2026-08-06 | ⛔ **the ROMs are not on this machine** and need an external download — Alex's call. See ledger #16 |
+| D10 | MBC test-ROM adoption (mooneye `emulator-only/`) | DONE | 2026-08-06 | **27/28 pass**; MBC1 multicart the only skip. Found 3 real bugs — ledger #18 |
 
 ---
 
@@ -1801,13 +1801,20 @@ select one; a third now pins the quirk. DIV alignment was left approximate, as t
 
 ### D10 — MBC test-ROM adoption
 
-**State:** BLOCKED (2026-08-06) · **Depends:** D3–D7
+**State:** DONE (2026-08-06) · **Depends:** D3–D7
 
-⛔ **Blocked on ROMs that are not on this machine.** mooneye's `emulator-only/mbc*` is not in the
-repo, not anywhere under `/home/alex/projects`, and gambatte ships only its own `hwtests`. Fetching
-`c-sp/game-boy-test-roms` v7.0 is an external download and therefore **Alex's call** — ask before
-doing it. Until then the three gambatte/Pan Docs divergences in ledger #15 are **unadjudicated** and
-Phase D must not be called complete.
+**27 of 28 pass.** `game_boy::tests::mooneye::{mbc1,mbc2,mbc5}`, behind the **`hwtests`** feature.
+Only `mbc1/multicart_rom_8Mb` is skipped, which this task permits — and the skip is *printed at
+run time*, not silently filtered.
+
+⭐ **The plan's shortcut was right: no `LD B,B` CPU hook was needed.** mooneye sends the same six
+Fibonacci bytes over the link port and `gb` already captures serial, so the whole harness is "run
+until six bytes arrive, compare against `3 5 8 13 21 34`".
+
+**The ROMs are committed lz4-compressed** (`src/roms/mooneye/*.lz4`, 22 MB → 149 KB) and
+decompressed **in memory** by the test fixture — they are ~99% padding, and 22 MB of someone
+else's test data does not belong in the history. Regenerate with
+`roms::mooneye::tests::compress_mooneye_roms`.
 
 **Do.** Wire mooneye `emulator-only/mbc1` (13), `mbc2` (7), `mbc5` (8) — 28 ROMs, MIT, prebuilt in
 `c-sp/game-boy-test-roms` v7.0.
@@ -3514,3 +3521,80 @@ git status --porcelain src/pokemon/data/                  → empty
 - The remaining *optional* work, in rough value order: MBC1 multicart; Phase C's `OpCode::machine_cycles`
   table and the `draw_pixels_to` sprite second-pass (ledger #13's handoff); C8, whose premise has a
   hole.
+
+### 2026-08-06 (#18) — D10 — mooneye adopted, **27/28 pass**, and it found three real MBC bugs
+
+**State:** **D10 → `DONE`. Phase D is complete.** Alex authorised the download.
+
+**Did.** `c-sp/game-boy-test-roms` v7.0, `mooneye-test-suite/emulator-only/` — 13 mbc1, 7 mbc2, 8
+mbc5. Committed **lz4-compressed** to `src/roms/mooneye/` and decompressed in memory by the test
+fixture; behind the new **`hwtests`** feature so a default build carries none of it. Harness is
+`game_boy::tests::mooneye`, one test per mapper, reporting *all* failures at once.
+
+⭐ **No `LD B,B` hook was needed** — this task's own shortcut note was right. mooneye sends the six
+Fibonacci bytes over the link port and `gb` already captures serial.
+
+**⚠️⚠️ The suite found three real bugs, all of them places where D3/D4 had followed gambatte.**
+This is the entry to read if you are ever tempted to treat gambatte as the specification.
+
+1. ⭐ **MBC1's mode bit does not remove `BANK2` from the high bank.** D3 copied gambatte's mode-1
+   path, `rombank_ = data & 0x1F`, which drops the top two bits. On hardware `BANK2` *always*
+   supplies bits 5-6 of the bank at `0x4000`; the mode only decides whether it **additionally**
+   applies to `0x0000..=0x3FFF` and to the RAM bank. Failed `mbc1/rom_8Mb` and `rom_16Mb`.
+2. ⭐ **`0x0000..=0x3FFF` is not always bank 0.** In mode 1 on a cartridge large enough to use
+   `BANK2`, the low half maps `BANK2 << 5`. **Gambatte does not model this at all** —
+   `DefaultMbc::isAddressWithinAreaRombankCanBeMappedTo` hardcodes `(addr < 0x4000) == (bank == 0)`.
+   Needed a new `Mbc::rom_bank_low` and a cached offset on the MMU read path. Same two ROMs.
+3. ⭐ **MBC2 decodes A8 and nothing else.** Gambatte's `switch (p & 0x6100)` handles only `0x0000`
+   and `0x2100` and silently ignores every other address in the range; on hardware, within
+   `0x0000..=0x3FFF`, **A8 clear is RAM-enable and A8 set is the bank register** — so `0x2000`
+   enables RAM and `0x0100` selects a bank, the opposite of what the address ranges suggest. Plus
+   MBC2's RAM is 512 **nibbles**, mirrored across the 8 KB window, upper nibble reading as `1`s,
+   where D4 modelled a flat 8 KB bank. Failed `mbc2/bits_ramg`, `bits_romb`, `ram`.
+
+**Adjudicating ledger #15's three deliberate divergences**, which was the whole reason this was
+worth doing:
+
+| Divergence | Verdict |
+|---|---|
+| MBC2 bank-0 remap (Pan Docs yes, gambatte no) | ✅ **confirmed correct** by `mbc2/rom_*` |
+| MBC1 mode-0 RAM bank | not covered by this suite — remains a documented judgement call |
+| HuC1 read-while-disabled | not covered — no HuC1 ROMs exist here |
+
+**Verified.**
+
+```
+cargo test --release --features hwtests --bin gb -- game_boy::tests::mooneye
+  → 3 passed; 0 failed        (27 ROMs run, mbc1-multicart_rom_8Mb skipped and said so)
+cargo test --release --bin gb                        → 1018 passed; 0 failed; 114 ignored
+cargo test --release --features hwtests --bin gb     → 1021 passed; 0 failed; 115 ignored
+cargo test --release --bin gb -- game_boy::tests::blargg   → 27 passed; 0 failed
+cargo test --release --features slow-tests --bin gb  → 1112 passed; 0 failed (49.9s)
+cargo test --release --features full-playthrough --bin gb -- full_playthrough
+  → 1 passed; 0 failed (263.0s)
+git status --porcelain src/pokemon/data/             → empty
+```
+
+⚠️ `full_playthrough` matters more than usual here: fixing bug 2 put a **cached low-bank offset on
+`MMU::read`'s inlined fast path**, which every cartridge goes through including Pokémon Red's.
+
+**Surprises.**
+
+4. **MBC5 passed 8/8 on the first run, before any of these fixes.** Its register layout has no
+   modes and no aliasing, which is precisely why it replaced MBC1 on real hardware.
+5. **22 MB of ROMs compress to 149 KB** — `mbc5/rom_64Mb.gb` is 8 MB of mostly-nothing proving that
+   bank 511 is addressable. Committing them raw would have been 15x the rest of this repository's
+   binary data.
+
+**Tree:** committed. `src/sdl/render.rs` remains dirty and is **still not this session's change**
+(ledger #14 surprise 4).
+
+**Next agent:** **Phase D is done.** The only open task in the whole plan is **B11**, which needs
+Alex's call because it can move the fixture chain. Optional work, in rough value order: MBC1
+multicart (`mbc1/multicart_rom_8Mb` is a ready-made acceptance test); Phase C's
+`OpCode::machine_cycles` table and the `draw_pixels_to` sprite second-pass (ledger #13's handoff);
+C8, whose premise has a hole.
+
+⭐ **If you take anything from this entry, take this:** D3-D7 were written by porting gambatte and
+cross-checking Pan Docs, and looked complete. **Three of the six mappers were wrong**, and only the
+hardware test ROMs said so. Wire the test ROMs *before* believing a port.

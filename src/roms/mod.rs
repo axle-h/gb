@@ -148,3 +148,105 @@ pub mod blargg_oam_bug {
     pub const TIMING_EFFECT: &[u8] = include_bytes!("oam_bug/7-timing_effect.gb");
     pub const INSTR_EFFECT: &[u8] = include_bytes!("oam_bug/8-instr_effect.gb");
 }
+
+/// **D10.** The mooneye MBC test ROMs, from `c-sp/game-boy-test-roms` v7.0 (MIT).
+///
+/// ⚠️ **These are stored lz4-compressed and must be decompressed before use** — see
+/// [`mooneye::rom`]. Raw they are 22 MB, which is 15x the rest of this repository's committed
+/// binary data put together, and almost all of it is padding: `mbc5/rom_64Mb.gb` alone is 8 MB of
+/// mostly-nothing testing that bank 511 is addressable. Compressed the whole set is ~90 KB.
+///
+/// Regenerate with [`mooneye::tests::compress_mooneye_roms`] if the upstream set ever changes.
+///
+/// Behind the `hwtests` feature so a default build carries none of it.
+#[cfg(feature = "hwtests")]
+pub mod mooneye {
+    /// Decompress one of the ROMs below into a real cartridge image.
+    pub fn rom(compressed: &[u8]) -> Vec<u8> {
+        lz4_flex::decompress_size_prepended(compressed)
+            .expect("a committed mooneye ROM should decompress")
+    }
+
+    macro_rules! mooneye_roms {
+        ($($konst:ident => $file:literal),* $(,)?) => {
+            $(pub const $konst: &[u8] = include_bytes!(concat!("mooneye/", $file, ".lz4"));)*
+            /// Every ROM with its upstream name, for the harness to iterate.
+            pub const ALL: &[(&str, &[u8])] = &[$(($file, $konst)),*];
+        };
+    }
+
+    mooneye_roms! {
+        MBC1_BITS_BANK1 => "mbc1-bits_bank1",
+        MBC1_BITS_BANK2 => "mbc1-bits_bank2",
+        MBC1_BITS_MODE => "mbc1-bits_mode",
+        MBC1_BITS_RAMG => "mbc1-bits_ramg",
+        MBC1_MULTICART_ROM_8MB => "mbc1-multicart_rom_8Mb",
+        MBC1_RAM_64KB => "mbc1-ram_64kb",
+        MBC1_RAM_256KB => "mbc1-ram_256kb",
+        MBC1_ROM_512KB => "mbc1-rom_512kb",
+        MBC1_ROM_1MB => "mbc1-rom_1Mb",
+        MBC1_ROM_2MB => "mbc1-rom_2Mb",
+        MBC1_ROM_4MB => "mbc1-rom_4Mb",
+        MBC1_ROM_8MB => "mbc1-rom_8Mb",
+        MBC1_ROM_16MB => "mbc1-rom_16Mb",
+        MBC2_BITS_RAMG => "mbc2-bits_ramg",
+        MBC2_BITS_ROMB => "mbc2-bits_romb",
+        MBC2_BITS_UNUSED => "mbc2-bits_unused",
+        MBC2_RAM => "mbc2-ram",
+        MBC2_ROM_512KB => "mbc2-rom_512kb",
+        MBC2_ROM_1MB => "mbc2-rom_1Mb",
+        MBC2_ROM_2MB => "mbc2-rom_2Mb",
+        MBC5_ROM_512KB => "mbc5-rom_512kb",
+        MBC5_ROM_1MB => "mbc5-rom_1Mb",
+        MBC5_ROM_2MB => "mbc5-rom_2Mb",
+        MBC5_ROM_4MB => "mbc5-rom_4Mb",
+        MBC5_ROM_8MB => "mbc5-rom_8Mb",
+        MBC5_ROM_16MB => "mbc5-rom_16Mb",
+        MBC5_ROM_32MB => "mbc5-rom_32Mb",
+        MBC5_ROM_64MB => "mbc5-rom_64Mb",
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// Rebuild `src/roms/mooneye/*.lz4` from an extracted `game-boy-test-roms` release.
+        ///
+        /// ```text
+        /// MOONEYE_SRC=/path/to/mooneye-test-suite/emulator-only \
+        ///   cargo test --release --features hwtests --bin gb -- compress_mooneye_roms --ignored --nocapture
+        /// ```
+        ///
+        /// Same shape as the blip golden-vector regeneration: a tool, not an assertion, so it is
+        /// `#[ignore]`d on top of its feature gate.
+        #[test]
+        #[ignore = "tool: rebuilds the committed mooneye ROMs from an extracted release"]
+        fn compress_mooneye_roms() {
+            let src = std::env::var("MOONEYE_SRC").expect("set MOONEYE_SRC to .../emulator-only");
+            let out = concat!(env!("CARGO_MANIFEST_DIR"), "/src/roms/mooneye");
+            let (mut count, mut raw, mut packed) = (0usize, 0usize, 0usize);
+
+            for mapper in ["mbc1", "mbc2", "mbc5"] {
+                let dir = std::path::Path::new(&src).join(mapper);
+                let mut entries: Vec<_> = std::fs::read_dir(&dir)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|e| e == "gb"))
+                    .collect();
+                entries.sort();
+
+                for path in entries {
+                    let data = std::fs::read(&path).expect("read ROM");
+                    let name = path.file_stem().unwrap().to_string_lossy();
+                    let compressed = lz4_flex::compress_prepend_size(&data);
+                    let target = format!("{out}/{mapper}-{name}.lz4");
+                    std::fs::write(&target, &compressed).expect("write");
+                    println!("{mapper}-{name}: {} -> {} bytes", data.len(), compressed.len());
+                    count += 1;
+                    raw += data.len();
+                    packed += compressed.len();
+                }
+            }
+            println!("\n{count} ROMs: {raw} bytes raw -> {packed} bytes committed");
+        }
+    }
+}
