@@ -2,7 +2,9 @@
 
 A Game Boy (DMG **and CGB**) emulator written in Rust, repurposed as a platform for an LLM agent to play Pokémon Red entirely via text — no images required.
 
-The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs — including the combined ROM — all 12 of dmg_sound, instr_timing; dmg-acid2 **and cgb-acid2** PPU tests). The one exception is the **combined** `dmg_sound.gb`, which needs MBC bank *masking* where gb still *clamps*, so its runner never reaches its terminator; that is task **D1**. It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
+The emulator is accurate enough to pass hardware-compatibility test ROMs (Blargg's cpu_instrs and dmg_sound — **including both combined suite ROMs** — instr_timing; dmg-acid2 **and cgb-acid2** PPU tests). It has full CPU, PPU (graphics), audio, timer, DMA, interrupt, and joypad emulation.
+
+⚠️ **MBC support is still one hardcoded pseudo-mapper**, not a real one per cartridge type: `CartType` is parsed and, apart from the bank-register width and the bank-0 remap that D1 wired up, never dispatched on. `0x6000-0x7FFF` writes are dropped, so MBC1 mode-select and the MBC3 RTC latch are both no-ops. It works because Pokémon Red is MBC3-no-RTC under 128 banks. That is Phase D of `docs/compatibility/10-implementation-plan.md`.
 
 **Game Boy Color is supported** — `GameBoy::cgb(cart)` beside `GameBoy::dmg(cart)`, with VRAM/WRAM
 banking, CGB palette RAM, BG map attributes, OAM-index sprite priority, KEY1 double speed and
@@ -178,10 +180,10 @@ goes behind a Cargo feature, so the ignored list stays a readable backlog:
 | `diagnostics` | `probe_*`, `dump_fixture_states`, `capture_golden_input` — tools that print a report rather than assert. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal: two legitimately end by exhausting their cycle budget *after* printing what was asked for |
 | `bench` | `bench_core_throughput`, `bench_emulation_throughput` |
 
-With every tier feature on and the tool features off, the ignored list is **19 blocked emulator
-tests** and nothing else — 9 `oam_bug`, 9 `mem_timing`/`halt_bug`, and the combined `dmg_sound`
-suite ROM (D1). Each names its blocker: a plan task ID, or why it will not be fixed. Keep it that
-way.
+With every tier feature on and the tool features off, the ignored list is **18 blocked emulator
+tests** and nothing else — 9 `oam_bug` and 9 `mem_timing`/`halt_bug`. (It was 19 until D1 fixed the
+combined `dmg_sound` suite ROM.) Each names its blocker: a plan task ID, or why it will not be
+fixed. Keep it that way.
 
 ```bash
 # The diagnostics and probes

@@ -404,7 +404,7 @@ control.
 
 | ID | Task | State | Date | Notes |
 |---|---|---|---|---|
-| D1 | ROM padding + bank masking (prereq for all MBCs) | TODO | | ⭐ has a **failing acceptance test already**: `blargg_dmg_sound::all`. Mask width is per-mapper — see A17 |
+| D1 | ROM padding + bank masking (prereq for all MBCs) | DONE | 2026-08-06 | `blargg_dmg_sound::all` **passes**, un-`#[ignore]`d. Mask width + bank-0 remap now come from `CartType` |
 | D2 | `trait Mbc` + dispatch on `CartType` | TODO | | |
 | D3 | MBC1 (+ multicart) | TODO | | |
 | D4 | MBC2 | TODO | | |
@@ -1652,11 +1652,30 @@ Pokémon Red is MBC3-no-RTC under 128 banks.
 
 ### D1 — ROM padding and bank masking
 
-**State:** TODO · **Depends:** A5 · **Blocks:** D2–D7
+**State:** DONE (2026-08-06) · **Depends:** A5 · **Blocks:** D2–D7
 
 **Do.** Complete what A5 started: derive bank count from file size, pad with `0xFF`, and **replace
 every `.min()` clamp with `& (n - 1)` masking**. Hardware **wraps**; `gb` saturates
 (`src/mmu.rs:82-84`, `:354`), so an out-of-range bank silently aliases to the top bank.
+
+**Done.** `MMU::set_rom_bank_register` is now three steps in hardware's order — mask to the
+mapper's register width, apply the mapper's bank-0 remap, then wrap against the loaded image:
+
+```rust
+let mut bank = value & cart_type.rom_bank_register_mask();
+if bank == 0 && cart_type.remaps_rom_bank_zero() { bank = 1; }
+self.rom_bank_register = bank & (self.rom_bank_count() - 1);
+```
+
+A17 is right that the width has to come from the mapper, so `CartType::rom_bank_register_mask` and
+`CartType::remaps_rom_bank_zero` (`src/header.rs`) carry it: `0x00` RomOnly, `0x0F` MBC2, `0x1F`
+MBC1/MMM01, `0x3F` HuC1, `0xFF` MBC5, `0x7F` for MBC3 and everything D7 will reject. **MBC5 is the
+only mapper that does not remap bank 0.** The RAM-bank register wraps through
+`MMU::wrap_ram_bank`. ⚠️ **The remap runs *before* the wrap and the order is observable** — that
+is precisely what lets `dmg_sound.gb`'s runner reach bank 0.
+
+These two methods are the seam D2 absorbs into `trait Mbc`; they exist because D1's acceptance test
+could not pass without per-mapper knowledge, not as a rival abstraction.
 
 ---
 
@@ -3106,3 +3125,85 @@ Before you start, read surprises 2, 3 and 4: **three of one session's four "obvi
 were net-negative until the cheap case was special-cased**, and the paired benchmark is the only
 thing that caught it. Also read surprise 9 and use §2.5's protocol — a single reading proves
 nothing on this machine.
+
+### 2026-08-06 (#14) — D1 — Bank registers **wrap** instead of saturating; the last blargg suite ROM passes
+
+**State:** **D1 → `DONE`.** Phase D is open; D2 is next and unblocked. Alex chose Phase D over B11
+and over more Phase C work at the start of this session, so **B11 remains `TODO` and still needs
+his call** — nothing in this entry touches it.
+
+**Did.**
+
+- `CartType::rom_bank_register_mask()` and `CartType::remaps_rom_bank_zero()` (`src/header.rs`) —
+  the minimum per-mapper knowledge D1's acceptance test cannot pass without. `0x00` RomOnly, `0x0F`
+  MBC2, `0x1F` MBC1/MMM01, `0x3F` HuC1, `0xFF` MBC5 (low register only; the ninth bit is D6),
+  `0x7F` MBC3 and everything D7 will reject. MBC5 is the only mapper that does not remap bank 0.
+- `MMU::set_rom_bank_register` (`src/mmu.rs`) is now hardware's three steps in hardware's order:
+  mask to the register width, remap a zero selection, **wrap** with `& (rom_bank_count() - 1)`.
+  The `.min(rom_bank_count() - 1).max(1)` clamp is gone.
+- `MMU::wrap_ram_bank` does the same for the RAM-bank register, replacing
+  `.min(header.ram_banks() - 1)`.
+- `game_boy::tests::blargg_dmg_sound::all` un-`#[ignore]`d — it was D1's pre-written acceptance
+  test and it passes.
+- Four regression tests in `mmu::tests`: `an_out_of_range_rom_bank_wraps` (A17's exact `1,2,3,0`
+  trace), `the_rom_bank_register_width_is_per_mapper`, `mbc5_does_not_remap_bank_zero`,
+  `an_out_of_range_ram_bank_wraps`.
+
+**Verified.** Every command run on the final tree:
+
+```
+cargo test --release --bin gb -- game_boy::tests::blargg
+  → 27 passed; 0 failed; 18 ignored     ← includes blargg_dmg_sound::all AND blargg_cpu::all
+cargo test --release --bin gb
+  → 976 passed; 0 failed; 114 ignored   (6.18s; 975/115 before, the delta is the un-ignored test)
+cargo test --release --features slow-tests --bin gb
+  → 1074 passed; 0 failed; 20 ignored   (53.6s)
+cargo test --release --features full-playthrough --bin gb -- full_playthrough
+  → 1 passed; 0 failed                  (268.4s)
+cargo test --release --features slow-tests,very-slow-tests,full-playthrough --bin gb
+  → 1076 passed; 0 failed; 18 ignored   (301.2s) — 9 oam_bug + 9 mem_timing/halt_bug, nothing else
+git status --porcelain src/pokemon/data/  → empty
+```
+
+**Zero fixture regeneration.** Pokémon Red is MBC3 with 64 banks and never selects out of range, so
+masking and clamping agree on every write it makes; `full_playthrough` confirms the RNG stream did
+not move.
+
+**Surprises.**
+
+1. ⭐ **The bank-0 remap must run *before* the wrap, and the order is observable.** This is the
+   whole fix. `4` written to a four-bank MBC1: `4 & 0x1F` is non-zero so nothing is remapped, then
+   `4 & 3` is bank 0 — where blargg's runner keeps its terminator. Do it in the other order and you
+   get bank 1 and the same infinite loop the clamp caused, just by a different route. A17 quoted
+   gambatte's `adjustedRombank(4) & (4-1)` correctly; it is easy to read past.
+2. **A17's per-mapper warning is real and the widths are not guessable.** Checked all four against
+   `gambatte/libgambatte/src/mem/cartridge.cpp` rather than trusting the plan: MBC1 `data & 0x1F`
+   (`:98`), MBC2 `data & 0xF` (`:236`), HuC1 `data & 0x3F` (`:352`), MBC5 full byte plus a ninth bit
+   from `0x3000-0x3FFF` (`:412-415`). All four match. Gambatte's MBC5 `setRombank` has **no**
+   `adjustedRombank` call, which is the reference for the bank-0 exception.
+3. **`.min()` is not a conservative version of `& (n-1)`.** It reads like a safety clamp and is
+   actually a silent aliasing bug: every out-of-range selection lands on the *top* bank, which is
+   real code, so the guest runs the wrong bank instead of the one it asked for. It cost this
+   project a permanently-hanging test ROM. Nothing else in `src/` still clamps a bank —
+   `work_ram_bank.clamp(1, WRAM_BANKS-1)` on save-state restore is input validation, not a mapper,
+   and the remaining `.min()`s are PPU pixel geometry.
+4. **Not a surprise from the code, but worth recording:** `src/sdl/render.rs` gained a change during
+   this session that this session did not make — `GameBoy::dmg(POKERED)` → `GameBoy::cgb(POKERED)`
+   at `:27`. The tree was clean at session start. Left untouched; it is presumably Alex or the
+   Pokémon agent trying the colour path. **It is not part of D1 and must not be attributed to it.**
+
+**Tree:** dirty, uncommitted (§0.2 — no commits without Alex asking). Modified: `src/header.rs`,
+`src/mmu.rs`, `src/game_boy.rs`, `CLAUDE.md`, this document. Plus `src/sdl/render.rs`, **which is
+not this session's change** — see surprise 4.
+
+**Next agent:** **D2** — `trait Mbc` + dispatch on `CartType` — and read this first: the two
+`CartType` methods D1 added are *the seam D2 should absorb*, not a competing abstraction. Move them
+into the mapper implementations and delete them; they exist only because D1's acceptance test
+needed per-mapper widths before the trait existed. Two things the plan does not say: the `mbc`
+save-state label is already reserved (`src/savestate/mod.rs:101`) and nothing writes it yet, so the
+section is free; and `write_uncommon`'s `0x2000..=0x3FFF if self.rom_bank_count() > 2` guard is
+wrong for MBC5, where selecting bank 0 on a two-bank cartridge is legal and currently dropped —
+fix it when the dispatch lands, not before, or you will change behaviour with no test to catch it.
+Note also that gambatte decodes uniformly as `p >> 13 & 3` **except MBC2**, which uses
+`p & 0x6100` because it decodes A8 as well (`cartridge.cpp:232`); a uniform `match addr >> 13 & 3`
+across all mappers would silently mis-decode MBC2.
