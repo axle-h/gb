@@ -153,14 +153,25 @@ impl SquareWaveChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if !self.envelope_function.dac_enabled() {
-            // DAC off: the channel really is disconnected from the mixer.
-            return 0.0;
+        match self.digital_level() {
+            None => 0.0,
+            Some(level) => dac_sample(level),
         }
-        // DAC on but the channel disabled: hardware holds the level for digital 0, which is *not*
-        // analogue zero. Snapping to 0.0 here put a full-scale step on every note-off. The wave
-        // channel already gets this right (`wave_channel.rs:152-164`).
-        dac_sample(if self.active { self.output } else { 0 })
+    }
+
+    /// The level the DAC sees, or `None` when the DAC is disconnected and the channel really is
+    /// out of the mixer.
+    ///
+    /// C4 compares this either side of an update to decide whether the mix needs recomputing —
+    /// which is why it is a small integer rather than the `f32` the mixer wants. DAC on but the
+    /// channel disabled holds the level for digital 0, which is *not* analogue zero; snapping to
+    /// 0.0 there put a full-scale step on every note-off.
+    #[inline]
+    pub fn digital_level(&self) -> Option<u8> {
+        if !self.envelope_function.dac_enabled() {
+            return None;
+        }
+        Some(if self.active { self.output } else { 0 })
     }
 
     fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
@@ -231,6 +242,15 @@ impl SquareWaveChannel {
             // Period changes (written to NR13 or NR14) only take effect after the current “sample” ends
             self.frequency_timer.set_frequency(self.period);
         }
+    }
+
+    /// M-cycles until this channel's output can next move on its own, or `None` if it is not
+    /// clocking. See [`crate::audio::Audio::next_event`].
+    pub fn next_event(&self) -> Option<u64> {
+        if !self.active || !self.initialised {
+            return None;
+        }
+        Some(self.frequency_timer.machine_cycles_to_next_phase())
     }
 
     fn waveform_bit(&self) -> bool {

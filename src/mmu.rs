@@ -6,15 +6,17 @@ use crate::cycles::MachineCycles;
 use crate::divider::Divider;
 use crate::header::CartHeader;
 use crate::hdma::{Hdma, HdmaRequest};
-use crate::interrupt::{InterruptFlags, InterruptType};
+use crate::interrupt::{InterruptFlags, InterruptFlagsSnapshot, InterruptType};
 use crate::joypad::JoypadRegister;
 use crate::model::{ColorMode, Model};
 use crate::pokemon::symbols::{DmgBank, DmgPointer};
 use crate::ppu::{CGB_SECTION_VERSION, PPU};
 use crate::ram::{RAM, ROM};
 use crate::savestate::{labels, SectionReader, SectionWriter};
-use crate::serial::Serial;
-use crate::timer::Timer;
+use crate::schedule::{Ev, Schedule};
+use crate::serial::{Serial, SerialSnapshot};
+use crate::timer::{Timer, TimerSnapshot};
+use crate::divider::DividerSnapshot;
 
 pub const RAM_BANK_SIZE: usize = 0x2000; // 8KB
 pub const ROM_BANK_SIZE: usize = 0x4000; // 16KB
@@ -108,6 +110,10 @@ pub struct MMU {
     interrupt_request: InterruptFlags,
     joypad_register: JoypadRegister,
     audio: Audio,
+    /// **The absolute clock** (C1). M-cycles since the machine was constructed, counted at the CPU
+    /// rate — so in CGB double speed it advances twice as fast as the video clock, exactly as the
+    /// CPU does. Every `catch_up` in the machine is against this one number.
+    now: u64,
 }
 
 /// Contents of the `cart` save-state section: everything that describes the cartridge and its
@@ -121,20 +127,33 @@ pub struct CartSection {
     pub ram_bank_register: usize,
 }
 
-/// Contents of the `irq` save-state section.
+/// Contents of the `irq` save-state section. Carries the pre-C7 five-boolean shape — see
+/// [`InterruptFlagsSnapshot`] — so changing `InterruptFlags` to a bitmask cost no fixture churn.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct IrqSection {
-    pub interrupt_enable: InterruptFlags,
-    pub interrupt_request: InterruptFlags,
+    pub interrupt_enable: InterruptFlagsSnapshot,
+    pub interrupt_request: InterruptFlagsSnapshot,
 }
 
 /// Contents of the `timer` save-state section: everything clocked off the divider, plus serial,
 /// which shares its clock domain.
+///
+/// C1 gave all three an absolute clock stamp, but this section still carries the **pre-C1 field
+/// list** — the stamp is derived (it is always [`MMU::now`]) and comes back from the `sched`
+/// section instead. That is what let the absolute clock land without regenerating a single one of
+/// the 91 committed fixtures.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct TimerSection {
-    pub divider: Divider,
-    pub timer: Timer,
-    pub serial: Serial,
+    pub divider: DividerSnapshot,
+    pub timer: TimerSnapshot,
+    pub serial: SerialSnapshot,
+}
+
+/// Contents of the `sched` save-state section. Only the clock: the [`Schedule`] itself is a cache
+/// of what the peripherals already say, so it is recomputed on load.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct SchedSection {
+    pub now: u64,
 }
 
 /// Contents of the MMU's half of the `cgb` save-state section — the PPU writes its own fields
@@ -160,6 +179,9 @@ pub const HRAM_SECTION_VERSION: u16 = 1;
 pub const IRQ_SECTION_VERSION: u16 = 2;
 pub const TIMER_SECTION_VERSION: u16 = 1;
 pub const JOYP_SECTION_VERSION: u16 = 1;
+/// New in C1. Absent from every state written before it, in which case the clock restarts at zero
+/// — which is not observable: nothing depends on the epoch, only on the intervals between events.
+pub const SCHED_SECTION_VERSION: u16 = 1;
 
 impl MMU {
     pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
@@ -179,15 +201,16 @@ impl MMU {
             fields.field(&upper) // appended in v2
         })?;
         writer.write(labels::HRAM, HRAM_SECTION_VERSION, &self.high_ram)?;
+        writer.write(labels::SCHED, SCHED_SECTION_VERSION, &SchedSection { now: self.now })?;
         writer.write(labels::TIMER, TIMER_SECTION_VERSION, &TimerSection {
-            divider: self.divider,
-            timer: self.timer.clone(),
-            serial: self.serial.clone(),
+            divider: self.divider.snapshot(self.now),
+            timer: self.timer.snapshot(self.now),
+            serial: self.serial.snapshot(self.now),
         })?;
         writer.write_fields(labels::IRQ, IRQ_SECTION_VERSION, |fields| {
             fields.field(&IrqSection {
-                interrupt_enable: self.interrupt_enable,
-                interrupt_request: self.interrupt_request,
+                interrupt_enable: self.interrupt_enable.snapshot(),
+                interrupt_request: self.interrupt_request.snapshot(),
             })?;
             fields.field(&self.interrupt_enable_upper) // appended in v2
         })?;
@@ -229,15 +252,20 @@ impl MMU {
         if let Some((_version, high_ram)) = reader.read::<[u8; 0x7F]>(labels::HRAM)? {
             self.high_ram = high_ram;
         }
+        // Read before the `timer` section, which restores its stamps against it.
+        self.now = match reader.read::<SchedSection>(labels::SCHED)? {
+            Some((_version, section)) => section.now,
+            None => 0, // pre-C1 state: restart the epoch, which nothing observes
+        };
         if let Some((_version, section)) = reader.read::<TimerSection>(labels::TIMER)? {
-            self.divider = section.divider;
-            self.timer = section.timer;
-            self.serial = section.serial;
+            self.divider.restore(section.divider, self.now);
+            self.timer.restore(section.timer, self.now);
+            self.serial.restore(section.serial, self.now);
         }
         if let Some(mut fields) = reader.section(labels::IRQ)? {
             if let Some(section) = fields.field::<IrqSection>()? {
-                self.interrupt_enable = section.interrupt_enable;
-                self.interrupt_request = section.interrupt_request;
+                self.interrupt_enable = InterruptFlags::from_snapshot(section.interrupt_enable);
+                self.interrupt_request = InterruptFlags::from_snapshot(section.interrupt_request);
             }
             // Absent in v1 payloads, which is not an error — see src/savestate/mod.rs.
             if let Some(upper) = fields.field::<u8>()? {
@@ -314,6 +342,7 @@ impl MMU {
             divider: Divider::default(),
             timer: Timer::default(),
             audio: Audio::default(),
+            now: 0,
         };
         mmu.apply_boot_state();
         Ok(mmu)
@@ -378,6 +407,9 @@ impl MMU {
         self.interrupt_request = InterruptFlags::default();
         self.joypad_register = JoypadRegister::default();
         self.audio = Audio::default();
+        // The clock restarts with the machine. Every peripheral stamp was just reset to zero with
+        // it, so leaving `now` where it was would put them all in the future.
+        self.now = 0;
         // `data`, `header` and `ram_banks` are deliberately untouched: the cartridge does not
         // leave the slot, and its RAM is battery-backed.
         self.apply_boot_state();
@@ -556,13 +588,13 @@ impl MMU {
     }
 
     pub fn stop(&mut self) {
-        self.divider.disable();
-        self.timer.disable();
+        self.divider.disable(self.now);
+        self.timer.disable(self.now);
     }
 
     pub fn restart(&mut self) {
-        self.divider.enable();
-        self.timer.enable();
+        self.divider.enable(self.now);
+        self.timer.enable(self.now);
     }
 
     /// A `STOP` on a CGB with `KEY1` bit 0 set switches the CPU between 4 MHz and 8 MHz instead of
@@ -728,16 +760,17 @@ impl MMU {
         // hangs off DIV, stays at 512 Hz in real time exactly as hardware does. The carry bit
         // makes the halving exact rather than rounding every odd cycle away.
         let video_cycles = if self.double_speed {
-            let total = delta_machine_cycles.m_cycles() + usize::from(self.double_speed_carry);
+            let total = delta_machine_cycles.m_cycles() + u64::from(self.double_speed_carry);
             self.double_speed_carry = total % 2 == 1;
             MachineCycles::from_m(total / 2)
         } else {
             delta_machine_cycles
         };
 
-        self.serial.update(delta_machine_cycles, self.serial_fast);
-        let div_clocks = self.divider.update(delta_machine_cycles);
-        self.timer.update(delta_machine_cycles);
+        self.now += delta_machine_cycles.m_cycles();
+        self.serial.catch_up(self.now, self.serial_fast);
+        let div_clocks = self.divider.catch_up(self.now);
+        self.timer.catch_up(self.now);
         self.ppu.update(video_cycles);
         if self.ppu.consume_hblank_started() && self.hdma.is_active() {
             self.run_hblank_dma();
@@ -759,13 +792,65 @@ impl MMU {
         }
     }
 
-    pub fn interrupt_pending(&self) -> Option<InterruptType> {
-        for interrupt in InterruptType::all() {
-            if self.interrupt_enable.is_set(interrupt) && self.interrupt_request.is_set(interrupt) {
-                return Some(interrupt);
-            }
+    /// The absolute clock — m-cycles at the CPU rate since construction. See [`MMU::now`].
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
+    /// When each peripheral next does something observable, in absolute m-cycles on [`MMU::now`].
+    ///
+    /// **Built on demand rather than maintained.** The eager form — resyncing the schedule from
+    /// each peripheral inside [`MMU::update`] — was measured at **−6% throughput** across all
+    /// three A9 workloads, which is the whole of C1's budget spent on a cache nothing reads yet.
+    /// Maintenance only pays once the run loop queries the schedule more often than the
+    /// peripherals move it; today the one caller is C2's HALT skip, once per idle span.
+    ///
+    /// ⚠️ **This is a promise the HALT fast-path relies on.** Anything that can raise an interrupt,
+    /// or that a later step could observe, must appear here or [`crate::core::Core::skip_halt`]
+    /// will jump straight over it. See each arm below for why it is a complete list.
+    pub fn schedule(&self) -> Schedule {
+        let mut sched = Schedule::default();
+        sched.set(Ev::Timer, self.timer.next_event());
+        sched.set(Ev::Divider, self.divider.next_event());
+        sched.set(Ev::Serial, self.serial.next_event(self.serial_fast));
+        // The PPU and APU run off the video clock, which is half the CPU clock in double speed.
+        if let Some(video) = self.ppu.next_event() {
+            sched.set(Ev::Video, self.now + self.cpu_cycles_from_video(video));
         }
-        None
+        if let Some(apu) = self.audio.next_event() {
+            sched.set(Ev::Apu, self.now + self.cpu_cycles_from_video(apu));
+        }
+        // Host input arrives between `run` slices, so a joypad activation raised before the slice
+        // would otherwise wait out a whole idle span before being consumed. Making it due *now*
+        // drops the skip back to a single cycle, which is what the pre-C2 driver did.
+        if self.joypad_register.is_activation_pending() {
+            sched.set(Ev::Interrupt, self.now);
+        }
+        // [`Ev::OamDma`] is deliberately absent. A transfer in flight copies more bytes per call
+        // when the window is longer, but the only thing that reads OAM is the PPU's mode-2 scan —
+        // which is a mode transition, so [`Ev::Video`] already bounds the skip short of it. HDMA
+        // is the same story: it is paced by the mode 3 → 0 edge.
+        sched
+    }
+
+    /// How many CPU M-cycles it takes the video clock to advance by `video_cycles`.
+    ///
+    /// In double speed [`MMU::update`] hands the video hardware `(delta + carry) / 2`, so the
+    /// exact answer is `2v - carry` — **not** `2v`, which would land a cycle *late* whenever the
+    /// carry is set and let a HALT skip step over the very event it was bounded by.
+    fn cpu_cycles_from_video(&self, video_cycles: u64) -> u64 {
+        if self.double_speed {
+            video_cycles * 2 - u64::from(self.double_speed_carry)
+        } else {
+            video_cycles
+        }
+    }
+
+    /// C7: one `and` and a `trailing_zeros`, where this used to be a five-iteration scan run once
+    /// per CPU instruction from [`crate::core::Core::interrupt`].
+    #[inline]
+    pub fn interrupt_pending(&self) -> Option<InterruptType> {
+        self.interrupt_request.highest_priority(self.interrupt_enable)
     }
 
     pub fn clear_interrupt_request(&mut self, interrupt: InterruptType) {
@@ -777,18 +862,14 @@ impl MMU {
             return None;
         }
 
-        // check if enabled interrupts in order of priority
-        for interrupt in InterruptType::all() {
-            if core_mode == CoreMode::Stop && interrupt != InterruptType::Joypad {
-                continue; // In STOP mode, only JOYPAD interrupts are checked
-            }
-
-            if self.interrupt_enable.is_set(interrupt) && self.interrupt_request.is_set(interrupt) {
-                self.interrupt_request.clear_interrupt(interrupt);
-                return Some(interrupt);
-            }
+        // In STOP mode only the joypad is checked; otherwise, highest priority wins.
+        let mut enabled = self.interrupt_enable;
+        if core_mode == CoreMode::Stop {
+            enabled.set(enabled.get() & InterruptType::Joypad.mask());
         }
-        None
+        let interrupt = self.interrupt_request.highest_priority(enabled)?;
+        self.interrupt_request.clear_interrupt(interrupt);
+        Some(interrupt)
     }
 }
 
@@ -905,12 +986,12 @@ impl RAM for MMU {
                 if self.model.is_cgb() {
                     self.serial_fast = value & 0x02 != 0;
                 }
-                self.serial.set_control(value);
+                self.serial.set_control(value, self.now);
             }
             0xFF04 => self.divider.reset(), // DIV register (reset on write)
             0xFF05 => self.timer.set_value(value), // TIMA register
             0xFF06 => self.timer.set_modulo(value), // TMA register
-            0xFF07 => self.timer.set_control(value), // TAC register
+            0xFF07 => self.timer.set_control(value, self.now), // TAC register
             0xFF0F => self.interrupt_request.set(value), // IF register (interrupt request flags)
             0xFF10..=0xFF3F => self.audio.write(address, value),
             0xFF40 => self.ppu.lcd_control_mut().set(value), // LCD control register
@@ -1421,7 +1502,7 @@ mod tests {
         /// B9. `SC` bit 1 selects the CGB's 32x shift clock, and only exists there.
         #[test]
         fn serial_runs_32x_faster_when_asked() {
-            fn transfer_cycles(mut mmu: MMU, control: u8) -> usize {
+            fn transfer_cycles(mut mmu: MMU, control: u8) -> u64 {
                 mmu.serial_mut().enable_buffer();
                 mmu.write(0xFF01, 0x42);
                 mmu.write(0xFF02, control);

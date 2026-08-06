@@ -43,8 +43,14 @@ impl GameBoy {
     pub fn run(&mut self, min_cycles: MachineCycles) -> MachineCycles {
         let mut cycles = MachineCycles::ZERO;
         while cycles < min_cycles {
-            let opcode = self.core.fetch();
-            cycles += self.core.execute(opcode);
+            // C2: HALT is 65% of the M-cycles a real game emulates. Stepping it one virtual `Nop`
+            // at a time is what made it cost full price — see [`Core::skip_halt`].
+            if self.core.mode() == crate::core::CoreMode::Halt {
+                cycles += self.core.skip_halt(min_cycles - cycles);
+            } else {
+                let opcode = self.core.fetch();
+                cycles += self.core.execute(opcode);
+            }
         }
         cycles
     }
@@ -145,7 +151,14 @@ mod tests {
         /// One frame: 154 scanlines x 456 T-cycles.
         const FRAME: MachineCycles = MachineCycles::from_t(70_224);
         const WARM_UP_FRAMES: usize = 60;
-        const MEASURED_FRAMES: usize = 600;
+
+        // Two knobs, for `perf` rather than for the benchmark itself. 600 frames is 10 s of game
+        // time, which at present speeds is ~0.1 s of wall clock — far too short to sample. And a
+        // profile of all three workloads at once is a profile of none of them.
+        //   BENCH_FRAMES=60000 BENCH_ONLY=pokemon perf record -F 999 -g -- <binary> …
+        let measured_frames: usize = std::env::var("BENCH_FRAMES")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        let only = std::env::var("BENCH_ONLY").unwrap_or_default();
 
         fn pokemon_in_game() -> GameBoy {
             let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data/at-celadon.bin");
@@ -167,6 +180,9 @@ mod tests {
         println!("{}", "-".repeat(66));
 
         for (name, build) in &workloads {
+            if !only.is_empty() && !name.contains(&only) {
+                continue;
+            }
             let mut gb = build();
             for _ in 0..WARM_UP_FRAMES {
                 gb.run(FRAME);
@@ -174,7 +190,7 @@ mod tests {
 
             let start = Instant::now();
             let mut cycles = MachineCycles::ZERO;
-            for _ in 0..MEASURED_FRAMES {
+            for _ in 0..measured_frames {
                 cycles += gb.run(FRAME);
             }
             let elapsed = start.elapsed();
@@ -182,11 +198,68 @@ mod tests {
             let t_cycles_per_sec = cycles.t_cycles() as f64 / elapsed.as_secs_f64();
             let realtime = t_cycles_per_sec / MachineCycles::CPU_FREQ as f64;
             println!(
-                "{name:<24} {realtime:>11.1}x {:>16.0} {MEASURED_FRAMES:>10}",
+                "{name:<24} {realtime:>11.1}x {:>16.0} {measured_frames:>10}",
                 t_cycles_per_sec
             );
         }
         println!();
+    }
+
+    /// ⭐ **C2's correctness test, and the one that matters.** The HALT fast-path sleeps through
+    /// whole idle spans in a single [`MMU::update`]; this proves the machine it wakes up in is
+    /// bit-identical to the one that stepped every M-cycle of that span individually.
+    ///
+    /// The framebuffer is compared as well as the state, because [`PartialEq`] deliberately
+    /// excludes it (see the note on `PPU`) — and rendering is exactly where a skip that jumped an
+    /// event would show up first.
+    ///
+    /// It only means anything if the workload actually HALTs, so the ROMs here are a real game and
+    /// a PPU test that both idle heavily, and the assertion below fails if HALT is not reached.
+    #[test]
+    fn the_halt_fast_path_matches_stepping_cycle_by_cycle() {
+        /// One frame: 154 scanlines x 456 T-cycles.
+        const FRAME: MachineCycles = MachineCycles::from_t(70_224);
+        const FRAMES: usize = 120;
+
+        /// The pre-C2 run loop, verbatim: fetch and execute, HALT included.
+        fn run_stepped(gb: &mut GameBoy, min_cycles: MachineCycles) {
+            let mut cycles = MachineCycles::ZERO;
+            while cycles < min_cycles {
+                let opcode = gb.core_mut().fetch();
+                cycles += gb.core_mut().execute(opcode);
+            }
+        }
+
+        let pokemon = || {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data/at-celadon.bin");
+            let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+            gb.load_state(&std::fs::read(path).expect("fixture")).expect("load fixture");
+            gb
+        };
+        let workloads: Vec<(&str, Box<dyn Fn() -> GameBoy>)> = vec![
+            ("pokemon-red", Box::new(pokemon)),
+            ("dmg-acid2", Box::new(|| GameBoy::dmg(crate::roms::acid::ROM))),
+            // A CGB too: the skip converts the PPU and APU deadlines out of the video clock, and
+            // that conversion only exists because a CGB can halve it.
+            ("cgb-acid2", Box::new(|| GameBoy::cgb(crate::roms::cgb_acid::ROM))),
+            ("pokemon-red (cgb compat)", Box::new(|| GameBoy::cgb(crate::pokemon::roms::POKERED))),
+        ];
+
+        for (name, build) in &workloads {
+            let (mut fast, mut slow) = (build(), build());
+            let mut halted = false;
+            for _ in 0..FRAMES {
+                fast.run(FRAME);
+                run_stepped(&mut slow, FRAME);
+                halted |= slow.core().mode() == crate::core::CoreMode::Halt;
+                assert_eq!(fast, slow, "{name}: machine state diverged");
+                assert!(
+                    fast.core().mmu().ppu().lcd() == slow.core().mmu().ppu().lcd(),
+                    "{name}: framebuffer diverged",
+                );
+            }
+            assert!(halted, "{name} never HALTs, so it proves nothing about the fast path");
+        }
     }
 
     /// A1: `reset()` used to be `todo!()`, so any caller panicked.
@@ -560,7 +633,7 @@ mod tests {
 
             let mut saw_colour = false;
             // The copyright screen, the Game Freak logo, and the Nidorino/Gengar intro.
-            for checkpoint in [3_000_000usize, 8_000_000, 12_000_000] {
+            for checkpoint in [3_000_000u64, 8_000_000, 12_000_000] {
                 let step = MachineCycles::from_m(checkpoint) - cgb_elapsed(checkpoint);
                 cgb.run(step);
                 dmg.run(step);
@@ -591,8 +664,8 @@ mod tests {
         /// takes a delta; this turns one into the other. `run` overshoots by at most one
         /// instruction, and both machines execute the same instruction stream, so they stay in
         /// lockstep.
-        fn cgb_elapsed(checkpoint: usize) -> MachineCycles {
-            const CHECKPOINTS: [usize; 3] = [3_000_000, 8_000_000, 12_000_000];
+        fn cgb_elapsed(checkpoint: u64) -> MachineCycles {
+            const CHECKPOINTS: [u64; 3] = [3_000_000, 8_000_000, 12_000_000];
             let index = CHECKPOINTS.iter().position(|&c| c == checkpoint).expect("a known checkpoint");
             MachineCycles::from_m(if index == 0 { 0 } else { CHECKPOINTS[index - 1] })
         }

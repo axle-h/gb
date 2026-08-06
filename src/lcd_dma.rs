@@ -39,7 +39,7 @@ impl LcdDma {
 
         state.cycles += delta_machine_cycles;
         // One byte per M-cycle, capped at the 160 the transfer copies.
-        let target = state.cycles.m_cycles().min(OAM_BYTES);
+        let target = (state.cycles.m_cycles() as usize).min(OAM_BYTES);
         let from = state.pos as usize;
         if target <= from {
             return None;

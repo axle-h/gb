@@ -218,18 +218,26 @@ impl WaveChannel {
     }
 
     pub fn output_f32(&self) -> f32 {
-        if !self.dac_enabled || self.volume_register == 0 {
-            return 0.0;
+        match self.digital_level() {
+            None => 0.0,
+            Some(level) => dac_sample(level),
         }
+    }
 
+    /// See [`crate::audio::square_channel::SquareWaveChannel::digital_level`]. Note the **phase
+    /// parity** in here: a wave-RAM byte holds two nibbles, so advancing the phase changes the
+    /// output even when `sample_buffer` has not moved.
+    #[inline]
+    pub fn digital_level(&self) -> Option<u8> {
+        if !self.dac_enabled || self.volume_register == 0 {
+            return None;
+        }
         let sample_byte = self.sample_buffer >> (self.volume_register - 1);
-        let sample = if self.frequency_timer.phase() & 0x1 == 0 {
+        Some(if self.frequency_timer.phase() & 0x1 == 0 {
             sample_byte >> 4
         } else {
             sample_byte & 0xF
-        };
-
-        dac_sample(sample)
+        })
     }
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer, access_offset: u16) {
@@ -283,6 +291,15 @@ impl WaveChannel {
         }
     }
 
+    /// M-cycles until this channel's output can next move on its own. See
+    /// [`crate::audio::Audio::next_event`].
+    pub fn next_event(&self) -> Option<u64> {
+        if !self.active {
+            return None;
+        }
+        Some(self.frequency_timer.machine_cycles_to_next_phase())
+    }
+
     fn current_sample_byte(&self) -> u8 {
         self.wave_ram[(self.frequency_timer.phase() >> 1) as usize]
     }
@@ -325,7 +342,7 @@ mod tests {
         channel
     }
 
-    fn advance(channel: &mut WaveChannel, m_cycles: usize) {
+    fn advance(channel: &mut WaveChannel, m_cycles: u64) {
         channel.update(MachineCycles::from_m(m_cycles), FrameSequencerEvent::empty());
     }
 

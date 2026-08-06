@@ -574,7 +574,7 @@ pub enum OpCode {
 }
 
 impl OpCode {
-    pub fn machine_cycles(&self, condition_met: bool) -> usize {
+    pub fn machine_cycles(&self, condition_met: bool) -> u64 {
         match self {
             OpCode::Illegal { .. } => 1,
             OpCode::Nop => 1,
