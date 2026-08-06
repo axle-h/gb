@@ -421,18 +421,17 @@ mod tests {
         use super::*;
 
         /// The whole suite in one run, off the combined 64 KB ROM — so unlike the twelve
-        /// sub-tests below, this one exercises MBC bank switching, and that is what it fails on.
+        /// sub-tests below, this one exercises MBC bank switching. **It is D1's acceptance test.**
         ///
         /// Blargg's runner selects each sub-test by writing its index to the bank register. On the
         /// fourth write hardware *masks* `4` down to bank 0, where the runner's terminator lives;
-        /// gb *clamps* it to 3 and re-runs bank 3's test forever, printing `NN:ok` past 12 and on
-        /// past 99. Applying the mask makes this pass — but the mask width is per-mapper (MBC1 is
-        /// 5 bits, pokered's MBC3 needs 6), so the fix is **D1**, not a one-liner here.
+        /// gb used to *clamp* it to 3 and re-run bank 3's test forever, printing `NN:ok` past 12
+        /// and on past 99. D1 gave [`crate::mmu::MMU::set_rom_bank_register`] the per-mapper mask
+        /// (this cartridge is MBC1, five bits; pokered's MBC3 needs seven) and this went green.
         ///
-        /// The reference is gambatte's own frame and is correct, so this goes green the day D1
-        /// lands. The budget is ~50 s of emulated time, which is what the ROM needs to finish.
+        /// The reference is gambatte's own frame. The budget is ~50 s of emulated time, which is
+        /// what the ROM needs to finish.
         #[test]
-        #[ignore = "D1: needs hardware's per-mapper bank mask; gb clamps, so the runner never reaches its terminator"]
         fn all() {
             ppu_test_within("audio-all", ROM, EXPECTED_ALL, MachineCycles::from_m(60_000_000));
         }

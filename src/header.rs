@@ -32,6 +32,48 @@ pub enum CartType {
     HuC1RamBattery = 0xFF,
 }
 
+impl CartType {
+    /// How many bits of a write to `0x2000..=0x3FFF` reach the ROM-bank register.
+    ///
+    /// **This is per-mapper and that is the whole reason D1 is not a one-liner** (see the plan's
+    /// A17). A universal `& 0x1F` — MBC1's width — fails eight tests in the default tier, because
+    /// `pokered.gbc` is MBC3 with 64 banks and needs six.
+    ///
+    /// A `RomOnly` cartridge has no register at all; a mask of zero, combined with
+    /// [`CartType::remaps_rom_bank_zero`], leaves bank 1 permanently in the switchable slot, which
+    /// is what the hardware does.
+    pub fn rom_bank_register_mask(self) -> usize {
+        use CartType::*;
+        match self {
+            RomOnly => 0x00,
+            MBC2 | MBC2Battery => 0x0F,
+            MBC1 | MBC1Ram | MBC1RamBattery | MMM01 | MMM01Ram | MMM01RamBattery => 0x1F,
+            HuC1RamBattery => 0x3F,
+            // MBC5's register is nine bits wide, split across `0x2000-0x2FFF` and
+            // `0x3000-0x3FFF`. Only the low eight are wired today; the ninth is **D6**.
+            MBC5 | MBC5Ram | MBC5RamBattery | MBC5Rumble | MBC5RumbleRam | MBC5RumbleRamBattery => 0xFF,
+            // MBC3 and everything D7 will reject outright.
+            _ => 0x7F,
+        }
+    }
+
+    /// Whether selecting bank 0 in the switchable slot is remapped to bank 1.
+    ///
+    /// Every mapper does this except **MBC5**, where bank 0 is a legal selection and genuinely
+    /// maps bank 0 at `0x4000`.
+    ///
+    /// ⚠️ The remap happens **before** the mask against the banks that exist, not after — which is
+    /// what lets blargg's `dmg_sound.gb` runner reach its terminator: it writes `4` to a four-bank
+    /// cartridge, `4 & 0x1F` is non-zero so nothing is remapped, and `4 & (4 - 1)` selects bank 0.
+    pub fn remaps_rom_bank_zero(self) -> bool {
+        use CartType::*;
+        !matches!(
+            self,
+            MBC5 | MBC5Ram | MBC5RamBattery | MBC5Rumble | MBC5RumbleRam | MBC5RumbleRamBattery
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode)]
 pub enum CGBMode {
     None,

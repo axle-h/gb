@@ -427,14 +427,36 @@ impl MMU {
         self.rom_bank_register
     }
 
+    /// **D1.** Select the ROM bank at `0x4000..=0x7FFF`, the way hardware does: mask the write to
+    /// the mapper's register width, apply the mapper's bank-0 remap, then **wrap** around the banks
+    /// that actually exist.
+    ///
+    /// The three steps are in that order for a reason, and the order is observable — see
+    /// [`CartType::remaps_rom_bank_zero`].
+    ///
+    /// ⚠️ This used to `.min(rom_bank_count() - 1).max(1)`. **Saturating is not a safe
+    /// approximation of wrapping**: it silently aliases every out-of-range bank to the top one, and
+    /// it kept blargg's combined `dmg_sound.gb` running forever because the runner's terminator
+    /// lives in bank 0 and gb handed it bank 3 instead. The final mask is against the *loaded*
+    /// image, never header byte `0x148`, which cartridges are free to lie about — [`pad_rom`]
+    /// guarantees it is a power of two of at least 2, so the mask is always exact.
     pub fn set_rom_bank_register(&mut self, value: usize) {
-        // TODO MBC1 should mask to 0x1F
-        // Clamp against the ROM actually loaded, not against header byte 0x148 — a cartridge that
-        // claims more banks than its file contains would otherwise index past the buffer and
-        // panic on the first high-bank read. D1 replaces this clamp with hardware's wrapping mask.
-        self.rom_bank_register = (value & 0x7F)
-            .min(self.rom_bank_count() - 1)
-            .max(1);
+        let cart_type = self.header.cart_type();
+        let mut bank = value & cart_type.rom_bank_register_mask();
+        if bank == 0 && cart_type.remaps_rom_bank_zero() {
+            bank = 1;
+        }
+        self.rom_bank_register = bank & (self.rom_bank_count() - 1);
+    }
+
+    /// Wrap a RAM-bank selection around the banks that exist, as hardware does.
+    ///
+    /// Every legal value of header byte `0x149` gives a power-of-two bank count (1, 4, 8 or 16), so
+    /// this is a mask in practice; the `%` arm exists only so that D8's "default an unknown size to
+    /// something sensible" cannot turn into an out-of-bounds index here.
+    fn wrap_ram_bank(&self, value: usize) -> usize {
+        let banks = self.ram_banks.len();
+        if banks.is_power_of_two() { value & (banks - 1) } else { value % banks }
     }
 
     /// Banks actually backed by data. Derived from the loaded image rather than from header byte
@@ -1007,7 +1029,9 @@ impl MMU {
             }
             0x4000..=0x5FFF if self.header.ram_banks() > 0 => {
                 // https://gbdev.io/pandocs/MBC1.html#40005fff--ram-bank-number--or--upper-bits-of-rom-bank-number-write-only
-                self.ram_bank_register = ((value & 0x03) as usize).min(self.header.ram_banks() - 1);
+                // D1: wrap, do not clamp. The `& 0x03` is MBC1/MBC3's register width; MBC3's
+                // RTC-register selections (`0x08-0x0C`) are D5.
+                self.ram_bank_register = self.wrap_ram_bank((value & 0x03) as usize);
             }
             // vram
             0x8000..=0x9FFF => self.ppu.write_vram(address - 0x8000, value),
@@ -1203,6 +1227,85 @@ mod tests {
 
         // Real data is untouched.
         assert_eq!(mmu.read(0x0100), full[0x0100]);
+    }
+
+    /// D1: an out-of-range bank **wraps**, it does not saturate.
+    ///
+    /// This is the trace from the plan's A17, which root-caused the combined `dmg_sound.gb` hang:
+    /// blargg's runner walks its sub-tests by writing the index to the bank register, and on a
+    /// four-bank cartridge the fourth write has to land on bank 0, where the terminator lives.
+    #[test]
+    fn an_out_of_range_rom_bank_wraps() {
+        // MBC1, 64 KB, four banks — blargg's combined audio suite.
+        let mut mmu = MMU::from_rom(crate::roms::blargg_dmg_sound::ROM).unwrap();
+        assert_eq!(mmu.header().cart_type(), crate::header::CartType::MBC1RamBattery);
+        assert_eq!(mmu.rom_bank_count(), 4);
+
+        for (write, expected) in [(1, 1), (2, 2), (3, 3), (4, 0)] {
+            mmu.write(0x2000, write);
+            assert_eq!(mmu.rom_bank_register, expected, "write of {write} to a four-bank cartridge");
+        }
+
+        // Five bits reach the register, so anything above them is simply not there: `0x21` is
+        // bank 1, and `0x20` is a zero selection and therefore remapped to 1 as well.
+        mmu.write(0x2000, 0x21);
+        assert_eq!(mmu.rom_bank_register, 1);
+        mmu.write(0x2000, 0x20);
+        assert_eq!(mmu.rom_bank_register, 1);
+    }
+
+    /// D1: the register width comes from the mapper. pokered is MBC3 with 64 banks, so it needs
+    /// **seven** bits — masking everything to MBC1's five would break the live path.
+    #[test]
+    fn the_rom_bank_register_width_is_per_mapper() {
+        let mut mmu = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+        assert_eq!(mmu.header().cart_type(), crate::header::CartType::MBC3RamBattery);
+        assert_eq!(mmu.rom_bank_count(), 64);
+
+        // A bank MBC1's five-bit register could not hold at all.
+        mmu.write(0x2000, 0x3F);
+        assert_eq!(mmu.rom_bank_register, 0x3F);
+
+        // Seven bits, then wrap: 64 is one past the top bank and comes back round to 0.
+        mmu.write(0x2000, 64);
+        assert_eq!(mmu.rom_bank_register, 0);
+
+        // Bank 0 in the switchable slot is remapped to 1 — and the eighth bit is not wired, so
+        // `0x80` is a zero selection.
+        mmu.write(0x2000, 0x00);
+        assert_eq!(mmu.rom_bank_register, 1);
+        mmu.write(0x2000, 0x80);
+        assert_eq!(mmu.rom_bank_register, 1);
+    }
+
+    /// D1: **MBC5 is the exception** — bank 0 is a legal selection there and is not remapped.
+    /// No MBC5 cartridge is committed, so this re-badges one: only header byte `0x147` decides.
+    #[test]
+    fn mbc5_does_not_remap_bank_zero() {
+        let mut rom = crate::pokemon::roms::POKERED.to_vec();
+        rom[0x147] = 0x19; // MBC5
+        let mut mmu = MMU::from_rom(&rom).unwrap();
+        assert_eq!(mmu.header().cart_type(), crate::header::CartType::MBC5);
+
+        mmu.write(0x2000, 0x00);
+        assert_eq!(mmu.rom_bank_register, 0, "MBC5 maps bank 0 at 0x4000");
+        assert_eq!(mmu.read(0x4000), mmu.read(0x0000), "...so the two halves show the same bank");
+    }
+
+    /// D1: the RAM-bank register wraps too. `dmg_sound.gb` declares one bank and its runner is
+    /// free to select four.
+    #[test]
+    fn an_out_of_range_ram_bank_wraps() {
+        let mut mmu = MMU::from_rom(crate::roms::blargg_dmg_sound::ROM).unwrap();
+        assert_eq!(mmu.header().ram_banks(), 1);
+
+        mmu.write(0x0000, 0x0A); // enable RAM
+        for bank in 0..=3 {
+            mmu.write(0x4000, bank);
+            assert_eq!(mmu.ram_bank_register, 0, "one bank, so every selection is bank 0");
+            mmu.write(0xA000, bank); // must not panic
+        }
+        assert_eq!(mmu.read(0xA000), 3, "every selection aliased to the one bank that exists");
     }
 
     /// Phase B. `cgb_acid::ROM` has `0x143 = 0xC0` (CGB exclusive) so it gets the full register
