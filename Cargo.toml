@@ -4,17 +4,29 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["sdl"]
+default = ["sdl", "web"]
 # The SDL2 desktop UI (`src/sdl/`): window, audio device, keyboard. On by default, so a plain
 # `cargo build` is exactly what it always was. Off, the binary drops `libsdl2` and `fontdue`
 # entirely — which is the point: a server-only container should not need a native SDL2 to link
 # against, and `gb serve` never opens a window.
 #   cargo build --release --no-default-features
 sdl = ["dep:sdl2", "dep:fontdue"]
-# Types that leave the process as JSON: the observation facade in `src/pokemon/observe.rs`, and
-# everything the web UI and the LLM tool layer are built on from W1 onward. `serde` is optional
-# because nothing in the emulator or the agent needs it — only the things that talk to the outside.
-web = ["dep:serde", "dep:serde_json"]
+# Everything that leaves the process: the observation facade in `src/pokemon/observe.rs` serialised
+# as JSON, the headless emulator host (`src/host.rs`) and the axum server (`src/web/`). `serde` and
+# the server stack are optional because nothing in the emulator or the agent needs them — only the
+# things that talk to the outside.
+#
+# `tokio` is here for `axum` and for the sync→async bridge only: the emulator and (from W4) the LLM
+# worker are plain `std::thread`s and neither is ever inside a runtime.
+#
+# ⚠️ **On by default since W1**, which W0 deliberately did not do. The reason W0 gave — ~200 crates
+# nothing compiles against and no test exercises — expired the moment `src/host.rs` and `src/web/`
+# landed: the video codec, the late-joiner ordering and the host's publishing are all default-tier
+# tests, and behind an opt-in feature a plain `cargo test --release` would silently skip every one of
+# them. The cost is 57 extra crates on a build that already pulls 119. A server-only build still
+# drops SDL entirely:
+#   cargo build --release --no-default-features --features web
+web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64"]
 # The Pokémon integration tests are tiered by how much game time they emulate. The emulator runs at
 # ~23x realtime, so game time is the cost: a plain `cargo test --release` stays under a minute by
 # running only the mechanic tests and two navigation smoke tests.
@@ -74,6 +86,15 @@ rand = "0.10.0-rc.0"
 phf = { version = "0.13.1", features = ["macros"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
+# The HTTP server only. `rt-multi-thread` because axum's serve wants a reactor; the emulator thread
+# is spawned with `std::thread` and never enters it.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "signal"], optional = true }
+# `BroadcastStream` — the sync→async bridge in stream form, and the only thing that surfaces
+# `Lagged` so a viewer that fell out of the video ring buffer can be re-synced from a keyframe
+# instead of silently keeping a stale screen.
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+axum = { version = "0.8", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [build-dependencies]
 regex = "1.12.2"

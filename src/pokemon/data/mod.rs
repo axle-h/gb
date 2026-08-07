@@ -4,6 +4,15 @@ use rand::{rng, SeedableRng};
 
 static POKEMON_NAMES_CSV: &str = include_str!("pokemon-names.csv");
 
+/// A save state at the very start of the game — `RedsHouse2F`, no Pokémon, before Oak's script.
+///
+/// This is the fixture [`crate::pokemon::integration_tests`]' `full_playthrough` plays from, and it
+/// is also where `gb serve` starts a run: a fresh boot lands on the title screen, which no policy
+/// can get past, so the harness would have nothing to show. **W7 replaces this with a run directory**
+/// — a resumed checkpoint, or a fresh game when there is none. Until then, every `gb serve` starts
+/// in the same bedroom.
+pub const START_OF_GAME: &[u8] = include_bytes!("start-of-game-state.bin");
+
 /// Picks Pokémon names one at a time in a random order, with no repeats until
 /// every name has been picked (then it reshuffles and starts over).
 #[derive(Debug, Clone)]

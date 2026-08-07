@@ -3,9 +3,10 @@
 An `LlmPolicy` that delegates every decision to an LLM over an OpenAI-compatible API, and a
 browser UI — served from the same process — that lets anyone with the URL watch it play.
 
-**Status:** **W0 complete** (2026-08-07) — the seams in the core are in, `full_playthrough` is green
-with them. W1 onward is unbuilt. Each W0 task below carries what actually shipped, including three
-places the plan was wrong.
+**Status:** **W0–W2 complete** (2026-08-07). The seams are in, `gb serve --policy random` plays the
+game headlessly and streams it to a browser over SSE, and a dev page renders it. W3 onward is
+unbuilt. Each completed task below carries what actually shipped, including the places the plan was
+wrong.
 
 ---
 
@@ -152,18 +153,26 @@ the later phases depend on.
 
 ```toml
 [features]
-default = ["sdl"]
+default = ["sdl", "web"]                                     # ← `web` joined the default in W1
 sdl  = ["dep:sdl2", "dep:fontdue"]
-web  = ["dep:serde", "dep:serde_json"]          # ← shipped; grows in W1
-# W1 adds: tokio, axum, tower-http, rust-embed, base64 to `web`, and
+web  = ["dep:serde", "dep:serde_json",
+        "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64"]
+# W3 adds: rust-embed, tower-http. W4 adds:
 llm  = ["web", "dep:ureq"]
 ```
 
-**`web` shipped with only `serde`/`serde_json`.** The server crates are declared where they are
-first used, in W1 — adding `tokio`, `axum`, `tower-http`, `rust-embed` and `base64` in W0 would have
-been ~200 crates that nothing compiles against and no acceptance test could exercise. What W0 needed
-from `web` was the `Serialize` derives on [W0.5](#w05--the-observation-facade-done)'s views, and that
-is what it has.
+**`web` shipped in W0 with only `serde`/`serde_json`.** The server crates were declared where they
+were first used, in W1 — adding `tokio`, `axum` and the rest in W0 would have been ~200 crates that
+nothing compiles against and no acceptance test could exercise. What W0 needed from `web` was the
+`Serialize` derives on [W0.5](#w05--the-observation-facade-done)'s views.
+
+**W1 then put `web` in `default`**, which W0 deliberately did not do. That reason expired the moment
+`src/host.rs` and `src/web/` landed: the video codec, the late-joiner ordering and the host's
+publishing are all default-tier tests, and behind an opt-in feature a plain `cargo test --release`
+would silently skip every one of them — which is precisely how `full_playthrough` rotted once
+already. The measured cost is **57 extra crates** on a build that already pulls 119, and a
+server-only build still drops SDL entirely (`--no-default-features --features web`). Reverting is a
+one-word change if it ever stops being worth it.
 
 `tokio` is needed only for `axum` and for the `broadcast`/`watch` bridge types (§2.2) — the emulator
 and the LLM worker are plain `std::thread`s and neither is ever inside a runtime. `ureq` is a
@@ -198,12 +207,12 @@ gb --help                   → usage, exit 0
 
 Lives in `src/cli.rs` so `parse` is unit-testable without spawning a process; `main` is dispatch and
 exit codes only. Every rejection prints the specific complaint followed by the full usage, and exits
-non-zero. `gb serve` parses today and then reports that the server lands in W1 — the seam is real,
-the other half is not pretended.
+non-zero.
 
 Keyed on **`sdl`**, not `llm`: without the feature there is no UI to run, so a bare `gb` says so and
-prints usage. That is the same behaviour the plan asked for and it does not depend on a feature that
-does not exist yet.
+prints usage. `gb serve` is keyed on `web` the same way. **W1 filled the command in** — it now
+starts the server; `--policy llm` reports that it arrives with W4 rather than starting a server that
+would sit at a decision point forever with nothing to answer it.
 
 ### W0.3 — `Policy::on_event` ✅ **done**
 
@@ -390,9 +399,9 @@ harness — the options pin, the stall detector, the cycle budget.
 
 ---
 
-## 4. Phase W1 — Headless host + server skeleton
+## 4. Phase W1 — Headless host + server skeleton ✅ **done**
 
-### W1.1 — `src/host.rs`
+### W1.1 — `src/host.rs` ✅ **done**
 
 Lift the pacing loop out of `render.rs` into an `EmulatorHost` that owns `GameBoy`, `PokemonAgent`
 and `MapMetadataCache` and runs on its own thread. The pacing algorithm transplants unchanged:
@@ -403,18 +412,62 @@ accumulate wall-clock into `since_last_update`, drain it in `cycle_duration` ste
 tangled into the same event pump, and untangling them buys nothing. The duplication is ~30 lines and
 the SDL path stays exactly as it is today.
 
-### W1.2 — Server skeleton
+**Shipped detail.**
 
-`src/web/mod.rs` with axum on `0.0.0.0:$GB_PORT` (default 8080), a placeholder index page,
-`/api/healthz`, and `/api/events` SSE emitting the 10 Hz status snapshot. `gb serve --policy random`
-plays the game and streams status; nothing is rendered yet.
+- **`tick()` is public and `run()` is a loop around it.** The loop is otherwise untestable — a test
+  would be racing a thread — and the two host tests drive `tick` directly instead.
+- **`EmulatorHost::spawn` takes a policy *factory*, `Box<dyn FnOnce() -> Box<dyn Policy> + Send>`,
+  not a policy.** `Policy` is not declared `Send`, and `PokemonAgent` holds a `Box<dyn Policy>`, so
+  a built host cannot cross a thread boundary. Adding `Send` to the trait would constrain every
+  implementation for one call site; building the policy on the thread that will own it costs one
+  closure. Construction still reports on the *calling* thread through a one-shot channel, so a
+  starting state that will not load is a clean error before anything is listening.
+- **Two things `render.rs` does not do, both needed by a process meant to run for hours.**
+  `IDLE_SLEEP` is 1 ms rather than `sleep(0)`, so an idle server does not spin a core; and
+  `MAX_CATCHUP` caps one iteration's make-up at 250 ms, so a container throttled for a few seconds
+  comes back and carries on rather than emulating the backlog flat out — which on a livestream looks
+  exactly like the game fast-forwarding for no reason.
+- **The host starts from `pokemon::data::START_OF_GAME`** (`start-of-game-state.bin`, the fixture
+  `full_playthrough` plays from — `mod data` became `pub mod data` for it). A fresh boot lands on the
+  title screen and no policy can get past that, so the harness would have nothing to show. **W7
+  replaces this with a run directory.** The state is a DMG save, so the host builds a DMG `GameBoy`
+  to match.
+- **Status is `Option`al by design.** `game_state()` can legitimately fail mid-transition; a
+  heartbeat that says "no game state" is far easier to diagnose than one that stops arriving.
 
-**Acceptance:** `gb serve --policy random`, then `curl -N localhost:8080/api/events` shows status
-frames ticking with a changing map/position.
+### W1.2 — Server skeleton ✅ **done**
+
+`src/web/mod.rs` with axum on `0.0.0.0:<port>`, an index page, `/api/healthz`, and `/api/events` SSE
+emitting the 10 Hz status snapshot plus `AgentEvent`s as they happen.
+
+`src/web/published.rs` holds the buffers, and it is the **whole** interface between the two sides:
+the web layer can reach `Published` and nothing else, which is what makes §1.1's "strictly view-only"
+structural rather than a matter of not exposing a POST route. There is no channel back into the
+emulator to expose.
+
+**Two deviations from §2.2, both deliberate.**
+
+1. **No `watch<Status>`.** Status rides the `UiEvent` broadcast as `UiEventBody::Status`. A second
+   channel exists only to hand a joiner the current value instantly, and at 10 Hz the wait it saves
+   is under 100 ms. W6, where `Status` becomes a real enum with transitions worth latching, is where
+   to revisit it — building it now would be unused machinery.
+2. **`GB_PORT` is not read yet.** `--port` is the only source. The env vars in §7.1 land as a block
+   in W4 with the rest of the config; one of them read early would be the odd one out.
+
+`tokio-stream` joined the dependency list. `BroadcastStream` is the sync→async bridge in stream form
+and, more to the point, the only thing that surfaces `Lagged` — see W2.
+
+**Acceptance — met.** `gb serve --policy random --port 8099`, then `curl -N
+localhost:8099/api/events` shows status frames ticking with the map changing (`RedsHouse2F` →
+`RedsHouse1F`) and `emulated_ms` tracking `wall_ms` at 1.0×. `the_host_publishes_a_moving_game_state`
+asserts the same thing without a socket.
 
 ---
 
-## 5. Phase W2 — Video pipeline
+## 5. Phase W2 — Video pipeline ✅ **done**
+
+`src/web/video.rs`. The wire format below shipped as specified with **one correction**, marked ⚠️
+under §5.1 — the original palette rule quietly desynchronised every late joiner.
 
 ### 5.1 Wire format
 
@@ -437,44 +490,115 @@ u16  block_count
 ```
 
 - **Mode 0 (RLE):** `[u8 run_len (1..=64)][u8 palette_index]` pairs until 64 pixels are covered.
-  Game Boy 8×8 blocks are extremely run-friendly.
-- **Mode 1 (raw):** 64 palette indices. The encoder picks whichever is smaller per block.
+- **Mode 1 (raw):** 64 palette indices.
+- **Mode 2 (packed) — added during W2, not in the original spec:** a 4-entry sub-palette of global
+  indices in first-appearance order, then 2 bits per pixel into it, low bits first. A flat 20 bytes.
+  The encoder picks whichever of the three is smallest per block.
 - **Palette exhaustion:** if a frame would push past 256 entries, the encoder emits a keyframe with a
   fresh palette instead. Pokémon Red in CGB-compat mode uses a few dozen colours on screen; this is
   a safety valve, not a normal path.
 - **RGB888, not RGB565.** DMG's greys are `FF/AA/55/00`; `0xAA` does not survive a round trip through
   5-bit. The palette is small enough that the extra byte per entry is free.
 
-Base64 the whole thing into one SSE `data:` line. Cost estimate: a static screen sends nothing
-(heartbeat comment every 2 s to keep proxies from closing the connection); a walking animation
-touches ~40–80 blocks at ~15 bytes RLE each ≈ 1 KB → 1.4 KB base64 → **well under 300 kbit/s at
-20 fps**, and typically a small fraction of that.
+⚠️ **The palette rule as first written was wrong, and its failure is silent.** "Entries appended to
+the persistent palette" is right for a *delta*; for a **keyframe it has to be a replacement**, and
+the keyframe has to carry the encoder's **entire** palette rather than only the colours its own
+blocks need. Otherwise §5.2's handshake — a keyframe encoded on demand for a late joiner — leaves
+that joiner's palette a *subset*, in a different order, from the encoder's, and the first delta that
+references an index the keyframe did not list paints the wrong colour. Nothing errors; a corner of
+the screen is simply wrong forever. `a_keyframe_catches_a_fresh_decoder_up_exactly` and
+`palette_exhaustion_forces_a_keyframe` are what pin it.
 
-### 5.2 Cadence and late joiners
+A consequence worth knowing: `VideoEncoder::keyframe()` is **pure**. It describes the state the
+encoder is already in, advancing nothing, so the emulator thread publishes one beside every delta and
+a late joiner picks it up without racing the encoder. Producing one costs ~5 KB of RLE at 30 fps,
+which is nothing, and it removes the on-demand-encoding race the plan would otherwise have needed.
 
-The encoder is called from the emulator loop on a **wall-clock** timer, at most 30 fps, independent
-of emulated frame rate (so fast-forward does not multiply bandwidth). Keyframe every 5 s or when the
-palette resets.
+The encoder also tracks what the **decoder** will hold rather than what the frame contained
+(`last_sent` stores palette-resolved colours). That matters only on the lossy path — a frame with
+more than 256 distinct colours, which Pokémon Red never produces and which falls back to the nearest
+palette entry rather than failing — but without it a block approximated once would read as unchanged
+forever after.
+
+Base64 the whole thing into one SSE `data:` line. A keep-alive comment every 2 s stops proxies
+closing an idle connection.
+
+⚠️ **The two-mode estimate was wrong, and the reason is why mode 2 exists.** "Game Boy 8×8 blocks are
+extremely run-friendly … ~15 bytes RLE each" does not survive contact with the game: measured over
+10 s of continuous outdoor walking under `--policy random` at 30 fps, RLE blocks averaged **39.7
+bytes**. The runs are ~3.5 pixels long, not ~10 — a tile is 8 pixels wide and detailed ones (grass,
+trees, interior clutter) change colour every two or three, so a scrolling screen is close to the
+worst case for run-length coding at 1:1. That put the stream at **1.1 Mbit/s**, 3.7× the budget.
+
+Mode 2 was added in response, and the *same 10 s of content* re-encoded through all three modes:
+
+| | RLE + raw (as specced) | with mode 2 |
+|---|---|---|
+| Continuous outdoor walking | 1117 kbit/s | **536 kbit/s** — 52 % less |
+| Static screen (text box, nobody moving) | ~11 kbit/s | **~8 kbit/s** |
+| Blocks choosing RLE | 26 242 @ 39.7 B | 4 643 @ 6.4 B — only the flat ones are left |
+| Blocks choosing packed | — | 26 858 @ 23.0 B |
+| Blocks choosing raw | 5 259 @ 67 B | **0** |
+| Keyframe | ~6 KB | ~4 KB |
+
+**Raw is now dead on DMG and stays anyway.** Every block that chose it had ≤4 distinct indices, so
+packing beats it everywhere; it is the fallback for a block with five or more colours, which is a CGB
+concern rather than a Pokémon Red one. Keeping it costs one `match` arm and removes a cliff.
+
+536 kbit/s is still above the 300 the plan budgeted, and that is the honest number for the worst
+case. It matters less than it looks: under `--policy llm` the screen is static for most of every turn
+while the model thinks, and a static screen costs nothing at all. The next lever, if one is ever
+needed, is not another block mode but a **tile cache** — the hardware draws 8×8 tiles and a scroll
+re-sends the same handful of them at every offset — and that is a much larger design.
+
+### 5.2 Cadence and late joiners ✅ **done**
+
+The encoder is called from the emulator loop on a **wall-clock** timer, at 30 fps, independent of
+emulated frame rate (so fast-forward does not multiply bandwidth).
 
 Late joiners must not miss a delta between reading the current frame and subscribing:
 
 1. `broadcast::subscribe()` **first**.
-2. Read `RwLock<Arc<FrameSnapshot>>`, encode a keyframe from it, note its `frame_seq`.
-3. Send the keyframe, then forward buffered deltas, **discarding any with `seq <= keyframe_seq`**.
+2. Take the published keyframe, note its `seq`.
+3. Send it, then forward messages from the receiver, **discarding any with `seq <= keyframe_seq`**.
 
-### 5.3 Decoder
+`Published::join_video` does 1 and 2 in that order, and `Published::publish_video` **stores the
+keyframe before broadcasting the delta**. That second ordering is the load-bearing half and it is
+easy to get backwards: broadcast-first leaves a window in which a joiner subscribes, reads the
+*previous* keyframe, and never sees the delta that followed it. Storing first makes the worst case a
+delta the joiner already has, which `seq` filters out. `late_joiner_never_misses_a_delta` loops over
+the size of that window rather than testing one interleaving.
+
+**Two changes from the plan.**
+
+- **No 5-second keyframe timer.** Keyframes go into the stream only on a palette reset, which is the
+  one case that is semantically a reset. A client that falls out of the 64-message ring buffer is
+  handled better: `BroadcastStream` reports `Lagged`, and `/api/video` answers it by sending the
+  latest keyframe in place. Re-syncing is invisible to the viewer, where a periodic keyframe costs
+  every viewer 6 KB every 5 s to insure against something that mostly does not happen.
+- **`seq` is `u64` in `VideoMessage`, `u16` on the wire.** The discard rule in step 3 is a
+  comparison, and a comparison across a `u16` wrap is wrong — that is ~36 minutes into a run, which
+  is exactly the kind of bug that survives every test and appears in production.
+
+### 5.3 Decoder ✅ **done**
 
 TypeScript decoder mirroring the encoder, writing into an `ImageData` backing a 160×144 `<canvas>`,
 scaled up with CSS and `image-rendering: pixelated`. Only changed blocks are written; `putImageData`
-once per message.
+once per message. (Shipped as plain JS in the dev page — no build step until W3 introduces Vite.)
 
-**Testing.** A Rust reference decoder in `src/web/video/tests.rs` round-trips a recorded sequence of
-real frames (captured from a fixture playthrough) and asserts pixel-exact reconstruction after every
-message, including across keyframes and a forced palette reset. The TS decoder is a direct port and
-is checked by eye; the Rust test is the regression net.
+**Testing.** A Rust reference decoder in `src/web/video/tests.rs` round-trips 120 frames of the agent
+actually playing under `RandomPolicy` and asserts pixel-exact reconstruction after every message.
+Synthetic frames would have exercised none of what makes this codec cheap and would not catch a
+regression on a sprite edge. Around it: the keyframe-catch-up invariant, a forced palette reset, both
+block modes (`a_noisy_block_falls_back_to_raw_mode` also asserts a *real* frame still prefers RLE, or
+the "cheap" claim above is wrong), and a corruption sweep that truncates a valid message at every
+length and requires an error rather than a panic at each.
 
-**Acceptance:** a throwaway `web/dev/video.html` (plain canvas + `EventSource`, no build step) shows
-the game playing under `--policy random`. This page is discarded in W3.
+**Acceptance — met.** `web/dev/video.html` (plain canvas + two `EventSource`s, no build step) renders
+the game under `--policy random`; the SSE capture was independently decoded and rendered to PNG to
+confirm it is a real Pokémon Red screen and not merely self-consistent. This page is discarded in W3
+— it is `include_str!`'d at `src/web/mod.rs`'s `DEV_PAGE`, so deleting it is a compile error rather
+than a dead route.
 
 ---
 
@@ -934,8 +1058,16 @@ feature. New tests follow it.
 
 | Test | Tier | Asserts |
 |---|---|---|
-| `video::tests::roundtrip_recorded_frames` | default | Pixel-exact reconstruction across deltas, keyframes and a forced palette reset |
-| `video::tests::late_joiner_never_misses_a_delta` | default | The subscribe-then-keyframe ordering of §5.2 |
+| `web::video::tests::roundtrip_recorded_frames` ✅ | default | Pixel-exact reconstruction over 120 frames of real play |
+| `web::video::tests::a_keyframe_catches_a_fresh_decoder_up_exactly` ✅ | default | §5.1's ⚠️ — a keyframe leaves a joiner holding the encoder's exact palette, and both stay in step across the deltas after it |
+| `web::video::tests::palette_exhaustion_forces_a_keyframe` ✅ | default | The safety valve, and that a decoder joining *at* the reset lands in the same place |
+| `web::video::tests::every_block_mode_is_chosen_when_it_is_the_smallest` ✅ | default | All three modes, and that a real four-shade frame splits RLE/packed and never needs raw |
+| `web::video::tests::a_frame_that_overflows_the_palette_degrades_without_desynchronising` ✅ | default | The length byte does not wrap at the 255 cap, and a lossy frame does not re-emit forever |
+| `web::video::tests::a_corrupt_message_is_an_error_not_a_panic` ✅ | default | Truncation at every length, a bad version, an unsent palette index |
+| `web::published::tests::late_joiner_never_misses_a_delta` ✅ | default | §5.2's subscribe-then-keyframe ordering, looped over the size of the race window |
+| `web::published::tests::events_are_numbered_from_zero_and_reach_a_subscriber` ✅ | default | `UiEvent` sequencing, which W7's `/api/history?since=` replays from |
+| `host::tests::the_host_publishes_a_moving_game_state` ✅ | default | W1's acceptance without a socket: heartbeats arrive, carry a game state, and the player moves |
+| `host::tests::the_host_publishes_decodable_video` ✅ | default | What the host publishes decodes back to the emulator's own frame buffer, and the frame snapshot and keyframe describe the same moment |
 | `llm::client::tests::parses_fragmented_tool_call_arguments` | default | Arguments split across SSE chunks reassemble |
 | `llm::compaction::tests::*` | default | Image eviction, summary replacement, system prompt survives |
 | `llm_policy::tests::kind_change_cancels_pending_turn` | default | An overworld turn in flight is dropped when `pick_battle_action` is polled, and a battle turn replaces it |
@@ -967,8 +1099,8 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | Phase | Deliverable | Gate |
 |---|---|---|
 | **W0** | SDL feature-gated · CLI dispatch · `Policy::{on_event, service_tools}` · manual input queue · observation facade | `full_playthrough` |
-| **W1** | `EmulatorHost` thread · shared published state · axum skeleton · `/api/events` status SSE | `curl` shows status ticking |
-| **W2** | Block-diff encoder + TS decoder · `/api/video` | Round-trip test; game visible in a dev page |
+| **W1** ✅ | `EmulatorHost` thread · shared published state · axum skeleton · `/api/events` status SSE | ✅ `curl` shows status ticking, map changing |
+| **W2** ✅ | Block-diff encoder (three modes) + JS decoder · `/api/video` | ✅ Round-trip tests; game visible in the dev page. 8 kbit/s idle, 536 kbit/s walking — see §5.1's ⚠️ |
 | **W3** | Vite/React SPA · embedded via `rust-embed` · screen + status + conversation shell | Full UI under `--policy random` |
 | **W4** | OpenAI client (streaming, tool calls) · `LlmPolicy` · kind-keyed turns + cancellation · overworld + battle decisions | LLM plays; conversation streams |
 | **W5** | Full tool surface: screenshot, reads, raw buttons, field moves, nickname/mart/forget | Mock-server test |
@@ -980,6 +1112,11 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.
+
+**What W3 inherits.** `/` serves `web/dev/video.html` via `DEV_PAGE` in `src/web/mod.rs`; replacing
+it with the embedded SPA means swapping that one `include_str!` for `rust-embed` and deleting the
+file. The JS decoder in it is the direct ancestor of the TypeScript one and should be ported rather
+than rewritten — it is the only thing that has been checked against a real stream.
 
 ---
 

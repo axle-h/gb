@@ -23,7 +23,12 @@ The project has been extended with a Pokémon Red-specific layer that reads game
 
 ```
 src/
-├── main.rs              — entry point, starts SDL2 UI
+├── main.rs              — entry point: `gb` (SDL UI) or `gb serve` (web), dispatched from cli.rs
+├── cli.rs               — hand-rolled arg parsing; `parse` is unit-testable without a process
+├── host.rs              — headless emulator host: GameBoy + PokemonAgent + video encoder on one thread
+├── web/                 — the axum server (`web` feature); read-only, four endpoints
+│   ├── published.rs     — the only interface between the emulator thread and HTTP
+│   └── video.rs         — 8×8 block-diff video codec + the reference decoder
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)
 ├── core.rs              — CPU + MMU wiring
 ├── opcode.rs            — full SM83 instruction set
@@ -110,7 +115,20 @@ cargo build --release
 
 # Run SDL2 debug UI (loads pokemon-red.sav, starts ConsolePolicy on stdin)
 cargo run --release
+
+# Serve the web UI and play headlessly — no window, no SDL, no API key. Open http://localhost:8080.
+# Streams the screen as 8x8 block deltas over SSE (~19 kbit/s) plus a 10 Hz status/event feed.
+cargo run --release -- serve --policy random --port 8080
+
+# The container build: no window system at all.
+cargo build --release --no-default-features --features web
 ```
+
+`default = ["sdl", "web"]`. **`web` is on by default deliberately** — the video codec, the
+late-joiner ordering and the emulator host are all default-tier tests, and behind an opt-in feature a
+plain `cargo test --release` would silently skip every one of them. It costs 57 crates on top of the
+119 a default build already pulls. `--policy llm` and the browser SPA arrive in W4/W3 of
+`docs/llm-web-playthrough-plan.md`; today `/` serves a throwaway dev page.
 
 ### Tests
 
@@ -143,7 +161,8 @@ workload in the profile. ⚠️ Watch for sampling skid: a hot instruction is of
 *load* feeding it, not for itself — §2.5 has a worked example that cost an hour.
 
 ```bash
-# Default tier: all unit tests + agent mechanics + two navigation smoke tests. ~7s, 975 tests.
+# Default tier: all unit tests + agent mechanics + two navigation smoke tests + the web/host tier.
+# ~7s, 1043 tests.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.
