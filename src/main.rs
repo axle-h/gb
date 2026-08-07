@@ -20,6 +20,10 @@ mod lcd_palette;
 mod lcd_dma;
 #[cfg(feature = "sdl")]
 mod sdl;
+#[cfg(feature = "web")]
+mod web;
+#[cfg(feature = "web")]
+mod host;
 mod cli;
 mod serial;
 mod cycles;
@@ -61,13 +65,20 @@ fn run(command: cli::Command) -> Result<(), String> {
     match command {
         cli::Command::Help => Ok(()), // handled by the caller, which needs to exit zero
         cli::Command::Ui => run_ui(),
-        // W1 replaces this with the axum server. Until then the command parses, so the seam is
-        // testable, and says plainly that the other half has not landed rather than pretending.
-        cli::Command::Serve { port, policy } => Err(format!(
-            "`gb serve` (port {port}, policy {policy:?}) is not built yet — the web server arrives \
-             with phase W1 of docs/llm-web-playthrough-plan.md"
-        )),
+        cli::Command::Serve { port, policy } => run_serve(port, policy),
     }
+}
+
+#[cfg(feature = "web")]
+fn run_serve(port: u16, policy: cli::ServePolicy) -> Result<(), String> {
+    web::run(port, policy)
+}
+
+/// `gb serve` is the whole of the `web` feature, so without it there is nothing to serve.
+#[cfg(not(feature = "web"))]
+fn run_serve(_port: u16, _policy: cli::ServePolicy) -> Result<(), String> {
+    Err(format!("this build has no web server — it was built without the `web` feature\n\n{}",
+                cli::USAGE))
 }
 
 #[cfg(feature = "sdl")]

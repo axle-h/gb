@@ -59,7 +59,7 @@ pub mod postgame;
 
 #[cfg(test)]
 mod integration_tests;
-mod data;
+pub mod data;
 mod options;
 pub mod map_metadata;
 mod tile;
