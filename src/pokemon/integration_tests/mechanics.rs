@@ -479,3 +479,390 @@ fn item_prices_match_the_rom_table() {
     assert_eq!(api.item_price(ItemId::Hm01Cut), None);
     assert_eq!(api.item_price(ItemId::Tm14Blizzard), None);
 }
+
+// ── W0.4 — the manual-input escape hatch ─────────────────────────────────────────────────────────
+
+/// A queued raw press must reach the game through a path the state machine has no action for at all.
+/// START is the clearest case: no `OverworldAction` can express it, and the agent never presses it of
+/// its own accord in the overworld, so a menu on screen afterwards can only have come from the queue.
+///
+/// Checked on the tick the queue drains, before the agent has resumed and started reading the menu
+/// as a text box — one tick later it is already mashing A through it.
+#[test]
+fn manual_input_presses_a_button_the_agent_never_would() {
+    use crate::joypad::JoypadButton;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60), vec![]);
+    // Settle into the ordinary overworld idle first, so what follows pre-empts a running state
+    // machine rather than pressing into a fresh one.
+    for _ in 0..20 { fixture.step(); }
+    assert_eq!(fixture.api().game_mode(), Some(GameMode::Overworld), "expected a quiet overworld");
+
+    fixture.agent.queue_manual_input([JoypadButton::Start]);
+    assert_eq!(fixture.agent.manual_input_pending(), 1);
+    assert_eq!(fixture.agent.state_debug(), "idle", "queueing must clear the current state");
+
+    for _ in 0..MANUAL_INPUT_TICKS_PER_PRESS { fixture.step(); }
+    assert_eq!(fixture.agent.manual_input_pending(), 0, "the press should be fully delivered");
+
+    // The START menu is the one thing that can take a standing overworld into `TextBox` without the
+    // player touching anything, and the agent presses START nowhere in the overworld. `on_screen_text`
+    // deliberately cannot corroborate it: the overworld has not loaded `vFont`, so the reader has no
+    // tiles to decode and answers `None` no matter what the menu says.
+    assert_eq!(fixture.api().game_mode(), Some(GameMode::TextBox),
+               "START should have opened the menu");
+}
+
+/// The press/hold/release cadence, asserted tick by tick, because both halves of it are load-bearing
+/// and neither is visible in the game state:
+///
+/// - **the hold** is two ticks because one is not enough — see `MANUAL_INPUT_HOLD_TICKS`;
+/// - **the release** is what separates repeats. pokered drives menus off *newly* pressed bits, so a
+///   button held straight through would deliver "A, A" as a single A.
+#[test]
+fn manual_input_holds_then_releases_each_press() {
+    use crate::joypad::JoypadButton;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60), vec![]);
+    for _ in 0..20 { fixture.step(); }
+
+    fixture.agent.queue_manual_input([JoypadButton::A, JoypadButton::A]);
+    let mut held = Vec::new();
+    for _ in 0..2 * MANUAL_INPUT_TICKS_PER_PRESS {
+        fixture.step();
+        held.push(fixture.api().mmu().joypad().is_button_pressed(JoypadButton::A));
+    }
+
+    assert_eq!(held, vec![true, true, false, true, true, false],
+               "each press gets two held ticks and one released one");
+    assert_eq!(fixture.agent.manual_input_pending(), 0);
+}
+
+/// The cap exists so a confused model cannot hand the agent a hundred buttons and take the game away
+/// from the state machine for seconds at a time. Anything past it is dropped, not queued.
+#[test]
+fn manual_input_queue_is_capped() {
+    use crate::joypad::JoypadButton;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(1), vec![]);
+    fixture.agent.queue_manual_input(
+        std::iter::repeat(JoypadButton::B).take(MANUAL_INPUT_CAPACITY * 3));
+    assert_eq!(fixture.agent.manual_input_pending(), MANUAL_INPUT_CAPACITY);
+
+    // A second call appends into what is left rather than resetting the cap.
+    fixture.agent.queue_manual_input([JoypadButton::A]);
+    assert_eq!(fixture.agent.manual_input_pending(), MANUAL_INPUT_CAPACITY);
+}
+
+/// The measurement behind [`MANUAL_INPUT_HOLD_TICKS`]: for each hold length, does one START press
+/// open the menu, at each of 16 successive agent-tick alignments?
+///
+/// A hold of 1 tick (20 ms — longer than a frame, which is why it looks like it should be enough)
+/// prints `.` at five of the sixteen. A hold of 2 prints `Y` at all of them. pokered does not sample
+/// the pad on every frame in the overworld, and a dropped press is the worst failure mode this
+/// feature has: the LLM cannot tell one from a button the game ignored deliberately.
+///
+/// `cargo test --release --features diagnostics --bin gb -- probe_manual_input_hold_length --ignored --nocapture`
+#[test]
+#[cfg(feature = "diagnostics")]
+#[ignore = "probe — run with --ignored --nocapture"]
+fn probe_manual_input_hold_length() {
+    use crate::joypad::JoypadButton;
+
+    for align in 0..16usize {
+        let mut row = String::new();
+        for hold in 1..=4usize {
+            let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60), vec![]);
+            for _ in 0..20 + align { fixture.step(); }
+            fixture.api().press_button(JoypadButton::Start);
+            // Driven straight, without the agent, so the probe measures the game's pad sampling and
+            // nothing about the queue that is built on top of it.
+            for _ in 0..hold { fixture.gb.run(AGENT_RESOLUTION); }
+            fixture.api().release_all_buttons();
+            for _ in 0..6 { fixture.gb.run(AGENT_RESOLUTION); }
+            row.push_str(if fixture.api().game_mode() == Some(GameMode::Overworld) { " ." } else { " Y" });
+        }
+        println!("alignment {align:>2}: holds 1..4 ={row}");
+    }
+}
+
+// ── W0.3 / W0.5b — the two policy seams ──────────────────────────────────────────────────────────
+
+/// What [`RecordingPolicy`] saw, shared with the test because the agent owns the policy.
+#[derive(Default)]
+struct Recording {
+    /// `AgentEvent` is `Debug`-only, so the debug rendering is the record. It is enough: the tests
+    /// below ask which *kinds* of event arrived, not what was inside them.
+    events: Vec<String>,
+    /// One entry per `service_tools` call: the map it was told about, and how many maps the world
+    /// graph it was handed knew. Enough to prove the triple arrives intact and is the agent's own.
+    tool_polls: Vec<(Map, usize)>,
+}
+
+/// A `DeterministicPolicy` that also records what the agent asks of it. Every decision is delegated
+/// unchanged, so the run is identical to the same steps without it — the recording is pure
+/// observation.
+struct RecordingPolicy {
+    inner: DeterministicPolicy,
+    log: std::rc::Rc<std::cell::RefCell<Recording>>,
+}
+
+impl RecordingPolicy {
+    fn new(steps: Vec<PolicyStep>) -> (Box<Self>, std::rc::Rc<std::cell::RefCell<Recording>>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Recording::default()));
+        (Box::new(Self { inner: DeterministicPolicy::new(42, steps), log: log.clone() }), log)
+    }
+}
+
+impl crate::pokemon::policy::Policy for RecordingPolicy {
+    fn on_event(&mut self, event: &AgentEvent) {
+        self.log.borrow_mut().events.push(format!("{event:?}"));
+    }
+
+    fn service_tools(&mut self, state: &GameState, api: &mut PokemonApi<'_>,
+                     graph: &crate::pokemon::world_graph::WorldGraph) {
+        // Answer the poll the way `LlmPolicy` will: straight out of the observation facade, against
+        // the state already in hand. If this runs, W5's tool dispatch is a match arm over W0.5.
+        use crate::pokemon::observe;
+        assert_eq!(observe::map_view(state).map, format!("{}", state.map.map),
+                   "the facade must describe the state it was given");
+        assert!(observe::trainer(state, api).badge_count <= 8);
+        assert_eq!(observe::party(state).len(), state.pokemon.len());
+        self.log.borrow_mut().tool_polls.push((state.map.map, graph.map_count()));
+    }
+
+    fn pick_overworld_action(&mut self, state: &GameState,
+                             graph: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction>
+    {
+        self.inner.pick_overworld_action(state, graph)
+    }
+    fn pick_battle_action(&mut self, state: &GameState)
+        -> Option<crate::pokemon::battle::BattleAction>
+    {
+        self.inner.pick_battle_action(state)
+    }
+    fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
+        self.inner.pick_nickname(species)
+    }
+    fn pick_mart_purchase(&mut self, state: &GameState) -> Option<Option<crate::pokemon::bag::BagItem>> {
+        self.inner.pick_mart_purchase(state)
+    }
+    fn pick_move_to_forget(&mut self, moves: &[crate::pokemon::move_name::PokemonMove],
+                           new_move: crate::pokemon::move_name::PokemonMoveName)
+        -> Option<Option<usize>>
+    {
+        self.inner.pick_move_to_forget(moves, new_move)
+    }
+    fn pick_field_move(&mut self, state: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
+        self.inner.pick_field_move(state)
+    }
+    fn is_exhausted(&self) -> bool { self.inner.is_exhausted() }
+    fn steps_remaining(&self) -> Option<usize> { self.inner.steps_remaining() }
+    fn current_step_is_long_running(&self) -> bool { self.inner.current_step_is_long_running() }
+}
+
+/// **W0.3** — every event the agent emits reaches the policy, *including* the ones collected into
+/// `update`'s local `new_events` and drained at the end of the tick. That was the class the plan
+/// warned might be missed; `OverworldActionCompleted` is only ever emitted that way, so seeing one
+/// here is the proof that the drain goes through `event()`.
+///
+/// **W0.5b** — `service_tools` is called at the overworld poll, and the triple it receives is real:
+/// a state that agrees with the map the agent is standing on, and the agent's own world graph rather
+/// than an empty one.
+#[test]
+fn policy_sees_every_event_and_gets_a_tool_poll() {
+    // The same short indoor walk as `test_debouncing`: it ends in a warp, so the run emits a text
+    // box, an action completion and a map change for almost no game time.
+    let (policy, log) = RecordingPolicy::new(vec![PolicyStep::goto(Map::PalletTown)]);
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/oaks-lab-just-got-squirtle.bin"),
+        Duration::from_secs(200),
+        policy,
+    );
+    fixture.step_until_exhausted();
+
+    let log = log.borrow();
+    assert!(!log.tool_polls.is_empty(), "service_tools was never called");
+    assert!(log.tool_polls.iter().any(|(map, _)| *map == Map::OaksLab),
+            "the poll should carry the map the agent is on; saw {:?}", log.tool_polls);
+    assert!(log.tool_polls.iter().any(|(_, maps_known)| *maps_known > 0),
+            "the world graph handed to service_tools should be the agent's, not an empty one");
+
+    assert!(!log.events.is_empty(), "on_event was never called");
+    assert!(log.events.iter().any(|e| e.starts_with("OverworldActionCompleted")),
+            "events pushed into `new_events` and drained at the end of the tick must reach the \
+             policy too; saw {:?}", log.events);
+}
+
+// ── W0.5 — the observation facade ────────────────────────────────────────────────────────────────
+
+/// Every view against a known snapshot. These are the shapes the LLM sees, so the assertions are
+/// about the things a wrong one would quietly get away with: a count that disagrees with the list it
+/// counts, an HP over its maximum, a grid whose rows do not match the width it declares.
+#[test]
+fn observation_views_describe_the_snapshot() {
+    use crate::pokemon::observe;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
+    let api = fixture.api();
+
+    let trainer = observe::trainer(&state, &api);
+    assert_eq!(trainer.badge_count as usize, trainer.badges.len(), "badge count vs badge list");
+    assert!(trainer.badge_count <= 8);
+    assert_eq!(trainer.playtime.len(), 8, "playtime should read HH:MM:SS, got {}", trainer.playtime);
+    assert!(trainer.pokedex_owned <= trainer.pokedex_seen,
+            "you cannot own more species than you have seen ({} > {})",
+            trainer.pokedex_owned, trainer.pokedex_seen);
+
+    let party = observe::party(&state);
+    assert_eq!(party.len(), state.pokemon.len());
+    for (slot, mon) in party.iter().enumerate() {
+        assert_eq!(mon.slot, slot, "slots must be the party index, not the enumeration of a filter");
+        assert!(mon.hp <= mon.max_hp, "{}: {}/{}", mon.species, mon.hp, mon.max_hp);
+        assert_eq!(mon.fainted, mon.hp == 0);
+        assert!(!mon.moves.is_empty(), "{} knows no moves", mon.species);
+        assert!(mon.moves.iter().all(|m| m.pp <= m.max_pp));
+        assert!((1..=2).contains(&mon.types.len()), "{:?}", mon.types);
+    }
+
+    let bag = observe::bag(&state, &api);
+    assert_eq!(bag.slots_used, bag.items.len());
+    assert_eq!(bag.slots_total, 20);
+    assert_eq!(bag.money, trainer.money);
+
+    let status = observe::status(&state);
+    assert_eq!(status.badge_count, trainer.badge_count);
+    assert_eq!(status.party_hp.len(), party.len());
+    assert!(!status.in_battle, "the Pallet Town snapshot is not in a battle");
+    assert!(observe::battle(&state).is_none(), "…so there is no battle to describe");
+
+    // The overworld loads no dialogue font, so there is nothing on screen to decode. Reporting that
+    // as `None` rather than an error is the contract.
+    assert_eq!(observe::screen_text(&api), None);
+}
+
+/// The map grid is the single densest thing the model reads, and three ways of getting it wrong are
+/// invisible from the outside: rows that do not match the declared width, a legend that has fallen
+/// behind `impl Display for MetaTileMap`, and an order that reshuffles between two identical reads.
+#[test]
+fn map_view_is_well_formed_stable_and_fully_documented() {
+    use crate::pokemon::observe;
+
+    const REDS_HOUSE_1F_STATE: &[u8] = include_bytes!("../data/reds-house-1f-state.bin");
+    let legend: std::collections::HashSet<char> =
+        observe::MAP_LEGEND.iter().map(|(c, _)| *c).collect();
+
+    // An outdoor town, a route with grass and ledges, and an indoor map — between them they exercise
+    // most of the tile alphabet.
+    for (name, snapshot) in [("Pallet Town", PALLET_TOWN_STATE),
+                             ("Route 1", ROUTE1_STATE),
+                             ("Red's house", REDS_HOUSE_1F_STATE)] {
+        let mut fixture = TestFixture::new(snapshot, Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
+        let view = observe::map_view(&state);
+
+        assert_eq!(view.grid.len(), view.height, "{name}: row count vs declared height");
+        for (y, row) in view.grid.iter().enumerate() {
+            assert_eq!(row.chars().count(), view.width, "{name}: row {y} is {row:?}");
+        }
+        assert_eq!(view.grid.iter().flat_map(|r| r.chars()).filter(|c| *c == 'P').count(), 1,
+                   "{name}: exactly one player on the map");
+        assert_eq!(view.grid[view.position.y as usize].chars().nth(view.position.x as usize), Some('P'),
+                   "{name}: the reported position must be where the P is");
+
+        // The legend travels with the grid, so a new symbol in `Display for MetaTileMap` that nobody
+        // documented shows up here rather than as an unexplained character in a context window.
+        for c in view.grid.iter().flat_map(|r| r.chars()) {
+            assert!(legend.contains(&c), "{name}: grid uses '{c}', which MAP_LEGEND does not explain");
+        }
+        assert_eq!(view.legend.len(), observe::MAP_LEGEND.len());
+
+        // `warp_targets` and the action list come off a `HashSet`. Two reads of an unchanged map must
+        // still be equal, or the model sees churn that is not there.
+        assert_eq!(view, observe::map_view(&state), "{name}: two reads of one state disagree");
+        for warp in &view.warps {
+            // 'P' is painted over whatever the player is standing on, and standing on a warp is
+            // exactly what a door looks like the tick after you walk through it — so the `warps`
+            // list, not the grid, is what tells you the warp is there.
+            let drawn = view.grid[warp.at.y as usize].chars().nth(warp.at.x as usize);
+            assert!(drawn == Some('W') || warp.at == view.position,
+                    "{name}: warp at {:?} is drawn as {drawn:?}", warp.at);
+        }
+    }
+}
+
+/// The battle view against a snapshot that is in one, including the option list a decider chooses
+/// from — the thing that must never come back empty on a turn the game is waiting for.
+#[test]
+fn battle_view_describes_a_live_battle() {
+    use crate::pokemon::observe;
+
+    let mut fixture = TestFixture::new(BATTLE_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
+
+    let battle = observe::battle(&state).expect("the battle snapshot should be in a battle");
+    assert!(battle.player.hp <= battle.player.max_hp);
+    assert!(battle.enemy.hp <= battle.enemy.max_hp);
+    assert!(battle.player.level > 0 && battle.enemy.level > 0);
+    assert!(!battle.options.is_empty(), "a battle with no legal action would deadlock the agent");
+    assert!(!battle.player.moves.is_empty(), "the active Pokémon knows no moves");
+    assert_eq!(observe::status(&state).in_battle, true);
+    assert_eq!(battle.active_party_slot as usize, {
+        let slot = battle.active_party_slot as usize;
+        assert!(slot < state.pokemon.len(), "active slot {slot} is outside the party");
+        slot
+    });
+}
+
+/// The world graph is built as the player walks, so its guarantee is negative: an absent map means
+/// unvisited, never unreachable. The view has to hold that line and stay ordered.
+#[test]
+fn world_graph_view_reports_only_visited_maps() {
+    use crate::pokemon::observe;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60),
+                                       vec![PolicyStep::goto(Map::Route1)]);
+    let empty = observe::world_graph(fixture.agent.world_graph());
+    assert_eq!(empty.map_count, 0, "nothing has been walked yet");
+    assert!(empty.nodes.is_empty());
+
+    fixture.step_until_exhausted();
+
+    let graph = observe::world_graph(fixture.agent.world_graph());
+    assert!(graph.map_count > 0, "walking to Route 1 should have observed at least one map");
+    assert_eq!(graph.nodes.len(), graph.map_count);
+    assert_eq!(graph.edge_count, graph.nodes.iter().map(|n| n.edges.len()).sum::<usize>());
+    assert_eq!(graph, observe::world_graph(fixture.agent.world_graph()),
+               "two reads of one graph must agree");
+
+    let names: Vec<&str> = graph.nodes.iter().map(|n| n.map.as_str()).collect();
+    assert!(names.iter().any(|n| *n == format!("{}", Map::PalletTown)),
+            "Pallet Town was walked; saw {names:?}");
+    assert_eq!(observe::known_maps(fixture.agent.world_graph()).len(), graph.map_count);
+}
+
+/// Under `--features web` the views serialise. Worth its own test because `cfg_attr` failing to
+/// apply is silent — the code still compiles, it just stops being able to leave the process, and the
+/// first sign would be W5's tool layer not building.
+#[test]
+#[cfg(feature = "web")]
+fn observation_views_serialise_to_json() {
+    use crate::pokemon::observe;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
+    let json = serde_json::to_value(observe::map_view(&state)).expect("map view should serialise");
+
+    assert_eq!(json["map"], format!("{}", state.map.map));
+    // `Point` is a struct so the coordinates are named rather than a pair a model has to guess at.
+    assert_eq!(json["position"]["x"], state.map.player_position.x);
+    assert_eq!(json["grid"].as_array().expect("grid is an array").len(), state.map.height);
+
+    for value in [serde_json::to_value(observe::party(&state)).unwrap(),
+                  serde_json::to_value(observe::status(&state)).unwrap(),
+                  serde_json::to_value(observe::bag(&state, &fixture.api())).unwrap()] {
+        assert!(!value.is_null());
+    }
+}

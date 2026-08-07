@@ -3,7 +3,9 @@
 An `LlmPolicy` that delegates every decision to an LLM over an OpenAI-compatible API, and a
 browser UI — served from the same process — that lets anyone with the URL watch it play.
 
-**Status:** planning. Nothing here is built yet.
+**Status:** **W0 complete** (2026-08-07) — the seams in the core are in, `full_playthrough` is green
+with them. W1 onward is unbuilt. Each W0 task below carries what actually shipped, including three
+places the plan was wrong.
 
 ---
 
@@ -146,16 +148,22 @@ for video, and for `UiEvent` the client recovers via `/api/history`.
 **No web, no LLM.** Everything here is a small, independently mergeable change to existing code that
 the later phases depend on.
 
-### W0.1 — SDL behind a cargo feature
+### W0.1 — SDL behind a cargo feature ✅ **done**
 
 ```toml
 [features]
 default = ["sdl"]
 sdl  = ["dep:sdl2", "dep:fontdue"]
-web  = ["dep:tokio", "dep:axum", "dep:tower-http", "dep:rust-embed",
-        "dep:serde", "dep:serde_json", "dep:base64"]
+web  = ["dep:serde", "dep:serde_json"]          # ← shipped; grows in W1
+# W1 adds: tokio, axum, tower-http, rust-embed, base64 to `web`, and
 llm  = ["web", "dep:ureq"]
 ```
+
+**`web` shipped with only `serde`/`serde_json`.** The server crates are declared where they are
+first used, in W1 — adding `tokio`, `axum`, `tower-http`, `rust-embed` and `base64` in W0 would have
+been ~200 crates that nothing compiles against and no acceptance test could exercise. What W0 needed
+from `web` was the `Serialize` derives on [W0.5](#w05--the-observation-facade-done)'s views, and that
+is what it has.
 
 `tokio` is needed only for `axum` and for the `broadcast`/`watch` bridge types (§2.2) — the emulator
 and the LLM worker are plain `std::thread`s and neither is ever inside a runtime. `ureq` is a
@@ -168,10 +176,16 @@ Only `sdl2` and `fontdue` are SDL-only (`src/sdl/font.rs`, `src/sdl/render.rs`) 
 2026-08-07**. `itertools` is *not*: it is used by `src/ppu.rs`, `src/pokemon/mod.rs` and
 `src/pokemon/map_header.rs`, so it stays unconditional. An earlier survey claimed otherwise.
 
-**Acceptance:** `cargo build --release` unchanged; `cargo build --release --no-default-features`
-succeeds and links no SDL2.
+**Acceptance — met.** `cargo build --release` links `libSDL2-2.0.so.0` exactly as before;
+`cargo build --release --no-default-features` succeeds and `ldd` shows no SDL2 at all. `mod sdl` and
+`run_ui` are both `#[cfg(feature = "sdl")]`, with a `#[cfg(not(...))]` `run_ui` that reports the
+missing feature.
 
-### W0.2 — CLI dispatch
+⚠️ A no-SDL build emits ~780 warnings against the default build's ~313: most of the emulator's
+inspection surface (`PPU`, palettes, joypad helpers) has the UI as its only caller, so dropping it
+makes them dead code. Nothing is broken; do not "fix" it by deleting the accessors.
+
+### W0.2 — CLI dispatch ✅ **done**
 
 `main.rs` grows a hand-rolled arg parse over `std::env::args` — no `clap`.
 
@@ -179,11 +193,19 @@ succeeds and links no SDL2.
 gb                          → SDL UI, ConsolePolicy               (today's behaviour, unchanged)
 gb serve [--port 8080]      → web UI + LlmPolicy
 gb serve --policy random    → web UI, RandomPolicy (no API key needed; the video-pipeline harness)
+gb --help                   → usage, exit 0
 ```
 
-With `--no-default-features --features llm`, bare `gb` prints usage and exits non-zero.
+Lives in `src/cli.rs` so `parse` is unit-testable without spawning a process; `main` is dispatch and
+exit codes only. Every rejection prints the specific complaint followed by the full usage, and exits
+non-zero. `gb serve` parses today and then reports that the server lands in W1 — the seam is real,
+the other half is not pretended.
 
-### W0.3 — `Policy::on_event`
+Keyed on **`sdl`**, not `llm`: without the feature there is no UI to run, so a bare `gb` says so and
+prints usage. That is the same behaviour the plan asked for and it does not depend on a feature that
+does not exist yet.
+
+### W0.3 — `Policy::on_event` ✅ **done**
 
 The user-visible requirement: *text-reading events must reach the policy.*
 
@@ -199,8 +221,11 @@ fn on_event(&mut self, _event: &AgentEvent) {}
 `BattleStarted/Ended` and the rest to `LlmPolicy`, which turns them into conversation entries — the
 abort reasons in particular are exactly the feedback the LLM needs to stop retrying a blocked route.
 
-⚠️ Some sites push into a local `new_events: Vec<AgentEvent>` (`agent.rs:870`) and drain later. Route
-those through `event()` too, or `on_event` silently misses them.
+~~⚠️ Some sites push into a local `new_events: Vec<AgentEvent>` and drain later. Route those through
+`event()` too, or `on_event` silently misses them.~~ **Checked — this was already the case.** The
+drain at the end of `update()` calls `self.event(x)` for each, so every path converges on the one
+function and `on_event` cannot miss a class of event. `policy_sees_every_event_and_gets_a_tool_poll`
+pins it by asserting an `OverworldActionCompleted` arrives, which is emitted *only* via `new_events`.
 
 ### W0.3b — Poll rate: considered, deliberately not changed
 
@@ -231,7 +256,7 @@ A `Policy::repoll_delay` hook to throttle it was designed and dropped. Three rea
 If profiling under a real run ever contradicts this, the hook is a ten-line change — but it needs a
 measurement first, not an intuition.
 
-### W0.4 — Manual input queue on the agent
+### W0.4 — Manual input queue on the agent ✅ **done**
 
 The escape hatch. `OverworldAction` cannot express "press B once": the agent re-derives the action
 mid-walk and matches it by `MetaTile` (`agent.rs:1140-1154`), so a synthetic action fails with
@@ -247,15 +272,36 @@ impl PokemonAgent {
 }
 ```
 
-Handled at the top of `update()`, immediately after the `AGENT_RESOLUTION` gate and before
-`drive_post_champion_cutscene`. Each tick: release everything, press the head of the queue, pop. On
-an empty queue, `self.state = AgentState::Idle` once, then fall through to the normal machine.
+Handled at the top of `update()`, immediately after the `AGENT_RESOLUTION` gate — ahead of
+`drive_post_champion_cutscene` *and* ahead of the `game_mode()` "Not in game" check, so a title screen
+or a continue prompt, where the state machine cannot help and a raw button can, is still reachable.
 
 - The queue is capped at **16** buttons so a confused model cannot run away with the game.
-- `queue_manual_input` sets `state = Idle` on entry — otherwise a queued press mid-`OverworldMovement`
-  corrupts the route and the walk resumes into a wall.
+- `queue_manual_input` sets `state = Idle` on entry (and drops `backup_state`) — otherwise a queued
+  press mid-`OverworldMovement` corrupts the route and the walk resumes into a wall. Nothing else is
+  needed when the queue drains: the state machine simply resumes from that `Idle`.
 
-### W0.5 — The observation facade
+**⚠️ The cadence is three ticks per press, not one — measured, and the plan's original "one tick
+each" was wrong.** A press is held for **2** agent ticks and then released for **1**:
+
+- **The hold is 2 because 1 does not work.** 20 ms is longer than a frame, so one tick looks
+  sufficient; it is not. Driving START in a standing Pallet Town at 16 successive tick alignments, a
+  1-tick hold opens the menu at 11 of them and does *nothing* at the other 5 — pokered does not sample
+  the pad on every frame in the overworld. A 2-tick hold lands at all 16. `probe_manual_input_hold_length`
+  (`--features diagnostics`) prints the grid; the failure it prevents is the worst one this feature
+  has, since a dropped press is indistinguishable to the LLM from a button the game ignored on purpose.
+- **The released tick separates repeats.** A button held straight through is one continuous press and
+  pokered drives menus off *newly* pressed bits, so without the gap "A, A" arrives as a single A.
+
+`manual_input_pending()` counts the in-flight press as well as the queued ones, so zero means the
+state machine is back in charge.
+
+Tests (default tier, `mechanics.rs`): `manual_input_presses_a_button_the_agent_never_would` (START
+from a quiet overworld — the one thing that takes `GameMode` to `TextBox` with nobody touching the
+pad; note `on_screen_text` cannot corroborate it, as the overworld has not loaded `vFont`),
+`manual_input_holds_then_releases_each_press` (the cadence, tick by tick), `manual_input_queue_is_capped`.
+
+### W0.5 — The observation facade ✅ **done**
 
 One module, `src/pokemon/observe.rs`, holding every read the LLM tools need, each a free function
 taking `&mut PokemonApi` (plus `&WorldGraph` where relevant) and returning a serialisable struct.
@@ -277,9 +323,32 @@ This is the *only* place tool reads live, so the tool layer in W5 is a thin disp
 sprite, *which* warp), so `map_view` pairs the grid with the `actions()` list and the sprite table.
 
 Every function here is pure over `(&GameState, &mut PokemonApi, &WorldGraph)` — the exact triple a
-policy holds at a poll — which is what lets W0.5b service tool calls without any round trip.
+policy holds at a poll — which is what lets W0.5b service tool calls without any round trip. In
+practice each takes only the part of the triple it needs (`party(&GameState)`,
+`screen_text(&PokemonApi)`, `world_graph(&WorldGraph)`), which is what makes them individually
+testable.
 
-### W0.5b — `Policy::service_tools`
+**Shipped detail worth knowing before W5 writes the tool schemas.**
+
+- **The views are the contract, not `GameState`.** `GameState` is the agent's working set —
+  `raw_tile_ids`, tile-pair collision tables, spinner maps, BFS inputs — most of which is noise in a
+  context window, and every rename inside it would silently change the schema the model was prompted
+  against. The `*View` structs are hand-cut so `GameState` stays free to move.
+- **Ordering is pinned.** `warp_targets` and `connection_targets` are `HashSet`s, so `warps`,
+  `connections`, `actions` and the world-graph `nodes` are all sorted before they leave. Without it
+  two reads of an unchanged map come back in different orders, which reads to a model as the world
+  having moved. `map_view_is_well_formed_stable_and_fully_documented` asserts a second read is equal.
+- **`MAP_LEGEND` travels with every grid**, and a test asserts the legend explains every character
+  the grid actually uses across three maps — so a new symbol in `impl Display for MetaTileMap` fails
+  a test instead of appearing undocumented in a context window.
+- **`screen_text` answers `None` in the overworld** and that is correct, not a failure: no dialogue
+  font is loaded there, so there is nothing in VRAM to decode. Anything asserting on menu text has to
+  use `game_mode` instead — this cost time in W0.4.
+- `Serialize` is `#[cfg_attr(feature = "web", ...)]`, applied by a small `view!` macro so the
+  attribute cannot be forgotten on a new struct. `observation_views_serialise_to_json` proves the
+  derive actually lands, which a compile alone would not.
+
+### W0.5b — `Policy::service_tools` ✅ **done**
 
 ```rust
 // Policy trait, defaulted
@@ -293,13 +362,31 @@ Five call sites in `agent.rs`, each immediately after the state for that decisio
 forget-move handler). `LlmPolicy` drains its pending tool-call queue here and replies; every other
 policy ignores it.
 
+Four of the five already had a `GameState` in hand. **`NamingPokemon` did not**, so it reads one — but
+with `if let Ok(...)` rather than `?`: the naming screen is the least ordinary place in the game to
+ask for a full `GameState`, and adding the tool seam must not invent a failure mode for the policies
+that ignore it.
+
+Both assumptions the seam rested on hold: the signature is object-safe under `Box<dyn Policy>`, and
+`self.policy.service_tools(&state, api, &self.world_graph)` borrow-checks at every site — the same
+disjoint-field shape `pick_overworld_action` has always used.
+
 ⚠️ The observed state is computed **once** per poll and every queued tool call is answered from it,
 so a turn never sees a torn view — `read_party` and `read_map` in the same assistant message are
 guaranteed consistent with each other.
 
-**Acceptance for W0:** `cargo test --release` green; **`cargo test --release --features
-full-playthrough full_playthrough` green** — W0.3 and W0.4 both touch `agent.rs`, and per `CLAUDE.md`
-the leg tier is not a substitute for the full run.
+**Acceptance for W0 — met.** `cargo test --release` green (1033 tests); **`cargo test --release
+--features full-playthrough full_playthrough` green** — W0.3, W0.4 and W0.5b all touch `agent.rs`,
+and per `CLAUDE.md` the leg tier is not a substitute for the full run.
+
+Tests added, all in the default tier: `src/cli.rs`'s own module (parsing, including that every
+rejection carries the usage); `manual_input_*` ×3 (W0.4);
+`policy_sees_every_event_and_gets_a_tool_poll` (W0.3 + W0.5b, via a `RecordingPolicy` that delegates
+every decision and records what it was asked); `observation_views_describe_the_snapshot`,
+`map_view_is_well_formed_stable_and_fully_documented`, `battle_view_describes_a_live_battle`,
+`world_graph_view_reports_only_visited_maps` and `observation_views_serialise_to_json` (W0.5).
+`TestFixture::with_policy` was added so a test can supply its own policy and still get the whole
+harness — the options pin, the stall detector, the cycle budget.
 
 ---
 

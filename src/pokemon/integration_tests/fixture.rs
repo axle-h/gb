@@ -44,12 +44,18 @@ pub struct TestFixture {
 
 impl TestFixture {
     pub fn new(save_state: &[u8], max_game_time: Duration, policy_steps: Vec<PolicyStep>) -> Self {
+        Self::with_policy(save_state, max_game_time, Box::new(DeterministicPolicy::new(42, policy_steps)))
+    }
+
+    /// [`Self::new`] with the policy supplied rather than built. Everything else — the options pin,
+    /// the stall detector, the cycle budget — is identical, so a test that needs to observe what the
+    /// agent asks its policy gets the whole harness rather than hand-rolling a `GameBoy` beside it.
+    pub fn with_policy(save_state: &[u8], max_game_time: Duration, policy: Box<dyn crate::pokemon::policy::Policy>) -> Self {
         let mut gb = GameBoy::dmg(roms::POKERED);
         gb.load_state(save_state).expect("failed to load save state");
 
         // The agent builds its world graph incrementally as it traverses.
-        let steps_at_start = Some(policy_steps.len());
-        let policy = DeterministicPolicy::new(42, policy_steps);
+        let steps_at_start = policy.steps_remaining();
 
         // **Workstream J2.** Applied here rather than by regenerating the 27 committed `.bin`s: one
         // place, every tier, and no chance of a half-regenerated chain. See
@@ -71,7 +77,7 @@ impl TestFixture {
             stall_threshold: MachineCycles::from_duration(Duration::from_secs(10 * 60)),
             options_reapplied: false,
             options_drifts: 0,
-            agent: PokemonAgent::new(Box::new(policy)),
+            agent: PokemonAgent::new(policy),
         }
     }
 
