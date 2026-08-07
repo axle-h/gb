@@ -38,6 +38,7 @@ pub mod party;
 pub mod agent;
 pub mod actions;
 pub mod battle;
+pub mod observe;
 pub mod policy;
 pub mod tile_map;
 pub mod encoding;

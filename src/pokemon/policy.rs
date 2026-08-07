@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver};
 use rand::prelude::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use crate::pokemon::GameState;
+use crate::pokemon::{GameState, PokemonApi};
 use crate::pokemon::actions::OverworldAction;
 use crate::geometry::Point8;
 use crate::pokemon::badge::Badge;
@@ -68,6 +68,38 @@ pub trait Policy {
     fn pick_field_move(&mut self, _state: &GameState) -> Option<FieldMove> {
         None
     }
+
+    /// Called for **every** event the agent emits, as it is emitted and before it is buffered.
+    ///
+    /// This is the only way a policy learns anything between decisions. The `pick_*` methods see a
+    /// [`GameState`], which is a snapshot of RAM and says nothing about what just happened; the
+    /// events carry the narrative — the text of a conversation
+    /// ([`AgentEvent::TextBox`](crate::pokemon::agent::AgentEvent::TextBox)), a battle starting and
+    /// ending, and above all
+    /// [`OverworldActionAborted`](crate::pokemon::agent::AgentEvent::OverworldActionAborted), which
+    /// is the feedback a decider needs to stop re-picking a route that cannot be walked.
+    ///
+    /// The default ignores them, so no existing policy is affected: `RandomPolicy` and
+    /// `DeterministicPolicy` do not override it.
+    ///
+    /// ⚠️ Called from inside the agent's tick, so it must not block — the same non-blocking contract
+    /// the `pick_*` methods are under, without the `Option` to make it obvious.
+    fn on_event(&mut self, _event: &crate::pokemon::agent::AgentEvent) {}
+
+    /// Called at the top of every policy poll, before any `pick_*` for that decision point.
+    ///
+    /// This is where a policy that answers questions — an LLM working through a batch of read-only
+    /// tool calls before it commits to a move — gets to do so, without a round trip through the
+    /// agent and without the emulator advancing underneath it. The observation facade in
+    /// [`crate::pokemon::observe`] is written against exactly this triple, so servicing a call is a
+    /// direct function call rather than a message.
+    ///
+    /// ⚠️ **The state is observed once per poll and every queued call is answered from it**, so one
+    /// turn never sees a torn view: `read_party` and `read_map` in the same assistant message are
+    /// guaranteed to agree with each other.
+    ///
+    /// Default: a no-op. No existing policy is affected.
+    fn service_tools(&mut self, _state: &GameState, _api: &mut PokemonApi<'_>, _graph: &WorldGraph) {}
 
     fn is_exhausted(&self) -> bool {
         false

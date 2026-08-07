@@ -22,6 +22,28 @@ use crate::pokemon::world_graph::WorldGraph;
 // too long and player veers off course on the overworld, too short and the game doesn't get chance to update values between turns
 pub const AGENT_RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
 
+/// How many manual button presses [`PokemonAgent::queue_manual_input`] will hold. A bound rather
+/// than a tuned number: each press costs [`MANUAL_INPUT_TICKS_PER_PRESS`] agent ticks, so a full
+/// queue is ~1 s of emulated time during which the state machine is not running.
+pub const MANUAL_INPUT_CAPACITY: usize = 16;
+
+/// Agent ticks a manual press is **held** before being released.
+///
+/// One tick is 20 ms, longer than a frame, and yet holding for a single tick is **not** reliable:
+/// measured against START in Pallet Town it opens the menu at 11 of 16 successive tick alignments and
+/// silently does nothing at the other 5, because pokered does not sample the pad on every frame in
+/// the overworld. Two ticks lands at all 16 (`probe_manual_input_hold_length`), so this is a measured
+/// number, not a guess — and a dropped press is the worst possible failure here, since the LLM has no
+/// way to tell one from a button the game ignored on purpose.
+const MANUAL_INPUT_HOLD_TICKS: u8 = 2;
+
+/// Total ticks one queued press occupies: the hold, plus one tick released.
+///
+/// The released tick is what makes repeats work — a held button is one continuous press, and pokered
+/// drives menus off *newly* pressed bits, so without a gap "A, A" would land as a single A and every
+/// run of identical buttons would be delivered once.
+pub const MANUAL_INPUT_TICKS_PER_PRESS: u8 = MANUAL_INPUT_HOLD_TICKS + 1;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OverworldActionAbortedReason {
     Unknown,
@@ -372,6 +394,13 @@ pub struct PokemonAgent {
     /// (reset when the player no longer faces a door). Once it exceeds the open threshold the tile is
     /// treated as an unopenable wall (added to `blocked_tiles`).
     door_open_attempts: u32,
+    /// Raw button presses queued by `queue_manual_input`, delivered ahead of the state machine at
+    /// [`MANUAL_INPUT_TICKS_PER_PRESS`] ticks each. Empty in every ordinary run — nothing in the agent
+    /// or in any scripted policy ever enqueues.
+    manual_input: VecDeque<JoypadButton>,
+    /// Ticks left of the press currently being delivered — see [`MANUAL_INPUT_HOLD_TICKS`]. Zero
+    /// means nothing is held and the next tick takes the head of the queue.
+    manual_input_held: u8,
 }
 
 impl Default for PokemonAgent {
@@ -392,7 +421,38 @@ impl PokemonAgent {
             cut_tiles: std::collections::HashSet::new(),
             blocked_tiles: std::collections::HashSet::new(),
             door_open_attempts: 0,
+            manual_input: VecDeque::new(),
+            manual_input_held: 0,
         }
+    }
+
+    /// Queue raw button presses, one per agent tick, pre-empting the state machine.
+    ///
+    /// The escape hatch for a policy that needs to press a button the agent has no action for.
+    /// `OverworldAction` cannot express "press B once" — the agent re-derives the action mid-walk and
+    /// matches it by `MetaTile`, so a synthetic action fails with `NoRoute` — and the need is broader
+    /// than the overworld anyway: the policy is never consulted at all while the agent believes it is
+    /// mid-script, which is exactly when a wedged run needs a nudge.
+    ///
+    /// The current state is cleared to `Idle` (and any backed-up state dropped) so the next ordinary
+    /// tick re-derives from scratch. Without that, a press landing mid-`OverworldMovement` corrupts
+    /// the route and the walk resumes into a wall.
+    ///
+    /// The queue is capped at [`MANUAL_INPUT_CAPACITY`] buttons; anything past the cap is dropped, so
+    /// a confused model cannot run away with the game.
+    pub fn queue_manual_input(&mut self, buttons: impl IntoIterator<Item = JoypadButton>) {
+        for button in buttons {
+            if self.manual_input.len() >= MANUAL_INPUT_CAPACITY { break; }
+            self.manual_input.push_back(button);
+        }
+        self.backup_state = None;
+        self.set_state(AgentState::Idle);
+    }
+
+    /// Manual button presses not yet fully delivered, including the one currently being held. Zero
+    /// means the state machine is back in charge (see [`Self::queue_manual_input`]).
+    pub fn manual_input_pending(&self) -> usize {
+        self.manual_input.len() + usize::from(self.manual_input_held > 0)
     }
 
     /// The incrementally-built world graph (exposed for tests/inspection).
@@ -430,8 +490,14 @@ impl PokemonAgent {
         format!("{}", self.state)
     }
 
+    /// Emit an event: to the policy first, then to the buffer the host drains.
+    ///
+    /// Every event goes through here, including the ones collected into `update`'s local
+    /// `new_events` and drained at the end of the tick, so `on_event` cannot silently miss a class
+    /// of them.
     pub(crate) fn event(&mut self, event: AgentEvent) {
         println!("{:?}", event);
+        self.policy.on_event(&event);
         self.event_buffer.push_back(event);
         while self.event_buffer.len() > 100 {
             self.event_buffer.pop_front();
@@ -449,6 +515,31 @@ impl PokemonAgent {
         }
         self.state = self.backup_state.clone().unwrap();
         self.backup_state = None;
+    }
+
+    /// Drive the manual-input queue, returning true if this tick belonged to it.
+    ///
+    /// [`MANUAL_INPUT_TICKS_PER_PRESS`] ticks per button: the press, `MANUAL_INPUT_HOLD_TICKS - 1`
+    /// more ticks holding it, then a tick with everything released. Both counts are load-bearing and
+    /// both are documented where they are defined. The state machine resumes on the tick after the
+    /// queue empties, from the `Idle` state `queue_manual_input` left behind.
+    fn drive_manual_input(&mut self, api: &mut PokemonApi) -> bool {
+        if self.manual_input_held > 0 {
+            self.manual_input_held -= 1;
+            if self.manual_input_held == 0 {
+                api.release_all_buttons();
+            }
+            return true;
+        }
+        match self.manual_input.pop_front() {
+            Some(button) => {
+                api.release_all_buttons();
+                api.press_button(button);
+                self.manual_input_held = MANUAL_INPUT_HOLD_TICKS;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Read the game state, overriding tiles the agent has cut down to `Empty` (the ROM-decoded map
@@ -582,6 +673,7 @@ impl PokemonAgent {
     /// policy which slot to forget (it keeps the strongest moves) and navigates there / presses A.
     fn drive_forget_menu(&mut self, api: &mut PokemonApi, cursor_index: u8) -> Result<(), String> {
         let game_state = api.game_state()?;
+        self.policy.service_tools(&game_state, api, &self.world_graph);
         let which = api.learning_pokemon_index();
         let current_moves: Vec<_> = game_state.pokemon.get(which)
             .map(|p| p.moves.iter().flatten().copied().collect())
@@ -730,6 +822,7 @@ impl PokemonAgent {
             // step's menu with BUY. See `postgame::game_corner`.
             if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::SellingToMart(_)) {
                 let game_state = api.game_state()?;
+                self.policy.service_tools(&game_state, api, &self.world_graph);
                 if let Some(item) = self.policy.pick_mart_purchase(&game_state) {
                     api.release_all_buttons();
 
@@ -794,6 +887,15 @@ impl PokemonAgent {
         while self.cycles >= AGENT_RESOLUTION {
             delta_cycles += AGENT_RESOLUTION;
             self.cycles -= AGENT_RESOLUTION;
+        }
+
+        // ── Manual input ──────────────────────────────────────────────────────────
+        // The policy's escape hatch (`queue_manual_input`). It pre-empts everything below, including
+        // the post-Champion cutscene handler and the "not in game" check — a title screen or a
+        // continue prompt is precisely somewhere the state machine cannot help and a raw button can.
+        // Inert unless something enqueues, which nothing in the agent or in any scripted policy does.
+        if self.drive_manual_input(api) {
+            return Ok(());
         }
 
         let game_mode = api.game_mode()
@@ -918,6 +1020,7 @@ impl PokemonAgent {
             AgentState::AwaitingOverworldAction { ref mut delay } => {
                 if delay.tick(delta_cycles) {
                     let game_state = self.observe_state(api)?;
+                    self.policy.service_tools(&game_state, api, &self.world_graph);
                     // Incrementally build the world graph: every time we settle in the overworld,
                     // record this section's live (sprite-resolved) reachable warps/connections, keyed
                     // by the raw landing coords (the space warp `to_position`s use). The player is
@@ -1332,6 +1435,7 @@ impl PokemonAgent {
                     BattleState::AwaitingPolicy { delay } => {
                         if delay.tick(delta_cycles) {
                             let game_state = api.game_state()?;
+                            self.policy.service_tools(&game_state, api, &self.world_graph);
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
                                 new_events.push(AgentEvent::BattleActionStarted { action });
                                 // In-battle item use goes through the dedicated `HealingActive` driver:
@@ -2389,15 +2493,25 @@ impl PokemonAgent {
                     } else {
                         self.set_state(AgentState::NamingPokemon { species, decided, ticks: ticks + 1 });
                     }
-                } else if let Some(decision) = self.policy.pick_nickname(species) {
-                    // Write the nickname directly into the naming screen's string buffer,
-                    // bypassing character-grid navigation.  The screen copies this buffer
-                    // when START is pressed.  An empty/None nickname causes AskName to
-                    // fall back to the default species name.
-                    api.write_naming_screen_buffer(decision.as_deref())?;
-                    self.set_state(AgentState::NamingPokemon { species, decided: true, ticks: 0 });
                 } else {
-                    api.release_all_buttons();
+                    // The only one of the five poll sites with no state of its own already in hand.
+                    // Read one — but do not let a failed read become an error the other four cannot
+                    // produce: the naming screen is the least ordinary place in the game to ask for a
+                    // full `GameState`, and a policy that ignores tool calls (every policy today)
+                    // must not start failing here.
+                    if let Ok(game_state) = api.game_state() {
+                        self.policy.service_tools(&game_state, api, &self.world_graph);
+                    }
+                    if let Some(decision) = self.policy.pick_nickname(species) {
+                        // Write the nickname directly into the naming screen's string buffer,
+                        // bypassing character-grid navigation.  The screen copies this buffer
+                        // when START is pressed.  An empty/None nickname causes AskName to
+                        // fall back to the default species name.
+                        api.write_naming_screen_buffer(decision.as_deref())?;
+                        self.set_state(AgentState::NamingPokemon { species, decided: true, ticks: 0 });
+                    } else {
+                        api.release_all_buttons();
+                    }
                 }
             }
         }

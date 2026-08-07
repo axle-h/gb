@@ -40,7 +40,8 @@ use std::time::Duration;
 use crate::cycles::MachineCycles;
 use crate::pokemon::policy::{DeterministicPolicy, PartyRef, PolicyStep};
 use crate::pokemon::*;
-use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason, PokemonAgent, AGENT_RESOLUTION};
+use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason, PokemonAgent, AGENT_RESOLUTION,
+                            MANUAL_INPUT_CAPACITY, MANUAL_INPUT_TICKS_PER_PRESS};
 use crate::pokemon::battle::BattleType;
 use crate::pokemon::tile::JumpDirection;
 use crate::pokemon::tile::MetaTile;
