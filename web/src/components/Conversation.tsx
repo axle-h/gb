@@ -31,14 +31,17 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
     <div className="conversation">
       <div className="conversation-list" ref={list} onScroll={onScroll}>
         {entries.length === 0 && <p className="dim">waiting for the agent…</p>}
-        {entries.map((entry) => (
-          <div key={entry.seq} className={`entry ${entry.type} ${entry.type === 'agent' ? entry.kind : entry.level}`}>
-            <span className="chip" title={entry.type === 'agent' ? entry.kind : entry.level}>
-              {entry.type === 'agent' ? category(entry.kind) : entry.level}
-            </span>
-            <span className="body">{entry.type === 'agent' ? entry.text : entry.message}</span>
-          </div>
-        ))}
+        {entries.map((entry) => {
+          const { gutter, body, title, modifier } = render(entry);
+          return (
+            <div key={entry.seq} className={`entry ${entry.type} ${modifier}`}>
+              <span className="chip" title={title}>
+                {gutter}
+              </span>
+              <span className="body">{body}</span>
+            </div>
+          );
+        })}
       </div>
       {!pinned && (
         <button className="jump" onClick={() => setPinned(true)}>
@@ -48,6 +51,53 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
     </div>
   );
 });
+
+interface Rendered {
+  /** The left gutter: who is talking. */
+  gutter: string;
+  body: string;
+  /** The full detail, on hover — the gutter is ten characters wide and the log is long. */
+  title: string;
+  /** A second class name for colour. */
+  modifier: string;
+}
+
+function render(entry: Entry): Rendered {
+  switch (entry.type) {
+    case 'agent':
+      return { gutter: category(entry.kind), body: entry.text, title: entry.kind, modifier: entry.kind };
+    case 'notice':
+      return { gutter: entry.level, body: entry.message, title: entry.level, modifier: entry.level };
+    case 'turn':
+      return { gutter: `#${entry.turn}`, body: entry.headline, title: `${entry.kind} decision`, modifier: entry.kind };
+    case 'assistant':
+      return { gutter: 'model', body: entry.text, title: `turn ${entry.turn}`, modifier: '' };
+    case 'tool':
+      // Arguments are shown, not hidden: `choose_action {"id": "PalletTown:5,6:Warp"}` is the single
+      // most informative line in the whole log, and `read_map {}` costs three characters.
+      return {
+        gutter: 'tool',
+        body: `${entry.name} ${compact(entry.arguments)}`,
+        title: `turn ${entry.turn}`,
+        modifier: '',
+      };
+    case 'decision':
+      return { gutter: '→', body: entry.summary, title: `turn ${entry.turn}`, modifier: '' };
+    case 'cancelled':
+      return { gutter: 'dropped', body: entry.reason, title: `turn ${entry.turn}`, modifier: '' };
+  }
+}
+
+/** Arguments arrive as the model sent them, which may be pretty-printed across several lines. */
+function compact(json: string): string {
+  const trimmed = json.trim();
+  if (trimmed === '' || trimmed === '{}') return '';
+  try {
+    return JSON.stringify(JSON.parse(trimmed));
+  } catch {
+    return trimmed;
+  }
+}
 
 /**
  * The gutter says which part of the game is talking, not which `AgentEvent` variant it was:

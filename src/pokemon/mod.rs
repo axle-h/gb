@@ -41,6 +41,10 @@ pub mod actions;
 pub mod battle;
 pub mod observe;
 pub mod policy;
+/// **W4** — the `Policy` an LLM drives. Behind the `llm` feature, which is where its channel
+/// endpoints and the worker it talks to live.
+#[cfg(feature = "llm")]
+pub mod llm_policy;
 pub mod tile_map;
 pub mod encoding;
 pub mod strings;
@@ -63,7 +67,7 @@ mod integration_tests;
 pub mod data;
 mod options;
 pub mod map_metadata;
-mod tile;
+pub mod tile;
 mod pokedex;
 
 pub trait PokemonApiTrait {

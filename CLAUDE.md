@@ -31,6 +31,13 @@ src/
 │   ├── video.rs         — 8×8 block-diff video codec + the reference decoder
 │   ├── assets.rs        — the SPA: `web/dist` embedded, or read from disk under GB_WEB_DEV=1
 │   └── badges.rs        — /api/badges.png: the eight badges, decoded from the cartridge
+├── llm/                 — the LLM client and turn loop (`llm` feature)
+│   ├── config.rs        — the environment block: OPENAI_*, GB_MODEL, GB_MAX_TOOL_STEPS, …
+│   ├── protocol.rs      — OpenAI wire types + the SSE accumulator (no HTTP; pure and testable)
+│   ├── client.rs        — `ChatEndpoint` + `OpenAiClient` over ureq, and the retry policy
+│   ├── tools.rs         — the tool catalogue, scoped per decision kind; ids; servicing
+│   ├── prompt.rs        — the system prompt and the per-turn situation
+│   └── worker.rs        — the turn loop: stream → tool batch → terminal call, with cancellation
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)
 ├── core.rs              — CPU + MMU wiring
 ├── opcode.rs            — full SM83 instruction set
@@ -51,6 +58,7 @@ src/
     ├── mod.rs            — PokemonApi / PokemonApiTrait / GameState
     ├── agent.rs          — PokemonAgent: drives joypad each frame, emits AgentEvents
     ├── policy.rs         — Policy trait + impls (Random, Console/stdin, Deterministic)
+    ├── llm_policy.rs     — LlmPolicy: kind-keyed turns, cancellation, tool servicing (`llm` feature)
     ├── actions.rs        — OverworldAction (walk to tile, warp, talk to sprite)
     ├── encoding.rs       — reads/writes Pokémon data structures from MMU
     ├── symbols.rs        — DmgPointer / DmgBank types + include of generated symbols
@@ -123,15 +131,28 @@ cargo run --release
 # Streams the screen as 8x8 block deltas over SSE (~19 kbit/s) plus a 10 Hz status/event feed.
 cargo run --release -- serve --policy random --port 8080
 
+# Let an LLM play it. OPENAI_API_KEY and GB_MODEL are the only required settings; OPENAI_BASE_URL
+# points at any OpenAI-compatible endpoint. `gb serve` defaults to --policy llm.
+OPENAI_API_KEY=sk-… GB_MODEL=… cargo run --release -- serve
+
 # The container build: no window system at all.
-cargo build --release --no-default-features --features web
+cargo build --release --no-default-features --features llm
 ```
 
-`default = ["sdl", "web"]`. **`web` is on by default deliberately** — the video codec, the
-late-joiner ordering and the emulator host are all default-tier tests, and behind an opt-in feature a
-plain `cargo test --release` would silently skip every one of them. It costs 58 crates on top of the
-119 a default build already pulls. `--policy llm` arrives in W4 of
-`docs/llm-web-playthrough-plan.md`.
+`default = ["sdl", "web", "llm"]`. **`web` and `llm` are on by default deliberately** — the video
+codec, the late-joiner ordering, the emulator host, the SSE parser, the turn-cancellation contract
+and the mock-server playthrough are all default-tier tests, and behind an opt-in feature a plain
+`cargo test --release` would silently skip every one of them. `web` costs 58 crates on top of the 119
+a default build already pulls, and `llm` (ureq + its rustls stack) a further 14.
+
+**The LLM configuration is all environment variables**, never flags, because the API key has to be
+one: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `GB_MODEL`, `GB_CONTEXT_LIMIT`, `GB_TEMPERATURE`,
+`GB_MAX_TOOL_STEPS` and `GB_PORT`. `gb --help` lists them; `src/llm/config.rs` documents them.
+
+⚠️ **The emulator never pauses while the model thinks, and must not be made to.** A tool batch is
+answered by `Policy::service_tools`, which only runs when `gb.run` advances the agent — so any pause
+spanning an LLM tool call deadlocks the run. A `GB_PAUSE_WHILE_THINKING` flag was built in W4 and
+removed the same day; `HostConfig` in `src/host.rs` carries the ⚠️.
 
 ### The web UI
 
@@ -193,8 +214,8 @@ workload in the profile. ⚠️ Watch for sampling skid: a hot instruction is of
 *load* feeding it, not for itself — §2.5 has a worked example that cost an hour.
 
 ```bash
-# Default tier: all unit tests + agent mechanics + two navigation smoke tests + the web/host tier.
-# ~7s, 1056 tests.
+# Default tier: all unit tests + agent mechanics + two navigation smoke tests + the web/host/llm tier.
+# ~7s, 1093 tests.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.

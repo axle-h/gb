@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Connection, Entry, Status, UiEvent } from './api';
+import type { Connection, Entry, Status, UiEvent, UsageView } from './api';
 
 /** How long the conversation keeps. A run is hours long; the DOM is not the transcript (W7 is). */
 const MAX_ENTRIES = 500;
@@ -54,6 +54,40 @@ export interface EventStream {
   status: Status | null;
   entries: Entry[];
   connection: Connection;
+  usage: UsageView | null;
+}
+
+/**
+ * Fold one event into the log.
+ *
+ * The only interesting case is `assistant_delta`: the worker publishes one event per fragment the
+ * model emits, and the reply is the concatenation of all of them. Appending to the last entry when
+ * it belongs to the same turn is what turns a stream of tokens back into a paragraph — and it has to
+ * happen *here*, in the updater, rather than in the batch, because a flush can land in the middle of
+ * a reply.
+ */
+function fold(entries: Entry[], event: UiEvent): Entry[] {
+  if (event.type === 'assistant_delta') {
+    const last = entries[entries.length - 1];
+    if (last?.type === 'assistant' && last.turn === event.turn) {
+      return [...entries.slice(0, -1), { ...last, text: last.text + event.text }];
+    }
+    return [...entries, { seq: event.seq, type: 'assistant', turn: event.turn, text: event.text }];
+  }
+  switch (event.type) {
+    case 'status':
+      return entries; // handled separately — it must not re-render the log
+    case 'turn_started':
+      return [...entries, { seq: event.seq, type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }];
+    case 'tool_call':
+      return [...entries, { seq: event.seq, type: 'tool', turn: event.turn, name: event.name, arguments: event.arguments }];
+    case 'decision':
+      return [...entries, { seq: event.seq, type: 'decision', turn: event.turn, summary: event.summary }];
+    case 'turn_cancelled':
+      return [...entries, { seq: event.seq, type: 'cancelled', turn: event.turn, reason: event.reason }];
+    default:
+      return [...entries, event];
+  }
 }
 
 /**
@@ -67,9 +101,10 @@ export function useEventStream(): EventStream {
   const [status, setStatus] = useState<Status | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [connection, setConnection] = useState<Connection>('connecting');
-  // Batched between animation frames: a burst of dialogue is many events in one tick, and each one
-  // would otherwise be its own render.
-  const pending = useRef<Entry[]>([]);
+  const [usage, setUsage] = useState<UsageView | null>(null);
+  // Batched between animation frames: a burst of dialogue is many events in one tick, and a
+  // streaming reply is one per token — each would otherwise be its own render.
+  const pending = useRef<UiEvent[]>([]);
   const frame = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -78,7 +113,7 @@ export function useEventStream(): EventStream {
       const arrived = pending.current;
       if (arrived.length === 0) return;
       pending.current = [];
-      setEntries((previous) => [...previous, ...arrived].slice(-MAX_ENTRIES));
+      setEntries((previous) => arrived.reduce(fold, previous).slice(-MAX_ENTRIES));
     };
 
     return subscribe(
@@ -90,6 +125,7 @@ export function useEventStream(): EventStream {
           setStatus(rest);
           return;
         }
+        if (event.type === 'decision' && event.usage) setUsage(event.usage);
         pending.current.push(event);
         // A backgrounded tab gets no animation frames, and a livestream is left in one for hours —
         // so the queue is capped as well as the list it flushes into.
@@ -102,5 +138,5 @@ export function useEventStream(): EventStream {
 
   useEffect(() => () => cancelAnimationFrame(frame.current ?? 0), []);
 
-  return { status, entries, connection };
+  return { status, entries, connection, usage };
 }

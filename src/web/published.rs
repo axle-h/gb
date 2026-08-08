@@ -79,6 +79,33 @@ pub enum UiEventBody {
     Agent { kind: &'static str, text: String },
     /// Something the operator should see — a failed agent tick, a policy that ran out.
     Notice { level: &'static str, message: String },
+
+    // ── W4: the LLM's side of the conversation ───────────────────────────────────────────────────
+    //
+    // Every one of these carries `turn`, and the client groups on it: a turn is one bubble, not one
+    // bubble per token. That is also what lets a viewer joining mid-turn drop the fragments of a
+    // turn it did not see the start of.
+    /// A decision has been asked for. `headline` is a sentence, not the thousand tokens that were
+    /// actually sent — the full prompt is the transcript's business (W7).
+    TurnStarted { turn: u64, kind: &'static str, headline: String },
+    /// One fragment of the assistant's prose, as it arrives.
+    AssistantDelta { turn: u64, text: String },
+    /// A tool the model called. `arguments` is the raw JSON string it sent.
+    ToolCall { turn: u64, name: String, arguments: String },
+    /// The terminal call that ended the turn.
+    Decision { turn: u64, summary: String, usage: Option<UsageView> },
+    /// The turn was abandoned — the game moved on to a different question, or the model would not
+    /// produce a decision. §17's risk 2b is that this becomes a *rate*, so it is an event rather
+    /// than a silence.
+    TurnCancelled { turn: u64, reason: String },
+}
+
+/// Context occupancy after a turn. The full accounting — cumulative totals, a cost estimate,
+/// estimated-vs-reported — is W6's; this is the one number the conversation pane can show now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct UsageView {
+    pub context_tokens: u64,
+    pub context_limit: u64,
 }
 
 /// What the status panel renders, and the cheapest thing the host can publish at 10 Hz.

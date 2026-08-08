@@ -20,8 +20,13 @@ USAGE:
     gb --help                   Print this message
 
 SERVE OPTIONS:
-    --port <PORT>               Port to listen on [default: 8080]
+    --port <PORT>               Port to listen on [default: $GB_PORT, else 8080]
     --policy <llm|random>       What plays the game [default: llm]
+
+ENVIRONMENT (--policy llm):
+    OPENAI_API_KEY, GB_MODEL    Required
+    OPENAI_BASE_URL             Any OpenAI-compatible endpoint [default: api.openai.com/v1]
+    GB_CONTEXT_LIMIT, GB_TEMPERATURE, GB_MAX_TOOL_STEPS
 ";
 
 /// What the process was asked to do.
@@ -57,6 +62,19 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    parse_with_env(args, &|name| std::env::var(name).ok())
+}
+
+/// [`parse`] against an explicit environment.
+///
+/// The environment is process-global, which would make every test here order-dependent against
+/// whatever `GB_PORT` the shell happened to export — so the tests pass their own, and `parse`
+/// supplies the real one.
+pub fn parse_with_env<I, S>(args: I, env: &dyn Fn(&str) -> Option<String>) -> Result<Command, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_string()).collect();
     let fail = |msg: String| Err(format!("{msg}\n\n{USAGE}"));
 
@@ -68,7 +86,14 @@ where
         other => return fail(format!("unknown command `{other}`")),
     }
 
-    let mut port = DEFAULT_PORT;
+    // `GB_PORT` is the container's way of setting this (§7.1); `--port` is the operator's, and wins.
+    let mut port = match env("GB_PORT").map(|value| value.trim().to_string()).filter(|v| !v.is_empty()) {
+        Some(value) => match value.parse::<u16>() {
+            Ok(0) | Err(_) => return fail(format!("`GB_PORT={value}` is not a port number")),
+            Ok(parsed) => parsed,
+        },
+        None => DEFAULT_PORT,
+    };
     let mut policy = ServePolicy::Llm;
     while let Some(flag) = rest.next() {
         // Every flag takes a value, so a missing one is always the same mistake and reports the same
@@ -97,6 +122,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests must not see whatever the shell exported.
+    fn parse<I: IntoIterator<Item = S>, S: AsRef<str>>(args: I) -> Result<Command, String> {
+        parse_with_env(args, &|_| None)
+    }
 
     #[test]
     fn bare_invocation_is_the_desktop_ui() {
@@ -137,6 +167,29 @@ mod tests {
         for args in rejected {
             let error = parse(&args).expect_err(&format!("{args:?} should not parse"));
             assert!(error.contains(USAGE), "{args:?} rejected without usage: {error}");
+        }
+    }
+
+    /// **W4 / §7.1.** The container sets the port through the environment; a person debugging sets it
+    /// on the command line, and theirs wins.
+    #[test]
+    fn gb_port_is_the_default_and_the_flag_overrides_it() {
+        let env = |name: &str| (name == "GB_PORT").then(|| "9999".to_string());
+        assert_eq!(
+            parse_with_env(["serve"], &env),
+            Ok(Command::Serve { port: 9999, policy: ServePolicy::Llm }),
+        );
+        assert_eq!(
+            parse_with_env(["serve", "--port", "7000"], &env),
+            Ok(Command::Serve { port: 7000, policy: ServePolicy::Llm }),
+        );
+
+        // A nonsense `GB_PORT` is reported rather than silently ignored: a container that quietly
+        // binds 8080 when it was told 80 is a much longer afternoon than one that will not start.
+        for bad in ["0", "port80", "70000"] {
+            let env = |name: &str| (name == "GB_PORT").then(|| bad.to_string());
+            let error = parse_with_env(["serve"], &env).expect_err("{bad} is not a port");
+            assert!(error.contains("GB_PORT") && error.contains(bad), "{error}");
         }
     }
 }

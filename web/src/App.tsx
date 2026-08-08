@@ -4,18 +4,23 @@ import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 
 export function App() {
-  const { status, entries, connection } = useEventStream();
+  const { status, entries, connection, usage } = useEventStream();
 
   return (
     <div className="app">
       <header>
-        {/* W4 puts the model and the token/context accounting here — it is the one part of §6's
-            mock that has nothing behind it yet, and inventing a placeholder number would be worse
-            than the gap. */}
         <span className="title">Pokémon Red</span>
         <span className="dim">·</span>
         <span className="policy">{status?.policy ?? '…'}</span>
         <span className="spacer" />
+        {/* Context occupancy after the last turn. W6 makes this a real gauge with cumulative totals
+            and an estimated-vs-reported flag; until then it is the one number there is, and it
+            appears only once a turn has reported one rather than as a placeholder zero. */}
+        {usage && (
+          <span className="context" title={`${usage.context_tokens} of ${usage.context_limit} tokens`}>
+            context {Math.round((100 * usage.context_tokens) / Math.max(1, usage.context_limit))}%
+          </span>
+        )}
         <span className={`pill ${connection}`}>
           {connection === 'live' ? status?.game?.mode ?? 'connected' : connection}
         </span>
