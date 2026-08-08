@@ -26,7 +26,7 @@ sdl = ["dep:sdl2", "dep:fontdue"]
 # them. The cost is 57 extra crates on a build that already pulls 119. A server-only build still
 # drops SDL entirely:
 #   cargo build --release --no-default-features --features web
-web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64"]
+web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed"]
 # The Pokémon integration tests are tiered by how much game time they emulate. The emulator runs at
 # ~23x realtime, so game time is the cost: a plain `cargo test --release` stays under a minute by
 # running only the mechanic tests and two navigation smoke tests.
@@ -95,6 +95,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.22", optional = true }
+# The built SPA (`web/dist`), baked into the binary so the container is one file. ⚠️ The folder must
+# exist at compile time — `web/dist/.gitkeep` is committed for exactly that reason, and a checkout
+# that has not run `npm run build` compiles fine and serves a page saying so.
+rust-embed = { version = "8.12", optional = true }
 
 [build-dependencies]
 regex = "1.12.2"

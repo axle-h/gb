@@ -26,9 +26,11 @@ src/
 ├── main.rs              — entry point: `gb` (SDL UI) or `gb serve` (web), dispatched from cli.rs
 ├── cli.rs               — hand-rolled arg parsing; `parse` is unit-testable without a process
 ├── host.rs              — headless emulator host: GameBoy + PokemonAgent + video encoder on one thread
-├── web/                 — the axum server (`web` feature); read-only, four endpoints
+├── web/                 — the axum server (`web` feature); read-only, five endpoints
 │   ├── published.rs     — the only interface between the emulator thread and HTTP
-│   └── video.rs         — 8×8 block-diff video codec + the reference decoder
+│   ├── video.rs         — 8×8 block-diff video codec + the reference decoder
+│   ├── assets.rs        — the SPA: `web/dist` embedded, or read from disk under GB_WEB_DEV=1
+│   └── badges.rs        — /api/badges.png: the eight badges, decoded from the cartridge
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)
 ├── core.rs              — CPU + MMU wiring
 ├── opcode.rs            — full SM83 instruction set
@@ -56,6 +58,7 @@ src/
     ├── tile_map.rs       — MetaTileMap: abstracts the current map into typed tiles
     ├── map.rs            — Map enum (all 248 maps)
     ├── battle.rs         — battle state reader + BattleAction
+    ├── badge_gfx.rs      — the badge sprites, decoded from the trainer card's ROM graphics
     ├── delay.rs          — DelayContext: cycle-accurate waits between agent steps
     ├── text.rs           — PokemonTextReader: reads on-screen text from VRAM
     ├── integration_tests/ — agent end-to-end tests, tiered (see Tests below)
@@ -110,7 +113,7 @@ Current policy implementations: `RandomPolicy`, `ConsolePolicy` (stdin, used in 
 ### Build & run
 
 ```bash
-# Build
+# Build. ⚠️ The browser UI is built first and separately — see "The web UI" below.
 cargo build --release
 
 # Run SDL2 debug UI (loads pokemon-red.sav, starts ConsolePolicy on stdin)
@@ -126,9 +129,38 @@ cargo build --release --no-default-features --features web
 
 `default = ["sdl", "web"]`. **`web` is on by default deliberately** — the video codec, the
 late-joiner ordering and the emulator host are all default-tier tests, and behind an opt-in feature a
-plain `cargo test --release` would silently skip every one of them. It costs 57 crates on top of the
-119 a default build already pulls. `--policy llm` and the browser SPA arrive in W4/W3 of
-`docs/llm-web-playthrough-plan.md`; today `/` serves a throwaway dev page.
+plain `cargo test --release` would silently skip every one of them. It costs 58 crates on top of the
+119 a default build already pulls. `--policy llm` arrives in W4 of
+`docs/llm-web-playthrough-plan.md`.
+
+### The web UI
+
+`web/` is a Vite + React + TypeScript SPA — screen, status panel, conversation, and a TypeScript port
+of the video decoder in `web/src/video.ts`. The badge strip is the game's own art: `src/pokemon/badge_gfx.rs`
+decodes the trainer card's badge tiles out of the ROM and `/api/badges.png` serves them as one sheet,
+so no graphics are committed. `npm run build` produces `web/dist`, which `rust-embed`
+bakes into the binary, so **the npm build comes first**:
+
+```bash
+cd web && npm ci && npm run build     # → web/dist
+cargo build --release                 # embeds it
+```
+
+⚠️ **`web/dist` must exist for the crate to compile at all** — `rust-embed`'s derive fails if the
+folder is missing, which is why `web/dist/.gitkeep` is committed and why `vite build` (which empties
+`dist`) copies it back from `web/public/`. A checkout that has never run `npm run build` compiles and
+serves a page saying which two commands to run, so a missing UI is never a mystery.
+
+Two dev loops:
+
+```bash
+# Hot reload: Vite on :5173 proxies /api to a `gb serve` on :8080.
+cargo run --release -- serve --policy random --port 8080 &
+cd web && npm run dev
+
+# Or: skip the cargo rebuild after an npm build by reading web/dist from disk.
+GB_WEB_DEV=1 cargo run --release -- serve --policy random
+```
 
 ### Tests
 
@@ -162,7 +194,7 @@ workload in the profile. ⚠️ Watch for sampling skid: a hot instruction is of
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + the web/host tier.
-# ~7s, 1043 tests.
+# ~7s, 1056 tests.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.

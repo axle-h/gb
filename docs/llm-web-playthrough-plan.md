@@ -3,9 +3,9 @@
 An `LlmPolicy` that delegates every decision to an LLM over an OpenAI-compatible API, and a
 browser UI — served from the same process — that lets anyone with the URL watch it play.
 
-**Status:** **W0–W2 complete** (2026-08-07). The seams are in, `gb serve --policy random` plays the
-game headlessly and streams it to a browser over SSE, and a dev page renders it. W3 onward is
-unbuilt. Each completed task below carries what actually shipped, including the places the plan was
+**Status:** **W0–W3 complete** (2026-08-07). The seams are in, `gb serve --policy random` plays the
+game headlessly and streams it to a browser over SSE, and the React SPA — screen, status panel and
+conversation — is embedded in the binary and renders it. W4 onward is unbuilt. Each completed task below carries what actually shipped, including the places the plan was
 wrong.
 
 ---
@@ -596,13 +596,13 @@ length and requires an error rather than a panic at each.
 
 **Acceptance — met.** `web/dev/video.html` (plain canvas + two `EventSource`s, no build step) renders
 the game under `--policy random`; the SSE capture was independently decoded and rendered to PNG to
-confirm it is a real Pokémon Red screen and not merely self-consistent. This page is discarded in W3
-— it is `include_str!`'d at `src/web/mod.rs`'s `DEV_PAGE`, so deleting it is a compile error rather
+confirm it is a real Pokémon Red screen and not merely self-consistent. This page was discarded in W3
+— it was `include_str!`'d at `src/web/mod.rs`'s `DEV_PAGE`, so deleting it was a compile error rather
 than a dead route.
 
 ---
 
-## 6. Phase W3 — The SPA
+## 6. Phase W3 — The SPA ✅ **done**
 
 `web/` — Vite + React + TypeScript. Dependencies: `react`, `react-dom`, `vite`,
 `@vitejs/plugin-react`, `typescript`. Nothing else — no UI kit, no state library, no router.
@@ -636,6 +636,65 @@ Embedded with `rust-embed` over `web/dist`. `GB_WEB_DEV=1` serves from disk via 
 Ship a committed placeholder `web/dist/.gitkeep` + an `index.html` stub so a clean checkout builds,
 and document the real order (`npm ci && npm run build`, then `cargo build`) in the Dockerfile and
 the README section this plan adds.
+
+**Shipped detail.**
+
+- **The layout is the mock, minus what does not exist yet.** The header's model and token accounting
+  is W4's; a placeholder number there would be worse than the gap, so it carries the policy name and
+  the game mode instead. The party list has no levels because `StatusView.party_hp` does not carry
+  them — the full party is a W5 read tool, and widening the 10 Hz heartbeat for one decoration is
+  the wrong trade. The playtime clock **was** added (`observe::status` now takes `&PokemonApi` for
+  three byte reads), because "how long has this run been going" is the one number a livestream
+  viewer actually wants.
+- **The `AgentEvent` variant is not the gutter label.** `overworld_action_completed` and
+  `started_overworld_action` differ by a glyph the line itself already carries (`→ ✓ ✗ 📖`), and
+  spelling both out cost a quarter of the pane's width. The gutter says which part of the game is
+  talking (`overworld` / `battle` / `text`); the variant is the `title` attribute.
+- **No `tower-http`.** `GB_WEB_DEV=1` reads the same paths from disk through 20 lines in
+  `src/web/assets.rs`, sharing one sanitiser with the embedded path. `ServeDir` would have been a
+  reasonable call, but the sanitiser has to exist for the URL→embed-key mapping anyway, and a
+  whitelist of path shapes (`Component::Normal` only) is a smaller thing to be sure of than a
+  dependency that also does ranges, precompression and directory listings.
+- **The `.gitkeep` needs help.** `vite build` empties `dist` first, so the committed marker whose
+  entire job is to make `web/dist` exist at compile time was deleted by the first build — and
+  `rust-embed` fails to **compile**, loudly but confusingly, when it is missing. `web/public/.gitkeep`
+  is copied back into `dist` on every build, which keeps the committed file in place instead of
+  leaving a deletion in `git status` after each build.
+- **`index.html` is not shipped as a stub.** A checkout that has never run `npm run build` compiles
+  (the `.gitkeep` is enough) and serves a page saying exactly which two commands to run. A committed
+  stub would have been overwritten by every build, which is churn for a worse message.
+- **The screen is scaled by an `outline`, not a `border`.** Under `box-sizing: border-box` a 1 px
+  border leaves the canvas 638 px wide in a 640 px column — 3.99 device pixels per Game Boy pixel,
+  and a few visibly narrow rows. An outline does not take part in layout, so the scale stays exactly
+  4×.
+- **The badge strip is the ROM's own art.** `src/pokemon/badge_gfx.rs` decodes
+  `GymLeaderFaceAndBadgeTileGraphics` — the blob the trainer card uses, 8 tiles per gym (a 2×2 gym
+  leader face, then its 2×2 badge) — and `/api/badges.png` serves the eight badges as one 128×16
+  sheet the UI slices by `background-position`. Nothing is committed: it is read from the same
+  cartridge bytes the emulator boots, at run time.
+  - ⚠️ **The tone ramp is inverted on the way out.** On the trainer card a badge is dark line art on
+    a *white* background. Dropped on this page it would be either a bright white chip or — if the
+    background were simply made transparent — black-on-black. Inverting gives light line art on a
+    dark page, and the first attempt was still too dark at 2×: the visible levels are now
+    `#8B94A2 / #C6CCD6 / #FFFFFF`, checked on the page rather than in a 4× preview.
+  - **`StatusView.badge_count` became `badges: Vec<BadgeView>`** — a name and an `earned` flag for
+    all eight, in bit order, which is also the sheet's sprite order. A count cannot drive the strip:
+    gyms can be beaten out of order, so "the first N" is wrong. Sending all eight with their names
+    also keeps the client from carrying its own copy of the badge list.
+  - **Earned and unearned are the same sprite at different opacity** (1.0 against 0.16), so the
+    sheet needs no second variant and the transition is one CSS property.
+- **A viewer joining mid-run starts with an empty conversation.** The event stream is live-only;
+  `/api/history?since=` is W7's, and until then a late joiner sees the status panel populate
+  immediately and the log fill from the next thing that happens.
+
+**Acceptance — met.** `gb serve --policy random --port 8099`, driven headlessly through CDP: the
+screen renders, the status panel tracks `OaksLab (5, 3)` / the badge strip / ¥ / the playtime clock, and the
+conversation streams and auto-scrolls. Killing `gb` mid-session puts the pill and the screen overlay
+into `reconnecting…`; restarting it repaints the canvas and resumes the log with no reload. Both
+asset paths were exercised: an empty `web/dist` compiles and serves the not-built page, and
+`GB_WEB_DEV=1` serves the SPA from disk out of a binary that embeds nothing. The TypeScript decoder
+was run under node against the live stream and its output written to a PNG — the four DMG shades and
+a real Pokémon Red screen, not merely self-consistent bytes.
 
 ---
 
@@ -1068,6 +1127,14 @@ feature. New tests follow it.
 | `web::published::tests::events_are_numbered_from_zero_and_reach_a_subscriber` ✅ | default | `UiEvent` sequencing, which W7's `/api/history?since=` replays from |
 | `host::tests::the_host_publishes_a_moving_game_state` ✅ | default | W1's acceptance without a socket: heartbeats arrive, carry a game state, and the player moves |
 | `host::tests::the_host_publishes_decodable_video` ✅ | default | What the host publishes decodes back to the emulator's own frame buffer, and the frame snapshot and keyframe describe the same moment |
+| `web::assets::tests::sanitise_keeps_asset_paths_and_rejects_everything_else` ✅ | default | The traversal defence from both directions — `../`, absolute paths and a `.` component are rejected, hashed asset paths survive |
+| `web::assets::tests::index_is_always_a_page` ✅ | default | `/` is HTML and `no-cache` whether or not `npm run build` ran before `cargo build`, and takes the right branch of the two |
+| `web::assets::tests::a_missing_asset_is_a_404_rather_than_the_index` ✅ | default | No SPA fallback: there is no client-side router, so an unknown path is a genuine 404 |
+| `pokemon::badge_gfx::tests::eight_distinct_badges_come_out_of_the_rom` ✅ | default | The ROM offsets — being one tile out still yields a plausible 16×16 sprite, of half a gym leader's face |
+| `pokemon::badge_gfx::tests::the_quadrants_are_four_consecutive_tiles` ✅ | default | The 2×2 assembly, re-read tile by tile without trusting the decoder |
+| `pokemon::badge::tests::badges_are_declared_in_bit_order` ✅ | default | `Badge::ORDER` is bit order — the sprite sheet is indexed by it, and lighting badge 3 for bit 4 would look plausible |
+| `web::badges::tests::the_sheet_is_eight_distinct_badges_side_by_side` ✅ | default | Sheet geometry (what `background-position` slices), a transparent background, and eight different sprites |
+| `mechanics::the_badge_strip_reports_which_badges_not_only_how_many` ✅ | default | Against the post-Earth-Badge fixture, where the answer is known — a mapping that returns `false` eight times passes on a fresh save |
 | `llm::client::tests::parses_fragmented_tool_call_arguments` | default | Arguments split across SSE chunks reassemble |
 | `llm::compaction::tests::*` | default | Image eviction, summary replacement, system prompt survives |
 | `llm_policy::tests::kind_change_cancels_pending_turn` | default | An overworld turn in flight is dropped when `pick_battle_action` is polled, and a battle turn replaces it |
@@ -1101,7 +1168,7 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | **W0** | SDL feature-gated · CLI dispatch · `Policy::{on_event, service_tools}` · manual input queue · observation facade | `full_playthrough` |
 | **W1** ✅ | `EmulatorHost` thread · shared published state · axum skeleton · `/api/events` status SSE | ✅ `curl` shows status ticking, map changing |
 | **W2** ✅ | Block-diff encoder (three modes) + JS decoder · `/api/video` | ✅ Round-trip tests; game visible in the dev page. 8 kbit/s idle, 536 kbit/s walking — see §5.1's ⚠️ |
-| **W3** | Vite/React SPA · embedded via `rust-embed` · screen + status + conversation shell | Full UI under `--policy random` |
+| **W3** ✅ | Vite/React SPA · embedded via `rust-embed` · screen + status + conversation shell | ✅ Full UI under `--policy random`, verified headlessly including reconnect |
 | **W4** | OpenAI client (streaming, tool calls) · `LlmPolicy` · kind-keyed turns + cancellation · overworld + battle decisions | LLM plays; conversation streams |
 | **W5** | Full tool surface: screenshot, reads, raw buttons, field moves, nickname/mart/forget | Mock-server test |
 | **W6** | Token accounting · status broadcast · two-stage compaction · memory + TODO | Compaction tests |
@@ -1113,10 +1180,10 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.
 
-**What W3 inherits.** `/` serves `web/dev/video.html` via `DEV_PAGE` in `src/web/mod.rs`; replacing
-it with the embedded SPA means swapping that one `include_str!` for `rust-embed` and deleting the
-file. The JS decoder in it is the direct ancestor of the TypeScript one and should be ported rather
-than rewritten — it is the only thing that has been checked against a real stream.
+**What W3 inherited.** `/` served `web/dev/video.html` via `DEV_PAGE` in `src/web/mod.rs`; it is now
+`rust-embed` over `web/dist` (`src/web/assets.rs`) and the file is gone. Its JS decoder was ported to
+`web/src/video.ts` rather than rewritten — it was the only version that had been checked against a
+real stream, and the port was re-checked the same way.
 
 ---
 

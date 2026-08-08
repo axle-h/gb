@@ -244,10 +244,8 @@ impl EmulatorHost {
     fn publish_status(&mut self, now: Instant) {
         // `game_state` reads a lot of RAM and can legitimately fail mid-transition. A heartbeat that
         // says "no game state" is far easier to diagnose than one that stops arriving.
-        let game = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache)
-            .game_state()
-            .ok()
-            .map(|state| observe::status(&state));
+        let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+        let game = api.game_state().ok().map(|state| observe::status(&state, &api));
         self.published.publish_event(UiEventBody::Status(Box::new(StatusSnapshot {
             wall_ms: now.duration_since(self.started).as_millis() as u64,
             emulated_ms: self.emulated.to_duration().as_millis() as u64,
