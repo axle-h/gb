@@ -19,6 +19,7 @@
 use crate::pokemon::GameState;
 use crate::pokemon::PokemonApi;
 use crate::pokemon::PokemonApiTrait;
+use crate::pokemon::badge::Badge;
 use crate::pokemon::battle::BattleType;
 use crate::pokemon::map::Map;
 use crate::pokemon::policy::battle_options;
@@ -61,11 +62,17 @@ view! {
     }
 }
 
-pub fn trainer(state: &GameState, api: &PokemonApi<'_>) -> TrainerView {
+/// `HH:MM:SS` of in-game play time. Saturates at 255:59:59, as the game itself does.
+fn playtime(api: &PokemonApi<'_>) -> String {
     let mmu = api.mmu();
     let hours = mmu.read_pointer(&pokered_symbols::wPlayTimeHours);
     let minutes = mmu.read_pointer(&pokered_symbols::wPlayTimeMinutes);
     let seconds = mmu.read_pointer(&pokered_symbols::wPlayTimeSeconds);
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+pub fn trainer(state: &GameState, api: &PokemonApi<'_>) -> TrainerView {
+    let mmu = api.mmu();
     TrainerView {
         name: state.name.to_default_string(),
         rival_name: state.rival_name.to_default_string(),
@@ -76,7 +83,7 @@ pub fn trainer(state: &GameState, api: &PokemonApi<'_>) -> TrainerView {
         has_pokedex: state.has_pokedex,
         pokedex_owned: state.pokedex_owned.species().len(),
         pokedex_seen: state.pokedex_seen.species().len(),
-        playtime: format!("{hours:02}:{minutes:02}:{seconds:02}"),
+        playtime: playtime(api),
         playtime_maxed: mmu.read_pointer(&pokered_symbols::wPlayTimeMaxed) != 0,
     }
 }
@@ -474,27 +481,48 @@ pub fn battle(state: &GameState) -> Option<BattleView> {
 // ── Status ───────────────────────────────────────────────────────────────────────────────────────
 
 view! {
-    /// The cheap subset the web UI polls at 10 Hz. Everything in it is already in `GameState`, so
-    /// this costs one clone of a few small fields and no extra RAM reads.
+    /// One badge and whether it has been earned, in the order of
+    /// [`Badge::ORDER`](crate::pokemon::badge::Badge::ORDER) — which is also the order of the sprites
+    /// in `/api/badges.png`, so index `i` is the badge and the sprite.
+    ///
+    /// All eight are always reported, rather than only the earned ones: the UI draws all eight
+    /// either way, gyms can legitimately be beaten out of order, and a name beside each one saves
+    /// the client from carrying its own copy of the list.
+    pub struct BadgeView {
+        pub name: String,
+        pub earned: bool,
+    }
+}
+
+view! {
+    /// The cheap subset the web UI polls at 10 Hz. Everything but the clock is already in
+    /// `GameState`, so this costs one clone of a few small fields and three byte reads.
     pub struct StatusView {
         pub map: String,
         pub position: Point,
         pub mode: String,
-        pub badge_count: u32,
+        pub badges: Vec<BadgeView>,
         pub money: u32,
+        /// `HH:MM:SS` of in-game play time — the run's own clock, which is what a viewer wants to
+        /// see rather than how long the process has been up.
+        pub playtime: String,
         /// `(nickname-or-species, hp, max_hp)` per party slot — enough for a health bar.
         pub party_hp: Vec<(String, u16, u16)>,
         pub in_battle: bool,
     }
 }
 
-pub fn status(state: &GameState) -> StatusView {
+pub fn status(state: &GameState, api: &PokemonApi<'_>) -> StatusView {
     StatusView {
         map: format!("{}", state.map.map),
         position: state.map.player_position.into(),
         mode: format!("{:?}", state.mode),
-        badge_count: state.badges.bits().count_ones(),
+        badges: Badge::ORDER
+            .iter()
+            .map(|badge| BadgeView { name: format!("{badge}"), earned: state.badges.contains(*badge) })
+            .collect(),
         money: state.money,
+        playtime: playtime(api),
         party_hp: state.pokemon.iter()
             .map(|mon| (mon.nickname.to_default_string(), mon.current_hp, mon.stats.hp))
             .collect(),

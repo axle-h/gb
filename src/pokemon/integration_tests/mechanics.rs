@@ -732,8 +732,18 @@ fn observation_views_describe_the_snapshot() {
     assert_eq!(bag.slots_total, 20);
     assert_eq!(bag.money, trainer.money);
 
-    let status = observe::status(&state);
-    assert_eq!(status.badge_count, trainer.badge_count);
+    let status = observe::status(&state, &api);
+    assert_eq!(status.badges.len(), 8, "the status reports every badge, earned or not");
+    assert_eq!(
+        status.badges.iter().filter(|badge| badge.earned).count() as u32,
+        trainer.badge_count,
+    );
+    assert_eq!(
+        status.badges.iter().filter(|badge| badge.earned).map(|badge| badge.name.clone()).collect::<Vec<_>>(),
+        trainer.badges,
+        "the two views must agree on which badges, not merely how many",
+    );
+    assert_eq!(status.playtime, trainer.playtime);
     assert_eq!(status.party_hp.len(), party.len());
     assert!(!status.in_battle, "the Pallet Town snapshot is not in a battle");
     assert!(observe::battle(&state).is_none(), "…so there is no battle to describe");
@@ -793,6 +803,39 @@ fn map_view_is_well_formed_stable_and_fully_documented() {
     }
 }
 
+/// The badge strip the web UI draws, against a snapshot that has actually earned some.
+///
+/// `observation_views_describe_the_snapshot` checks the shape on a fixture with **no** badges, which
+/// cannot tell a working mapping from one that reports `false` eight times. This one uses the
+/// end-of-game fixture, where the answer is known: index `i` is bit `i` of `wObtainedBadges`, and the
+/// sprite at that index in `/api/badges.png` is the badge the name says it is.
+#[test]
+fn the_badge_strip_reports_which_badges_not_only_how_many() {
+    use crate::pokemon::badge::Badge;
+    use crate::pokemon::observe;
+    const POST_EARTH_BADGE: &[u8] = include_bytes!("../data/post-earth-badge.bin");
+
+    let mut fixture = TestFixture::new(POST_EARTH_BADGE, Duration::from_secs(10), vec![]);
+    let state = fixture.game_state();
+    let badges = observe::status(&state, &fixture.api()).badges;
+
+    assert_eq!(badges.len(), 8);
+    assert_eq!(
+        badges.iter().map(|badge| badge.name.as_str()).collect::<Vec<_>>(),
+        Badge::ORDER.iter().map(|badge| format!("{badge}")).collect::<Vec<_>>(),
+        "the strip must be in bit order — the sprite sheet is indexed by it",
+    );
+    for badge in &badges {
+        assert_eq!(
+            badge.earned,
+            state.badges.contains(Badge::from_name(&badge.name).expect("a real flag name")),
+            "{} disagrees with the badge flags", badge.name,
+        );
+    }
+    let earned = badges.iter().filter(|badge| badge.earned).count();
+    assert_eq!(earned, 8, "the post-Earth-Badge fixture should hold every badge, not {earned}");
+}
+
 /// The battle view against a snapshot that is in one, including the option list a decider chooses
 /// from — the thing that must never come back empty on a turn the game is waiting for.
 #[test]
@@ -808,7 +851,7 @@ fn battle_view_describes_a_live_battle() {
     assert!(battle.player.level > 0 && battle.enemy.level > 0);
     assert!(!battle.options.is_empty(), "a battle with no legal action would deadlock the agent");
     assert!(!battle.player.moves.is_empty(), "the active Pokémon knows no moves");
-    assert_eq!(observe::status(&state).in_battle, true);
+    assert_eq!(observe::status(&state, &fixture.api()).in_battle, true);
     assert_eq!(battle.active_party_slot as usize, {
         let slot = battle.active_party_slot as usize;
         assert!(slot < state.pokemon.len(), "active slot {slot} is outside the party");
@@ -861,7 +904,7 @@ fn observation_views_serialise_to_json() {
     assert_eq!(json["grid"].as_array().expect("grid is an array").len(), state.map.height);
 
     for value in [serde_json::to_value(observe::party(&state)).unwrap(),
-                  serde_json::to_value(observe::status(&state)).unwrap(),
+                  serde_json::to_value(observe::status(&state, &fixture.api())).unwrap(),
                   serde_json::to_value(observe::bag(&state, &fixture.api())).unwrap()] {
         assert!(!value.is_null());
     }

@@ -6,12 +6,16 @@
 //! There is no channel from here back into the emulator to expose.
 //!
 //! ```text
-//! GET /              the dev page (W3 replaces it with the embedded SPA)
-//! GET /api/healthz   liveness
-//! GET /api/events    SSE — status heartbeat at 10 Hz, plus agent events as they happen
-//! GET /api/video     SSE — a keyframe, then base64 block deltas
+//! GET /                the SPA (`web/dist`, embedded — see `assets.rs`)
+//! GET /{*path}         its assets
+//! GET /api/healthz     liveness
+//! GET /api/events      SSE — status heartbeat at 10 Hz, plus agent events as they happen
+//! GET /api/video       SSE — a keyframe, then base64 block deltas
+//! GET /api/badges.png  the eight gym badges, decoded from the cartridge
 //! ```
 
+pub mod assets;
+pub mod badges;
 pub mod published;
 pub mod video;
 
@@ -23,7 +27,7 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, Json};
+use axum::response::Json;
 use axum::routing::get;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
@@ -95,10 +99,13 @@ fn serve_http(port: u16, published: Arc<Published>) -> Result<(), String> {
     runtime.block_on(async move {
         let state = AppState { published, started: Instant::now() };
         let app = Router::new()
-            .route("/", get(index))
             .route("/api/healthz", get(healthz))
             .route("/api/events", get(events))
             .route("/api/video", get(video_stream))
+            .route("/api/badges.png", get(badges::badges))
+            // Last, so the catch-all cannot shadow an API route it happens to match.
+            .route("/", get(assets::index))
+            .route("/{*path}", get(assets::asset))
             .with_state(state);
 
         // 0.0.0.0: the container publishes the port, and there is nothing here worth binding to
@@ -117,14 +124,6 @@ fn serve_http(port: u16, published: Arc<Published>) -> Result<(), String> {
             .map_err(|e| format!("server failed: {e}"))
     })
 }
-
-async fn index() -> Html<&'static str> {
-    Html(DEV_PAGE)
-}
-
-/// The W2 acceptance page: a canvas, an `EventSource`, and a TypeScript-free port of
-/// [`video::VideoDecoder`]. W3 replaces it with the embedded SPA and this file is deleted.
-const DEV_PAGE: &str = include_str!("../../web/dev/video.html");
 
 async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
