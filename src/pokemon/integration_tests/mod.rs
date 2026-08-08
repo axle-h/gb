@@ -53,6 +53,11 @@ pub use fixture::TestFixture;
 
 mod mechanics;
 mod early_game;
+/// **W4** — the LLM path end to end against a mock OpenAI server. Default tier: it is the test that
+/// keeps the tool schema, the resolution logic and the agent's expectations in step, and it emulates
+/// a few seconds of game time.
+#[cfg(feature = "llm")]
+mod llm;
 mod vermilion;
 mod celadon;
 mod fuchsia;

@@ -52,6 +52,14 @@ pub struct HostConfig {
     pub policy_name: &'static str,
 }
 
+// ⚠️ **Nothing may stop this loop while the game is being played.** W4 briefly had a
+// `GB_PAUSE_WHILE_THINKING` that froze `gb.run` while the model thought (§2.1 of
+// `docs/llm-web-playthrough-plan.md`); it was removed the same day. A live picture is the whole
+// point of the server, and freezing it is never the trade anyone wants — and because
+// `Policy::service_tools` only runs when the emulator advances, any pause spanning an LLM tool call
+// deadlocked the run outright. If a future change wants to pause here, that is the hazard to think
+// about first.
+
 impl Default for HostConfig {
     fn default() -> Self {
         Self {

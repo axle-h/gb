@@ -319,3 +319,50 @@ main {
     grid-template-rows: auto minmax(240px, 1fr);
   }
 }
+
+/* ── The model's side of the conversation (W4) ───────────────────────────────────────────────── */
+
+header .context {
+  color: var(--dim);
+}
+
+/* A turn header is the log's paragraph break: the only entry with space above it. */
+.entry.turn {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.entry.turn .chip {
+  color: var(--text);
+}
+
+.entry.turn .body {
+  color: var(--dim);
+}
+
+.entry.battle .chip {
+  color: var(--warn);
+}
+
+/* The model's prose is the thing a viewer is actually here to read. */
+.entry.assistant .body {
+  color: var(--text);
+}
+
+.entry.tool .chip,
+.entry.tool .body {
+  color: #7fa8d4;
+}
+
+.entry.decision .chip,
+.entry.decision .body {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.entry.cancelled .chip,
+.entry.cancelled .body {
+  color: var(--dim);
+  font-style: italic;
+}

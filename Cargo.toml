@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["sdl", "web"]
+default = ["sdl", "web", "llm"]
 # The SDL2 desktop UI (`src/sdl/`): window, audio device, keyboard. On by default, so a plain
 # `cargo build` is exactly what it always was. Off, the binary drops `libsdl2` and `fontdue`
 # entirely — which is the point: a server-only container should not need a native SDL2 to link
@@ -27,6 +27,19 @@ sdl = ["dep:sdl2", "dep:fontdue"]
 # drops SDL entirely:
 #   cargo build --release --no-default-features --features web
 web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed"]
+# **W4** — the LLM: the OpenAI-compatible client (`src/llm/`) and the policy that drives the game
+# from it (`src/pokemon/llm_policy.rs`). Implies `web`, because the turn loop publishes into the same
+# `Published` buffers the browser reads and there is no configuration in which one is wanted without
+# the other.
+#
+# ⚠️ **In `default` for the reason `web` is**, and it is the same argument a third time: every W4 test
+# — the SSE parser, the cancellation contract, the tool scoping, the mock-server playthrough — lives
+# in this module, and behind an opt-in feature a plain `cargo test --release` would run none of them.
+# The measured cost is **14 crates** — ureq and its rustls/ring TLS stack, most of whose transitive
+# dependencies the build already had — against the 175 without it, and it needs no system library
+# beyond a C compiler for `ring`. A container build is still
+# `--no-default-features --features llm`.
+llm = ["web", "dep:ureq"]
 # The Pokémon integration tests are tiered by how much game time they emulate. The emulator runs at
 # ~23x realtime, so game time is the cost: a plain `cargo test --release` stays under a minute by
 # running only the mechanic tests and two navigation smoke tests.
@@ -99,6 +112,10 @@ base64 = { version = "0.22", optional = true }
 # exist at compile time — `web/dist/.gitkeep` is committed for exactly that reason, and a checkout
 # that has not run `npm run build` compiles fine and serves a page saying so.
 rust-embed = { version = "8.12", optional = true }
+# The chat completions client. **Blocking on purpose**: `Response::into_reader()` is a plain
+# `impl Read`, so streaming SSE is a `BufReader::lines()` loop on the worker's own `std::thread` and
+# there is no second async runtime in the process. `reqwest::blocking` would start one internally.
+ureq = { version = "3.3", optional = true }
 
 [build-dependencies]
 regex = "1.12.2"

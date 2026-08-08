@@ -53,20 +53,36 @@ struct AppState {
 /// Two threads: this one becomes the tokio runtime serving HTTP, and a plain `std::thread` runs the
 /// emulator. The runtime never touches the emulator and the emulator never enters the runtime.
 pub fn run(port: u16, policy: ServePolicy) -> Result<(), String> {
+    let published = Published::new();
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // The policy is a **factory**, built on the emulator thread — `Policy` is not `Send` and
+    // `LlmPolicy` owns channel endpoints. The pieces it needs are assembled here, where a bad
+    // configuration is still a clean error before anything is listening.
     let make_policy: Box<dyn FnOnce() -> Box<dyn crate::pokemon::policy::Policy> + Send> = match policy
     {
         ServePolicy::Random => Box::new(|| Box::new(RandomPolicy)),
-        // W4 builds this. Failing here beats starting a server that would sit at a decision point
-        // forever with nothing to answer it.
+        #[cfg(feature = "llm")]
         ServePolicy::Llm => {
-            return Err("`--policy llm` is not built yet — it arrives with phase W4 of \
-                        docs/llm-web-playthrough-plan.md. `--policy random` plays now."
+            use crate::llm::{LlmConfig, client::OpenAiClient, worker};
+            use crate::pokemon::llm_policy::LlmPolicy;
+
+            let config = LlmConfig::from_env()?;
+            println!("gb serve — {} via {}", config.model, config.base_url);
+            let endpoint = Box::new(OpenAiClient::new(&config));
+            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published));
+            // The worker outlives this function; it ends when the policy is dropped and its channels
+            // close, which happens when the emulator thread stops.
+            worker.spawn()?;
+            Box::new(move || Box::new(LlmPolicy::new(handles)))
+        }
+        #[cfg(not(feature = "llm"))]
+        ServePolicy::Llm => {
+            return Err("this build has no LLM — it was built without the `llm` feature. \
+                        `--policy random` plays now."
                 .to_string());
         }
     };
-
-    let published = Published::new();
-    let shutdown = Arc::new(AtomicBool::new(false));
 
     let emulator = EmulatorHost::spawn(
         crate::pokemon::data::START_OF_GAME,

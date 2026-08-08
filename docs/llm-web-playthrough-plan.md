@@ -3,10 +3,11 @@
 An `LlmPolicy` that delegates every decision to an LLM over an OpenAI-compatible API, and a
 browser UI — served from the same process — that lets anyone with the URL watch it play.
 
-**Status:** **W0–W3 complete** (2026-08-07). The seams are in, `gb serve --policy random` plays the
-game headlessly and streams it to a browser over SSE, and the React SPA — screen, status panel and
-conversation — is embedded in the binary and renders it. W4 onward is unbuilt. Each completed task below carries what actually shipped, including the places the plan was
-wrong.
+**Status:** **W0–W4 complete** (W0–W3 2026-08-07, W4 2026-08-08). The seams are in, `gb serve` plays
+the game headlessly and streams it to a browser over SSE, the React SPA renders it, and
+`--policy llm` hands every overworld and battle decision to an OpenAI-compatible endpoint and streams
+the conversation back to the page. W5 onward is unbuilt. Each completed task below carries what
+actually shipped, including the places the plan was wrong.
 
 ---
 
@@ -114,12 +115,27 @@ results back. Worst-case latency is one agent tick — 20 ms of emulated time (W
 The blocking is the point: the worker thread is *supposed* to wait. It is one thread doing one
 request at a time, and it has nothing else to do.
 
-⚠️ **The emulator keeps running while the LLM thinks.** In the overworld the player stands still and
-in battle the game waits at the menu, so this is usually harmless — but a `press_buttons` decision
-made against a screenshot taken 4 seconds ago can land on a different screen. Config flag
-`GB_PAUSE_WHILE_THINKING` (default `false`) skips `gb.run` while a turn is in flight, at the cost of
-a frozen livestream. Default off: a frozen screen with a "Thinking" pill is a worse watch than a
-slightly stale one.
+⚠️ **The emulator keeps running while the LLM thinks, always.** In the overworld the player stands
+still and in battle the game waits at the menu, so this is usually harmless — but a `press_buttons`
+decision made against a screenshot taken 4 seconds ago can land on a different screen.
+
+An earlier draft of this section offered `GB_PAUSE_WHILE_THINKING` to skip `gb.run` while a turn was
+in flight. **It was built in W4 and removed the same day, and it is not coming back.** Two reasons,
+either of which is sufficient:
+
+- **A live picture is the product.** A frozen screen with a "Thinking" pill is a worse watch than a
+  slightly stale one, under every circumstance anyone could name — so the flag's *on* position is
+  never the one you want, which makes it not a trade-off but dead weight.
+- ⚠️ **It could deadlock the run.** A tool batch is answered by `Policy::service_tools`, which only
+  runs when `gb.run` advances the agent. Any pause spanning a tool round trip hangs the run on the
+  first `read_map`. W4's implementation dodged this by pausing only while a completion was
+  *streaming* — a subtlety that existed purely to keep a feature nobody wanted from breaking things.
+
+The staleness it was meant to address is handled where the decision lands instead: a `choose_action`
+id is re-resolved against a **freshly recomputed** `actions()` (§7.4), and W5's `press_buttons` goes
+through `queue_manual_input`, which is applied within one agent tick of the poll that receives it.
+`src/host.rs` carries a ⚠️ above `HostConfig` so the next person to reach for a pause finds the
+argument before they write it.
 
 ### 2.2 Threading contract
 
@@ -698,7 +714,31 @@ a real Pokémon Red screen, not merely self-consistent bytes.
 
 ---
 
-## 7. Phase W4 — LLM client and the turn lifecycle
+## 7. Phase W4 — LLM client and the turn lifecycle ✅ **done**
+
+**What shipped.** `src/llm/` — `config.rs` (the §7.1 environment block), `protocol.rs` (the wire
+types and the SSE accumulator), `client.rs` (`ChatEndpoint` + `OpenAiClient` over `ureq`, and the
+retry policy), `tools.rs` (the catalogue, the per-kind scoping, the ids and the servicing),
+`prompt.rs` (the system prompt and the turn situation), `worker.rs` (the turn loop) — plus
+`src/pokemon/llm_policy.rs`. `gb serve --policy llm` is live; the SPA renders turns, streamed prose,
+tool calls, decisions and context occupancy.
+
+**Acceptance — met.** Against a mock endpoint on loopback, `gb serve --policy llm` played from the
+start of the game through Oak's script, took a starter, and fought the rival — asking one turn per
+decision point, streaming its prose into the browser, and answering `read_map` from the live game.
+`the_llm_plays_from_a_fixture` (default tier, 0.08 s) pins the same path in CI: a real socket, a real
+`text/event-stream`, `OpenAiClient` parsing it, and the emulator executing what came out.
+
+**Where the plan was wrong, or silent.**
+
+1. ⚠️ **`GB_PAUSE_WHILE_THINKING` was built, then deleted — see §2.1 for the argument.** It was
+   specified as "skip `gb.run` while a turn is in flight", which **deadlocks**: a tool batch is
+   answered at the policy poll, and the policy is only polled when `gb.run` advances the agent, so
+   the first `read_map` of the run hangs it forever. The shipped version dodged that by pausing only
+   while a completion was *streaming* — and then the whole feature came out, because freezing the
+   livestream is never the trade anyone wants and a knob whose on position is a footgun is worse than
+   no knob. `src/host.rs` keeps a ⚠️ above `HostConfig` so the next person to reach for a pause finds
+   the reasoning first.
 
 ### 7.1 Client — `src/llm/client.rs`
 
@@ -745,8 +785,7 @@ Config, all environment variables, never exposed to the browser:
 | `GB_TEMPERATURE` | `1.0` | |
 | `GB_MAX_TOOL_STEPS` | `12` | Non-terminal tool calls per turn before we force a decision |
 | `GB_PORT` | `8080` | |
-| `GB_RUN_DIR` | `./runs` | |
-| `GB_PAUSE_WHILE_THINKING` | `false` | §2.1 |
+| `GB_RUN_DIR` | `./runs` | W7 |
 
 Retry with exponential backoff on 429/5xx, surfacing `Status::RateLimited { retry_in }` to the UI.
 
@@ -1042,8 +1081,10 @@ jitter buffer — 768 kbit/s, no encoder. If that proves too fat, IMA-ADPCM is ~
 ~40 of JS for 192 kbit/s.
 
 ⚠️ Under fast-forward, `set_emulation_speed` must track `cycle_duration` or the queue backs up
-(`render.rs:224-229`). And `GB_PAUSE_WHILE_THINKING=true` would produce audible gaps — the two
-features are mutually exclusive in practice.
+(`render.rs:224-229`). This section used to warn that `GB_PAUSE_WHILE_THINKING` would produce
+audible gaps and was mutually exclusive with audio; that flag no longer exists (§2.1), and the
+emulator now never stops while a run is in progress — which is exactly the property a continuous
+audio stream needs.
 
 ---
 
@@ -1135,21 +1176,39 @@ feature. New tests follow it.
 | `pokemon::badge::tests::badges_are_declared_in_bit_order` ✅ | default | `Badge::ORDER` is bit order — the sprite sheet is indexed by it, and lighting badge 3 for bit 4 would look plausible |
 | `web::badges::tests::the_sheet_is_eight_distinct_badges_side_by_side` ✅ | default | Sheet geometry (what `background-position` slices), a transparent background, and eight different sprites |
 | `mechanics::the_badge_strip_reports_which_badges_not_only_how_many` ✅ | default | Against the post-Earth-Badge fixture, where the answer is known — a mapping that returns `false` eight times passes on a fresh save |
-| `llm::client::tests::parses_fragmented_tool_call_arguments` | default | Arguments split across SSE chunks reassemble |
-| `llm::compaction::tests::*` | default | Image eviction, summary replacement, system prompt survives |
-| `llm_policy::tests::kind_change_cancels_pending_turn` | default | An overworld turn in flight is dropped when `pick_battle_action` is polled, and a battle turn replaces it |
-| `llm_policy::tests::cancelled_turn_leaves_history_well_formed` | default | After a mid-turn cancel and one-step rollback, no `tool_call` is left without a result (§7.3) |
-| `llm_policy::tests::tool_batch_is_all_or_nothing` | default | A batch is never partially serviced across two polls |
-| `llm::tools::tests::terminal_tools_scoped_per_kind` | default | §7.5 — a battle turn's `tools` array omits `choose_action`, and vice versa |
-| `llm::tools::tests::parallel_batch_shares_one_observation` | default | Two reads in one assistant message are answered from the same `GameState` |
-| `llm::compaction::tests::summary_restates_turn_contract` | default | §9 — the contract survives a compaction |
-| `llm_policy::tests::no_tool_call_nudges_then_forces_wait` | default | §7.5 fallback, and it emits the marker event |
-| `llm_policy::tests::field_move_does_not_cancel_overworld_turn` | default | `pick_field_move` shares the `Overworld` kind and never pre-empts |
-| `mechanics::manual_input_preempts_state_machine` | default | W0.4 — a queued press fires and resets to `Idle` |
-| `mechanics::policy_receives_text_events` | default | W0.3 — `on_event` sees `TextBox` |
-| `llm_policy::tests::idle_poll_is_allocation_free` | default | W0.3b — a poll with no pending tool batch and no outcome does no work |
-| `llm_policy::plays_from_fixture` | `slow-tests,llm` | A **mock OpenAI server** (axum, in-process) serves a scripted tool-call sequence; the agent executes it from a committed fixture |
+| `llm::protocol::tests::parses_fragmented_tool_call_arguments` ✅ | default | §7.1's ⚠️ — arguments split across SSE chunks reassemble, split mid-key and mid-string |
+| `llm::protocol::tests::parallel_tool_calls_are_kept_apart_even_interleaved` ✅ | default | Two calls interleaved by `index`, with a fragmented *name* as well as fragmented arguments |
+| `llm::protocol::tests::a_minimal_endpoint_still_yields_a_usable_call` ✅ | default | §17 risk 3 — no `index`, no id, no `usage`: still a call with an id, and the estimator stands in |
+| `llm::protocol::tests::indexless_calls_split_on_a_new_id` ✅ | default | …and two indexless calls are not concatenated into one |
+| `llm::protocol::tests::{non_data_lines_are_ignored, a_mid_stream_error_frame_is_an_error, a_corrupt_chunk_is_an_error, read_stream_stops_the_moment_a_turn_is_cancelled}` ✅ | default | Keep-alives, an error inside a 200, truncation, and the per-line cancel point |
+| `llm::protocol::tests::the_request_serialises_to_the_documented_shape` ✅ | default | `stream_options`, `parallel_tool_calls`, and no `null` where a key should be absent |
+| `llm::client::tests::*` ✅ | default | Backoff doubles and caps; 429 retried **and reported**; 400 not retried; cancellation beats backing off; a persistent fault gives up |
+| `llm::config::tests::*` ✅ | default | §7.1's block: the two required variables name themselves, a trailing slash does not double up |
+| `llm::tools::tests::terminal_tools_are_scoped_per_kind` ✅ | default | §7.5 — a battle turn's `tools` array omits `choose_action`, and vice versa, and the contract matches the array |
+| `llm::tools::tests::every_schema_is_a_well_formed_object` ✅ | default | A malformed schema is a 400 on the first turn of a run |
+| `llm::tools::tests::a_terminal_tool_from_the_wrong_kind_is_rejected_with_the_right_one` ✅ | default | It is a message to the model, not a dead turn |
+| `llm::tools::tests::a_battle_id_ignores_the_volatile_parts` ✅ | default | §7.4 — a battle id survives the PP that `BattleAction`'s `Display` carries |
+| `llm::prompt::tests::the_contract_names_every_tool_the_turn_is_actually_sent` ✅ | default | §7.5's second/third lines of defence cannot drift from the first |
+| `llm_policy::tests::one_decision_point_is_one_turn_and_its_answer_is_executed` ✅ | default | The re-issue guard: fifty polls a second, one turn, and the action lands |
+| `llm_policy::tests::a_kind_change_cancels_the_turn_in_flight` ✅ | default | §7.2 — an overworld turn dies when a battle starts, and the battle decision is what lands |
+| `llm_policy::tests::a_cancelled_batch_leaves_the_history_well_formed` ✅ | default | §7.3's one-step rollback: no `tool_call` left without a result |
+| `llm_policy::tests::a_parallel_read_batch_is_answered_from_one_observation` ✅ | default | All-or-nothing, from one `GameState`, in one poll |
+| `llm_policy::tests::a_reply_with_no_tool_call_is_nudged_once_then_forced_to_wait` ✅ | default | §7.5's fallback, and the marker event that makes it a visible rate |
+| `llm_policy::tests::field_move_polls_do_not_cancel_the_overworld_turn` ✅ | default | `pick_field_move` shares the `Overworld` kind and never pre-empts |
+| `llm_policy::tests::an_unresolvable_id_is_explained_on_the_next_turn` ✅ | default | §7.4's ⚠️ — a stale id is a message, not a panic and not a silent no-op |
+| `integration_tests::llm::the_llm_plays_from_a_fixture` ✅ | default | A **mock OpenAI server** (axum, in-process, real socket, real SSE with fragmented arguments) serves a scripted tool-call sequence; the agent executes it from a committed fixture |
+| `cli::tests::gb_port_is_the_default_and_the_flag_overrides_it` ✅ | default | §7.1's `GB_PORT`, and that a nonsense one refuses to start |
+| `llm::compaction::tests::*` | W6 | Image eviction, summary replacement, system prompt survives |
+| `llm::compaction::tests::summary_restates_turn_contract` | W6 | §9 — the contract survives a compaction |
+| `mechanics::manual_input_preempts_state_machine` ✅ | default | W0.4 — a queued press fires and resets to `Idle` |
+| `mechanics::policy_receives_text_events` ✅ | default | W0.3 — `on_event` sees `TextBox` |
 | Existing suite | all tiers | Unchanged |
+
+`llm_policy::tests::idle_poll_is_allocation_free` was dropped rather than written: what it was
+guarding — one decision point becoming fifty turns — is asserted directly by
+`one_decision_point_is_one_turn_and_its_answer_is_executed`, and "allocation free" is not true of the
+poll anyway (`service_tools` refreshes the `ApiSnapshot` before a turn starts) nor worth making true
+at 50 Hz against a 90×-realtime emulator (W0.3b).
 
 **`full_playthrough` gates W0 and any later phase that touches `agent.rs` or `policy.rs`.** Per
 `CLAUDE.md`: the leg tier proves the legs individually, only the full run proves they compose, and
@@ -1169,8 +1228,8 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | **W1** ✅ | `EmulatorHost` thread · shared published state · axum skeleton · `/api/events` status SSE | ✅ `curl` shows status ticking, map changing |
 | **W2** ✅ | Block-diff encoder (three modes) + JS decoder · `/api/video` | ✅ Round-trip tests; game visible in the dev page. 8 kbit/s idle, 536 kbit/s walking — see §5.1's ⚠️ |
 | **W3** ✅ | Vite/React SPA · embedded via `rust-embed` · screen + status + conversation shell | ✅ Full UI under `--policy random`, verified headlessly including reconnect |
-| **W4** | OpenAI client (streaming, tool calls) · `LlmPolicy` · kind-keyed turns + cancellation · overworld + battle decisions | LLM plays; conversation streams |
-| **W5** | Full tool surface: screenshot, reads, raw buttons, field moves, nickname/mart/forget | Mock-server test |
+| **W4** ✅ | OpenAI client (streaming, tool calls) · `LlmPolicy` · kind-keyed turns + cancellation · overworld + battle decisions · the read tools | ✅ LLM plays from the start of the game against a mock endpoint; conversation, tool calls and decisions stream into the SPA |
+| **W5** | The rest of the tool surface: `screenshot`, raw buttons, field moves, nickname/mart/forget | Mock-server test |
 | **W6** | Token accounting · status broadcast · two-stage compaction · memory + TODO | Compaction tests |
 | **W7** | Run directory · checkpoint/resume · transcript backlog | Survives restart mid-run |
 | **W8** | Multi-stage Dockerfile · no-SDL build · ops config | Image builds and runs |
@@ -1179,6 +1238,12 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.
+
+**What W5 inherits.** The read half of §8's table is already built (`llm::tools::READ_TOOLS`, serviced
+from W0.5's facade); what is left there is `screenshot`, which needs PNG encoding on the worker thread
+and the multi-part `content` form the wire types do not yet model. The terminal half needs
+`press_buttons` (W0.4's queue is waiting for it, and it needs a drain path from the policy to
+`PokemonAgent::queue_manual_input`), `use_field_move`, and the three extra `DecisionKind`s.
 
 **What W3 inherited.** `/` served `web/dev/video.html` via `DEV_PAGE` in `src/web/mod.rs`; it is now
 `rust-embed` over `web/dist` (`src/web/assets.rs`) and the file is gone. Its JS decoder was ported to

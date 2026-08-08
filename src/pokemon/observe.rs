@@ -63,7 +63,10 @@ view! {
 }
 
 /// `HH:MM:SS` of in-game play time. Saturates at 255:59:59, as the game itself does.
-fn playtime(api: &PokemonApi<'_>) -> String {
+///
+/// Public because it is the one line of [`TrainerView`] a turn request wants without the other
+/// eleven — see [`crate::llm::prompt::ApiSnapshot`].
+pub fn playtime(api: &PokemonApi<'_>) -> String {
     let mmu = api.mmu();
     let hours = mmu.read_pointer(&pokered_symbols::wPlayTimeHours);
     let minutes = mmu.read_pointer(&pokered_symbols::wPlayTimeMinutes);

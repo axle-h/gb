@@ -24,6 +24,8 @@ mod sdl;
 mod web;
 #[cfg(feature = "web")]
 mod host;
+#[cfg(feature = "llm")]
+mod llm;
 mod cli;
 mod serial;
 mod cycles;

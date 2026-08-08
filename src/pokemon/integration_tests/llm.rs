@@ -1,0 +1,225 @@
+//! **W4** — the LLM path end to end, against a mock OpenAI server in this process.
+//!
+//! This is the test that stops the tool schema, the resolution logic and the agent's expectations
+//! drifting apart, and it costs no API key and no network. Everything between the model and the game
+//! is the real thing: a real socket, a real `text/event-stream` body, [`OpenAiClient`] parsing it,
+//! the real worker, the real [`LlmPolicy`], the real agent, and the real emulator executing what
+//! comes out. Only the model is a stand-in — a forty-line program that reads the menu it is sent and
+//! picks the warp.
+//!
+//! ⚠️ **The mock fragments its tool-call arguments across several `data:` frames on purpose.** That is
+//! the one thing about the wire format most likely to be got wrong (§7.1's ⚠️), and a mock that sends
+//! a whole call in one frame would never catch it.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use axum::Router;
+use axum::extract::State;
+use axum::http::header;
+use axum::response::IntoResponse;
+use axum::routing::post;
+
+use crate::llm::client::OpenAiClient;
+use crate::llm::config::LlmConfig;
+use crate::llm::worker;
+use crate::pokemon::integration_tests::fixture::TestFixture;
+use crate::pokemon::llm_policy::LlmPolicy;
+use crate::pokemon::map::Map;
+use crate::web::published::Published;
+
+/// Pallet Town, standing outside. Chosen for what it does **not** contain: no tall grass and no
+/// scripted encounter, so the only thing that can move the player off this map is the decision the
+/// model made.
+///
+/// ⚠️ `oaks-lab-just-got-squirtle.bin` was the obvious pick and is the wrong one — walking out of the
+/// lab trips the rival battle, and a mock that has to *win a fight* to reach its assertion is testing
+/// the RNG rather than the wire format.
+const FIXTURE: &[u8] = include_bytes!("../data/pallet-town-state.bin");
+
+#[derive(Clone, Default)]
+struct Mock {
+    turns: Arc<AtomicUsize>,
+    /// What came back from `read_map`. `None` until the batch round trip has completed, which is the
+    /// only way a `tool` message can appear in a request at all.
+    map_result: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// The stand-in model.
+///
+/// Two rules, both of which need the request to have been *correct* for the test to pass: on its
+/// first overworld turn it calls `read_map`, which only comes back if the batch round trip works;
+/// after that it picks the warp out of the menu it was sent, which only exists if the situation
+/// carried one.
+async fn completions(State(mock): State<Mock>, body: String) -> impl IntoResponse {
+    let request: serde_json::Value = serde_json::from_str(&body).expect("the client sends JSON");
+    let tools: Vec<&str> = request["tools"]
+        .as_array()
+        .expect("a request always carries tools")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap_or_default())
+        .collect();
+    let last_user = request["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    if let Some(result) = request["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+    {
+        *mock.map_result.lock().expect("not poisoned") = Some(result.to_string());
+    }
+
+    let turn = mock.turns.fetch_add(1, Ordering::SeqCst);
+    let ids = menu_ids(&last_user);
+    let (name, arguments) = if tools.contains(&"choose_battle_action") {
+        // Nothing should start a battle here, but a wild encounter is never impossible and a mock
+        // that only knows how to run would hang the test in a trainer fight.
+        let id = ids.iter().find(|id| id.starts_with("fight:")).cloned().unwrap_or_else(|| "run".into());
+        ("choose_battle_action".to_string(), serde_json::json!({ "id": id }))
+    } else if turn == 0 {
+        ("read_map".to_string(), serde_json::json!({}))
+    } else if let Some(id) = ids.iter().find(|id| id.ends_with(":Warp") || id.ends_with(":Connection")) {
+        ("choose_action".to_string(), serde_json::json!({ "id": id }))
+    } else {
+        ("wait".to_string(), serde_json::json!({ "ticks": 1 }))
+    };
+
+    (
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        sse(&name, &serde_json::to_string(&arguments).expect("valid JSON")),
+    )
+}
+
+/// The ids the turn request offered, in order. Parsed out of the rendered menu exactly as a model
+/// would have to.
+fn menu_ids(situation: &str) -> Vec<String> {
+    situation
+        .lines()
+        .filter_map(|line| line.strip_prefix("- `"))
+        .filter_map(|line| line.split_once('`'))
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// One completion, as an OpenAI-compatible stream — with the arguments deliberately chopped into
+/// three-character fragments.
+fn sse(name: &str, arguments: &str) -> String {
+    let mut out = String::new();
+    let frame = |value: serde_json::Value| format!("data: {value}\n\n");
+
+    out.push_str(&frame(serde_json::json!({
+        "choices": [{ "delta": { "role": "assistant", "content": "Let me look at where I am." } }]
+    })));
+    out.push_str(&frame(serde_json::json!({
+        "choices": [{ "delta": { "tool_calls": [{
+            "index": 0, "id": "call_mock", "type": "function",
+            "function": { "name": name, "arguments": "" },
+        }] } }]
+    })));
+    for fragment in chunks(arguments, 3) {
+        out.push_str(&frame(serde_json::json!({
+            "choices": [{ "delta": { "tool_calls": [{
+                "index": 0, "function": { "arguments": fragment },
+            }] } }]
+        })));
+    }
+    out.push_str(&frame(serde_json::json!({
+        "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+    })));
+    out.push_str(&frame(serde_json::json!({
+        "choices": [], "usage": { "prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240 }
+    })));
+    out.push_str("data: [DONE]\n\n");
+    out
+}
+
+fn chunks(text: &str, size: usize) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let split = rest.char_indices().nth(size).map_or(rest.len(), |(i, _)| i);
+        let (head, tail) = rest.split_at(split);
+        out.push(head);
+        rest = tail;
+    }
+    out
+}
+
+/// Start the mock on an arbitrary port and return the base URL. The runtime lives on its own thread
+/// and is never joined — the test process ends and takes it with it.
+fn serve_mock(mock: Mock) -> String {
+    let (ready, address) = std::sync::mpsc::channel::<SocketAddr>();
+    std::thread::Builder::new()
+        .name("mock-openai".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime");
+            runtime.block_on(async move {
+                let app = Router::new()
+                    .route("/v1/chat/completions", post(completions))
+                    .with_state(mock);
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                    .await
+                    .expect("an arbitrary loopback port");
+                ready.send(listener.local_addr().expect("bound")).expect("the test is waiting");
+                axum::serve(listener, app).await.expect("the mock serves");
+            });
+        })
+        .expect("the mock server thread starts");
+
+    let address = address.recv_timeout(Duration::from_secs(10)).expect("the mock server bound a port");
+    format!("http://{address}/v1")
+}
+
+/// **W4's acceptance, without an API key.** The model asks a read tool, is answered from the live
+/// game, picks the warp out of the menu it was given, and the agent walks the player through it.
+#[test]
+fn the_llm_plays_from_a_fixture() {
+    let mock = Mock::default();
+    let config = LlmConfig {
+        base_url: serve_mock(mock.clone()),
+        api_key: "mock".to_string(),
+        model: "mock".to_string(),
+        context_limit: 128_000,
+        temperature: 1.0,
+        max_tool_steps: 6,
+    };
+    let published = Published::new();
+    let (worker, handles) =
+        worker::channels(Box::new(OpenAiClient::new(&config)), config, Arc::clone(&published));
+    let _worker = worker.spawn().expect("the worker thread starts");
+
+    let mut fixture = TestFixture::with_policy(
+        FIXTURE,
+        Duration::from_secs(120),
+        Box::new(LlmPolicy::new(handles)),
+    );
+    let arrived = fixture.try_run_until(|state| state.map.map != Map::PalletTown);
+
+    let state = arrived.unwrap_or_else(|| {
+        let state = fixture.game_state();
+        panic!("the player never left Pallet Town — still at {}", state.map.player_position);
+    });
+    assert_ne!(state.map.map, Map::PalletTown, "the decision the model made is what moved the player");
+
+    // …and it got there having actually used a tool. Without this the test would still pass if the
+    // batch round trip silently answered nothing, because the second turn does not need the answer.
+    let read = mock.map_result.lock().expect("not poisoned").clone();
+    let read = read.expect("`read_map` was never answered — the tool round trip did not complete");
+    assert!(read.contains("\"PalletTown\""), "read_map answered from the wrong state: {read:.200}");
+    assert!(read.contains("\"grid\"") && read.contains("\"legend\""), "read_map lost its shape: {read:.200}");
+}
