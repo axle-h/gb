@@ -23,6 +23,7 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 
 use crate::llm::client::OpenAiClient;
+use crate::llm::screenshot::SCALE;
 use crate::llm::config::LlmConfig;
 use crate::llm::worker;
 use crate::pokemon::integration_tests::fixture::TestFixture;
@@ -45,14 +46,17 @@ struct Mock {
     /// What came back from `read_map`. `None` until the batch round trip has completed, which is the
     /// only way a `tool` message can appear in a request at all.
     map_result: Arc<std::sync::Mutex<Option<String>>>,
+    /// **W5** — the `image_url` the `screenshot` answer put into the history, as the endpoint saw it.
+    /// This is the only place the multi-part content form is exercised over a real socket.
+    picture: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// The stand-in model.
 ///
 /// Two rules, both of which need the request to have been *correct* for the test to pass: on its
-/// first overworld turn it calls `read_map`, which only comes back if the batch round trip works;
-/// after that it picks the warp out of the menu it was sent, which only exists if the situation
-/// carried one.
+/// first overworld turn it asks for `read_map` **and** a `screenshot` in one message — which only
+/// come back if the batch round trip and the worker's own encoding both work — and after that it
+/// picks the warp out of the menu it was sent, which only exists if the situation carried one.
 async fn completions(State(mock): State<Mock>, body: String) -> impl IntoResponse {
     let request: serde_json::Value = serde_json::from_str(&body).expect("the client sends JSON");
     let tools: Vec<&str> = request["tools"]
@@ -81,25 +85,43 @@ async fn completions(State(mock): State<Mock>, body: String) -> impl IntoRespons
         *mock.map_result.lock().expect("not poisoned") = Some(result.to_string());
     }
 
+    // The picture arrives as a *user* message in the multi-part form, never on the tool result —
+    // see `Message::user_with_image`. Finding it here is finding it exactly where an endpoint would.
+    if let Some(url) = request["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .find(|part| part["type"] == "image_url")
+        .and_then(|part| part["image_url"]["url"].as_str())
+    {
+        *mock.picture.lock().expect("not poisoned") = Some(url.to_string());
+    }
+
     let turn = mock.turns.fetch_add(1, Ordering::SeqCst);
     let ids = menu_ids(&last_user);
-    let (name, arguments) = if tools.contains(&"choose_battle_action") {
+    let calls = if tools.contains(&"choose_battle_action") {
         // Nothing should start a battle here, but a wild encounter is never impossible and a mock
         // that only knows how to run would hang the test in a trainer fight.
         let id = ids.iter().find(|id| id.starts_with("fight:")).cloned().unwrap_or_else(|| "run".into());
-        ("choose_battle_action".to_string(), serde_json::json!({ "id": id }))
+        vec![("choose_battle_action", serde_json::json!({ "id": id }))]
     } else if turn == 0 {
-        ("read_map".to_string(), serde_json::json!({}))
+        // Both in one assistant message: the read goes to the emulator thread and the screenshot is
+        // answered by the worker, so this is the one request that exercises both paths at once.
+        vec![("read_map", serde_json::json!({})), ("screenshot", serde_json::json!({}))]
     } else if let Some(id) = ids.iter().find(|id| id.ends_with(":Warp") || id.ends_with(":Connection")) {
-        ("choose_action".to_string(), serde_json::json!({ "id": id }))
+        vec![("choose_action", serde_json::json!({ "id": id }))]
     } else {
-        ("wait".to_string(), serde_json::json!({ "ticks": 1 }))
+        vec![("wait", serde_json::json!({ "ticks": 1 }))]
     };
 
-    (
-        [(header::CONTENT_TYPE, "text/event-stream")],
-        sse(&name, &serde_json::to_string(&arguments).expect("valid JSON")),
-    )
+    let calls: Vec<(&str, String)> = calls
+        .into_iter()
+        .map(|(name, arguments)| (name, serde_json::to_string(&arguments).expect("valid JSON")))
+        .collect();
+    ([(header::CONTENT_TYPE, "text/event-stream")], sse(&calls))
 }
 
 /// The ids the turn request offered, in order. Parsed out of the rendered menu exactly as a model
@@ -114,26 +136,33 @@ fn menu_ids(situation: &str) -> Vec<String> {
 }
 
 /// One completion, as an OpenAI-compatible stream — with the arguments deliberately chopped into
-/// three-character fragments.
-fn sse(name: &str, arguments: &str) -> String {
+/// three-character fragments, and every call's fragments interleaved with every other's, which is
+/// what a parallel tool call actually looks like on the wire.
+fn sse(calls: &[(&str, String)]) -> String {
     let mut out = String::new();
     let frame = |value: serde_json::Value| format!("data: {value}\n\n");
 
     out.push_str(&frame(serde_json::json!({
         "choices": [{ "delta": { "role": "assistant", "content": "Let me look at where I am." } }]
     })));
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": { "tool_calls": [{
-            "index": 0, "id": "call_mock", "type": "function",
-            "function": { "name": name, "arguments": "" },
-        }] } }]
-    })));
-    for fragment in chunks(arguments, 3) {
+    for (index, (name, _)) in calls.iter().enumerate() {
         out.push_str(&frame(serde_json::json!({
             "choices": [{ "delta": { "tool_calls": [{
-                "index": 0, "function": { "arguments": fragment },
+                "index": index, "id": format!("call_mock_{index}"), "type": "function",
+                "function": { "name": name, "arguments": "" },
             }] } }]
         })));
+    }
+    let fragments: Vec<Vec<&str>> = calls.iter().map(|(_, arguments)| chunks(arguments, 3)).collect();
+    for step in 0..fragments.iter().map(Vec::len).max().unwrap_or(0) {
+        for (index, call) in fragments.iter().enumerate() {
+            let Some(fragment) = call.get(step) else { continue };
+            out.push_str(&frame(serde_json::json!({
+                "choices": [{ "delta": { "tool_calls": [{
+                    "index": index, "function": { "arguments": fragment },
+                }] } }]
+            })));
+        }
     }
     out.push_str(&frame(serde_json::json!({
         "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
@@ -222,4 +251,23 @@ fn the_llm_plays_from_a_fixture() {
     let read = read.expect("`read_map` was never answered — the tool round trip did not complete");
     assert!(read.contains("\"PalletTown\""), "read_map answered from the wrong state: {read:.200}");
     assert!(read.contains("\"grid\"") && read.contains("\"legend\""), "read_map lost its shape: {read:.200}");
+
+    // **W5** — and the screenshot in the same assistant message came back too, encoded by the worker
+    // and carried to the endpoint in the multi-part content form. This is the only test in which
+    // that form goes through the real client, and a PNG that decodes is a PNG the endpoint would
+    // have accepted.
+    let picture = mock.picture.lock().expect("not poisoned").clone();
+    let picture = picture.expect("`screenshot` never reached the endpoint as an image part");
+    let payload = picture
+        .strip_prefix("data:image/png;base64,")
+        .unwrap_or_else(|| panic!("not a PNG data URL: {picture:.60}"));
+    let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload)
+        .expect("the worker encoded this");
+    use image::GenericImageView;
+    let decoded = image::load_from_memory(&png).expect("a PNG the worker produced");
+    assert_eq!(
+        decoded.dimensions(),
+        ((crate::ppu::LCD_WIDTH * SCALE) as u32, (crate::ppu::LCD_HEIGHT * SCALE) as u32),
+        "the picture is the Game Boy screen, upscaled",
+    );
 }

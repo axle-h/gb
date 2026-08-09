@@ -946,7 +946,60 @@ browser. Overworld and battle decisions only.
 
 ---
 
-## 8. Phase W5 — The full tool surface
+## 8. Phase W5 — The full tool surface ✅ **done**
+
+**What shipped.** `screenshot` (`src/llm/screenshot.rs`, encoded on the worker thread and carried in
+the multi-part content form `src/llm/protocol.rs` now models), `press_buttons`, `use_field_move`, and
+the three menu decision kinds — `Nickname`, `MartPurchase`, `ForgetMove` — with `set_nickname`,
+`buy_item` and `forget_move`. `DecisionKind` is now exactly the agent's five policy poll sites.
+
+**Acceptance — met.** The mock-server test asks for `read_map` **and** `screenshot` in one assistant
+message, and asserts the PNG that came back through the real socket decodes at the right size; the
+policy tests drive all three menu prompts, including the forget prompt pre-empting a battle turn;
+`mechanics::a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it` closes the `press_buttons`
+loop through the real agent. Default tier 1112 green, `full_playthrough` green.
+
+**Where the plan was wrong, or silent.**
+
+1. ⚠️ **An image cannot ride on the `tool` message that answered the call.** §8 says "base64 in an
+   `image_url` content part", which reads as "as the tool result". OpenAI allows an array of content
+   parts on a tool message but only *text* parts in it, and several compatible endpoints reject an
+   `image_url` there outright. The shipped shape answers the call with a sentence and appends the
+   picture as a **user** message immediately after every tool result — never interleaved, because a
+   `user` message between an assistant's `tool_calls` and their answers is rejected too.
+2. ⚠️ **`observed_kind` cannot be inferred from the `GameState` alone any more.** W4 read the kind off
+   `state.battle.is_some()`, which is fine for two kinds and wrong for five: a naming screen, a mart
+   menu and the forget prompt all look like an ordinary overworld or battle state. Getting it wrong is
+   not a wasted round trip but an **infinite loop** — every read batch cancelled, every turn restarted,
+   for as long as the prompt is open. The fix is `LlmPolicy::site`, the kind of the last `pick_*`,
+   which is exact for every poll of a decision point after the first.
+3. ⚠️ **`service_tools` now snapshots unconditionally, and W4's "only when nothing is pending" guard
+   was wrong.** Any such guard has to predict whether *this* poll is the first of a new decision
+   point, and it cannot — the site is only known once the `pick_*` after it runs. Two cases broke it:
+   a battle interrupting an overworld turn built its menu from the overworld state it replaced, and a
+   mart opening mid-turn rendered a stock list read before the player reached the shop. The price of
+   being right is a `GameState` clone and one VRAM text decode per poll, and `LlmPolicy` only ever
+   runs at **1× real time** — it is the livestream's policy — so that is fifty of each per wall-clock
+   second against an emulator that is otherwise idle 95% of the time.
+4. **`use_field_move` is one tool with a `move` discriminator, and covers a chosen subset of
+   `FieldMove`.** `Fish`, `UseItemPc`, `UsePcBox`, `SellToMart`, `RedeemPrize`, `UsePartyScript` and
+   `UseElevator` are left out: their arguments are internal types a model cannot name from anything it
+   is shown, and none is on the path to the Hall of Fame. Surf is left out for the opposite reason —
+   the agent mounts it by itself the moment a route steps onto water.
+5. **A field move is stashed, not returned.** `pick_overworld_action` decides it and `pick_field_move`
+   — which runs *before* it, on the next tick — hands it over. `pick_field_move` still touches nothing:
+   not `pending`, not `waiting`, not `site`.
+6. **`press_buttons` needed a *pull*, not a push.** The plan has "the host calls `queue_manual_input`",
+   but the host does not own the policy — the agent does. `Policy::take_manual_input` (default: an
+   empty `Vec`, which does not allocate) is drained at the top of `PokemonAgent::update`, immediately
+   before `drive_manual_input`.
+7. **`ItemId` and `BagItem` had to become publicly reachable** (`pokemon::{item, bag}` are now `pub
+   mod`), because the tool layer parses them and lives outside `pokemon`. Names are matched
+   case-insensitively with non-alphanumerics ignored, so `"HM01 Cut"`, `"hm01_cut"` and `"Hm01Cut"`
+   are the same item — nothing the model is shown spells them any other way, so rejecting two of the
+   three would be a rejection it could not learn its way out of.
+8. **The mart's stock is not in `GameState`** and had to join `ApiSnapshot`, which is the only thing
+   holding a `PokemonApi` at the moment a turn is built.
 
 ### Terminal tools
 `choose_action`, `use_field_move`, `press_buttons`, `wait`, `choose_battle_action`, `set_nickname`,
@@ -972,6 +1025,15 @@ only wanted to look at.
 
 ⚠️ **Screenshots are the dominant token cost.** A 160×144 PNG is small, but every vision model bills
 it as a few hundred to ~1000 tokens, and they accumulate in history. §9 evicts old images first.
+
+**What shipped for that:** the picture goes out with `detail: "low"`, which is a flat 85 tokens on
+OpenAI against roughly a thousand for `"high"` — the screen is four shades and 8×8 tiles, so there is
+no detail the expensive tier could find. It is upscaled 3× to 480×432 first, the largest whole
+multiple that still fits inside the 512×512 box a low-detail image is fitted to, so the endpoint
+resizes nothing. `Message::approximate_tokens` charges an image at that flat rate rather than by the
+length of its data URL: a 3 KB PNG is four thousand base64 characters, and estimating it as prose
+would overstate the context fifty-fold and trip the trim on a history that is nowhere near full.
+`Message::has_image` is there for §9's eviction.
 
 ---
 
@@ -1198,6 +1260,25 @@ feature. New tests follow it.
 | `llm_policy::tests::an_unresolvable_id_is_explained_on_the_next_turn` ✅ | default | §7.4's ⚠️ — a stale id is a message, not a panic and not a silent no-op |
 | `integration_tests::llm::the_llm_plays_from_a_fixture` ✅ | default | A **mock OpenAI server** (axum, in-process, real socket, real SSE with fragmented arguments) serves a scripted tool-call sequence; the agent executes it from a committed fixture |
 | `cli::tests::gb_port_is_the_default_and_the_flag_overrides_it` ✅ | default | §7.1's `GB_PORT`, and that a nonsense one refuses to start |
+| `llm::protocol::tests::an_image_rides_on_a_user_message_in_the_multi_part_form` ✅ | default | §8's ⚠️ — the shape that goes on the wire, that it round-trips, and that an ordinary message's content stays a bare string |
+| `llm::protocol::tests::an_image_is_estimated_by_the_flat_rate_rather_than_by_its_length` ✅ | default | A 40 kB data URL must not be charged as 40 kB of prose |
+| `llm::screenshot::tests::a_frame_becomes_a_data_url_holding_the_same_picture` ✅ | default | The prefix an `image_url` needs, and that the 3× upscale puts the frame's own pixels where it claims |
+| `llm::tools::tests::terminal_tools_are_scoped_per_kind` ✅ | default | Extended to all five kinds: the three menu prompts offer their one tool and `wait`, and never `choose_action` |
+| `llm::tools::tests::a_field_move_call_parses_into_the_move_it_names` ✅ | default | Every `use_field_move` argument shape, and the sentence each malformed one earns |
+| `llm::tools::tests::a_field_move_is_resolved_against_the_party_and_the_bag_it_needs` ✅ | default | `cut` checks the tile in front; a move nobody knows, an empty slot and an item not held are all messages |
+| `llm::tools::tests::a_party_field_moves_index_is_computed_from_the_moves_it_knows` ✅ | default | ⚠️ The field-move box is in move-slot order, so index 0 is right only for an HM slave |
+| `llm::tools::tests::names_are_matched_the_way_a_model_spells_them` ✅ | default | `"HM01 Cut"` = `"hm01_cut"` = `Hm01Cut`; `"a potion of healing"` is still not an item |
+| `llm::tools::tests::press_buttons_parses_a_sequence_and_refuses_what_is_not_one` ✅ | default | A bad button is a rejection, not a silently shorter queue; the agent's own cap is the cap |
+| `llm::tools::tests::omitting_the_argument_is_an_answer_for_the_three_menu_prompts` ✅ | default | No nickname / no purchase / no move forgotten are real answers, not malformed calls |
+| `llm::tools::tests::a_screenshot_is_classified_apart_from_the_other_reads` ✅ | default | It never reaches the emulator thread, and is still offered as a read |
+| `llm_policy::tests::a_field_move_decision_is_collected_by_the_next_field_move_poll` ✅ | default | Both halves of the stash: the overworld poll answers `None`, the next field-move poll hands it over once |
+| `llm_policy::tests::an_impossible_field_move_is_explained_rather_than_attempted` ✅ | default | Nothing reaches the agent, and the model is told why on its next turn |
+| `llm_policy::tests::press_buttons_leaves_the_presses_for_the_agent_to_collect` ✅ | default | The policy half of the escape hatch, and that a collected press is not queued twice |
+| `llm_policy::tests::the_menu_prompts_are_their_own_turns_and_can_use_read_tools` ✅ | default | §8's ⚠️ 2 — a read *during* a naming screen is answered, not cancelled into a restart loop |
+| `llm_policy::tests::a_mart_turn_answers_with_a_purchase` ✅ | default | The stock comes from `ApiSnapshot`; nothing in `GameState` has it |
+| `llm_policy::tests::a_forget_prompt_pre_empts_the_battle_turn_it_interrupts` ✅ | default | §7.2's ⚠️ — the battle turn is cancelled, and the four known moves are the menu |
+| `llm_policy::tests::a_forget_slot_the_pokemon_does_not_have_declines_instead_of_hanging` ✅ | default | A cursor sent to a fifth move slot never arrives |
+| `mechanics::a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it` ✅ | default | W5's pull seam end to end: the START menu opens without the test touching `queue_manual_input` |
 | `llm::compaction::tests::*` | W6 | Image eviction, summary replacement, system prompt survives |
 | `llm::compaction::tests::summary_restates_turn_contract` | W6 | §9 — the contract survives a compaction |
 | `mechanics::manual_input_preempts_state_machine` ✅ | default | W0.4 — a queued press fires and resets to `Idle` |
@@ -1229,7 +1310,7 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | **W2** ✅ | Block-diff encoder (three modes) + JS decoder · `/api/video` | ✅ Round-trip tests; game visible in the dev page. 8 kbit/s idle, 536 kbit/s walking — see §5.1's ⚠️ |
 | **W3** ✅ | Vite/React SPA · embedded via `rust-embed` · screen + status + conversation shell | ✅ Full UI under `--policy random`, verified headlessly including reconnect |
 | **W4** ✅ | OpenAI client (streaming, tool calls) · `LlmPolicy` · kind-keyed turns + cancellation · overworld + battle decisions · the read tools | ✅ LLM plays from the start of the game against a mock endpoint; conversation, tool calls and decisions stream into the SPA |
-| **W5** | The rest of the tool surface: `screenshot`, raw buttons, field moves, nickname/mart/forget | Mock-server test |
+| **W5** ✅ | The rest of the tool surface: `screenshot`, raw buttons, field moves, nickname/mart/forget | ✅ Mock-server test asks for a read and a screenshot in one message and checks the PNG that came back; `full_playthrough` green |
 | **W6** | Token accounting · status broadcast · two-stage compaction · memory + TODO | Compaction tests |
 | **W7** | Run directory · checkpoint/resume · transcript backlog | Survives restart mid-run |
 | **W8** | Multi-stage Dockerfile · no-SDL build · ops config | Image builds and runs |
@@ -1239,11 +1320,12 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.
 
-**What W5 inherits.** The read half of §8's table is already built (`llm::tools::READ_TOOLS`, serviced
-from W0.5's facade); what is left there is `screenshot`, which needs PNG encoding on the worker thread
-and the multi-part `content` form the wire types do not yet model. The terminal half needs
-`press_buttons` (W0.4's queue is waiting for it, and it needs a drain path from the policy to
-`PokemonAgent::queue_manual_input`), `use_field_move`, and the three extra `DecisionKind`s.
+**What W6 inherits.** The whole tool surface except memory and TODO (§10), which are W6b's. Token
+accounting has one number (`UsageView::context_tokens`) and a crude turn-dropping trim
+(`Worker::trim_history`) standing in for compaction; `Message::has_image` is already there for §9's
+image-first eviction, and images are the only messages in the history whose cost is a flat rate
+rather than a character count. `Status` is still riding the `UiEvent` broadcast rather than being an
+enum of its own (W1's decision, revisited here).
 
 **What W3 inherited.** `/` served `web/dev/video.html` via `DEV_PAGE` in `src/web/mod.rs`; it is now
 `rust-embed` over `web/dist` (`src/web/assets.rs`) and the file is gone. Its JS decoder was ported to

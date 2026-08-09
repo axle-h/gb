@@ -894,6 +894,15 @@ impl PokemonAgent {
         // the post-Champion cutscene handler and the "not in game" check — a title screen or a
         // continue prompt is precisely somewhere the state machine cannot help and a raw button can.
         // Inert unless something enqueues, which nothing in the agent or in any scripted policy does.
+        //
+        // **W5** — the policy is asked first, because it is the only one that ever has anything:
+        // `LlmPolicy` parks a `press_buttons` decision and this is where it is collected. The default
+        // `take_manual_input` returns an empty `Vec`, which does not allocate, so this costs the
+        // scripted policies one virtual call per tick.
+        let queued = self.policy.take_manual_input();
+        if !queued.is_empty() {
+            self.queue_manual_input(queued);
+        }
         if self.drive_manual_input(api) {
             return Ok(());
         }

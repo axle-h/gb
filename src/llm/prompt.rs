@@ -38,7 +38,17 @@ How the interface works:
 - The game keeps running while you think. A menu action can therefore disappear before your answer \
   lands — you will be told when that happens, and shown the current menu, so simply pick again.
 - Read tools (`read_map`, `read_party`, …) do not end the turn. Request every read you need in a \
-  single message; they are all answered from one consistent snapshot of the game.
+  single message; they are all answered from one consistent snapshot of the game. Most turns should \
+  need none of them: the situation you are shown already carries the party, the money, the badges, \
+  what is on screen and the menu.
+- `screenshot` shows you the actual screen. It costs far more than a read does, so use it when you \
+  want to see something the other tools do not describe, not as a matter of routine.
+- Not everything is walking. `use_field_move` covers cutting a tree you are facing, using Strength \
+  or Flash or Dig from the party menu, flying, teaching an HM, using an item on something, pushing a \
+  boulder, and pressing A at a tile to find what is hidden there.
+- `press_buttons` presses the joypad yourself. It is a **last resort**: it interrupts whatever the \
+  agent was doing, and the agent is better at menus than you are. Reach for it only where the game \
+  is somewhere the action menu does not describe.
 
 Things worth knowing about this particular game:
 
@@ -75,13 +85,19 @@ pub struct ApiSnapshot {
     pub screen_text: Option<String>,
     /// `HH:MM:SS` of in-game play time.
     pub playtime: String,
+    /// **W5** — what the mart the player is standing in front of sells, with each item's price. Read
+    /// from `wCurMart`, so it is empty everywhere except inside a shop; a `MartPurchase` turn's whole
+    /// menu comes from here, and nothing else can supply it — the stock is not in `GameState`.
+    pub mart_stock: Vec<(crate::pokemon::item::ItemId, Option<u32>)>,
 }
 
 impl ApiSnapshot {
     pub fn read(api: &crate::pokemon::PokemonApi<'_>) -> Self {
+        use crate::pokemon::PokemonApiTrait;
         Self {
             screen_text: crate::pokemon::observe::screen_text(api),
             playtime: crate::pokemon::observe::playtime(api),
+            mart_stock: api.mart_item_list().into_iter().map(|item| (item, api.item_price(item))).collect(),
         }
     }
 }
@@ -104,24 +120,59 @@ pub fn describe_event(event: &AgentEvent) -> String {
     }
 }
 
+/// The part of a question that is not in the [`GameState`] — because the agent passed it as an
+/// argument to the `pick_*` that asked.
+///
+/// Two of the five poll sites are like this: the naming screen knows the species and nothing else
+/// does, and the forget prompt knows the four moves and the incoming one. Reading them back out of
+/// RAM would be a second source of truth for something already in hand.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum TurnContext<'a> {
+    #[default]
+    None,
+    Nickname(crate::pokemon::species::PokemonSpecies),
+    ForgetMove { current: &'a [crate::pokemon::move_name::PokemonMove], new: crate::pokemon::move_name::PokemonMoveName },
+}
+
 pub fn situation(
     kind: DecisionKind,
     state: &GameState,
     snapshot: &ApiSnapshot,
     events: &[String],
     menu: &[MenuItem],
+    context: TurnContext<'_>,
 ) -> String {
     let mut out = String::with_capacity(2048);
 
     out.push_str(match kind {
         DecisionKind::Overworld => "## Decision: what to do next in the overworld\n\n",
         DecisionKind::Battle => "## Decision: what to do this battle turn\n\n",
+        DecisionKind::Nickname => "## Decision: name this Pokémon, or keep the default\n\n",
+        DecisionKind::MartPurchase => "## Decision: what to buy here, if anything\n\n",
+        DecisionKind::ForgetMove => "## Decision: which move to forget, if any\n\n",
     });
+
+    match context {
+        TurnContext::None => {}
+        TurnContext::Nickname(species) => out.push_str(&format!(
+            "The naming screen is open for a {species}. It has just been caught, hatched or given \
+             to you.\n\n",
+        )),
+        TurnContext::ForgetMove { new, .. } => out.push_str(&format!(
+            "A Pokémon is trying to learn **{new}** but already knows four moves. Pick one to \
+             replace, or decline and keep all four.\n\n",
+        )),
+    }
 
     out.push_str(&format!(
         "Location: {} at ({}, {}), facing {:?}\n",
         state.map.map, state.map.player_position.x, state.map.player_position.y, state.map.player_direction,
     ));
+    // What the player is facing is the precondition for half of `use_field_move` — `cut` works on
+    // the tile in front and nothing else — and it is one line against a whole `read_map`.
+    if let Some((at, tile)) = state.map.tile_in_front() {
+        out.push_str(&format!("Facing: {tile} at ({}, {})\n", at.x, at.y));
+    }
     let badges: Vec<String> = state.badges.iter_names().map(|(name, _)| name.to_string()).collect();
     out.push_str(&format!(
         "Badges: {}\nMoney: ¥{}   Play time: {}\n",
@@ -183,12 +234,24 @@ pub fn situation(
     out.push_str(match kind {
         DecisionKind::Overworld => "\n### Actions available now\n",
         DecisionKind::Battle => "\n### Battle menu\n",
+        DecisionKind::Nickname => "\n### Naming\n",
+        DecisionKind::MartPurchase => "\n### For sale\n",
+        DecisionKind::ForgetMove => "\n### The four moves it knows\n",
     });
     if menu.is_empty() {
-        out.push_str(
-            "(nothing — the agent can reach no action from here. `wait` and look again; if it \
-             stays empty you are boxed in and the run needs a person.)\n",
-        );
+        out.push_str(match kind {
+            DecisionKind::Nickname => "(there is no menu — call `set_nickname`, with or without a name.)\n",
+            DecisionKind::MartPurchase => {
+                "(the shop's stock could not be read. Call `buy_item` with no `item` to leave.)\n"
+            }
+            DecisionKind::ForgetMove => {
+                "(the move list could not be read. Call `forget_move` with no `slot` to decline.)\n"
+            }
+            _ => {
+                "(nothing — the agent can reach no action from here. `wait` and look again; if it \
+                 stays empty you are boxed in and the run needs a person.)\n"
+            }
+        });
     }
     for item in menu {
         out.push_str(&format!("- `{}` — {}\n", item.id, item.description));
@@ -240,7 +303,13 @@ mod tests {
     /// something false at the end of every single turn.
     #[test]
     fn the_contract_names_every_tool_the_turn_is_actually_sent() {
-        for kind in [DecisionKind::Overworld, DecisionKind::Battle] {
+        for kind in [
+            DecisionKind::Overworld,
+            DecisionKind::Battle,
+            DecisionKind::Nickname,
+            DecisionKind::MartPurchase,
+            DecisionKind::ForgetMove,
+        ] {
             let contract = contract(kind);
             for tool in crate::llm::tools::for_kind(kind) {
                 assert!(contract.contains(tool.function.name),

@@ -101,6 +101,21 @@ pub trait Policy {
     /// Default: a no-op. No existing policy is affected.
     fn service_tools(&mut self, _state: &GameState, _api: &mut PokemonApi<'_>, _graph: &WorldGraph) {}
 
+    /// **W5** — raw button presses the policy wants delivered, collected by the agent at the top of
+    /// its next tick and handed to
+    /// [`queue_manual_input`](crate::pokemon::agent::PokemonAgent::queue_manual_input).
+    ///
+    /// This is the collection half of W0.4's escape hatch. The queue lives on the agent, but the
+    /// agent owns the policy rather than the other way round, so the presses have to be *pulled*:
+    /// there is no moment at which a `pick_*` could push them, and returning them from one would mean
+    /// a return type that says "a walk, or some buttons" at every site.
+    ///
+    /// The default returns an empty `Vec`, which does not allocate — this runs once per agent tick
+    /// for every policy, including the scripted ones that will never use it.
+    fn take_manual_input(&mut self) -> Vec<crate::joypad::JoypadButton> {
+        Vec::new()
+    }
+
     fn is_exhausted(&self) -> bool {
         false
     }

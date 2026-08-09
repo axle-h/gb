@@ -32,6 +32,7 @@ pub mod client;
 pub mod config;
 pub mod prompt;
 pub mod protocol;
+pub mod screenshot;
 pub mod tools;
 pub mod worker;
 
