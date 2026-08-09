@@ -33,6 +33,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use crate::llm::client::{ChatEndpoint, RetryPolicy, stream_with_retries};
 use crate::llm::config::LlmConfig;
 use crate::llm::prompt;
+use crate::llm::screenshot;
 use crate::llm::protocol::{ChatRequest, Message, StreamOptions, ToolCall, Usage};
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
@@ -325,7 +326,8 @@ impl Worker {
             }
 
             // No terminal call, so this is a read step. Anything rejected is answered here; anything
-            // real goes to the policy as one batch.
+            // real goes to the policy as one batch — except `screenshot`, which this thread answers
+            // itself from the frame the host already published.
             let last_step = step + 1 == self.config.max_tool_steps;
             let reads: Vec<ToolCall> = completion
                 .tool_calls
@@ -349,16 +351,31 @@ impl Worker {
             };
             let mut answers = answers.into_iter();
 
+            // ⚠️ Pictures cannot ride on a `tool` message (see `Message::user_with_image`), so they
+            // are collected and appended *after* every tool result. Interleaving them would put a
+            // `user` message between an assistant's `tool_calls` and their answers, which several
+            // endpoints reject outright.
+            let mut pictures: Vec<Message> = Vec::new();
             for (call, classification) in completion.tool_calls.iter().zip(&classified) {
                 let content = match classification {
                     CallKind::Read => answers.next().unwrap_or_else(|| {
                         "{\"error\": \"the agent returned no result for this call\"}".to_string()
                     }),
+                    CallKind::Screenshot => {
+                        let frame = self.published.latest_frame();
+                        let caption = screenshot::caption(frame.seq);
+                        pictures.push(Message::user_with_image(
+                            caption.clone(),
+                            screenshot::data_url(&frame.pixels),
+                        ));
+                        format!("{caption} It is attached to the message after this one.")
+                    }
                     CallKind::Rejected(complaint) => complaint.clone(),
                     CallKind::Terminal(_) => unreachable!("handled above"),
                 };
                 self.messages.push(Message::tool_result(&call.id, content));
             }
+            self.messages.extend(pictures);
             if last_step {
                 self.messages.push(Message::user(prompt::OUT_OF_STEPS));
             }
@@ -439,14 +456,37 @@ impl Worker {
     }
 }
 
+/// Where the history may be cut, and where a failed request's question may be popped from.
+///
+/// ⚠️ **A picture is a `user` message but is not a turn boundary.** W5 answers `screenshot` with a
+/// tool result plus a `user` message carrying the image, which lands in the middle of a turn — and
+/// treating that as a boundary would let [`Worker::trim_history`] cut a turn in half and let
+/// [`PopIfUser`] drop the picture while leaving the situation it belongs to dangling.
 fn is_turn_start(message: &Message) -> bool {
-    message.role == crate::llm::protocol::Role::User
+    message.role == crate::llm::protocol::Role::User && !message.has_image()
 }
 
 fn describe(decision: &Terminal) -> String {
     match decision {
         Terminal::ChooseAction { id } => format!("choose_action {id}"),
         Terminal::ChooseBattleAction { id } => format!("choose_battle_action {id}"),
+        Terminal::UseFieldMove(request) => format!("use_field_move {request:?}"),
+        Terminal::PressButtons { buttons } => format!(
+            "press_buttons {}",
+            buttons.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(" "),
+        ),
+        Terminal::SetNickname { name } => match name {
+            Some(name) => format!("set_nickname {name}"),
+            None => "set_nickname (keep the default)".to_string(),
+        },
+        Terminal::BuyItem { item } => match item {
+            Some(item) => format!("buy_item {item}"),
+            None => "buy_item (nothing)".to_string(),
+        },
+        Terminal::ForgetMove { slot } => match slot {
+            Some(slot) => format!("forget_move slot {slot}"),
+            None => "forget_move (decline)".to_string(),
+        },
         Terminal::Wait { ticks } => format!("wait {ticks} ticks"),
     }
 }

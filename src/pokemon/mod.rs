@@ -53,8 +53,11 @@ pub mod font;
 pub mod roms;
 mod text;
 mod map_header;
-mod item;
-mod bag;
+// ⚠️ **W5 made these two public.** `ItemId` and `BagItem` are arguments the LLM tool layer parses —
+// `buy_item`, `use_field_move { teach, use_item, toss_item }` — and it lives outside `pokemon`, so
+// reaching them through `policy`'s one re-export would have meant re-exporting the other half too.
+pub mod item;
+pub mod bag;
 mod menu;
 pub mod delay;
 pub mod damage;

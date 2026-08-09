@@ -26,16 +26,42 @@ pub enum Role {
     Tool,
 }
 
-/// One message in the conversation, in the shape the endpoint wants it back.
+/// What a message says: either a plain string, or the multi-part form an image needs.
 ///
-/// `content` is a plain `String`. W5's `screenshot` tool needs the multi-part content form
-/// (`[{"type":"image_url",…}]`) for its result, and that arrives as an enum here when it does —
-/// modelling it now would be a variant nothing constructs.
+/// `#[serde(untagged)]` is what makes the plain case serialise as `"content": "…"` rather than as a
+/// one-element array — which matters, because a *tool* message is only allowed the string form on
+/// several endpoints (see [`Message::user_with_image`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Content {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// A `data:image/png;base64,…` URL. Nothing is hosted: the run has no public address, and a
+    /// screenshot that outlived the turn would be a privacy question nobody asked for.
+    pub url: String,
+    /// `"low"` — which on OpenAI is a flat [`IMAGE_TOKENS`] regardless of size, against roughly a
+    /// thousand for `"high"`. The Game Boy screen is 160×144 in four shades; there is no detail for
+    /// the expensive tier to find, and §8's ⚠️ is that screenshots dominate the token cost of a run.
+    pub detail: String,
+}
+
+/// One message in the conversation, in the shape the endpoint wants it back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Content>,
     /// Assistant messages only, and the reason the whole turn loop exists.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
@@ -58,7 +84,7 @@ impl Message {
     pub fn assistant(content: String, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
-            content: (!content.is_empty()).then_some(content),
+            content: (!content.is_empty()).then_some(Content::Text(content)),
             tool_calls,
             tool_call_id: None,
         }
@@ -70,23 +96,74 @@ impl Message {
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
-            content: Some(content.into()),
+            content: Some(Content::Text(content.into())),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
         }
     }
 
+    /// A user message carrying a picture, which is how a `screenshot` result reaches the model.
+    ///
+    /// ⚠️ **The image cannot ride on the `tool` message that answered the call.** OpenAI's schema
+    /// allows an array of content parts on a tool result but only *text* parts in it, and several
+    /// compatible endpoints reject an `image_url` there outright. So the call is answered with a
+    /// sentence and the picture follows as a user message — which every endpoint accepts, and which
+    /// keeps §7.3's rule that every `tool_call` has exactly one matching result.
+    pub fn user_with_image(caption: impl Into<String>, data_url: String) -> Self {
+        Self {
+            role: Role::User,
+            content: Some(Content::Parts(vec![
+                ContentPart::Text { text: caption.into() },
+                ContentPart::ImageUrl { image_url: ImageUrl { url: data_url, detail: "low".to_string() } },
+            ])),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
     fn plain(role: Role, content: impl Into<String>) -> Self {
-        Self { role, content: Some(content.into()), tool_calls: Vec::new(), tool_call_id: None }
+        Self {
+            role,
+            content: Some(Content::Text(content.into())),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// The message's prose, for anything that wants to read rather than send it. `None` for a
+    /// message that is only a picture.
+    pub fn text(&self) -> Option<&str> {
+        match self.content.as_ref()? {
+            Content::Text(text) => Some(text),
+            Content::Parts(parts) => parts.iter().find_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::ImageUrl { .. } => None,
+            }),
+        }
+    }
+
+    /// Whether this message carries a picture. W6 evicts these first, which is the reason it is
+    /// asked as a question rather than derived by whoever needs it.
+    pub fn has_image(&self) -> bool {
+        matches!(self.content.as_ref(), Some(Content::Parts(parts))
+            if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. })))
     }
 
     /// Roughly how many tokens this message costs, for the fallback in [`Usage::estimate`].
+    ///
+    /// ⚠️ The base64 payload is deliberately **not** counted by its length — a 3 KB data URL is
+    /// four thousand characters and about eighty tokens, so charging it as text would overstate the
+    /// context by fifty times and trip compaction on a history that is nowhere near full.
     pub fn approximate_tokens(&self) -> u64 {
-        let text = self.content.as_deref().unwrap_or("").len()
+        let text = self.text().unwrap_or("").len()
             + self.tool_calls.iter().map(|c| c.function.name.len() + c.function.arguments.len()).sum::<usize>();
-        (text as f64 / CHARS_PER_TOKEN).ceil() as u64
+        (text as f64 / CHARS_PER_TOKEN).ceil() as u64 + if self.has_image() { IMAGE_TOKENS } else { 0 }
     }
 }
+
+/// What one `detail: "low"` image costs. OpenAI's published figure, and the right order of magnitude
+/// everywhere else; only ever used when the endpoint reports no `usage` of its own.
+pub const IMAGE_TOKENS: u64 = 85;
 
 /// English through a byte-pair tokeniser runs about this many characters per token. Only ever used
 /// when the endpoint declines to report `usage` at all — see [`Usage::estimate`].
@@ -615,6 +692,48 @@ mod tests {
         assert!(json["messages"][0].get("tool_calls").is_none());
         assert_eq!(json["messages"][2]["tool_call_id"], "c1");
         assert_eq!(json["messages"][2]["role"], "tool");
+        // An ordinary message's content is a bare string, not a one-element array. The multi-part
+        // form is legal everywhere in principle and rejected in several places in practice, so it is
+        // used only where it is needed — see `an_image_rides_on_a_user_message`.
+        assert_eq!(json["messages"][0]["content"], "be brief");
+    }
+
+    /// ⚠️ **W5's screenshot trap.** The picture cannot go on the `tool` message that answered the
+    /// call — OpenAI allows only text parts there and several compatible endpoints reject an image
+    /// outright — so it follows as a `user` message. This pins the shape that goes on the wire and,
+    /// with it, that a tool result stays a plain string.
+    #[test]
+    fn an_image_rides_on_a_user_message_in_the_multi_part_form() {
+        let message = Message::user_with_image("look at this", "data:image/png;base64,AAAA".to_string());
+        let json = serde_json::to_value(&message).expect("serialises");
+
+        assert_eq!(json["role"], "user");
+        assert_eq!(json["content"][0]["type"], "text");
+        assert_eq!(json["content"][0]["text"], "look at this");
+        assert_eq!(json["content"][1]["type"], "image_url");
+        assert_eq!(json["content"][1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(json["content"][1]["image_url"]["detail"], "low");
+
+        // …and it round-trips, because a history that has been through a compaction (W6) is rebuilt
+        // from these types rather than kept as JSON.
+        assert_eq!(serde_json::from_value::<Message>(json).expect("deserialises"), message);
+
+        assert_eq!(message.text(), Some("look at this"), "the caption is still readable as prose");
+        assert!(message.has_image());
+        assert!(!Message::user("no picture here").has_image());
+    }
+
+    /// ⚠️ A base64 payload is four thousand characters and about eighty tokens. Estimating it as text
+    /// would overstate a screenshot by fifty times and trip the context trim on a history that is
+    /// nowhere near full.
+    #[test]
+    fn an_image_is_estimated_by_the_flat_rate_rather_than_by_its_length() {
+        let caption = "look at this";
+        let big = Message::user_with_image(caption, format!("data:image/png;base64,{}", "A".repeat(40_000)));
+        let text_only = Message::user(caption);
+
+        assert_eq!(big.approximate_tokens(), text_only.approximate_tokens() + IMAGE_TOKENS);
+        assert!(big.approximate_tokens() < 200, "a 40 kB data URL must not be charged as 40 kB of prose");
     }
 
     #[test]

@@ -37,6 +37,7 @@ src/
 │   ├── client.rs        — `ChatEndpoint` + `OpenAiClient` over ureq, and the retry policy
 │   ├── tools.rs         — the tool catalogue, scoped per decision kind; ids; servicing
 │   ├── prompt.rs        — the system prompt and the per-turn situation
+│   ├── screenshot.rs    — one published frame as a PNG data URL, encoded on the worker thread
 │   └── worker.rs        — the turn loop: stream → tool batch → terminal call, with cancellation
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)
 ├── core.rs              — CPU + MMU wiring
@@ -215,7 +216,7 @@ workload in the profile. ⚠️ Watch for sampling skid: a hot instruction is of
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + the web/host/llm tier.
-# ~7s, 1093 tests.
+# ~7s, 1112 tests.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.

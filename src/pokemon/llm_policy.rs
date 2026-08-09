@@ -20,19 +20,23 @@
 //!
 //! ⚠️ **`pick_field_move` shares the `Overworld` kind and must never become a kind of its own.** It
 //! is called on *every* idle overworld tick immediately before `pick_overworld_action`; given its own
-//! kind the two would cancel each other fifty times a second and no turn would ever complete. W4
-//! does not override it at all — the trait's `None` is exactly right, and W5's `use_field_move`
-//! arrives as an *outcome* of an overworld turn, stashed and picked up on the next tick.
+//! kind the two would cancel each other fifty times a second and no turn would ever complete. W5's
+//! `use_field_move` is therefore an *outcome* of an overworld turn: the decision is stashed and this
+//! method hands it over on the next tick without touching `pending`, `waiting` or `site`.
 
 use std::sync::atomic::Ordering;
 
-use crate::llm::prompt::{self, ApiSnapshot};
+use crate::joypad::JoypadButton;
+use crate::llm::prompt::{self, ApiSnapshot, TurnContext};
 use crate::llm::tools::{self, DecisionKind, Terminal};
 use crate::llm::worker::{ToolBatchResult, TurnHandles, TurnRequest};
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::agent::AgentEvent;
+use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::BattleAction;
-use crate::pokemon::policy::Policy;
+use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
+use crate::pokemon::policy::{FieldMove, Policy};
+use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::world_graph::WorldGraph;
 use crate::pokemon::{GameState, PokemonApi};
 
@@ -55,6 +59,27 @@ pub struct LlmPolicy {
     /// The half of the situation that needs a `PokemonApi`. Refreshed at the poll immediately before
     /// a turn is built, which is the only moment this policy is handed one.
     snapshot: ApiSnapshot,
+    /// The last `GameState` seen at a poll where a turn could start.
+    ///
+    /// ⚠️ **Two of the five poll sites are handed no state at all** — `pick_nickname` gets a species
+    /// and `pick_move_to_forget` gets four moves — so a turn asked from either of them has to build
+    /// its situation from somewhere. `service_tools` runs immediately before every one of the five,
+    /// with the state the agent has just read, so this is that state and it is never more than one
+    /// tick old.
+    state: Option<Box<GameState>>,
+    /// Which of the five poll sites was asked last. The three menu prompts are invisible in a
+    /// `GameState`, so this is the only thing that can tell `service_tools` which question a batch
+    /// belongs to — see [`Self::observed_kind`].
+    site: Option<DecisionKind>,
+    /// A decided [`FieldMove`], waiting for the `pick_field_move` that will collect it.
+    ///
+    /// ⚠️ It has to be stashed rather than returned, because `pick_overworld_action` — the site that
+    /// decided it — cannot return a field move, and `pick_field_move` runs *before* it on the next
+    /// tick rather than after it on this one.
+    field_move: Option<FieldMove>,
+    /// Raw presses waiting for the agent to collect them at the top of its next tick
+    /// ([`Policy::take_manual_input`]).
+    manual: Vec<JoypadButton>,
     /// Prepended to the next turn: what went wrong with the last decision, in the model's own terms.
     note: Option<String>,
 }
@@ -67,22 +92,35 @@ impl LlmPolicy {
             waiting: None,
             events: Vec::new(),
             snapshot: ApiSnapshot::default(),
+            state: None,
+            site: None,
+            field_move: None,
+            manual: Vec::new(),
             note: None,
         }
     }
 
-    /// Which question *this* poll site is asking, inferred from the state.
+    /// Which question *this* poll site is asking.
     ///
     /// The plan has `service_tools` compare the pending kind against "the kind about to be asked",
-    /// which the seam's signature does not carry. A battle in progress is the whole difference
-    /// between the two kinds, so the state answers it — and it answers it the same way the `pick_*`
-    /// that follows will. The consequence of being wrong either way is one wasted round trip, never
-    /// a decision applied to the wrong state: the `pick_*` re-checks the kind before it accepts an
-    /// outcome.
-    fn observed_kind(state: &GameState) -> DecisionKind {
-        match state.battle.is_some() {
-            true => DecisionKind::Battle,
-            false => DecisionKind::Overworld,
+    /// which the seam's signature does not carry. Two things answer it between them:
+    ///
+    /// - **The three menu prompts are not in the state.** A naming screen, a mart's Buy/Sell menu and
+    ///   the forget-move prompt all look like an ordinary overworld or battle `GameState`, so the
+    ///   only evidence is which `pick_*` ran last. That is [`Self::site`], and it is right for every
+    ///   poll of a decision point except the first after the site changes.
+    /// - **A battle is in the state**, and is the whole difference between the other two kinds — so
+    ///   they are read from it, which detects a battle starting one tick *earlier* than `site` would.
+    ///
+    /// Being wrong either way costs one wasted round trip, never a decision applied to the wrong
+    /// state: the `pick_*` re-checks the kind before it accepts an outcome.
+    fn observed_kind(&self, state: &GameState) -> DecisionKind {
+        match self.site {
+            Some(site) if site.is_menu_prompt() => site,
+            _ => match state.battle.is_some() {
+                true => DecisionKind::Battle,
+                false => DecisionKind::Overworld,
+            },
         }
     }
 
@@ -90,7 +128,11 @@ impl LlmPolicy {
     ///
     /// Returns the decision to apply, or `None` for "not ready — ask again next tick", which is
     /// every one of: waiting out a `wait`, a turn still in flight, and a turn only just started.
-    fn advance(&mut self, kind: DecisionKind, state: &GameState) -> Option<Terminal> {
+    fn advance(&mut self, kind: DecisionKind, context: TurnContext<'_>) -> Option<Terminal> {
+        // Recorded before anything else: this is what tells the *next* tick's `service_tools` which
+        // question a tool batch belongs to.
+        self.site = Some(kind);
+
         match self.waiting {
             Some((waiting_on, ticks)) if waiting_on == kind => {
                 self.waiting = (ticks > 1).then_some((kind, ticks - 1));
@@ -113,37 +155,53 @@ impl LlmPolicy {
                 Ok(_) => None,
                 Err(_) => None,
             },
-            // A different question is being asked now. Cancelling costs the tokens already spent —
-            // §17's risk 2b, which is why `TurnCancelled` is an event and not a silence.
-            Some(_) => {
-                self.start_turn(kind, state);
-                None
-            }
-            None => {
-                self.start_turn(kind, state);
+            // A different question is being asked now, or none was. Cancelling costs the tokens
+            // already spent — §17's risk 2b, which is why `TurnCancelled` is an event, not a silence.
+            _ => {
+                self.start_turn(kind, context);
                 None
             }
         }
     }
 
     /// Bump the generation — which is what cancels anything in flight — and send a fresh turn.
-    fn start_turn(&mut self, kind: DecisionKind, state: &GameState) {
-        let id = self.handles.next_generation();
-        let menu = match kind {
-            DecisionKind::Overworld => tools::overworld_menu(state),
-            DecisionKind::Battle => tools::battle_menu(state),
+    fn start_turn(&mut self, kind: DecisionKind, context: TurnContext<'_>) {
+        // Everything that reads `self` immutably happens inside this block, so the mutations below
+        // it are free of the borrow. `situation` and `headline` come out owned.
+        let Some((mut situation, headline)) = ({
+            // No state has been observed yet, so there is nothing to describe. `service_tools` runs
+            // immediately before every poll site, so this is only ever true before the first tick.
+            self.state.as_deref().map(|state| {
+                let menu = match kind {
+                    DecisionKind::Overworld => tools::overworld_menu(state),
+                    DecisionKind::Battle => tools::battle_menu(state),
+                    DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot),
+                    DecisionKind::ForgetMove => match context {
+                        TurnContext::ForgetMove { current, .. } => tools::forget_menu(current),
+                        _ => Vec::new(),
+                    },
+                    // The naming screen offers no choices; the tool's own arguments are the menu.
+                    DecisionKind::Nickname => Vec::new(),
+                };
+                let situation =
+                    prompt::situation(kind, state, &self.snapshot, &self.events, &menu, context);
+                let headline = format!(
+                    "{} — {} at ({}, {})",
+                    kind.label(),
+                    state.map.map,
+                    state.map.player_position.x,
+                    state.map.player_position.y,
+                );
+                (situation, headline)
+            })
+        }) else {
+            return;
         };
-        let mut situation = prompt::situation(kind, state, &self.snapshot, &self.events, &menu);
+
+        let id = self.handles.next_generation();
         if let Some(note) = self.note.take() {
             situation = format!("{note}\n\n{situation}");
         }
-        let headline = format!(
-            "{} — {} at ({}, {})",
-            kind.label(),
-            state.map.map,
-            state.map.player_position.x,
-            state.map.player_position.y,
-        );
         self.events.clear();
 
         if self.handles.turns.send(TurnRequest { id, kind, situation, headline }).is_ok() {
@@ -163,17 +221,26 @@ impl LlmPolicy {
 
 impl Policy for LlmPolicy {
     /// ⚠️ Runs at every poll of every decision point — fifty times a second — so the common path
-    /// here is an empty `try_recv` and nothing else.
+    /// here is a snapshot and an empty `try_recv`.
     fn service_tools(&mut self, state: &GameState, api: &mut PokemonApi<'_>, graph: &WorldGraph) {
-        // Only when a turn is about to be built: this is the one moment the policy is handed a
-        // `PokemonApi`, and reading the screen costs a VRAM decode that is pure waste on the ticks
-        // where nothing is going to ask for it.
-        if self.pending.is_none() && self.waiting.is_none() {
-            self.snapshot = ApiSnapshot::read(api);
-        }
-
         let live = self.handles.current_generation();
-        let asking = Self::observed_kind(state);
+        let asking = self.observed_kind(state);
+
+        // This is the one moment the policy is handed a `PokemonApi`, and the only source of the
+        // situation a turn started from any of the five poll sites will be built from.
+        //
+        // ⚠️ **Unconditional, and W4's "only when nothing is pending" guard was wrong.** Every
+        // version of that guard has to predict whether *this* poll is the first of a new decision
+        // point, and it cannot: the site is only known once the `pick_*` after this one runs. Two
+        // cases broke it — a battle interrupting an overworld turn built its menu from the overworld
+        // state it replaced, and a mart opening during an overworld turn rendered a stock list read
+        // before the player reached the shop. The cost of being right is a `GameState` clone and one
+        // VRAM text decode per poll; `LlmPolicy` only ever runs at **1× real time** (it is the
+        // livestream's policy), so that is fifty of each per wall-clock second and the emulator under
+        // it is doing nothing else with the other 95% of the time.
+        self.snapshot = ApiSnapshot::read(api);
+        self.state = Some(Box::new(state.clone()));
+
         while let Ok(batch) = self.handles.tool_calls.try_recv() {
             let current = batch.turn == live
                 && self.pending.is_some_and(|(kind, id)| kind == asking && id == batch.turn);
@@ -193,7 +260,7 @@ impl Policy for LlmPolicy {
     }
 
     fn pick_overworld_action(&mut self, state: &GameState, _graph: &WorldGraph) -> Option<OverworldAction> {
-        match self.advance(DecisionKind::Overworld, state)? {
+        match self.advance(DecisionKind::Overworld, TurnContext::None)? {
             Terminal::ChooseAction { id } => {
                 // ⚠️ Resolved against a **freshly recomputed** action list, never against the one the
                 // menu was rendered from: `actions()` is sorted by `MetaTile` and the world has been
@@ -209,6 +276,20 @@ impl Policy for LlmPolicy {
                     }
                 }
             }
+            // Stashed, not returned: this method's return type is a walk, and a field move is not
+            // one. `pick_field_move` collects it on the next tick — 20 ms later — and hands it
+            // straight to the agent.
+            Terminal::UseFieldMove(request) => {
+                match tools::resolve_field_move(state, &request) {
+                    Ok(field_move) => self.field_move = Some(field_move),
+                    Err(complaint) => self.reject(complaint),
+                }
+                None
+            }
+            Terminal::PressButtons { buttons } => {
+                self.manual.extend(buttons);
+                None
+            }
             Terminal::Wait { ticks } => {
                 self.waiting = Some((DecisionKind::Overworld, ticks));
                 None
@@ -223,7 +304,7 @@ impl Policy for LlmPolicy {
     }
 
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
-        match self.advance(DecisionKind::Battle, state)? {
+        match self.advance(DecisionKind::Battle, TurnContext::None)? {
             Terminal::ChooseBattleAction { id } => match tools::resolve_battle(state, &id) {
                 Some(action) => Some(action),
                 None => {
@@ -234,6 +315,10 @@ impl Policy for LlmPolicy {
                     None
                 }
             },
+            Terminal::PressButtons { buttons } => {
+                self.manual.extend(buttons);
+                None
+            }
             Terminal::Wait { ticks } => {
                 self.waiting = Some((DecisionKind::Battle, ticks));
                 None
@@ -243,6 +328,82 @@ impl Policy for LlmPolicy {
                 None
             }
         }
+    }
+
+    /// ⚠️ **Not a decision point, and must never become one.** This runs on every idle overworld tick
+    /// immediately before `pick_overworld_action`; it neither starts a turn nor touches `pending`,
+    /// `waiting` or `site`. All it does is hand over what an overworld turn already decided.
+    fn pick_field_move(&mut self, _state: &GameState) -> Option<FieldMove> {
+        self.field_move.take()
+    }
+
+    fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
+        match self.advance(DecisionKind::Nickname, TurnContext::Nickname(species))? {
+            Terminal::SetNickname { name } => Some(name),
+            Terminal::Wait { ticks } => {
+                self.waiting = Some((DecisionKind::Nickname, ticks));
+                None
+            }
+            other => {
+                self.reject(format!("`{other:?}` cannot answer the naming screen."));
+                None
+            }
+        }
+    }
+
+    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
+        match self.advance(DecisionKind::MartPurchase, TurnContext::None)? {
+            // ⚠️ The quantity is **not** trimmed to the wallet here — `assert_pokemart_state` does
+            // that against the ROM's own price table, because Gen 1 hands over *nothing* for an
+            // order it cannot afford and the agent has been trimming since long before this policy.
+            Terminal::BuyItem { item } => Some(item),
+            Terminal::Wait { ticks } => {
+                self.waiting = Some((DecisionKind::MartPurchase, ticks));
+                None
+            }
+            other => {
+                self.reject(format!("`{other:?}` cannot answer a mart menu."));
+                None
+            }
+        }
+    }
+
+    fn pick_move_to_forget(
+        &mut self,
+        current_moves: &[PokemonMove],
+        new_move: PokemonMoveName,
+    ) -> Option<Option<usize>> {
+        let context = TurnContext::ForgetMove { current: current_moves, new: new_move };
+        match self.advance(DecisionKind::ForgetMove, context)? {
+            Terminal::ForgetMove { slot } => match slot {
+                // A slot the mon does not have would be navigated to and never reached, so the
+                // cursor drive would loop until the prompt timed out. Declining is the safe answer,
+                // and the model is told why on its next turn.
+                Some(slot) if slot as usize >= current_moves.len() => {
+                    self.reject(format!(
+                        "Slot {slot} is not one of the {} moves that Pokémon knows, so nothing was \
+                         forgotten and the new move was declined.",
+                        current_moves.len(),
+                    ));
+                    Some(None)
+                }
+                Some(slot) => Some(Some(slot as usize)),
+                None => Some(None),
+            },
+            Terminal::Wait { ticks } => {
+                self.waiting = Some((DecisionKind::ForgetMove, ticks));
+                None
+            }
+            other => {
+                self.reject(format!("`{other:?}` cannot answer the forget-move prompt."));
+                None
+            }
+        }
+    }
+
+    /// Collected by the agent at the top of its next tick, ahead of the state machine.
+    fn take_manual_input(&mut self) -> Vec<JoypadButton> {
+        std::mem::take(&mut self.manual)
     }
 
     /// The narrative between decisions: dialogue, a battle starting, and above all the abort reasons
@@ -278,7 +439,7 @@ mod tests {
     use crate::llm::LlmError;
     use crate::llm::client::ChatEndpoint;
     use crate::llm::config::LlmConfig;
-    use crate::llm::protocol::{ChatRequest, Completion, FunctionCall, Role, ToolCall};
+    use crate::llm::protocol::{ChatRequest, Completion, FunctionCall, Message, Role, ToolCall};
     use crate::llm::worker;
     use crate::pokemon::PokemonApiTrait;
     use crate::pokemon::actions::OverworldAction;
@@ -447,6 +608,36 @@ mod tests {
             policy.pick_battle_action(&state)
         }
 
+        /// The three menu prompts, each in the order `agent.rs` polls it: `service_tools`, then the
+        /// one `pick_*` that site asks. `ask` runs the second half so one helper serves all three.
+        fn tick_prompt<T>(
+            &mut self,
+            policy: &mut LlmPolicy,
+            ask: impl FnOnce(&mut LlmPolicy, &GameState) -> Option<T>,
+        ) -> Option<T> {
+            let state = self.state();
+            let mut api = PokemonApi::new(&mut self.gb);
+            policy.service_tools(&state, &mut api, &self.graph);
+            drop(api);
+            ask(policy, &state)
+        }
+
+        /// Poll a menu prompt like the agent does until it answers or time runs out.
+        fn pump_prompt<T>(
+            &mut self,
+            policy: &mut LlmPolicy,
+            mut ask: impl FnMut(&mut LlmPolicy, &GameState) -> Option<T>,
+        ) -> Option<T> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Some(answer) = self.tick_prompt(policy, &mut ask) {
+                    return Some(answer);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        }
+
         fn pump_battle(&mut self, policy: &mut LlmPolicy, budget: Duration)
             -> Option<crate::pokemon::battle::BattleAction>
         {
@@ -530,7 +721,7 @@ mod tests {
             .iter()
             .rev()
             .find(|m| m.role == Role::User)
-            .and_then(|m| m.content.as_deref())
+            .and_then(Message::text)
             .expect("every request carries a user message")
     }
 
@@ -595,7 +786,7 @@ mod tests {
         // Fifty ticks of the real call order while the turn is in flight.
         for _ in 0..50 {
             let state = rig.state();
-            assert_eq!(policy.pick_field_move(&state), None, "W4 does not answer field moves");
+            assert_eq!(policy.pick_field_move(&state), None, "nothing has been decided to hand over");
             rig.tick_overworld(&mut policy);
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -638,6 +829,10 @@ mod tests {
         let offered: Vec<&str> = requests[1].tools.iter().map(|t| t.function.name).collect();
         assert!(offered.contains(&"choose_battle_action") && !offered.contains(&"choose_action"),
                 "the replacement turn is a battle turn");
+        // …built from the state the battle is in, not from the overworld state it replaced. The menu
+        // is the whole point of the turn, and a stale one would offer actions that cannot be taken.
+        let asked = last_user_message(&requests[1]);
+        assert!(asked.contains("### Battle menu") && asked.contains("`run`"), "{asked}");
 
         // …and it is the battle decision that lands, from a fresh `battle_options`.
         let action = rig.pump_battle(&mut policy, Duration::from_secs(2)).expect("the battle turn decides");
@@ -667,7 +862,7 @@ mod tests {
             .messages
             .iter()
             .filter(|m| m.role == Role::Tool)
-            .filter_map(|m| m.content.as_deref())
+            .filter_map(Message::text)
             .collect();
         assert_eq!(results.len(), 3, "every call in the batch was answered, and in one go");
 
@@ -781,5 +976,170 @@ mod tests {
         let reopened = last_user_message(&requests[1]);
         assert!(reopened.contains("no longer available"), "{reopened}");
         assert!(reopened.contains("PalletTown:99,99:Warp"), "the model is told which id failed");
+    }
+
+    // ── W5 ───────────────────────────────────────────────────────────────────────────────────────
+
+    /// ⚠️ **A field move is decided by an overworld turn and collected by a different method.**
+    /// `pick_overworld_action` cannot return one — its return type is a walk — so the decision is
+    /// parked and `pick_field_move` takes it on the next tick. This pins both halves: that the
+    /// overworld poll answers `None` rather than pretending, and that the very next field-move poll
+    /// hands over the move the model actually asked for.
+    #[test]
+    fn a_field_move_decision_is_collected_by_the_next_field_move_poll() {
+        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
+            "use_field_move",
+            r#"{"move":"reorder_party","slot":0}"#,
+        )])]);
+
+        // The overworld poll never yields an action for this…
+        assert!(rig.pump_overworld_for(&mut policy, Duration::from_secs(2)).is_none());
+        // …and `pick_field_move`, which W4 always answered `None`, now has the answer.
+        let state = rig.state();
+        assert_eq!(policy.pick_field_move(&state), Some(FieldMove::ReorderParty { slot: 0 }));
+        assert_eq!(policy.pick_field_move(&state), None, "it is taken, not repeated every tick");
+    }
+
+    /// A field move that cannot be carried out is a sentence back to the model, exactly as an
+    /// unresolvable action id is — never a `FieldMove` handed to the agent that quietly does nothing.
+    #[test]
+    fn an_impossible_field_move_is_explained_rather_than_attempted() {
+        let (mut rig, mut policy) = Rig::new(vec![
+            // Nobody in Oak's lab is facing a tree, and the starter does not know Cut.
+            calls(&[("use_field_move", r#"{"move":"cut"}"#)]),
+            calls(&[("wait", r#"{"ticks":1}"#)]),
+        ]);
+
+        rig.pump_overworld_for(&mut policy, Duration::from_secs(2));
+        assert_eq!(policy.pick_field_move(&rig.state()), None, "nothing was handed to the agent");
+
+        let requests = rig.requests();
+        assert!(requests.len() >= 2, "a fresh turn is asked after a field move that could not run");
+        assert!(last_user_message(&requests[1]).contains("facing"), "{}", last_user_message(&requests[1]));
+    }
+
+    /// The escape hatch's policy half: a `press_buttons` decision leaves the presses where the agent
+    /// collects them, and taking them empties the queue so they cannot be delivered twice.
+    #[test]
+    fn press_buttons_leaves_the_presses_for_the_agent_to_collect() {
+        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
+            "press_buttons",
+            r#"{"buttons":["b","start","a"]}"#,
+        )])]);
+
+        assert!(rig.pump_overworld_for(&mut policy, Duration::from_secs(2)).is_none());
+        assert_eq!(
+            policy.take_manual_input(),
+            [JoypadButton::B, JoypadButton::Start, JoypadButton::A],
+        );
+        assert!(policy.take_manual_input().is_empty(), "a collected press is not queued again");
+    }
+
+    /// The three menu prompts, each asked as its own turn with its own scoped tools, and each
+    /// answered into the shape its `pick_*` returns.
+    ///
+    /// ⚠️ The important part is that a batch **serviced during one of these** is answered rather than
+    /// cancelled. `observed_kind` cannot see a naming screen in a `GameState`, so an earlier version
+    /// read every one of these turns as `Overworld`, cancelled its first read, restarted the turn,
+    /// and looped for as long as the prompt was open.
+    #[test]
+    fn the_menu_prompts_are_their_own_turns_and_can_use_read_tools() {
+        let (mut rig, mut policy) = Rig::new(vec![
+            calls(&[("read_party", "{}")]),
+            calls(&[("set_nickname", r#"{"name":"Bubbles"}"#)]),
+        ]);
+
+        let answer = rig
+            .pump_prompt(&mut policy, |policy, _| policy.pick_nickname(PokemonSpecies::Squirtle))
+            .expect("the naming screen is answered");
+        assert_eq!(answer, Some("Bubbles".to_string()));
+
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2, "one read step, then the decision — not a restart loop");
+        history_is_well_formed(&requests[1]);
+        let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.function.name).collect();
+        assert!(offered.contains(&"set_nickname") && !offered.contains(&"choose_action"));
+        assert!(last_user_message(&requests[0]).contains("Squirtle"), "the species is in the situation");
+        // The read really was serviced, from the live fixture.
+        let results: Vec<&str> =
+            requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("\"slot\":0"), "read_party: {}", results[0]);
+    }
+
+    /// The mart's stock is the menu, and it comes from the ROM through `ApiSnapshot` — nothing in
+    /// `GameState` has it. A turn that offered `buy_item` without one would be asking the model to
+    /// guess what the shop sells.
+    #[test]
+    fn a_mart_turn_answers_with_a_purchase() {
+        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
+            "buy_item",
+            r#"{"item":"Potion","quantity":3}"#,
+        )])]);
+
+        let answer = rig
+            .pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state))
+            .expect("the mart menu is answered");
+        assert_eq!(answer, Some(BagItem::new(crate::pokemon::item::ItemId::Potion, 3)));
+
+        let offered: Vec<&str> = rig.requests()[0].tools.iter().map(|t| t.function.name).collect();
+        assert!(offered.contains(&"buy_item") && !offered.contains(&"choose_action"));
+    }
+
+    /// ⚠️ The forget prompt fires **mid-battle**, and answering it means cancelling the battle turn
+    /// in flight — which is correct, because the prompt is the live question. This pins that the
+    /// cancellation happens and that the answer is the slot the model named.
+    #[test]
+    fn a_forget_prompt_pre_empts_the_battle_turn_it_interrupts() {
+        let release = Arc::new(AtomicBool::new(false));
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        rig.enter_battle();
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            replies.push_back(held(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]), &release));
+            replies.push_back(calls(&[("forget_move", r#"{"slot":2}"#)]));
+        }
+
+        rig.tick_battle(&mut policy);
+        rig.wait_for_requests(1, Duration::from_secs(2));
+        let generation = policy.handles.current_generation();
+
+        let moves: Vec<PokemonMove> = [
+            PokemonMoveName::Tackle,
+            PokemonMoveName::TailWhip,
+            PokemonMoveName::Bubble,
+            PokemonMoveName::WaterGun,
+        ]
+        .into_iter()
+        .map(PokemonMove::with_max_pp)
+        .collect();
+
+        let answer = rig
+            .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(&moves, PokemonMoveName::Bite))
+            .expect("the forget prompt is answered");
+        assert_eq!(answer, Some(2));
+        release.store(true, Ordering::SeqCst);
+
+        assert!(policy.handles.current_generation() > generation, "the battle turn must have been cancelled");
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2);
+        let asked = last_user_message(&requests[1]);
+        assert!(asked.contains("Bite"), "the incoming move is in the situation: {asked}");
+        assert!(asked.contains("`2` — Bubble"), "the four known moves are the menu: {asked}");
+    }
+
+    /// A slot the Pokémon does not have would send the menu cursor somewhere it can never arrive, so
+    /// it is declined — and the model is told why rather than left watching a prompt that never
+    /// closes.
+    #[test]
+    fn a_forget_slot_the_pokemon_does_not_have_declines_instead_of_hanging() {
+        let (mut rig, mut policy) = Rig::new(vec![calls(&[("forget_move", r#"{"slot":3}"#)])]);
+        let moves: Vec<PokemonMove> =
+            [PokemonMoveName::Tackle, PokemonMoveName::Growl].into_iter().map(PokemonMove::with_max_pp).collect();
+
+        let answer = rig
+            .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(&moves, PokemonMoveName::Bite))
+            .expect("it is answered rather than left hanging");
+        assert_eq!(answer, None, "declining keeps all the moves it has");
     }
 }

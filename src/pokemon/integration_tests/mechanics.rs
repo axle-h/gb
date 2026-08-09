@@ -695,6 +695,62 @@ fn policy_sees_every_event_and_gets_a_tool_poll() {
              policy too; saw {:?}", log.events);
 }
 
+/// **W5** — the other half of the escape hatch. W0.4 built the queue on the agent and the tests
+/// above fill it by hand; a policy cannot do that, because the agent owns the policy rather than the
+/// other way round. So the agent *pulls*, at the top of every tick, and this is the proof that it
+/// does: a policy that asks for START gets the START menu, without the test ever touching
+/// `queue_manual_input`.
+#[test]
+fn a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it() {
+    use crate::joypad::JoypadButton;
+
+    /// Decides at the overworld poll and hands the press over on the tick after, which is exactly
+    /// `LlmPolicy`'s shape: a `press_buttons` decision is taken once, parked, and collected next
+    /// tick. Arming at the poll also means the press lands from a *settled* overworld rather than
+    /// from whatever the first tick of the fixture happens to be.
+    #[derive(Default)]
+    struct AsksForStart {
+        decided: bool,
+    }
+    impl crate::pokemon::policy::Policy for AsksForStart {
+        fn take_manual_input(&mut self) -> Vec<JoypadButton> {
+            match std::mem::take(&mut self.decided) {
+                true => vec![JoypadButton::Start],
+                false => Vec::new(),
+            }
+        }
+        fn pick_overworld_action(&mut self, _: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction>
+        {
+            self.decided = true;
+            None
+        }
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> {
+            None
+        }
+    }
+
+    let mut fixture =
+        TestFixture::with_policy(PALLET_TOWN_STATE, Duration::from_secs(60), Box::new(AsksForStart::default()));
+
+    // Step until the agent has pulled the press — which is the thing under test, and which nothing
+    // in this test ever puts there by hand.
+    let mut collected = false;
+    for _ in 0..200 {
+        fixture.step();
+        if fixture.agent.manual_input_pending() > 0 {
+            collected = true;
+            break;
+        }
+    }
+    assert!(collected, "the agent never collected the press the policy was holding");
+
+    for _ in 0..MANUAL_INPUT_TICKS_PER_PRESS { fixture.step(); }
+    assert_eq!(fixture.agent.manual_input_pending(), 0, "the press should be fully delivered");
+    assert_eq!(fixture.api().game_mode(), Some(GameMode::TextBox),
+               "START should have opened the menu — the agent never presses it by itself");
+}
+
 // ── W0.5 — the observation facade ────────────────────────────────────────────────────────────────
 
 /// Every view against a known snapshot. These are the shapes the LLM sees, so the assertions are
