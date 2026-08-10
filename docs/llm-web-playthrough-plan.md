@@ -3,11 +3,18 @@
 An `LlmPolicy` that delegates every decision to an LLM over an OpenAI-compatible API, and a
 browser UI — served from the same process — that lets anyone with the URL watch it play.
 
-**Status:** **W0–W4 complete** (W0–W3 2026-08-07, W4 2026-08-08). The seams are in, `gb serve` plays
-the game headlessly and streams it to a browser over SSE, the React SPA renders it, and
-`--policy llm` hands every overworld and battle decision to an OpenAI-compatible endpoint and streams
-the conversation back to the page. W5 onward is unbuilt. Each completed task below carries what
-actually shipped, including the places the plan was wrong.
+**Status:** **W0–W9 complete** — every phase (W0–W3 2026-08-07, W4 2026-08-08, W5 2026-08-09,
+W6/W6b/W7 2026-08-10, W8 and W9 2026-08-10). The seams are in, `gb serve` plays the game headlessly
+and streams it to a browser over SSE, the React SPA renders it, `--policy llm` hands every decision
+to an OpenAI-compatible endpoint, a run bounds its own context and survives being restarted, the
+whole thing ships as a container that builds its own cartridge, and a run that wedges asks the model
+to get it moving rather than standing still until someone notices.
+
+**What is left is not a phase.** §16 lists the two: a per-run token ceiling (§17's risk 4) and
+counting cancellations (§17's risk 2b). And the thing no phase covers — ⭐ **nothing has ever driven
+this with a real model.** Every acceptance in this document was met against a mock.
+
+Each completed task below carries what actually shipped, including the places the plan was wrong.
 
 ---
 
@@ -950,10 +957,20 @@ copy that survives everything.
 **4. The compaction summary ends with a restatement** (§9), so the message immediately following a
 compaction re-establishes it even if the summariser drops everything else.
 
-**Fallback when it still happens.** A completion with no tool calls gets one nudge quoting the rule
-verbatim; a second failure forces `wait { ticks: 1 }` and emits a `UiEvent` marking it, so a model
-that cannot hold the contract shows up as a visible rate rather than a mysteriously idle game. Same
-for exhausting `GB_MAX_TOOL_STEPS` (§7.3).
+**Fallback when it still happens**, and there are two shapes of it. A completion with **no tool
+calls** gets one nudge quoting the rule verbatim (`prompt::nudge`, a new `user` message), and a
+second failure forces `wait { ticks: 1 }` and emits a `UiEvent` marking it — so a model that cannot
+hold the contract shows up as a visible rate rather than a mysteriously idle game. A turn that
+**reads and never commits** gets `prompt::OUT_OF_STEPS` instead, and then exhausting
+`GB_MAX_TOOL_STEPS` forces the same wait (§7.3).
+
+⚠️ **The second nudge has to arrive while there is still a request left to answer it with.** It was
+appended on the *final* iteration of the loop, which meant "call a terminal tool now to end the turn"
+was a sentence the model first saw on the turn *after* the one it was about to be forced out of.
+Nothing looked broken — the turn resolved, the next one started a tick later — it simply spent a
+whole turn's tokens saying something the model could not act on. It is now appended one step earlier
+(`step + 2 >= max_tool_steps`), so the budget buys `max_tool_steps - 1` rounds of reading and one
+round of "decide with what you have".
 
 **Acceptance for W4:** the LLM plays from a committed fixture and the conversation streams into the
 browser. Overworld and battle decisions only.
@@ -1271,43 +1288,93 @@ audio stream needs.
 
 ---
 
-## 13. Phase W8 — Container
+## 13. Phase W8 — Container ✅ **done**
 
-```dockerfile
-# stage 1 — SPA
-FROM node:22-alpine AS web
-WORKDIR /web
-COPY web/package*.json ./
-RUN npm ci
-COPY web/ ./
-RUN npm run build                      # → /web/dist
+`Dockerfile`, `.dockerignore` and `docker-compose.yml`, all at the repo root. **146 MB on disk /
+36.8 MB of content**, of which the binary is 6.9 MB and Debian is nearly all the rest.
 
-# stage 2 — Rust, no SDL2 system library needed
-FROM rust:1-bookworm AS build
-WORKDIR /src
-COPY . .
-COPY --from=web /web/dist ./web/dist
-RUN cargo build --release --no-default-features --features llm
-
-# stage 3
-FROM debian:bookworm-slim
-COPY --from=build /src/target/release/gb /usr/local/bin/gb
-VOLUME /runs
-ENV GB_RUN_DIR=/runs GB_PORT=8080
-EXPOSE 8080
-CMD ["gb", "serve"]
+```bash
+docker build -t gb .
+docker run -d -p 8080:8080 -v gb-runs:/runs -e OPENAI_API_KEY=sk-… -e GB_MODEL=… gb
+# or, with the ops shape (a named volume, restart policy and a 30 s stop grace period):
+OPENAI_API_KEY=sk-… GB_MODEL=… docker compose up -d --build
 ```
 
-The pokered submodule must be initialised and built before stage 2 — `pokered/pokered.gbc` is
-`include_bytes!`'d at compile time (`src/pokemon/roms.rs`). Either commit the built ROM into the
-build context or add a submodule build stage.
+The sketch above had three stages and left the cartridge as an open question — "either commit the
+built ROM into the build context or add a submodule build stage". **It is a stage**, and it is the
+first one, because the alternative is committing a 1 MB copyrighted binary that `.gitignore` has
+excluded since the repo began.
 
-**Acceptance:** the image builds, `docker run -e OPENAI_API_KEY=… -e GB_MODEL=… -p 8080:8080` serves
-a live playthrough, and the run survives `docker restart`.
+### The stages
+
+| # | Stage | What it is for |
+|---|---|---|
+| 1 | `rom` | rgbds 0.9.3 from source, then `make pokered.gbc` — the ROM and its symbol map |
+| 2 | `web` | `npm ci && npm run build` → `web/dist`, which `rust-embed` bakes into the binary |
+| 3 | `build` | `cargo build --release --no-default-features --features llm` |
+| 4 | — | `debian:bookworm-slim`, the binary, a non-root user and `/runs` |
+
+Stages 1 and 2 exist for the same underlying reason: **two of this crate's compile-time inputs are
+generated and neither is in git.** `pokered/pokered.gbc` is `include_bytes!`'d
+(`src/pokemon/roms.rs`) and `pokered/pokered.sym` is parsed by `build.rs`; `web/dist` fails
+`rust-embed`'s derive outright if it does not exist. A build that does not produce them first does
+not compile.
+
+### What the ROM stage taught us
+
+- ⚠️ **The sha1 check against `pokered/roms.sha1` is the point of stage 1, not a formality.** All 91
+  committed fixtures, every generated symbol and every address the Pokémon layer reads are pinned to
+  *those* bytes — a ROM that merely assembles is a different game, and it would fail somewhere deep
+  in the agent instead of at the build. The stage ends with
+  `grep ' \*pokered\.gbc$' roms.sha1 | sha1sum -c -`, and the container's ROM matches upstream's
+  manifest exactly.
+- ⚠️ **`pokered/*.o` does not match `pokered/gfx/pics_red.o`** — and the host's stale object files,
+  built by a *newer* rgbds, stopped the container build dead: `Unsupported object file for rgblink
+  v0.9.3 … expected revision 12, got 13`. `.dockerignore` needs `pokered/**/*.o` (and the same for
+  `.2bpp`/`.pic`/`.gbc`/`.sym`, plus the four `tools/` binaries, which would be the wrong
+  architecture on an arm64 build). Nothing excluded is tracked in the submodule; every one of them
+  is a `make` output. **Found by the sha1 gate's own stage failing**, which is the argument for
+  having it.
+- **rgbds is built from source rather than taken from the release's prebuilt tarball**, which is
+  x86-64 only; the source build is the one thing that would otherwise stop the image building on an
+  arm64 host. Version and sha256 are `ARG`s, pinned together — pokered wants "0.9.3 or newer"
+  (`rgbdscheck.asm`) and 0.9.3 is what its INSTALL.md names, so a newer major is not worth the risk
+  to bytes this exact.
+- An uninitialised submodule is an empty directory, and `make`'s error for that ("No rule to make
+  target 'main.asm'") says nothing about why. The stage tests for `main.asm` and prints the
+  `git submodule update --init --recursive` line instead.
+
+### What the runtime stage taught us
+
+- ⚠️ **Exec-form `CMD`, so `gb` is PID 1 and gets `docker stop`'s SIGTERM itself.** That signal is
+  what checkpoints the run (W7); with a shell in between it goes to the shell, nothing is written,
+  and the next start loses everything since the last periodic checkpoint. `docker-compose.yml` sets
+  `stop_grace_period: 30s` for the same reason — the checkpoint is quick, but the default 10 s is a
+  needless deadline on the one operation whose failure is silent.
+- **`/runs` is created and `chown`ed before `USER gb`**, so an anonymous volume inherits the
+  ownership instead of arriving root-owned under a non-root process.
+- **No CA bundle is needed for the endpoint** — ureq is built against `webpki-roots`, so its trust
+  store is compiled in. `ca-certificates` and `curl` are installed for the `HEALTHCHECK`, which is a
+  plain `GET /api/healthz`.
+- ⚠️ **A cache mount is not part of the image**, so `/src/target` does not exist in any later layer
+  and the binary has to be copied out inside the same `RUN`.
+
+**Acceptance — all verified 2026-08-10:**
+
+- The image builds from a clean context (`docker build`), and stage 1 reports `pokered.gbc: OK`.
+- `--policy random` serves the SPA, `/api/badges.png` (2 114 bytes of badge art decoded from the
+  cartridge the container built — which is the end-to-end proof that stage 1's ROM is the real one),
+  the video SSE and the status SSE. The healthcheck reports `healthy`.
+- `--policy llm` against a mock endpoint reachable at `host.docker.internal` played **44 turns in
+  30 s**, each one a `read_map` serviced on the emulator thread followed by a terminal `wait`, with
+  the endpoint's own `usage` numbers (`estimated: false`) reaching the UI.
+- `docker stop` logged `shutting down — checkpointing`; `docker start` logged
+  `resuming run run-20260810-181323`, same run id, same `/runs` volume, and carried on. `meta.json`
+  recorded the checkpoint and the resume.
 
 ---
 
-## 14. Phase W9 — Stuck-run watchdog (last resort)
+## 14. Phase W9 — Stuck-run watchdog (last resort) ✅ **done**
 
 **Deliberately the last thing built, and deliberately lenient.** This is insurance for a multi-hour
 run, not a mechanism the design leans on.
@@ -1322,15 +1389,57 @@ Two failure modes get confused here, and only one of them needs a watchdog:
 The second is narrow: it can only happen in agent states that never consult the policy. The
 navigation bugs that used to cause it are believed fixed, so in a healthy run this never fires.
 
-**Design.** The host tracks emulated time since the last decision point of any kind. After
-`GB_STUCK_TIMEOUT_SECS` (default **300** — five emulated minutes; normal play never approaches it) it
-raises a `DecisionKind::Stuck` turn: no action menu, the full read-tool set, and only `press_buttons`
-and `wait` as terminal tools. `queue_manual_input` (W0.4) is the execution path, so nothing new is
-needed on the agent side.
+**Design.** Emulated time since the last decision point of any kind. After `GB_STUCK_TIMEOUT_SECS`
+(default **300** — five emulated minutes) a `DecisionKind::Stuck` turn is raised: no action menu, the
+full read-tool set, and only `press_buttons` and `wait` as terminal tools. `queue_manual_input`
+(W0.4) is the execution path.
 
-⚠️ **Every firing is a bug report.** Log it prominently to the transcript, the UI and stdout with the
-agent's `state_debug()` at the moment it tripped. A watchdog that quietly rescues runs turns an
-agent bug into an invisible ongoing cost; the point is to un-stick the run *and* leave evidence.
+⚠️ **Every firing is a bug report.** `AgentEvent::WatchdogFired` carries the agent's `state_debug()`
+and how long it had been stuck, and goes to all four places at once — the model's next turn, the UI
+(styled red, `.entry.watchdog`), `transcript.jsonl`, and stdout. A watchdog that quietly rescues runs
+turns an agent bug into an invisible ongoing cost; the point is to un-stick the run *and* leave
+evidence.
+
+### What shipped, and where the plan was wrong
+
+**"The host tracks" was wrong, and so was "nothing new is needed on the agent side".** Both come from
+the same mistake: the host does not own the policy — the agent does, and the agent is the only thing
+that knows a decision point happened. Two consequences, and the second is the load-bearing one:
+
+- ⚠️ **A stuck turn has to be polled on every tick of the jam, not notified once.** A tool batch is
+  only ever answered by `Policy::service_tools`, which only runs inside `agent.update` (§2.1's rule,
+  and the reason `GB_PAUSE_WHILE_THINKING` had to die). A one-shot notification would leave any turn
+  that wanted a `read_map` first with nowhere to be serviced — it would hang, be abandoned, and be
+  re-raised on the next timeout, forever. So `Policy::pick_unstick` is called at the agent's own
+  rate, exactly like the other five poll sites.
+- ⚠️ **The watchdog must not reset the clock it reads.** Resetting on its own poll clears the jam the
+  instant it is noticed, and the turn — seconds of wall clock — is never polled a second time. The
+  clock is reset only by `PokemonAgent::poll_policy`, which is now the **single seam** every real
+  decision point goes through; a sixth site added later that bypassed it would look like a permanent
+  jam.
+
+**`Stuck` is a sixth `DecisionKind` but not a sixth poll site**, and it is the only kind whose
+`pick_*` returns nothing: a wedged agent can carry out no decision, so the answer leaves by
+`take_manual_input` — which also clears the jam, because `queue_manual_input` resets the state
+machine to `Idle`. It joins the three menu prompts in `is_inferred_from_the_site` (renamed from
+`is_menu_prompt`): a wedged agent looks, in the `GameState`, exactly like whatever it wedged in, so
+`observed_kind` has to take it from the site. ⚠️ **Getting that wrong is W5's infinite loop again**,
+not a wasted round trip — every read batch cancelled, every turn restarted, money spent in a circle
+for as long as the jam lasts.
+
+**Where the configuration lives.** `GB_STUCK_TIMEOUT_SECS` is on `LlmConfig` beside the rest of the
+block, read once in `web/mod.rs` before the worker takes the config, and handed to `LlmPolicy::new`.
+`0` is **off**, not "a timeout of zero" — the other reading would raise a turn every 20 ms.
+`Policy::stuck_timeout` is asked once, when the agent is built, so a scripted policy compiles the
+whole thing down to one `Option` comparison per tick.
+
+**How much headroom 300 seconds is.** `mechanics::ordinary_play_stays_far_inside_the_stuck_timeout`
+measures it rather than asserting a belief: the longest an agent playing normally goes without
+asking anything is **5.9 seconds** of game time (an `OverworldMovement` — walking is not a poll
+site), so the default has ~50× of margin. That is also why both firing tests run at a **one-second**
+timeout: nothing in a fixture is genuinely wedged, and at one second an ordinary walk is
+indistinguishable from a jam — which is the honest statement of what this mechanism can and cannot
+tell apart. The threshold is the whole of the difference between insurance and a nuisance.
 
 ---
 
@@ -1377,6 +1486,7 @@ feature. New tests follow it.
 | `llm_policy::tests::a_cancelled_batch_leaves_the_history_well_formed` ✅ | default | §7.3's one-step rollback: no `tool_call` left without a result |
 | `llm_policy::tests::a_parallel_read_batch_is_answered_from_one_observation` ✅ | default | All-or-nothing, from one `GameState`, in one poll |
 | `llm_policy::tests::a_reply_with_no_tool_call_is_nudged_once_then_forced_to_wait` ✅ | default | §7.5's fallback, and the marker event that makes it a visible rate |
+| `llm_policy::tests::a_turn_that_only_reads_is_told_to_decide_while_it_still_can` ✅ | default | §7.5's ⚠️ — *which* request carries "you have used every read"; one step later and it is unanswerable |
 | `llm_policy::tests::field_move_polls_do_not_cancel_the_overworld_turn` ✅ | default | `pick_field_move` shares the `Overworld` kind and never pre-empts |
 | `llm_policy::tests::an_unresolvable_id_is_explained_on_the_next_turn` ✅ | default | §7.4's ⚠️ — a stale id is a message, not a panic and not a silent no-op |
 | `integration_tests::llm::the_llm_plays_from_a_fixture` ✅ | default | A **mock OpenAI server** (axum, in-process, real socket, real SSE with fragmented arguments) serves a scripted tool-call sequence; the agent executes it from a committed fixture |
@@ -1424,6 +1534,13 @@ feature. New tests follow it.
 | `host::tests::a_checkpointed_run_resumes_where_it_stopped` ✅ | default | W7's acceptance without a restart: a second host, given only the directory, comes up in the same place |
 | `host::tests::a_heartbeat_that_says_nothing_new_is_not_sent` ✅ | default | Every heartbeat sent says something the one before did not — sampled far faster than anything can change, so every suppression is exercised |
 | `host::tests::an_idle_run_still_sends_a_keepalive` ✅ | default | …and a game that is not moving still proves it is alive |
+| `mechanics::the_watchdog_wakes_a_policy_the_agent_has_stopped_asking` ✅ | default | **W9** — it fires, it names the state, it is asked *repeatedly* (a turn needs polling to finish), the nudge reaches the joypad, and a real decision point is what resets the clock |
+| `mechanics::ordinary_play_stays_far_inside_the_stuck_timeout` ✅ | default | The other half, and it prints the number: normal play's longest silence is 5.9 s of game time against a 300 s default |
+| `llm_policy::tests::a_stuck_turn_may_read_first_and_its_press_reaches_the_agent` ✅ | default | §14's ⚠️ — the read batch of a stuck turn is **answered**, not cancelled into a restart loop, and the turn is scoped to buttons and `wait` |
+| `llm_policy::tests::a_stuck_turn_is_cancelled_the_moment_the_agent_asks_a_real_question` ✅ | default | A jam that clears mid-turn: the press decided for it is never delivered afterwards |
+| `llm::tools::tests::terminal_tools_are_scoped_per_kind` ✅ | default | Extended to `Stuck`: press and wait, every read including `screenshot`, and not one menu tool |
+| `llm::config::tests::a_zero_stuck_timeout_turns_the_watchdog_off` ✅ | default | `0` is off rather than "fire every 20 ms", which would be a turn per tick and a bill to match |
+| `integration_tests::llm::the_watchdog_asks_the_model_for_a_nudge_and_delivers_it` ✅ | default | **W9's acceptance** — a jammed agent, a real socket, a `Stuck` turn scoped to two tools, and the model's press delivered to the joypad |
 | `published::tests::a_heartbeat_is_the_same_as_another_when_only_the_clock_has_moved` ✅ | default | ⚠️ A derived `PartialEq` would never match and the suppression would silently never fire |
 | `published::tests::a_joiner_is_handed_the_last_heartbeat_rather_than_an_empty_panel` ✅ | default | The other half of send-on-change, and that it is one shared cell rather than a buffer per client |
 | `cli::tests::the_usage_names_every_flag_and_variable` ✅ | default | ⚠️ `--new-run` shipped without ever appearing in `--help`; for a tool discovered through `--help` that is a flag that does not exist |
@@ -1467,16 +1584,20 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | **W6** ✅ | Token accounting · status broadcast · two-stage compaction | ✅ Compaction tests, plus a live run against a mock endpoint that compacted at 72% and carried on |
 | **W6b** ✅ | Memory and TODO (§10): four tools, a note directory, a TODO list, both rendered into the system prompt every turn | ✅ Notes survive a compaction and a restart; verified live |
 | **W7** ✅ | Run directory · checkpoint/resume · SIGTERM · transcript · `/api/history` · `--new-run` | ✅ Survives a restart mid-run: SIGTERM, checkpoint, second process resumes at 4:47 of play with its notes |
-| **W8** | Multi-stage Dockerfile · no-SDL build · ops config | Image builds and runs |
-| **W9** | Stuck-run watchdog — lenient, last resort, loud (§14) | Fires on a deliberately jammed agent |
+| **W8** ✅ | Four-stage Dockerfile — the cartridge is a stage of its own · no-SDL build · compose file | ✅ Image builds, the ROM matches upstream's sha1, an LLM run plays inside it and survives `docker stop`/`start` |
+| **W9** ✅ | Stuck-run watchdog — lenient, last resort, loud (§14): a sixth `DecisionKind`, one poll seam, `GB_STUCK_TIMEOUT_SECS` | ✅ Fires on a jammed agent, through a real socket, and the model's press reaches the joypad; silent through ordinary play with 50× margin |
 | *(deferred)* | Audio streaming (§12) | — |
 
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.
 
-**What W8 inherits.** W6, W6b and W7 all shipped, so a run now bounds its own context, keeps its own
-notes, and survives the process being restarted. The container has one job left that is really its
-own: `GB_RUN_DIR` wants to be a volume, and `docker stop`'s SIGTERM is already handled.
+**What W8 inherited, and what it turned out to be.** W6, W6b and W7 had already made a run bound its
+own context, keep its own notes and survive a restart, so the container's own job looked like two
+lines — mount `GB_RUN_DIR`, and let the existing SIGTERM handler do the rest. Both were indeed easy.
+The work was **stage 1**: the crate does not compile without a ROM and a symbol map that no
+checkout contains, and getting those built reproducibly — pinned rgbds, pinned checksum, sha1
+verified against upstream's manifest, host artifacts kept firmly out of the context — is most of
+what §13 now documents.
 
 Still open, and neither is a phase:
 

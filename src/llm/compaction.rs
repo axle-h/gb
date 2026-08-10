@@ -401,6 +401,7 @@ mod tests {
             context_limit: 1000,
             temperature: 0.4,
             max_tool_steps: 4,
+            stuck_timeout: None,
         };
         let messages = history(2, false);
         let request = summary_request(&config, &messages);

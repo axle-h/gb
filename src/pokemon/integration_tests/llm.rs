@@ -49,6 +49,9 @@ struct Mock {
     /// **W5** — the `image_url` the `screenshot` answer put into the history, as the endpoint saw it.
     /// This is the only place the multi-part content form is exercised over a real socket.
     picture: Arc<std::sync::Mutex<Option<String>>>,
+    /// **W9** — the situation of the first watchdog turn, and the terminal tools it was sent with.
+    /// `None` until one arrives, which for the test below is the whole question.
+    stuck_turn: Arc<std::sync::Mutex<Option<(String, Vec<String>)>>>,
 }
 
 /// The stand-in model.
@@ -102,7 +105,22 @@ async fn completions(State(mock): State<Mock>, body: String) -> impl IntoRespons
 
     let turn = mock.turns.fetch_add(1, Ordering::SeqCst);
     let ids = menu_ids(&last_user);
-    let calls = if tools.contains(&"choose_battle_action") {
+    // **W9.** A stuck turn is recognisable from the `tools` array alone, which is the point of §7.5
+    // scoping it: it is the only kind that can press buttons and has no menu tool to choose from.
+    let is_stuck = tools.contains(&"press_buttons")
+        && !tools.contains(&"choose_action")
+        && !tools.contains(&"choose_battle_action");
+    let calls = if is_stuck {
+        let mut seen = mock.stuck_turn.lock().expect("not poisoned");
+        if seen.is_none() {
+            let terminals = tools.iter().filter(|name| **name != "screenshot")
+                .filter(|name| name.starts_with("press") || **name == "wait")
+                .map(|name| name.to_string())
+                .collect();
+            *seen = Some((last_user.clone(), terminals));
+        }
+        vec![("press_buttons", serde_json::json!({ "buttons": ["a"] }))]
+    } else if tools.contains(&"choose_battle_action") {
         // Nothing should start a battle here, but a wild encounter is never impossible and a mock
         // that only knows how to run would hang the test in a trainer fight.
         let id = ids.iter().find(|id| id.starts_with("fight:")).cloned().unwrap_or_else(|| "run".into());
@@ -226,6 +244,7 @@ fn the_llm_plays_from_a_fixture() {
         context_limit: 128_000,
         temperature: 1.0,
         max_tool_steps: 6,
+        stuck_timeout: None,
     };
     let published = Published::new();
     let (worker, handles) =
@@ -240,7 +259,7 @@ fn the_llm_plays_from_a_fixture() {
     let mut fixture = TestFixture::with_policy(
         FIXTURE,
         Duration::from_secs(120),
-        Box::new(LlmPolicy::new(handles)),
+        Box::new(LlmPolicy::new(handles, None)),
     );
     let arrived = fixture.try_run_until(|state| state.map.map != Map::PalletTown);
 
@@ -275,4 +294,74 @@ fn the_llm_plays_from_a_fixture() {
         ((crate::ppu::LCD_WIDTH * SCALE) as u32, (crate::ppu::LCD_HEIGHT * SCALE) as u32),
         "the picture is the Game Boy screen, upscaled",
     );
+}
+
+/// **W9's acceptance (§14): fires on a deliberately jammed agent.**
+///
+/// The whole chain, and every link of it is the real thing except the model: the agent notices it
+/// has asked nothing for the timeout, raises a `Stuck` turn, the worker sends it over a socket with
+/// only `press_buttons` and `wait` to end it, the endpoint answers with a press, and the press
+/// arrives back through `take_manual_input` and is delivered to the joypad.
+///
+/// ⚠️ **The timeout is one second here, and that is what makes the "jam" happen at all.** Nothing in
+/// this fixture is genuinely wedged — an ordinary walk is a multi-second stretch in which the agent
+/// asks nothing, which is exactly what the watchdog measures. At the shipped default of 300 emulated
+/// seconds it would never fire (`mechanics::ordinary_play_stays_far_inside_the_stuck_timeout`
+/// measures the real headroom); what is under test here is the mechanism, not the threshold.
+#[test]
+fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
+    let mock = Mock::default();
+    let config = LlmConfig {
+        base_url: serve_mock(mock.clone()),
+        api_key: "mock".to_string(),
+        model: "mock".to_string(),
+        context_limit: 128_000,
+        temperature: 1.0,
+        max_tool_steps: 6,
+        stuck_timeout: Some(Duration::from_secs(1)),
+    };
+    let published = Published::new();
+    let (worker, handles) = worker::channels(
+        Box::new(OpenAiClient::new(&config)),
+        config,
+        Arc::clone(&published),
+        crate::llm::notes::Notes::open(None),
+    );
+    let _worker = worker.spawn().expect("the worker thread starts");
+
+    let mut fixture = TestFixture::with_policy(
+        FIXTURE,
+        Duration::from_secs(120),
+        Box::new(LlmPolicy::new(handles, Some(Duration::from_secs(1)))),
+    );
+
+    let mut reported = false;
+    let mut delivered = false;
+    for _ in 0..4_000 {
+        fixture.step();
+        reported |= fixture.agent.drain_events().iter().any(|event| {
+            matches!(event, crate::pokemon::agent::AgentEvent::WatchdogFired { .. })
+        });
+        delivered |= fixture.agent.manual_input_pending() > 0;
+        if reported && delivered && mock.stuck_turn.lock().expect("not poisoned").is_some() {
+            break;
+        }
+    }
+
+    let stuck = mock.stuck_turn.lock().expect("not poisoned").clone();
+    let (situation, terminals) = stuck.expect("no stuck turn ever reached the endpoint");
+
+    // Scoped as §7.5 requires: the escape hatch and doing nothing, and nothing else. A menu tool
+    // here would let a turn end in a decision the wedged agent cannot carry out.
+    let mut terminals = terminals;
+    terminals.sort();
+    assert_eq!(terminals, vec!["press_buttons".to_string(), "wait".to_string()]);
+
+    // And the turn says what is wrong in terms the model can act on — the agent's own state, and
+    // that this is the agent's fault rather than a puzzle in the game.
+    assert!(situation.contains("## Decision: the game is stuck"), "{situation:.300}");
+    assert!(situation.contains("bug in the agent"), "{situation:.600}");
+
+    assert!(reported, "a firing has to be reported — §14: every one of them is a bug report");
+    assert!(delivered, "the model's press never reached the joypad");
 }

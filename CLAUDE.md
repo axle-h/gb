@@ -121,7 +121,27 @@ fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction>;
 fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>>;
 ```
 
-Current policy implementations: `RandomPolicy`, `ConsolePolicy` (stdin, used in the SDL2 debug UI), `DeterministicPolicy` (scripted steps, used in tests).
+Current policy implementations: `RandomPolicy`, `ConsolePolicy` (stdin, used in the SDL2 debug UI), `DeterministicPolicy` (scripted steps, used in tests), `LlmPolicy` (`llm` feature).
+
+⚠️ **`PokemonAgent::poll_policy` is the single seam every decision point goes through**, and it is
+not just a tidy-up: it resets the clock W9's stuck-run watchdog reads. Call `policy.service_tools`
+directly from a new poll site and the watchdog will believe the run has been wedged since that
+moment, forever.
+
+**The watchdog** (`Policy::{stuck_timeout, pick_unstick}`, `GB_STUCK_TIMEOUT_SECS`, default 300
+*emulated* seconds; `0` is off) covers the one failure mode nothing else does: the agent reaching no
+decision point at all, so the policy is never consulted and cannot notice. It raises a
+`DecisionKind::Stuck` turn whose only terminal tools are `press_buttons` and `wait`. Two ⚠️s, both
+learned the hard way in the design and both documented in the code:
+
+- **It is asked on every tick of the jam, not once.** A tool batch is only serviced inside
+  `agent.update`, so a one-shot notification would hang any turn that wanted to read first.
+- **It must not reset the clock it reads**, or the jam clears the instant it is noticed and the turn
+  is never polled again.
+
+Every firing emits `AgentEvent::WatchdogFired` — to the model, the UI, the transcript and stdout. In
+a healthy run it never fires: ordinary play's longest silence is ~6 s of game time (measured by
+`mechanics::ordinary_play_stays_far_inside_the_stuck_timeout`) against a 300 s default.
 
 ## Common commands
 
@@ -160,7 +180,7 @@ a default build already pulls, and `llm` (ureq + its rustls stack) a further 14.
 
 **The LLM configuration is all environment variables**, never flags, because the API key has to be
 one: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `GB_MODEL`, `GB_CONTEXT_LIMIT`, `GB_TEMPERATURE`,
-`GB_MAX_TOOL_STEPS`, `GB_PORT`, `GB_RUN_DIR` and `GB_STATUS_HZ`. `gb --help` lists them, and
+`GB_MAX_TOOL_STEPS`, `GB_STUCK_TIMEOUT_SECS`, `GB_PORT`, `GB_RUN_DIR` and `GB_STATUS_HZ`. `gb --help` lists them, and
 `cli::tests::the_usage_names_every_flag_and_variable` makes sure it keeps doing so; `src/llm/config.rs`
 documents them (`GB_PORT` is read in `cli.rs`, `GB_RUN_DIR` and `GB_STATUS_HZ` in `web/mod.rs`, since
 all three apply to `--policy random` too).
@@ -212,6 +232,38 @@ cd web && npm run dev
 # Or: skip the cargo rebuild after an npm build by reading web/dist from disk.
 GB_WEB_DEV=1 cargo run --release -- serve --policy random
 ```
+
+### The container
+
+`Dockerfile` builds the whole thing from a bare checkout in four stages — **146 MB, of which the
+binary is 6.9 MB** — and `docker-compose.yml` is the ops shape of a run (named volume, restart
+policy, 30 s stop grace period).
+
+```bash
+docker build -t gb .
+docker run -d -p 8080:8080 -v gb-runs:/runs -e OPENAI_API_KEY=sk-… -e GB_MODEL=… gb
+OPENAI_API_KEY=sk-… GB_MODEL=… docker compose up -d --build     # the same, with the volume named
+docker compose run --rm --service-ports gb gb serve --policy random   # no API key, no spend
+```
+
+⚠️ **The cartridge is stage 1, not an input.** Two of this crate's compile-time inputs are generated
+and neither is in git: `pokered/pokered.gbc` (`include_bytes!`) and `pokered/pokered.sym`
+(`build.rs`). Stage 1 builds **rgbds 0.9.3 from source** (pinned by `ARG` + sha256; from source, not
+the prebuilt tarball, so the image also builds on arm64) and then `make pokered.gbc` — and ends by
+checking the result against upstream's own `pokered/roms.sha1`. **That check is load-bearing**: all
+91 committed fixtures and every generated symbol are pinned to those exact bytes, so a ROM that
+merely assembles is a different game and would fail somewhere deep in the agent instead of at the
+build. Stage 2 is `npm run build` for the same class of reason (`rust-embed` needs `web/dist`).
+
+⚠️ **`.dockerignore` must exclude the host's pokered artifacts with `**`.** `pokered/*.o` leaves
+`pokered/gfx/pics_red.o` in the context, and a stale object file from a *newer* rgbds stops the build
+dead (`Unsupported object file … expected revision 12, got 13`). None of what it excludes is tracked;
+every one is a `make` output.
+
+⚠️ **`CMD` is exec form so `gb` is PID 1 and receives SIGTERM itself** — that signal is what
+checkpoints the run. A shell in between means `docker stop` loses everything since the last periodic
+checkpoint. `gb serve` **resumes** the newest run under `/runs` by default, so `docker restart` picks
+up where it was; `--new-run` starts the game over.
 
 ### Tests
 

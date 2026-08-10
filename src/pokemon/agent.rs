@@ -6,7 +6,7 @@ use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::battle::BattleAction;
-use crate::pokemon::{PokemonApi, PokemonApiTrait};
+use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::delay::DelayContext;
 use crate::pokemon::encoding::GameMode;
@@ -14,7 +14,7 @@ use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::menu::{is_forget_move_prompt, BattleMenuState};
-use crate::pokemon::policy::{Policy, RandomPolicy};
+use crate::pokemon::policy::{Jam, Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::text::PokemonTextReader;
 use crate::pokemon::world_graph::WorldGraph;
@@ -76,7 +76,16 @@ pub enum AgentEvent {
     BattleStarted,
     BattleActionStarted { action: BattleAction },
     BattleEnded,
-    TextBox { message: String }
+    TextBox { message: String },
+    /// **W9 / §14** — the agent went `stuck_for` of emulated time without reaching a decision point
+    /// of any kind, and the watchdog woke the policy up.
+    ///
+    /// ⚠️ **This is a bug report, not a status line.** In a healthy run it never happens: the states
+    /// that never consult the policy are meant to be transient, so one of these means the agent got
+    /// wedged in `agent_state` and something outside it had to intervene. It goes to the model, to
+    /// the UI, to the transcript and to stdout — all four, so that a watchdog that quietly rescues a
+    /// run cannot turn an agent bug into an invisible ongoing cost.
+    WatchdogFired { agent_state: String, stuck_for: Duration },
 }
 
 impl AgentEvent {
@@ -102,6 +111,9 @@ impl Display for AgentEvent {
                 write!(f, "battle ended"),
             AgentEvent::TextBox { message } =>
                 write!(f, "📖 {message}"),
+            AgentEvent::WatchdogFired { agent_state, stuck_for } =>
+                write!(f, "⚠️ stuck in `{agent_state}` for {}s of game time without asking for a \
+                           decision — asking for a nudge", stuck_for.as_secs()),
         }
     }
 }
@@ -401,6 +413,17 @@ pub struct PokemonAgent {
     /// Ticks left of the press currently being delivered — see [`MANUAL_INPUT_HOLD_TICKS`]. Zero
     /// means nothing is held and the next tick takes the head of the queue.
     manual_input_held: u8,
+
+    // ── W9: the stuck-run watchdog ───────────────────────────────────────────────────────────────
+    /// Emulated time since the policy was last polled, in cycles. Reset by [`Self::poll_policy`] and
+    /// by nothing else — which is what makes it measure *decision points* rather than ticks.
+    cycles_since_poll: MachineCycles,
+    /// [`Policy::stuck_timeout`], read once when the agent was built. `None` — every scripted policy
+    /// — makes the whole watchdog one comparison per tick.
+    stuck_after: Option<MachineCycles>,
+    /// `cycles_since_poll` as of the last [`AgentEvent::WatchdogFired`], so a jam is reported when it
+    /// starts and once per timeout after that rather than fifty times a second.
+    stuck_reported_at: MachineCycles,
 }
 
 impl Default for PokemonAgent {
@@ -409,7 +432,16 @@ impl Default for PokemonAgent {
 
 impl PokemonAgent {
     pub fn new(policy: Box<dyn Policy>) -> Self {
+        // ⚠️ Asked once. A policy that changed its mind later would not be heard, which is documented
+        // on the trait method — and a zero timeout is "off" rather than "fire on every tick".
+        let stuck_after = policy
+            .stuck_timeout()
+            .filter(|timeout| !timeout.is_zero())
+            .map(MachineCycles::from_duration);
         Self {
+            cycles_since_poll: MachineCycles::ZERO,
+            stuck_after,
+            stuck_reported_at: MachineCycles::ZERO,
             state: AgentState::default(),
             post_champion_tick: 0,
             backup_state: None,
@@ -488,6 +520,58 @@ impl PokemonAgent {
     /// Human-readable description of the agent's current state (for debugging/tests).
     pub fn state_debug(&self) -> String {
         format!("{}", self.state)
+    }
+
+    /// **The** policy poll — every one of the agent's decision points goes through here.
+    ///
+    /// It exists for its first line. `cycles_since_poll` is what W9's watchdog measures, and if it
+    /// were reset at each `service_tools` call site instead, a sixth decision point added later
+    /// would look like a jam forever. One seam, and the compiler finds anything that bypasses it.
+    fn poll_policy(&mut self, game_state: &GameState, api: &mut PokemonApi) {
+        self.cycles_since_poll = MachineCycles::ZERO;
+        self.stuck_reported_at = MachineCycles::ZERO;
+        self.policy.service_tools(game_state, api, &self.world_graph);
+    }
+
+    /// Emulated time the agent has gone without reaching a decision point of any kind. Zero on any
+    /// tick that polled the policy.
+    pub fn since_last_policy_poll(&self) -> Duration {
+        self.cycles_since_poll.to_duration()
+    }
+
+    /// **W9 / §14** — the watchdog: ask the policy for a nudge when nothing has asked it anything.
+    ///
+    /// Returns whether it fired, which is only of interest to the tests — the answer travels the
+    /// manual-input queue and arrives at the top of the next tick.
+    ///
+    /// ⚠️ **This must not go through [`Self::poll_policy`].** Resetting the clock here would clear
+    /// the jam the instant it was noticed, and a turn that takes seconds of wall clock would never
+    /// be polled a second time — so it would never be serviced, never answered, and the run would
+    /// sit there with one abandoned turn per timeout. The jam ends when the *agent* reaches a real
+    /// decision point again, and not before.
+    fn run_watchdog(&mut self, api: &mut PokemonApi) -> bool {
+        let Some(after) = self.stuck_after.filter(|after| self.cycles_since_poll >= *after) else {
+            return false;
+        };
+        // The naming screen's ⚠️ applies here too, and more so: a failed read must never turn the
+        // watchdog itself into the thing that breaks the tick.
+        let Ok(game_state) = api.game_state() else { return false };
+
+        // §14: **every firing is a bug report.** Emitted before the policy is asked, so the turn this
+        // poll may start carries the line in its "since your last decision"; `event` also prints it
+        // to stdout and the host publishes it to the UI and the transcript. Once when the jam starts
+        // and once per timeout after that — at fifty polls a second, anything else is a flood.
+        let agent_state = self.state_debug();
+        let stuck_for = self.cycles_since_poll.to_duration();
+        if self.cycles_since_poll >= self.stuck_reported_at + after {
+            self.stuck_reported_at = self.cycles_since_poll;
+            self.event(AgentEvent::WatchdogFired { agent_state: agent_state.clone(), stuck_for });
+        }
+
+        let jam = Jam { agent_state: &agent_state, stuck_for };
+        self.policy.service_tools(&game_state, api, &self.world_graph);
+        self.policy.pick_unstick(&game_state, jam);
+        true
     }
 
     /// Emit an event: to the policy first, then to the buffer the host drains.
@@ -673,7 +757,7 @@ impl PokemonAgent {
     /// policy which slot to forget (it keeps the strongest moves) and navigates there / presses A.
     fn drive_forget_menu(&mut self, api: &mut PokemonApi, cursor_index: u8) -> Result<(), String> {
         let game_state = api.game_state()?;
-        self.policy.service_tools(&game_state, api, &self.world_graph);
+        self.poll_policy(&game_state, api);
         let which = api.learning_pokemon_index();
         let current_moves: Vec<_> = game_state.pokemon.get(which)
             .map(|p| p.moves.iter().flatten().copied().collect())
@@ -822,7 +906,7 @@ impl PokemonAgent {
             // step's menu with BUY. See `postgame::game_corner`.
             if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::SellingToMart(_)) {
                 let game_state = api.game_state()?;
-                self.policy.service_tools(&game_state, api, &self.world_graph);
+                self.poll_policy(&game_state, api);
                 if let Some(item) = self.policy.pick_mart_purchase(&game_state) {
                     api.release_all_buttons();
 
@@ -888,6 +972,9 @@ impl PokemonAgent {
             delta_cycles += AGENT_RESOLUTION;
             self.cycles -= AGENT_RESOLUTION;
         }
+        // **W9.** Counted here rather than at the bottom, because every early return below is a tick
+        // that did not ask the policy anything — which is exactly what the watchdog measures.
+        self.cycles_since_poll += delta_cycles;
 
         // ── Manual input ──────────────────────────────────────────────────────────
         // The policy's escape hatch (`queue_manual_input`). It pre-empts everything below, including
@@ -906,6 +993,16 @@ impl PokemonAgent {
         if self.drive_manual_input(api) {
             return Ok(());
         }
+
+        // ── W9: the stuck-run watchdog ────────────────────────────────────────────
+        // Below the manual-input queue on purpose: while a nudge is being delivered the run is being
+        // un-stuck, and asking for another on top of it would stack presses. Above everything else,
+        // because a jam can be in any state — including the ones the checks below hand off to.
+        //
+        // Deliberately **not** an early return. The watchdog only ever *adds* a question; the state
+        // machine keeps running underneath it, and if the jam clears itself the next ordinary poll
+        // resets the clock and nothing more is said.
+        self.run_watchdog(api);
 
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
@@ -1029,7 +1126,7 @@ impl PokemonAgent {
             AgentState::AwaitingOverworldAction { ref mut delay } => {
                 if delay.tick(delta_cycles) {
                     let game_state = self.observe_state(api)?;
-                    self.policy.service_tools(&game_state, api, &self.world_graph);
+                    self.poll_policy(&game_state, api);
                     // Incrementally build the world graph: every time we settle in the overworld,
                     // record this section's live (sprite-resolved) reachable warps/connections, keyed
                     // by the raw landing coords (the space warp `to_position`s use). The player is
@@ -1444,7 +1541,7 @@ impl PokemonAgent {
                     BattleState::AwaitingPolicy { delay } => {
                         if delay.tick(delta_cycles) {
                             let game_state = api.game_state()?;
-                            self.policy.service_tools(&game_state, api, &self.world_graph);
+                            self.poll_policy(&game_state, api);
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
                                 new_events.push(AgentEvent::BattleActionStarted { action });
                                 // In-battle item use goes through the dedicated `HealingActive` driver:
@@ -2509,7 +2606,7 @@ impl PokemonAgent {
                     // full `GameState`, and a policy that ignores tool calls (every policy today)
                     // must not start failing here.
                     if let Ok(game_state) = api.game_state() {
-                        self.policy.service_tools(&game_state, api, &self.world_graph);
+                        self.poll_policy(&game_state, api);
                     }
                     if let Some(decision) = self.policy.pick_nickname(species) {
                         // Write the nickname directly into the naming screen's string buffer,

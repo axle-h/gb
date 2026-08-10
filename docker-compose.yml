@@ -1,0 +1,43 @@
+# The ops shape of a run: one service, one volume, one port.
+#
+#   OPENAI_API_KEY=sk-… GB_MODEL=… docker compose up -d --build
+#   docker compose logs -f
+#   docker compose restart gb          # resumes where it was, notes and all
+#
+# `--policy random` needs neither variable and is the way to check the video pipeline and the page
+# without spending anything:
+#
+#   docker compose run --rm --service-ports gb gb serve --policy random
+
+services:
+  gb:
+    build: .
+    image: gb:latest
+    ports:
+      - "${GB_PUBLISH_PORT:-8080}:8080"
+    environment:
+      # Required for the default `--policy llm`. `?` so a missing one fails at `up` rather than
+      # inside the container thirty seconds later.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY, or run with --policy random}
+      GB_MODEL: ${GB_MODEL:?set GB_MODEL, or run with --policy random}
+      # Any OpenAI-compatible endpoint. Everything below is optional; the defaults are the ones
+      # `gb --help` documents and `src/llm/config.rs` explains.
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      GB_CONTEXT_LIMIT: ${GB_CONTEXT_LIMIT:-}
+      GB_TEMPERATURE: ${GB_TEMPERATURE:-}
+      GB_MAX_TOOL_STEPS: ${GB_MAX_TOOL_STEPS:-}
+      GB_STATUS_HZ: ${GB_STATUS_HZ:-}
+      # W9's watchdog. Emulated seconds with the agent asking nothing at all before the model is
+      # asked for a nudge; `0` turns it off. Every firing is a bug report — see the plan's §14.
+      GB_STUCK_TIMEOUT_SECS: ${GB_STUCK_TIMEOUT_SECS:-}
+    volumes:
+      - runs:/runs
+    restart: unless-stopped
+    # ⚠️ SIGTERM is what checkpoints the run (W7), and docker's default grace period is 10 s. The
+    # checkpoint is a save state and a couple of small files, so it is far quicker than that — but
+    # a SIGKILL here costs whatever has happened since the last periodic checkpoint, and there is
+    # no reason to be tight about it.
+    stop_grace_period: 30s
+
+volumes:
+  runs:

@@ -396,6 +396,9 @@ fn event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::BattleActionStarted { .. } => "battle_action_started",
         AgentEvent::BattleEnded => "battle_ended",
         AgentEvent::TextBox { .. } => "text_box",
+        // **W9.** Styled loudly by the page, and the one agent event that is a bug report rather
+        // than a narration — see `AgentEvent::WatchdogFired`.
+        AgentEvent::WatchdogFired { .. } => "watchdog",
     }
 }
 

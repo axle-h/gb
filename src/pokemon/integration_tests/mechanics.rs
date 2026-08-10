@@ -751,6 +751,169 @@ fn a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it() {
                "START should have opened the menu — the agent never presses it by itself");
 }
 
+// ── W9 — the stuck-run watchdog ──────────────────────────────────────────────────────────────────
+
+/// A policy that plays ordinarily and writes down everything the watchdog does to it.
+///
+/// It walks by picking the first action it is offered, which is enough to produce the thing both
+/// tests below are about: an `OverworldMovement` is a stretch of *seconds* in which the agent asks
+/// nothing at all, and to the watchdog that is indistinguishable from a jam. Which one it is, is
+/// entirely a matter of the threshold — and that is the whole design.
+struct WatchdogSpy {
+    timeout: Option<Duration>,
+    log: std::rc::Rc<std::cell::RefCell<WatchdogLog>>,
+}
+
+#[derive(Default)]
+struct WatchdogLog {
+    /// Every `pick_unstick`, as the policy saw it.
+    jams: Vec<(String, Duration)>,
+    /// Real decision points — `service_tools`, which the watchdog deliberately does not count as one.
+    polls: usize,
+    /// Handed to the agent on the tick after the first nudge is asked for.
+    nudge: Option<Vec<JoypadButton>>,
+    /// Whether a nudge has already been armed, so the spy asks for exactly one.
+    nudged: bool,
+}
+
+impl WatchdogSpy {
+    fn new(timeout: Option<Duration>) -> (Box<Self>, std::rc::Rc<std::cell::RefCell<WatchdogLog>>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(WatchdogLog::default()));
+        (Box::new(Self { timeout, log: log.clone() }), log)
+    }
+}
+
+impl crate::pokemon::policy::Policy for WatchdogSpy {
+    fn stuck_timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    fn pick_unstick(&mut self, _state: &GameState, jam: crate::pokemon::policy::Jam<'_>) {
+        let mut log = self.log.borrow_mut();
+        log.jams.push((jam.agent_state.to_string(), jam.stuck_for));
+        // Answers on the third ask rather than the first, because that is the shape of the real
+        // thing: an `LlmPolicy` turn takes seconds of wall clock and is polled on every tick of them.
+        // A watchdog that notified once would leave such a turn with nowhere to be serviced.
+        if !log.nudged && log.jams.len() >= 3 {
+            log.nudged = true;
+            log.nudge = Some(vec![JoypadButton::A]);
+        }
+    }
+
+    fn service_tools(&mut self, _: &GameState, _: &mut PokemonApi<'_>,
+                     _: &crate::pokemon::world_graph::WorldGraph) {
+        self.log.borrow_mut().polls += 1;
+    }
+
+    fn take_manual_input(&mut self) -> Vec<JoypadButton> {
+        self.log.borrow_mut().nudge.take().unwrap_or_default()
+    }
+
+    fn pick_overworld_action(&mut self, state: &GameState,
+                             _: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction>
+    {
+        state.map.actions().into_iter().next()
+    }
+
+    fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> {
+        None
+    }
+}
+
+/// **W9 / §14** — the watchdog fires when the agent stops asking, says what it was doing, and its
+/// answer reaches the game.
+///
+/// ⚠️ **The jam here is a walk**, and a walk is not a bug. That is deliberate: the only thing the
+/// agent can observe is "nothing has asked me anything for N seconds", and at a one-second threshold
+/// an ordinary walk across Pallet Town qualifies. What separates insurance from a nuisance is
+/// entirely the size of N — `GB_STUCK_TIMEOUT_SECS` defaults to **300 emulated seconds**, and the
+/// test below this one measures how much headroom that really is.
+#[test]
+fn the_watchdog_wakes_a_policy_the_agent_has_stopped_asking() {
+    let (policy, log) = WatchdogSpy::new(Some(Duration::from_secs(1)));
+    let mut fixture = TestFixture::with_policy(PALLET_TOWN_STATE, Duration::from_secs(120), policy);
+
+    let mut fired_after = None;
+    for _ in 0..2_000 {
+        fixture.step();
+        if fired_after.is_none() && !log.borrow().jams.is_empty() {
+            fired_after = Some(fixture.agent.since_last_policy_poll());
+        }
+        // Stop once the nudge has been collected — that is the last link in the chain.
+        if fired_after.is_some() && fixture.agent.manual_input_pending() > 0 {
+            break;
+        }
+    }
+
+    let jams = log.borrow().jams.clone();
+    let (state, stuck_for) = jams.first().cloned().expect("the watchdog never fired");
+    assert!(stuck_for >= Duration::from_secs(1),
+            "the watchdog fired early, after only {stuck_for:?}");
+    assert!(!state.is_empty() && state != "idle",
+            "the jam has to name what the agent thought it was doing, got `{state}`");
+    assert!(fired_after.is_some(), "the watchdog never fired");
+
+    // It is asked on *every* tick of the jam, not once — which is what gives a turn's tool batch
+    // somewhere to be serviced, and what lets a `wait` count down. One notification would deadlock
+    // an LLM turn that needed a read before it could answer.
+    assert!(jams.len() > 1, "the watchdog asked once and gave up; a turn needs polling to complete");
+
+    // The answer travels the escape hatch: no new agent seam, and `queue_manual_input` resets the
+    // state machine to `Idle`, which is itself half of what clears a real jam.
+    assert!(fixture.agent.manual_input_pending() > 0, "the nudge never reached the agent");
+
+    // …and the event that says so is a bug report the run cannot lose: the model reads it, the host
+    // publishes it to the UI and the transcript, and `event` prints it to stdout.
+    let reported = fixture.agent.drain_events().into_iter().any(|event| {
+        matches!(event, AgentEvent::WatchdogFired { ref agent_state, .. } if !agent_state.is_empty())
+    });
+    assert!(reported, "a firing must be reported, not quietly recovered from");
+
+    // Once the press has been delivered the agent is back in charge and asking again, so the clock
+    // is back to zero rather than latched at "stuck forever".
+    // ⚠️ Measured as a *minimum over the window*, not as the value at the end of it. At a
+    // one-second threshold this fixture is stuck again within a couple of tiles of walking, so the
+    // instantaneous reading is usually mid-jam; what is under test is that a real decision point
+    // puts the clock back to zero at all, which the watchdog's own polling must never do.
+    let polls_before = log.borrow().polls;
+    let mut lowest = Duration::MAX;
+    for _ in 0..200 {
+        fixture.step();
+        lowest = lowest.min(fixture.agent.since_last_policy_poll());
+    }
+    assert!(log.borrow().polls > polls_before, "the agent never went back to asking for decisions");
+    assert!(lowest < Duration::from_millis(100),
+            "the clock must be reset by a real decision point, not by the watchdog itself; the \
+             closest it came to zero was {lowest:?}");
+}
+
+/// The other half, and the one that says the default is not a nuisance: ordinary play never gets
+/// close to the threshold.
+///
+/// The number this prints is the useful part — it is the headroom between the longest stretch the
+/// agent legitimately goes without asking anything and the five emulated minutes at which the
+/// watchdog decides something is wrong.
+#[test]
+fn ordinary_play_stays_far_inside_the_stuck_timeout() {
+    let (policy, log) = WatchdogSpy::new(
+        Some(Duration::from_secs(crate::llm::config::DEFAULT_STUCK_TIMEOUT_SECS)));
+    let mut fixture = TestFixture::with_policy(PALLET_TOWN_STATE, Duration::from_secs(120), policy);
+
+    let mut longest = Duration::ZERO;
+    for _ in 0..3_000 {
+        fixture.step();
+        longest = longest.max(fixture.agent.since_last_policy_poll());
+    }
+
+    println!("[watchdog] longest stretch without a decision point: {longest:?} of game time");
+    assert!(log.borrow().jams.is_empty(),
+            "the watchdog fired during ordinary play, {longest:?} without a poll");
+    assert!(longest < Duration::from_secs(30),
+            "an agent playing normally went {longest:?} without asking anything — either the \
+             default timeout is too tight or something is genuinely wedged");
+}
+
 // ── W0.5 — the observation facade ────────────────────────────────────────────────────────────────
 
 /// Every view against a known snapshot. These are the shapes the LLM sees, so the assertions are

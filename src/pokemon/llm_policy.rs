@@ -82,12 +82,16 @@ pub struct LlmPolicy {
     manual: Vec<JoypadButton>,
     /// Prepended to the next turn: what went wrong with the last decision, in the model's own terms.
     note: Option<String>,
+    /// **W9** — `GB_STUCK_TIMEOUT_SECS`, handed to the agent once at construction
+    /// ([`Policy::stuck_timeout`]). `None` turns the watchdog off entirely.
+    stuck_timeout: Option<std::time::Duration>,
 }
 
 impl LlmPolicy {
-    pub fn new(handles: TurnHandles) -> Self {
+    pub fn new(handles: TurnHandles, stuck_timeout: Option<std::time::Duration>) -> Self {
         Self {
             handles,
+            stuck_timeout,
             pending: None,
             waiting: None,
             events: Vec::new(),
@@ -105,10 +109,11 @@ impl LlmPolicy {
     /// The plan has `service_tools` compare the pending kind against "the kind about to be asked",
     /// which the seam's signature does not carry. Two things answer it between them:
     ///
-    /// - **The three menu prompts are not in the state.** A naming screen, a mart's Buy/Sell menu and
-    ///   the forget-move prompt all look like an ordinary overworld or battle `GameState`, so the
-    ///   only evidence is which `pick_*` ran last. That is [`Self::site`], and it is right for every
-    ///   poll of a decision point except the first after the site changes.
+    /// - **The three menu prompts are not in the state**, and neither is W9's `Stuck`. A naming
+    ///   screen, a mart's Buy/Sell menu and the forget-move prompt all look like an ordinary
+    ///   overworld or battle `GameState`, and a wedged agent looks like whatever it was doing when
+    ///   it wedged — so the only evidence is which site ran last. That is [`Self::site`], and it is
+    ///   right for every poll of a decision point except the first after the site changes.
     /// - **A battle is in the state**, and is the whole difference between the other two kinds — so
     ///   they are read from it, which detects a battle starting one tick *earlier* than `site` would.
     ///
@@ -116,7 +121,7 @@ impl LlmPolicy {
     /// state: the `pick_*` re-checks the kind before it accepts an outcome.
     fn observed_kind(&self, state: &GameState) -> DecisionKind {
         match self.site {
-            Some(site) if site.is_menu_prompt() => site,
+            Some(site) if site.is_inferred_from_the_site() => site,
             _ => match state.battle.is_some() {
                 true => DecisionKind::Battle,
                 false => DecisionKind::Overworld,
@@ -181,7 +186,8 @@ impl LlmPolicy {
                         _ => Vec::new(),
                     },
                     // The naming screen offers no choices; the tool's own arguments are the menu.
-                    DecisionKind::Nickname => Vec::new(),
+                    // Neither does W9's `Stuck`, and there the absence *is* the situation.
+                    DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
                 };
                 let situation =
                     prompt::situation(kind, state, &self.snapshot, &self.events, &menu, context);
@@ -401,6 +407,36 @@ impl Policy for LlmPolicy {
         }
     }
 
+    /// **W9 / §14** — the sixth kind, asked by the watchdog rather than by a poll site.
+    ///
+    /// Structurally an ordinary turn: [`Self::advance`] keys it, cancels anything in flight for a
+    /// different question, and counts down a `wait` the same way. The two differences are that it
+    /// returns nothing — a jammed agent can carry out no decision, so the answer leaves by
+    /// [`Policy::take_manual_input`] — and that it is asked on every tick of the jam rather than at
+    /// a decision point, which is what gives the turn's tool batch somewhere to be serviced.
+    ///
+    /// ⚠️ **A `wait` here is not free of consequence.** It sits out `ticks` and then the watchdog
+    /// asks again, because the agent is still stuck; that is the intended shape (the model may
+    /// reasonably believe the game needs a moment), but a model that answers `wait` forever spends a
+    /// turn every few seconds doing it. `TurnCancelled` and this kind's share of the turn count are
+    /// what make that visible.
+    fn pick_unstick(&mut self, _state: &GameState, jam: crate::pokemon::policy::Jam<'_>) {
+        let context = TurnContext::Stuck { agent_state: jam.agent_state, stuck_for: jam.stuck_for };
+        match self.advance(DecisionKind::Stuck, context) {
+            Some(Terminal::PressButtons { buttons }) => self.manual.extend(buttons),
+            Some(Terminal::Wait { ticks }) => self.waiting = Some((DecisionKind::Stuck, ticks)),
+            Some(other) => self.reject(format!(
+                "`{other:?}` cannot be used while the agent is stuck — only `press_buttons` and \
+                 `wait` can."
+            )),
+            None => {}
+        }
+    }
+
+    fn stuck_timeout(&self) -> Option<std::time::Duration> {
+        self.stuck_timeout
+    }
+
     /// Collected by the agent at the top of its next tick, ahead of the state machine.
     fn take_manual_input(&mut self) -> Vec<JoypadButton> {
         std::mem::take(&mut self.manual)
@@ -579,8 +615,11 @@ mod tests {
                 context_limit: 128_000,
                 temperature: 1.0,
                 max_tool_steps: 4,
+                stuck_timeout: Some(Duration::from_secs(300)),
             };
             tweak(&mut config);
+            // Read off before the worker takes the config, exactly as `web/mod.rs` does.
+            let config_stuck_timeout = config.stuck_timeout;
             let (worker, handles) = worker::channels(
                 Box::new(Forwarding(Arc::clone(&endpoint))),
                 config,
@@ -598,7 +637,7 @@ mod tests {
                 events,
                 worker: Some(handle),
             };
-            (rig, LlmPolicy::new(handles))
+            (rig, LlmPolicy::new(handles, config_stuck_timeout))
         }
 
         /// A trainer just spotted the player. Swapping the loaded state is exactly what that looks
@@ -642,6 +681,21 @@ mod tests {
             policy.service_tools(&state, &mut api, &self.graph);
             drop(api);
             ask(policy, &state)
+        }
+
+        /// **W9** — one tick of a jammed agent, in the order `agent.rs::run_watchdog` does it:
+        /// `service_tools`, then `pick_unstick`. Note what it does *not* do — return anything. The
+        /// answer to a stuck turn leaves by `take_manual_input`.
+        fn tick_stuck(&mut self, policy: &mut LlmPolicy, agent_state: &str) {
+            let state = self.state();
+            let mut api = PokemonApi::new(&mut self.gb);
+            policy.service_tools(&state, &mut api, &self.graph);
+            drop(api);
+            let jam = crate::pokemon::policy::Jam {
+                agent_state,
+                stuck_for: Duration::from_secs(300),
+            };
+            policy.pick_unstick(&state, jam);
         }
 
         /// Poll a menu prompt like the agent does until it answers or time runs out.
@@ -930,6 +984,80 @@ mod tests {
         assert!(results[2].contains("\"badges\""), "read_trainer: {}", results[2]);
     }
 
+    /// **W9 / §14** — a stuck turn is an ordinary turn in every respect except how its answer
+    /// leaves: it may read first, and the press it ends with goes out through the escape hatch.
+    ///
+    /// ⚠️ **The read is the assertion that matters.** `service_tools` decides whether a batch belongs
+    /// to the turn in flight by comparing the pending kind against the kind it thinks is being
+    /// asked — and a `Stuck` turn looks, in the `GameState`, exactly like the overworld it wedged
+    /// in. If `observed_kind` did not know that only the site can tell, every batch would come back
+    /// `Cancelled`, every turn would restart, and the run would spend money in a loop for as long as
+    /// the jam lasted. That failure mode is invisible in a test that answers without reading.
+    #[test]
+    fn a_stuck_turn_may_read_first_and_its_press_reaches_the_agent() {
+        let (mut rig, mut policy) = Rig::new(vec![
+            calls(&[("read_map", "{}")]),
+            calls(&[("press_buttons", r#"{"buttons":["a"]}"#)]),
+        ]);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut pressed = Vec::new();
+        while Instant::now() < deadline && pressed.is_empty() {
+            rig.tick_stuck(&mut policy, "script");
+            pressed = policy.take_manual_input();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(pressed, vec![JoypadButton::A], "the nudge never came back out of the policy");
+
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2, "a read, then the decision");
+        history_is_well_formed(&requests[1]);
+        let answered: Vec<&str> =
+            requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text).collect();
+        assert_eq!(answered.len(), 1, "the read batch of a stuck turn has to be answered, not cancelled");
+        assert!(answered[0].contains(&format!("\"{}\"", rig.state().map.map)), "{}", answered[0]);
+
+        // The turn was scoped as a stuck one: no menu tool on offer, and the situation says what the
+        // agent believed it was doing rather than describing a decision it cannot carry out.
+        let offered: Vec<&str> =
+            requests[0].tools.iter().map(|tool| tool.function.name).collect();
+        assert!(offered.contains(&"press_buttons") && offered.contains(&"wait"));
+        assert!(!offered.contains(&"choose_action"), "a wedged agent cannot walk anywhere: {offered:?}");
+        let situation = requests[0].messages.last().and_then(Message::text).unwrap_or_default();
+        assert!(situation.contains("`script`"), "the situation must name the state it is stuck in");
+        assert!(situation.contains("300 seconds"), "…and how long it has been stuck: {situation:.400}");
+    }
+
+    /// A jam that clears while the model is still thinking: the very next real decision point
+    /// cancels the stuck turn, exactly as a battle cancels an overworld one (§7.2). Without this the
+    /// press would arrive after the agent had moved on and be applied to a game somewhere else.
+    #[test]
+    fn a_stuck_turn_is_cancelled_the_moment_the_agent_asks_a_real_question() {
+        let release = Arc::new(AtomicBool::new(false));
+        let (mut rig, mut policy) = Rig::new(vec![
+            held(calls(&[("press_buttons", r#"{"buttons":["a"]}"#)]), &release),
+            calls(&[("wait", r#"{"ticks":1}"#)]),
+        ]);
+
+        rig.tick_stuck(&mut policy, "script");
+        rig.wait_for_requests(1, Duration::from_secs(5));
+
+        // The jam clears: the agent reaches an ordinary overworld poll while the stuck turn is still
+        // streaming.
+        assert!(rig.tick_overworld(&mut policy).is_none(), "the overworld turn has not answered yet");
+        release.store(true, Ordering::SeqCst);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            rig.tick_overworld(&mut policy);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(policy.take_manual_input().is_empty(),
+                "a press decided for a jam that has cleared must not be delivered afterwards");
+        assert!(rig.drained_events().iter().any(|event| matches!(event, UiEventBody::TurnCancelled { .. })),
+                "a cancelled turn is an event, never a silence (§17 risk 2b)");
+    }
+
     /// §7.3's rollback. A batch is cancelled mid-turn; the assistant message whose calls were never
     /// serviced is dropped, so the next request has no orphaned `tool_call`.
     #[test]
@@ -990,6 +1118,47 @@ mod tests {
         assert!(
             reasons.iter().any(|reason| reason.contains("no tool call")),
             "the forced wait was not reported to the UI: {reasons:?}",
+        );
+    }
+
+    /// §7.5's other fallback, and the one that is easy to get subtly wrong: a model that reads and
+    /// reads and never commits is told to decide **while it still has a request left to decide in**.
+    ///
+    /// ⚠️ The assertion that matters is which request carries the sentence. Appended on the final
+    /// iteration — where it used to be — "call a terminal tool now to end the turn" is a message the
+    /// model first sees on the *next* turn, after this one has already been forced to a wait. The
+    /// turn would still resolve, so nothing looked broken; it just spent a whole turn's tokens
+    /// telling the model something it could not act on.
+    #[test]
+    fn a_turn_that_only_reads_is_told_to_decide_while_it_still_can() {
+        let id = {
+            let (mut rig, _) = Rig::new(vec![]);
+            rig.first_action_id()
+        };
+        // Four steps: three of reading, and the fourth is the one the warning is for.
+        let (mut rig, mut policy) = Rig::with_config(
+            vec![
+                calls(&[("read_map", "{}")]),
+                calls(&[("read_party", "{}")]),
+                calls(&[("read_bag", "{}")]),
+                calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
+            ],
+            |config| config.max_tool_steps = 4,
+        );
+
+        let action = rig.pump_overworld(&mut policy).expect("the last request is a real decision");
+        assert_eq!(tools::overworld_id(&rig.state(), &action), id);
+
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 4, "the whole budget was used");
+        assert!(
+            last_user_message(&requests[3]).contains("used every read"),
+            "the final request must carry the instruction it is the answer to: {}",
+            last_user_message(&requests[3]),
+        );
+        assert!(
+            !last_user_message(&requests[2]).contains("used every read"),
+            "…and not before that, or the budget is a step shorter than it says",
         );
     }
 

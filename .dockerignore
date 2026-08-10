@@ -1,0 +1,46 @@
+# What the image is built from is smaller than it looks: the crate source, the `pokered`
+# submodule's *source*, and the `web/` npm project. Everything else is either regenerated inside
+# the image or would make the context enormous — `target/` alone is 11 GB.
+
+target/
+**/node_modules/
+**/.git
+.git/
+.gitignore
+.gitmodules
+runs/
+docs/
+tools/
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Runtime files of a desktop run; the container never loads either.
+pokemon-red.sav
+pokemon-red.bin
+
+# ⚠️ Built by stage 2 (`npm run build`), never taken from the host — a `dist/` from a different
+# checkout would be baked into the binary by `rust-embed` and nothing would say so.
+web/dist/
+
+# ⚠️ Built by stage 1, for the same reason and one more: these are *host* artifacts. A stale
+# `pokered.gbc`, or an x86-64 `tools/gfx` in an arm64 build, would either ship silently or fail
+# somewhere far from the cause. None of them is tracked in the submodule — every one is generated
+# by `make` — so excluding the lot loses nothing.
+#
+# ⚠️ The `**` is load-bearing: `pokered/*.o` alone leaves `pokered/gfx/pics_red.o` in the context,
+# and a host object file built by a *newer* rgbds stops the build dead inside the container
+# ("Unsupported object file ... expected revision 12, got 13"). Found exactly that way.
+pokered/**/*.o
+pokered/**/*.gbc
+pokered/**/*.sym
+pokered/**/*.map
+pokered/**/*.patch
+pokered/**/*.1bpp
+pokered/**/*.2bpp
+pokered/**/*.pic
+pokered/tools/gfx
+pokered/tools/make_patch
+pokered/tools/pkmncompress
+pokered/tools/scan_includes

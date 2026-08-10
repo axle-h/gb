@@ -68,6 +68,14 @@ pub enum DecisionKind {
     /// global handler, and the prompt is the live question. Cancelling the battle turn to answer it
     /// is correct, and a fresh battle turn starts afterwards.
     ForgetMove,
+    /// **W9 / §14** — the sixth kind, and the only one that is not a poll site: the agent has
+    /// reached *no* decision point for `GB_STUCK_TIMEOUT_SECS` of emulated time and the watchdog is
+    /// asking on its behalf.
+    ///
+    /// It is the exception that proves the rule above. The other five are questions the agent knows
+    /// how to carry out an answer to; this one is "the agent is wedged", so the only terminal tools
+    /// are `press_buttons` — which goes round the state machine entirely — and `wait`.
+    Stuck,
 }
 
 impl DecisionKind {
@@ -78,13 +86,20 @@ impl DecisionKind {
             Self::Nickname => "nickname",
             Self::MartPurchase => "mart",
             Self::ForgetMove => "forget-move",
+            Self::Stuck => "stuck",
         }
     }
 
-    /// Whether this kind is one of the three transient menu questions, which the game state alone
-    /// cannot distinguish from the overworld or a battle — see `LlmPolicy::observed_kind`.
-    pub fn is_menu_prompt(self) -> bool {
-        matches!(self, Self::Nickname | Self::MartPurchase | Self::ForgetMove)
+    /// Whether the `GameState` cannot tell that this is the question being asked, so the only
+    /// evidence is which poll site ran last — see `LlmPolicy::observed_kind`.
+    ///
+    /// True of the three transient menu prompts (a naming screen, a mart's Buy/Sell menu and the
+    /// forget-move prompt all look like an ordinary overworld or battle state) and of **W9's
+    /// `Stuck`**, which looks like whatever the agent was doing when it wedged. Getting this wrong
+    /// is not a wasted round trip but an infinite loop: every read batch cancelled, every turn
+    /// restarted.
+    pub fn is_inferred_from_the_site(self) -> bool {
+        matches!(self, Self::Nickname | Self::MartPurchase | Self::ForgetMove | Self::Stuck)
     }
 }
 
@@ -503,6 +518,9 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                 "additionalProperties": false,
             }),
         )),
+        // **W9.** `press_buttons` is pushed by the arms above for the two kinds that also have a
+        // menu; here it is the only thing on offer besides `wait`.
+        DecisionKind::Stuck => tools.push(press_buttons_spec()),
         DecisionKind::ForgetMove => tools.push(ToolSpec::new(
             "forget_move",
             "ENDS THE TURN. Answer the 'which move should be forgotten?' prompt. `slot` is the move \
@@ -665,6 +683,9 @@ pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
         DecisionKind::Nickname => &["set_nickname", "wait"],
         DecisionKind::MartPurchase => &["buy_item", "wait"],
         DecisionKind::ForgetMove => &["forget_move", "wait"],
+        // **W9.** There is no menu to choose from and no action the agent could execute, so the
+        // escape hatch and doing nothing are the whole of it.
+        DecisionKind::Stuck => &["press_buttons", "wait"],
     }
 }
 
@@ -710,7 +731,9 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
             Ok(request) => CallKind::Terminal(Terminal::UseFieldMove(request)),
             Err(complaint) => CallKind::Rejected(complaint),
         },
-        "press_buttons" if matches!(kind, DecisionKind::Overworld | DecisionKind::Battle) => {
+        "press_buttons"
+            if matches!(kind, DecisionKind::Overworld | DecisionKind::Battle | DecisionKind::Stuck) =>
+        {
             match button_arguments(&arguments) {
                 Ok(buttons) => CallKind::Terminal(Terminal::PressButtons { buttons }),
                 Err(complaint) => CallKind::Rejected(complaint),
@@ -1079,12 +1102,13 @@ mod tests {
 
     /// Every kind, so a loop that meant "all of them" cannot quietly stop meaning it when a sixth
     /// is added.
-    const KINDS: [DecisionKind; 5] = [
+    const KINDS: [DecisionKind; 6] = [
         DecisionKind::Overworld,
         DecisionKind::Battle,
         DecisionKind::Nickname,
         DecisionKind::MartPurchase,
         DecisionKind::ForgetMove,
+        DecisionKind::Stuck,
     ];
 
     /// §7.5's first line of defence: the model cannot end a turn the wrong way because the wrong way
@@ -1115,6 +1139,23 @@ mod tests {
         // the overworld and a battle — not a menu whose one question is already on offer.
         assert!(names(DecisionKind::Overworld).contains(&"press_buttons"));
         assert!(names(DecisionKind::Battle).contains(&"press_buttons"));
+
+        // **W9.** The watchdog's turn is the one where `press_buttons` is not a last resort but the
+        // only resort: there is no menu, because the agent is not offering one. Anything else on
+        // offer would be a turn ending in a decision a wedged agent cannot carry out.
+        let stuck = names(DecisionKind::Stuck);
+        assert_eq!(
+            stuck.iter().filter(|name| terminal_names(DecisionKind::Stuck).contains(name)).count(),
+            2,
+        );
+        assert!(stuck.contains(&"press_buttons") && stuck.contains(&"wait"));
+        for elsewhere in ["choose_action", "choose_battle_action", "use_field_move", "set_nickname",
+                          "buy_item", "forget_move"] {
+            assert!(!stuck.contains(&elsewhere), "a stuck turn must not offer {elsewhere}");
+        }
+        // …and the reads are all there, because working out *why* it is stuck is the useful thing to
+        // do before pressing anything.
+        assert!(stuck.contains(&"read_map") && stuck.contains(&SCREENSHOT));
         assert!(!names(DecisionKind::Battle).contains(&"use_field_move"), "field moves are overworld-only");
 
         for kind in KINDS {
