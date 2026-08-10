@@ -6,7 +6,7 @@
 # Compiled golden-vector generator (tools/blip-golden/build.sh builds into target/)
 /tools/blip-golden/gen_golden
 
-# The SPA (W3). `npm ci && npm run build` in `web/` produces `web/dist`, which `rust-embed` bakes
+# The SPA (W3). `pnpm install && pnpm run build` in `web/` produces `web/dist`, which `rust-embed` bakes
 # into the binary at compile time — build output, not source. The directory itself must exist for the
 # crate to compile at all, which is what the committed `web/dist/.gitkeep` is for.
 /web/node_modules/

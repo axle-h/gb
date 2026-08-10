@@ -209,27 +209,37 @@ removed the same day; `HostConfig` in `src/host.rs` carries the ⚠️.
 `web/` is a Vite + React + TypeScript SPA — screen, status panel, conversation, and a TypeScript port
 of the video decoder in `web/src/video.ts`. The badge strip is the game's own art: `src/pokemon/badge_gfx.rs`
 decodes the trainer card's badge tiles out of the ROM and `/api/badges.png` serves them as one sheet,
-so no graphics are committed. `npm run build` produces `web/dist`, which `rust-embed`
-bakes into the binary, so **the npm build comes first**:
+so no graphics are committed. `pnpm run build` produces `web/dist`, which `rust-embed`
+bakes into the binary, so **the SPA build comes first**:
 
 ```bash
-cd web && npm ci && npm run build     # → web/dist
-cargo build --release                 # embeds it
+cd web && pnpm install && pnpm run build   # → web/dist
+cargo build --release                      # embeds it
 ```
+
+**The package manager is pnpm**, pinned by `packageManager` in `web/package.json` and activated by
+corepack — no pnpm version is named in the Dockerfile, so there is nothing there to drift from it.
 
 ⚠️ **`web/dist` must exist for the crate to compile at all** — `rust-embed`'s derive fails if the
 folder is missing, which is why `web/dist/.gitkeep` is committed and why `vite build` (which empties
-`dist`) copies it back from `web/public/`. A checkout that has never run `npm run build` compiles and
+`dist`) copies it back from `web/public/`. A checkout that has never run `pnpm run build` compiles and
 serves a page saying which two commands to run, so a missing UI is never a mystery.
+
+⚠️ **`web/pnpm-workspace.yaml` sets a `minimumReleaseAge` cooldown, and it is checked on *every*
+install — `--frozen-lockfile` included, not just `pnpm update`.** A lockfile pinning anything younger
+than the window fails with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`, so the lockfile has to be
+*generated* under the same number the builds enforce; raise the window without regenerating
+`pnpm-lock.yaml` and what breaks is the container build, not the dev loop. The file documents why it
+is 3 days rather than the usual 7 and when that can change.
 
 Two dev loops:
 
 ```bash
 # Hot reload: Vite on :5173 proxies /api to a `gb serve` on :8080.
 cargo run --release -- serve --policy random --port 8080 &
-cd web && npm run dev
+cd web && pnpm run dev
 
-# Or: skip the cargo rebuild after an npm build by reading web/dist from disk.
+# Or: skip the cargo rebuild after an SPA build by reading web/dist from disk.
 GB_WEB_DEV=1 cargo run --release -- serve --policy random
 ```
 
@@ -253,7 +263,7 @@ the prebuilt tarball, so the image also builds on arm64) and then `make pokered.
 checking the result against upstream's own `pokered/roms.sha1`. **That check is load-bearing**: all
 91 committed fixtures and every generated symbol are pinned to those exact bytes, so a ROM that
 merely assembles is a different game and would fail somewhere deep in the agent instead of at the
-build. Stage 2 is `npm run build` for the same class of reason (`rust-embed` needs `web/dist`).
+build. Stage 2 is `pnpm run build` for the same class of reason (`rust-embed` needs `web/dist`).
 
 ⚠️ **`.dockerignore` must exclude the host's pokered artifacts with `**`.** `pokered/*.o` leaves
 `pokered/gfx/pics_red.o` in the context, and a stale object file from a *newer* rgbds stops the build

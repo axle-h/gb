@@ -2,12 +2,12 @@
 //!
 //! In a release build `web/dist` is baked into the binary by `rust-embed`, so the container is one
 //! file with no asset directory to mount or get out of step. With `GB_WEB_DEV=1` the same paths are
-//! read from disk instead, which is what makes `npm run build && cargo run` a loop rather than a
-//! rebuild — the other dev loop, `npm run dev` on :5173 proxying `/api` to :8080, does not come
+//! read from disk instead, which is what makes `pnpm run build && cargo run` a loop rather than a
+//! rebuild — the other dev loop, `pnpm run dev` on :5173 proxying `/api` to :8080, does not come
 //! through here at all.
 //!
 //! ⚠️ **`web/dist` must exist when the crate is compiled**, or the `rust-embed` derive fails. A
-//! `.gitkeep` is committed for that, and a checkout that has never run `npm run build` compiles and
+//! `.gitkeep` is committed for that, and a checkout that has never run `pnpm run build` compiles and
 //! serves [`NOT_BUILT`] instead of a 404 that looks like a routing bug.
 //!
 //! The whole module is read-only and always was: it answers GETs from a fixed directory and holds
@@ -135,7 +135,7 @@ const NOT_BUILT: &str = r#"<!doctype html>
 <h1 style="font-size:16px">The web UI was not built into this binary.</h1>
 <p>The SPA is compiled into <code>gb</code> from <code>web/dist</code>, which was empty when the
 binary was built. Build it and rebuild:</p>
-<pre style="background:#161920;border:1px solid #262b34;border-radius:4px;padding:12px">cd web &amp;&amp; npm ci &amp;&amp; npm run build
+<pre style="background:#161920;border:1px solid #262b34;border-radius:4px;padding:12px">cd web &amp;&amp; pnpm install &amp;&amp; pnpm run build
 cargo build --release</pre>
 <p>Or run <code>GB_WEB_DEV=1 gb serve</code> to read <code>web/dist</code> from disk instead.
 The API is up either way — <code>/api/events</code>, <code>/api/video</code>,
@@ -188,7 +188,7 @@ mod tests {
     }
 
     /// `/` answers with a page in both worlds — the built SPA, or the message explaining that it is
-    /// not built. Which one depends on whether `npm run build` ran before `cargo build`, so the test
+    /// not built. Which one depends on whether `pnpm run build` ran before `cargo build`, so the test
     /// asserts what is true either way and then checks the *right* branch was taken.
     #[test]
     fn index_is_always_a_page() {
