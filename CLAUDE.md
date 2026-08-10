@@ -105,6 +105,14 @@ git submodule update --init --recursive
 
 The submodule must be compiled to produce `pokered/pokered.gbc` (the ROM). Follow the pokered build instructions (`make` inside `pokered/`).
 
+⚠️ **pokered needs rgbds ≥ 1.0.0 and `rgbdscheck.asm` `fail`s the assembly below that** — it is a
+hard error, not a warning, so an older rgbds does not produce a wrong ROM, it produces none. The
+container pins 1.0.3 (`ARG RGBDS_VERSION`), which is what upstream's own `INSTALL.md` and CI name.
+The symbol *names* are upstream's to change: the 2026-08 bump renamed pokered's "hidden object" and
+"missable object" vocabulary to **hidden event** and **toggleable object**
+(`HiddenEventMaps`, `HiddenEventPointers`, `wToggleableObjectFlags`), which is a compile error here
+rather than a silent one, because `build.rs` only emits constants for symbols that exist.
+
 ## Agent / Policy system
 
 `PokemonAgent` is a frame-by-frame driver. Each call to `agent.step(&mut gb)` advances the emulator by `AGENT_RESOLUTION` (20 ms of emulated time) and dispatches actions based on the current `GameMode`:
@@ -258,7 +266,7 @@ docker compose run --rm --service-ports gb gb serve --policy random   # no API k
 
 ⚠️ **The cartridge is stage 1, not an input.** Two of this crate's compile-time inputs are generated
 and neither is in git: `pokered/pokered.gbc` (`include_bytes!`) and `pokered/pokered.sym`
-(`build.rs`). Stage 1 builds **rgbds 0.9.3 from source** (pinned by `ARG` + sha256; from source, not
+(`build.rs`). Stage 1 builds **rgbds 1.0.3 from source** (pinned by `ARG` + sha256; from source, not
 the prebuilt tarball, so the image also builds on arm64) and then `make pokered.gbc` — and ends by
 checking the result against upstream's own `pokered/roms.sha1`. **That check is load-bearing**: all
 91 committed fixtures and every generated symbol are pinned to those exact bytes, so a ROM that

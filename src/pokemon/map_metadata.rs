@@ -1119,9 +1119,9 @@ impl MMU {
         let map = Map::from_repr(self.read_pointer(&pokered_symbols::wCurMap)).ok_or_else(|| "Invalid map number".to_string())?;
         let map_sprites = map.sprites();
 
-        let missable_objects = self.read_pointer_vec(
-            &pokered_symbols::wMissableObjectFlags,
-            (pokered_symbols::wMissableObjectFlagsEnd.address - pokered_symbols::wMissableObjectFlags.address) as usize
+        let toggleable_objects = self.read_pointer_vec(
+            &pokered_symbols::wToggleableObjectFlags,
+            (pokered_symbols::wToggleableObjectFlagsEnd.address - pokered_symbols::wToggleableObjectFlags.address) as usize
         );
 
         let mut sprites: Vec<Sprite> = Vec::new();
@@ -1139,7 +1139,7 @@ impl MMU {
             let hidden = match map_sprite.hidden_object_id {
                 Some(hidden_object_bit) => {
                     let mask = 1 << hidden_object_bit % 8;
-                    (missable_objects[(hidden_object_bit / 8) as usize] & mask) == mask
+                    (toggleable_objects[(hidden_object_bit / 8) as usize] & mask) == mask
                 }
                 None => false,
             };
