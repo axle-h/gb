@@ -13,6 +13,7 @@
 //! | `GB_CONTEXT_LIMIT` | `128000` | The window W6's compaction triggers at 70% of |
 //! | `GB_TEMPERATURE` | `1.0` | |
 //! | `GB_MAX_TOOL_STEPS` | `12` | Non-terminal calls per turn before a decision is forced |
+//! | `GB_STUCK_TIMEOUT_SECS` | `300` | **W9** — emulated seconds with the agent asking nothing before the watchdog does; `0` is off |
 //! | `GB_PORT` | `8080` | Read in `cli.rs`, since it applies to `--policy random` too |
 //! | `GB_RUN_DIR` | `runs` | Read in `web/mod.rs`, for the same reason (**W7**) |
 //!
@@ -39,12 +40,22 @@ pub struct LlmConfig {
     pub temperature: f32,
     /// Non-terminal tool calls a single turn may make before the worker forces `wait` (§7.3).
     pub max_tool_steps: usize,
+    /// **W9 / §14** — how much *emulated* time the agent may go without reaching a decision point of
+    /// any kind before the watchdog asks for a nudge on its behalf. `None` when
+    /// `GB_STUCK_TIMEOUT_SECS=0`, which turns it off.
+    ///
+    /// Deliberately generous: normal play never approaches five minutes of game time without asking
+    /// something, and this is insurance against an agent bug rather than a mechanism the design
+    /// leans on. Every firing is a bug report.
+    pub stuck_timeout: Option<std::time::Duration>,
 }
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_CONTEXT_LIMIT: u64 = 128_000;
 pub const DEFAULT_TEMPERATURE: f32 = 1.0;
 pub const DEFAULT_MAX_TOOL_STEPS: usize = 12;
+/// Five minutes of *emulated* time. **W9 / §14.**
+pub const DEFAULT_STUCK_TIMEOUT_SECS: u64 = 300;
 
 impl LlmConfig {
     /// Read the block from the process environment.
@@ -78,6 +89,12 @@ impl LlmConfig {
             context_limit: number(env, "GB_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT)?,
             temperature: number(env, "GB_TEMPERATURE", DEFAULT_TEMPERATURE)?,
             max_tool_steps: number(env, "GB_MAX_TOOL_STEPS", DEFAULT_MAX_TOOL_STEPS)?,
+            // Zero is "off" rather than "fire on every tick", which is the only reading that makes
+            // the variable a way to turn the watchdog off.
+            stuck_timeout: match number(env, "GB_STUCK_TIMEOUT_SECS", DEFAULT_STUCK_TIMEOUT_SECS)? {
+                0 => None,
+                seconds => Some(std::time::Duration::from_secs(seconds)),
+            },
         })
     }
 
@@ -119,6 +136,26 @@ mod tests {
         assert_eq!(config.completions_url(), "https://api.openai.com/v1/chat/completions");
         assert_eq!(config.context_limit, DEFAULT_CONTEXT_LIMIT);
         assert_eq!(config.max_tool_steps, DEFAULT_MAX_TOOL_STEPS);
+        assert_eq!(config.stuck_timeout, Some(std::time::Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)));
+    }
+
+    /// **W9.** Zero is the off switch, and it has to be *off* rather than "a timeout of zero", which
+    /// would fire the watchdog on every tick of every run — a turn per 20 ms, and a bill to match.
+    #[test]
+    fn a_zero_stuck_timeout_turns_the_watchdog_off() {
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_STUCK_TIMEOUT_SECS", "0"));
+        assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").stuck_timeout, None);
+
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_STUCK_TIMEOUT_SECS", "45"));
+        let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
+        assert_eq!(config.stuck_timeout, Some(std::time::Duration::from_secs(45)));
+
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_STUCK_TIMEOUT_SECS", "ages"));
+        let failure = LlmConfig::from_lookup(&lookup(&pairs)).expect_err("not a number");
+        assert!(failure.contains("GB_STUCK_TIMEOUT_SECS"), "{failure}");
     }
 
     /// The failure an operator actually hits, and it must name the variable rather than say "config".

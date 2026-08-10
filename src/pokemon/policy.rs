@@ -101,6 +101,39 @@ pub trait Policy {
     /// Default: a no-op. No existing policy is affected.
     fn service_tools(&mut self, _state: &GameState, _api: &mut PokemonApi<'_>, _graph: &WorldGraph) {}
 
+    /// **W9 / §14** — how much **emulated** time may pass with the agent asking this policy nothing
+    /// at all before it wants waking anyway. `None` — the default, and what every scripted policy
+    /// returns — means never, and compiles the watchdog down to one comparison per tick.
+    ///
+    /// This is not "how long a decision may take". The `pick_*` methods are polled fifty times a
+    /// second while a policy thinks, and every one of those polls resets the clock. What it measures
+    /// is the agent reaching **no decision point of any kind** — a jam in `RunningScript`, or an
+    /// `OverworldMovement` walking into a sprite forever — which is the one failure mode nothing
+    /// else covers, because the policy is not consulted in those states and so cannot notice.
+    ///
+    /// ⚠️ **Read once, when the agent is built.** A policy that changed its mind later would not be
+    /// heard.
+    fn stuck_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// **W9 / §14** — the agent has gone [`Self::stuck_timeout`] without asking anything, and is
+    /// asking now.
+    ///
+    /// Called on **every** tick for as long as the jam lasts, immediately after
+    /// [`Self::service_tools`] — which is the whole point: a tool batch is only ever answered at a
+    /// policy poll, so a decision that needs one could not be made at all if this were a one-shot
+    /// notification.
+    ///
+    /// It returns nothing because there is nothing a jammed agent could carry out. The answer
+    /// travels the escape hatch instead: [`Self::take_manual_input`] is collected at the top of the
+    /// next tick and pre-empts the state machine, which is also what clears the jam — a queued press
+    /// resets the agent to `Idle` (see
+    /// [`queue_manual_input`](crate::pokemon::agent::PokemonAgent::queue_manual_input)).
+    ///
+    /// Default: a no-op, and unreachable for any policy that did not ask for it above.
+    fn pick_unstick(&mut self, _state: &GameState, _jam: Jam<'_>) {}
+
     /// **W5** — raw button presses the policy wants delivered, collected by the agent at the top of
     /// its next tick and handed to
     /// [`queue_manual_input`](crate::pokemon::agent::PokemonAgent::queue_manual_input).
@@ -131,6 +164,19 @@ pub trait Policy {
     fn current_step_is_long_running(&self) -> bool {
         false
     }
+}
+
+/// **W9 / §14** — what the watchdog knows about the jam it is waking the policy for.
+///
+/// Both fields exist to be *reported*: §14's rule is that every firing is a bug report, so the
+/// state the agent believes it is in and how long it has believed it go to the model, to the UI and
+/// to stdout rather than being quietly recovered from.
+#[derive(Debug, Clone, Copy)]
+pub struct Jam<'a> {
+    /// What the agent thinks it is doing — [`PokemonAgent::state_debug`](crate::pokemon::agent::PokemonAgent::state_debug).
+    pub agent_state: &'a str,
+    /// Emulated time since the agent last asked the policy anything.
+    pub stuck_for: std::time::Duration,
 }
 
 // ── Random (always-ready) ─────────────────────────────────────────────────────

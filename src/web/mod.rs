@@ -137,6 +137,9 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             let config = llm.expect("built above");
             println!("gb serve — {} via {}", config.model, config.base_url);
             let endpoint = Box::new(OpenAiClient::new(&config));
+            // **W9** — read off before `config` is moved into the worker. The watchdog belongs to
+            // the policy (it is what the agent asks how long to wait), not to the turn loop.
+            let stuck_timeout = config.stuck_timeout;
             // **W6b** — the model's own notes live in the run directory, so they survive both a
             // compaction and a restart.
             let notes = Notes::open(Some(run.path()));
@@ -145,7 +148,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // The worker outlives this function; it ends when the policy is dropped and its channels
             // close, which happens when the emulator thread stops.
             worker.spawn()?;
-            Box::new(move || Box::new(LlmPolicy::new(handles)))
+            Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout)))
         }
         #[cfg(not(feature = "llm"))]
         ServePolicy::Llm => unreachable!("rejected above"),

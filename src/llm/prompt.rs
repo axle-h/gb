@@ -147,6 +147,10 @@ pub enum TurnContext<'a> {
     None,
     Nickname(crate::pokemon::species::PokemonSpecies),
     ForgetMove { current: &'a [crate::pokemon::move_name::PokemonMove], new: crate::pokemon::move_name::PokemonMoveName },
+    /// **W9 / §14** — the watchdog's turn: what the agent believes it is doing, and for how long.
+    /// Carried rather than read from the state for the same reason the two above are — nothing but
+    /// the agent knows it.
+    Stuck { agent_state: &'a str, stuck_for: std::time::Duration },
 }
 
 pub fn situation(
@@ -165,6 +169,7 @@ pub fn situation(
         DecisionKind::Nickname => "## Decision: name this Pokémon, or keep the default\n\n",
         DecisionKind::MartPurchase => "## Decision: what to buy here, if anything\n\n",
         DecisionKind::ForgetMove => "## Decision: which move to forget, if any\n\n",
+        DecisionKind::Stuck => "## Decision: the game is stuck — get it moving\n\n",
     });
 
     match context {
@@ -176,6 +181,18 @@ pub fn situation(
         TurnContext::ForgetMove { new, .. } => out.push_str(&format!(
             "A Pokémon is trying to learn **{new}** but already knows four moves. Pick one to \
              replace, or decline and keep all four.\n\n",
+        )),
+        // **W9 / §14.** Said plainly, including that it is the agent's fault: a model told only "you
+        // are stuck" tends to reason about the *game* being stuck and go looking for a puzzle.
+        TurnContext::Stuck { agent_state, stuck_for } => out.push_str(&format!(
+            "**The agent has not offered you a decision for {} seconds of game time.** It thinks it \
+             is busy doing `{agent_state}`, and it is not asking anything — so this is a bug in the \
+             agent rather than a puzzle in the game, and no action menu can be shown.\n\n\
+             What usually clears it is one button: `A` to advance a text box or confirm a prompt, \
+             `B` to back out of a menu, a direction to step off a tile it cannot leave. Look at the \
+             screen if you are unsure — `screenshot` is worth it here, because the state description \
+             is exactly what has gone wrong. If you think the game genuinely needs a moment, `wait`.\n\n",
+            stuck_for.as_secs(),
         )),
     }
 
@@ -252,9 +269,14 @@ pub fn situation(
         DecisionKind::Nickname => "\n### Naming\n",
         DecisionKind::MartPurchase => "\n### For sale\n",
         DecisionKind::ForgetMove => "\n### The four moves it knows\n",
+        DecisionKind::Stuck => "\n### What you can do\n",
     });
     if menu.is_empty() {
         out.push_str(match kind {
+            DecisionKind::Stuck => {
+                "(no menu — the agent is not offering actions, which is why you are being asked. \
+                 `press_buttons`, or `wait`.)\n"
+            }
             DecisionKind::Nickname => "(there is no menu — call `set_nickname`, with or without a name.)\n",
             DecisionKind::MartPurchase => {
                 "(the shop's stock could not be read. Call `buy_item` with no `item` to leave.)\n"
@@ -295,7 +317,11 @@ fn summarise_events(events: &[String]) -> Vec<String> {
     lines
 }
 
-/// What the worker sends when a tool batch was answered but the turn has already run out of steps.
+/// What the worker sends when a tool batch was answered and the turn has one request left.
+///
+/// ⚠️ **It has to arrive while there is still a request to answer it with** — see the `+ 2` in
+/// `Worker::decide`. A "call a terminal tool now" that lands after the last request is a sentence
+/// the model can only read on the next turn.
 pub const OUT_OF_STEPS: &str =
     "You have used every read this turn. Call a terminal tool now to end the turn.";
 
@@ -324,6 +350,7 @@ mod tests {
             DecisionKind::Nickname,
             DecisionKind::MartPurchase,
             DecisionKind::ForgetMove,
+            DecisionKind::Stuck,
         ] {
             let contract = contract(kind);
             for tool in crate::llm::tools::for_kind(kind) {

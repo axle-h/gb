@@ -300,6 +300,15 @@ main {
   color: var(--bad);
 }
 
+/* W9. The one agent event that is a bug report rather than a narration, so it is the one that does
+   not get to look like the rest of the log — a run that quietly rescues itself for an hour should be
+   obvious at a glance from the number of these. */
+.entry.watchdog .chip,
+.entry.watchdog .body {
+  color: var(--bad);
+  font-weight: 600;
+}
+
 .jump {
   position: absolute;
   right: 16px;

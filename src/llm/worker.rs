@@ -367,7 +367,14 @@ impl Worker {
             // No terminal call, so this is a read step. Anything rejected is answered here; anything
             // real goes to the policy as one batch — except `screenshot`, which this thread answers
             // itself from the frame the host already published.
-            let last_step = step + 1 == self.config.max_tool_steps;
+            //
+            // ⚠️ **`+ 2`, not `+ 1`, and that is the whole point of the warning.** It says "call a
+            // terminal tool *now*", so it has to be appended before the request that can still act
+            // on it — appended on the final iteration it is a sentence the model only ever reads on
+            // the next turn, after this one has already been forced to a wait. The budget therefore
+            // buys `max_tool_steps - 1` rounds of reading and one round of "decide with what you
+            // have", which is what a model that over-reads actually needs.
+            let out_of_reads = step + 2 >= self.config.max_tool_steps;
             let reads: Vec<ToolCall> = completion
                 .tool_calls
                 .iter()
@@ -417,7 +424,7 @@ impl Worker {
                 self.messages.push(Message::tool_result(&call.id, content));
             }
             self.messages.extend(pictures);
-            if last_step {
+            if out_of_reads {
                 self.messages.push(Message::user(prompt::OUT_OF_STEPS));
             }
         }

@@ -30,6 +30,8 @@ ENVIRONMENT (--policy llm):
     OPENAI_API_KEY, GB_MODEL    Required
     OPENAI_BASE_URL             Any OpenAI-compatible endpoint [default: api.openai.com/v1]
     GB_CONTEXT_LIMIT, GB_TEMPERATURE, GB_MAX_TOOL_STEPS
+    GB_STUCK_TIMEOUT_SECS       Emulated seconds with the agent asking nothing at all before
+                                the watchdog asks on its behalf [default: 300; 0 turns it off]
 
 ENVIRONMENT (any policy):
     GB_PORT                     Port to listen on; --port wins
@@ -195,7 +197,7 @@ mod tests {
             "--port", "--policy", "--new-run", "--help",
             "GB_PORT", "GB_RUN_DIR", "GB_STATUS_HZ",
             "OPENAI_API_KEY", "GB_MODEL", "OPENAI_BASE_URL",
-            "GB_CONTEXT_LIMIT", "GB_TEMPERATURE", "GB_MAX_TOOL_STEPS",
+            "GB_CONTEXT_LIMIT", "GB_TEMPERATURE", "GB_MAX_TOOL_STEPS", "GB_STUCK_TIMEOUT_SECS",
         ] {
             assert!(USAGE.contains(name), "`{name}` is accepted but `--help` does not mention it");
         }
