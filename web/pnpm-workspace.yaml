@@ -1,0 +1,23 @@
+# There is no workspace here — `web/` is a single package. This file exists because pnpm 11 reads
+# its settings from it and nowhere else, so the supply-chain policy below has no other home.
+
+# Delay installing freshly published versions, so a compromised release has to survive a window of
+# public scrutiny before this project will pull it. 4320 minutes = 3 days.
+#
+# ⚠️ **The cooldown is enforced on every install, including `--frozen-lockfile`** — it is not just a
+# speed bump on `pnpm update`. A lockfile pinning anything younger than this window fails outright
+# with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`, and `--frozen-lockfile` is exactly what the Dockerfile
+# and CI run. So the lockfile must be *generated* under the same number the builds enforce; changing
+# it here without regenerating `pnpm-lock.yaml` breaks the container build rather than the dev loop,
+# which is the slower place to find out.
+#
+# ⚠️ **3 days is a floor set by today's dependencies, not a considered maximum.** It is the largest
+# window under which `vite@8.2.1` (published 2026-08-06) resolves at all; 7 days is the usual
+# recommendation and this should become `10080` once the current pins have aged past it. Bump the
+# number and run `pnpm install` in `web/` — if nothing new has been published in the meantime the
+# resolution does not move, and neither does `web/dist`.
+#
+# Two related defaults are left alone deliberately: `minimumReleaseAgeStrict` becomes true as soon
+# as this setting is written, so a range with no mature version *fails* instead of quietly taking
+# the newest anyway — loud is correct here — and `minimumReleaseAgeIgnoreMissingTime` stays true.
+minimumReleaseAge: 4320

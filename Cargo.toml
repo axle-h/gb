@@ -110,7 +110,7 @@ axum = { version = "0.8", optional = true }
 base64 = { version = "0.22", optional = true }
 # The built SPA (`web/dist`), baked into the binary so the container is one file. ⚠️ The folder must
 # exist at compile time — `web/dist/.gitkeep` is committed for exactly that reason, and a checkout
-# that has not run `npm run build` compiles fine and serves a page saying so.
+# that has not run `pnpm run build` compiles fine and serves a page saying so.
 rust-embed = { version = "8.12", optional = true }
 # The chat completions client. **Blocking on purpose**: `Response::into_reader()` is a plain
 # `impl Read`, so streaming SSE is a `BufReader::lines()` loop on the worker's own `std::thread` and

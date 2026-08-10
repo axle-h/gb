@@ -68,13 +68,22 @@ RUN make -j"$(nproc)" pokered.gbc \
 ##############################################################################
 # stage 2 — the SPA
 ##############################################################################
-# `npm ci` on its own layer so a change to the React source does not re-resolve the dependency tree.
+# The install is on its own layer so a change to the React source does not re-resolve the dependency
+# tree, and the pnpm store is a cache mount for the same reason the cargo registry is one in stage 3.
 FROM node:22-alpine AS web
+# ⚠️ corepack is what pins the pnpm version, from `packageManager` in `web/package.json` — there is
+# no pnpm version named in this file to drift from it. It is bundled with node 22; newer Node images
+# unbundle it, so a base-image bump lands here as "corepack: not found" and wants `npm i -g pnpm@…`.
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
+RUN corepack enable
 WORKDIR /web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci
+# ⚠️ `pnpm-workspace.yaml` carries the `minimumReleaseAge` cooldown and must arrive *before* the
+# install, not with the source. Without it pnpm falls back to its own default and the image is built
+# under a policy that is not the one the repo states.
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY web/ ./
-RUN npm run build
+RUN pnpm run build
 
 
 ##############################################################################

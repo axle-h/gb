@@ -1,0 +1,120 @@
+# Builds the container from a bare checkout and proves the thing it produced actually runs.
+#
+# The build is the whole of `Dockerfile` — rgbds from source, `pokered.gbc` checked against
+# upstream's sha1, the SPA, then the crate — so a green run here means the four stages still compose
+# on a machine that has none of this project's build artifacts lying around. That is a different
+# claim from `cargo test`, which runs against a working tree where the ROM and `web/dist` already
+# exist, and it is the one that rots silently.
+#
+# ⚠️ **`submodules: recursive` is load-bearing.** `pokered/` is a submodule and an uninitialised one
+# is an empty directory; stage 1 catches that deliberately (`test -f main.asm`) rather than letting
+# `make` fail with "No rule to make target 'main.asm'", but only the checkout below stops it
+# happening at all.
+name: container
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first build irrelevant — building both wastes ~15
+# minutes of a runner for an answer nobody will read.
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Stage 1 compiles rgbds and assembles the ROM, stage 3 is a release build of the crate; both
+    # are minutes even when warm, and the default 6 h timeout would let a hang burn the afternoon.
+    timeout-minutes: 60
+
+    steps:
+      # Actions are pinned by commit SHA rather than tag: a tag is mutable and moving it is the
+      # cheapest way to run someone else's code in this job. The comment is the version the SHA was.
+      - name: Check out, with the pokered submodule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # ⚠️ `type=gha` caches **layers**, not BuildKit cache mounts. The cargo registry, the cargo
+      # target directory and the pnpm store are all `--mount=type=cache` and start empty on every
+      # runner, so an invalidated stage 3 pays a full cold `cargo build --release`. What the cache
+      # does buy is the two expensive stages that rarely change: a run that touches only `src/`
+      # reuses rgbds, the ROM and the SPA rather than rebuilding them.
+      - name: Build the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true          # into the runner's docker, so the smoke test below can run it
+          tags: gb:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # An image that builds is not the claim worth making — the interesting failures are an empty
+      # `web/dist` baked in, or a ROM the Pokémon layer cannot read, and both build perfectly.
+      #
+      # `--policy random` is what makes this runnable in CI at all: it is the one policy that needs
+      # no OPENAI_API_KEY and spends nothing. The argv is the full command because `CMD` is exec form
+      # with no `ENTRYPOINT`, so overriding it replaces the lot.
+      - name: Start the container
+        run: |
+          docker run -d --name gb-ci -p 8080:8080 gb:ci gb serve --policy random --new-run
+
+      - name: It serves, it embedded the SPA, and it is emulating
+        run: |
+          set -euo pipefail
+
+          # HEALTHCHECK allows a 20 s start period; the emulator boots the ROM before the first
+          # frame is published, so poll rather than sleep on a guess.
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/api/healthz >/dev/null 2>&1; then break; fi
+            if [ "$i" = 60 ]; then echo "::error::/api/healthz never came up"; exit 1; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/healthz
+
+          # Stage 2 landed in the binary. The failure this catches is a *successful* build with an
+          # empty web/dist, which serves the "UI is not built" placeholder instead of the SPA.
+          index=$(curl -fsS http://localhost:8080/)
+          case "$index" in
+            *'id="root"'*) echo "the SPA is embedded" ;;
+            *) echo "::error::/ served the not-built placeholder — stage 2 did not reach the binary"
+               printf '%s\n' "$index" | head -20; exit 1 ;;
+          esac
+
+          # Stage 1 landed too, and is readable as a *cartridge* rather than as bytes: these eight
+          # sprites are decoded out of the trainer card's ROM graphics at runtime.
+          curl -fsS -o badges.png http://localhost:8080/api/badges.png
+          file badges.png | grep -q 'PNG image data' \
+            || { echo "::error::/api/badges.png is not a PNG — the ROM did not decode"; exit 1; }
+
+          # And the emulator is actually running: video_seq is null until the first keyframe is
+          # published, so a non-null value means frames are being produced, not merely that axum
+          # answered.
+          for i in $(seq 1 30); do
+            seq=$(curl -fsS http://localhost:8080/api/healthz | python3 -c 'import json,sys; print(json.load(sys.stdin)["video_seq"])')
+            [ "$seq" != "None" ] && { echo "emulating — video_seq=$seq"; exit 0; }
+            sleep 2
+          done
+          echo "::error::no video keyframe was ever published — the emulator thread is not running"
+          exit 1
+
+      # The container's own stdout is where the agent reports what it did, so it is the first thing
+      # worth having when any of the above fails.
+      - name: Container logs
+        if: always()
+        run: docker logs gb-ci 2>&1 | tail -100
+
+      - name: Stop it
+        if: always()
+        run: docker rm -f gb-ci >/dev/null 2>&1 || true

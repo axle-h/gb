@@ -11,6 +11,7 @@ target/
 runs/
 docs/
 tools/
+.github/
 *.md
 Dockerfile
 .dockerignore
@@ -20,7 +21,7 @@ docker-compose.yml
 pokemon-red.sav
 pokemon-red.bin
 
-# ⚠️ Built by stage 2 (`npm run build`), never taken from the host — a `dist/` from a different
+# ⚠️ Built by stage 2 (`pnpm run build`), never taken from the host — a `dist/` from a different
 # checkout would be baked into the binary by `rust-embed` and nothing would say so.
 web/dist/
 

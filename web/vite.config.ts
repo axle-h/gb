@@ -1,14 +1,14 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
-// `npm run build` → `web/dist`, which `rust-embed` bakes into the binary (`src/web/assets.rs`).
-// `npm run dev` serves the same app on :5173 with hot reload and proxies the two SSE endpoints to a
+// `pnpm run build` → `web/dist`, which `rust-embed` bakes into the binary (`src/web/assets.rs`).
+// `pnpm run dev` serves the same app on :5173 with hot reload and proxies the two SSE endpoints to a
 // `gb serve` on :8080 — which is why the app only ever uses relative URLs.
 export default defineConfig({
   plugins: [react()],
   // ⚠️ `public/.gitkeep` is not decoration. `rust-embed` fails to *compile* if `web/dist` does not
   // exist, so a committed `web/dist/.gitkeep` is what lets a fresh checkout build before anyone has
-  // run `npm run build` — and `vite build` empties `dist` first, which would delete it. Copying it
+  // run `pnpm run build` — and `vite build` empties `dist` first, which would delete it. Copying it
   // back from `public/` on every build keeps the committed file in place instead of leaving a
   // deletion in `git status` after each build.
   build: {
