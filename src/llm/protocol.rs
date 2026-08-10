@@ -241,7 +241,13 @@ pub struct ChatRequest {
     /// Explicit, though `true` is the default: §7.1 wants the whole batch of reads in one assistant
     /// message, because a batch is answered from one observed `GameState` and therefore cannot
     /// disagree with itself.
-    pub parallel_tool_calls: bool,
+    ///
+    /// ⚠️ **`None` — the key absent entirely — whenever `tools` is empty.** OpenAI rejects the field
+    /// outright without tools ("only allowed when 'tools' are specified"), which is exactly the shape
+    /// of W6's summarisation request; a `false` there would be a 400 in the one place a 400 stalls
+    /// the run rather than costing a turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
     pub temperature: f32,
     pub stream: bool,
     /// ⚠️ Several endpoints report no `usage` on a streamed response unless asked. Some report none
@@ -675,7 +681,7 @@ mod tests {
                 Message::tool_result("c1", "ok"),
             ],
             tools: vec![ToolSpec::new("wait", "do nothing", serde_json::json!({"type": "object"}))],
-            parallel_tool_calls: true,
+            parallel_tool_calls: Some(true),
             temperature: 1.0,
             stream: true,
             stream_options: StreamOptions { include_usage: true },

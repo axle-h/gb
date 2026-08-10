@@ -85,6 +85,23 @@ function render(entry: Entry): Rendered {
       return { gutter: '→', body: entry.summary, title: `turn ${entry.turn}`, modifier: '' };
     case 'cancelled':
       return { gutter: 'dropped', body: entry.reason, title: `turn ${entry.turn}`, modifier: '' };
+    case 'compacted': {
+      // W6. Worth a line in the log: a compaction is the one thing that changes what the model
+      // knows without the model doing anything, so a reply that suddenly forgets something should
+      // have an entry above it explaining why.
+      const how = [
+        entry.summarised ? 'summarised' : null,
+        entry.images_evicted > 0 ? `${entry.images_evicted} screenshot${entry.images_evicted === 1 ? '' : 's'} dropped` : null,
+      ]
+        .filter(Boolean)
+        .join(', ');
+      return {
+        gutter: 'context',
+        body: `compacted ${entry.before.toLocaleString()} → ${entry.after.toLocaleString()} tokens${how ? ` (${how})` : ''}`,
+        title: 'the history was compacted to fit the context window',
+        modifier: 'compacted',
+      };
+    }
   }
 }
 

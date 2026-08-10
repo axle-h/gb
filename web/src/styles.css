@@ -324,6 +324,55 @@ main {
 
 header .context {
   color: var(--dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The gauge is the only thing on the page that says "this run has a lifetime". */
+header .gauge {
+  width: 56px;
+  height: 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+header .gauge .fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* What the run is doing right now (W6). `playing` is the quiet state and is styled as such: the
+   others are the ones a viewer might want to notice. */
+header .run {
+  color: var(--dim);
+}
+
+header .run.awaiting_llm,
+header .run.streaming,
+header .run.running_tool,
+header .run.compacting {
+  color: var(--accent);
+}
+
+header .run.rate_limited {
+  color: var(--warn);
+}
+
+header .run.error {
+  color: var(--bad);
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry.compacted .chip,
+.entry.compacted .body {
+  color: var(--dim);
+  font-style: italic;
 }
 
 /* A turn header is the log's paragraph break: the only entry with space above it. */

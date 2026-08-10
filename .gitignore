@@ -12,3 +12,7 @@
 /web/node_modules/
 /web/dist/*
 !/web/dist/.gitkeep
+
+# W7's run directories: `gb serve` keeps a run's save state, transcript and the model's notes in
+# `$GB_RUN_DIR/<run-id>/`, defaulting to here. It is a run's state, not the project's.
+/runs

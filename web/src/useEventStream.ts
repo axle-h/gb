@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Connection, Entry, Status, UiEvent, UsageView } from './api';
+import type { Connection, Entry, RunStatus, Status, UiEvent, UsageView } from './api';
 
 /** How long the conversation keeps. A run is hours long; the DOM is not the transcript (W7 is). */
 const MAX_ENTRIES = 500;
@@ -55,6 +55,8 @@ export interface EventStream {
   entries: Entry[];
   connection: Connection;
   usage: UsageView | null;
+  /** W6. From the transition event, which is instant; the heartbeat's copy is the late-joiner path. */
+  run: RunStatus;
 }
 
 /**
@@ -76,7 +78,8 @@ function fold(entries: Entry[], event: UiEvent): Entry[] {
   }
   switch (event.type) {
     case 'status':
-      return entries; // handled separately — it must not re-render the log
+    case 'run_status':
+      return entries; // handled separately — neither may re-render the log
     case 'turn_started':
       return [...entries, { seq: event.seq, type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }];
     case 'tool_call':
@@ -85,6 +88,18 @@ function fold(entries: Entry[], event: UiEvent): Entry[] {
       return [...entries, { seq: event.seq, type: 'decision', turn: event.turn, summary: event.summary }];
     case 'turn_cancelled':
       return [...entries, { seq: event.seq, type: 'cancelled', turn: event.turn, reason: event.reason }];
+    case 'compacted':
+      return [
+        ...entries,
+        {
+          seq: event.seq,
+          type: 'compacted',
+          before: event.before,
+          after: event.after,
+          images_evicted: event.images_evicted,
+          summarised: event.summarised,
+        },
+      ];
     default:
       return [...entries, event];
   }
@@ -102,12 +117,39 @@ export function useEventStream(): EventStream {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [connection, setConnection] = useState<Connection>('connecting');
   const [usage, setUsage] = useState<UsageView | null>(null);
+  const [run, setRun] = useState<RunStatus>({ state: 'booting' });
   // Batched between animation frames: a burst of dialogue is many events in one tick, and a
   // streaming reply is one per token — each would otherwise be its own render.
   const pending = useRef<UiEvent[]>([]);
   const frame = useRef<number | undefined>(undefined);
 
   useEffect(() => {
+    // **W7 / §11.** ⚠️ **Subscribe first, backfill second** — the same ordering the video path uses
+    // (§5.2), and for the same reason: the other way round loses everything published between the
+    // fetch returning and the stream attaching, and loses it invisibly.
+    let abandoned = false;
+    const backfill = () => {
+      fetch('/api/history')
+        .then((response) => (response.ok ? response.json() : []))
+        .then((backlog: UiEvent[]) => {
+          if (abandoned || backlog.length === 0) return;
+          for (const event of backlog) {
+            if (event.type === 'decision' && event.usage) setUsage((current) => current ?? event.usage!);
+          }
+          const older = backlog.reduce(fold, [] as Entry[]);
+          setEntries((live) => {
+            // Anything the stream has already delivered wins; the transcript only fills in what
+            // happened before this page existed.
+            const oldest = live.length > 0 ? live[0].seq : Number.MAX_SAFE_INTEGER;
+            return [...older.filter((entry) => entry.seq < oldest), ...live].slice(-MAX_ENTRIES);
+          });
+        })
+        .catch(() => {
+          // No transcript, or a build with no run directory. The live stream is the whole of the
+          // page either way, so there is nothing to report.
+        });
+    };
+
     const flush = () => {
       frame.current = undefined;
       const arrived = pending.current;
@@ -116,13 +158,20 @@ export function useEventStream(): EventStream {
       setEntries((previous) => arrived.reduce(fold, previous).slice(-MAX_ENTRIES));
     };
 
-    return subscribe(
+    const unsubscribe = subscribe(
       '/api/events',
       (data) => {
         const event = JSON.parse(data) as UiEvent;
         if (event.type === 'status') {
           const { seq: _seq, type: _type, ...rest } = event;
           setStatus(rest);
+          // The heartbeat carries the run status too, which is how a page opened mid-turn shows the
+          // right thing without waiting for the next transition.
+          setRun(rest.run);
+          return;
+        }
+        if (event.type === 'run_status') {
+          setRun(event.status);
           return;
         }
         if (event.type === 'decision' && event.usage) setUsage(event.usage);
@@ -134,9 +183,15 @@ export function useEventStream(): EventStream {
       },
       setConnection,
     );
+    backfill();
+
+    return () => {
+      abandoned = true;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => () => cancelAnimationFrame(frame.current ?? 0), []);
 
-  return { status, entries, connection, usage };
+  return { status, entries, connection, usage, run };
 }

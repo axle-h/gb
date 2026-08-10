@@ -145,15 +145,29 @@ argument before they write it.
 | `TurnOutcome` | `std::sync::mpsc::Receiver`, polled with `try_recv()` | worker → policy |
 | `ToolCall` | `std::sync::mpsc::Sender` | worker → policy |
 | `ToolResult` | `std::sync::mpsc::Receiver`, **blocking `recv()`** | policy → worker |
-| `UiEvent` | `tokio::sync::broadcast::Sender` (capacity 1024) | emulator + worker → SSE clients |
+| `UiEvent` | `tokio::sync::broadcast::Sender` (capacity 1024) + an `RwLock` holding the latest heartbeat | emulator + worker → SSE clients |
 | `VideoMsg` | `tokio::sync::broadcast::Sender` (capacity 64) | emulator → SSE clients |
-| `Status` | `tokio::sync::watch::Sender` | emulator + worker → SSE clients |
+| `RunStatus` | `RwLock<RunStatus>` + a `UiEvent` on each transition (**W6**) | emulator + worker → SSE clients |
 | Latest frame | `RwLock<Arc<FrameSnapshot>>` | emulator → worker (screenshots) + late joiners |
 
-The only tokio types are the three broadcast/watch senders, and they are used purely as the
-sync→async bridge: **`broadcast::Sender::send` and `watch::Sender::send` are synchronous and
-non-blocking**, callable from a plain thread with no runtime handle and no `block_on`. Everything
-between the emulator, the policy and the worker is `std::sync::mpsc`.
+The only tokio types are the two broadcast senders, and they are used purely as the sync→async
+bridge: **`broadcast::Sender::send` is synchronous and non-blocking**, callable from a plain thread
+with no runtime handle and no `block_on`. Everything between the emulator, the policy and the worker
+is `std::sync::mpsc`.
+
+⚠️ **The status heartbeat is sent on change, not on a timer.** At the original 10 Hz unconditional it
+measured **49.7 kbit/s per viewer** against ~8 for the idle video feed, with nine of ten payloads
+identical to the one before. It is now sampled at `GB_STATUS_HZ` (2 Hz) and published only when
+`StatusSnapshot::says_the_same_as` says it differs, with a 2 s keepalive for liveness: 5.2 kbit/s
+measured. The consequence is that `/api/events` has to **open with the latest heartbeat** — one
+shared cell, not a buffer per client — or a page opened during a quiet stretch waits for something to
+move. Same subscribe-then-read handshake as the video keyframe, and for the same reason.
+
+⚠️ **There is no `watch<Status>`, and W6 did not add one.** A `watch` would give a late joiner the
+current value, which is the whole reason it was in this table — but the 10 Hz `StatusSnapshot` is
+already going to every client, so carrying `RunStatus` on it costs nothing and needs no second
+channel. What is left is an `RwLock` the heartbeat reads and a `UiEvent` on each transition, so a
+viewer sees a change at once and a joiner is at worst 100 ms behind.
 
 `broadcast` drops the oldest message for a slow client rather than blocking the producer — correct
 for video, and for `UiEvent` the client recovers via `/api/history`.
@@ -1037,21 +1051,37 @@ would overstate the context fifty-fold and trip the trim on a history that is no
 
 ---
 
-## 9. Phase W6 — Tokens, status, compaction
+## 9. Phase W6 — Tokens, status, compaction ✅ **done**
+
+**What shipped.** `src/llm/accounting.rs` (the token ledger and the estimator's calibration),
+`src/llm/compaction.rs` (both stages, as pure functions over `Vec<Message>`), `RunStatus` in
+`src/web/published.rs`, and the worker changes that drive all three. The SPA gained a run-status
+label, a context gauge with the run's cumulative spend, and a `compacted` line in the conversation.
+
+**Acceptance — met.** `llm::compaction::tests::*` and `llm::accounting::tests::*` cover the surgery
+and the arithmetic; `llm_policy::tests::a_full_context_is_summarised_and_the_next_turn_carries_the_summary`
+drives a real compaction through the real worker and asserts the next turn opens on the summary;
+`the_run_status_follows_the_turn_and_settles_back_to_playing` pins the state machine. Verified live
+against a mock endpoint that reports honest `usage`: the gauge climbed turn by turn, a compaction
+fired at 72% (**5 829 → 1 439 tokens, summarised**), and the run carried on for sixty more turns on
+the compacted history. Default tier **1128** green, `full_playthrough` green (266 s).
 
 ### Token accounting
-Track `prompt_tokens` / `completion_tokens` / cumulative totals from each response's `usage`, with
-the §7.1 estimator as a fallback. The UI shows current context occupancy as a percentage of
-`GB_CONTEXT_LIMIT` and a running total for the run.
+`Accounting` folds each response's `usage` in, with `Usage::estimate` as the fallback, and publishes
+`UsageView` — occupancy, the run's cumulative prompt and completion totals, the number of completions
+billed, and whether the figures are reported or estimated — on every `Decision` event.
 
 ### Status
-Broadcast on every transition:
+`RunStatus`, exactly as the enum below, and it rides **both** the transition event
+(`UiEventBody::Run`, sent only when the value changes) and every 10 Hz `StatusSnapshot`. That is the
+answer to W1's deferred "no `watch<Status>`": the event is instant, the heartbeat is what a late
+joiner reads, and neither needs W7's history endpoint.
 
 ```rust
-enum Status {
-    Booting,
+enum RunStatus {
+    Booting,                              // until the emulator runs its first cycle
     Playing,                              // agent driving, no decision pending
-    AwaitingLlm { kind: DecisionKind },   // request sent, nothing back yet
+    AwaitingLlm { kind: &'static str },   // request sent, nothing back yet
     Streaming,                            // tokens arriving
     RunningTool { name: String },
     Compacting,
@@ -1062,72 +1092,163 @@ enum Status {
 
 ### Compaction
 
-Two stages, cheapest first, both triggered when occupancy crosses **70%** of `GB_CONTEXT_LIMIT`:
+Two stages, cheapest first, both triggered when occupancy crosses **70%** of `GB_CONTEXT_LIMIT`
+(`worker::COMPACT_ABOVE`):
 
-1. **Image eviction.** Replace all but the two most recent screenshot content parts with the text
-   `[screenshot removed to save context]`. Often enough on its own.
-2. **Summarising compaction.** If still over threshold: one extra completion asking the model to
-   write a "story so far" — where it is, what it has done, what it is trying to do next, what it has
-   learned about the world. Replace everything except the system prompt and the last **8** messages
-   with that summary as a single user message.
+1. **Image eviction.** Every screenshot but the two most recent becomes its caption plus
+   `[screenshot removed to save context]`. Often enough on its own, and it costs nothing.
+2. **Summarising compaction.** One extra completion writes the story so far; everything except the
+   system prompt and the last **8** messages is replaced by it. Skipped when it cannot help
+   (`compaction::worth_summarising`).
 
-The system prompt is never compacted, and neither are the memory index or the TODO list — they are
-re-rendered into the system prompt every turn (§10), so they survive compaction by construction.
-That is the point of having them.
+If neither gets the history under the line, `Worker::trim_history` — W4's stopgap, now the last
+resort — drops whole turns from the front. A `UiEvent::Compacted { before, after, images_evicted,
+summarised }` reports what happened, and `Status::Compacting` shows it happening.
 
-⚠️ **The summary message must end with a restatement of the turn contract** (§7.5). Compaction is
-exactly where a long-running behavioural rule gets quietly dropped, and the failure mode — a model
-that replies with prose and never calls a terminal tool — stalls the run rather than erroring. The
-summarisation prompt appends it as fixed text rather than asking the model to carry it over.
+**Where the plan was wrong, or silent.**
 
-Emit `Status::Compacting` and a `UiEvent::Compacted { before, after }` so a viewer sees it happen.
+1. ⚠️ **"70% full" has to mean the same thing before and after a message is removed, and it did not.**
+   The reported figure counts the request that was *sent*; our own estimator counts the history as it
+   *stands*, and the two differ by tens of percent. Deciding stage 2 on the estimate after deciding
+   stage 1 on the report means a history the endpoint calls 90 k, whose estimate is 40 k, drops three
+   screenshots to 39 k and never gets summarised. Every reported figure now calibrates the estimator
+   (`Accounting::calibration`, clamped to 0.25–8×) and every decision is taken on that one scale.
+2. ⚠️ **The summarisation request must carry no `tools` key *and* no `parallel_tool_calls`.** OpenAI
+   rejects the latter outright when the former is absent — "only allowed when 'tools' are specified" —
+   so `ChatRequest::parallel_tool_calls` became an `Option<bool>` that is omitted for this one request.
+   A 400 here is worse than a 400 anywhere else: it is the request that exists to stop the *next* one
+   failing.
+3. ⚠️ **Eviction creates a cut point where there was none.** A picture is a `user` message that is not
+   a turn boundary (W5); turning it into text makes it look exactly like one, in the middle of a turn.
+   `compaction::is_turn_start` therefore excludes an evicted picture as well as a real one, and it is
+   now the single definition used by the trim, the summary's tail cut and `pop_if_user`.
+4. ⚠️ **The summary sits exactly where "drop the oldest turn" looks first.** Without
+   `compaction::is_summary`, the last-resort trim eats the summary one turn after paying a completion
+   for it — throwing away everything it stands for to save fifty tokens.
+5. ⚠️ **A context limit smaller than the system prompt would summarise on every turn, forever**, each
+   one making the history one message *longer*. `worth_summarising` requires more in the history than
+   the system prompt, a summary and the tail that would be kept.
+6. ⚠️ **Compaction is deliberately not cancellable**, unlike every other blocking point in the worker.
+   Abandoning it leaves the history over the limit and makes the *next* request the one that fails.
+   The cost is one completion's latency on a game that is not waiting for anything — the emulator runs
+   throughout, as it does during any turn.
+7. **The turn that filled the window survives the compaction**, because it is the most recent one and
+   the tail is what stage 2 keeps. That is not a bug and not worth special-casing: the next turn's
+   trim drops it once it is no longer the newest.
+8. **`Playing` is set by the emulator loop exactly once**, on the first tick that emulates a cycle.
+   Setting it every tick — the obvious reading — stamps on `AwaitingLlm` fifty times a second. After
+   that the worker owns every transition, and an `Error` is left standing until the next turn starts,
+   because a status that flicks straight back to `Playing` is one nobody ever sees.
+9. **The summary's deltas are not published as `AssistantDelta`.** A thousand words of bookkeeping in
+   the conversation pane reads as the model talking to itself.
 
----
-
-## 10. Phase W6b — Memory and TODO
+## 10. Phase W6b — Memory and TODO ✅ **done**
 
 Files on disk, in the run directory, so they survive both compaction and process restart.
 
 ```
 $GB_RUN_DIR/<run-id>/
-    memories/<slug>.md      # one note per file: frontmatter title + freeform body
+    memories/<slug>.md      # one note per file: frontmatter name + freeform body
     todo.json               # [{ id, text, done }]
 ```
 
-`memory_write` slugifies the name, caps the body (8 KB) and the count (64 files). The **index**
-(names + first line of each) and the **entire TODO list** are re-rendered into the system prompt every
-turn, so the model always knows what it knows without spending a tool call; `memory_read` fetches a
-full body on demand.
+**What shipped.** `src/llm/notes.rs` and four tools — `memory_write`, `memory_read`, `todo_add`,
+`todo_complete` — offered on every decision kind and answered on the **worker thread**, like
+`screenshot` and for the same reason: none of it needs the emulator, so a round trip through
+`service_tools` would be a round trip for a file write. `memory_write` slugifies the name, caps the
+body (8 KB) and the count (64); the TODO list caps at 64 items of 200 characters.
+
+The **index** (names + first line of each) and the **entire TODO list** are re-rendered into the
+system prompt every turn by `prompt::system_message`, so the model always knows what it knows without
+spending a tool call; `memory_read` fetches a full body on demand.
 
 This is the mechanism by which a run keeps long-horizon intent across compactions: "beat Brock" is a
 TODO item, not something in the last 8 messages.
 
+**Where the plan was wrong, or silent.**
+
+1. ⚠️ **A note written in the same message as the terminal call was being thrown away.** §7.3's rule
+   is that a message mixing reads with a terminal call ends the turn and the reads are *not run* — a
+   read's answer is worthless once the turn is over. A note is not a question, it is a **side effect
+   the model asked for**, and "remember this, and go north" is the most natural sentence in the
+   world. Dropping half of it silently loses exactly the intent §10 exists to keep. Found within
+   thirty seconds of pointing a mock at it: the very first turn wrote a TODO and it never appeared.
+2. ⚠️ **A name from a model is not a filename.** `memory_write { name: "../../etc/passwd" }` is one
+   tool call away at all times. `notes::slugify` reduces to `[a-z0-9-]`, and the test asserts on the
+   *directory listing* rather than on the function, because that is the thing that must hold.
+3. **The notes go in the system message, not a user one.** Index 0 is the one message compaction
+   never touches (§9) — putting them anywhere else would mean the memory feature stops working
+   exactly when it starts mattering.
+4. **`Notes::open(None)` is a first-class mode**, not a test seam: everything works, nothing is kept.
+   That is what the worker's own tests run against, and it means no calling code has to branch on
+   whether there is a run directory.
+5. **The TODO cap drops a *done* item to make room** rather than refusing. A run that finished sixty
+   things an hour ago should not be unable to plan the sixty-first.
+
 ---
 
-## 11. Phase W7 — Persistence and resume
+## 11. Phase W7 — Persistence and resume ✅ **done**
 
 ```
 $GB_RUN_DIR/<run-id>/
-    meta.json           # run id, model, started-at, last-checkpoint-at
-    state.gbst          # GameBoy::save_state()
-    sram.bin            # dump_sram()
+    meta.json           # run id, model, started-at, last-checkpoint-at, emulated ms, resume history
+    state.gbst          # GameBoy::save_state() — what a resume actually loads
+    sram.bin            # dump_sram(), as an ordinary .sav for anything else that reads one
     transcript.jsonl    # one JSON object per UiEvent, append-only
     memories/  todo.json
 ```
 
-- **Checkpoint** every 60 s and on clean shutdown (SIGTERM handler): save state + SRAM + `meta.json`.
-  The transcript is appended continuously, not checkpointed.
-- **Resume** on startup: newest run directory wins unless `--new-run`. `GameBoy::load_state` is
-  transactional (applies to a clone, `game_boy.rs:115`), so a corrupt checkpoint fails cleanly and
-  we fall back to a fresh run rather than a half-loaded one.
-- **Backlog:** `GET /api/history?since=<seq>` streams `transcript.jsonl` from a sequence number. The
-  SPA calls it on mount, renders it, then attaches to `/api/events` — same subscribe-then-backfill
-  ordering as the video path (§5.2), so nothing is lost or duplicated at the seam.
+**What shipped.** `src/run/mod.rs` (the directory, `meta.json`, atomic checkpoints, resume
+discovery), `src/run/transcript.rs` (the writer thread and the backlog reader), the host's periodic
+and shutdown checkpoints, `GET /api/history?since=`, `--new-run`, `GB_RUN_DIR`, and the SPA's
+backfill on mount.
+
+- **Checkpoint** every 60 s and on clean shutdown — **SIGTERM as well as Ctrl-C**, because `docker
+  stop` sends the former and a container that handled only the latter would lose up to a minute of
+  play on every deploy. The transcript is appended continuously, not checkpointed.
+- **Resume** on startup: the newest directory holding a *loadable* `state.gbst` wins, unless
+  `--new-run`. `GameBoy::load_state` applies to a clone, which is what makes it usable as the
+  validity test — a corrupt checkpoint falls through to the next candidate and then to a fresh run,
+  and says so, rather than refusing to start.
+- **Backlog:** `GET /api/history?since=<seq>` returns the transcript from a sequence number, capped
+  at the most recent 2 000 events. The SPA attaches to `/api/events` **first** and calls this second
+  — the same subscribe-then-backfill ordering as the video path (§5.2).
 - Transcript rotation at 256 MB; the LLM's own message history is capped by compaction, not by this.
+
+**Acceptance — met.** `run::tests::*` cover the directory, the resume, the corrupt-checkpoint
+fallthrough and the rename; `transcript::tests::*` cover the writer, the append-on-restart and the
+backlog cap; `host::tests::a_checkpointed_run_resumes_where_it_stopped` plays, checkpoints, and
+brings a second host up in the same place. Verified for real against a mock endpoint: a run played
+for 90 s, took SIGTERM, wrote its checkpoint, and a second process printed `resuming run
+run-…` and came up at 4:47 of in-game play time with its notes intact.
+
+**Where the plan was wrong, or silent.**
+
+1. ⚠️ **`UiEvent::seq` restarted at zero in the second process**, which quietly breaks the two things
+   the sequence number is for: `?since=` selects across both ranges, and the browser keys its
+   entries by it, so a resumed run renders duplicate keys. `Published::resuming` continues the
+   numbering from `transcript::last_seq`. Found by reading the file after a restart, not by a test —
+   which is why the test exists now.
+2. ⚠️ **The status heartbeat is excluded from the transcript.** "One JSON object per `UiEvent`" taken
+   literally is ten a second of a message whose whole purpose is to be current: 36 000 lines and
+   ~14 MB an hour, drowning the conversation and making `/api/history` a replay of yesterday's clock.
+   A viewer gets a fresh heartbeat within 100 ms of connecting.
+3. ⚠️ **Every file is written by rename.** A SIGTERM landing inside a `state.gbst` write leaves a
+   truncated file, and the *next* start is the one that fails — by which time the good copy is gone.
+4. **A resume continues the run in place** rather than creating a new directory that points at the
+   old one. A run resumed nightly is one directory, not thirty; `meta.json` keeps the list of resume
+   times.
+5. **`sram.bin` is an artifact, not part of the resume.** The save state already carries the
+   cartridge RAM (`mmu`'s `ram_banks`), so a resume needs `state.gbst` alone; the `.sav` is there for
+   anything else that wants to read the file.
+6. **The first periodic checkpoint is one interval away, not immediate.** Otherwise a process that
+   crash-loops rewrites its own save every few seconds.
+7. **The run directory is resolved before the policy is built**, so a missing `OPENAI_API_KEY` is an
+   error before a directory exists for a run that cannot start.
 
 ⚠️ **`Audio::set_output_sample_rate` is not serialised** and must be re-applied after every
 `load_state` (`render.rs:154-159`). Irrelevant while audio is deferred, but the resume path is where
-it will bite when §12 lands — leave a comment there now.
+it will bite when §12 lands — `EmulatorHost::new` now carries the comment.
 
 ---
 
@@ -1279,8 +1400,40 @@ feature. New tests follow it.
 | `llm_policy::tests::a_forget_prompt_pre_empts_the_battle_turn_it_interrupts` ✅ | default | §7.2's ⚠️ — the battle turn is cancelled, and the four known moves are the menu |
 | `llm_policy::tests::a_forget_slot_the_pokemon_does_not_have_declines_instead_of_hanging` ✅ | default | A cursor sent to a fifth move slot never arrives |
 | `mechanics::a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it` ✅ | default | W5's pull seam end to end: the START menu opens without the test touching `queue_manual_input` |
-| `llm::compaction::tests::*` | W6 | Image eviction, summary replacement, system prompt survives |
-| `llm::compaction::tests::summary_restates_turn_contract` | W6 | §9 — the contract survives a compaction |
+| `llm::compaction::tests::eviction_keeps_the_two_most_recent_pictures_and_costs_nothing_else` ✅ | default | Stage 1: which pictures go, that the caption stays, that a plain string is left behind, and that it saves what it claims |
+| `llm::compaction::tests::an_evicted_picture_is_never_a_cut_point` ✅ | default | §9's ⚠️ 3 — eviction must not turn a mid-turn message into a legal boundary |
+| `llm::compaction::tests::a_summary_replaces_the_middle_and_leaves_a_well_formed_history` ✅ | default | Stage 2, and the invariant the endpoint enforces with a 400: every surviving `tool` message still has its call |
+| `llm::compaction::tests::the_tail_starts_at_a_turn_and_never_in_the_middle_of_one` ✅ | default | Looped over every tail length, including the ones shorter than one turn |
+| `llm::compaction::tests::summary_restates_turn_contract` ✅ | default | §9's ⚠️ — the contract survives a compaction, in the same words the turn contract uses |
+| `llm::compaction::tests::a_summary_is_recognisable_and_a_short_history_is_not_worth_one` ✅ | default | §9's ⚠️ 4 and 5 — the trim can spot the summary, and a history too short to gain from one is left alone |
+| `llm::compaction::tests::a_summary_request_asks_for_prose_and_offers_no_tools` ✅ | default | §9's ⚠️ 2 — no `tools`, and therefore no `parallel_tool_calls` |
+| `llm::compaction::tests::degenerate_histories_survive_a_compaction` ✅ | default | No system prompt, nothing at all, a history shorter than the tail |
+| `llm::accounting::tests::the_estimator_is_calibrated_against_what_the_endpoint_reported` ✅ | default | §9's ⚠️ 1 — one scale, before and after a message is removed |
+| `llm::accounting::tests::{totals_accumulate…, an_endpoint_that_reports_nothing…, an_absurd_ratio_is_clamped}` ✅ | default | The bill against the gauge; the W4 degradation path; a lying endpoint |
+| `web::published::tests::a_status_is_broadcast_on_transition_and_only_on_transition` ✅ | default | The silence matters: `set_status` is called from loops running at 50 Hz |
+| `web::published::tests::a_run_status_serialises_flat_with_a_state_discriminator` ✅ | default | The wire shape `api.ts` is hand-written against |
+| `llm_policy::tests::the_run_status_follows_the_turn_and_settles_back_to_playing` ✅ | default | §9's state machine end to end, including that it comes back to `Playing` |
+| `llm_policy::tests::a_full_context_is_summarised_and_the_next_turn_carries_the_summary` ✅ | default | A real compaction through the real worker: summarised, cheaper, well-formed, and the contract still in the history |
+| `run::tests::a_fresh_run_becomes_a_resumable_one` ✅ | default | §11 — the directory, `meta.json`, and a checkpoint that comes back |
+| `run::tests::a_corrupt_checkpoint_falls_through_to_a_fresh_run` ✅ | default | §11's rule: an unloadable state is not a reason to refuse to start, and a good one beside it still wins |
+| `run::tests::{new_run_starts_beside_the_old_one…, a_checkpoint_is_written_by_rename, run_ids_do_not_collide_within_a_second}` ✅ | default | `--new-run` leaves the old run untouched; the `.tmp`-then-rename; two runs in one second |
+| `run::tests::the_clock_agrees_with_a_calendar` ✅ | default | The twelve lines of date arithmetic that replace a `chrono` dependency — a leap day, and a century that is not one |
+| `run::transcript::tests::the_story_is_written_and_the_heartbeats_are_not` ✅ | default | §11's ⚠️ 2, and the sequence number a restart continues from |
+| `run::transcript::tests::a_second_process_appends_rather_than_starting_again` ✅ | default | The transcript is the one thing in the directory that is not a snapshot |
+| `run::transcript::tests::the_backlog_is_capped_at_the_most_recent_events` ✅ | default | A month-old run must not make a page load allocate the file |
+| `host::tests::a_checkpointed_run_resumes_where_it_stopped` ✅ | default | W7's acceptance without a restart: a second host, given only the directory, comes up in the same place |
+| `host::tests::a_heartbeat_that_says_nothing_new_is_not_sent` ✅ | default | Every heartbeat sent says something the one before did not — sampled far faster than anything can change, so every suppression is exercised |
+| `host::tests::an_idle_run_still_sends_a_keepalive` ✅ | default | …and a game that is not moving still proves it is alive |
+| `published::tests::a_heartbeat_is_the_same_as_another_when_only_the_clock_has_moved` ✅ | default | ⚠️ A derived `PartialEq` would never match and the suppression would silently never fire |
+| `published::tests::a_joiner_is_handed_the_last_heartbeat_rather_than_an_empty_panel` ✅ | default | The other half of send-on-change, and that it is one shared cell rather than a buffer per client |
+| `cli::tests::the_usage_names_every_flag_and_variable` ✅ | default | ⚠️ `--new-run` shipped without ever appearing in `--help`; for a tool discovered through `--help` that is a flag that does not exist |
+| `published::tests::events_are_numbered_from_zero…` ✅ (extended) | default | §11's ⚠️ 1 — a resumed process continues the numbering |
+| `llm::notes::tests::notes_survive_the_process_that_wrote_them` ✅ | default | §10 end to end: written, indexed into the system prompt, read back after a reopen |
+| `llm::notes::tests::a_name_from_a_model_can_never_escape_the_directory` ✅ | default | §10's ⚠️ 2 — asserted on the directory listing, not on the function |
+| `llm::notes::tests::{the_caps_hold_and_say_why, notes_without_a_directory_still_answer}` ✅ | default | The caps and their messages; `Notes::open(None)` as a first-class mode |
+| `llm::tools::tests::terminal_tools_are_scoped_per_kind` ✅ (extended) | default | Every kind is offered the four note tools as well as the reads |
+| `prompt::tests::the_contract_names_every_tool_the_turn_is_actually_sent` ✅ (extended) | default | The notes reach the system message, and the contract names them as non-terminal |
+| `cli::tests::new_run_is_a_switch_and_not_a_setting` ✅ | default | It must not swallow the flag after it |
 | `mechanics::manual_input_preempts_state_machine` ✅ | default | W0.4 — a queued press fires and resets to `Idle` |
 | `mechanics::policy_receives_text_events` ✅ | default | W0.3 — `on_event` sees `TextBox` |
 | Existing suite | all tiers | Unchanged |
@@ -1311,8 +1464,9 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | **W3** ✅ | Vite/React SPA · embedded via `rust-embed` · screen + status + conversation shell | ✅ Full UI under `--policy random`, verified headlessly including reconnect |
 | **W4** ✅ | OpenAI client (streaming, tool calls) · `LlmPolicy` · kind-keyed turns + cancellation · overworld + battle decisions · the read tools | ✅ LLM plays from the start of the game against a mock endpoint; conversation, tool calls and decisions stream into the SPA |
 | **W5** ✅ | The rest of the tool surface: `screenshot`, raw buttons, field moves, nickname/mart/forget | ✅ Mock-server test asks for a read and a screenshot in one message and checks the PNG that came back; `full_playthrough` green |
-| **W6** | Token accounting · status broadcast · two-stage compaction · memory + TODO | Compaction tests |
-| **W7** | Run directory · checkpoint/resume · transcript backlog | Survives restart mid-run |
+| **W6** ✅ | Token accounting · status broadcast · two-stage compaction | ✅ Compaction tests, plus a live run against a mock endpoint that compacted at 72% and carried on |
+| **W6b** ✅ | Memory and TODO (§10): four tools, a note directory, a TODO list, both rendered into the system prompt every turn | ✅ Notes survive a compaction and a restart; verified live |
+| **W7** ✅ | Run directory · checkpoint/resume · SIGTERM · transcript · `/api/history` · `--new-run` | ✅ Survives a restart mid-run: SIGTERM, checkpoint, second process resumes at 4:47 of play with its notes |
 | **W8** | Multi-stage Dockerfile · no-SDL build · ops config | Image builds and runs |
 | **W9** | Stuck-run watchdog — lenient, last resort, loud (§14) | Fires on a deliberately jammed agent |
 | *(deferred)* | Audio streaming (§12) | — |
@@ -1320,12 +1474,20 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.
 
-**What W6 inherits.** The whole tool surface except memory and TODO (§10), which are W6b's. Token
-accounting has one number (`UsageView::context_tokens`) and a crude turn-dropping trim
-(`Worker::trim_history`) standing in for compaction; `Message::has_image` is already there for §9's
-image-first eviction, and images are the only messages in the history whose cost is a flat rate
-rather than a character count. `Status` is still riding the `UiEvent` broadcast rather than being an
-enum of its own (W1's decision, revisited here).
+**What W8 inherits.** W6, W6b and W7 all shipped, so a run now bounds its own context, keeps its own
+notes, and survives the process being restarted. The container has one job left that is really its
+own: `GB_RUN_DIR` wants to be a volume, and `docker stop`'s SIGTERM is already handled.
+
+Still open, and neither is a phase:
+
+- **The per-run token ceiling (§17's risk 4).** The accounting is there —
+  `UsageView::{prompt_tokens, completion_tokens, completions}` — so it is a limit and a halting
+  `RunStatus`.
+- **Cancellation churn as a number (§17's risk 2b).** `TurnCancelled` is an event; nothing counts it.
+
+`Worker::trim_history` survives as the last resort behind both compaction stages rather than as the
+whole of the strategy, and `is_turn_start` moved to `compaction` where the rules about what may be
+cut now live together.
 
 **What W3 inherited.** `/` served `web/dev/video.html` via `DEV_PAGE` in `src/web/mod.rs`; it is now
 `rust-embed` over `web/dist` (`src/web/assets.rs`) and the file is gone. Its JS decoder was ported to
@@ -1350,8 +1512,9 @@ real stream, and the port was re-checked the same way.
 3. **Endpoint compatibility.** "OpenAI-compatible" varies most in exactly the two places we depend
    on: streamed `usage`, and tool-call argument fragmentation. §7.1 hedges both.
 4. **Cost.** Every decision point is a completion, and there are thousands per playthrough. Screenshots
-   multiply it. Worth adding a per-run token ceiling that stops the run rather than a surprise bill —
-   the accounting from W6 is already there, it just needs a limit and a `Status::Halted`.
+   multiply it. Worth adding a per-run token ceiling that stops the run rather than a surprise bill.
+   **W6's accounting is now there** — `UsageView` carries the cumulative prompt and completion totals
+   and the number of completions billed — so what is left is a limit and a halting `RunStatus`.
 5. **`CLAUDE.md` references deleted docs.** `docs/` was removed wholesale in `1aa9141`, but
    `CLAUDE.md` still points at `docs/compatibility/10-implementation-plan.md`,
    `docs/postgame-coverage-plan.md` and others in several places. Unrelated to this work, but it will

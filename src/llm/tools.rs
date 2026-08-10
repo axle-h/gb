@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
+use crate::llm::notes::{MAX_BODY, MAX_MEMORIES, MAX_TODO_TEXT, NoteCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
 use crate::pokemon::GameState;
 use crate::pokemon::PokemonApi;
@@ -121,6 +122,9 @@ pub enum CallKind {
     /// `screenshot`. Answered by the **worker**, from the frame the host already published — see
     /// [`crate::llm::screenshot`]. It never reaches the emulator thread.
     Screenshot,
+    /// **W6b** — a note or TODO operation. Answered by the worker too: none of it needs the
+    /// emulator, so making it a batch for `service_tools` would cost a round trip for a file write.
+    Note(NoteCall),
     /// The turn is over.
     Terminal(Terminal),
     /// Nothing this turn can use — an unknown name, a terminal tool belonging to the other decision
@@ -336,12 +340,103 @@ fn is_read_tool(name: &str) -> bool {
     READ_TOOLS.iter().any(|tool| tool.name == name)
 }
 
+// ── W6b: the notes (§10) ─────────────────────────────────────────────────────────────────────────
+
+/// The four note tools, by name. Non-terminal like the reads, and named in the turn contract for the
+/// same reason: a model that thinks `memory_write` ends the turn stops playing.
+pub const NOTE_TOOL_NAMES: &[&str] = &["memory_write", "memory_read", "todo_add", "todo_complete"];
+
+/// Their specs. A function rather than a const because two of them take arguments and a JSON Schema
+/// is not a `const` expression.
+pub fn note_tools() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec::new(
+            "memory_write",
+            format!(
+                "Write a note to yourself, under a short name. Notes survive a context compaction \
+                 and a restart, which nothing else in this conversation does — use them for what \
+                 you would otherwise have to rediscover: what a person wanted, where a route was \
+                 blocked, what you have already tried. Writing to a name you have used before \
+                 replaces it. At most {MAX_MEMORIES} notes of {MAX_BODY} characters, and the first \
+                 line of every one is in your system prompt."
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "A short name, e.g. `mt-moon` or `rival team`." },
+                    "body": { "type": "string", "description": "The note itself." },
+                },
+                "required": ["name", "body"],
+                "additionalProperties": false,
+            }),
+        ),
+        ToolSpec::new(
+            "memory_read",
+            "Read one of your notes back in full. The names are listed in your system prompt.",
+            json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "The note's name." } },
+                "required": ["name"],
+                "additionalProperties": false,
+            }),
+        ),
+        ToolSpec::new(
+            "todo_add",
+            format!(
+                "Add something to your TODO list. The whole list is in your system prompt every \
+                 turn, so this is how a plan outlives the conversation that made it: `beat Brock`, \
+                 `come back here with Surf`. At most {MAX_TODO_TEXT} characters."
+            ),
+            json!({
+                "type": "object",
+                "properties": { "text": { "type": "string", "description": "What to do." } },
+                "required": ["text"],
+                "additionalProperties": false,
+            }),
+        ),
+        ToolSpec::new(
+            "todo_complete",
+            "Mark one of your TODO items done, by the number shown beside it in your system prompt.",
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "integer", "minimum": 1, "description": "The item's number." } },
+                "required": ["id"],
+                "additionalProperties": false,
+            }),
+        ),
+    ]
+}
+
+fn classify_note(name: &str, arguments: &Value) -> Option<CallKind> {
+    let call = match name {
+        "memory_write" => match (string_argument(arguments, "name"), string_argument(arguments, "body")) {
+            (Ok(name), Ok(body)) => NoteCall::Write { name, body },
+            (Err(complaint), _) | (_, Err(complaint)) => return Some(CallKind::Rejected(complaint)),
+        },
+        "memory_read" => match string_argument(arguments, "name") {
+            Ok(name) => NoteCall::Read { name },
+            Err(complaint) => return Some(CallKind::Rejected(complaint)),
+        },
+        "todo_add" => match string_argument(arguments, "text") {
+            Ok(text) => NoteCall::TodoAdd { text },
+            Err(complaint) => return Some(CallKind::Rejected(complaint)),
+        },
+        "todo_complete" => match arguments.get("id").and_then(Value::as_u64) {
+            Some(id) => NoteCall::TodoComplete { id: id.min(u64::from(u32::MAX)) as u32 },
+            None => return Some(CallKind::Rejected("`todo_complete` needs the item's `id`.".to_string())),
+        },
+        _ => return None,
+    };
+    Some(CallKind::Note(call))
+}
+
 /// The `tools` array for one decision kind — §7.5's first line of defence.
 pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
     let mut tools: Vec<ToolSpec> = READ_TOOLS
         .iter()
         .map(|tool| ToolSpec::new(tool.name, tool.description, no_arguments()))
         .collect();
+    tools.extend(note_tools());
 
     match kind {
         DecisionKind::Overworld => {
@@ -556,6 +651,13 @@ fn press_buttons_spec() -> ToolSpec {
 }
 
 /// The terminal tool names a turn of this kind may end with, for the contract restated in the prompt.
+/// Every tool that does **not** end a turn: the reads, the screenshot and W6b's notes. The contract
+/// at the bottom of each turn names them all, because a model that believes `memory_write` was its
+/// terminal call simply stops playing.
+pub fn non_terminal_names() -> Vec<&'static str> {
+    READ_TOOLS.iter().map(|tool| tool.name).chain(NOTE_TOOL_NAMES.iter().copied()).collect()
+}
+
 pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
     match kind {
         DecisionKind::Overworld => &["choose_action", "use_field_move", "press_buttons", "wait"],
@@ -590,6 +692,10 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
             ));
         }
     };
+
+    if let Some(note) = classify_note(name, &arguments) {
+        return note;
+    }
 
     match name {
         "choose_action" if kind == DecisionKind::Overworld => match string_argument(&arguments, "id") {
@@ -665,8 +771,9 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
             terminal_names(kind).join(", "),
         )),
         other => CallKind::Rejected(format!(
-            "There is no tool called `{other}`. The read tools are {}; end the turn with one of: {}.",
-            READ_TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", "),
+            "There is no tool called `{other}`. The tools that do not end the turn are {}; end the \
+             turn with one of: {}.",
+            non_terminal_names().join(", "),
             terminal_names(kind).join(", "),
         )),
     }
@@ -1021,7 +1128,11 @@ mod tests {
             for terminal in terminal_names(kind) {
                 assert!(offered.contains(terminal), "{kind:?} promises {terminal} but does not offer it");
             }
-            assert_eq!(offered.len(), READ_TOOLS.len() + terminal_names(kind).len());
+            assert_eq!(
+                offered.len(),
+                READ_TOOLS.len() + NOTE_TOOL_NAMES.len() + terminal_names(kind).len(),
+                "every turn is offered the reads, W6b's notes, and its own terminal tools",
+            );
         }
     }
 

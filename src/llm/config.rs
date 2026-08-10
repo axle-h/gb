@@ -10,16 +10,15 @@
 //! | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any compatible endpoint |
 //! | `OPENAI_API_KEY` | — | Required for `--policy llm` |
 //! | `GB_MODEL` | — | Required |
-//! | `GB_CONTEXT_LIMIT` | `128000` | Drives W6's compaction trigger |
+//! | `GB_CONTEXT_LIMIT` | `128000` | The window W6's compaction triggers at 70% of |
 //! | `GB_TEMPERATURE` | `1.0` | |
 //! | `GB_MAX_TOOL_STEPS` | `12` | Non-terminal calls per turn before a decision is forced |
 //! | `GB_PORT` | `8080` | Read in `cli.rs`, since it applies to `--policy random` too |
+//! | `GB_RUN_DIR` | `runs` | Read in `web/mod.rs`, for the same reason (**W7**) |
 //!
-//! Two of the plan's variables are deliberately **not** read here.
-//!
-//! `GB_RUN_DIR` is W7's. It configures the run
-//! directory, and a variable that is parsed and then ignored is worse than one that is not read at
-//! all, because it looks like it works.
+//! `GB_RUN_DIR` is **W7's and is read in `src/web/mod.rs`**, not here: it applies to
+//! `--policy random` too, and the run directory is resolved before this block is — a missing API key
+//! should be an error before a directory exists for a run that cannot start.
 //!
 //! `GB_PAUSE_WHILE_THINKING` (§2.1) was built in W4 and removed the same day. Freezing the emulator
 //! while the model thinks is never what this thing is for — the live picture is the product, and a
