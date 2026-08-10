@@ -229,7 +229,12 @@ fn the_llm_plays_from_a_fixture() {
     };
     let published = Published::new();
     let (worker, handles) =
-        worker::channels(Box::new(OpenAiClient::new(&config)), config, Arc::clone(&published));
+        worker::channels(
+            Box::new(OpenAiClient::new(&config)),
+            config,
+            Arc::clone(&published),
+            crate::llm::notes::Notes::open(None),
+        );
     let _worker = worker.spawn().expect("the worker thread starts");
 
     let mut fixture = TestFixture::with_policy(

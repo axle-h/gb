@@ -443,7 +443,7 @@ mod tests {
     use crate::llm::worker;
     use crate::pokemon::PokemonApiTrait;
     use crate::pokemon::actions::OverworldAction;
-    use crate::web::published::{Published, UiEvent, UiEventBody};
+    use crate::web::published::{Published, RunStatus, UiEvent, UiEventBody};
 
     // ── A scripted endpoint ──────────────────────────────────────────────────────────────────────
 
@@ -507,6 +507,15 @@ mod tests {
         Reply { completion: Completion { tool_calls, ..Completion::default() }, release: None }
     }
 
+    /// A reply that says something *and* calls a tool. The prose is what makes it possible to write a
+    /// turn of a chosen size, which is how the compaction test reaches its threshold without a
+    /// hundred thousand tokens of fixture.
+    fn saying_calls(text: &str, pairs: &[(&str, &str)]) -> Reply {
+        let mut reply = calls(pairs);
+        reply.completion.content = text.to_string();
+        reply
+    }
+
     fn held(mut reply: Reply, release: &Arc<AtomicBool>) -> Reply {
         reply.release = Some(Arc::clone(release));
         reply
@@ -535,6 +544,13 @@ mod tests {
 
     impl Rig {
         fn new(script: Vec<Reply>) -> (Self, LlmPolicy) {
+            Self::with_config(script, |_| {})
+        }
+
+        /// [`Self::new`] with the chance to change the config first — which in practice means
+        /// `context_limit`, because a compaction test that had to fill a real 128 k window would
+        /// have to send a hundred thousand tokens of fixture through a scripted endpoint.
+        fn with_config(script: Vec<Reply>, tweak: impl FnOnce(&mut LlmConfig)) -> (Self, LlmPolicy) {
             let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
             gb.load_state(FIXTURE).expect("the committed fixture loads");
 
@@ -556,7 +572,7 @@ mod tests {
                 }
             });
 
-            let config = LlmConfig {
+            let mut config = LlmConfig {
                 base_url: "http://scripted".into(),
                 api_key: "none".into(),
                 model: "scripted".into(),
@@ -564,8 +580,14 @@ mod tests {
                 temperature: 1.0,
                 max_tool_steps: 4,
             };
-            let (worker, handles) =
-                worker::channels(Box::new(Forwarding(Arc::clone(&endpoint))), config, Arc::clone(&published));
+            tweak(&mut config);
+            let (worker, handles) = worker::channels(
+                Box::new(Forwarding(Arc::clone(&endpoint))),
+                config,
+                Arc::clone(&published),
+                // No run directory: the note tools work, they simply keep nothing (W6b).
+                crate::llm::notes::Notes::open(None),
+            );
             let handle = worker.spawn().expect("the worker thread starts");
 
             let rig = Rig {
@@ -680,6 +702,41 @@ mod tests {
 
         fn drained_events(&self) -> Vec<UiEventBody> {
             self.events.try_iter().map(|event| event.body).collect()
+        }
+
+        /// Everything published up to and including the first event `wanted` accepts, or everything
+        /// published within `budget` if it never arrives.
+        ///
+        /// The worker publishes on its own thread, so "the decision landed" does not mean everything
+        /// that turn published has been seen — the status that follows it certainly has not.
+        fn events_until(
+            &self,
+            budget: Duration,
+            wanted: impl Fn(&UiEventBody) -> bool,
+        ) -> Vec<UiEventBody> {
+            let deadline = Instant::now() + budget;
+            let mut seen: Vec<UiEventBody> = Vec::new();
+            loop {
+                seen.extend(self.events.try_iter().map(|event| event.body));
+                if seen.iter().any(&wanted) || Instant::now() >= deadline {
+                    return seen;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn statuses(events: &[UiEventBody]) -> Vec<RunStatus> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    UiEventBody::Run { status } => Some(status.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn push(&self, replies: Vec<Reply>) {
+            self.endpoint.replies.lock().unwrap().extend(replies);
         }
 
         /// The first menu id the model would be offered.
@@ -1141,5 +1198,103 @@ mod tests {
             .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(&moves, PokemonMoveName::Bite))
             .expect("it is answered rather than left hanging");
         assert_eq!(answer, None, "declining keeps all the moves it has");
+    }
+    // ── W6 ───────────────────────────────────────────────────────────────────────────────────────
+
+    /// §9's status. A viewer should be able to tell, at any instant, whether the run is waiting on
+    /// the endpoint, reading the game, or playing — and the sequence must come back to `Playing`,
+    /// because a status that gets stuck on `AwaitingLlm` is worse than none at all.
+    #[test]
+    fn the_run_status_follows_the_turn_and_settles_back_to_playing() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        rig.push(vec![
+            calls(&[("read_map", "{}")]),
+            saying_calls("North it is.", &[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
+        ]);
+
+        rig.pump_overworld(&mut policy).expect("the decision lands");
+        let events =
+            rig.events_until(Duration::from_secs(2), |event| {
+                matches!(event, UiEventBody::Run { status: RunStatus::Playing })
+            });
+
+        assert_eq!(Rig::statuses(&events), [
+            RunStatus::AwaitingLlm { kind: "overworld" },
+            RunStatus::RunningTool { name: "read_map".into() },
+            RunStatus::AwaitingLlm { kind: "overworld" },
+            RunStatus::Streaming,
+            RunStatus::Playing,
+        ]);
+    }
+
+    /// §9 end to end, through the real worker: a history over the threshold is summarised, and the
+    /// **next** turn opens on the summary rather than on everything that came before it.
+    ///
+    /// The size comes from the model's own prose rather than from the fixture, because a compaction
+    /// test that had to fill a real context window would have to send it through a scripted endpoint
+    /// one turn at a time.
+    #[test]
+    fn a_full_context_is_summarised_and_the_next_turn_carries_the_summary() {
+        let (mut rig, mut policy) = Rig::with_config(vec![], |config| config.context_limit = 6_000);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        rig.push(vec![
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            // ~3 200 tokens of reasoning in one turn, which is what puts it over 70% of 6 000.
+            saying_calls(&"I am thinking very hard about this. ".repeat(320), &[("choose_action", &choose)]),
+            says("I am in Oak's lab with a Squirtle, about to leave for Route 1."),
+            calls(&[("choose_action", &choose)]),
+        ]);
+
+        for turn in 1..=4 {
+            rig.pump_overworld(&mut policy).unwrap_or_else(|| panic!("turn {turn} did not land"));
+        }
+        let events = rig
+            .events_until(Duration::from_secs(5), |event| matches!(event, UiEventBody::Compacted { .. }));
+        let compaction = events
+            .iter()
+            .find_map(|event| match event {
+                UiEventBody::Compacted { before, after, summarised, .. } => Some((*before, *after, *summarised)),
+                _ => None,
+            })
+            .expect("four turns of that should have filled a 6 000-token window");
+        let (before, after, summarised) = compaction;
+        assert!(summarised, "eviction cannot help a history with no pictures in it");
+        assert!(after < before, "the compaction saved nothing: {before} → {after}");
+        assert!(
+            Rig::statuses(&events).contains(&RunStatus::Compacting),
+            "a compaction is visible while it happens",
+        );
+
+        // The fifth turn is the point of the exercise: it opens on the system prompt and the summary.
+        rig.pump_overworld(&mut policy).expect("the run continues after a compaction");
+        let requests = rig.requests();
+        let last = requests.last().expect("requests were sent");
+        assert_eq!(last.messages[0].role, Role::System, "the system prompt is never compacted");
+        assert!(
+            last.messages[1].text().unwrap_or_default().starts_with("## The story so far"),
+            "the summary is the second message: {:?}",
+            last.messages[1].text(),
+        );
+        assert!(
+            last.messages[1].text().unwrap_or_default().contains("exactly one terminal tool call"),
+            "§9's ⚠️ — the contract has to survive the compaction",
+        );
+        // ⚠️ What is kept is the *tail*, so the turn that filled the window is still there — it is the
+        // most recent one. Everything before it is not: four turns of history are now three messages
+        // of it plus the summary.
+        assert!(
+            last.messages.len() <= 2 + crate::llm::compaction::KEEP_MESSAGES,
+            "the middle of the conversation is still there: {} messages",
+            last.messages.len(),
+        );
+        assert!(
+            last.messages.len() < requests[3].messages.len(),
+            "the turn after a compaction must be cheaper than the turn before it",
+        );
+        history_is_well_formed(last);
     }
 }

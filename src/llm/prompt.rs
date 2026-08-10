@@ -17,6 +17,17 @@ use crate::llm::tools::{DecisionKind, MenuItem, terminal_names};
 use crate::pokemon::GameState;
 use crate::pokemon::agent::AgentEvent;
 
+/// The system prompt as it goes into the history: [`SYSTEM_PROMPT`] plus the model's own notes
+/// (**W6b / §10**), re-rendered every turn.
+///
+/// ⚠️ **The notes have to be in the *system* message, not a user one.** Index 0 is the one message
+/// compaction never touches (§9), which is the whole reason the notes are the thing that outlives a
+/// compaction. Rebuilding it each turn costs the endpoint's prompt cache only when the notes
+/// actually change, which is rarely.
+pub fn system_message(notes: &crate::llm::notes::Notes) -> crate::llm::protocol::Message {
+    crate::llm::protocol::Message::system(format!("{SYSTEM_PROMPT}{}", notes.render()))
+}
+
 /// Never compacted. Everything that must stay true for the whole run lives here.
 pub const SYSTEM_PROMPT: &str = "\
 You are playing Pokémon Red on a Game Boy, through a text interface. You cannot see the screen \
@@ -49,6 +60,10 @@ How the interface works:
 - `press_buttons` presses the joypad yourself. It is a **last resort**: it interrupts whatever the \
   agent was doing, and the agent is better at menus than you are. Reach for it only where the game \
   is somewhere the action menu does not describe.
+- **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
+  everything not in that summary is gone. `memory_write` and `todo_add` are what survive it — and a \
+  restart of the program as well. Use them for anything you will still need in an hour: a plan, a \
+  place you have not been yet, something a person asked you for, something that did not work.
 
 Things worth knowing about this particular game:
 
@@ -66,10 +81,10 @@ Things worth knowing about this particular game:
 pub fn contract(kind: DecisionKind) -> String {
     format!(
         "End this turn by calling exactly one of: {}.\n\
-         Read tools ({}) do not end the turn — call as many as you need, in one message, then \
-         finish with a terminal call.",
+         These do not end the turn ({}) — call as many as you need, in one message, then finish \
+         with a terminal call.",
         terminal_names(kind).join(", "),
-        crate::llm::tools::READ_TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", "),
+        crate::llm::tools::non_terminal_names().join(", "),
     )
 }
 
@@ -319,6 +334,15 @@ mod tests {
         }
         assert!(SYSTEM_PROMPT.contains("do not end the turn"),
                 "the system prompt is the copy of the contract that survives compaction");
+
+        // **W6b.** The notes are rendered into the system message, which is the message a compaction
+        // never touches — that is the whole reason they are where the long-horizon plan lives.
+        let mut notes = crate::llm::notes::Notes::open(None);
+        notes.apply(crate::llm::notes::NoteCall::TodoAdd { text: "beat Brock".into() });
+        let system = system_message(&notes);
+        let text = system.text().expect("prose");
+        assert!(text.starts_with(SYSTEM_PROMPT), "the fixed part comes first and is unchanged");
+        assert!(text.contains("beat Brock"), "the TODO list is in every request: {text}");
     }
 
     /// A scrolling conversation emits the same line repeatedly. Twenty identical sentences is not

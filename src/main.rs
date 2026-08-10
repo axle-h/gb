@@ -24,6 +24,8 @@ mod sdl;
 mod web;
 #[cfg(feature = "web")]
 mod host;
+#[cfg(feature = "web")]
+mod run;
 #[cfg(feature = "llm")]
 mod llm;
 mod cli;
@@ -67,18 +69,18 @@ fn run(command: cli::Command) -> Result<(), String> {
     match command {
         cli::Command::Help => Ok(()), // handled by the caller, which needs to exit zero
         cli::Command::Ui => run_ui(),
-        cli::Command::Serve { port, policy } => run_serve(port, policy),
+        cli::Command::Serve { port, policy, new_run } => run_serve(port, policy, new_run),
     }
 }
 
 #[cfg(feature = "web")]
-fn run_serve(port: u16, policy: cli::ServePolicy) -> Result<(), String> {
-    web::run(port, policy)
+fn run_serve(port: u16, policy: cli::ServePolicy, new_run: bool) -> Result<(), String> {
+    web::run(port, policy, new_run)
 }
 
 /// `gb serve` is the whole of the `web` feature, so without it there is nothing to serve.
 #[cfg(not(feature = "web"))]
-fn run_serve(_port: u16, _policy: cli::ServePolicy) -> Result<(), String> {
+fn run_serve(_port: u16, _policy: cli::ServePolicy, _new_run: bool) -> Result<(), String> {
     Err(format!("this build has no web server — it was built without the `web` feature\n\n{}",
                 cli::USAGE))
 }

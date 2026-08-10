@@ -11,7 +11,8 @@
 //!   │     │     └─ Cancelled  → drop the last assistant message, abandon the turn
 //!   │     └─ terminal tool call  →  break
 //!   ├─ budget exhausted without a terminal call → force `wait`
-//!   └─ send TurnOutcome
+//!   ├─ send TurnOutcome
+//!   └─ over 70% of the context? → compact (W6 / §9)
 //! ```
 //!
 //! **Cancellation is a generation counter checked at exactly two points**, because those are the
@@ -30,14 +31,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use crate::llm::accounting::Accounting;
 use crate::llm::client::{ChatEndpoint, RetryPolicy, stream_with_retries};
+use crate::llm::compaction;
 use crate::llm::config::LlmConfig;
+use crate::llm::notes::Notes;
 use crate::llm::prompt;
 use crate::llm::screenshot;
-use crate::llm::protocol::{ChatRequest, Message, StreamOptions, ToolCall, Usage};
+use crate::llm::protocol::{ChatRequest, Completion, Message, StreamOptions, ToolCall, Usage};
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
-use crate::web::published::{Published, UiEventBody, UsageView};
+use crate::web::published::{Published, RunStatus, UiEventBody};
 
 /// One question, from the policy to the worker.
 #[derive(Debug, Clone)]
@@ -109,14 +113,19 @@ impl TurnHandles {
 /// going anywhere.
 const FAILURE_WAIT_TICKS: u16 = 100;
 
-/// Occupancy at which the W4 stopgap starts dropping old turns, and the level it drops back to.
+/// **W6 / §9** — the occupancy at which the history is compacted, as a fraction of
+/// `GB_CONTEXT_LIMIT`. Both stages trigger here: eviction first, and summarisation only if eviction
+/// left it still over.
 ///
-/// ⚠️ **This is not W6's compaction and does not pretend to be.** W6 summarises; this throws whole
-/// turns away from the front of the history, oldest first. It is here because without *some* bound a
-/// run stops working after an hour with a 400 from the endpoint, which would make W4's own
-/// acceptance criterion unreachable. It cuts only at turn boundaries — a `user` message — so a
-/// `tool_call` is never separated from its result.
-const TRIM_ABOVE: f64 = 0.70;
+/// Measured on the calibrated scale — see [`crate::llm::accounting`], whose whole reason for
+/// existing is that "70% full" has to mean the same thing before and after a message is removed.
+const COMPACT_ABOVE: f64 = 0.70;
+
+/// Where [`Worker::trim_history`] drops back to. That function is W4's stopgap, kept as W6's **last
+/// resort**: it throws whole turns away from the front of the history rather than summarising them,
+/// and it runs only when a summarisation could not be had — the endpoint was down, or the model
+/// returned nothing. Losing the oldest turns is much worse than a summary and much better than a
+/// run that 400s on every request from here on.
 const TRIM_TO: f64 = 0.50;
 
 pub struct Worker {
@@ -131,10 +140,14 @@ pub struct Worker {
     tool_calls: Sender<ToolBatch>,
     tool_results: Receiver<ToolBatchResult>,
 
-    /// The conversation. Index 0 is the system prompt and is never removed.
+    /// The conversation. Index 0 is the system prompt and is never removed — it is rebuilt from
+    /// [`Self::notes`] at the top of every request (**W6b**).
     messages: Vec<Message>,
-    /// The most recent reported context occupancy, in tokens.
-    context_tokens: u64,
+    /// **W6b / §10** — the model's memory files and TODO list. Answered here rather than at the
+    /// policy poll: none of it needs the emulator.
+    notes: Notes,
+    /// **W6** — tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
+    accounting: Accounting,
 }
 
 /// Build the worker and its counterpart handles. The thread is started by [`Worker::spawn`]; this is
@@ -143,6 +156,7 @@ pub fn channels(
     endpoint: Box<dyn ChatEndpoint>,
     config: LlmConfig,
     published: Arc<Published>,
+    notes: Notes,
 ) -> (Worker, TurnHandles) {
     let (turn_tx, turn_rx) = mpsc::channel();
     let (outcome_tx, outcome_rx) = mpsc::channel();
@@ -150,6 +164,7 @@ pub fn channels(
     let (result_tx, result_rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
 
+    let accounting = Accounting::new(config.context_limit);
     let worker = Worker {
         endpoint,
         config,
@@ -160,8 +175,9 @@ pub fn channels(
         outcomes: outcome_tx,
         tool_calls: call_tx,
         tool_results: result_rx,
-        messages: vec![Message::system(prompt::SYSTEM_PROMPT)],
-        context_tokens: 0,
+        messages: vec![prompt::system_message(&notes)],
+        notes,
+        accounting,
     };
     let handles = TurnHandles {
         turns: turn_tx,
@@ -200,10 +216,7 @@ impl Worker {
                 self.published.publish_event(UiEventBody::Decision {
                     turn: id,
                     summary: describe(&decision),
-                    usage: (self.context_tokens > 0).then(|| UsageView {
-                        context_tokens: self.context_tokens,
-                        context_limit: self.config.context_limit,
-                    }),
+                    usage: self.accounting.has_figures().then(|| self.accounting.view()),
                 });
                 let _ = self.outcomes.send(TurnOutcome { id, kind, decision });
             }
@@ -216,7 +229,13 @@ impl Worker {
                 });
             }
         }
-        self.trim_history();
+        // ⚠️ An error stays on the board until the next turn starts. Flicking straight back to
+        // `Playing` would make a run that is failing every request look, to anyone watching, exactly
+        // like a run that is playing quietly.
+        if !matches!(self.published.run_status(), RunStatus::Error { .. }) {
+            self.published.set_status(RunStatus::Playing);
+        }
+        self.compact_if_needed();
     }
 
     /// `None` means the turn was cancelled and abandoned.
@@ -229,12 +248,16 @@ impl Worker {
                 return None;
             }
 
+            self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
+            // **W6b.** Rebuilt every request rather than once, so a note written two tool calls ago
+            // is in the system prompt of the very next one.
+            self.messages[0] = prompt::system_message(&self.notes);
             let completion = {
                 let request = ChatRequest {
                     model: self.config.model.clone(),
                     messages: self.messages.clone(),
                     tools: specs.clone(),
-                    parallel_tool_calls: true,
+                    parallel_tool_calls: Some(true),
                     temperature: self.config.temperature,
                     stream: true,
                     stream_options: StreamOptions { include_usage: true },
@@ -246,6 +269,7 @@ impl Worker {
                     self.endpoint.as_ref(),
                     &request,
                     &mut |delta| {
+                        published.set_status(RunStatus::Streaming);
                         published.publish_event(UiEventBody::AssistantDelta {
                             turn: id,
                             text: delta.to_string(),
@@ -253,6 +277,9 @@ impl Worker {
                     },
                     &|| generation.load(Ordering::SeqCst) != id,
                     &mut |retry| {
+                        published.set_status(RunStatus::RateLimited {
+                            retry_in_ms: retry.waiting.as_millis() as u64,
+                        });
                         published.publish_event(UiEventBody::Notice {
                             level: "warn",
                             message: format!(
@@ -270,6 +297,7 @@ impl Worker {
                     Ok(completion) => completion,
                     Err(LlmError::Cancelled) => return None,
                     Err(failure) => {
+                        self.published.set_status(RunStatus::Error { message: failure.to_string() });
                         self.published.publish_event(UiEventBody::Notice {
                             level: "error",
                             message: format!("the turn could not be completed: {failure}"),
@@ -282,7 +310,7 @@ impl Worker {
                 }
             };
 
-            self.account_for(completion.usage, &completion);
+            self.account_for(&completion);
             self.messages.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
 
             if completion.tool_calls.is_empty() {
@@ -309,16 +337,27 @@ impl Worker {
             // A message that mixes reads with a terminal call ends the turn: the model has already
             // committed, so running the reads would be answering a question it stopped asking. They
             // still get a result message, because every `tool_call` needs one.
+            //
+            // ⚠️ **W6b's notes are the exception, and it is not a detail.** A read is a question
+            // whose answer is worthless once the turn is over; `memory_write` and `todo_add` are
+            // *side effects the model asked for*. "Remember this, and go north" is a completely
+            // natural thing to say in one message — dropping the first half of it silently loses
+            // exactly the long-horizon intent §10 exists to keep. Found by watching a mock do it on
+            // its very first turn.
             if let Some(position) = classified.iter().position(|c| matches!(c, CallKind::Terminal(_))) {
                 let CallKind::Terminal(decision) = &classified[position] else { unreachable!() };
                 let decision = decision.clone();
                 let ended_with = completion.tool_calls[position].function.name.clone();
                 for (index, call) in completion.tool_calls.iter().enumerate() {
-                    let content = if index == position {
-                        "Accepted. The agent is carrying it out now; the next turn will tell you what happened."
-                            .to_string()
-                    } else {
-                        format!("Not run — the turn ended with `{ended_with}` in the same message.")
+                    let content = match &classified[index] {
+                        _ if index == position => {
+                            "Accepted. The agent is carrying it out now; the next turn will tell you \
+                             what happened."
+                                .to_string()
+                        }
+                        CallKind::Note(note) => self.notes.apply(note.clone()),
+                        CallKind::Rejected(complaint) => complaint.clone(),
+                        _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
                     };
                     self.messages.push(Message::tool_result(&call.id, content));
                 }
@@ -362,6 +401,7 @@ impl Worker {
                         "{\"error\": \"the agent returned no result for this call\"}".to_string()
                     }),
                     CallKind::Screenshot => {
+                        self.published.set_status(RunStatus::RunningTool { name: "screenshot".into() });
                         let frame = self.published.latest_frame();
                         let caption = screenshot::caption(frame.seq);
                         pictures.push(Message::user_with_image(
@@ -370,6 +410,7 @@ impl Worker {
                         ));
                         format!("{caption} It is attached to the message after this one.")
                     }
+                    CallKind::Note(note) => self.notes.apply(note.clone()),
                     CallKind::Rejected(complaint) => complaint.clone(),
                     CallKind::Terminal(_) => unreachable!("handled above"),
                 };
@@ -391,6 +432,7 @@ impl Worker {
         // `Policy::service_tools`, which only runs when `gb.run` advances the agent — so anything
         // that pauses emulation across this round trip hangs the run on the first `read_map`. That is
         // what killed `GB_PAUSE_WHILE_THINKING`; see `src/llm/config.rs`.
+        self.published.set_status(RunStatus::RunningTool { name: names(&calls) });
         let answers = self.tool_calls.send(ToolBatch { turn: id, calls }).ok().and_then(|()| {
             // Blocking, and that is the point: this thread is *supposed* to wait. It does one request
             // at a time and has nothing else to do. The wait is at most one agent tick — 20 ms of
@@ -417,33 +459,129 @@ impl Worker {
         self.generation.load(Ordering::SeqCst) != id
     }
 
-    fn account_for(&mut self, usage: Option<Usage>, completion: &crate::llm::protocol::Completion) {
-        let usage = usage.unwrap_or_else(|| Usage::estimate(&self.messages, completion));
-        self.context_tokens = usage.prompt_tokens + usage.completion_tokens;
+    /// Fold one response into [`Accounting`]. Called **before** the assistant message is appended,
+    /// so `self.messages` is still exactly what the endpoint counted — which is what makes the
+    /// reported figure usable as a calibration.
+    fn account_for(&mut self, completion: &Completion) {
+        let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&self.messages, completion));
+        self.accounting.record(usage, &self.messages);
     }
 
-    /// The W4 stopgap described at [`TRIM_ABOVE`]. Drops whole turns from the front.
-    fn trim_history(&mut self) {
-        let limit = self.config.context_limit as f64;
-        if (self.context_tokens as f64) < limit * TRIM_ABOVE {
+    /// **W6 / §9** — the two-stage compaction, run after every turn.
+    ///
+    /// Stage 1 is free and often enough: a run that looks at the screen regularly is carrying most of
+    /// its context in pictures it has already acted on. Stage 2 costs a completion, so it runs only
+    /// when stage 1 left the history still over the line.
+    fn compact_if_needed(&mut self) {
+        if self.accounting.occupancy(&self.messages) < COMPACT_ABOVE {
             return;
         }
-        let target = (limit * TRIM_TO) as u64;
-        let mut held: u64 = self.messages.iter().map(Message::approximate_tokens).sum();
-        // Estimated tokens and reported ones are different scales, so trim against the estimate of
-        // the whole history rather than mixing the two.
+        let resume = self.published.run_status();
+        self.published.set_status(RunStatus::Compacting);
+        let before = self.accounting.tokens_in(&self.messages);
+
+        let images_evicted = compaction::evict_images(&mut self.messages, compaction::KEEP_IMAGES);
+        let mut summarised = false;
+        let still_over = self.accounting.occupancy(&self.messages) >= COMPACT_ABOVE;
+        if still_over && compaction::worth_summarising(&self.messages, compaction::KEEP_MESSAGES) {
+            if let Some(summary) = self.summarise() {
+                compaction::apply_summary(&mut self.messages, &summary, compaction::KEEP_MESSAGES);
+                summarised = true;
+            }
+            // A summary could not be had — the endpoint is down, or the model returned nothing. The
+            // trim below is then the whole of the compaction, which is worse than a summary and far
+            // better than a history that no longer fits.
+        }
+        // Still over: the summary was refused, or what it kept is itself too big. Dropping the oldest
+        // turns is the last resort, and it leaves the summary alone (`compaction::is_summary`).
+        if self.accounting.occupancy(&self.messages) >= COMPACT_ABOVE {
+            self.trim_history();
+        }
+
+        let after = self.accounting.tokens_in(&self.messages);
+        self.published.publish_event(UiEventBody::Compacted { before, after, images_evicted, summarised });
+        self.published.set_status(resume);
+    }
+
+    /// One extra completion, asking the model to write the story so far. `None` if it could not be
+    /// had, in which case the caller falls back to [`Self::trim_history`].
+    ///
+    /// ⚠️ **Not cancellable, deliberately.** Every other blocking point in this file gives way to a
+    /// change of decision kind; this one cannot, because abandoning it leaves the history over the
+    /// limit and the *next* request is then the one that 400s. The cost of that choice is one
+    /// completion's worth of latency on a game that is not waiting for anything — the emulator keeps
+    /// running throughout, as it does while any turn is in flight.
+    fn summarise(&mut self) -> Option<String> {
+        let request = compaction::summary_request(&self.config, &self.messages);
+        let published = Arc::clone(&self.published);
+        let result = stream_with_retries(
+            self.retry,
+            self.endpoint.as_ref(),
+            &request,
+            // Not published as an `AssistantDelta`: the summary is bookkeeping, and a thousand words
+            // of it in the conversation pane would read as the model talking to itself.
+            &mut |_| {},
+            &|| false,
+            &mut |retry| {
+                published.publish_event(UiEventBody::Notice {
+                    level: "warn",
+                    message: format!("compaction attempt {}/{} failed ({})", retry.attempt, retry.of, retry.failure),
+                });
+            },
+        );
+
+        match result {
+            Ok(completion) if !completion.content.trim().is_empty() => {
+                let usage = completion
+                    .usage
+                    .unwrap_or_else(|| Usage::estimate(&request.messages, &completion));
+                self.accounting.record(usage, &request.messages);
+                Some(completion.content)
+            }
+            Ok(_) => {
+                self.published.publish_event(UiEventBody::Notice {
+                    level: "warn",
+                    message: "the model returned an empty summary; dropping the oldest turns instead".to_string(),
+                });
+                None
+            }
+            Err(failure) => {
+                self.published.publish_event(UiEventBody::Notice {
+                    level: "error",
+                    message: format!("could not summarise the history ({failure}); dropping the oldest turns instead"),
+                });
+                None
+            }
+        }
+    }
+
+    /// The last resort described at [`TRIM_TO`]: drop whole turns from the front until the history
+    /// is back under half the window.
+    ///
+    /// It cuts only at turn boundaries — see [`compaction::is_turn_start`] — so a `tool_call` is
+    /// never separated from its result, and it never drops the last turn, which would leave the
+    /// model with nothing to answer.
+    fn trim_history(&mut self) {
+        let target = (self.accounting.limit() as f64 * TRIM_TO) as u64;
+        // Index 0 is the system prompt; index 1 is the summary, if a stage 2 has ever run. Neither is
+        // a turn, and dropping the summary would throw away every turn it stands for.
+        let first = 1 + usize::from(self.messages.get(1).is_some_and(compaction::is_summary));
         let mut dropped = 0;
-        while held > target {
-            // The next turn boundary after the system prompt. Cutting only here is what keeps every
-            // `tool_call` with its result.
-            let Some(boundary) = self.messages.iter().skip(1).position(is_turn_start).map(|i| i + 1) else {
+        while self.accounting.tokens_in(&self.messages) > target {
+            let Some(boundary) =
+                self.messages.iter().skip(first).position(compaction::is_turn_start).map(|i| i + first)
+            else {
                 break;
             };
-            let Some(next) = self.messages.iter().skip(boundary + 1).position(is_turn_start).map(|i| i + boundary + 1)
+            let Some(next) = self
+                .messages
+                .iter()
+                .skip(boundary + 1)
+                .position(compaction::is_turn_start)
+                .map(|i| i + boundary + 1)
             else {
                 break; // only one turn left; dropping it would leave nothing to answer
             };
-            held -= self.messages[boundary..next].iter().map(Message::approximate_tokens).sum::<u64>();
             self.messages.drain(boundary..next);
             dropped += 1;
         }
@@ -456,14 +594,14 @@ impl Worker {
     }
 }
 
-/// Where the history may be cut, and where a failed request's question may be popped from.
-///
-/// ⚠️ **A picture is a `user` message but is not a turn boundary.** W5 answers `screenshot` with a
-/// tool result plus a `user` message carrying the image, which lands in the middle of a turn — and
-/// treating that as a boundary would let [`Worker::trim_history`] cut a turn in half and let
-/// [`PopIfUser`] drop the picture while leaving the situation it belongs to dangling.
-fn is_turn_start(message: &Message) -> bool {
-    message.role == crate::llm::protocol::Role::User && !message.has_image()
+/// What the status shows while a batch is out. One name reads better than one; four read worse than
+/// a count.
+fn names(calls: &[ToolCall]) -> String {
+    match calls {
+        [] => "nothing".to_string(),
+        [one] => one.function.name.clone(),
+        [first, rest @ ..] => format!("{} +{}", first.function.name, rest.len()),
+    }
 }
 
 fn describe(decision: &Terminal) -> String {
@@ -493,13 +631,17 @@ fn describe(decision: &Terminal) -> String {
 
 /// Drop a trailing `user` message. Used when a request failed outright, so the question is not left
 /// in the history unanswered — the next turn asks a fresher version of it anyway.
+///
+/// ⚠️ It tests for a **turn start**, not merely for a `user` message: W5's picture and W6's evicted
+/// picture are both `user` messages in the middle of a turn, and popping either would leave the tool
+/// result they belong beside without the context that explains it.
 trait PopIfUser {
     fn pop_if_user(&mut self);
 }
 
 impl PopIfUser for Vec<Message> {
     fn pop_if_user(&mut self) {
-        if self.last().is_some_and(is_turn_start) {
+        if self.last().is_some_and(compaction::is_turn_start) {
             self.pop();
         }
     }

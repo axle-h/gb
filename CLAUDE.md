@@ -26,6 +26,9 @@ src/
 ├── main.rs              — entry point: `gb` (SDL UI) or `gb serve` (web), dispatched from cli.rs
 ├── cli.rs               — hand-rolled arg parsing; `parse` is unit-testable without a process
 ├── host.rs              — headless emulator host: GameBoy + PokemonAgent + video encoder on one thread
+├── run/                 — the run directory (`web` feature): checkpoint, resume, transcript
+│   ├── mod.rs           — $GB_RUN_DIR/<run-id>/: meta.json, state.gbst, sram.bin; atomic writes
+│   └── transcript.rs    — transcript.jsonl writer thread + the /api/history backlog reader
 ├── web/                 — the axum server (`web` feature); read-only, five endpoints
 │   ├── published.rs     — the only interface between the emulator thread and HTTP
 │   ├── video.rs         — 8×8 block-diff video codec + the reference decoder
@@ -38,6 +41,9 @@ src/
 │   ├── tools.rs         — the tool catalogue, scoped per decision kind; ids; servicing
 │   ├── prompt.rs        — the system prompt and the per-turn situation
 │   ├── screenshot.rs    — one published frame as a PNG data URL, encoded on the worker thread
+│   ├── accounting.rs    — tokens reported vs tokens estimated, and the calibration between them
+│   ├── notes.rs         — the model's memory files and TODO list, rendered into the system prompt
+│   ├── compaction.rs    — image eviction + summarising compaction, as pure functions over the history
 │   └── worker.rs        — the turn loop: stream → tool batch → terminal call, with cancellation
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)
 ├── core.rs              — CPU + MMU wiring
@@ -136,6 +142,12 @@ cargo run --release -- serve --policy random --port 8080
 # points at any OpenAI-compatible endpoint. `gb serve` defaults to --policy llm.
 OPENAI_API_KEY=sk-… GB_MODEL=… cargo run --release -- serve
 
+# ⚠️ `gb serve` RESUMES by default (W7): the newest run under $GB_RUN_DIR (default ./runs) whose
+# state.gbst loads is continued in place, notes and all. `--new-run` starts the game over in a
+# directory of its own and leaves the old one alone. Ctrl-C and SIGTERM both checkpoint on the way
+# out — killing the process with SIGKILL loses up to a minute.
+cargo run --release -- serve --new-run
+
 # The container build: no window system at all.
 cargo build --release --no-default-features --features llm
 ```
@@ -148,7 +160,24 @@ a default build already pulls, and `llm` (ureq + its rustls stack) a further 14.
 
 **The LLM configuration is all environment variables**, never flags, because the API key has to be
 one: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `GB_MODEL`, `GB_CONTEXT_LIMIT`, `GB_TEMPERATURE`,
-`GB_MAX_TOOL_STEPS` and `GB_PORT`. `gb --help` lists them; `src/llm/config.rs` documents them.
+`GB_MAX_TOOL_STEPS`, `GB_PORT`, `GB_RUN_DIR` and `GB_STATUS_HZ`. `gb --help` lists them, and
+`cli::tests::the_usage_names_every_flag_and_variable` makes sure it keeps doing so; `src/llm/config.rs`
+documents them (`GB_PORT` is read in `cli.rs`, `GB_RUN_DIR` and `GB_STATUS_HZ` in `web/mod.rs`, since
+all three apply to `--policy random` too).
+
+⚠️ **The status heartbeat is sent on change, not on a timer.** It is sampled at `GB_STATUS_HZ` (2 Hz)
+and published only when it says something the last one did not, with a 2 s keepalive so an idle run
+still proves it is alive and `curl -N /api/events` still ticks. At the original 10 Hz unconditional it
+measured **49.7 kbit/s per viewer** — six times the idle video feed, with nine of ten payloads
+byte-identical to the one before; it is now 5.2. Two consequences: `StatusSnapshot` compares with
+`says_the_same_as`, which excludes the clocks and `frame_seq` (a derived `PartialEq` would never match
+and the suppression would silently never fire), and `/api/events` **opens with the latest heartbeat**
+— `Published::join_events`, subscribe-then-read, the same handshake as the video keyframe — or a page
+opened during a quiet stretch shows an empty panel.
+
+**A run keeps everything it needs in one directory** (`$GB_RUN_DIR/<run-id>/`): `meta.json`,
+`state.gbst`, `sram.bin`, `transcript.jsonl`, and the model's own `memories/` and `todo.json`. That
+directory is the whole of a run's state — copy it and the run moves with it.
 
 ⚠️ **The emulator never pauses while the model thinks, and must not be made to.** A tool batch is
 answered by `Policy::service_tools`, which only runs when `gb.run` advances the agent — so any pause
@@ -216,7 +245,7 @@ workload in the profile. ⚠️ Watch for sampling skid: a hot instruction is of
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + the web/host/llm tier.
-# ~7s, 1112 tests.
+# ~7s, 1143 tests.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.

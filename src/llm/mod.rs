@@ -28,8 +28,11 @@
 //! Nothing here is async. The worker is a plain `std::thread` blocking on a channel, and `ureq`
 //! streams the response body through `impl Read`.
 
+pub mod accounting;
 pub mod client;
+pub mod compaction;
 pub mod config;
+pub mod notes;
 pub mod prompt;
 pub mod protocol;
 pub mod screenshot;

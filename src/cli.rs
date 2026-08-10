@@ -7,8 +7,9 @@
 //!
 //! ```text
 //! gb                        SDL UI, ConsolePolicy on stdin   (requires the `sdl` feature)
-//! gb serve [--port 8080]    web UI + LlmPolicy
+//! gb serve [--port 8080]    web UI + LlmPolicy, resuming the newest run if there is one
 //! gb serve --policy random  web UI, RandomPolicy — no API key, the video-pipeline harness
+//! gb serve --new-run        start from the beginning of the game rather than resuming (W7)
 //! ```
 
 pub const USAGE: &str = "\
@@ -22,11 +23,18 @@ USAGE:
 SERVE OPTIONS:
     --port <PORT>               Port to listen on [default: $GB_PORT, else 8080]
     --policy <llm|random>       What plays the game [default: llm]
+    --new-run                   Start the game from the beginning, in a new run directory,
+                                instead of resuming the newest resumable run
 
 ENVIRONMENT (--policy llm):
     OPENAI_API_KEY, GB_MODEL    Required
     OPENAI_BASE_URL             Any OpenAI-compatible endpoint [default: api.openai.com/v1]
     GB_CONTEXT_LIMIT, GB_TEMPERATURE, GB_MAX_TOOL_STEPS
+
+ENVIRONMENT (any policy):
+    GB_PORT                     Port to listen on; --port wins
+    GB_RUN_DIR                  Where runs are kept [default: ./runs]
+    GB_STATUS_HZ                How often the status panel is sampled [default: 2]
 ";
 
 /// What the process was asked to do.
@@ -36,7 +44,13 @@ pub enum Command {
     /// `ConsolePolicy` on stdin.
     Ui,
     /// The web UI, served from this process.
-    Serve { port: u16, policy: ServePolicy },
+    Serve {
+        port: u16,
+        policy: ServePolicy,
+        /// **W7** — ignore any resumable run under `GB_RUN_DIR` and start the game from the
+        /// beginning in a directory of its own. The old run is left exactly as it was.
+        new_run: bool,
+    },
     /// `--help`. Separate from a parse error because it exits zero and prints to stdout.
     Help,
 }
@@ -95,9 +109,15 @@ where
         None => DEFAULT_PORT,
     };
     let mut policy = ServePolicy::Llm;
+    let mut new_run = false;
     while let Some(flag) = rest.next() {
-        // Every flag takes a value, so a missing one is always the same mistake and reports the same
+        // `--new-run` is the only flag that is a switch rather than a setting, so it is taken before
+        // a value is demanded — every other missing value is the same mistake and reports the same
         // way rather than silently defaulting.
+        if flag == "--new-run" {
+            new_run = true;
+            continue;
+        }
         let value = match rest.next() {
             Some(value) => value,
             None => return fail(format!("`{flag}` needs a value")),
@@ -116,7 +136,7 @@ where
             other => return fail(format!("unknown option `{other}`")),
         }
     }
-    Ok(Command::Serve { port, policy })
+    Ok(Command::Serve { port, policy, new_run })
 }
 
 #[cfg(test)]
@@ -135,20 +155,49 @@ mod tests {
 
     #[test]
     fn serve_defaults_to_the_llm_on_8080() {
-        assert_eq!(parse(["serve"]), Ok(Command::Serve { port: DEFAULT_PORT, policy: ServePolicy::Llm }));
+        assert_eq!(
+            parse(["serve"]),
+            Ok(Command::Serve { port: DEFAULT_PORT, policy: ServePolicy::Llm, new_run: false }),
+        );
     }
 
     #[test]
     fn serve_flags_parse_in_any_order() {
-        let expected = Command::Serve { port: 9000, policy: ServePolicy::Random };
+        let expected = Command::Serve { port: 9000, policy: ServePolicy::Random, new_run: false };
         assert_eq!(parse(["serve", "--port", "9000", "--policy", "random"]), Ok(expected.clone()));
         assert_eq!(parse(["serve", "--policy", "random", "--port", "9000"]), Ok(expected));
+    }
+
+    /// **W7.** A switch among settings: it must not swallow the flag after it, and it must be
+    /// accepted anywhere in the line.
+    #[test]
+    fn new_run_is_a_switch_and_not_a_setting() {
+        let expected = Command::Serve { port: 9000, policy: ServePolicy::Random, new_run: true };
+        assert_eq!(parse(["serve", "--new-run", "--port", "9000", "--policy", "random"]), Ok(expected.clone()));
+        assert_eq!(parse(["serve", "--port", "9000", "--new-run", "--policy", "random"]), Ok(expected.clone()));
+        assert_eq!(parse(["serve", "--port", "9000", "--policy", "random", "--new-run"]), Ok(expected));
     }
 
     #[test]
     fn help_is_not_an_error() {
         for flag in ["--help", "-h", "help"] {
             assert_eq!(parse([flag]), Ok(Command::Help), "{flag}");
+        }
+    }
+
+    /// ⚠️ **The usage text is hand-maintained beside a hand-rolled parser, and it fell behind
+    /// silently once already** — `--new-run` shipped and `--help` never mentioned it, which for a
+    /// tool whose only discovery mechanism is `--help` means the flag may as well not exist. Every
+    /// flag the parser accepts and every variable the server reads has to appear in it.
+    #[test]
+    fn the_usage_names_every_flag_and_variable() {
+        for name in [
+            "--port", "--policy", "--new-run", "--help",
+            "GB_PORT", "GB_RUN_DIR", "GB_STATUS_HZ",
+            "OPENAI_API_KEY", "GB_MODEL", "OPENAI_BASE_URL",
+            "GB_CONTEXT_LIMIT", "GB_TEMPERATURE", "GB_MAX_TOOL_STEPS",
+        ] {
+            assert!(USAGE.contains(name), "`{name}` is accepted but `--help` does not mention it");
         }
     }
 
@@ -177,11 +226,11 @@ mod tests {
         let env = |name: &str| (name == "GB_PORT").then(|| "9999".to_string());
         assert_eq!(
             parse_with_env(["serve"], &env),
-            Ok(Command::Serve { port: 9999, policy: ServePolicy::Llm }),
+            Ok(Command::Serve { port: 9999, policy: ServePolicy::Llm, new_run: false }),
         );
         assert_eq!(
             parse_with_env(["serve", "--port", "7000"], &env),
-            Ok(Command::Serve { port: 7000, policy: ServePolicy::Llm }),
+            Ok(Command::Serve { port: 7000, policy: ServePolicy::Llm, new_run: false }),
         );
 
         // A nonsense `GB_PORT` is reported rather than silently ignored: a container that quietly
