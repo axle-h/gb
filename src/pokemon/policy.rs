@@ -679,7 +679,7 @@ pub enum FieldMove {
     /// Named for the Vermilion Gym cans it was written for, but it is the generic **face a tile and
     /// interact** move, and three unrelated steps ride it: `SolveTrashCans`, `FlipSwitch` (Mansion
     /// statues, the Rocket Hideout poster) and `SearchHiddenItem`. They share it because the ROM does:
-    /// all three are `hidden_object`s, dispatched by `CheckForHiddenObject` when A is pressed and the
+    /// all three are `hidden_event`s, dispatched by `CheckForHiddenEvent` when A is pressed and the
     /// tile in front of the player matches.
     CheckTrashCan { target: crate::geometry::Point8, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
     /// Drive the elevator floor menu (panel at `panel`) to select menu index `floor`, then ride the
@@ -1656,10 +1656,11 @@ impl PolicyStep {
     ///
     /// B3F is the only floor below 1F whose boulders can be pushed on arrival. The game intends a chain
     /// — 1F's pair into 1F's holes reveals B1F's pair, which reveals B2F's, which reveals B3F's last two
-    /// — and `hide_show_data.asm` enforces it: every boulder on B1F and B2F starts HIDDEN. B3F is the
-    /// exception. Its (5,14) and (9,14) are not missable objects at all (permanently visible) and its
-    /// (3,15)/(8,14) start SHOWn, so the floor offers four pushable boulders with no prerequisites —
-    /// which is exactly the pair of drops SEAFOAM4 needs, and why the chain above can be skipped.
+    /// — and `data/maps/toggleable_objects.asm` enforces it: every boulder on B1F and B2F starts
+    /// HIDDEN. B3F is the exception. Its (5,14) and (9,14) are not toggleable objects at all
+    /// (permanently visible) and its (3,15)/(8,14) start SHOWn, so the floor offers four pushable
+    /// boulders with no prerequisites — which is exactly the pair of drops SEAFOAM4 needs, and why
+    /// the chain above can be skipped.
     ///
     /// ## Getting out again — an Escape Rope, because there is no way back east on foot
     ///

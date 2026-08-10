@@ -789,10 +789,10 @@ impl MetaTileMap {
         //    coordinate rather than found in the sprite list).
         for &pc in self.pc_locations() {
             // **The only usable approach is from directly below, facing up.** Not because of the
-            // `SPRITE_FACING_UP` in the hidden-object table — that argument does not restrict
-            // anything, and `data/events/hidden_objects.asm:191` says so explicitly; matching is
-            // purely on the tile in front of the player. It is the *routines* that check: both
-            // `OpenPokemonCenterPC` and `BillsHousePC` open with
+            // `SPRITE_FACING_UP` in the hidden-event table — that argument does not restrict
+            // anything, and the `ANY_FACING` comment in `data/events/hidden_events.asm` says so
+            // explicitly; matching is purely on the tile in front of the player. It is the
+            // *routines* that check: both `OpenPokemonCenterPC` and `BillsHousePC` open with
             // `ld a, [wSpritePlayerStateData1FacingDirection] / cp SPRITE_FACING_UP / ret nz`.
             //
             // That makes a side approach a silent no-op — the object matches and is dispatched, and
@@ -1031,14 +1031,16 @@ fn step_one(pos: Point8, dir: JoypadButton, width: usize, height: usize) -> Opti
     }
 }
 
-/// Fixed PC-tile coordinates on `map` — hidden objects the player faces (from below) and presses A on.
+/// Fixed PC-tile coordinates on `map` — hidden events the player faces (from below) and presses A on.
 ///
-/// PCs are not derivable from the tileset: a PC is a `hidden_object`, so nothing distinguishes its
+/// PCs are not derivable from the tileset: a PC is a `hidden_event`, so nothing distinguishes its
 /// tile from the wall it is drawn on. This table is transcribed from pokered
-/// `data/events/hidden_objects.asm`, cross-referenced against `HiddenObjectMaps` so each object list
-/// is attributed to the right map — the labels in that file are stale (`SafariZoneRestHouse2` is
-/// `SAFARI_ZONE_WEST_REST_HOUSE`, `CinnabarLab4` is `CINNABAR_LAB_FOSSIL_ROOM`), so the label alone is
-/// not a safe guide.
+/// `data/events/hidden_events.asm`, cross-referenced against `HiddenEventMaps` so each event list is
+/// attributed to the right map. That cross-reference is what made it trustworthy when the lists were
+/// labelled by hand and the labels had drifted (`SafariZoneRestHouse2` was really
+/// `SAFARI_ZONE_WEST_REST_HOUSE`, `CinnabarLab4` really `CINNABAR_LAB_FOSSIL_ROOM`); upstream now
+/// keys each list by the map constant itself (`hidden_events_for SAFARI_ZONE_WEST_REST_HOUSE`), so
+/// the labels agree with the cross-reference rather than contradicting it.
 ///
 /// Every entry in the file that runs `OpenPokemonCenterPC`, `OpenRedsPC` or `BillsHousePC` is here;
 /// there are 22 of them across 21 maps.

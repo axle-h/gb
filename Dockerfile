@@ -23,12 +23,13 @@
 # stage 1 — the cartridge
 ##############################################################################
 # Bump these two together; the checksum is version-specific and is what stops a silent substitution
-# upstream. pokered wants rgbds 0.9.3 *or newer* (`pokered/rgbdscheck.asm`), and 0.9.3 is the
-# version its own INSTALL.md names, so that is what we pin: a newer major release is free to change
-# codegen, and this ROM's bytes are load-bearing (see the sha1 check below).
+# upstream. pokered wants rgbds 1.0.0 *or newer* — `pokered/rgbdscheck.asm` `fail`s the assembly
+# outright below that, it is not a warning — and 1.0.3 is the version its own INSTALL.md names, so
+# that is what we pin: a newer major release is free to change codegen, and this ROM's bytes are
+# load-bearing (see the sha1 check below).
 FROM debian:bookworm-slim AS rom
-ARG RGBDS_VERSION=0.9.3
-ARG RGBDS_SHA256=87e56678fa2e8ddeec552a9149e4f2983fc1d3f8d2dbc3606d4b434e64d9baa5
+ARG RGBDS_VERSION=1.0.3
+ARG RGBDS_SHA256=97b523435f7da0b6d2a58daff447bb2c8280895c3f49eb4e63e5df8da63dd64d
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential bison libpng-dev pkg-config make curl ca-certificates \

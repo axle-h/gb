@@ -14,7 +14,7 @@
 //! auto-walks the player north into `SafariZoneCenter`. Every overworld step inside the zone then runs
 //! `SafariZoneCheckSteps`, which decrements the counter and, at zero (or when the last ball is spent),
 //! warps the player back to the gate and ends the game
-//! (`engine/events/hidden_objects/safari_game.asm`). Both of those are the same code path, which is
+//! (`engine/events/hidden_events/safari_game.asm`). Both of those are the same code path, which is
 //! why E4's "walk out" and "be ejected" cases converge on the same tile.
 //!
 //! # The battle is not a battle

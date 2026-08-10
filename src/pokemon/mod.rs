@@ -718,8 +718,8 @@ fn inventory_quantity(mmu: &MMU, count_ptr: &symbols::DmgPointer, base_ptr: &sym
     }
 }
 
-/// Map coordinate of gym trash-can hidden object `index` (0..=14), from pokered
-/// `data/events/hidden_objects.asm` (`VermilionGymHiddenObjects`): cans laid out in a 5×3 grid at
+/// Map coordinate of gym trash-can hidden event `index` (0..=14), from pokered
+/// `data/events/hidden_events.asm` (`HiddenEventsFor_VERMILION_GYM`): cans laid out in a 5×3 grid at
 /// odd columns 1,3,5,7,9 and rows 7,9,11, indexed column-major.
 pub fn trash_can_position(index: u8) -> crate::geometry::Point8 {
     crate::geometry::Point8 { x: 1 + 2 * (index / 3), y: 7 + 2 * (index % 3) }

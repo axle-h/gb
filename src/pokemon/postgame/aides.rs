@@ -44,7 +44,7 @@ pub struct HiddenItem {
 /// Every hidden item on `map`, decoded from the ROM.
 ///
 /// Two tables have to be crossed, because neither is complete on its own.
-/// `data/events/hidden_objects.asm` holds the **item id** but mixes hidden items in with bookshelves,
+/// `data/events/hidden_events.asm` holds the **item id** but mixes hidden items in with bookshelves,
 /// PCs, gym statues and the Safari Zone's own scripts — the discriminator is the object's routine
 /// pointer being `HiddenItems`. `data/events/hidden_item_coords.asm` holds only map/x/y, but its
 /// **row order is the flag numbering**, which is the only way to ask "has this one been taken?".
@@ -53,16 +53,16 @@ pub struct HiddenItem {
 /// rows of hand-copied coordinates is 55 chances to be silently one off, and a wrong coordinate here
 /// does not error — the agent walks to a tile, presses A, and nothing at all happens.
 pub fn hidden_items(map: Map) -> Vec<HiddenItem> {
-    /// `hidden_object` is `db y, db x, db arg` then `dba` (bank + address) of its routine.
+    /// `hidden_event` is `db y, db x, db arg` then `dba` (bank + address) of its routine.
     const ENTRY: usize = 6;
 
-    let Some(index) = rom_at(&pokered_symbols::HiddenObjectMaps).iter()
+    let Some(index) = rom_at(&pokered_symbols::HiddenEventMaps).iter()
         .take_while(|&&b| b != 0xFF)
         .position(|&b| b == map as u8)
     else { return Vec::new() };
 
-    let pointers = &pokered_symbols::HiddenObjectPointers;
-    let DmgBank::ROM { bank } = pointers.bank else { panic!("HiddenObjectPointers is not in ROM") };
+    let pointers = &pokered_symbols::HiddenEventPointers;
+    let DmgBank::ROM { bank } = pointers.bank else { panic!("HiddenEventPointers is not in ROM") };
     let table = rom_at(pointers);
     let list = rom_bank_at(bank, u16::from_le_bytes([table[index * 2], table[index * 2 + 1]]));
 
