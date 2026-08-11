@@ -148,7 +148,9 @@ fn random_play_never_goes_quiet_for_longer_than_the_watchdog_allows() {
         }
     }
 
-    println!("[soak] {:?} of random play, longest quiet stretch {worst:?} in state {worst_state:?} \
-              (the watchdog fires at {limit:?})", SOAK_GAME_TIME, );
+    // The *emulated* total, not the constant it was asked for: a summary that prints its own target
+    // back cannot tell you the loop exited early, which is exactly the failure it should surface.
+    println!("[soak] seed {seed}: {:?} of random play, longest quiet stretch {worst:?} in state \
+              {worst_state:?} (the watchdog fires at {limit:?})", emulated.to_duration());
     assert!(worst < limit, "checked in the loop above");
 }

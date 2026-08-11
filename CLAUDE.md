@@ -86,6 +86,13 @@ If you touch them, check with `nm -S --size-sort -C target/release/deps/gb-*` th
 still around 3–4 KB (Phase C left it at 3764 bytes). `Serial::complete_transfer` and the APU's
 `mix()` fell to the same rule.
 
+⚠️ **`MachineCycles::to_duration` multiplies by 4e9, and that overflowed `u64` after ~73 minutes of
+emulated time** — silently, because release builds wrap rather than panic. Everything that reports
+emulated time over a long run went through it: `meta.json`'s `emulated_ms` and the status heartbeat
+both wrapped every 73 minutes on the deployed run. It surfaced as `soak`'s progress line simply
+stopping after 3600 s, which looked like a bug in the test. `from_duration` had always used `u128`;
+now both do, and `cycles::tests::to_duration_survives_a_long_run` pins it out to 24 h.
+
 **Tuned constants**, both arrived at empirically: `AGENT_RESOLUTION` (20 ms) — longer and the player
 overshoots on the overworld, shorter and the game state does not settle between frames; and
 `DelayContext`'s 2500 ms post-script delay, which covers the worst-case pre-battle animation gap
@@ -202,6 +209,11 @@ cargo test --release --features slow-tests,very-slow-tests --bin gb -- can_sweep
 # The whole game from a fresh save, ~5 min of wall clock (was ~11 min before Phase C).
 cargo test --release --features full-playthrough full_playthrough
 
+# The stall hunt: 5 h of game time under RandomPolicy, ~4.5 min of wall clock. Fails if the agent
+# ever goes longer without reaching a decision point than the watchdog allows. Seeded — vary
+# GB_SOAK_SEED to hunt for new jams; seed 1 is the one that must stay green.
+cargo test --release --features soak-tests --bin gb -- soak --nocapture
+
 # A single test with output (file module included in the path).
 cargo test --release --bin gb -- pokemon::integration_tests::mechanics::test_debouncing --exact --nocapture
 
@@ -230,6 +242,7 @@ goes behind a Cargo feature, so the ignored list stays a readable backlog:
 | `slow-tests` / `very-slow-tests` / `full-playthrough` | Tiering by emulated game time |
 | `diagnostics` | `probe_*`, `dump_fixture_states`, `capture_golden_input` — tools that print a report rather than assert. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal: two legitimately end by exhausting their cycle budget *after* printing what was asked for |
 | `bench` | `bench_core_throughput`, `bench_emulation_throughput` |
+| `soak-tests` | `integration_tests::soak` — the fuzzer. Gated as a **module**, not with `#[ignore]`, so it never appears in the ignored list |
 | `hwtests` | The mooneye MBC suite and its ROMs. 22 MB raw, committed lz4-compressed (149 KB) and decompressed in memory by the fixture, so a default build carries none of it |
 
 With every tier feature on and the tool features off, the ignored list is **18 blocked emulator
@@ -239,6 +252,44 @@ fixed. Keep it that way.
 
 Failure artifacts — a save state and a screenshot at the point of a stall or timeout — land in
 `target/test-artifacts/`, not the repo root.
+
+### Finding jams: `soak`, and `stalls` beside it
+
+⚠️ **`full_playthrough` proves one route still works; it cannot find a jam off that route.** The
+scripted policy never chooses to walk into a PC, or into grass with nothing in it, or to pick a move
+the game will refuse — so none of those were reachable by any test in the suite, and all of them
+wedged the deployed run instead. `soak` is the answer: hours of `RandomPolicy`, which explores the
+agent's state machine far more widely than any route.
+
+It watches `PokemonAgent::since_last_policy_poll` — the **same** value W9's watchdog reads — so it
+fails exactly when a deployed `LlmPolicy` would have its watchdog fire. One definition of stuck.
+
+⚠️ **It is seeded (`GB_SOAK_SEED`, default 1) and must stay that way.** The first runs each failed
+somewhere different, which is worse than useless: a failure that vanishes when you go back to look at
+it cannot verify its own fix, and CI would flake. Seed 1 is the one that must stay green; vary the
+seed to hunt.
+
+**Every jam it finds gets promoted to `integration_tests::stalls`**, in the *default* tier: the save
+state at the moment the agent went quiet, replayed against a fresh agent, about a second each. That
+is what makes the fix loop tolerable — the difference between a 4½-minute reproduction and a
+one-second one. ⚠️ **Not every stall survives the trip**, because the save state holds the emulator
+and not the agent: a jam the game's own screen re-creates reproduces perfectly, a jam that lived in
+the agent's own state (an `OverworldMovement` route) does not. Watch a new case go red before
+committing it, or it may be asserting nothing.
+
+The states it has caught all had the same shape — a driver waiting for something that had stopped
+coming, pressing buttons in silence. Two traps in fixing them, both paid for twice:
+
+- ⚠️ **A counter outside the variant is reset by `set_state`.** `HealingActive` and `WaitingForMenu`
+  rebuild themselves every tick with a `press`/toggle field flipped, so `set_state` sees a *new*
+  state and zeroes anything counting from `PokemonAgent`. The first bound on each silently never
+  fired. `OverworldMovement` is the one state where the agent-level `state_ticks` works, because it
+  does not rebuild itself.
+- ⚠️ **The branch that detects a problem is not always the branch that presses the wrong button.**
+  `WaitingForMenu`'s `MoveList` arm had handled a spent move with B since an earlier hours-long
+  wedge, and it still wedged — because the `screen.contains` check above it returns first while the
+  message is up, and the *text reader* (in the `None` arm) was the thing mashing A. A fix has to sit
+  above every branch that can press.
 
 ### ⚠️ Why `full_playthrough` is not optional
 
