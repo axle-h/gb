@@ -631,6 +631,7 @@ impl MapMetadataCache {
             player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                 .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
             sprites: mmu.read_sprites()?,
+            grass_encounter_rate: mmu.read_pointer(&pokered_symbols::wGrassRate),
             closed_doors: closed_door_blocks(mmu, map),
             card_key_locked: map_has_card_key_doors(map) && !mmu.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
         })
@@ -673,8 +674,9 @@ impl MapMetadataReader for MMU {
                 player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                     .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
                 sprites: self.read_sprites()?,
+                grass_encounter_rate: self.read_pointer(&pokered_symbols::wGrassRate),
                 closed_doors: closed_door_blocks(self, map),
-                card_key_locked: map_has_card_key_doors(map) && !self.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
+            card_key_locked: map_has_card_key_doors(map) && !self.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
             }
         )
     }
@@ -1201,6 +1203,17 @@ pub struct CurrentMap {
     /// Runtime `ReplaceTileBlock` door blocks that are currently shut (event-gated). Empty for
     /// maps with no such doors. Applied over the static map so BFS avoids closed doorways.
     pub closed_doors: Vec<DoorBlock>,
+    /// `wGrassRate` — the chance, out of 256, that a step in this map's tall grass rolls a wild
+    /// encounter. **Zero means there are none at all**, and that is not a rare edge: every town and
+    /// city in the game points at `NothingWildMons` (`data/wild/grass_water.asm`), while still
+    /// drawing perfectly ordinary tall grass.
+    ///
+    /// ⚠️ **Grass you can see and grass that holds Pokémon are two different facts.** `wGrassTile`
+    /// is a *tileset* property, so Pallet Town's grass is literally the same tile as Route 1's and
+    /// reads as [`MetaTile::Grass`] either way; this is the *map* property that says whether
+    /// standing in it can ever do anything. `TryDoWildEncounter` compares a random byte against this
+    /// with `jr nc, .CantEncounter2`, so a rate of zero never fires — it is impossible, not unlikely.
+    pub grass_encounter_rate: u8,
     /// True on Silph Co floors while the **Card Key** is not yet in the bag: the card-key door tiles
     /// ($18/$24) are then impassable walls (the game refuses to open them without the key), so BFS
     /// must route around them. Once the key is held they open on approach and become passable.
@@ -1421,6 +1434,7 @@ mod test {
             sprites: vec![],
             metadata: Arc::new(map),
             closed_doors: vec![],
+            grass_encounter_rate: 0,
             card_key_locked: false,
         };
         let tile_map = MetaTileMap::new(&current_map);

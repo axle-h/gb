@@ -61,6 +61,14 @@ very-slow-tests = []
 # — it is the only test that proves the legs compose. See CLAUDE.md.
 #   cargo test --release --features full-playthrough full_playthrough
 full-playthrough = []
+# The stall hunt: hours of `RandomPolicy` play, failing if the agent ever goes longer than
+# `GB_STUCK_TIMEOUT_SECS` without reaching a decision point — i.e. exactly when a deployed
+# `LlmPolicy`'s watchdog would fire. A random decider explores the agent's state machine far more
+# widely than any scripted route, so this is where jams get *found*; `full_playthrough` proves one
+# route still works. Gated as a **module** rather than with `#[ignore]`, so it never appears in the
+# ignored list — that list is a backlog of blocked tests, and this is not one.
+#   cargo test --release --features soak-tests --bin gb -- soak --nocapture
+soak-tests = []
 # Diagnostics and probes: tools that print a report about the game or the agent, not assertions.
 # Compiled out by default so the ignored-test list stays a readable backlog of genuinely blocked
 # work. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal — several

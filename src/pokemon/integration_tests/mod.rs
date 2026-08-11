@@ -65,6 +65,9 @@ mod saffron;
 mod cinnabar;
 mod endgame;
 mod playthrough;
+// Gated as a module: without the feature the test does not exist, so it never shows up as ignored.
+#[cfg(feature = "soak-tests")]
+mod soak;
 mod postgame;
 
 pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("../data/pallet-town-state.bin");

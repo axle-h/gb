@@ -533,7 +533,7 @@ mod tests {
         tweak(&mut config);
         EmulatorHost::new(
             crate::pokemon::data::START_OF_GAME,
-            Box::new(RandomPolicy),
+            Box::new(RandomPolicy::default()),
             published,
             config,
         )
@@ -713,7 +713,7 @@ mod tests {
 
         let mut second = EmulatorHost::new(
             &state.expect("a state was checkpointed"),
-            Box::new(RandomPolicy),
+            Box::new(RandomPolicy::default()),
             Published::new(),
             HostConfig::default(),
         )

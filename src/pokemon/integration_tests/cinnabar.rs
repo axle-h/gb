@@ -22,6 +22,8 @@ fn seafoam_articuno_is_reachable_offline() {
             player_position: at,
             player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
             sprites: vec![], metadata, closed_doors: vec![], card_key_locked: false,
+            // Seafoam is surf routing; grass never enters into it.
+            grass_encounter_rate: 0,
         };
         let mut tm = MetaTileMap::new(&current);
         tm.can_surf = true;

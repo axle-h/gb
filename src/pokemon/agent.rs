@@ -126,8 +126,9 @@ enum BattleState {
     /// Battle menu is up but policy hasn't returned an action yet.
     AwaitingPolicy { delay: DelayContext },
 
-    /// Navigating the menus
-    Navigating { action: BattleAction, delay: DelayContext },
+    /// Navigating the menus. `ticks` bounds how long that may take — see the ⚠️ in the tick, which is
+    /// the difference between "this decision is taking a while" and "the policy is never asked again".
+    Navigating { action: BattleAction, delay: DelayContext, ticks: u16 },
 
     /// Dedicated driver for using a healing item on the *active* Pokémon in battle. The generic
     /// navigator can't handle the "use on which POKéMON?" party menu that follows selecting a potion,
@@ -136,7 +137,7 @@ enum BattleState {
     /// `start_qty` is its count on entry (completion = the count dropped). `confirmed` marks that the
     /// active mon has been selected, so we don't re-press A during the heal-animation lag and burn the
     /// whole stack. `press` gives the two-tick press/release cadence.
-    HealingActive { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext },
+    HealingActive { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16 },
 }
 
 impl Default for BattleState {
@@ -207,7 +208,11 @@ pub(crate) enum AgentState {
     /// sprite forever. Bumping is not a step, so the ROM never rolls for an encounter: no error, no
     /// state change, no log line, just a run that quietly does nothing until its budget expires. The
     /// counter turns that into a re-pick, by which time the sprites have settled.
-    PacingForEncounters { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool, stalled: u16 },
+    /// Walking back and forth between two tiles so the ROM rolls for a wild encounter on each step.
+    /// `stalled` counts ticks spent failing to reach the target (walking into something); `paced`
+    /// counts every tick, successful or not, and is what bounds the wait for an encounter that is
+    /// never coming. See the two constants in the tick for why one cannot do both jobs.
+    PacingForEncounters { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool, stalled: u16, paced: u16 },
 
     Battle(BattleState),
 
@@ -413,6 +418,17 @@ pub struct PokemonAgent {
     /// Ticks left of the press currently being delivered — see [`MANUAL_INPUT_HOLD_TICKS`]. Zero
     /// means nothing is held and the next tick takes the head of the queue.
     manual_input_held: u8,
+    /// Ticks spent in the current state, reset by [`Self::set_state`] — so a state machine that is
+    /// *making progress* (any transition at all, including between battle sub-states) keeps it at
+    /// zero, and only genuinely sitting still accumulates.
+    ///
+    /// ⚠️ **The states that need it are the ones that never poll the policy.** `soak` found four of
+    /// them one at a time — `OverworldMovement`, `Navigating`, `HealingActive`, `PacingForEncounters`
+    /// — and the shape was identical every time: a driver waiting for something that had already
+    /// stopped coming, pressing buttons in silence until a deployed watchdog would have fired. Each
+    /// bound below hands back to a state that re-reads the screen and asks the policy again, so the
+    /// cost of being wrong is one re-decided turn.
+    state_ticks: u16,
 
     // ── W9: the stuck-run watchdog ───────────────────────────────────────────────────────────────
     /// Emulated time since the policy was last polled, in cycles. Reset by [`Self::poll_policy`] and
@@ -427,7 +443,7 @@ pub struct PokemonAgent {
 }
 
 impl Default for PokemonAgent {
-    fn default() -> Self { Self::new(Box::new(RandomPolicy)) }
+    fn default() -> Self { Self::new(Box::new(RandomPolicy::default())) }
 }
 
 impl PokemonAgent {
@@ -455,6 +471,7 @@ impl PokemonAgent {
             door_open_attempts: 0,
             manual_input: VecDeque::new(),
             manual_input_held: 0,
+            state_ticks: 0,
         }
     }
 
@@ -485,6 +502,7 @@ impl PokemonAgent {
         self.door_open_attempts = 0;
         self.manual_input.clear();
         self.manual_input_held = 0;
+        self.state_ticks = 0;
         self.cycles_since_poll = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
     }
@@ -767,6 +785,11 @@ impl PokemonAgent {
 
     pub(crate) fn set_state(&mut self, state: AgentState) {
         if self.state != state {
+            // Every state change restarts the walk clock. Kept here rather than in the variant
+            // because the `OverworldMovement` arm binds its fields by value and calls `&mut self`
+            // methods (`abort_overworld`, `set_state`) throughout — a `ref mut` field there would
+            // borrow `self.state` across all of them.
+            self.state_ticks = 0;
             self.state = state;
 
             if self.state != AgentState::Idle {
@@ -1301,6 +1324,23 @@ impl PokemonAgent {
                 }
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
+                // ⚠️ **A walk that never arrives is silence, and silence is what the watchdog reads.**
+                // The route is re-derived every tick, so a destination that stays reachable-looking but
+                // is never reached — an NPC parked on the only approach tile, a route that re-plans
+                // into the same blocked step — presses buttons for ever without the policy being asked
+                // anything. `soak` found it in Oak's Lab: 300 s of game time walking at a sprite.
+                //
+                // 4500 ticks is 90 s of game time. A tile step is ~13 ticks, so that is over 300 tiles
+                // — further than any single map is wide, and still under a third of the watchdog's
+                // 300 s. Giving up aborts the action, which returns to the policy for a new one.
+                const MAX_MOVEMENT_TICKS: u16 = 4500;
+                self.state_ticks += 1;
+                if self.state_ticks >= MAX_MOVEMENT_TICKS {
+                    api.release_all_buttons();
+                    self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination));
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
                 let game_state = self.observe_state(api)?;
                 if game_state.mode != GameMode::Overworld {
                     self.abort_overworld(destination, OverworldActionAbortedReason::from_game_mode(game_state.mode));
@@ -1349,7 +1389,7 @@ impl PokemonAgent {
                     let pos = game_state.map.player_position;
                     match adjacent_pacing_pair(&game_state.map, pos) {
                         Some((tile_a, tile_b)) => self.set_state(AgentState::PacingForEncounters {
-                            map: game_state.map.map, tile_a, tile_b, heading_to_b: false, stalled: 0 }),
+                            map: game_state.map.map, tile_a, tile_b, heading_to_b: false, stalled: 0, paced: 0 }),
                         None => {
                             self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination));
                             self.set_state(AgentState::Idle);
@@ -1365,7 +1405,7 @@ impl PokemonAgent {
                         let pair = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
                             .or_else(|| adjacent_pacing_pair(&game_state.map, pos));
                         if let Some((tile_a, tile_b)) = pair {
-                            self.set_state(AgentState::PacingForEncounters { map: game_state.map.map, tile_a, tile_b, heading_to_b: true, stalled: 0 });
+                            self.set_state(AgentState::PacingForEncounters { map: game_state.map.map, tile_a, tile_b, heading_to_b: true, stalled: 0, paced: 0 });
                         } else {
                             // TODO this should not happen, we shouldn't generate an action if this is true
                             //      the adjacent grass tile should be in the action
@@ -1479,8 +1519,20 @@ impl PokemonAgent {
                             // this before the FIGHT test matters during the transition, when the bag and
                             // the next-turn FIGHT menu briefly render together — handing to the policy
                             // then would drive the move-select on top of the still-open bag.
+                            // ⚠️ **"No PP left" belongs here for the same reason `CANCEL` does**, and it
+                            // is the PC menu's trap in a different costume: the refusal drops back to
+                            // the *move list* with the cursor still on the spent move, so A-mashing
+                            // re-selects it and bounces again, for ever. B backs out to the main menu,
+                            // where the policy gets to pick something else. `soak` found it in Viridian
+                            // Forest — a Bulbasaur out of Vine Whip, 300 s of game time silent.
+                            //
+                            // The moves *offered* are already filtered on `pp > 0`
+                            // (`Pokemon::available_battle_moves`), so this is the case where the game
+                            // and the party data disagree — Disable, or PP spent since the read — which
+                            // is exactly the case a filter cannot cover.
                             if screen.contains("CANCEL")
-                                || screen.contains("isn't the time") || screen.contains("won by using") {
+                                || screen.contains("isn't the time") || screen.contains("won by using")
+                                || screen.contains("No PP left") {
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
                             }
@@ -1612,20 +1664,44 @@ impl PokemonAgent {
                                             .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
                                         let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
                                         let entry_hp = game_state.pokemon.get(active as usize).map(|p| p.current_hp).unwrap_or(0);
-                                        self.set_battle_state(BattleState::HealingActive {
+                                        self.set_battle_state(BattleState::HealingActive { ticks: 0,
                                             item: item.id, start_qty, entry_hp, press: true, confirmed: false,
                                             delay: DelayContext::default(),
                                         });
                                         return Ok(());
                                     }
                                 }
-                                self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default() });
+                                self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default(), ticks: 0 });
                             }
                         }
                     }
 
-                    BattleState::Navigating { action, delay } => {
+                    BattleState::Navigating { action, delay, ticks } => {
                         if delay.tick(delta_cycles) {
+                            // ⚠️ **Nothing below this line polls the policy, so nothing below it may
+                            // run forever.** `Navigating` drives menus on the decision the policy has
+                            // already made; every exit from it goes through `WaitingForMenu`, which is
+                            // what leads back to `AwaitingPolicy` and the next poll. So a `Navigating`
+                            // that cannot finish is indistinguishable, from the outside, from a dead
+                            // run — and `soak` found exactly that: 300 s silent in `battle:Run` on
+                            // Route 1, walking a cursor toward an option it never reached.
+                            //
+                            // 250 ticks is 5 s of game time. Real navigation is a handful of cursor
+                            // steps and a confirm; even the slowest case here — driving the party list
+                            // to slot 5 for a voluntary switch — is far inside it. Giving up hands back
+                            // to `WaitingForMenu`, which re-reads the screen and asks the policy again,
+                            // so the cost of being wrong is one re-decided turn rather than a wedge.
+                            const MAX_NAVIGATING_TICKS: u16 = 250;
+                            *ticks += 1;
+                            if *ticks >= MAX_NAVIGATING_TICKS {
+                                // Formatted before the state is touched: `action` borrows from the
+                                // `battle_state` that `set_battle_state` replaces.
+                                let gave_up = format!("battle navigation to {action:?} got nowhere in 5s — re-deciding");
+                                api.release_all_buttons();
+                                self.set_battle_state(BattleState::default());
+                                self.event(AgentEvent::TextBox { message: gave_up });
+                                return Ok(());
+                            }
                             // A *voluntary* party switch (chosen from the battle PKMN menu) needs a
                             // dedicated driver: the in-battle party menu isn't a recognized
                             // `battle_menu_state` (its top-menu geometry is stale from the PKMN grid),
@@ -1716,6 +1792,11 @@ impl PokemonAgent {
                                         | BattleMenuState::SafariBall
                                         | BattleMenuState::SafariBait
                                         | BattleMenuState::SafariRock) {
+                                        // Re-confirmed for as long as the option keeps coming back: a
+                                        // Gen 1 escape is a dice roll whose odds improve with each
+                                        // attempt, so bouncing to the policy after one failure would
+                                        // mean a flee rarely fires. `MAX_NAVIGATING_TICKS` above is
+                                        // what stops that being unbounded.
                                         api.toggle_button(JoypadButton::A);
                                     } else {
                                         api.release_all_buttons();
@@ -1754,7 +1835,25 @@ impl PokemonAgent {
                         }
                     }
 
-                    BattleState::HealingActive { item, start_qty, entry_hp, press, confirmed, delay: _ } => {
+                    BattleState::HealingActive { item, start_qty, entry_hp, press, confirmed, delay: _, ticks } => {
+                        // ⚠️ Same bound and same reason as `Navigating`: this drives six menus deep on
+                        // a decision the policy already made and polls nothing on the way. `soak` found
+                        // it wedged at `confirmed=false` in Viridian Forest for 300 s — the bag list
+                        // had moved under it, so the potion was never selected and the completion
+                        // signal (the item count dropping) could not arrive.
+                        //
+                        // ⚠️ **Counted inside the variant, not on the agent.** This state rebuilds
+                        // itself every tick with `press` flipped, so `set_state` sees a *different*
+                        // state each time and resets anything counting from outside — which is exactly
+                        // how the first attempt at this bound silently never fired. 250 ticks is 5 s
+                        // of game time; a real heal is well inside it, animation included.
+                        const MAX_HEALING_TICKS: u16 = 250;
+                        let ticks = *ticks;
+                        if ticks >= MAX_HEALING_TICKS {
+                            api.release_all_buttons();
+                            self.set_battle_state(BattleState::default());
+                            return Ok(());
+                        }
                         use crate::pokemon::item::ItemId;
                         let item = *item;
                         let start_qty = *start_qty;
@@ -1789,13 +1888,13 @@ impl PokemonAgent {
                         if active_hp > entry_hp {
                             // Heal bar filling — wait, don't touch the (still-open) party menu.
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default() });
+                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1 });
                             return Ok(());
                         }
                         // Two-tick press/release cadence for clean rising edges.
                         if !press {
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default() });
+                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
                             return Ok(());
                         }
 
@@ -1842,20 +1941,42 @@ impl PokemonAgent {
 
                         api.release_all_buttons();
                         if let Some(b) = button { api.press_button(b); }
-                        self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default() });
+                        self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
                     }
                 }
             }
-            AgentState::PacingForEncounters { map, tile_a, tile_b, ref mut heading_to_b, ref mut stalled } => {
+            AgentState::PacingForEncounters { map, tile_a, tile_b, ref mut heading_to_b, ref mut stalled, ref mut paced } => {
                 /// Overworld ticks on the same tile before the pair is declared unwalkable. One tile
                 /// step is ~13 ticks at `AGENT_RESOLUTION`, so this is several steps' worth of slack —
                 /// long enough never to fire on healthy pacing, short enough to cost nothing.
                 const STALL_TICKS: u16 = 60;
 
+                /// Total ticks of *successful* pacing before giving up on the encounter ever coming.
+                ///
+                /// ⚠️ **`STALL_TICKS` cannot see this failure**, which is the whole reason this
+                /// exists: it counts ticks spent failing to reach the target tile, so it catches
+                /// "walking into a wall" and is reset on arrival by healthy pacing. An agent pacing
+                /// perfectly in grass where nothing will ever appear resets it for ever.
+                ///
+                /// 9000 ticks is 180 s of game time. The rarest grass in the game is 8/256 per step
+                /// (`data/wild/maps/*.asm`; most are 15 or 25), and a step is ~13 ticks — so 99.9%
+                /// of encounters on the *worst* map land inside ~218 steps, about 57 s. This is
+                /// three times that, which makes firing it a real signal rather than impatience.
+                const PACING_BUDGET_TICKS: u16 = 9000;
+
                 let game_state = api.game_state()?;
                 if game_state.mode == GameMode::Overworld {
                     if game_state.map.map != map {
                         // Blackout or other warp moved us off the grass map — let policy re-route.
+                        self.set_state(AgentState::Idle);
+                        return Ok(());
+                    }
+                    *paced += 1;
+                    if *paced >= PACING_BUDGET_TICKS {
+                        self.event(AgentEvent::TextBox { message: format!(
+                            "paced {tile_a}↔{tile_b} on {map} for {}s of game time with no encounter \
+                             — giving up", PACING_BUDGET_TICKS as u64 * AGENT_RESOLUTION.to_duration().as_millis() as u64 / 1000) });
+                        api.release_all_buttons();
                         self.set_state(AgentState::Idle);
                         return Ok(());
                     }
