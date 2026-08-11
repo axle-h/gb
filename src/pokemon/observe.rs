@@ -256,6 +256,10 @@ view! {
     /// forty `Up`/`Down` tokens tell a decider nothing that "23 steps" does not.
     pub struct ActionView {
         pub destination: Point,
+        /// What is there, named — `"the warp to OaksLab"`, `"the way into Route1"`, `"Mom"`. This is
+        /// [`MetaTile`](crate::pokemon::tile::MetaTile)'s prose and **not** the `MetaTile::kind` an
+        /// action id is minted from, so it is a thing to read rather than a thing to quote back; the
+        /// id to quote is in the turn's menu.
         pub tile: String,
         pub steps: usize,
     }

@@ -500,6 +500,10 @@ fn event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::StartedOverworldAction { .. } => "started_overworld_action",
         AgentEvent::OverworldActionAborted { .. } => "overworld_action_aborted",
         AgentEvent::OverworldActionCompleted { .. } => "overworld_action_completed",
+        // ⚠️ **The page keys off this to *not* draw a row** (`useEventStream`'s `fold`), so it is
+        // load-bearing rather than decorative: folded back into the line above, every conversation
+        // in the run would reappear in the log as a "✓" the dialogue underneath already said.
+        AgentEvent::OverworldInteractionCompleted { .. } => "overworld_interaction_completed",
         AgentEvent::BattleStarted => "battle_started",
         AgentEvent::BattleActionStarted { .. } => "battle_action_started",
         AgentEvent::BattleEnded => "battle_ended",
