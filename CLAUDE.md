@@ -246,10 +246,22 @@ every one, so a fixture of any other kind dropped in beside the save states fail
 modules away with a save-state error message.
 
 **Palettes are the web layer's business, not the decoders'.** Both decoders return 2bpp shade
-indices and nothing else. `src/web/sprites.rs` inverts the ramp for the same reason `badges.rs` does
-— the page is dark and Gen 1 art is black on white — and finds the background by **flood-filling
-shade 0 from the border**, four-way. ⚠️ Simply calling shade 0 transparent renders the entire
-Pokédex as wireframes: all 151 use the background tone as body fill.
+indices and nothing else; `src/web/badges.rs` and `src/web/sprites.rs` choose the colours.
+
+⚠️ **`badges.rs` inverts its ramp and `sprites.rs` must not**, and the difference is not the page —
+both land on the same dark panel. A badge is *line art*: there is no fill, so inverting it turns
+black-on-white into white-on-dark and loses nothing. A Pokémon pic is *filled*, so inverting it is
+not a palette choice but a different picture — it shipped that way once and Gengar came out
+white-bodied with a dark grin. The argument that talked me into it ("a black outline is invisible on
+a near-black panel") is simply false: an outline is bounded by the body's own bright fill and reads
+at full contrast, and only the outermost contour meets the panel. `the_ramp_is_not_inverted` pins
+the direction, because nothing else would notice it flipping.
+
+⚠️ **The background is found by flood-filling shade 0 from the border**, four-way, and it is
+load-bearing rather than a refinement: shade 0 is a body's *white fill* as well as the surround, so
+calling it transparent outright renders the whole Pokédex as wireframes (all 151 use it as fill),
+and not finding it at all renders them as solid white blocks. A diagonal step leaks through any
+outline drawn on the diagonal, which is why the fill is four-way.
 
 ## Starting a new run in place
 

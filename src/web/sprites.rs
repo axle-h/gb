@@ -25,28 +25,37 @@ pub const SPECIES_COUNT: usize = 151;
 /// The favicon is drawn at 2× so it stays crisp on a hidpi tab strip; 16 px doubled is 32.
 const FAVICON_SCALE: usize = 2;
 
-/// Tone-**inverted**, as RGBA, for the same reason [`crate::web::badges`] inverts the badges: this
-/// page is dark by decision, and a Gen 1 pic is black line art over a white body on a white
-/// background. Left alone it is a white box; with its background merely made transparent it is a
-/// black outline on a near-black panel, i.e. invisible.
+/// The Game Boy's own four shades, as RGBA: 0 is the white a body is filled with, 3 the black it is
+/// outlined in.
 ///
-/// So shade 3 — the outline — comes out brightest, and shade 0 — the body's own fill — becomes the
-/// darkest *visible* tone rather than nothing. Which is the point of the flood fill below: only the
-/// shade-0 pixels that the border can reach are background. An interior shade 0 that went
-/// transparent too would leave the sprite hollow, showing the panel through the middle of the
-/// Pokémon.
+/// ⚠️ **Do not invert this the way [`crate::web::badges`] inverts the badges.** It shipped inverted
+/// once, on the argument that a black outline would vanish against a near-black panel. That argument
+/// is wrong, and the sprites say so: an outline is *bounded by the body's own bright fill*, so it
+/// reads at full contrast — only the outermost contour meets the panel, which just lets the
+/// silhouette sit on the page. What inverting actually does is turn every Pokémon into a
+/// photographic negative of itself, which for filled art is not a palette choice but a different
+/// picture: Gengar came out white-bodied with a dark grin.
+///
+/// A badge inverts well because it *is* line art — there is no fill to negate. That is the whole of
+/// the difference between the two modules, and it is why the favicon (the Poké Ball, below) keeps
+/// its tones too.
+///
+/// Which makes the flood fill below load-bearing rather than a refinement: shade 0 is now opaque
+/// white, so a sprite whose background was not found would be a solid white block.
 const INK: [[u8; 4]; 4] = [
-    [0x2E, 0x34, 0x40, 0xFF],
-    [0x6B, 0x74, 0x85, 0xFF],
-    [0xB4, 0xBC, 0xC8, 0xFF],
     [0xF2, 0xF5, 0xF9, 0xFF],
+    [0xB4, 0xBC, 0xC8, 0xFF],
+    [0x6B, 0x74, 0x85, 0xFF],
+    [0x11, 0x13, 0x18, 0xFF],
 ];
 
 const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 
-/// The Poké Ball keeps the Game Boy's own tones. It is the browser's tab strip rather than this
-/// page, and that is light on some machines and dark on others — the ball has a white fill *and* a
-/// black outline, so as drawn it reads on both. Inverting it would cost one of the two.
+/// The Poké Ball, whose only difference from [`INK`] is that shade 0 is its background rather than
+/// part of it — an overworld sprite is drawn with a transparent colour 0, so there is nothing to
+/// flood-fill. It lands on the browser's tab strip rather than on this page, and that is light on
+/// some machines and dark on others; the ball has a white fill *and* a black outline, so as drawn it
+/// reads on both.
 const BALL_INK: [[u8; 4]; 4] = [
     TRANSPARENT,
     [0xF2, 0xF5, 0xF9, 0xFF],
@@ -239,6 +248,24 @@ mod tests {
             .expect("151 sprites");
         // The emptiest of them (Slowbro, which fills its box) leaves 579 of 3136 pixels behind it.
         assert!(smallest > 400, "the emptiest sprite has only {smallest} transparent pixels of {}", PIC_PX * PIC_PX);
+    }
+
+    /// ⚠️ **The direction of the ramp, pinned.** It shipped inverted once — a defensible-sounding
+    /// change (the badges next door do exactly that) which quietly turns every Pokémon into a
+    /// negative of itself. Nothing else here would notice: the sprites stay distinct, opaque and
+    /// transparent in all the right places whichever way round the four colours go.
+    #[test]
+    fn the_ramp_is_not_inverted() {
+        let luminance = |c: [u8; 4]| c[0] as u32 * 2 + c[1] as u32 * 3 + c[2] as u32;
+        for ramp in [INK, BALL_INK] {
+            assert!(
+                luminance(ramp[1]) > luminance(ramp[2]) && luminance(ramp[2]) > luminance(ramp[3]),
+                "shades 1-3 must darken, as they do on the cartridge: {ramp:?}",
+            );
+        }
+        // …and shade 0, which is a body's white fill here and transparent on an overworld sprite.
+        assert!(luminance(INK[0]) > luminance(INK[1]), "shade 0 is the lightest, not the darkest");
+        assert_eq!(BALL_INK[0], TRANSPARENT);
     }
 
     #[test]
