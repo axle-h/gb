@@ -110,11 +110,16 @@ jobs:
                printf '%s\n' "$index" | head -20; exit 1 ;;
           esac
 
-          # Stage 1 landed too, and is readable as a *cartridge* rather than as bytes: these eight
-          # sprites are decoded out of the trainer card's ROM graphics at runtime.
-          curl -fsS -o badges.png http://localhost:8080/api/badges.png
-          file badges.png | grep -q 'PNG image data' \
-            || { echo "::error::/api/badges.png is not a PNG — the ROM did not decode"; exit 1; }
+          # Stage 1 landed too, and is readable as a *cartridge* rather than as bytes: all three of
+          # these are decoded out of the ROM at runtime, and nothing pictorial is committed to the
+          # repo. The Pokémon sprite is the one worth having here — it is *decompressed* rather than
+          # merely sliced, and the container is exactly where its `.2bpp` oracle is absent
+          # (.dockerignore excludes them), so this is the only place that decompressor runs in CI.
+          for path in api/badges.png api/pokemon/1/front.png favicon.png; do
+            curl -fsS -o rom.png "http://localhost:8080/$path"
+            file rom.png | grep -q 'PNG image data' \
+              || { echo "::error::/$path is not a PNG — the ROM did not decode"; exit 1; }
+          done
 
           # And the emulator is actually running: video_seq is null until the first keyframe is
           # published, so a non-null value means frames are being produced, not merely that axum

@@ -42,7 +42,9 @@ notes and all. So a rollout, a `kubectl delete pod`, a node reboot — all of th
 playthrough up where it was, and the pod is deliberately given a 30 s grace period because SIGTERM
 is what writes that checkpoint.
 
-To start the game over, set `GB_ADMIN_TOKEN` in the Secret and ask the running pod:
+To start the game over, set `GB_ADMIN_TOKEN` in the Secret and open
+<https://gb.ax-h.com/reset-game>. The browser asks for a password — any user name, the token as the
+password — and the game restarts. Or, from a script:
 
 ```shell
 curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://gb.ax-h.com/api/new-run
@@ -50,8 +52,8 @@ curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://gb.ax-h.com/api/new-run
 ```
 
 No rollout, no downtime, nothing to remember to undo — the current run is checkpointed and left
-complete on the volume, and the page follows the new one on its own. The header has a **new run**
-button that does the same thing and asks for the token.
+complete on the volume, and the page follows the new one on its own. ⚠️ Both 404 while
+`GB_ADMIN_TOKEN` is unset *or blank*, which is the shape a placeholder Secret takes.
 
 The old way still works and is the fallback if the process is not answering: uncomment the `args:`
 line in `gb/deployment.yml` for one rollout and then take it back out. ⚠️ Left in place, every

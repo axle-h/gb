@@ -11,6 +11,25 @@ export interface BadgeView {
   earned: boolean;
 }
 
+/**
+ * `observe::PartyMonView` — one party slot.
+ *
+ * ⚠️ **`dex` is a number and the sprite is a separate request.** `/api/pokemon/{dex}/front.png` is
+ * `immutable`, so the browser fetches each species once and caches it for ever; putting the pixels
+ * on a heartbeat that arrives several times a second would be thousands of times the traffic for
+ * the same picture.
+ */
+export interface PartyMonView {
+  nickname: string;
+  /** National Pokédex number, 1–151. */
+  dex: number;
+  level: number;
+  hp: number;
+  max_hp: number;
+  /** `''` when healthy; otherwise `Paralyzed`, `Asleep`, … */
+  status: string;
+}
+
 /** `observe::StatusView` — what the status panel renders. */
 export interface GameView {
   map: string;
@@ -20,8 +39,7 @@ export interface GameView {
   money: number;
   /** `HH:MM:SS` of in-game play time. */
   playtime: string;
-  /** `[nickname-or-species, hp, max_hp]` per party slot. */
-  party_hp: [string, number, number][];
+  party: PartyMonView[];
   in_battle: boolean;
 }
 
@@ -91,19 +109,35 @@ export type UiEvent =
     };
 
 /**
- * Everything the conversation pane renders.
+ * What the conversation pane renders, before the bookkeeping every row carries.
  *
  * `assistant` is the one entry that is not one event: the deltas of a turn are folded into a single
  * growing block by [`fold`](./useEventStream), because a hundred one-token rows is not a reply.
  */
-export type Entry =
-  | { seq: number; type: 'agent'; kind: string; text: string }
-  | { seq: number; type: 'notice'; level: string; message: string }
-  | { seq: number; type: 'turn'; turn: number; kind: string; headline: string }
-  | { seq: number; type: 'assistant'; turn: number; text: string }
-  | { seq: number; type: 'tool'; turn: number; name: string; arguments: string }
-  | { seq: number; type: 'decision'; turn: number; summary: string }
-  | { seq: number; type: 'cancelled'; turn: number; reason: string }
-  | { seq: number; type: 'compacted'; before: number; after: number; images_evicted: number; summarised: boolean };
+export type EntryBody =
+  | { type: 'agent'; kind: string; text: string }
+  | { type: 'notice'; level: string; message: string }
+  | { type: 'turn'; turn: number; kind: string; headline: string }
+  | { type: 'assistant'; turn: number; text: string }
+  | { type: 'tool'; turn: number; name: string; arguments: string }
+  | { type: 'decision'; turn: number; summary: string }
+  | { type: 'cancelled'; turn: number; reason: string }
+  | { type: 'compacted'; before: number; after: number; images_evicted: number; summarised: boolean };
+
+/**
+ * One row of the log.
+ *
+ * ⚠️ **`raw` is the event exactly as it arrived**, and it is what the row reveals when it is
+ * expanded. That is deliberate: the summary is prose the server wrote for people, and the thing
+ * underneath it should be the real wire message rather than a second rendering of the same fields —
+ * which is why nothing on the server had to grow a `detail` string. It costs one reference per row;
+ * the objects were parsed either way.
+ */
+export type Entry = EntryBody & {
+  seq: number;
+  raw: UiEvent;
+  /** How many identical rows this one stands for. `1` unless the agent repeated itself. */
+  count: number;
+};
 
 export type Connection = 'connecting' | 'live' | 'reconnecting';

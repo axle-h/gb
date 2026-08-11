@@ -5,27 +5,36 @@
 //! steer the run — and for everything except `POST /api/new-run` that remains structural rather than
 //! editorial: this module can reach [`published::Published`] and nothing else.
 //!
-//! ⚠️ **`POST /api/new-run` is the exception, and it is the only one.** It reaches the emulator
+//! ⚠️ **Starting the game over is the exception, and it is the only one.** It reaches the emulator
 //! through [`crate::host::NewRunRequests`], which carries no data inwards and is answered by the
 //! emulator thread between instructions. It is **off unless `GB_ADMIN_TOKEN` is set** — without it
-//! the route 404s exactly as if it had never been registered — because the deployment this exists
-//! for serves the public internet and starting the game over is not something a passer-by should be
-//! able to do.
+//! both routes that offer it 404 exactly as if they had never been registered — because the
+//! deployment this exists for serves the public internet and starting the game over is not
+//! something a passer-by should be able to do.
+//!
+//! There are two doors onto it and they differ only in how they ask for the token. `/reset-game` is
+//! the one a person uses: it answers an unauthenticated GET with `WWW-Authenticate: Basic`, so the
+//! *browser* collects the password in its own dialog and the page needs no token-handling code at
+//! all. `POST /api/new-run` is the one a script uses, and keeps its `X-GB-Token` header.
 //!
 //! ```text
-//! GET  /                    the SPA (`web/dist`, embedded — see `assets.rs`)
-//! GET  /{*path}             its assets
-//! GET  /api/healthz         liveness
-//! GET  /api/events          SSE — status heartbeat at 10 Hz, plus agent events as they happen
-//! GET  /api/video           binary — a keyframe, then block deltas, deflated per connection
-//! GET  /api/badges.png      the eight gym badges, decoded from the cartridge
-//! GET  /api/history?since=  W7 — the transcript from a sequence number, for a page that just loaded
-//! POST /api/new-run         start the game over in a fresh run directory (needs GB_ADMIN_TOKEN)
+//! GET  /                            the SPA (`web/dist`, embedded — see `assets.rs`)
+//! GET  /{*path}                     its assets
+//! GET  /favicon.png, /favicon.ico   the overworld Poké Ball, decoded from the cartridge
+//! GET  /reset-game                  start the game over; HTTP Basic (needs GB_ADMIN_TOKEN)
+//! GET  /api/healthz                 liveness
+//! GET  /api/events                  SSE — the status heartbeat, plus agent events as they happen
+//! GET  /api/video                   binary — a keyframe, then block deltas, deflated per connection
+//! GET  /api/badges.png              the eight gym badges, decoded from the cartridge
+//! GET  /api/pokemon/{dex}/front.png one Pokémon's front sprite, decompressed from the cartridge
+//! GET  /api/history?since=          W7 — the transcript from a sequence number, for a fresh page
+//! POST /api/new-run                 the same reset, for a script; `X-GB-Token`
 //! ```
 
 pub mod assets;
 pub mod badges;
 pub mod published;
+pub mod sprites;
 pub mod video;
 
 use std::convert::Infallible;
@@ -197,7 +206,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     )?;
 
     println!(
-        "gb serve — POST /api/new-run is {}",
+        "gb serve — starting a new run (/reset-game, POST /api/new-run) is {}",
         match admin_token {
             Some(_) => "enabled (GB_ADMIN_TOKEN is set)",
             None => "off — set GB_ADMIN_TOKEN to enable it",
@@ -256,17 +265,7 @@ fn serve_http(
 
     runtime.block_on(async move {
         let state = AppState { published, started: Instant::now(), run, new_runs, admin_token };
-        let app = Router::new()
-            .route("/api/healthz", get(healthz))
-            .route("/api/events", get(events))
-            .route("/api/history", get(history))
-            .route("/api/video", get(video_stream))
-            .route("/api/badges.png", get(badges::badges))
-            .route("/api/new-run", post(new_run))
-            // Last, so the catch-all cannot shadow an API route it happens to match.
-            .route("/", get(assets::index))
-            .route("/{*path}", get(assets::asset))
-            .with_state(state);
+        let app = routes().with_state(state);
 
         // 0.0.0.0: the container publishes the port. Every endpoint is read-only except
         // `POST /api/new-run`, which is off unless `GB_ADMIN_TOKEN` is set and needs it when it is.
@@ -286,6 +285,30 @@ fn serve_http(
             .await
             .map_err(|e| format!("server failed: {e}"))
     })
+}
+
+/// Every route, in one place — the module doc's table above says the same thing in prose.
+///
+/// ⚠️ **A path axum's router cannot parse is a panic when the router is *built*, i.e. at startup**,
+/// not a 404 at request time. `/api/pokemon/{dex}.png` is exactly that mistake: matchit does not
+/// support a static suffix after a parameter, so the sprite route gives the parameter a segment of
+/// its own. `every_route_pattern_is_one_axum_accepts` is the guard, and it can only be a guard
+/// because this list is not duplicated inside `serve_http`.
+fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/healthz", get(healthz))
+        .route("/api/events", get(events))
+        .route("/api/history", get(history))
+        .route("/api/video", get(video_stream))
+        .route("/api/badges.png", get(badges::badges))
+        .route("/api/pokemon/{dex}/front.png", get(sprites::front_pic))
+        .route("/api/new-run", post(new_run))
+        .route("/reset-game", get(reset_game))
+        .route("/favicon.png", get(sprites::favicon))
+        .route("/favicon.ico", get(sprites::favicon))
+        // Last, so the catch-all cannot shadow an API route it happens to match.
+        .route("/", get(assets::index))
+        .route("/{*path}", get(assets::asset))
 }
 
 /// Whatever the supervisor uses to ask for a clean stop.
@@ -345,20 +368,51 @@ fn tokens_match(offered: &str, expected: &str) -> bool {
     difference == 0
 }
 
+/// The password out of an `Authorization: Basic` header, or `None` if there is not one to be had.
+///
+/// ⚠️ **The username is ignored.** Basic auth is `user:pass` and there is only one secret here, so
+/// whatever a viewer types in the first box is discarded and the second is compared against
+/// `GB_ADMIN_TOKEN`. ⚠️ And the split is on the **first** colon, not the last and not `split('=')`:
+/// a colon is a perfectly ordinary character in a generated token, and splitting wrongly would
+/// reject exactly the tokens most likely to be in use.
+fn basic_password(headers: &HeaderMap) -> Option<String> {
+    use base64::Engine;
+    let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = value.strip_prefix("Basic ").or_else(|| value.strip_prefix("basic "))?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    decoded.split_once(':').map(|(_, password)| password.to_string())
+}
+
 /// **Start the game over, in place**, and answer with the id of the run that just began.
 ///
-/// The one endpoint here that is not read-only, and the whole reason
-/// [`NewRunRequests`] exists. What it is *not* is a general control channel: it carries no data
-/// inwards, and the emulator thread decides when to act on it.
+/// The whole reason [`NewRunRequests`] exists. What it is *not* is a general control channel: it
+/// carries no data inwards, and the emulator thread decides when to act on it.
+///
+/// The old run is not deleted, or even stopped in any sense that loses anything: the emulator
+/// checkpoints it before swapping, so it is left complete on the volume and can be resumed by
+/// pointing a process back at it.
+async fn start_new_run(state: &AppState) -> Result<String, (StatusCode, String)> {
+    let receiver = state.new_runs.request().map_err(|failure| (StatusCode::CONFLICT, failure))?;
+    match tokio::time::timeout(NEW_RUN_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(run_id))) => Ok(run_id),
+        // The emulator tried and could not — a full disk, most likely. Its message is the useful one.
+        Ok(Ok(Err(failure))) => Err((StatusCode::INTERNAL_SERVER_ERROR, failure)),
+        // The sender was dropped, or never taken: either way the emulator thread is not running, and
+        // `Obituary` will have said so on `/api/events` already.
+        Ok(Err(_)) | Err(_) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the emulator thread did not answer — see /api/events".to_string(),
+        )),
+    }
+}
+
+/// `POST /api/new-run` — [`start_new_run`] for a script, gated on the `X-GB-Token` header.
 ///
 /// ⚠️ **404, not 403, when `GB_ADMIN_TOKEN` is unset.** The route is registered unconditionally
 /// because the router is built before the token is a question, so "off" has to be a response — and
 /// it should be the response a route that does not exist would give, rather than one advertising a
 /// reset endpoint to anyone who scans for it.
-///
-/// The old run is not deleted, or even stopped in any sense that loses anything: the emulator
-/// checkpoints it before swapping, so it is left complete on the volume and can be resumed by
-/// pointing a process back at it.
 async fn new_run(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(expected) = state.admin_token.as_deref() else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({
@@ -372,24 +426,82 @@ async fn new_run(State(state): State<AppState>, headers: HeaderMap) -> Response 
         }))).into_response();
     }
 
-    let receiver = match state.new_runs.request() {
-        Ok(receiver) => receiver,
-        Err(failure) => {
-            return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": failure }))).into_response();
-        }
-    };
-    match tokio::time::timeout(NEW_RUN_TIMEOUT, receiver).await {
-        Ok(Ok(Ok(run_id))) => (StatusCode::OK, Json(serde_json::json!({ "run_id": run_id }))).into_response(),
-        // The emulator tried and could not — a full disk, most likely. Its message is the useful one.
-        Ok(Ok(Err(failure))) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": failure,
-        }))).into_response(),
-        // The sender was dropped, or never taken: either way the emulator thread is not running, and
-        // `Obituary` will have said so on `/api/events` already.
-        Ok(Err(_)) | Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-            "error": "the emulator thread did not answer — see /api/events",
-        }))).into_response(),
+    match start_new_run(&state).await {
+        Ok(run_id) => (StatusCode::OK, Json(serde_json::json!({ "run_id": run_id }))).into_response(),
+        Err((status, error)) => (status, Json(serde_json::json!({ "error": error }))).into_response(),
     }
+}
+
+/// `GET /reset-game` — [`start_new_run`] for a person, gated on **HTTP Basic**, so the browser
+/// collects the password in its own dialog and the SPA needs no token-handling code at all. That is
+/// the whole reason it exists: the page used to carry a button, a `confirm`, a `prompt` and a
+/// `sessionStorage` key to do what `WWW-Authenticate` does natively.
+///
+/// ⚠️ **Nothing links here, and nothing should.** A GET that resets the game must not be reachable
+/// by a prefetch, a crawler or a middle-click; it is a URL somebody types. Once the browser has the
+/// credentials it will re-send them without asking, so a *refresh* of this page starts another run —
+/// which the response says, because a viewer who does not expect it has no other way to find out.
+///
+/// ⚠️ **404 when `GB_ADMIN_TOKEN` is unset, and byte-identical to the catch-all's** — challenging
+/// for a password would tell a scanner the endpoint is here, which is the same argument
+/// [`new_run`]'s 404 is making.
+async fn reset_game(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(expected) = state.admin_token.as_deref() else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let offered = basic_password(&headers).unwrap_or_default();
+    if !tokens_match(&offered, expected) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [
+                (axum::http::header::WWW_AUTHENTICATE, r#"Basic realm="gb", charset="UTF-8""#),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            reset_page("Password required", "Enter <code>GB_ADMIN_TOKEN</code> as the password. Any user name will do."),
+        )
+            .into_response();
+    }
+
+    let (status, body) = match start_new_run(&state).await {
+        Ok(run_id) => (
+            StatusCode::OK,
+            reset_page(
+                &format!("New run {run_id}"),
+                "The previous run was checkpointed and left complete on disk. \
+                 <strong>Reloading this page starts another one.</strong>",
+            ),
+        ),
+        Err((status, error)) => (status, reset_page("Could not start a new run", &html_escape(&error))),
+    };
+    (status, [(axum::http::header::CACHE_CONTROL, "no-store")], body).into_response()
+}
+
+/// The one page this server renders itself. Self-contained and in the SPA's palette, because it is
+/// reached by typing a URL and may well be the first thing a viewer sees.
+fn reset_page(heading: &str, detail: &str) -> Response {
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <meta name=\"robots\" content=\"noindex, nofollow\">\
+         <link rel=\"icon\" type=\"image/png\" href=\"/favicon.png\">\
+         <title>gb · new run</title><style>\
+         :root {{ color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}\
+         body {{ margin: 0; display: grid; place-items: center; min-height: 100vh; \
+         background: #0f1115; color: #d7dae0; line-height: 1.55; }}\
+         main {{ max-width: 46ch; padding: 24px; border: 1px solid #262b34; border-radius: 4px; background: #161920; }}\
+         h1 {{ margin: 0 0 8px; font-size: 15px; }}\
+         p {{ margin: 0 0 12px; color: #7d838f; }}\
+         code {{ color: #d7dae0; }} a {{ color: #8fd48f; }}\
+         </style></head><body><main><h1>{}</h1><p>{detail}</p><p><a href=\"/\">← back to the game</a></p>\
+         </main></body></html>",
+        html_escape(heading),
+    );
+    ([(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+/// Enough for the two things that reach the page: a run id and an error message from the emulator.
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 #[derive(serde::Deserialize)]
@@ -621,5 +733,48 @@ mod tests {
         assert!(!tokens_match("s3crets", "s3cret"), "nor is an extension");
         assert!(!tokens_match("S3CRET", "s3cret"), "and it is case sensitive");
         assert!(!tokens_match("", "s3cret"), "nor is sending no header at all");
+    }
+
+    fn authorization(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::AUTHORIZATION, value.parse().expect("a header value"));
+        headers
+    }
+
+    /// `/reset-game`'s half of the token check. Everything that is not a well-formed `Basic`
+    /// credential has to come out as `None` rather than as a panic or an empty-string match —
+    /// [`tokens_match`] refuses the empty string, so `None` and "wrong" land in the same place.
+    #[test]
+    fn only_a_well_formed_basic_header_yields_a_password() {
+        assert_eq!(basic_password(&HeaderMap::new()), None, "no header at all");
+        assert_eq!(basic_password(&authorization("Bearer s3cret")), None, "the wrong scheme");
+        assert_eq!(basic_password(&authorization("Basic !!!not base64!!!")), None);
+        // `dXNlcg==` is "user" — no colon, so there is no password in it.
+        assert_eq!(basic_password(&authorization("Basic dXNlcg==")), None);
+    }
+
+    /// ⚠️ **The username is ignored and the split is on the *first* colon.** A generated token may
+    /// well contain one, and splitting on the last would hand `tokens_match` a truncated password
+    /// that could never match — a failure that looks exactly like the operator mistyping it.
+    #[test]
+    fn the_password_is_everything_after_the_first_colon() {
+        use base64::Engine;
+        let basic = |raw: &str| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+            basic_password(&authorization(&format!("Basic {encoded}")))
+        };
+        assert_eq!(basic("anyone:s3cret").as_deref(), Some("s3cret"), "the user name is discarded");
+        assert_eq!(basic(":s3cret").as_deref(), Some("s3cret"), "an empty user name is the usual case");
+        assert_eq!(basic("gb:a:b:c").as_deref(), Some("a:b:c"), "a colon is legal inside a token");
+        assert_eq!(basic("user:").as_deref(), Some(""), "…and an empty password reaches tokens_match, which refuses it");
+        assert!(!tokens_match("", "s3cret"));
+    }
+
+    /// ⚠️ **The router is built at startup and a bad path panics there**, so a route axum's matcher
+    /// rejects — `/api/pokemon/{dex}.png`, which needs a dynamic suffix it does not support — would
+    /// take the server down on boot rather than 404. Nothing else in the suite builds the router.
+    #[test]
+    fn every_route_pattern_is_one_axum_accepts() {
+        let _: Router<AppState> = routes();
     }
 }

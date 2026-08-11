@@ -16,16 +16,13 @@
 //!
 //! Nothing is committed: this reads the ROM at run time, the same ROM the emulator boots.
 
-use crate::pokemon::roms::POKERED;
-use crate::pokemon::symbols::DmgBank;
-use crate::pokemon::symbols::pokered_symbols;
+use crate::pokemon::rom_gfx::{TILE_BYTES, tile_grid_shades};
+use crate::pokemon::symbols::pokered_symbols::GymLeaderFaceAndBadgeTileGraphics;
 
 /// Badges are 2×2 tiles.
 pub const BADGE_PX: usize = 16;
 pub const BADGE_COUNT: usize = 8;
 
-/// One 8×8 tile of 2bpp Game Boy graphics.
-const TILE_BYTES: usize = 16;
 /// Face + badge, 2×2 tiles each.
 const TILES_PER_GYM: usize = 8;
 
@@ -38,35 +35,19 @@ const TILES_PER_GYM: usize = 8;
 pub fn badge_shades(index: usize) -> [u8; BADGE_PX * BADGE_PX] {
     assert!(index < BADGE_COUNT, "there are only {BADGE_COUNT} badges");
     let first_tile = index * TILES_PER_GYM + 4; // past the gym leader's face
-    let mut shades = [0u8; BADGE_PX * BADGE_PX];
-    for tile in 0..4 {
-        let (left, top) = ((tile % 2) * 8, (tile / 2) * 8);
-        let bytes = tile_bytes(first_tile + tile);
-        for y in 0..8 {
-            let (low, high) = (bytes[y * 2], bytes[y * 2 + 1]);
-            for x in 0..8 {
-                let bit = 7 - x;
-                shades[(top + y) * BADGE_PX + left + x] =
-                    ((high >> bit) & 1) << 1 | ((low >> bit) & 1);
-            }
-        }
-    }
-    shades
-}
-
-fn tile_bytes(tile: usize) -> &'static [u8] {
-    let pointer = pokered_symbols::GymLeaderFaceAndBadgeTileGraphics;
-    let DmgBank::ROM { bank } = pointer.bank else {
-        panic!("the badge graphics moved out of ROM, which cannot happen");
-    };
-    // Bank 0 is at the bottom of the address space; every other bank is windowed at 0x4000.
-    let base = bank as usize * 0x4000 + (pointer.address as usize - 0x4000) + tile * TILE_BYTES;
-    &POKERED[base..base + TILE_BYTES]
+    let shades = tile_grid_shades(GymLeaderFaceAndBadgeTileGraphics + (first_tile * TILE_BYTES) as u16, 2, 2);
+    shades.try_into().expect("2×2 tiles is 16×16 pixels")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pokemon::rom_gfx::rom_slice;
+
+    fn tile_bytes(tile: usize) -> &'static [u8] {
+        let at = tile * TILE_BYTES;
+        &rom_slice(GymLeaderFaceAndBadgeTileGraphics)[at..at + TILE_BYTES]
+    }
 
     /// The offsets are arithmetic over a symbol address, and arithmetic that is one tile out still
     /// produces a plausible-looking 16×16 sprite — of half a gym leader's face. So: eight of them,

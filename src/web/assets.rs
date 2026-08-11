@@ -130,7 +130,8 @@ fn content_type(path: &str) -> &'static str {
 /// not a bug, and saying so beats a blank page.
 const NOT_BUILT: &str = r#"<!doctype html>
 <meta charset="utf-8">
-<title>gb — the UI is not built</title>
+<title>gb · the UI is not built</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <body style="background:#0f1115;color:#d7dae0;font:14px/1.6 ui-monospace,monospace;padding:40px">
 <h1 style="font-size:16px">The web UI was not built into this binary.</h1>
 <p>The SPA is compiled into <code>gb</code> from <code>web/dist</code>, which was empty when the
