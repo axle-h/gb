@@ -6,8 +6,13 @@ volume assumes the `local-path` provisioner.
 One pod: the emulator, the agent and the web server are one process (`src/host.rs`), and a run's
 whole state is one directory on one volume. There is nothing to scale and nothing to shard.
 
-First, put your API key in `gb/secret.yml` — or copy it to `gb/secret.axh.yml`, which is gitignored,
-and apply that instead. Then set `GB_MODEL` in `gb/configmap.yml` and the hostname in `ingress.yml`.
+⚠️ **`secret.example.yml` lives outside `gb/` on purpose, and that is not tidying.** Everything in
+`gb/` is applied as a directory, and a Secret template full of placeholders sitting in there means
+`kubectl apply -f ./gb` blanks the real API key and the real `GB_ADMIN_TOKEN` every time anyone
+re-applies the deployment. So the template is kept where a directory apply cannot reach it: copy it
+to `gb/secret.axh.yml` (gitignored), fill it in, and it is applied along with everything else.
+
+Set `GB_MODEL` in `gb/configmap.yml` and the hostname in `ingress.yml` first.
 
 ```shell
 # Create the namespace. ⚠️ It must be `gb`: the ingress names the redirect middleware as
@@ -17,7 +22,10 @@ kubectl create namespace gb
 # Create the redirect middleware
 kubectl -n gb apply -f ./redirect-http-https.yml
 
-# Create the volume, config and deployment
+# Your secrets, where a directory apply will keep them rather than overwrite them.
+cp ./secret.example.yml ./gb/secret.axh.yml && $EDITOR ./gb/secret.axh.yml
+
+# Create the volume, config, secret and deployment
 kubectl -n gb apply -f ./gb
 
 # Check it is UP — the pod is Running and the PVC is Bound
