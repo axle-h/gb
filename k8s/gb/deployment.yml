@@ -50,14 +50,24 @@ spec:
         - name: gb
           image: ghcr.io/axle-h/gb:latest
           imagePullPolicy: Always
-          # `gb serve` RESUMES the newest run under $GB_RUN_DIR by default, which is what makes a
-          # pod restart continue the playthrough instead of starting a new one. To deliberately
-          # start the game over, add `--new-run` here for one rollout and take it back out again —
-          # left in place, every restart would wipe the run.
+          # ⚠️ **This line is what the cluster is actually running, and it is here so that applying
+          # this file is not a change.** It used to be commented out while the live Deployment was
+          # applied from a generated copy carrying `--policy random` — so a plain
+          # `kubectl -n gb apply -f ./gb` silently switched the run to `--policy llm` against a
+          # placeholder key and crash-looped it. `secret.axh.yml` closes the other half of that trap.
           #
-          # `--policy llm` is the default. Swap in `--policy random` to exercise the whole stack
-          # without an API key or any spend.
-          # args: ["gb", "serve", "--new-run"]
+          # `--policy random` needs no API key and spends nothing, and it exercises the whole stack —
+          # the agent, the video pipeline, the page and the volume. To let a model play, put the real
+          # key in `secret.axh.yml` and change this to `--policy llm`; the two only make sense
+          # together.
+          #
+          # `gb serve` RESUMES the newest run under $GB_RUN_DIR, which is what makes a pod restart
+          # continue the playthrough instead of starting a new one. **To start the game over, do not
+          # edit this** — `POST /api/new-run` does it in place, with no rollout and nothing to undo
+          # (see ../README.md). `--new-run` here is the fallback for a process that is not answering,
+          # and ⚠️ left in place it would wipe the run on *every* restart, which is why it is not the
+          # first thing this comment offers any more.
+          args: ["gb", "serve", "--policy", "random"]
           envFrom:
             - configMapRef:
                 name: gb
