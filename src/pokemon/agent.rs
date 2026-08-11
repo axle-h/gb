@@ -56,6 +56,24 @@ pub enum OverworldActionAbortedReason {
     NoRoute(MetaTile),
 }
 
+impl Display for OverworldActionAbortedReason {
+    /// Why the walk stopped, in the words a viewer would use. The `{:?}` this replaced put
+    /// `NoAdjacentGrass` and `WrongMap(ViridianForest)` in the log, which read as internals because
+    /// they were.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => write!(f, "it stopped making progress"),
+            Self::Script => write!(f, "the game took over"),
+            Self::Battle => write!(f, "a battle started"),
+            Self::Textbox => write!(f, "something was said"),
+            Self::NamingScreen => write!(f, "the naming screen opened"),
+            Self::WrongMap(map) => write!(f, "it ended up on {map}"),
+            Self::NoAdjacentGrass => write!(f, "there is no grass to step into"),
+            Self::NoRoute(tile) => write!(f, "there is no route to {tile}"),
+        }
+    }
+}
+
 impl OverworldActionAbortedReason {
     pub fn from_game_mode(game_mode: GameMode) -> Self {
         match game_mode {
@@ -74,7 +92,12 @@ pub enum AgentEvent {
     OverworldActionAborted { destination: MetaTile, reason: OverworldActionAbortedReason },
     OverworldActionCompleted { destination: MetaTile },
     BattleStarted,
-    BattleActionStarted { action: BattleAction },
+    /// ⚠️ **`actor` is carried rather than looked up later** because nothing downstream can look it
+    /// up: the host formats events off the emulator thread and the party has moved on by then. It
+    /// is the acting party member's nickname, which is what turns
+    /// `Fight { slot: 1, battle_move: PokemonMove { name: Growl, pp: 40 } }` into `BULBASAUR used
+    /// Growl`.
+    BattleActionStarted { actor: String, action: BattleAction },
     BattleEnded,
     TextBox { message: String },
     /// **W9 / §14** — the agent went `stuck_for` of emulated time without reaching a decision point
@@ -92,21 +115,47 @@ impl AgentEvent {
     pub fn text_box_from_reader(reader: &PokemonTextReader) -> Self {
         Self::TextBox { message: reader.to_string() }
     }
+
+    /// Whether this is worth saying at all.
+    ///
+    /// ⚠️ **The text reader emits a great many empty boxes.** A textbox is detected before its
+    /// characters have been drawn, so an ordinary battle turn produces several `📖` events with
+    /// nothing after them — on the deployed run they were most of the log. Dropping them at
+    /// [`PokemonAgent::event`] rather than in the page keeps the transcript clean too, which is what
+    /// `/api/history` replays into a browser that has just loaded.
+    fn is_worth_reporting(&self) -> bool {
+        match self {
+            Self::TextBox { message } => !message.trim().is_empty(),
+            _ => true,
+        }
+    }
 }
 
 impl Display for AgentEvent {
+    /// **What the web UI puts in its log**, via `format!("{event}")` in `host.rs` — so this is
+    /// prose, not a debug dump. The structured form is still there for anyone who wants it: the
+    /// page keeps the JSON it received and shows it on demand.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AgentEvent::StartedOverworldAction { destination } =>
-                write!(f, "→ {destination}"),
+                write!(f, "→ heading for {destination}"),
             AgentEvent::OverworldActionAborted { destination, reason } =>
-                write!(f, "✗ {destination} ({reason:?})"),
+                write!(f, "✗ gave up on {destination} — {reason}"),
             AgentEvent::OverworldActionCompleted { destination } =>
-                write!(f, "✓ {destination}"),
+                write!(f, "✓ reached {destination}"),
             AgentEvent::BattleStarted =>
                 write!(f, "battle started"),
-            AgentEvent::BattleActionStarted { action } =>
-                write!(f, "battle: {action:?}"),
+            AgentEvent::BattleActionStarted { actor, action } => match action {
+                // The tense is deliberate: this is the action being *started*, not its outcome, so
+                // "used" is as far as it goes — whether the move hit is the next line's business.
+                BattleAction::Fight { battle_move, .. } => write!(f, "{actor} used {}", battle_move.name),
+                BattleAction::UseItem { item, .. } => write!(f, "used {} on {actor}", item.id),
+                BattleAction::SwitchPokemon { pokemon, .. } => write!(f, "sent out {}", pokemon.species),
+                BattleAction::Run => write!(f, "{actor} tried to run"),
+                BattleAction::SafariBall => write!(f, "threw a Safari Ball"),
+                BattleAction::SafariBait => write!(f, "threw bait"),
+                BattleAction::SafariRock => write!(f, "threw a rock"),
+            },
             AgentEvent::BattleEnded =>
                 write!(f, "battle ended"),
             AgentEvent::TextBox { message } =>
@@ -116,6 +165,20 @@ impl Display for AgentEvent {
                            decision — asking for a nudge", stuck_for.as_secs()),
         }
     }
+}
+
+/// What the player's side of the battle is called, for [`AgentEvent::BattleActionStarted`].
+///
+/// The party nickname rather than `battle.player.species`, because that is what the game itself puts
+/// on screen and what the model's own notes will be using. Falls back to the species when the slot
+/// cannot be read — a Safari battle or a mid-transition state — rather than reporting an empty name.
+fn active_pokemon_name(state: &GameState) -> String {
+    let Some(battle) = state.battle.as_ref() else { return String::new() };
+    state
+        .pokemon
+        .get(battle.active_party_slot as usize)
+        .map(|mon| mon.nickname.to_default_string())
+        .unwrap_or_else(|| format!("{}", battle.player.species))
 }
 
 /// Ticks of B-mashing [`BattleState::WaitingForMenu`] does after the game refuses a move. See the
@@ -634,6 +697,9 @@ impl PokemonAgent {
     /// `new_events` and drained at the end of the tick, so `on_event` cannot silently miss a class
     /// of them.
     pub(crate) fn event(&mut self, event: AgentEvent) {
+        if !event.is_worth_reporting() {
+            return;
+        }
         println!("{:?}", event);
         self.policy.on_event(&event);
         self.event_buffer.push_back(event);
@@ -1681,7 +1747,10 @@ impl PokemonAgent {
                             let game_state = api.game_state()?;
                             self.poll_policy(&game_state, api);
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
-                                new_events.push(AgentEvent::BattleActionStarted { action });
+                                new_events.push(AgentEvent::BattleActionStarted {
+                                    actor: active_pokemon_name(&game_state),
+                                    action,
+                                });
                                 // In-battle item use goes through the dedicated `HealingActive` driver:
                                 // it opens the bag and confirms the item with A, whereas the generic
                                 // navigator hands off to `WaitingForMenu`, which backs out of the bag on
@@ -2956,4 +3025,95 @@ fn is_on_map_border(map: &crate::pokemon::tile_map::MetaTileMap) -> bool {
         || pos.y == 0
         || pos.x as usize == map.width.saturating_sub(1)
         || pos.y as usize == map.height.saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pokemon::bag::BagItem;
+    use crate::pokemon::item::ItemId;
+    use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
+
+    /// ⚠️ **`impl Display for AgentEvent` is what the web UI puts in its log** — `host.rs` does
+    /// `format!("{event}")` into `UiEventBody::Agent { text }` and the page prints it verbatim. It
+    /// used to be `format!("battle: {action:?}")`, which put
+    /// `Fight { slot: 1, battle_move: PokemonMove { name: Growl, pp: 40 } }` on screen for every
+    /// turn of every battle. Nothing but this test looks at the prose, so nothing but this test
+    /// would notice it turning back into a debug dump.
+    #[test]
+    fn a_battle_turn_reads_as_a_sentence() {
+        let say = |action| format!("{}", AgentEvent::BattleActionStarted { actor: "BULBASAUR".into(), action });
+
+        assert_eq!(
+            say(BattleAction::Fight { slot: 1, battle_move: PokemonMove::with_max_pp(PokemonMoveName::VineWhip) }),
+            "BULBASAUR used Vine Whip",
+            "the move's own Display already spaces and capitalises it",
+        );
+        assert_eq!(
+            say(BattleAction::UseItem { slot: 0, item: BagItem::new(ItemId::Potion, 1) }),
+            "used Potion on BULBASAUR",
+        );
+        assert_eq!(say(BattleAction::Run), "BULBASAUR tried to run", "…tried: this is the action starting, not landing");
+        assert_eq!(say(BattleAction::SafariBall), "threw a Safari Ball");
+    }
+
+    /// The abort reason is the most useful thing the agent says — it is what stops the model
+    /// re-picking a route that cannot be walked — and it goes to the model as well as the page, so
+    /// `NoRoute(Grass)` was costing both of them.
+    #[test]
+    fn an_abandoned_walk_says_why() {
+        let event = AgentEvent::OverworldActionAborted {
+            destination: MetaTile::Pc,
+            reason: OverworldActionAbortedReason::Battle,
+        };
+        assert_eq!(format!("{event}"), "✗ gave up on Pc — a battle started");
+        assert_eq!(
+            format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass }),
+            "→ heading for Grass",
+        );
+    }
+
+    /// ⚠️ **A textbox is detected before its characters are drawn**, so the reader produces a stream
+    /// of empty ones — on the deployed run they were most of the log, and they reach the transcript
+    /// as well as the page. Dropped at the funnel every event goes through, so both are clean.
+    #[test]
+    fn an_empty_text_box_is_not_worth_saying() {
+        assert!(!AgentEvent::TextBox { message: String::new() }.is_worth_reporting());
+        assert!(!AgentEvent::TextBox { message: "   \n ".into() }.is_worth_reporting());
+        assert!(AgentEvent::TextBox { message: "Wild PIDGEY appeared!".into() }.is_worth_reporting());
+        // Nothing else is ever dropped: an event with no payload still says something happened.
+        assert!(AgentEvent::BattleStarted.is_worth_reporting());
+        assert!(AgentEvent::BattleEnded.is_worth_reporting());
+    }
+
+    /// Every variant has to produce *something* — an arm that fell through to an empty string would
+    /// show as a blank row rather than as a failure.
+    #[test]
+    fn no_event_formats_to_nothing() {
+        let events = [
+            AgentEvent::StartedOverworldAction { destination: MetaTile::Pc },
+            AgentEvent::OverworldActionAborted { destination: MetaTile::Pc, reason: OverworldActionAbortedReason::Unknown },
+            AgentEvent::OverworldActionCompleted { destination: MetaTile::Pc },
+            AgentEvent::BattleStarted,
+            AgentEvent::BattleActionStarted { actor: "X".into(), action: BattleAction::SafariRock },
+            AgentEvent::BattleEnded,
+            AgentEvent::TextBox { message: "hello".into() },
+            AgentEvent::WatchdogFired { agent_state: "wait".into(), stuck_for: Duration::from_secs(300) },
+        ];
+        for event in events {
+            assert!(!format!("{event}").trim().is_empty(), "{event:?} formats to nothing");
+        }
+        for reason in [
+            OverworldActionAbortedReason::Unknown,
+            OverworldActionAbortedReason::Script,
+            OverworldActionAbortedReason::Battle,
+            OverworldActionAbortedReason::Textbox,
+            OverworldActionAbortedReason::NamingScreen,
+            OverworldActionAbortedReason::WrongMap(Map::PalletTown),
+            OverworldActionAbortedReason::NoAdjacentGrass,
+            OverworldActionAbortedReason::NoRoute(MetaTile::Grass),
+        ] {
+            assert!(!format!("{reason}").trim().is_empty(), "{reason:?} formats to nothing");
+        }
+    }
 }

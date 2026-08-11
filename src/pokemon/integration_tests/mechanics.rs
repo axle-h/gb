@@ -963,7 +963,22 @@ fn observation_views_describe_the_snapshot() {
         "the two views must agree on which badges, not merely how many",
     );
     assert_eq!(status.playtime, trainer.playtime);
-    assert_eq!(status.party_hp.len(), party.len());
+    assert_eq!(status.party.len(), party.len());
+    // The heartbeat's party is what the status panel draws, so every field it draws has to be there
+    // — and `dex` in particular is a *request*: the client turns it into
+    // `/api/pokemon/{dex}/front.png`, so a zero would be a broken image on the page.
+    for (slot, mon) in status.party.iter().zip(party.iter()) {
+        // The two views spell the name differently on purpose: the heartbeat carries what the game
+        // stores (`CHARMANDER`), the LLM's view carries `None` for an un-renamed Pokémon and lets
+        // the species stand in (`Charmander`). Both are right; only the letters differ.
+        assert!(
+            slot.nickname.eq_ignore_ascii_case(&mon.nickname.clone().unwrap_or_else(|| mon.species.clone())),
+            "{} vs {:?}/{}", slot.nickname, mon.nickname, mon.species,
+        );
+        assert!((1..=151).contains(&slot.dex), "{} has dex number {}", slot.nickname, slot.dex);
+        assert_eq!(slot.level, mon.level);
+        assert_eq!((slot.hp, slot.max_hp), (mon.hp, mon.max_hp));
+    }
     assert!(!status.in_battle, "the Pallet Town snapshot is not in a battle");
     assert!(observe::battle(&state).is_none(), "…so there is no battle to describe");
 

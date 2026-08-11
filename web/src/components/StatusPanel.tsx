@@ -37,18 +37,29 @@ export function StatusPanel({ status }: { status: Status | null }) {
         <span className="dim">{game?.playtime ?? ''}</span>
       </div>
 
+      {/* Each sprite is `/api/pokemon/{dex}/front.png`, decompressed from the cartridge's own pic
+          data. The heartbeat carries only the dex number; the endpoint is `immutable`, so the
+          browser fetches a species once and never asks again. `key` is the slot rather than the
+          species — a party can hold two of the same Pokémon. */}
       <ol className="party">
-        {game?.party_hp.map(([name, hp, max], slot) => (
+        {game?.party.map((mon, slot) => (
           <li key={slot}>
-            <span className="mon">{name}</span>
+            <img className="sprite" src={`/api/pokemon/${mon.dex}/front.png`} alt="" loading="lazy" width={56} height={56} />
+            <span className="mon" title={mon.nickname}>
+              {mon.nickname}
+            </span>
+            <span className="meta">
+              {mon.status && <span className="ailment">{shortStatus(mon.status)}</span>}
+              <span className="level">L{mon.level}</span>
+            </span>
             <span className="bar">
               <span
-                className={`fill ${hp === 0 ? 'fainted' : hp * 4 <= max ? 'low' : hp * 2 <= max ? 'hurt' : ''}`}
-                style={{ width: `${max === 0 ? 0 : (hp / max) * 100}%` }}
+                className={`fill ${fillClass(mon.hp, mon.max_hp)}`}
+                style={{ width: `${mon.max_hp === 0 ? 0 : (mon.hp / mon.max_hp) * 100}%` }}
               />
             </span>
             <span className="hp">
-              {hp}/{max}
+              {mon.hp}/{mon.max_hp}
             </span>
           </li>
         ))}
@@ -81,6 +92,18 @@ function describeSpeed(status: Status): string {
 /** `BoulderBadge` → `Boulder Badge`, for the tooltip. The wire name is the game's flag name. */
 function spaced(name: string): string {
   return name.replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+
+function fillClass(hp: number, max: number): string {
+  if (hp === 0) return 'fainted';
+  if (hp * 4 <= max) return 'low';
+  if (hp * 2 <= max) return 'hurt';
+  return '';
+}
+
+/** The game's own three-letter abbreviations, which is what a player expects to see. */
+function shortStatus(status: string): string {
+  return { Paralyzed: 'PAR', Asleep: 'SLP', Poisoned: 'PSN', Burned: 'BRN', Frozen: 'FRZ' }[status] ?? status;
 }
 
 function formatDuration(ms: number): string {

@@ -7,38 +7,66 @@ const PIN_SLACK = 24;
 /**
  * The running commentary: agent events now, the model's own messages and tool calls from W4.
  *
- * `memo` because the status heartbeat arrives at 10 Hz and re-rendering a 500-entry log with it
- * would be the one performance mistake this page can make. `entries` only changes when something is
- * actually said.
+ * `memo` because the status heartbeat arrives several times a second and re-rendering a 500-entry
+ * log with it would be the one performance mistake this page can make. `entries` only changes when
+ * something is actually said.
  */
 export const Conversation = memo(function Conversation({ entries }: { entries: Entry[] }) {
   const list = useRef<HTMLDivElement>(null);
   // Pinned to the bottom unless the viewer has scrolled up to read something — in which case the
   // stream must not yank them back down.
   const [pinned, setPinned] = useState(true);
+  // Every row shows its wire JSON. The per-row toggle below is the common case; this is for
+  // watching the shape of a whole stretch of the stream at once.
+  const [showAllRaw, setShowAllRaw] = useState(false);
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
 
   useLayoutEffect(() => {
     const element = list.current;
     if (pinned && element) element.scrollTop = element.scrollHeight;
-  }, [entries, pinned]);
+  }, [entries, pinned, showAllRaw, expanded]);
 
   const onScroll = () => {
     const element = list.current;
     if (element) setPinned(element.scrollTop + element.clientHeight >= element.scrollHeight - PIN_SLACK);
   };
 
+  const toggle = (seq: number) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(seq)) next.add(seq);
+      return next;
+    });
+
   return (
     <div className="conversation">
+      <div className="conversation-bar">
+        <button
+          className={showAllRaw ? 'raw-toggle on' : 'raw-toggle'}
+          onClick={() => setShowAllRaw(!showAllRaw)}
+          title="Show the JSON behind every line, exactly as it arrived on /api/events"
+        >
+          raw
+        </button>
+      </div>
       <div className="conversation-list" ref={list} onScroll={onScroll}>
         {entries.length === 0 && <p className="dim">waiting for the agent…</p>}
         {entries.map((entry) => {
           const { gutter, body, title, modifier } = render(entry);
+          const open = showAllRaw || expanded.has(entry.seq);
           return (
-            <div key={entry.seq} className={`entry ${entry.type} ${modifier}`}>
+            <div key={entry.seq} className={`entry ${entry.type} ${modifier}${open ? ' open' : ''}`}>
               <span className="chip" title={title}>
                 {gutter}
               </span>
-              <span className="body">{body}</span>
+              <span className="body">
+                <button className="line" onClick={() => toggle(entry.seq)} title="Show the JSON this line was made from">
+                  {body}
+                </button>
+                {/* A repeat says nothing new, so it costs three characters rather than a row. */}
+                {entry.count > 1 && <span className="repeat">×{entry.count}</span>}
+                {open && <pre className="raw">{JSON.stringify(entry.raw, null, 2)}</pre>}
+              </span>
             </div>
           );
         })}
@@ -120,7 +148,7 @@ function compact(json: string): string {
  * The gutter says which part of the game is talking, not which `AgentEvent` variant it was:
  * `overworld_action_completed` and `started_overworld_action` differ by a glyph the line itself
  * already carries (→ ✓ ✗ 📖), and spelling both out in full costs a quarter of the width. The exact
- * variant is the `title`.
+ * variant is the `title`, and the whole event is one click away.
  */
 function category(kind: string): string {
   if (kind.startsWith('battle')) return 'battle';

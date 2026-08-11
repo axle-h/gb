@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Connection, Entry, RunStatus, Status, UiEvent, UsageView } from './api';
+import type { Connection, Entry, EntryBody, RunStatus, Status, UiEvent, UsageView } from './api';
 
 /** How long the conversation keeps. A run is hours long; the DOM is not the transcript (W7 is). */
 const MAX_ENTRIES = 500;
@@ -60,6 +60,35 @@ export interface EventStream {
 }
 
 /**
+ * What a row says, ignoring which event it came from and how many times it has been said. Two rows
+ * with the same signature are the same line and are collapsed into one with a count.
+ */
+function signature(entry: Entry): string {
+  const { seq: _seq, raw: _raw, count: _count, ...body } = entry;
+  return JSON.stringify(body);
+}
+
+/**
+ * Append a row, or — if it repeats the one above it verbatim — bump that row's counter instead.
+ *
+ * Worth doing because the agent genuinely repeats itself: under `--policy random` the same battle
+ * action comes up several times running, and the text reader emits doubled sentences ("Got away
+ * safely! Got away safely!"). Three identical lines say no more than one line and a `×3`, and they
+ * push the interesting ones off the top of a 500-row window.
+ *
+ * The row keeps its **first** `seq`, which is both its React key and what the backfill merge sorts
+ * on — a key that changed as the count rose would remount the row on every repeat.
+ */
+function push(entries: Entry[], body: EntryBody, event: UiEvent): Entry[] {
+  const entry: Entry = { ...body, seq: event.seq, raw: event, count: 1 };
+  const last = entries[entries.length - 1];
+  if (last && signature(last) === signature(entry)) {
+    return [...entries.slice(0, -1), { ...last, count: last.count + 1 }];
+  }
+  return [...entries, entry];
+}
+
+/**
  * Fold one event into the log.
  *
  * The only interesting case is `assistant_delta`: the worker publishes one event per fragment the
@@ -74,34 +103,37 @@ function fold(entries: Entry[], event: UiEvent): Entry[] {
     if (last?.type === 'assistant' && last.turn === event.turn) {
       return [...entries.slice(0, -1), { ...last, text: last.text + event.text }];
     }
-    return [...entries, { seq: event.seq, type: 'assistant', turn: event.turn, text: event.text }];
+    // Not through `push`: a reply grows, so it must never be collapsed against the row above it.
+    return [...entries, { seq: event.seq, type: 'assistant', turn: event.turn, text: event.text, raw: event, count: 1 }];
   }
   switch (event.type) {
     case 'status':
     case 'run_status':
       return entries; // handled separately — neither may re-render the log
     case 'turn_started':
-      return [...entries, { seq: event.seq, type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }];
+      return push(entries, { type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }, event);
     case 'tool_call':
-      return [...entries, { seq: event.seq, type: 'tool', turn: event.turn, name: event.name, arguments: event.arguments }];
+      return push(entries, { type: 'tool', turn: event.turn, name: event.name, arguments: event.arguments }, event);
     case 'decision':
-      return [...entries, { seq: event.seq, type: 'decision', turn: event.turn, summary: event.summary }];
+      return push(entries, { type: 'decision', turn: event.turn, summary: event.summary }, event);
     case 'turn_cancelled':
-      return [...entries, { seq: event.seq, type: 'cancelled', turn: event.turn, reason: event.reason }];
+      return push(entries, { type: 'cancelled', turn: event.turn, reason: event.reason }, event);
     case 'compacted':
-      return [
-        ...entries,
+      return push(
+        entries,
         {
-          seq: event.seq,
           type: 'compacted',
           before: event.before,
           after: event.after,
           images_evicted: event.images_evicted,
           summarised: event.summarised,
         },
-      ];
-    default:
-      return [...entries, event];
+        event,
+      );
+    case 'agent':
+      return push(entries, { type: 'agent', kind: event.kind, text: event.text }, event);
+    case 'notice':
+      return push(entries, { type: 'notice', level: event.level, message: event.message }, event);
   }
 }
 

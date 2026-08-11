@@ -404,6 +404,6 @@ mod tests {
             destination: MetaTile::Grass,
             reason: OverworldActionAbortedReason::NoRoute(MetaTile::Grass),
         })];
-        assert!(summarise_events(&events)[0].contains("NoRoute"), "{:?}", summarise_events(&events));
+        assert!(summarise_events(&events)[0].contains("no route"), "{:?}", summarise_events(&events));
     }
 }

@@ -23,6 +23,7 @@ use crate::pokemon::badge::Badge;
 use crate::pokemon::battle::BattleType;
 use crate::pokemon::map::Map;
 use crate::pokemon::policy::battle_options;
+use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::pokered_symbols;
 use crate::pokemon::symbols::DmgPointerRead;
 use crate::pokemon::world_graph::WorldGraph;
@@ -498,6 +499,25 @@ view! {
 }
 
 view! {
+    /// One party slot on the status panel: enough for a sprite, a name and a health bar.
+    ///
+    /// ⚠️ **`dex` is a number, not an image.** The sprite is 3 KB of PNG and the heartbeat is sent
+    /// several times a second; what rides the wire is the Pokédex number, and the client fetches
+    /// `/api/pokemon/{dex}/front.png` once and lets the browser cache it for ever (the endpoint is
+    /// `immutable` — it is a function of the cartridge).
+    pub struct PartyMonView {
+        /// What the player calls it, which is the species name in upper case unless they renamed it.
+        pub nickname: String,
+        pub dex: u16,
+        pub level: u8,
+        pub hp: u16,
+        pub max_hp: u16,
+        /// `""` when healthy, so the client can test it without knowing the spelling of "None".
+        pub status: String,
+    }
+}
+
+view! {
     /// The cheap subset the web UI polls at 10 Hz. Everything but the clock is already in
     /// `GameState`, so this costs one clone of a few small fields and three byte reads.
     pub struct StatusView {
@@ -509,8 +529,7 @@ view! {
         /// `HH:MM:SS` of in-game play time — the run's own clock, which is what a viewer wants to
         /// see rather than how long the process has been up.
         pub playtime: String,
-        /// `(nickname-or-species, hp, max_hp)` per party slot — enough for a health bar.
-        pub party_hp: Vec<(String, u16, u16)>,
+        pub party: Vec<PartyMonView>,
         pub in_battle: bool,
     }
 }
@@ -526,8 +545,18 @@ pub fn status(state: &GameState, api: &PokemonApi<'_>) -> StatusView {
             .collect(),
         money: state.money,
         playtime: playtime(api),
-        party_hp: state.pokemon.iter()
-            .map(|mon| (mon.nickname.to_default_string(), mon.current_hp, mon.stats.hp))
+        party: state.pokemon.iter()
+            .map(|mon| PartyMonView {
+                nickname: mon.nickname.to_default_string(),
+                dex: mon.species.metadata().pokedex_number as u16,
+                level: mon.level,
+                hp: mon.current_hp,
+                max_hp: mon.stats.hp,
+                status: match mon.status {
+                    PokemonStatus::None => String::new(),
+                    other => format!("{other}"),
+                },
+            })
             .collect(),
         in_battle: state.battle.is_some(),
     }

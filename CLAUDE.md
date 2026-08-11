@@ -67,7 +67,9 @@ first value and appending the new banks as a second.
 
 The **91** committed fixtures in `src/pokemon/data/*.bin` are `include_bytes!`'d;
 `every_committed_fixture_decodes` in the default tier fails in seconds if a layout change breaks
-them. `pokemon-red.sav` is raw SRAM, not a save state — the SDL UI loads and writes it at runtime.
+them. ⚠️ **That test walks the directory and `load_state`s every `.bin` in it**, so `data/` is for
+save states and nothing else — anything else goes in a subdirectory (`data/gfx/` is the one).
+`pokemon-red.sav` is raw SRAM, not a save state — the SDL UI loads and writes it at runtime.
 
 ⚠️ **`Audio` and `PPU` exclude derived state from `PartialEq`** — the resampler output and the cached
 mix (`mixed`/`levels`/`mix_dirty`), and the frame buffer plus the per-scanline sprite list
@@ -138,6 +140,20 @@ both checks. `UsingPcBox`/`UsingItemPc` cannot collide with this: they are exclu
 `assert_text_box_state`, so they never reach `ReadingTextBox`. Their *abort* paths do, which is a
 second bug fixed by the same line.
 
+⚠️ **`impl Display for AgentEvent` is a UI contract, not debugging output.** `host.rs` does
+`format!("{event}")` straight into `UiEventBody::Agent { text }` and the page prints it verbatim, so
+a `{:?}` in there puts `Fight { slot: 1, battle_move: PokemonMove { name: Growl, pp: 40 } }` on
+screen for every turn of every battle — which it did, on the deployed run, for months. It is also
+what `llm::prompt::describe_event` sends the *model*. `agent::tests::a_battle_turn_reads_as_a_sentence`
+is the only thing that looks at the prose. Relatedly, `BattleActionStarted` carries the acting
+Pokémon's nickname: nothing downstream can look it up, because the host formats events off the
+emulator thread and the party has moved on by then.
+
+⚠️ **A textbox is detected before its characters are drawn**, so the reader emits a stream of empty
+ones — on the deployed run they were most of the log. `PokemonAgent::event` drops them, which is the
+funnel *every* event goes through (including the ones collected into `update`'s local `new_events`),
+so the transcript is clean as well as the page.
+
 ⚠️ **The status heartbeat is sent on change, not on a timer.** Sampled at `GB_STATUS_HZ` and
 published only when it says something the last one did not, with a 2 s keepalive so an idle run still
 proves it is alive and `curl -N /api/events` still ticks. At the original 10 Hz unconditional it
@@ -195,11 +211,51 @@ neither built: 12–19% of changed blocks duplicate a block already on screen, a
 vector beats a straight diff on half to four fifths of moving frames. Deflate already collects most
 of the first.
 
+## Graphics out of the cartridge
+
+No image is committed to this repo. The badges, the party sprites and the favicon are all read from
+`POKERED` at run time — `src/pokemon/rom_gfx.rs` has the primitives, `badge_gfx`/`mon_gfx` the two
+decoders, and `src/web/sprites.rs` the palettes and the endpoints.
+
+⚠️ **Bank 0 is not windowed and every other bank is.** A ROM pointer's address is a raw file offset
+in bank 0 and a `0x4000`-based window everywhere else; `rom_gfx::rom_slice` is the one place that
+knows. (`badge_gfx` used to have this wrong inline and got away with it because badges are bank 3.)
+
+⚠️ **Tile order is row-major everywhere except a decompressed pic.** `rgbgfx` emits tiles left to
+right then down unless pokered's Makefile passes `--columns`, and for these it does not — but
+`AlignSpriteDataCentered` builds its buffer *column*-major. Comparing a decoded pic against
+`pokered/gfx/pokemon/front/*.2bpp` with the wrong one differs on four fifths of the bytes with both
+sides looking like drawn sprites.
+
+⚠️ **`mon_gfx`'s differential decode runs along rows and resets per row**, which is the opposite axis
+to the one the bitstream was written along. Get it backwards and you get the right Pokémon with
+horizontal smears — the kind of wrong that looks right in a thumbnail.
+
+**How the decompressor is trusted.** `the_decompressor_matches_upstreams_own_2bpp` compares all 151
+against `make`'s own output, which is the only thing that can *prove* the port. ⚠️ Those files
+**cannot be `include_bytes!`'d** — `.dockerignore` excludes `pokered/**/*.2bpp` and the Dockerfile's
+build stage copies only `pokered.gbc` and `pokered.sym`, so a compile-time dependency would build
+here and fail in the container. They are read from disk, and the test skips loudly when they are
+absent. `every_front_pic_matches_its_committed_checksum` is what covers that case; regenerate it with
+`dump_front_pic_checksums` (`--features diagnostics --ignored`) **only** when the 2bpp comparison is
+green, since that is the whole of what makes the fixture mean anything.
+
+⚠️ **That fixture lives in `src/pokemon/data/gfx/`, not `src/pokemon/data/`.**
+`savestate::tests::every_committed_fixture_decodes` walks `data/*.bin` and tries to `load_state`
+every one, so a fixture of any other kind dropped in beside the save states fails a test three
+modules away with a save-state error message.
+
+**Palettes are the web layer's business, not the decoders'.** Both decoders return 2bpp shade
+indices and nothing else. `src/web/sprites.rs` inverts the ramp for the same reason `badges.rs` does
+— the page is dark and Gen 1 art is black on white — and finds the background by **flood-filling
+shade 0 from the border**, four-way. ⚠️ Simply calling shade 0 transparent renders the entire
+Pokédex as wireframes: all 151 use the background tone as body fill.
+
 ## Starting a new run in place
 
-`POST /api/new-run` restarts the game without restarting the process. ⚠️ **It is the only channel
-from the HTTP layer back into the emulator**, and `src/web/mod.rs`'s module doc used to say there was
-none at all — that property was structural, so giving it up was a deliberate edit rather than a
+`GET /reset-game` and `POST /api/new-run` restart the game without restarting the process. ⚠️ **They
+are the only channel from the HTTP layer back into the emulator**, and `src/web/mod.rs`'s module doc
+used to say there was none at all — that property was structural, so giving it up was a deliberate edit rather than a
 drift. `host::NewRunRequests` is the whole of it: no data travels inwards, only the fact that someone
 asked, and it is answered at the **top of `EmulatorHost::tick`**, which is the one point where
 nothing is half-done.
@@ -221,8 +277,18 @@ Three more that are easy to get wrong, each with a test:
 - **Clear `last_status`**, or the send-on-change rule suppresses the one heartbeat that says the run
   changed.
 
-`GB_ADMIN_TOKEN` gates it and **404s when unset** rather than 403ing — this serves the public
-internet. Blank counts as unset, because that is the shape a placeholder Secret takes.
+`GB_ADMIN_TOKEN` gates both and they **404 when unset** rather than 403ing — this serves the public
+internet, and a challenge would tell a scanner the endpoint is there. Blank counts as unset, because
+that is the shape a placeholder Secret takes.
+
+The two differ only in how they ask. `/reset-game` answers an unauthenticated GET with
+`WWW-Authenticate: Basic`, so the **browser** collects the password and the SPA holds no token at
+all — that is why the "new run" button, its `confirm`, its `prompt` and its `sessionStorage` key are
+gone. ⚠️ **Nothing links to it and nothing should**: a GET that resets the game must not be reachable
+by a prefetch, a crawler or a middle-click. ⚠️ The username is ignored and the password is
+everything after the **first** colon — a generated token may well contain one. And ⚠️ browsers cache
+Basic credentials for the session, so a *refresh* of that page starts another run; the page says so,
+because a viewer who does not expect it has no other way to find out.
 
 ## Tests
 

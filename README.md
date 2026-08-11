@@ -79,7 +79,7 @@ cargo run --release
 
 `gb serve` **resumes** by default: the newest run under `$GB_RUN_DIR` (`./runs`) is continued in
 place, notes and all. `--new-run` starts the game over in a directory of its own — or, on something
-already running, `POST /api/new-run` does the same thing without a restart (see below).
+already running, opening `/reset-game` does the same thing without a restart (see below).
 
 ## How the model plays
 
@@ -131,7 +131,7 @@ Ctrl-C and SIGTERM both — so a restart, a rollout or a reboot resumes rather t
 ## The web UI
 
 `web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed` and served by
-the same process that runs the emulator. Five read-only endpoints and one that is not:
+the same process that runs the emulator. Six read-only endpoints and two that are not:
 
 | | |
 |---|---|
@@ -139,12 +139,20 @@ the same process that runs the emulator. Five read-only endpoints and one that i
 | `/api/video` | binary: a keyframe, then 8×8 block deltas, deflated per connection — about 21 kbit/s |
 | `/api/history?since=` | the transcript backlog, so a page that just loaded is not empty |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's own trainer-card graphics |
+| `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, decompressed from the cartridge |
+| `/favicon.png` | the overworld Poké Ball, ditto |
 | `/api/healthz` | liveness |
-| `POST /api/new-run` | start the game over, in place — off unless `GB_ADMIN_TOKEN` is set |
+| `/reset-game` | start the game over, in place — HTTP Basic, off unless `GB_ADMIN_TOKEN` is set |
+| `POST /api/new-run` | the same thing for a script, with an `X-GB-Token` header |
 
 The screen is streamed as block deltas rather than as images because it is a 160×144 screen that
-mostly does not change; the decoder is a TypeScript port of the encoder, in `web/src/video.ts`. No
-graphics are committed to this repo — the badges are read out of the ROM at runtime.
+mostly does not change; the decoder is a TypeScript port of the encoder, in `web/src/video.ts`.
+
+**No graphics are committed to this repo.** The badges, the party sprites and the favicon are all
+read out of the ROM at run time. The Pokémon sprites are the interesting ones: Gen 1 pics are
+compressed, so `src/pokemon/mon_gfx.rs` is a port of pokered's `UncompressSpriteData` — a bitstream
+of two 1bpp planes, run-length-encoded zeros and an XOR delta between the planes. All 151 are checked
+byte-for-byte against upstream's own build output.
 
 `/api/video` is the one endpoint that is not SSE, and `src/web/video/bench.rs` is why. Measured
 against four minutes of real play, the SSE version cost **565 kbit/s**; the "19" this file used to
@@ -158,17 +166,23 @@ visibly mangles pixel art, so a real video codec was measured and rejected rathe
 
 ### Starting a new run without a restart
 
-`POST /api/new-run` checkpoints the current run, leaves it complete on disk, and starts the game
-again in a fresh run directory — no restart, no downtime, and the page follows on its own. There is
-a **new run** button in the header that asks for the token and does the same thing.
+Open **`/reset-game`** and the browser asks for a password — any user name, `GB_ADMIN_TOKEN` as the
+password. The current run is checkpointed and left complete on disk, and the game starts again in a
+fresh run directory: no restart, no downtime, and every open page follows on its own.
+
+The page itself has no button and nothing links to that URL. A `WWW-Authenticate` challenge is the
+browser's own dialog, so the SPA holds no token and needs no prompt; and a GET that resets the game
+should not be reachable by a prefetch, a crawler or a middle-click. It is a URL you type.
+
+For a script, the same thing with a header:
 
 ```shell
 curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://your-host/api/new-run
 # → {"run_id":"run-20260811-142233"}
 ```
 
-It is **off unless `GB_ADMIN_TOKEN` is set**, and 404s rather than 403s when it is not — the server
-is on the public internet and an endpoint that resets the game should not advertise itself to
+Both are **off unless `GB_ADMIN_TOKEN` is set**, and both 404 rather than 403 when it is not — the
+server is on the public internet and an endpoint that resets the game should not advertise itself to
 whoever scans for it. Nothing is deleted: the old directory is a complete run and can be resumed by
 pointing a process back at it.
 
@@ -191,7 +205,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog; `0` turns it off |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
-| `GB_ADMIN_TOKEN` | enables `POST /api/new-run`; unset means the endpoint 404s |
+| `GB_ADMIN_TOKEN` | enables `/reset-game` and `POST /api/new-run`; unset means both 404 |
 
 ## Deployment
 
@@ -218,12 +232,13 @@ src/
 ├── run/                 — the run directory (`web` feature): checkpoint, resume, transcript
 │   ├── mod.rs           — $GB_RUN_DIR/<run-id>/: meta.json, state.gbst, sram.bin; atomic writes
 │   └── transcript.rs    — transcript.jsonl writer thread + the /api/history backlog reader
-├── web/                 — the axum server (`web` feature); read-only, five endpoints
+├── web/                 — the axum server (`web` feature); read-only but for the reset
 │   ├── published.rs     — the only interface between the emulator thread and HTTP
 │   ├── video.rs         — 8×8 block-diff video codec + the reference decoder
 │   │   └── bench.rs     — what the stream costs, and every alternative it was chosen over
 │   ├── assets.rs        — the SPA: `web/dist` embedded, or read from disk under GB_WEB_DEV=1
-│   └── badges.rs        — /api/badges.png: the eight badges, decoded from the cartridge
+│   ├── badges.rs        — /api/badges.png: the eight badges, decoded from the cartridge
+│   └── sprites.rs       — /api/pokemon/{dex}/front.png and /favicon.png, ditto
 ├── llm/                 — the LLM client and turn loop (`llm` feature)
 │   ├── config.rs        — the environment block: OPENAI_*, GB_MODEL, GB_MAX_TOOL_STEPS, …
 │   ├── protocol.rs      — OpenAI wire types + the SSE accumulator (no HTTP; pure and testable)
@@ -263,7 +278,9 @@ src/
     ├── tile_map.rs       — MetaTileMap: abstracts the current map into typed tiles
     ├── map.rs            — Map enum (all 248 maps)
     ├── battle.rs         — battle state reader + BattleAction
+    ├── rom_gfx.rs        — reading ROM graphics: bank windowing, 2bpp tiles, the Poké Ball
     ├── badge_gfx.rs      — the badge sprites, decoded from the trainer card's ROM graphics
+    ├── mon_gfx.rs        — the front pics, a port of pokered's `UncompressSpriteData`
     ├── delay.rs          — DelayContext: cycle-accurate waits between agent steps
     ├── text.rs           — PokemonTextReader: reads on-screen text from VRAM
     ├── integration_tests/ — agent end-to-end tests, tiered by emulated game time
