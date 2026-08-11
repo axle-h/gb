@@ -1,5 +1,6 @@
 import type { RunStatus, UsageView } from './api';
 import { Conversation } from './components/Conversation';
+import { NewRunButton } from './components/NewRunButton';
 import { Screen } from './components/Screen';
 import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
@@ -32,6 +33,7 @@ export function App() {
         <span className={`pill ${connection}`}>
           {connection === 'live' ? status?.game?.mode ?? 'connected' : connection}
         </span>
+        <NewRunButton />
       </header>
 
       <main>

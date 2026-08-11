@@ -27,7 +27,7 @@
 pub mod transcript;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// Where runs live when `GB_RUN_DIR` is unset.
@@ -184,6 +184,46 @@ impl RunDir {
         let meta = self.meta.lock().expect("run meta lock poisoned");
         let json = serde_json::to_vec_pretty(&*meta).map_err(|e| format!("could not encode meta.json: {e}"))?;
         write_atomically(&self.path.join(files::META), &json)
+    }
+}
+
+/// Which [`RunDir`] the process is writing to **right now**, and the only thing allowed to change it.
+///
+/// Before the reset endpoint there was no such question — the directory was chosen once at startup
+/// and moved into four places that each kept their own copy (the host's checkpointer, the transcript
+/// thread's open file, `/api/history`'s path and `/api/healthz`'s run id, and the LLM worker's
+/// notes). Starting a fresh run without restarting means all five have to change together, so they
+/// all read it from here instead.
+///
+/// ⚠️ **This does not make a run directory multi-writer.** The rule in the module note still holds
+/// and is what `RwLock` is protecting: exactly one `RunDir` is current at a time, the emulator thread
+/// is the only caller of [`Self::start_new`], and it checkpoints the outgoing run before swapping —
+/// so the directory that is left behind is complete and resumable rather than truncated mid-play.
+pub struct CurrentRun {
+    root: PathBuf,
+    model: String,
+    inner: std::sync::RwLock<Arc<RunDir>>,
+}
+
+impl CurrentRun {
+    pub fn new(root: PathBuf, model: String, run: RunDir) -> Self {
+        Self { root, model, inner: std::sync::RwLock::new(Arc::new(run)) }
+    }
+
+    /// The run directory as of now. Cheap enough for the transcript thread to ask per event.
+    pub fn get(&self) -> Arc<RunDir> {
+        Arc::clone(&self.inner.read().expect("current run lock poisoned"))
+    }
+
+    /// Open a fresh run directory beside the current one and make it current, returning it.
+    ///
+    /// The `validate` callback [`RunDir::open`] takes is never reached: `new_run` short-circuits the
+    /// resume scan, which is the only thing that reads a candidate state.
+    pub fn start_new(&self) -> Result<Arc<RunDir>, String> {
+        let (run, _, _) = RunDir::open(&self.root, true, &self.model, &|_| false)?;
+        let run = Arc::new(run);
+        *self.inner.write().expect("current run lock poisoned") = Arc::clone(&run);
+        Ok(run)
     }
 }
 

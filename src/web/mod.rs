@@ -1,18 +1,26 @@
 //! **W1.2 / W2** — the HTTP server.
 //!
-//! Four read-only endpoints and no write endpoints at all. Viewer controls are out of scope by
-//! decision (§1.1 of `docs/llm-web-playthrough-plan.md`), and the way that decision is enforced is
-//! structural rather than editorial: this module can reach [`published::Published`] and nothing else.
-//! There is no channel from here back into the emulator to expose.
+//! Read-only endpoints, and **one** that is not. Viewer controls are still out of scope by decision
+//! (§1.1 of `docs/llm-web-playthrough-plan.md`) — nothing here can press a button, choose a move or
+//! steer the run — and for everything except `POST /api/new-run` that remains structural rather than
+//! editorial: this module can reach [`published::Published`] and nothing else.
+//!
+//! ⚠️ **`POST /api/new-run` is the exception, and it is the only one.** It reaches the emulator
+//! through [`crate::host::NewRunRequests`], which carries no data inwards and is answered by the
+//! emulator thread between instructions. It is **off unless `GB_ADMIN_TOKEN` is set** — without it
+//! the route 404s exactly as if it had never been registered — because the deployment this exists
+//! for serves the public internet and starting the game over is not something a passer-by should be
+//! able to do.
 //!
 //! ```text
-//! GET /                    the SPA (`web/dist`, embedded — see `assets.rs`)
-//! GET /{*path}             its assets
-//! GET /api/healthz         liveness
-//! GET /api/events          SSE — status heartbeat at 10 Hz, plus agent events as they happen
-//! GET /api/video           SSE — a keyframe, then base64 block deltas
-//! GET /api/badges.png      the eight gym badges, decoded from the cartridge
-//! GET /api/history?since=  W7 — the transcript from a sequence number, for a page that just loaded
+//! GET  /                    the SPA (`web/dist`, embedded — see `assets.rs`)
+//! GET  /{*path}             its assets
+//! GET  /api/healthz         liveness
+//! GET  /api/events          SSE — status heartbeat at 10 Hz, plus agent events as they happen
+//! GET  /api/video           SSE — a keyframe, then base64 block deltas
+//! GET  /api/badges.png      the eight gym badges, decoded from the cartridge
+//! GET  /api/history?since=  W7 — the transcript from a sequence number, for a page that just loaded
+//! POST /api/new-run         start the game over in a fresh run directory (needs GB_ADMIN_TOKEN)
 //! ```
 
 pub mod assets;
@@ -28,31 +36,44 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::Json;
-use axum::routing::get;
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{get, post};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::cli::ServePolicy;
 use crate::game_boy::GameBoy;
-use crate::host::{EmulatorHost, HostConfig};
+use crate::host::{EmulatorHost, HostConfig, NewRunRequests};
 use crate::pokemon::policy::RandomPolicy;
-use crate::run::{Origin, RunDir, transcript};
+use crate::run::{CurrentRun, Origin, RunDir, transcript};
 use published::{Published, VideoMessage};
 
 /// Proxies close an idle connection; a comment every two seconds stops that without costing
 /// anything a client has to parse.
 const KEEP_ALIVE: Duration = Duration::from_secs(2);
 
+/// The header `POST /api/new-run` reads its token from.
+const ADMIN_TOKEN_HEADER: &str = "x-gb-token";
+
+/// How long the handler waits for the emulator thread to act. It answers at the top of its next
+/// tick, which is a millisecond away — so reaching this at all means the thread is gone, and the
+/// only useful thing left to do is say so rather than hold the connection open.
+const NEW_RUN_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 struct AppState {
     published: Arc<Published>,
     started: Instant,
-    /// **W7** — where `/api/history` reads from.
-    transcript: PathBuf,
-    run_id: String,
+    /// **W7** — the run directory, read through rather than copied out, because `POST /api/new-run`
+    /// can change it under a live server. `/api/history` and `/api/healthz` both ask it per request.
+    run: Arc<CurrentRun>,
+    /// The seam into the emulator thread. See [`NewRunRequests`].
+    new_runs: Arc<NewRunRequests>,
+    /// `GB_ADMIN_TOKEN`. `None` — the default — makes `POST /api/new-run` 404.
+    admin_token: Option<String>,
 }
 
 /// `gb serve`. Blocks until the process is interrupted.
@@ -93,7 +114,11 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let (run, origin, resumed) = RunDir::open(&root, new_run, &model, &|bytes| {
         GameBoy::dmg(crate::pokemon::roms::POKERED).load_state(bytes).is_ok()
     })?;
-    let run = Arc::new(run);
+    // From here on nothing holds the `RunDir` directly: `POST /api/new-run` can replace it under a
+    // live process, and the checkpointer, the transcript thread, `/api/history` and the model's
+    // notes all have to move together when it does.
+    let current = Arc::new(CurrentRun::new(root, model.clone(), run));
+    let run = current.get();
     println!(
         "gb serve — {} run {} in {}",
         match origin {
@@ -111,7 +136,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let transcript_path = run.transcript_path();
     let published = Published::resuming(transcript::last_seq(&transcript_path).map_or(0, |seq| seq + 1));
     let transcript =
-        transcript::spawn(transcript_path.clone(), Arc::clone(&published), Arc::clone(&shutdown))?;
+        transcript::spawn(Arc::clone(&current), Arc::clone(&published), Arc::clone(&shutdown))?;
     // Published *after* the writer is subscribed, so it lands in the transcript: it is the marker
     // that explains why turn numbers start again from 1 below it, the generation counter being
     // per-process.
@@ -154,20 +179,30 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         ServePolicy::Llm => unreachable!("rejected above"),
     };
 
+    let new_runs = Arc::new(NewRunRequests::default());
+    let admin_token = admin_token();
     let emulator = EmulatorHost::spawn(
         starting_state,
         make_policy,
         Arc::clone(&published),
         HostConfig {
             policy_name: policy_name(policy),
-            run: Some(Arc::clone(&run)),
+            run: Some(Arc::clone(&current)),
+            new_runs: Some(Arc::clone(&new_runs)),
             status_interval: status_interval()?,
             ..HostConfig::default()
         },
         Arc::clone(&shutdown),
     )?;
 
-    let result = serve_http(port, Arc::clone(&published), transcript_path, run.run_id());
+    println!(
+        "gb serve — POST /api/new-run is {}",
+        match admin_token {
+            Some(_) => "enabled (GB_ADMIN_TOKEN is set)",
+            None => "off — set GB_ADMIN_TOKEN to enable it",
+        },
+    );
+    let result = serve_http(port, Arc::clone(&published), current, new_runs, admin_token);
 
     // ⚠️ The order matters: the emulator's last act is a checkpoint (`EmulatorHost::run`), so it is
     // joined *before* the process is allowed to end. The transcript thread is woken by the next
@@ -209,8 +244,9 @@ fn policy_name(policy: ServePolicy) -> &'static str {
 fn serve_http(
     port: u16,
     published: Arc<Published>,
-    transcript: PathBuf,
-    run_id: String,
+    run: Arc<CurrentRun>,
+    new_runs: Arc<NewRunRequests>,
+    admin_token: Option<String>,
 ) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -218,20 +254,21 @@ fn serve_http(
         .map_err(|e| format!("could not start the HTTP runtime: {e}"))?;
 
     runtime.block_on(async move {
-        let state = AppState { published, started: Instant::now(), transcript, run_id };
+        let state = AppState { published, started: Instant::now(), run, new_runs, admin_token };
         let app = Router::new()
             .route("/api/healthz", get(healthz))
             .route("/api/events", get(events))
             .route("/api/history", get(history))
             .route("/api/video", get(video_stream))
             .route("/api/badges.png", get(badges::badges))
+            .route("/api/new-run", post(new_run))
             // Last, so the catch-all cannot shadow an API route it happens to match.
             .route("/", get(assets::index))
             .route("/{*path}", get(assets::asset))
             .with_state(state);
 
-        // 0.0.0.0: the container publishes the port, and there is nothing here worth binding to
-        // loopback for — every endpoint is read-only.
+        // 0.0.0.0: the container publishes the port. Every endpoint is read-only except
+        // `POST /api/new-run`, which is off unless `GB_ADMIN_TOKEN` is set and needs it when it is.
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
             .await
             .map_err(|e| format!("could not bind port {port}: {e}"))?;
@@ -274,8 +311,84 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "status": "ok",
         "uptime_ms": state.started.elapsed().as_millis() as u64,
         "video_seq": state.published.latest_keyframe().map(|k| k.seq),
-        "run_id": state.run_id,
+        // Read per request rather than captured: `POST /api/new-run` changes it, and a liveness
+        // endpoint reporting the run the process *started* with would be quietly wrong afterwards.
+        "run_id": state.run.get().run_id(),
     }))
+}
+
+/// `GB_ADMIN_TOKEN`, or `None` if it is unset or blank.
+///
+/// An environment variable for the reason `GB_RUN_DIR` and `GB_STATUS_HZ` are: it is deployment
+/// configuration. Blank counts as unset so that a Kubernetes Secret with an empty value — the shape
+/// a placeholder usually takes — leaves the endpoint off rather than open to the empty string.
+fn admin_token() -> Option<String> {
+    std::env::var("GB_ADMIN_TOKEN").ok().map(|token| token.trim().to_string()).filter(|token| !token.is_empty())
+}
+
+/// Compare without an early return, so the time taken says nothing about how much of the token was
+/// right. Overkill for a token nobody is going to grind over the internet, and cheaper than deciding
+/// that on a destructive endpoint reachable from it.
+fn tokens_match(offered: &str, expected: &str) -> bool {
+    // `expected` is this server's own configuration rather than anything a caller sent, so returning
+    // early on it leaks nothing — and it is what keeps the index below in bounds.
+    if expected.is_empty() {
+        return false;
+    }
+    let (offered, expected) = (offered.as_bytes(), expected.as_bytes());
+    let mut difference = offered.len() ^ expected.len();
+    for (index, byte) in offered.iter().enumerate() {
+        // Index into `expected` cyclically, so a wrong *length* still walks the whole offered token.
+        difference |= (byte ^ expected[index % expected.len()]) as usize;
+    }
+    difference == 0
+}
+
+/// **Start the game over, in place**, and answer with the id of the run that just began.
+///
+/// The one endpoint here that is not read-only, and the whole reason
+/// [`NewRunRequests`] exists. What it is *not* is a general control channel: it carries no data
+/// inwards, and the emulator thread decides when to act on it.
+///
+/// ⚠️ **404, not 403, when `GB_ADMIN_TOKEN` is unset.** The route is registered unconditionally
+/// because the router is built before the token is a question, so "off" has to be a response — and
+/// it should be the response a route that does not exist would give, rather than one advertising a
+/// reset endpoint to anyone who scans for it.
+///
+/// The old run is not deleted, or even stopped in any sense that loses anything: the emulator
+/// checkpoints it before swapping, so it is left complete on the volume and can be resumed by
+/// pointing a process back at it.
+async fn new_run(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(expected) = state.admin_token.as_deref() else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "this server has no GB_ADMIN_TOKEN set, so starting a new run is disabled",
+        }))).into_response();
+    };
+    let offered = headers.get(ADMIN_TOKEN_HEADER).and_then(|value| value.to_str().ok()).unwrap_or_default();
+    if !tokens_match(offered, expected) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": format!("a matching {ADMIN_TOKEN_HEADER} header is required"),
+        }))).into_response();
+    }
+
+    let receiver = match state.new_runs.request() {
+        Ok(receiver) => receiver,
+        Err(failure) => {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": failure }))).into_response();
+        }
+    };
+    match tokio::time::timeout(NEW_RUN_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(run_id))) => (StatusCode::OK, Json(serde_json::json!({ "run_id": run_id }))).into_response(),
+        // The emulator tried and could not — a full disk, most likely. Its message is the useful one.
+        Ok(Ok(Err(failure))) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": failure,
+        }))).into_response(),
+        // The sender was dropped, or never taken: either way the emulator thread is not running, and
+        // `Obituary` will have said so on `/api/events` already.
+        Ok(Err(_)) | Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+            "error": "the emulator thread did not answer — see /api/events",
+        }))).into_response(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -292,7 +405,8 @@ struct Since {
 /// Reading the file happens on a blocking thread: it is up to a couple of megabytes and the runtime
 /// threads are also serving two SSE streams.
 async fn history(State(state): State<AppState>, Query(query): Query<Since>) -> Json<serde_json::Value> {
-    let events = tokio::task::spawn_blocking(move || transcript::read_since(&state.transcript, query.since))
+    let path = state.run.get().transcript_path();
+    let events = tokio::task::spawn_blocking(move || transcript::read_since(&path, query.since))
         .await
         .unwrap_or_default();
     Json(serde_json::Value::Array(events))
@@ -358,4 +472,27 @@ async fn video_stream(
 
 fn sse_video(message: VideoMessage) -> Result<Event, Infallible> {
     Ok(Event::default().data(&*message.data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⚠️ **The endpoint is off unless a token is set, and blank is not set.** A Kubernetes Secret
+    /// with a placeholder value is usually the empty string, and the failure mode of getting this
+    /// wrong is a reset endpoint open to the internet that looks configured.
+    #[test]
+    fn a_blank_admin_token_leaves_the_endpoint_off() {
+        assert!(!tokens_match("", ""), "the empty token must never match, least of all itself");
+        assert!(!tokens_match("anything", ""));
+    }
+
+    #[test]
+    fn a_token_matches_only_itself() {
+        assert!(tokens_match("s3cret", "s3cret"));
+        assert!(!tokens_match("s3cret", "s3crets"), "a prefix is not a match");
+        assert!(!tokens_match("s3crets", "s3cret"), "nor is an extension");
+        assert!(!tokens_match("S3CRET", "s3cret"), "and it is case sensitive");
+        assert!(!tokens_match("", "s3cret"), "nor is sending no header at all");
+    }
 }

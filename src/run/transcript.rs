@@ -13,7 +13,7 @@
 //! the run's *story* — what the agent did, what the model said, what it decided.
 
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -34,16 +34,13 @@ pub const MAX_BACKLOG: usize = 2_000;
 /// caller, and failure to write is reported once and then the thread stops — a run whose disk has
 /// filled should not also spend the rest of its life printing about it.
 pub fn spawn(
-    path: PathBuf,
+    current: Arc<crate::run::CurrentRun>,
     published: Arc<Published>,
     stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>, String> {
     let mut events = published.subscribe_events();
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    let mut path = current.get().transcript_path();
+    let file = open_append(&path)?;
     let mut written = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut writer = BufWriter::new(file);
 
@@ -56,6 +53,26 @@ pub fn spawn(
                 }
                 if !keep(&event) {
                     continue;
+                }
+                // ⚠️ **Follow the run, do not capture it.** `POST /api/new-run` swaps the current run
+                // directory under a live process, and this thread is the only writer of the file it
+                // swaps away from — a captured `PathBuf` would keep appending the new run's events to
+                // the old run's transcript, which is invisible until someone reads either file. The
+                // check is a `PathBuf` join and a compare per *kept* event (heartbeats are filtered
+                // out above), so it costs nothing on the path that matters.
+                let live = current.get().transcript_path();
+                if live != path {
+                    let _ = writer.flush();
+                    match open_append(&live) {
+                        Ok(file) => {
+                            written = file.metadata().map(|m| m.len()).unwrap_or(0);
+                            writer = BufWriter::new(file);
+                            path = live;
+                        }
+                        // Keep writing to the old file rather than losing the run's events outright.
+                        Err(failure) => eprintln!("transcript: {failure} — still writing to {}",
+                                                  path.display()),
+                    }
                 }
                 let Ok(line) = serde_json::to_string(&event) else { continue };
                 if writeln!(writer, "{line}").is_err() || writer.flush().is_err() {
@@ -84,6 +101,14 @@ pub fn spawn(
 /// Whether an event belongs in the file. See the module's ⚠️.
 fn keep(event: &UiEvent) -> bool {
     !matches!(event.body, UiEventBody::Status(_))
+}
+
+fn open_append(path: &Path) -> Result<std::fs::File, String> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("could not open {}: {e}", path.display()))
 }
 
 fn rotate(path: &Path) -> Result<std::fs::File, String> {
@@ -140,6 +165,13 @@ mod tests {
     use crate::web::published::{RunStatus, StatusSnapshot};
     use std::time::{Duration, Instant};
 
+    /// A `CurrentRun` over a fresh run directory under `root`. The transcript now lives *inside* a
+    /// run directory rather than wherever the caller says, because that is what the writer follows.
+    fn current_run(root: &Path) -> Arc<crate::run::CurrentRun> {
+        let (run, _, _) = crate::run::RunDir::open(root, true, "test", &|_| false).expect("a fresh run");
+        Arc::new(crate::run::CurrentRun::new(root.to_path_buf(), "test".to_string(), run))
+    }
+
     fn heartbeat() -> UiEventBody {
         UiEventBody::Status(Box::new(StatusSnapshot {
             wall_ms: 0,
@@ -158,10 +190,11 @@ mod tests {
     #[test]
     fn the_story_is_written_and_the_heartbeats_are_not() {
         let scratch = Scratch::new("transcript");
-        let path = scratch.0.join("transcript.jsonl");
         let published = Published::new();
         let stop = Arc::new(AtomicBool::new(false));
-        let writer = spawn(path.clone(), Arc::clone(&published), Arc::clone(&stop)).expect("starts");
+        let current = current_run(&scratch.0);
+        let path = current.get().transcript_path();
+        let writer = spawn(Arc::clone(&current), Arc::clone(&published), Arc::clone(&stop)).expect("starts");
 
         published.publish_event(heartbeat());
         published.publish_event(UiEventBody::Notice { level: "info", message: "one".into() });
@@ -201,13 +234,14 @@ mod tests {
     #[test]
     fn a_second_process_appends_rather_than_starting_again() {
         let scratch = Scratch::new("transcript-append");
-        let path = scratch.0.join("transcript.jsonl");
+        let current = current_run(&scratch.0);
+        let path = current.get().transcript_path();
         std::fs::write(&path, "{\"seq\":0,\"type\":\"notice\",\"level\":\"info\",\"message\":\"before\"}\n")
             .expect("write");
 
         let published = Published::new();
         let stop = Arc::new(AtomicBool::new(false));
-        let writer = spawn(path.clone(), Arc::clone(&published), Arc::clone(&stop)).expect("starts");
+        let writer = spawn(Arc::clone(&current), Arc::clone(&published), Arc::clone(&stop)).expect("starts");
         published.publish_event(UiEventBody::Notice { level: "info", message: "after".into() });
 
         let deadline = Instant::now() + Duration::from_secs(5);

@@ -114,6 +114,23 @@ only terminal tools are `press_buttons` and `wait`. Two ⚠️s, both learned in
 In a healthy run it never fires — `mechanics::ordinary_play_stays_far_inside_the_stuck_timeout`
 measures ordinary play's longest silence at ~6 s of game time against the 300 s default.
 
+⚠️ **Every Gen 1 PC menu is a closed loop under A-only input, and `ReadingTextBox` presses B when
+`PokemonApiTrait::in_pc_menu` says so.** Each PC menu leaves only on B, and A on its resting cursor
+picks the first entry, which bounces off a refusal message straight back with the cursor untouched —
+`PCMainMenu` → Bill's PC → `WITHDRAW` → `NoMonText` → `BillsPCMenu`, or `PlayerPCMenu` →
+`WITHDRAW ITEM` → nothing stored → `PlayerPCMenu`. Nothing in the cycle moves the cursor, so A never
+reaches `LOG OFF`. This wedged the deployed run **permanently**, eight tiles from a fresh save, and
+it was not a Bill-event or empty-box problem: a full party or a one-mon party traps identically.
+
+Two traps in the detection, both paid for once. **The item PC sets no flag** —
+`TextScript_PokemonCenterPC` goes through `ActivatePC` and sets `wMiscFlags`' `BIT_USING_GENERIC_PC`,
+but `TextScript_ItemStoragePC` (Red's bedroom, and the one that actually broke) calls `PlayerPC`
+directly and deliberately leaves it clear, so the screen is matched on `LOG OFF` as well. And
+**`LOG OFF` alone is not enough either**, because the parent tree's submenus do not show one — hence
+both checks. `UsingPcBox`/`UsingItemPc` cannot collide with this: they are excluded from
+`assert_text_box_state`, so they never reach `ReadingTextBox`. Their *abort* paths do, which is a
+second bug fixed by the same line.
+
 ⚠️ **The status heartbeat is sent on change, not on a timer.** Sampled at `GB_STATUS_HZ` and
 published only when it says something the last one did not, with a 2 s keepalive so an idle run still
 proves it is alive and `curl -N /api/events` still ticks. At the original 10 Hz unconditional it
@@ -123,6 +140,35 @@ byte-identical to the one before; it is now 5.2. Two consequences: `StatusSnapsh
 match and the suppression would silently never fire), and `/api/events` **opens with the latest
 heartbeat** — `Published::join_events`, subscribe-then-read, the same handshake as the video keyframe
 — or a page opened during a quiet stretch shows an empty panel.
+
+## Starting a new run in place
+
+`POST /api/new-run` restarts the game without restarting the process. ⚠️ **It is the only channel
+from the HTTP layer back into the emulator**, and `src/web/mod.rs`'s module doc used to say there was
+none at all — that property was structural, so giving it up was a deliberate edit rather than a
+drift. `host::NewRunRequests` is the whole of it: no data travels inwards, only the fact that someone
+asked, and it is answered at the **top of `EmulatorHost::tick`**, which is the one point where
+nothing is half-done.
+
+⚠️ **A run directory has exactly one writer, and five things had a copy of which one it was** — the
+checkpointer, the transcript thread's open file, `/api/history`'s path, `/api/healthz`'s run id, and
+the LLM worker's notes. They all read `run::CurrentRun` now. The transcript thread in particular
+**re-reads the path per event**: a captured `PathBuf` keeps appending the new run's events to the old
+run's file, and nothing notices until someone reads either one.
+
+Three more that are easy to get wrong, each with a test:
+
+- **Checkpoint the outgoing run before swapping.** Everything since its last periodic write — up to a
+  minute — lives only in memory, and the directory left behind has to be resumable.
+- **`VideoEncoder::restart`, not `VideoEncoder::default`.** Deltas are diffed against `last_sent`, so
+  a state swap without it leaves fragments of the abandoned run on every viewer's screen. But `seq`
+  must survive: `/api/video` drops anything at or below the seq a client opened with, so restarting
+  the count at zero makes a live viewer discard the entire new run.
+- **Clear `last_status`**, or the send-on-change rule suppresses the one heartbeat that says the run
+  changed.
+
+`GB_ADMIN_TOKEN` gates it and **404s when unset** rather than 403ing — this serves the public
+internet. Blank counts as unset, because that is the shape a placeholder Secret takes.
 
 ## Tests
 
@@ -138,11 +184,11 @@ before.**
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + web/host/llm.
-# ~7s, 1143 tests.
+# ~7s, 1162 tests.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.
-# ~58s, 119 tests (measured 2026-08-06, after Phase C; it was ~131s before).
+# 131 tests in ~50s of wall clock (measured 2026-08-11; it took ~131s before Phase C).
 cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
 
 # The one leg that costs more game time than the whole leg chain combined: the Safari dex sweep,

@@ -458,6 +458,37 @@ impl PokemonAgent {
         }
     }
 
+    /// Throw away everything learned about the game so far, keeping only the policy.
+    ///
+    /// For `POST /api/new-run`, which reloads the emulator from the start-of-game state under a live
+    /// process. Every field here is an observation *about that game* and is now wrong: the world
+    /// graph was built from maps the player has not visited yet, `cut_tiles` and `blocked_tiles`
+    /// remember terrain edits that have not happened, and a `state` mid-`OverworldMovement` is
+    /// walking a route on a map that is no longer loaded.
+    ///
+    /// ⚠️ **`policy` and `stuck_after` are deliberately kept.** The policy is the *decider*, not
+    /// state about the game — rebuilding it would mean rebuilding `LlmPolicy`'s channels to a worker
+    /// thread that is still perfectly alive. It is told separately, via [`Policy::restart`], which is
+    /// where anything it holds *about the game* goes. `stuck_after` is read from the policy once by
+    /// contract (see [`Self::new`]), so re-reading it here would quietly make that a lie.
+    pub fn restart(&mut self, run_dir: Option<&std::path::Path>) {
+        self.policy.restart(run_dir);
+        self.state = AgentState::default();
+        self.backup_state = None;
+        self.post_champion_tick = 0;
+        self.event_buffer.clear();
+        self.cycles = MachineCycles::default();
+        self.world_graph = WorldGraph::new();
+        self.last_map = None;
+        self.cut_tiles.clear();
+        self.blocked_tiles.clear();
+        self.door_open_attempts = 0;
+        self.manual_input.clear();
+        self.manual_input_held = 0;
+        self.cycles_since_poll = MachineCycles::ZERO;
+        self.stuck_reported_at = MachineCycles::ZERO;
+    }
+
     /// Queue raw button presses, one per agent tick, pre-empting the state machine.
     ///
     /// The escape hatch for a policy that needs to press a button the agent has no action for.
@@ -1399,7 +1430,17 @@ impl PokemonAgent {
                 }
             }
             AgentState::ReadingTextBox { ref mut reader } => {
-                reader.update(api);
+                // ⚠️ **B, not A, inside a PC menu — it is the only way out.** Every Gen 1 PC menu is
+                // a closed cycle under A (menu → first entry → refusal message → same menu, cursor
+                // never moving), and it wedged the deployed run permanently at the item PC in Red's
+                // House 2F, eight tiles from a fresh save. `in_pc_menu` has the full trace.
+                //
+                // This arm cannot collide with the drivers that use the PC on purpose:
+                // `UsingPcBox` and `UsingItemPc` are both excluded from `assert_text_box_state`, so
+                // neither ever reaches `ReadingTextBox`. It *does* cover their abort paths, which
+                // drop to `Idle` while the menu is still open and would otherwise A-mash for ever.
+                let button = if api.in_pc_menu() { JoypadButton::B } else { JoypadButton::A };
+                reader.update_with(api, button);
             }
             AgentState::Battle(ref mut battle_state) => {
                 // Global safety net: an unusable-item message ("This isn't the time to use that!") can

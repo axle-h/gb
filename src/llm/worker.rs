@@ -27,7 +27,8 @@
 //! rests on a batch being serviced **all-or-nothing** (§2.1): the whole batch is answered from one
 //! observed `GameState` at one poll, so a partial batch cannot happen.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -94,7 +95,26 @@ pub struct TurnHandles {
     /// Bumped by the policy when the decision kind changes; read by the worker at its two cancel
     /// points. The policy owns the writes, which is why there is no lock.
     pub generation: Arc<AtomicU64>,
+    /// **`POST /api/new-run`** — a pending "the game restarted" notice. See [`Restart`].
+    pub restart: Restarts,
 }
+
+/// The game has been restarted underneath a live worker, so the conversation is now about a game
+/// that no longer exists and has to start again.
+///
+/// ⚠️ **A shared cell rather than a channel, because the worker cannot select.** It blocks on
+/// `turns.recv()`, so a second `Receiver` would need a `select` that `std::sync::mpsc` does not
+/// have. This is consumed at the top of [`Worker::run_one`] instead, which is reached promptly
+/// because the policy bumps the generation on its way past — cancelling whatever was in flight.
+#[derive(Debug, Clone, Default)]
+pub struct Restart {
+    /// The **new** run directory, which is where the model's notes now live. `None` keeps them in
+    /// memory only, as the tests do.
+    pub run_dir: Option<PathBuf>,
+}
+
+/// The cell a [`Restart`] waits in. Written by the policy, taken by the worker.
+pub type Restarts = Arc<Mutex<Option<Restart>>>;
 
 impl TurnHandles {
     /// Abandon whatever is in flight and claim the next turn id.
@@ -148,6 +168,8 @@ pub struct Worker {
     notes: Notes,
     /// **W6** — tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
     accounting: Accounting,
+    /// **`POST /api/new-run`** — taken at the top of every turn. See [`Restart`].
+    restart: Restarts,
 }
 
 /// Build the worker and its counterpart handles. The thread is started by [`Worker::spawn`]; this is
@@ -163,6 +185,7 @@ pub fn channels(
     let (call_tx, call_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
+    let restart: Restarts = Arc::new(Mutex::new(None));
 
     let accounting = Accounting::new(config.context_limit);
     let worker = Worker {
@@ -178,6 +201,7 @@ pub fn channels(
         messages: vec![prompt::system_message(&notes)],
         notes,
         accounting,
+        restart: Arc::clone(&restart),
     };
     let handles = TurnHandles {
         turns: turn_tx,
@@ -185,6 +209,7 @@ pub fn channels(
         tool_calls: call_rx,
         tool_results: result_tx,
         generation,
+        restart,
     };
     (worker, handles)
 }
@@ -204,8 +229,33 @@ impl Worker {
         }
     }
 
+    /// Start the conversation again, about the game that is playing now.
+    ///
+    /// The three things thrown away are the three that are about the old game: the history, the
+    /// notes read out of the old run directory, and the token accounting that was measuring that
+    /// history. Everything else — the endpoint, the config, the retry policy, the channels — belongs
+    /// to the *process*, and rebuilding any of it would mean rebuilding this thread.
+    fn apply_restart(&mut self, restart: Restart) {
+        self.notes = Notes::open(restart.run_dir.as_deref());
+        // Index 0 is the system prompt and is never removed, so the history *is* this vec.
+        self.messages = vec![prompt::system_message(&self.notes)];
+        self.accounting = Accounting::new(self.config.context_limit);
+        self.published.publish_event(UiEventBody::Notice {
+            level: "info",
+            message: "the game restarted — the conversation starts again from the system prompt"
+                .to_string(),
+        });
+    }
+
     /// One turn, start to finish. Public so a test can step the worker without a thread.
     pub fn run_one(&mut self, request: TurnRequest) {
+        // ⚠️ **Before the situation is appended, not after.** This is the moment the history for the
+        // next turn is chosen, and after a restart the old history describes a game that no longer
+        // exists — a party, a map and a TODO list belonging to a run that has been checkpointed and
+        // set aside.
+        if let Some(restart) = self.restart.lock().ok().and_then(|mut cell| cell.take()) {
+            self.apply_restart(restart);
+        }
         let TurnRequest { id, kind, situation, headline } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 

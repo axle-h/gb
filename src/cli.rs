@@ -37,6 +37,10 @@ ENVIRONMENT (any policy):
     GB_PORT                     Port to listen on; --port wins
     GB_RUN_DIR                  Where runs are kept [default: ./runs]
     GB_STATUS_HZ                How often the status panel is sampled [default: 2]
+    GB_ADMIN_TOKEN              Enables POST /api/new-run, which starts the game over in a
+                                fresh run directory without restarting the process. Callers
+                                send it as the X-GB-Token header. Unset — the default — and
+                                the endpoint 404s
 ";
 
 /// What the process was asked to do.

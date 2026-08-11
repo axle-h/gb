@@ -23,7 +23,7 @@ use crate::pokemon::agent::{AgentEvent, PokemonAgent};
 use crate::pokemon::map_metadata::MapMetadataCache;
 use crate::pokemon::policy::Policy;
 use crate::pokemon::{PokemonApi, PokemonApiTrait, observe};
-use crate::run::RunDir;
+use crate::run::CurrentRun;
 use crate::web::published::{FrameSnapshot, Published, RunStatus, StatusSnapshot, UiEventBody};
 use crate::web::video::{Frame, VideoEncoder};
 
@@ -61,8 +61,54 @@ pub struct HostConfig {
     pub policy_name: &'static str,
     /// **W7** — where to checkpoint, and how often. `None` is a host that keeps nothing, which is
     /// what every test wants and what `gb serve` never is.
-    pub run: Option<Arc<RunDir>>,
+    pub run: Option<Arc<CurrentRun>>,
     pub checkpoint_interval: Duration,
+    /// `POST /api/new-run`'s mailbox. `None` — the default, and every test — means the endpoint has
+    /// nothing to talk to and the emulator never checks.
+    pub new_runs: Option<Arc<NewRunRequests>>,
+}
+
+/// ⚠️ **The one channel from the HTTP layer back into the emulator thread**, and deliberately the
+/// narrowest one that will do the job.
+///
+/// `src/web/mod.rs` was built so that it could reach [`Published`] and nothing else, which made
+/// "the server cannot affect the run" a structural fact rather than a promise. `POST /api/new-run`
+/// gives that up on purpose, so it gives up as little as possible: this carries **no data inwards**
+/// — only the fact that someone asked — and it is answered by the emulator thread at a point of its
+/// own choosing, between instructions, never by the request handler. There is nothing here to grow
+/// into a general command channel without a deliberate edit.
+///
+/// The reply travels back on a `oneshot` so the handler can return the new run's id, which is the
+/// only thing a caller actually needs.
+#[derive(Default)]
+pub struct NewRunRequests {
+    pending: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>,
+}
+
+impl NewRunRequests {
+    /// Ask for a fresh run. The receiver resolves with the new run's id once the emulator has acted.
+    ///
+    /// Refuses while one is already outstanding rather than replacing it: two resets a few
+    /// milliseconds apart would otherwise leave the first caller's channel dropped and
+    /// indistinguishable from an emulator that had died.
+    ///
+    /// ⚠️ **"Outstanding" means a caller is still listening.** A request whose handler has given up
+    /// waiting — the emulator thread died, so nothing will ever `take()` it — leaves a sender whose
+    /// receiver is dropped, and treating *that* as outstanding would wedge the endpoint permanently
+    /// on the one failure it most needs to stay usable through.
+    pub fn request(&self) -> Result<tokio::sync::oneshot::Receiver<Result<String, String>>, String> {
+        let mut pending = self.pending.lock().expect("new-run mailbox poisoned");
+        if pending.as_ref().is_some_and(|sender| !sender.is_closed()) {
+            return Err("a new run is already being started".to_string());
+        }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        *pending = Some(sender);
+        Ok(receiver)
+    }
+
+    fn take(&self) -> Option<tokio::sync::oneshot::Sender<Result<String, String>>> {
+        self.pending.lock().expect("new-run mailbox poisoned").take()
+    }
 }
 
 // ⚠️ **Nothing may stop this loop while the game is being played.** W4 briefly had a
@@ -87,6 +133,7 @@ impl Default for HostConfig {
             policy_name: "random",
             run: None,
             checkpoint_interval: Duration::from_secs(60),
+            new_runs: None,
         }
     }
 }
@@ -231,7 +278,7 @@ impl EmulatorHost {
     /// shouting about; it is not worth stopping a run that is otherwise playing perfectly well, and
     /// the next attempt is sixty seconds away.
     fn checkpoint(&mut self) {
-        let Some(run) = self.config.run.clone() else { return };
+        let Some(run) = self.config.run.as_ref().map(|current| current.get()) else { return };
         let state = match self.gb.save_state() {
             Ok(state) => state,
             Err(failure) => {
@@ -251,12 +298,73 @@ impl EmulatorHost {
         }
     }
 
+    /// Abandon the current run and start the game again in a fresh run directory, without stopping.
+    ///
+    /// Runs on the **emulator thread** (see the call site in [`Self::tick`]), which is what makes it
+    /// safe to touch `gb`, the agent and the encoder at all. The order below is the whole design:
+    ///
+    /// 1. **Checkpoint the outgoing run first.** It is about to stop being current, and everything
+    ///    since its last periodic checkpoint lives only in memory — the directory left behind has to
+    ///    be a complete, resumable run, not one truncated up to a minute short.
+    /// 2. **Open the new directory before touching the emulator.** A full disk should fail with the
+    ///    old run still playing, not halfway into a reset with nothing to go back to.
+    /// 3. Load the start-of-game state, reset the agent, and tell the policy — [`Policy::restart`]
+    ///    is where `LlmPolicy` throws away a conversation that is now about a game that no longer
+    ///    exists, and repoints the model's notes at the new directory.
+    /// 4. **Restart the video encoder** (its ⚠️ explains why `default()` will not do) and clear
+    ///    `last_status`, or the send-on-change rule would suppress the heartbeat that says the run
+    ///    changed — the one heartbeat a viewer most needs.
+    ///
+    /// `emulated` restarts at zero because it measures *this game*, and it is what `meta.json`'s
+    /// `emulated_ms` reports. `started` does not: it is the process's wall clock, which is what
+    /// `/api/healthz`'s uptime means and is unaffected by a run ending.
+    fn start_new_run(&mut self) -> Result<String, String> {
+        let Some(current) = self.config.run.clone() else {
+            return Err("this host has no run directory, so there is no new run to start".to_string());
+        };
+        self.checkpoint();
+        let previous = current.get().run_id();
+        let run = current.start_new()?;
+        let run_id = run.run_id();
+
+        self.gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+        self.gb
+            .load_state(crate::pokemon::data::START_OF_GAME)
+            .map_err(|e| format!("could not load the start-of-game state: {e}"))?;
+        self.map_cache = MapMetadataCache::default();
+        self.agent.restart(Some(run.path()));
+
+        self.encoder.restart();
+        self.last_status = None;
+        self.emulated = MachineCycles::ZERO;
+        self.ahead_by_cycles = MachineCycles::ZERO;
+        self.since_last_update = Duration::ZERO;
+        self.last_iteration = Instant::now();
+        self.next_checkpoint = Instant::now() + self.config.checkpoint_interval;
+        self.published.set_status(RunStatus::Playing);
+        self.published.publish_event(UiEventBody::Notice {
+            level: "info",
+            message: format!("new run {run_id} — {previous} was checkpointed and left where it is"),
+        });
+        println!("gb serve — new run {run_id} (was {previous})");
+        Ok(run_id)
+    }
+
     /// One iteration of the loop. Returns whether any emulation happened, which is the loop's cue
     /// that it is behind and should come straight back rather than sleep.
     ///
     /// Separate from [`Self::run`] so a test can drive the host deterministically instead of racing
     /// a thread.
     pub fn tick(&mut self) -> bool {
+        // **The reset seam.** Answered here, at the top of a tick, because that is the one place in
+        // the process where nothing is half-done: the previous tick's instruction has retired, the
+        // agent is between decisions and no borrow of `gb` is outstanding. A `Mutex::try_lock`-free
+        // `take()` on an empty mailbox is a lock and a `None`, which is why this can sit on the hot
+        // path unconditionally.
+        if let Some(sender) = self.config.new_runs.as_ref().and_then(|mailbox| mailbox.take()) {
+            let _ = sender.send(self.start_new_run());
+        }
+
         let now = Instant::now();
         self.since_last_update += now.saturating_duration_since(self.last_iteration).min(MAX_CATCHUP);
         self.last_iteration = now;
@@ -571,9 +679,10 @@ mod tests {
         assert!(state.is_none());
 
         let published = Published::new();
-        let run = Arc::new(run);
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let run = current.get();
         let mut host = host_with(Arc::clone(&published), |config| {
-            config.run = Some(Arc::clone(&run));
+            config.run = Some(Arc::clone(&current));
             config.checkpoint_interval = Duration::from_millis(20);
         });
 
@@ -620,5 +729,99 @@ mod tests {
         // …and the SRAM was written beside it, for anything that reads an ordinary .sav.
         let sram = std::fs::read(run.path().join("sram.bin")).expect("sram.bin");
         assert!(!sram.is_empty() && sram.len() % 1024 == 0, "{} bytes is not a bank count", sram.len());
+    }
+
+    /// **`POST /api/new-run`'s acceptance, at the seam it actually crosses.** A run that has played
+    /// for a while is asked — through the mailbox, exactly as the handler asks — to start again, and
+    /// afterwards there are two run directories: the old one complete and resumable, the new one
+    /// being played from the beginning.
+    ///
+    /// The two assertions that matter are the ones a reset is easy to get wrong on. **The outgoing
+    /// run must be checkpointed by the swap**, not left however many seconds short at whatever its
+    /// last periodic write was — this host is given a checkpoint interval far longer than it runs, so
+    /// the only thing that can have written `state.gbst` is `start_new_run` itself. And **the game
+    /// must actually be back at the start**: a reset that swapped the directory but left the
+    /// emulator running would look identical from the outside for the first few seconds.
+    #[test]
+    fn a_new_run_starts_in_place_and_leaves_the_old_one_complete() {
+        use crate::pokemon::PokemonApiTrait;
+        use crate::run::{Origin, RunDir};
+
+        let scratch = crate::run::tests::Scratch::new("host-new-run");
+        let validate = |bytes: &[u8]| GameBoy::dmg(crate::pokemon::roms::POKERED).load_state(bytes).is_ok();
+        let (run, origin, _) = RunDir::open(&scratch.0, false, "random", &validate).expect("a fresh run");
+        assert_eq!(origin, Origin::Fresh);
+
+        let published = Published::new();
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let new_runs = Arc::new(NewRunRequests::default());
+        let first = current.get();
+        let mut host = host_with(Arc::clone(&published), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.new_runs = Some(Arc::clone(&new_runs));
+            // Longer than this test runs, so no *periodic* checkpoint can fire and the state file
+            // below can only have been written by the swap.
+            config.checkpoint_interval = Duration::from_secs(3600);
+        });
+
+        // Play far enough that the agent has left the start state behind.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while host.emulated.to_duration() < Duration::from_secs(8) && Instant::now() < deadline {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        let played = {
+            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            api.game_state().expect("a readable state")
+        };
+        assert!(host.emulated.to_duration() >= Duration::from_secs(8), "the host barely ran");
+        assert!(!first.path().join("state.gbst").exists(), "a periodic checkpoint fired after all");
+
+        // Ask exactly as the handler does, then give the emulator the one tick it needs.
+        let receiver = new_runs.request().expect("the mailbox is empty");
+        host.tick();
+        let run_id = receiver.blocking_recv().expect("the emulator answered").expect("a new run");
+
+        let second = current.get();
+        assert_eq!(second.run_id(), run_id);
+        assert_ne!(second.run_id(), first.run_id(), "the run directory did not change");
+        assert!(first.path().join("state.gbst").is_file(),
+                "the outgoing run was not checkpointed — everything since its last write is gone");
+
+        // The game itself is back at the beginning, and the agent has forgotten the old map.
+        let restarted = {
+            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            api.game_state().expect("a readable state")
+        };
+        let start = {
+            let mut fresh = host_with(Published::new(), |_| {});
+            let mut api = PokemonApi::with_cache(&mut fresh.gb, &mut fresh.map_cache);
+            api.game_state().expect("a readable state")
+        };
+        assert_eq!(restarted.map.player_position, start.map.player_position,
+                   "the emulator kept playing the old game — it was {:?} before the reset",
+                   played.map.player_position);
+        // Restarted, not merely carried on: the counter is zeroed by the swap and then the *rest of
+        // that same tick* emulates into it, so this is "back near zero" rather than exactly it.
+        assert!(host.emulated.to_duration() < Duration::from_secs(1),
+                "emulated time measures *this* game, but reads {:?}", host.emulated.to_duration());
+
+        // ⚠️ And the next frame is a keyframe, or a viewer keeps fragments of the abandoned run.
+        host.publish_video();
+        assert!(published.latest_keyframe().is_some_and(|frame| frame.keyframe),
+                "the video encoder was not restarted");
+    }
+
+    /// The mailbox refuses a second request only while someone is still listening for the first —
+    /// otherwise a handler that gave up would wedge the endpoint for the life of the process.
+    #[test]
+    fn the_new_run_mailbox_refuses_a_concurrent_request_but_not_an_abandoned_one() {
+        let mailbox = NewRunRequests::default();
+
+        let receiver = mailbox.request().expect("the first is accepted");
+        assert!(mailbox.request().is_err(), "a second request while the first is outstanding");
+
+        drop(receiver);
+        assert!(mailbox.request().is_ok(), "an abandoned request must not block the next one");
     }
 }

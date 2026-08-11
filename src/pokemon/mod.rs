@@ -85,6 +85,34 @@ pub trait PokemonApiTrait {
     /// In this window the game initialises the battle on its own — the agent must NOT press
     /// any button (a held direction wedges the engagement and a battle never starts).
     fn trainer_battle_pending(&self) -> bool;
+    /// True while the player is inside a **PC menu that A-mashing cannot leave**.
+    ///
+    /// ⚠️ **Every PC menu in Gen 1 is a closed loop under A-only input**, and this is what escapes
+    /// them. Each one leaves only on B, and A on its resting cursor picks the first entry, which
+    /// bounces off a refusal message straight back to the menu with the cursor untouched:
+    ///
+    /// | Menu | Leaves on | A on the resting cursor | Bounces back via |
+    /// |---|---|---|---|
+    /// | `PCMainMenu` (`menus/pc.asm:12`) | `bit B_PAD_B / jp nz, LogOff` | `BillsPC` | see the row below |
+    /// | `BillsPCMenu` (`pokemon/bills_pc.asm`) | B | `WITHDRAW` | `NoMonText` on an empty box, `CantTakeMonText` on a full party (`:256`) |
+    /// | `PlayerPCMenu` (`menus/players_pc.asm:19`) | `jp nz, ExitPlayerPC` | `WITHDRAW ITEM` | nothing stored |
+    ///
+    /// Nothing in any of those cycles moves the cursor, so A never reaches `LOG OFF` or `SEE YA!`
+    /// either. An empty box is only the *first* way in, not the cause — a full party or a one-mon
+    /// party (`CantDepositLastMonText`) trap just as well.
+    ///
+    /// **Two checks, because there are two ways into a PC and only one of them sets a flag.**
+    /// `TextScript_PokemonCenterPC` goes through `ActivatePC`, which sets `wMiscFlags`'
+    /// `BIT_USING_GENERIC_PC` and clears it only in `LogOff` — so that covers the whole parent tree
+    /// including Bill's-PC submenus, where B is also what backs out a level at a time. But
+    /// `TextScript_ItemStoragePC` — the PC in Red's bedroom, eight tiles from a fresh save — calls
+    /// `PlayerPC` **directly** and deliberately leaves the flag clear (`players_pc.asm:11`, "accessing
+    /// it directly"). That one is caught by its screen instead: `LOG OFF` is the last entry of both
+    /// top-level PC menus and appears nowhere else in the game, which is the same match
+    /// [`postgame::pc_box`](crate::pokemon::postgame::pc_box) uses and for the same reason — the
+    /// first entry's *label* varies (`SOMEONE's PC` before `EVENT_MET_BILL`, `BILL's PC` after) but
+    /// `LOG OFF` never does.
+    fn in_pc_menu(&self) -> bool;
     /// The player's **raw** map coordinates (`wXCoord`/`wYCoord`) — i.e. before the
     /// connection-strip offsets that `MetaTileMap` adds to produce "expanded" coordinates.
     /// These are the coordinate space warp `to_position`s and world-graph node keys use, so the
@@ -491,6 +519,14 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         // trainer battle wIsInBattle only becomes 2 after the engage/transition completes.
         mmu.read_pointer(&pokered_symbols::wCurOpponent) != 0
             && mmu.read_pointer(&pokered_symbols::wIsInBattle) == 0
+    }
+
+    fn in_pc_menu(&self) -> bool {
+        // `BIT_USING_GENERIC_PC` is bit 3 of `wMiscFlags` (`constants/ram_constants.asm:11`). Cheap,
+        // and it covers the parent tree's submenus, which show no `LOG OFF` of their own — so it is
+        // tried first and the screen is only scanned when it says no.
+        self.mmu().read_pointer(&pokered_symbols::wMiscFlags) & 0x08 != 0
+            || self.on_screen_text(false).is_some_and(|text| text.contains("LOG OFF"))
     }
 
     fn raw_player_coords(&self) -> Point8 {

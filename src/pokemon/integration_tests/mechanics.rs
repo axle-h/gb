@@ -1128,3 +1128,40 @@ fn observation_views_serialise_to_json() {
         assert!(!value.is_null());
     }
 }
+
+/// ⚠️ **The generic PC menu is a closed loop under A-only input, and this is the test that says so.**
+///
+/// Walking into the PC in Red's bedroom — eight tiles from a fresh save — used to wedge a run
+/// permanently. `PCMainMenu` (`engine/menus/pc.asm:12`) leaves only on B; A on its resting cursor
+/// enters Bill's PC, whose resting cursor is `WITHDRAW`, which on an empty box prints `NoMonText`
+/// and does `jp BillsPCMenu` — back to the start with the cursor untouched. The agent reads the
+/// whole tree as one long text box (`GameMode::TextBox` comes from `wFontLoaded` alone) and used to
+/// mash A at it for ever.
+///
+/// This is the deployed instance's exact failure, driven from the exact state it ships with
+/// (`START_OF_GAME` is what `gb serve` starts a fresh run from). The two assertions are separate on
+/// purpose: that the PC **opened at all** — without it a regression in `UsePc` would leave this
+/// passing while proving nothing — and that the run then reached somewhere it can only get to by
+/// having left the menu.
+#[test]
+fn the_generic_pc_menu_is_backed_out_of_rather_than_mashed() {
+    let mut fixture = TestFixture::new(
+        crate::pokemon::data::START_OF_GAME,
+        Duration::from_secs(180),
+        vec![
+            PolicyStep::UsePc { map: Map::RedsHouse2F },
+            PolicyStep::goto(Map::RedsHouse1F),
+        ],
+    );
+
+    let mut opened = false;
+    while !fixture.agent.policy_exhausted() {
+        fixture.step();
+        opened |= fixture.api().in_pc_menu();
+    }
+
+    assert!(opened, "the PC never opened, so this test says nothing about leaving one");
+    assert!(!fixture.api().in_pc_menu(), "the run finished still inside the PC menu");
+    assert_eq!(fixture.game_state().map.map, Map::RedsHouse1F,
+               "the agent should have logged off and walked downstairs");
+}
