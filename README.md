@@ -78,7 +78,8 @@ cargo run --release
 ```
 
 `gb serve` **resumes** by default: the newest run under `$GB_RUN_DIR` (`./runs`) is continued in
-place, notes and all. `--new-run` starts the game over in a directory of its own.
+place, notes and all. `--new-run` starts the game over in a directory of its own — or, on something
+already running, `POST /api/new-run` does the same thing without a restart (see below).
 
 ## How the model plays
 
@@ -130,7 +131,7 @@ Ctrl-C and SIGTERM both — so a restart, a rollout or a reboot resumes rather t
 ## The web UI
 
 `web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed` and served by
-the same process that runs the emulator. Five read-only endpoints:
+the same process that runs the emulator. Five read-only endpoints and one that is not:
 
 | | |
 |---|---|
@@ -139,10 +140,27 @@ the same process that runs the emulator. Five read-only endpoints:
 | `/api/history?since=` | the transcript backlog, so a page that just loaded is not empty |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's own trainer-card graphics |
 | `/api/healthz` | liveness |
+| `POST /api/new-run` | start the game over, in place — off unless `GB_ADMIN_TOKEN` is set |
 
 The screen is streamed as block deltas rather than as images because it is a 160×144 screen that
 mostly does not change; the decoder is a TypeScript port of the encoder, in `web/src/video.ts`. No
 graphics are committed to this repo — the badges are read out of the ROM at runtime.
+
+### Starting a new run without a restart
+
+`POST /api/new-run` checkpoints the current run, leaves it complete on disk, and starts the game
+again in a fresh run directory — no restart, no downtime, and the page follows on its own. There is
+a **new run** button in the header that asks for the token and does the same thing.
+
+```shell
+curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://your-host/api/new-run
+# → {"run_id":"run-20260811-142233"}
+```
+
+It is **off unless `GB_ADMIN_TOKEN` is set**, and 404s rather than 403s when it is not — the server
+is on the public internet and an endpoint that resets the game should not advertise itself to
+whoever scans for it. Nothing is deleted: the old directory is a complete run and can be resumed by
+pointing a process back at it.
 
 For a hot-reload loop, run `gb serve` on :8080 and `pnpm run dev` in `web/`, which proxies `/api` to
 it. `GB_WEB_DEV=1` reads `web/dist` from disk instead of the embedded copy, which skips the cargo
@@ -163,6 +181,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog; `0` turns it off |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
+| `GB_ADMIN_TOKEN` | enables `POST /api/new-run`; unset means the endpoint 404s |
 
 ## Deployment
 

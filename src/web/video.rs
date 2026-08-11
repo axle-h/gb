@@ -117,6 +117,25 @@ impl VideoEncoder {
         self.seq
     }
 
+    /// Forget everything the decoder is believed to hold, so the next [`Self::encode`] is a full
+    /// keyframe with a fresh palette.
+    ///
+    /// For `POST /api/new-run`, which replaces the emulator's state outright. Deltas are encoded
+    /// against `last_sent`, so without this the first frame of the new game would be diffed against
+    /// the last frame of the old one and every block that happened to match would simply not be
+    /// sent — leaving fragments of the abandoned run on screen with nothing to repair them.
+    ///
+    /// ⚠️ **`seq` is deliberately kept.** It is not part of what the decoder holds, it is the
+    /// ordering every connected client filters on (`/api/video` drops anything at or below the seq
+    /// it opened with), so restarting the count at zero would make a live viewer discard the whole
+    /// new run. `VideoEncoder::default()` is therefore *not* a substitute for this.
+    pub fn restart(&mut self) {
+        self.palette.clear();
+        self.index.clear();
+        self.last_sent = Box::new([LcdColor::default(); PIXELS]);
+        self.sent_anything = false;
+    }
+
     /// Encode `frame` against everything sent so far.
     ///
     /// `None` when nothing the decoder can see changed — the common case for an idle screen and the

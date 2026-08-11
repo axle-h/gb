@@ -134,6 +134,18 @@ pub trait Policy {
     /// Default: a no-op, and unreachable for any policy that did not ask for it above.
     fn pick_unstick(&mut self, _state: &GameState, _jam: Jam<'_>) {}
 
+    /// The game has been restarted underneath this policy — throw away anything held about the old
+    /// one. `run_dir` is the **new** run directory, for a policy that keeps files in it.
+    ///
+    /// Called from [`PokemonAgent::restart`](crate::pokemon::agent::PokemonAgent::restart), which
+    /// `POST /api/new-run` reaches on the emulator thread. Nothing else calls it: a policy that is
+    /// never reset simply never sees it.
+    ///
+    /// Default: a no-op. Correct for every scripted policy — `DeterministicPolicy`'s queue is the
+    /// script it was constructed with rather than anything it learned, and `RandomPolicy` holds
+    /// nothing at all.
+    fn restart(&mut self, _run_dir: Option<&std::path::Path>) {}
+
     /// **W5** — raw button presses the policy wants delivered, collected by the agent at the top of
     /// its next tick and handed to
     /// [`queue_manual_input`](crate::pokemon::agent::PokemonAgent::queue_manual_input).

@@ -27,7 +27,20 @@ impl PokemonTextReader {
 
     pub fn update<A: PokemonApiTrait>(&mut self, api: &mut A) {
         // mash the A button to advance the text
-        api.toggle_button(JoypadButton::A);
+        self.update_with(api, JoypadButton::A);
+    }
+
+    /// [`Self::update`], but advancing with `button` instead of A.
+    ///
+    /// ⚠️ **The caller picks the button; the reader still reads.** Both A and B advance a Gen 1 text
+    /// box (`ManualTextScroll` waits on either), so B is a drop-in for reading purposes — but where
+    /// the two differ is on a *menu*, and this reader cannot tell a menu from a message
+    /// (`GameMode::TextBox` comes from `wFontLoaded` alone; see `encoding.rs`'s `TODO menu vs
+    /// dialogue`). The places that matter today are the PC menus, which A-mashing cannot leave;
+    /// see [`PokemonApiTrait::in_pc_menu`]. Accumulation is unconditional either way, so the
+    /// text that scrolled past on the way out is still reported when the box closes.
+    pub fn update_with<A: PokemonApiTrait>(&mut self, api: &mut A, button: JoypadButton) {
+        api.toggle_button(button);
 
         let buffer_len = self.buffer.len();
         if let Some(on_screen_text) = api.on_screen_text(self.message_box_only) {
@@ -107,6 +120,10 @@ mod tests {
         }
 
         fn trainer_battle_pending(&self) -> bool {
+            false
+        }
+
+        fn in_pc_menu(&self) -> bool {
             false
         }
 

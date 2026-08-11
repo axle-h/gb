@@ -161,13 +161,23 @@ fn can_open_the_pokemon_center_pc() {
         assert!(main_menu.contains(entry), "{entry:?} missing from PC menu {main_menu:?}");
     }
 
-    // The agent's generic text-advance keeps mashing A once the menu is up, so it walks straight into
-    // the first entry. Harmless here, and it hands 0.5 and workstream A a free look at the next menu
-    // down — which matches §6-A3's transcription exactly.
+    // ⚠️ **This used to assert the opposite, and the comment called it harmless.** Task 0.4 recorded
+    // that "the agent's generic text-advance keeps mashing A once the menu is up, so it walks
+    // straight into the first entry", and took the free look at Bill's PC submenu that gave it. It
+    // was not harmless: every PC menu is a closed cycle under A — the first entry bounces off a
+    // refusal message back to the same menu with the cursor untouched — and it wedged the deployed
+    // run permanently. `ReadingTextBox` now presses B while `in_pc_menu` holds, so what this test
+    // pins is that the agent **leaves**.
+    //
+    // Nothing is lost by not transcribing the submenu here: workstream A drives it deliberately in
+    // `postgame::pc_box`, which is where a menu the agent opens on purpose belongs.
     assert!(
-        seen.iter().any(|t| t.contains("DEPOSIT") && t.contains("CHANGE BOX") && t.contains("SEE YA!")),
-        "Bill's PC submenu never appeared; screens seen: {seen:#?}"
+        !seen.iter().any(|t| t.contains("CHANGE BOX") && t.contains("SEE YA!")),
+        "the agent walked into Bill's PC instead of logging off; screens seen: {seen:#?}"
     );
+    assert!(!fixture.api().in_pc_menu(), "the agent never got back out of the PC");
+    assert_eq!(fixture.game_state().map.map, Map::ViridianPokecenter,
+               "it should have logged off and be standing in front of the PC again");
 }
 
 /// TM34 Bide — one of the six TMs sitting in the bag that no workstream has a plan for, and the one

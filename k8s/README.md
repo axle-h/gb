@@ -34,8 +34,20 @@ notes and all. So a rollout, a `kubectl delete pod`, a node reboot — all of th
 playthrough up where it was, and the pod is deliberately given a 30 s grace period because SIGTERM
 is what writes that checkpoint.
 
-To start the game over, uncomment the `args:` line in `gb/deployment.yml` for one rollout and then
-take it back out. Left in place, every restart would wipe the run.
+To start the game over, set `GB_ADMIN_TOKEN` in the Secret and ask the running pod:
+
+```shell
+curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://gb.ax-h.com/api/new-run
+# → {"run_id":"run-20260811-142233"}
+```
+
+No rollout, no downtime, nothing to remember to undo — the current run is checkpointed and left
+complete on the volume, and the page follows the new one on its own. The header has a **new run**
+button that does the same thing and asks for the token.
+
+The old way still works and is the fallback if the process is not answering: uncomment the `args:`
+line in `gb/deployment.yml` for one rollout and then take it back out. ⚠️ Left in place, every
+restart would wipe the run — which is the reason the endpoint exists.
 
 ```shell
 kubectl -n gb logs -f deploy/gb

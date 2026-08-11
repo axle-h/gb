@@ -437,6 +437,36 @@ impl Policy for LlmPolicy {
         self.stuck_timeout
     }
 
+    /// **`POST /api/new-run`** — the emulator has reloaded the game from the start under us.
+    ///
+    /// Everything this policy holds is about a decision in the game that just ended: a turn in
+    /// flight deciding a battle that no longer exists, a `field_move` stashed for a
+    /// `pick_field_move` that will never come, presses queued for a player who is somewhere else
+    /// entirely. All of it goes.
+    ///
+    /// ⚠️ **Bump the generation first.** It is what cancels the in-flight turn, and it is also what
+    /// makes the outcome already on the wire safe: a stale `TurnOutcome` reaching a later poll no
+    /// longer matches any pending id, so it is dropped instead of being applied to the new game.
+    /// The worker is told separately — its history and the model's notes are its own to replace, and
+    /// it does so at the top of its next turn (see [`Restart`](crate::llm::worker::Restart)).
+    fn restart(&mut self, run_dir: Option<&std::path::Path>) {
+        self.handles.next_generation();
+        if let Ok(mut cell) = self.handles.restart.lock() {
+            *cell = Some(crate::llm::worker::Restart {
+                run_dir: run_dir.map(|path| path.to_path_buf()),
+            });
+        }
+        self.pending = None;
+        self.waiting = None;
+        self.events.clear();
+        self.snapshot = ApiSnapshot::default();
+        self.state = None;
+        self.site = None;
+        self.field_move = None;
+        self.manual.clear();
+        self.note = None;
+    }
+
     /// Collected by the agent at the top of its next tick, ahead of the state machine.
     fn take_manual_input(&mut self) -> Vec<JoypadButton> {
         std::mem::take(&mut self.manual)
@@ -879,6 +909,71 @@ mod tests {
         let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.function.name).collect();
         assert!(offered.contains(&"choose_action") && !offered.contains(&"choose_battle_action"));
         assert!(last_user_message(&requests[0]).contains(&id), "the menu must carry the id it expects back");
+    }
+
+    /// **`POST /api/new-run`, from the policy's side.** A turn completes; the game is restarted
+    /// underneath; the next turn must be a conversation about the *new* game.
+    ///
+    /// The assertion that matters is the message count. A turn's history grows — system prompt, the
+    /// situation, the assistant's reply, the tool result — so a second turn on a live conversation
+    /// sends strictly more messages than the first. After a restart it sends exactly as many as a
+    /// first turn does, which is the only externally visible proof that the worker threw the old
+    /// history away rather than compacting it, trimming it, or carrying it on.
+    #[test]
+    fn a_restart_starts_the_conversation_again() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let reply = || calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]);
+        rig.endpoint.replies.lock().unwrap().push_back(reply());
+
+        assert!(rig.pump_overworld(&mut policy).is_some(), "the first turn resolves");
+        let first = rig.requests().len();
+        assert_eq!(first, 1);
+        let messages_in_first_turn = rig.requests()[0].messages.len();
+
+        // The emulator thread calls this, through `PokemonAgent::restart`, on the reset tick.
+        policy.restart(None);
+
+        rig.endpoint.replies.lock().unwrap().push_back(reply());
+        assert!(rig.pump_overworld(&mut policy).is_some(), "a turn still runs after the restart");
+        rig.wait_for_requests(2, Duration::from_secs(5));
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2, "the second turn never reached the endpoint");
+        assert_eq!(
+            requests[1].messages.len(), messages_in_first_turn,
+            "the second turn carried the old game's history: {:?}",
+            requests[1].messages.iter().map(|m| m.role).collect::<Vec<_>>(),
+        );
+    }
+
+    /// ⚠️ A restart must cancel the turn in flight, or an answer about the old game is applied to the
+    /// new one — the same hazard `a_kind_change_cancels_the_turn_in_flight` covers, reached the other
+    /// way. The generation is what does it, and this pins that `restart` bumps it.
+    #[test]
+    fn a_restart_cancels_the_turn_in_flight() {
+        let release = Arc::new(AtomicBool::new(false));
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        rig.endpoint.replies.lock().unwrap().push_back(held(
+            calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
+            &release,
+        ));
+
+        rig.tick_overworld(&mut policy);
+        rig.wait_for_requests(1, Duration::from_secs(5));
+        let generation = policy.handles.current_generation();
+
+        policy.restart(None);
+        assert!(policy.handles.current_generation() > generation,
+                "the generation must move, or the in-flight turn survives the restart");
+
+        // The held reply is released into a turn that no longer exists; it must not become an action.
+        release.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+        rig.endpoint.replies.lock().unwrap().push_back(
+            calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
+        );
+        assert!(rig.pump_overworld(&mut policy).is_some(), "the run carries on after the restart");
     }
 
     /// ⚠️ `pick_field_move` shares the `Overworld` kind. It runs immediately before
