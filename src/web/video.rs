@@ -1,48 +1,71 @@
 //! **W2** — the video wire format: an 8×8 block diff with a persistent palette.
 //!
-//! There is no image codec here and no dependency on one. The Game Boy's LCD is 160×144 with a few
-//! dozen colours on screen and long horizontal runs of identical pixels, so a hand-rolled
-//! palette + RLE block diff beats anything general-purpose at a fraction of the complexity: a static
-//! screen costs *nothing*, and a walking animation touches 40–80 blocks at ~15 bytes each.
+//! There is no image codec here and no dependency on one. The Game Boy's LCD is 160×144 with a
+//! handful of colours on screen and most of it unchanged from one frame to the next, so a
+//! hand-rolled palette block diff beats anything general-purpose at a fraction of the complexity: a
+//! static screen costs *nothing*.
 //!
 //! ```text
-//! u8   version (=1)
-//! u8   flags            bit0 = keyframe
+//! u8   version (=2)
+//! u8   flags            bit0 = keyframe, bit1 = the block list is a bitmap
 //! u16  frame_seq        wrapping, little-endian
+//! u8   bits_per_pixel   1, 2, 4 or 8 — how wide an index into the palette below is
 //! u8   new_palette_len
 //! [new_palette_len × u24 RGB]
-//! u16  block_count
-//! [block_count × {
-//!     u16 block_index                  0..360, row-major
-//!     u8  mode                         0 = RLE, 1 = raw (64 bytes), 2 = 2-bit packed (20 bytes)
-//!     payload
-//! }]
+//! block list            keyframe: absent, all 360 in order
+//!                       bit1 set: 45-byte bitmap, block n = byte n/8 bit n%8
+//!                       else:     u16 count, then count × u16 block index
+//! payloads              one per listed block, in ascending block order, each 64 × bits_per_pixel
+//!                       bits packed low-bits-first
 //! ```
 //!
-//! **Mode 2 exists because modes 0 and 1 were both worse than they looked.** The first draft assumed
-//! Game Boy blocks were "extremely run-friendly, ~15 bytes RLE each"; measured against the game
-//! walking around outdoors they average **39.7**. A tile is 8 pixels wide and detailed ones — grass,
-//! trees, interior clutter — change colour every two or three, so runs are ~3.5 pixels and a
-//! scrolling screen is close to the worst case for run-length coding at 1:1. Packing 2 bits per pixel
-//! against a four-entry per-block sub-palette costs a flat 20 bytes and fits DMG exactly, since DMG
-//! has exactly four shades. It is not a replacement for the other two — the encoder still picks
-//! whichever of the three is smallest per block, and on a flat block RLE still wins at 4 bytes.
+//! ## Why it looks like this
+//!
+//! **v1 had three per-block modes (RLE, raw, a 4-colour sub-palette) and picked the smallest.**
+//! `src/web/video/bench.rs` measured them against four minutes of real play and the answer was that
+//! the cleverness was costing bytes rather than saving them. Two facts did it in:
+//!
+//! - **`gb serve` runs `GameBoy::dmg`, so the screen is four shades and nothing else** — the bench
+//!   asserts it. v1's packed mode therefore spent 4 of its 23 bytes naming a per-block sub-palette
+//!   that was always a permutation of `0,1,2,3`, and another 3 on a block index and a mode tag. The
+//!   payload underneath was 16 bytes. **A third of the stream was describing the encoding rather
+//!   than the picture.**
+//! - **Anything downstream compresses far better than a per-block size contest does.** Variable-size
+//!   blocks with embedded tags are close to the worst input you can hand an LZ77 window; a fixed
+//!   16-byte payload at a fixed offset is close to the best. Measured end to end, dropping all three
+//!   modes for one flat width made the *uncompressed* stream 21% smaller and the *compressed* stream
+//!   **2.6×** smaller.
+//!
+//! So: one width for the whole message, wide enough for the palette (2 bits in practice, 8 in the
+//! worst case, which is still v1's raw mode). No modes, no tags, and the block list is hoisted out
+//! of the payloads so like sits with like — which is again for the compressor's benefit.
 //!
 //! **The palette is stream state, not message state.** A delta *appends* its `new_palette` entries
 //! to whatever the decoder already has; a **keyframe replaces the palette outright** with the entries
 //! it carries, which are the encoder's entire palette at that moment. That second rule is what makes
-//! §5.2's late-joiner handshake work: a keyframe encoded from the current frame leaves the decoder's
+//! the late-joiner handshake work: a keyframe encoded from the current frame leaves the decoder's
 //! palette *identical* to the encoder's, so every subsequent delta lines up. An earlier design had a
 //! keyframe carry only the colours it needed, which quietly desynchronised every late joiner the
 //! first time a delta referenced an index the keyframe had not listed.
 //!
+//! ⚠️ **`bits_per_pixel` is a property of the message, not of the stream.** It is whatever the
+//! palette needs *after* this message's new entries are folded in, so a frame that introduces a
+//! fifth colour widens from 2 bits to 4 for that message alone. Blocks already on screen are not
+//! resent, and do not need to be: the decoder holds pixels, not packed bytes.
+//!
 //! **RGB888, not RGB565.** DMG's greys are `FF/AA/55/00` and `0xAA` does not survive a round trip
-//! through 5 bits (see [`LcdColor`]). The palette is at most 256 entries, so the third byte is free.
+//! through 5 bits (see [`LcdColor`]). The palette is at most 255 entries, so the third byte is free.
 //!
 //! The encoder tracks what the *decoder* will hold, not what the frame contained — [`VideoEncoder`]
-//! writes palette-resolved colours back into `last_sent`. It matters only on the lossy path (a frame
-//! with more than 256 distinct colours, which Pokémon Red never produces), but without it a block
-//! that was approximated once would read as unchanged forever after.
+//! writes palette-resolved indices into `last_sent`. It matters only on the lossy path (a frame with
+//! more than 255 distinct colours, which Pokémon Red never produces), but without it a block that
+//! was approximated once would read as unchanged forever after.
+//!
+//! ## What goes on the wire
+//!
+//! Nothing here base64s anything. `src/web/mod.rs` streams these messages as binary, length-prefixed
+//! and deflated per connection — see that module for why, and for the measurement that base64 costs
+//! **twice** as much after compression as the 33% it costs before.
 
 use std::collections::{HashMap, HashSet};
 
@@ -57,15 +80,13 @@ pub const BLOCK_COUNT: usize = BLOCKS_X * BLOCKS_Y;
 pub const PIXELS: usize = LCD_WIDTH * LCD_HEIGHT;
 const BLOCK_PIXELS: usize = BLOCK * BLOCK;
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 const FLAG_KEYFRAME: u8 = 0x01;
-const MODE_RLE: u8 = 0;
-const MODE_RAW: u8 = 1;
-const MODE_PACKED: u8 = 2;
-/// Sub-palette size for [`MODE_PACKED`]: 2 bits per pixel. Not a coincidence — DMG renders four
-/// shades, so almost every block on screen fits.
-const PACKED_COLOURS: usize = 4;
-const PACKED_BYTES: usize = BLOCK_PIXELS / 4;
+const FLAG_BITMAP: u8 = 0x02;
+/// One bit per block, so a message that touches most of the screen names them all in 45 bytes
+/// instead of 720. The alternative — a `u16` each — wins below 22 blocks, and the encoder picks.
+const BITMAP_BYTES: usize = BLOCK_COUNT.div_ceil(8);
+const BITMAP_WORTH_IT: usize = (BITMAP_BYTES - 2) / 2 + 1;
 /// ⚠️ **255, not 256, and the `u8` index is not the reason.** `new_palette_len` is a `u8`, and a
 /// keyframe has to carry the *whole* palette in one message — so a 256th entry would encode its
 /// length as `0` and the decoder would silently read the block list as palette bytes. Losing one
@@ -76,8 +97,8 @@ const MAX_PALETTE: usize = 255;
 /// One LCD frame, exactly as [`crate::ppu::PPU::lcd`] hands it over.
 pub type Frame = [LcdColor; PIXELS];
 
-/// A message ready to go on the wire, with the bookkeeping the SSE route needs to order it against
-/// a keyframe (§5.2).
+/// A message ready to go on the wire, with the bookkeeping the streaming route needs to order it
+/// against a keyframe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Encoded {
     /// Monotonic and **not** wrapped — the wire field is `u16`, but a late joiner compares sequence
@@ -88,15 +109,52 @@ pub struct Encoded {
     pub bytes: Vec<u8>,
 }
 
+/// How wide an index into a palette of `entries` has to be. Rounded up to a power of two so a
+/// payload is a whole number of pixels per byte, which is what keeps packing and unpacking a shift
+/// rather than a division.
+fn bits_per_pixel(entries: usize) -> u8 {
+    match entries {
+        0..=2 => 1,
+        3..=4 => 2,
+        5..=16 => 4,
+        _ => 8,
+    }
+}
+
+fn payload_bytes(bits: u8) -> usize {
+    BLOCK_PIXELS * bits as usize / 8
+}
+
+fn pack(indices: &[u8; BLOCK_PIXELS], bits: u8, out: &mut Vec<u8>) {
+    if bits == 8 {
+        out.extend_from_slice(indices);
+        return;
+    }
+    let per_byte = 8 / bits as usize;
+    for chunk in indices.chunks(per_byte) {
+        out.push(
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0u8, |acc, (i, index)| acc | (index << (i * bits as usize))),
+        );
+    }
+}
+
 // ── Encoder ──────────────────────────────────────────────────────────────────────────────────────
 
 pub struct VideoEncoder {
     palette: Vec<LcdColor>,
     index: HashMap<LcdColor, u8>,
-    /// What the decoder holds after everything emitted so far — see the module docs.
-    last_sent: Box<Frame>,
+    /// What the decoder holds after everything emitted so far, **as palette indices** — see the
+    /// module docs. Indices rather than colours so [`VideoEncoder::keyframe`] is a straight pack:
+    /// holding colours meant one hash lookup per pixel, 23040 of them, every published frame.
+    last_sent: Box<[u8; PIXELS]>,
     sent_anything: bool,
     seq: u64,
+    /// Scratch for one message's block payloads, kept across calls so a 30 fps stream allocates
+    /// nothing per frame. `(block index, indices)`.
+    staged: Vec<(u16, [u8; BLOCK_PIXELS])>,
 }
 
 impl Default for VideoEncoder {
@@ -104,9 +162,10 @@ impl Default for VideoEncoder {
         Self {
             palette: Vec::new(),
             index: HashMap::new(),
-            last_sent: Box::new([LcdColor::default(); PIXELS]),
+            last_sent: Box::new([0; PIXELS]),
             sent_anything: false,
             seq: 0,
+            staged: Vec::with_capacity(BLOCK_COUNT),
         }
     }
 }
@@ -132,15 +191,16 @@ impl VideoEncoder {
     pub fn restart(&mut self) {
         self.palette.clear();
         self.index.clear();
-        self.last_sent = Box::new([LcdColor::default(); PIXELS]);
+        self.last_sent = Box::new([0; PIXELS]);
         self.sent_anything = false;
     }
 
     /// Encode `frame` against everything sent so far.
     ///
     /// `None` when nothing the decoder can see changed — the common case for an idle screen and the
-    /// reason a standing-still emulator costs no bandwidth at all. The sequence number only advances
-    /// when a message is actually produced, so a stored keyframe stays valid across idle ticks.
+    /// reason a standing-still emulator costs no bandwidth at all. Roughly half of all published
+    /// frames come back `None` in ordinary play. The sequence number only advances when a message is
+    /// actually produced, so a stored keyframe stays valid across idle ticks.
     ///
     /// "Nothing the decoder can see" rather than "nothing changed" is the precise rule, and on the
     /// lossy path they differ: a block whose true colours moved but whose *approximation* did not
@@ -167,18 +227,16 @@ impl VideoEncoder {
             self.index.clear();
         }
 
-        // Block payloads first: they are what decides which palette entries the message carries, so
-        // the header cannot be written until they are done.
+        // Two passes, and the split is forced: `bits_per_pixel` covers the palette *including* the
+        // entries these blocks are about to introduce, so nothing can be written until they have all
+        // been interned.
         let palette_base = self.palette.len();
-        let mut body = Vec::with_capacity(blocks.len() * 24);
-        let mut emitted = 0;
+        self.staged.clear();
         for &block in &blocks {
             // A keyframe carries all 360 blocks by definition — that is what makes it standalone.
-            if self.encode_block(frame, block as usize, keyframe, &mut body) {
-                emitted += 1;
-            }
+            self.stage_block(frame, block, keyframe);
         }
-        if emitted == 0 {
+        if self.staged.is_empty() {
             // Every candidate resolved to what the decoder already holds. Only reachable on the lossy
             // path, and only reachable at all *because* the candidates were chosen by comparing the
             // source against the approximation. Roll the palette back: an entry that was interned but
@@ -190,19 +248,41 @@ impl VideoEncoder {
 
         self.seq += 1;
         self.sent_anything = true;
+        let bits = bits_per_pixel(self.palette.len());
+        let bitmap = !keyframe && self.staged.len() >= BITMAP_WORTH_IT;
 
         let new_entries = &self.palette[palette_base..];
-        let mut bytes = Vec::with_capacity(8 + new_entries.len() * 3 + body.len());
+        let mut bytes = Vec::with_capacity(
+            6 + new_entries.len() * 3 + BITMAP_BYTES + self.staged.len() * payload_bytes(bits),
+        );
         bytes.push(VERSION);
-        bytes.push(if keyframe { FLAG_KEYFRAME } else { 0 });
+        bytes.push(if keyframe { FLAG_KEYFRAME } else { 0 } | if bitmap { FLAG_BITMAP } else { 0 });
         bytes.extend_from_slice(&(self.seq as u16).to_le_bytes());
+        bytes.push(bits);
         debug_assert!(new_entries.len() <= MAX_PALETTE, "the length field is a u8");
         bytes.push(new_entries.len() as u8);
         for colour in new_entries {
             bytes.extend_from_slice(&colour.to_rgb().0);
         }
-        bytes.extend_from_slice(&(emitted as u16).to_le_bytes());
-        bytes.extend_from_slice(&body);
+
+        // The block list, hoisted out of the payloads so like sits with like.
+        if keyframe {
+            debug_assert_eq!(self.staged.len(), BLOCK_COUNT, "a keyframe is every block");
+        } else if bitmap {
+            let mut map = [0u8; BITMAP_BYTES];
+            for (block, _) in &self.staged {
+                map[*block as usize / 8] |= 1 << (*block % 8);
+            }
+            bytes.extend_from_slice(&map);
+        } else {
+            bytes.extend_from_slice(&(self.staged.len() as u16).to_le_bytes());
+            for (block, _) in &self.staged {
+                bytes.extend_from_slice(&block.to_le_bytes());
+            }
+        }
+        for (_, indices) in &self.staged {
+            pack(indices, bits, &mut bytes);
+        }
 
         Some(Encoded { seq: self.seq, keyframe, bytes })
     }
@@ -211,36 +291,37 @@ impl VideoEncoder {
     /// palette so a decoder starting from nothing lands exactly where the encoder is.
     ///
     /// Pure: it neither advances the sequence number nor touches the palette, so the emulator thread
-    /// can publish one beside every delta and a late joiner picks it up without racing the encoder.
-    /// Returns `None` before anything has been encoded, when there is no state to describe.
+    /// can hand one to a joiner without racing the encoder. Returns `None` before anything has been
+    /// encoded, when there is no state to describe.
     pub fn keyframe(&self) -> Option<Encoded> {
         if !self.sent_anything {
             return None;
         }
-        let mut body = Vec::with_capacity(BLOCK_COUNT * 24);
-        for block in 0..BLOCK_COUNT {
-            body.extend_from_slice(&(block as u16).to_le_bytes());
-            let indices = self.block_indices(block);
-            append_payload(&indices, &mut body);
-        }
-
-        let mut bytes = Vec::with_capacity(8 + self.palette.len() * 3 + body.len());
+        let bits = bits_per_pixel(self.palette.len());
+        let mut bytes =
+            Vec::with_capacity(6 + self.palette.len() * 3 + BLOCK_COUNT * payload_bytes(bits));
         bytes.push(VERSION);
         bytes.push(FLAG_KEYFRAME);
         bytes.extend_from_slice(&(self.seq as u16).to_le_bytes());
+        bytes.push(bits);
         debug_assert!(self.palette.len() <= MAX_PALETTE, "the length field is a u8");
         bytes.push(self.palette.len() as u8);
         for colour in &self.palette {
             bytes.extend_from_slice(&colour.to_rgb().0);
         }
-        bytes.extend_from_slice(&(BLOCK_COUNT as u16).to_le_bytes());
-        bytes.extend_from_slice(&body);
+        let mut indices = [0u8; BLOCK_PIXELS];
+        for block in 0..BLOCK_COUNT {
+            for (slot, p) in block_pixels(block).enumerate() {
+                indices[slot] = self.last_sent[p];
+            }
+            pack(&indices, bits, &mut bytes);
+        }
 
         Some(Encoded { seq: self.seq, keyframe: true, bytes })
     }
 
     fn block_changed(&self, frame: &Frame, block: usize) -> bool {
-        block_pixels(block).any(|p| frame[p] != self.last_sent[p])
+        block_pixels(block).any(|p| self.palette[self.last_sent[p] as usize] != frame[p])
     }
 
     /// Should this frame be spent on a fresh palette? Decided before anything is written, so the
@@ -272,38 +353,24 @@ impl VideoEncoder {
         true
     }
 
-    /// Encode one block, returning whether it was written.
+    /// Resolve one block to palette indices and queue it, if it says anything new.
     ///
-    /// A block is written when its palette-resolved form differs from what the decoder holds — not
-    /// when the *source* differs, which is a weaker thing that is only equivalent off the lossy path.
-    /// `force` is how a keyframe gets all 360 blocks regardless, which is what makes it standalone.
-    fn encode_block(&mut self, frame: &Frame, block: usize, force: bool, out: &mut Vec<u8>) -> bool {
+    /// A block is queued when its palette-resolved form differs from what the decoder holds — not
+    /// when the *source* differs, which is a weaker thing that is only equivalent off the lossy
+    /// path. `force` is how a keyframe gets all 360 blocks regardless.
+    fn stage_block(&mut self, frame: &Frame, block: u16, force: bool) {
         let mut indices = [0u8; BLOCK_PIXELS];
         let mut changed = false;
-        for (slot, p) in block_pixels(block).enumerate() {
+        for (slot, p) in block_pixels(block as usize).enumerate() {
             let index = self.intern(frame[p]);
             indices[slot] = index;
             // Record what the decoder will hold, which is the frame itself except on the lossy path.
-            let resolved = self.palette[index as usize];
-            changed |= self.last_sent[p] != resolved;
-            self.last_sent[p] = resolved;
+            changed |= self.last_sent[p] != index;
+            self.last_sent[p] = index;
         }
-        if !(changed || force) {
-            return false;
+        if changed || force {
+            self.staged.push((block, indices));
         }
-        out.extend_from_slice(&(block as u16).to_le_bytes());
-        append_payload(&indices, out);
-        true
-    }
-
-    /// The palette indices for a block of `last_sent`, i.e. of what the decoder already holds. Only
-    /// [`Self::keyframe`] needs this, and it is why keyframing costs no palette churn.
-    fn block_indices(&self, block: usize) -> [u8; BLOCK_PIXELS] {
-        let mut indices = [0u8; BLOCK_PIXELS];
-        for (slot, p) in block_pixels(block).enumerate() {
-            indices[slot] = self.index.get(&self.last_sent[p]).copied().unwrap_or(0);
-        }
-        indices
     }
 
     fn intern(&mut self, colour: LcdColor) -> u8 {
@@ -317,64 +384,9 @@ impl VideoEncoder {
             return index;
         }
         // Unreachable for Pokémon Red — a full frame never carries 256 distinct colours, and
-        // `would_overflow` spends a keyframe before it gets close. Approximating beats failing: a
-        // slightly wrong pixel is a better outcome for a livestream than a dropped stream.
+        // `should_reset_palette` spends a keyframe before it gets close. Approximating beats
+        // failing: a slightly wrong pixel is a better outcome for a livestream than a dropped stream.
         nearest(&self.palette, colour)
-    }
-}
-
-/// Whichever of the three modes is smallest for this block.
-///
-/// A flat block is 2 bytes of RLE and nothing beats that; a four-shade detailed block is 20 bytes
-/// packed against ~40 RLE; a block with five or more colours cannot pack at all and falls back to
-/// raw's flat 64. Deciding per block rather than per frame matters because a single frame routinely
-/// contains all three shapes — a scrolling route has flat sky, detailed grass, and the sprite
-/// overlaps that bring in a fifth colour.
-fn append_payload(indices: &[u8; BLOCK_PIXELS], out: &mut Vec<u8>) {
-    let mut rle: Vec<u8> = Vec::with_capacity(16);
-    let mut run_start = 0;
-    for slot in 1..=BLOCK_PIXELS {
-        if slot == BLOCK_PIXELS || indices[slot] != indices[run_start] {
-            rle.push((slot - run_start) as u8);
-            rle.push(indices[run_start]);
-            run_start = slot;
-        }
-    }
-
-    // The sub-palette is built in first-appearance order, so it is deterministic and the decoder
-    // needs no sorting rule. More than four distinct indices and the block simply cannot pack.
-    let mut sub: Vec<u8> = Vec::with_capacity(PACKED_COLOURS);
-    for index in indices {
-        if !sub.contains(index) {
-            if sub.len() == PACKED_COLOURS {
-                sub.clear();
-                break;
-            }
-            sub.push(*index);
-        }
-    }
-    let packed_len = if sub.is_empty() { usize::MAX } else { PACKED_COLOURS + PACKED_BYTES };
-
-    if rle.len() <= packed_len.min(BLOCK_PIXELS) {
-        out.push(MODE_RLE);
-        out.extend_from_slice(&rle);
-    } else if packed_len <= BLOCK_PIXELS {
-        out.push(MODE_PACKED);
-        // Padded to four so the payload is a fixed size the decoder can read without a count. A
-        // repeat of entry 0 is harmless: nothing indexes it.
-        let mut entries = [sub[0]; PACKED_COLOURS];
-        entries[..sub.len()].copy_from_slice(&sub);
-        out.extend_from_slice(&entries);
-        for chunk in indices.chunks(4) {
-            let bits = chunk.iter().enumerate().fold(0u8, |acc, (i, index)| {
-                let slot = sub.iter().position(|s| s == index).expect("built from these indices");
-                acc | ((slot as u8) << (i * 2))
-            });
-            out.push(bits);
-        }
-    } else {
-        out.push(MODE_RAW);
-        out.extend_from_slice(indices);
     }
 }
 
@@ -430,6 +442,10 @@ impl VideoDecoder {
         let flags = reader.u8()?;
         let keyframe = flags & FLAG_KEYFRAME != 0;
         let seq = reader.u16()?;
+        let bits = reader.u8()?;
+        if !matches!(bits, 1 | 2 | 4 | 8) {
+            return Err(format!("{bits} bits per pixel is not 1, 2, 4 or 8"));
+        }
 
         let palette_len = reader.u8()? as usize;
         if keyframe {
@@ -439,53 +455,52 @@ impl VideoDecoder {
             let [r, g, b] = [reader.u8()?, reader.u8()?, reader.u8()?];
             self.palette.push(LcdColor::rgb(r, g, b));
         }
-
-        let block_count = reader.u16()? as usize;
-        if keyframe && block_count != BLOCK_COUNT {
-            return Err(format!("keyframe carries {block_count} blocks, expected {BLOCK_COUNT}"));
+        if self.palette.len() > 1 << bits {
+            return Err(format!(
+                "{} palette entries do not fit in {bits} bits",
+                self.palette.len()
+            ));
         }
-        for _ in 0..block_count {
-            let block = reader.u16()? as usize;
-            if block >= BLOCK_COUNT {
-                return Err(format!("block index {block} out of range"));
+
+        // A keyframe's block list is implicit: every block, in order. That is what makes it
+        // standalone, and it is also 45 bytes and a validation case that cannot go wrong.
+        let blocks: Vec<usize> = if keyframe {
+            (0..BLOCK_COUNT).collect()
+        } else if flags & FLAG_BITMAP != 0 {
+            let mut map = [0u8; BITMAP_BYTES];
+            for byte in map.iter_mut() {
+                *byte = reader.u8()?;
             }
-            let mut indices = [0u8; BLOCK_PIXELS];
-            match reader.u8()? {
-                MODE_RLE => {
-                    let mut slot = 0;
-                    while slot < BLOCK_PIXELS {
-                        let run = reader.u8()? as usize;
-                        let index = reader.u8()?;
-                        if run == 0 || slot + run > BLOCK_PIXELS {
-                            return Err(format!("run of {run} overruns block {block}"));
-                        }
-                        indices[slot..slot + run].fill(index);
-                        slot += run;
-                    }
+            (0..BLOCK_COUNT).filter(|b| map[b / 8] & (1 << (b % 8)) != 0).collect()
+        } else {
+            let count = reader.u16()? as usize;
+            let mut blocks = Vec::with_capacity(count);
+            for _ in 0..count {
+                let block = reader.u16()? as usize;
+                if block >= BLOCK_COUNT {
+                    return Err(format!("block index {block} out of range"));
                 }
-                MODE_RAW => {
-                    for slot in indices.iter_mut() {
-                        *slot = reader.u8()?;
-                    }
-                }
-                MODE_PACKED => {
-                    let mut sub = [0u8; PACKED_COLOURS];
-                    for entry in sub.iter_mut() {
-                        *entry = reader.u8()?;
-                    }
-                    for chunk in indices.chunks_mut(4) {
-                        let bits = reader.u8()?;
-                        for (i, slot) in chunk.iter_mut().enumerate() {
-                            *slot = sub[((bits >> (i * 2)) & 0b11) as usize];
-                        }
-                    }
-                }
-                other => return Err(format!("unknown block mode {other}")),
+                blocks.push(block);
             }
+            blocks
+        };
+
+        let mask = if bits == 8 { 0xFF } else { (1u16 << bits) as u8 - 1 };
+        for block in blocks {
             for (slot, p) in block_pixels(block).enumerate() {
-                let index = indices[slot] as usize;
-                self.pixels[p] = *self.palette.get(index)
-                    .ok_or_else(|| format!("palette index {index} beyond {} entries", self.palette.len()))?;
+                let index = if bits == 8 {
+                    reader.u8()?
+                } else {
+                    let per_byte = 8 / bits as usize;
+                    let byte = reader.peek(slot / per_byte)?;
+                    (byte >> ((slot % per_byte) * bits as usize)) & mask
+                } as usize;
+                self.pixels[p] = *self.palette.get(index).ok_or_else(|| {
+                    format!("palette index {index} beyond {} entries", self.palette.len())
+                })?;
+            }
+            if bits != 8 {
+                reader.at += payload_bytes(bits);
             }
         }
 
@@ -512,7 +527,15 @@ impl Reader<'_> {
     fn u16(&mut self) -> Result<u16, String> {
         Ok(u16::from_le_bytes([self.u8()?, self.u8()?]))
     }
+
+    /// Read without advancing — the packed payload is addressed by pixel, not consumed byte by byte.
+    fn peek(&self, offset: usize) -> Result<u8, String> {
+        self.bytes.get(self.at + offset).copied().ok_or_else(|| "video message ended early".into())
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "bench"))]
+mod bench;

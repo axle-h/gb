@@ -15,7 +15,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use base64::Engine;
 use tokio::sync::broadcast;
 
 use crate::pokemon::observe::StatusView;
@@ -30,23 +29,27 @@ const EVENT_CAPACITY: usize = 1024;
 
 // ── Video ────────────────────────────────────────────────────────────────────────────────────────
 
-/// One video message, base64'd **once** for every subscriber rather than per connection.
+/// One video message, encoded **once** and shared with every subscriber.
+///
+/// ⚠️ **Binary, and not base64.** It used to be base64'd here, once for all subscribers, so the SSE
+/// route could put it on a `data:` line. `src/web/video/bench.rs` measured what that costs: 33%
+/// before compression, as expected — but **69–113% after it**, because base64 shifts a repeating
+/// byte pattern into three different alphabet phases and an LZ77 window can no longer see it as a
+/// repeat. Since the connection is deflated (see `src/web/mod.rs`), base64 was the single most
+/// expensive thing in the video path. The compression is per connection, so there is nothing left to
+/// share here beyond the bytes themselves.
 #[derive(Debug, Clone)]
 pub struct VideoMessage {
     /// Unwrapped, unlike the `u16` on the wire — a late joiner compares these to decide what to
     /// discard and that comparison is wrong across a wrap (~36 minutes at 30 fps).
     pub seq: u64,
     pub keyframe: bool,
-    pub data: Arc<str>,
+    pub bytes: Arc<[u8]>,
 }
 
 impl From<Encoded> for VideoMessage {
     fn from(encoded: Encoded) -> Self {
-        Self {
-            seq: encoded.seq,
-            keyframe: encoded.keyframe,
-            data: base64::engine::general_purpose::STANDARD.encode(&encoded.bytes).into(),
-        }
+        Self { seq: encoded.seq, keyframe: encoded.keyframe, bytes: encoded.bytes.into() }
     }
 }
 
@@ -417,23 +420,19 @@ mod tests {
 
             let keyframe = keyframe.expect("something was published before the join");
             let mut decoder = VideoDecoder::default();
-            decoder.apply(&decode64(&keyframe.data)).unwrap();
+            decoder.apply(&keyframe.bytes).unwrap();
             let mut applied = 0;
             while let Ok(message) = receiver.try_recv() {
                 if message.seq <= keyframe.seq {
                     continue; // already folded into the keyframe
                 }
-                decoder.apply(&decode64(&message.data)).unwrap();
+                decoder.apply(&message.bytes).unwrap();
                 applied += 1;
             }
 
             assert!(applied > 0, "gap {gap}: no deltas followed the keyframe, so nothing was proved");
             assert_eq!(decoder.pixels(), frame(11).as_ref(), "gap {gap}: joiner is not pixel-exact");
         }
-    }
-
-    fn decode64(data: &str) -> Vec<u8> {
-        base64::engine::general_purpose::STANDARD.decode(data).expect("we produced this")
     }
 
     #[test]

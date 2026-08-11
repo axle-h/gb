@@ -148,6 +148,53 @@ match and the suppression would silently never fire), and `/api/events` **opens 
 heartbeat** — `Published::join_events`, subscribe-then-read, the same handshake as the video keyframe
 — or a page opened during a quiet stretch shows an empty panel.
 
+## The video stream
+
+⚠️ **Quote the number for a screen that is *moving*.** W2 measured this honestly — the plan's §5.1
+records 536 kbit/s walking against ~8 idle, and says so — but what reached the README was "about 19
+kbit/s", which is neither. `src/web/video/bench.rs` puts four minutes of ordinary play through the
+old stack at **565**, so the plan's worst case was the typical case. The bench is now the guard, and
+it exists because the honest figure had to be re-derived from scratch to challenge the headline one:
+seeded `RandomPolicy` over four fixtures with different screen behaviour, `--features bench`.
+
+The stack is **v2 block diff → length-prefixed binary → one deflate stream per connection**, 21
+kbit/s, and each layer earned its place against a measured alternative:
+
+- ⚠️ **Compress the connection, not the message.** Per message it is 55 kbit/s; across the
+  connection, 21. A Game Boy screen is repeated 8×8 tiles, so the same payload bytes recur within a
+  frame *and* across frames, and only a window spanning the stream sees it. The cost is that the
+  compressor is **per connection** — it cannot be done once in `Published` for everyone, which is why
+  `VideoMessage` carries plain bytes now.
+- ⚠️ **`VideoStream::frame` flushes after every message and must keep doing so.** Without the flush
+  the encoder holds messages back until its buffer fills — correct for a file, and a livestream that
+  arrives in bursts seconds apart. `the_video_stream_is_one_deflate_stream_of_length_prefixed_messages`
+  inflates incrementally for exactly this reason; inflating at the end would pass either way.
+- ⚠️ **Never base64 something you are going to compress.** It costs the well-known 33% before
+  compression and **69–113% after**, because it shifts a repeating byte pattern into three alphabet
+  phases and LZ77 stops seeing the repeat. That single fact is what took SSE off the table: SSE
+  cannot carry binary.
+- ⚠️ **The deflate is `Content-Type`, not `Content-Encoding`.** A declared encoding invites a proxy
+  to inflate and re-deflate, which buffers whole messages and shows up as stutter only in production.
+  The client inflates with `DecompressionStream('deflate')`.
+- **Not a WebSocket**, though it was the obvious suggestion. Nothing here is bidirectional, and this
+  module being unable to reach the emulator is the property `src/web/mod.rs` is built around. A
+  chunked binary response gets the same bytes with no upgrade handshake and no ping/pong.
+- **ffmpeg was measured, not dismissed.** x264 on the same footage is 45 kbit/s *lossless* and 25 at
+  `-crf 28`, which visibly mangles four-shade pixel art. A macroblock DCT has nothing to offer a
+  screen whose pixels take four values.
+
+⚠️ **`gb serve` runs `GameBoy::dmg`, so the screen is four shades — the format is built on it.** v1
+spent 4 bytes of every 23 on a per-block sub-palette that was always a permutation of `0,1,2,3`, plus
+a mode tag and a block index, to carry a 16-byte payload. v2 has one index width for the whole
+message (`bits_per_pixel`, 1/2/4/8, wide enough for the palette *after* this message's new entries)
+and no per-block anything. The wide widths still work and are tested — a CGB stream would take 8 —
+but nothing on this cartridge reaches them.
+
+Two things left on the table, both measured in `bench_video_redundancy_still_on_the_table` and
+neither built: 12–19% of changed blocks duplicate a block already on screen, and a global scroll
+vector beats a straight diff on half to four fifths of moving frames. Deflate already collects most
+of the first.
+
 ## Starting a new run in place
 
 `POST /api/new-run` restarts the game without restarting the process. ⚠️ **It is the only channel
@@ -232,6 +279,9 @@ cargo test --release --bin gb -- \
 # feature, so benchmarks never pad the ignored-test count.
 cargo test --release --features bench --bin gb -- \
   game_boy::tests::bench_core_throughput --exact --nocapture
+
+# What /api/video costs, and every alternative it was chosen over. ~25 s.
+cargo test --release --features bench --bin gb -- video::bench --nocapture
 ```
 
 **A test that is `#[ignore]`d should be blocked, not merely slow or not-a-test.** Everything else
@@ -241,7 +291,7 @@ goes behind a Cargo feature, so the ignored list stays a readable backlog:
 |---|---|
 | `slow-tests` / `very-slow-tests` / `full-playthrough` | Tiering by emulated game time |
 | `diagnostics` | `probe_*`, `dump_fixture_states`, `capture_golden_input` — tools that print a report rather than assert. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal: two legitimately end by exhausting their cycle budget *after* printing what was asked for |
-| `bench` | `bench_core_throughput`, `bench_emulation_throughput` |
+| `bench` | `bench_core_throughput`, `bench_emulation_throughput`, `web::video::bench` (which also pulls in `flate2`) |
 | `soak-tests` | `integration_tests::soak` — the fuzzer. Gated as a **module**, not with `#[ignore]`, so it never appears in the ignored list |
 | `hwtests` | The mooneye MBC suite and its ROMs. 22 MB raw, committed lz4-compressed (149 KB) and decompressed in memory by the fixture, so a default build carries none of it |
 

@@ -136,7 +136,7 @@ the same process that runs the emulator. Five read-only endpoints and one that i
 | | |
 |---|---|
 | `/api/events` | SSE: status heartbeat, published on change, plus agent events as they happen |
-| `/api/video` | SSE: a keyframe, then 8×8 block deltas — about 19 kbit/s |
+| `/api/video` | binary: a keyframe, then 8×8 block deltas, deflated per connection — about 21 kbit/s |
 | `/api/history?since=` | the transcript backlog, so a page that just loaded is not empty |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's own trainer-card graphics |
 | `/api/healthz` | liveness |
@@ -145,6 +145,16 @@ the same process that runs the emulator. Five read-only endpoints and one that i
 The screen is streamed as block deltas rather than as images because it is a 160×144 screen that
 mostly does not change; the decoder is a TypeScript port of the encoder, in `web/src/video.ts`. No
 graphics are committed to this repo — the badges are read out of the ROM at runtime.
+
+`/api/video` is the one endpoint that is not SSE, and `src/web/video/bench.rs` is why. Measured
+against four minutes of real play, the SSE version cost **565 kbit/s**; the "19" this file used to
+claim was an idle screen, and an idle screen costs nothing at all. Three changes took that to **21**:
+two bits per pixel against the stream's own palette rather than a per-block sub-palette, one deflate
+stream across the whole connection rather than one per message (worth 5×, because a Game Boy screen
+is repeated 8×8 tiles and a shared window sees every repeat), and dropping base64 — which costs 33%
+before compression but 69–113% *after* it.
+For comparison, the same footage through x264 is 45 kbit/s losslessly and 25 at a quality that
+visibly mangles pixel art, so a real video codec was measured and rejected rather than assumed away.
 
 ### Starting a new run without a restart
 
@@ -211,6 +221,7 @@ src/
 ├── web/                 — the axum server (`web` feature); read-only, five endpoints
 │   ├── published.rs     — the only interface between the emulator thread and HTTP
 │   ├── video.rs         — 8×8 block-diff video codec + the reference decoder
+│   │   └── bench.rs     — what the stream costs, and every alternative it was chosen over
 │   ├── assets.rs        — the SPA: `web/dist` embedded, or read from disk under GB_WEB_DEV=1
 │   └── badges.rs        — /api/badges.png: the eight badges, decoded from the cartridge
 ├── llm/                 — the LLM client and turn loop (`llm` feature)
@@ -278,6 +289,7 @@ a mock-server playthrough are all default-tier tests, and behind an opt-in featu
 | Symbol codegen | `build.rs` + `pokered/pokered.sym` | Every RAM/ROM symbol becomes a typed `DmgPointer` constant, so an address that moves upstream is a compile error |
 | pokered | a git submodule | The source of truth for the ROM, the symbol map and the game's data tables |
 | LLM transport | `ureq` + hand-rolled SSE | The wire types and the stream accumulator are pure and testable without HTTP |
+| Video transport | chunked binary + `flate2` | Not a WebSocket: nothing is bidirectional, and a plain response needs no upgrade, no ping/pong and no second reconnection story. The compression is the protocol rather than a `Content-Encoding`, so no proxy can decide to buffer and re-encode it |
 
 ## Tests
 
