@@ -71,11 +71,22 @@ const DEFAULT_SEED: u64 = 1;
 /// meant to predict.
 #[test]
 fn random_play_never_goes_quiet_for_longer_than_the_watchdog_allows() {
-    let limit = Duration::from_secs(crate::llm::config::DEFAULT_STUCK_TIMEOUT_SECS);
+    // `GB_SOAK_LIMIT_SECS` tightens the net below the watchdog's 300 s. The default is the watchdog,
+    // because that is the number that actually matters in production — but a *near* miss is a jam in
+    // embryo, and the only way to get one to drop its artifact is to lower the bar until it trips.
+    // Seed 1's worst healthy stretch is the number to keep an eye on; when it comes down, so can this.
+    // As of 2026-08-11 it is **62 s** over the full five hours, so `GB_SOAK_LIMIT_SECS=120` still
+    // passes and is the useful setting for hunting — it trips on anything twice as quiet as normal
+    // rather than waiting for a five-fold outlier. It found the pacing budget that way: 182 s of
+    // silence in Viridian Forest that turned out to be `PACING_BUDGET_TICKS` running to the end.
+    let limit = Duration::from_secs(
+        std::env::var("GB_SOAK_LIMIT_SECS").ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(crate::llm::config::DEFAULT_STUCK_TIMEOUT_SECS));
     let seed: u64 = std::env::var("GB_SOAK_SEED").ok()
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(DEFAULT_SEED);
-    println!("[soak] seed {seed} — {SOAK_GAME_TIME:?} of game time, watchdog limit {limit:?}");
+    println!("[soak] seed {seed} — {SOAK_GAME_TIME:?} of game time, stall limit {limit:?}");
 
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(crate::pokemon::data::START_OF_GAME).expect("the committed start-of-game fixture loads");
@@ -151,6 +162,6 @@ fn random_play_never_goes_quiet_for_longer_than_the_watchdog_allows() {
     // The *emulated* total, not the constant it was asked for: a summary that prints its own target
     // back cannot tell you the loop exited early, which is exactly the failure it should surface.
     println!("[soak] seed {seed}: {:?} of random play, longest quiet stretch {worst:?} in state \
-              {worst_state:?} (the watchdog fires at {limit:?})", emulated.to_duration());
+              {worst_state:?} (the limit is {limit:?})", emulated.to_duration());
     assert!(worst < limit, "checked in the loop above");
 }
