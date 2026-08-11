@@ -117,6 +117,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 ##############################################################################
 FROM debian:bookworm-slim
 
+# ⚠️ Not decoration: GHCR reads `image.source` to link the published package to this repository,
+# which is what makes the package page show this README — and what makes the package's
+# "inherit access from repository" setting mean anything. Without it the package is an orphan owned
+# by the user, and the CI push still works but nothing connects the two.
+# No `image.licenses` here on purpose — the repo has no top-level LICENSE, and this label would be
+# the first place one got asserted.
+LABEL org.opencontainers.image.source="https://github.com/axle-h/gb" \
+      org.opencontainers.image.description="A Game Boy emulator playing Pokémon Red, driven by an LLM over text"
+
 # `curl` is here for the HEALTHCHECK. The LLM client needs no CA bundle — ureq is built against
 # `webpki-roots`, so its trust store is compiled into the binary — but curl expects one.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \

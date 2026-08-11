@@ -1,0 +1,24 @@
+# A run's entire state is one directory: `$GB_RUN_DIR/<run-id>/` holding meta.json, state.gbst,
+# sram.bin, transcript.jsonl and the model's own memories/ and todo.json (`src/run/mod.rs`). Lose it
+# and the playthrough starts over from the title screen; keep it and `gb serve` resumes the newest
+# run in it on every start, notes and all.
+#
+# `local-path` is k3s's built-in provisioner and pins the volume to the node it was first scheduled
+# on. That is exactly what is wanted here — the run is single-writer and there is one replica — but
+# it does mean the pod cannot move nodes without the data staying behind.
+#
+# The transcript is the only thing that grows without bound (a few MB per playthrough); 1Gi is
+# generous for a run and cheap to raise.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: runs
+  labels:
+    app: gb
+spec:
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

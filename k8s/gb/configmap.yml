@@ -1,0 +1,26 @@
+# The tuning knobs. Everything here is optional — these are the defaults `gb --help` documents and
+# `src/llm/config.rs` explains — but they are the ones worth having somewhere you can edit and
+# `kubectl rollout restart` rather than rebuild.
+#
+# ⚠️ The API key is NOT here. It is in `secret.yml`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gb
+data:
+  # Any OpenAI-compatible endpoint. Leave unset for api.openai.com.
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+  GB_MODEL: "gpt-5"
+
+  # Tokens of history the turn loop will carry before it compacts.
+  GB_CONTEXT_LIMIT: "128000"
+  GB_TEMPERATURE: "1.0"
+  GB_MAX_TOOL_STEPS: "16"
+
+  # W9's watchdog: emulated seconds with the agent asking the policy nothing at all before the model
+  # is asked for a nudge. `0` turns it off. Every firing is a bug report, not routine.
+  GB_STUCK_TIMEOUT_SECS: "300"
+
+  # The status heartbeat is sampled at this rate and published only on change (2 Hz ≈ 5 kbit/s per
+  # viewer; it was 50 at 10 Hz unconditional).
+  GB_STATUS_HZ: "2"

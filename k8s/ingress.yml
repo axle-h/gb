@@ -1,0 +1,35 @@
+# TLS is terminated here by traefik, with the certificate issued by cert-manager from Let's Encrypt.
+# Nothing inside the namespace knows or cares about it.
+#
+# ⚠️ Two of the five endpoints are Server-Sent Events streams that stay open for the life of the page
+# (`/api/events` and `/api/video`). Traefik forwards them unbuffered and with no response timeout by
+# default, so there is nothing to configure — but if this is ever put behind something else, that is
+# the property to check first, and the symptom of getting it wrong is a screen that never updates
+# rather than an error.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    kubernetes.io/ingress.class: traefik
+    # <namespace>-<middleware>@kubernetescrd — so this only resolves if the namespace really is `gb`.
+    traefik.ingress.kubernetes.io/router.middlewares: gb-redirect-http-https@kubernetescrd
+  name: gb
+  labels:
+    app: gb
+spec:
+  rules:
+    - host: "gb.ax-h.com"
+      http:
+        paths:
+          - path: "/"
+            pathType: Prefix
+            backend:
+              service:
+                name: gb
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - gb.ax-h.com
+      secretName: gb-axh-com-tls
