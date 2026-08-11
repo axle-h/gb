@@ -193,16 +193,44 @@ pub struct Jam<'a> {
 
 // ── Random (always-ready) ─────────────────────────────────────────────────────
 
+/// Picks uniformly from whatever the agent offers. `gb serve --policy random` plays the deployment
+/// with it, and `integration_tests::soak` uses it as a **fuzzer** for the agent's state machine.
+///
+/// ⚠️ **It deliberately has no `stuck_timeout`**, so W9's watchdog never runs under it. That is the
+/// point of the soak test: a policy that nudged itself out of a jam would hide the jam.
 #[derive(Default)]
-pub struct RandomPolicy;
+pub struct RandomPolicy {
+    /// `None` — the default, and what `gb serve` uses — draws from the thread RNG, so no two runs
+    /// are alike. `Some` pins the sequence.
+    ///
+    /// ⚠️ **A fuzzer that cannot repeat itself cannot verify its own fix.** Reseeding every run means
+    /// a failure is gone the moment you go looking for it, and a pass proves only that *this* draw
+    /// was clean. `soak` therefore seeds it and prints the seed.
+    rng: Option<StdRng>,
+}
+
+impl RandomPolicy {
+    /// A policy whose choices are fixed by `seed` — the same seed always plays the same game.
+    pub fn seeded(seed: u64) -> Self {
+        Self { rng: Some(StdRng::seed_from_u64(seed)) }
+    }
+}
 
 impl Policy for RandomPolicy {
     fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
-        state.map.actions().into_iter().choose(&mut rand::rng())
+        let actions = state.map.actions();
+        match &mut self.rng {
+            Some(rng) => actions.into_iter().choose(rng),
+            None => actions.into_iter().choose(&mut rand::rng()),
+        }
     }
 
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
-        battle_options(state)?.into_iter().choose(&mut rand::rng())
+        let options = battle_options(state)?;
+        match &mut self.rng {
+            Some(rng) => options.into_iter().choose(rng),
+            None => options.into_iter().choose(&mut rand::rng()),
+        }
     }
 }
 

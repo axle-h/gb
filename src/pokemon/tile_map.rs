@@ -70,6 +70,10 @@ pub struct MetaTileMap {
     /// the ROM by [`crate::pokemon::postgame::aides::hidden_items`]; positions are corrected for the
     /// connection strip here, where the raw tables all are. Empty for most maps.
     pub hidden_items: Vec<(Point8, crate::pokemon::item::ItemId)>,
+    /// Whether standing in this map's tall grass can produce a wild encounter at all —
+    /// `wGrassRate != 0`. See [`CurrentMap::grass_encounter_rate`] for why this is not the same
+    /// question as whether the map *has* grass tiles.
+    pub has_grass_encounters: bool,
 }
 
 /// Strength boulder-switch tiles per map (raw object/script coords, no connection offset), from the
@@ -187,6 +191,7 @@ impl MetaTileMap {
                     _ => None,
                 })
                 .collect(),
+            has_grass_encounters: map.grass_encounter_rate != 0,
             raw_tile_ids: map.metadata.raw_tile_ids.clone(),
             tileset: map.metadata.map_header.tileset,
             tile_pair_collisions: map.metadata.tile_pair_collisions.clone(),
@@ -779,7 +784,14 @@ impl MetaTileMap {
         }
 
         // 4. Walk-in-grass (nearest reachable grass tile).
-        if let Some((_, dest)) = nearest(&|t| *t == MetaTile::Grass) {
+        //
+        // ⚠️ **Only where something can actually come out of it.** Every town and city draws real
+        // tall grass and has `wGrassRate == 0`, so this used to offer an action whose entire purpose
+        // — provoke a wild encounter — was impossible to fulfil. Taking it puts the agent into
+        // `PacingForEncounters`, which leaves on a map change or on failing to walk, and a healthy
+        // pace in empty grass is neither: it wedged the deployed run in Pallet Town for eleven
+        // minutes and would have paced there for ever.
+        if self.has_grass_encounters && let Some((_, dest)) = nearest(&|t| *t == MetaTile::Grass) {
             let route = reconstruct(dest, &full_from);
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
@@ -1163,7 +1175,7 @@ mod boulder_solver_tests {
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
             spinners: HashMap::new(), can_surf: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
-            hidden_items: vec![],
+            hidden_items: vec![], has_grass_encounters: false,
         }, switch)
     }
 

@@ -153,7 +153,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     // configuration is still a clean error before anything is listening.
     let make_policy: Box<dyn FnOnce() -> Box<dyn crate::pokemon::policy::Policy> + Send> = match policy
     {
-        ServePolicy::Random => Box::new(|| Box::new(RandomPolicy)),
+        ServePolicy::Random => Box::new(|| Box::new(RandomPolicy::default())),
         #[cfg(feature = "llm")]
         ServePolicy::Llm => {
             use crate::llm::{client::OpenAiClient, notes::Notes, worker};
