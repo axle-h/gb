@@ -1,4 +1,5 @@
-# Builds the container from a bare checkout and proves the thing it produced actually runs.
+# Builds the container from a bare checkout, proves the thing it produced actually runs, and — on
+# main only — publishes it to ghcr.io/axle-h/gb for `k8s/` to pull.
 #
 # The build is the whole of `Dockerfile` — rgbds from source, `pokered.gbc` checked against
 # upstream's sha1, the SPA, then the crate — so a green run here means the four stages still compose
@@ -26,6 +27,17 @@ concurrency:
 
 permissions:
   contents: read
+  # ⚠️ This is what lets GITHUB_TOKEN push to ghcr.io, and it is per-workflow: the repository's
+  # default token permissions (Settings → Actions → General) can be read-only and this still works,
+  # because the `permissions:` key sets the token's scopes for this workflow rather than inheriting
+  # them. What it cannot do is make the published package *public* — that is a one-off in the
+  # package's own settings, after the first push creates it. See `k8s/README.md`.
+  packages: write
+
+# The registry path is derived, not typed: `github.repository` is `axle-h/gb`, so this is
+# `ghcr.io/axle-h/gb` — the same string `k8s/gb/deployment.yml` pulls.
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   build:
@@ -114,6 +126,45 @@ jobs:
           done
           echo "::error::no video keyframe was ever published — the emulator thread is not running"
           exit 1
+
+      # ── publish ────────────────────────────────────────────────────────────────────────────────
+      #
+      # Everything below runs only after the smoke test above has passed, which is the whole point
+      # of the ordering: what reaches the registry is the exact image that was proven to serve the
+      # SPA, decode the cartridge and emulate. A build-and-push that runs in parallel with its own
+      # tests publishes whatever it made and finds out afterwards.
+      #
+      # ⚠️ Main only. A pull request from a fork gets a read-only GITHUB_TOKEN — `packages: write`
+      # above cannot grant what the fork's token never had — so without this guard every fork PR
+      # would fail on a login it was never going to be allowed to do.
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        # Through the environment rather than interpolated into the command: `${{ }}` inside `run:`
+        # is substituted into the script text before bash sees it, so a secret used that way is one
+        # `set -x` away from the log.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      # `docker tag` + `docker push` of the image already in the runner's docker, rather than a
+      # second `build-push-action` with `push: true`. The second build would be a near-total cache
+      # hit and is the more common pattern, but this pushes bytes that have demonstrably run — there
+      # is no step between the test and the registry that could produce a different image.
+      #
+      # Two tags: `latest`, which `k8s/gb/deployment.yml` pulls with `imagePullPolicy: Always`, and
+      # the commit, which is the only one that can be rolled back to or pinned.
+      - name: Push it
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          docker tag gb:ci "$IMAGE:latest"
+          docker tag gb:ci "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$GITHUB_SHA"
+          echo "### Pushed \`$IMAGE:$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo '```shell' >> "$GITHUB_STEP_SUMMARY"
+          echo "kubectl -n gb set image deploy/gb gb=$IMAGE:$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       # The container's own stdout is where the agent reports what it did, so it is the first thing
       # worth having when any of the above fails.

@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gb
+  labels:
+    app: gb
+spec:
+  # ⚠️ One replica, and it is not a scaling decision — it is the only correct number. A run
+  # directory has exactly one writer: two pods on the same volume would checkpoint over each other's
+  # save state, and two pods on different volumes would be two playthroughs behind one URL.
+  replicas: 1
+  # ⚠️ Recreate, not the default RollingUpdate. A rolling update starts the new pod before the old
+  # one has stopped — with ReadWriteOnce that pod simply never schedules, and if it did it would be
+  # a second writer. Recreate also guarantees the outgoing pod has finished its SIGTERM checkpoint
+  # before the incoming one reads the state it wrote.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gb
+  template:
+    metadata:
+      labels:
+        app: gb
+    spec:
+      # The image creates uid 10001 and owns /runs to it, but a fresh PersistentVolume is mounted
+      # over that. `fsGroup` is what makes the mounted directory writable by the process rather than
+      # by root.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      volumes:
+        - name: runs
+          persistentVolumeClaim:
+            claimName: runs
+      # ⚠️ SIGTERM is what checkpoints the run (W7), and `gb` is PID 1 (the Dockerfile's CMD is exec
+      # form) so it receives it directly. Kubernetes' default grace period is 30 s and the
+      # checkpoint is a save state plus two small files — far quicker — but there is no reason to be
+      # tight about it, and a SIGKILL costs everything since the last periodic checkpoint.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: gb
+          image: ghcr.io/axle-h/gb:latest
+          imagePullPolicy: Always
+          # `gb serve` RESUMES the newest run under $GB_RUN_DIR by default, which is what makes a
+          # pod restart continue the playthrough instead of starting a new one. To deliberately
+          # start the game over, add `--new-run` here for one rollout and take it back out again —
+          # left in place, every restart would wipe the run.
+          #
+          # `--policy llm` is the default. Swap in `--policy random` to exercise the whole stack
+          # without an API key or any spend.
+          # args: ["gb", "serve", "--new-run"]
+          envFrom:
+            - configMapRef:
+                name: gb
+            - secretRef:
+                name: gb
+          volumeMounts:
+            - name: runs
+              mountPath: /runs
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              # The emulator thread runs flat out — it is not event-driven, it emulates every frame
+              # as fast as the schedule allows — so it wants a core to itself and the scheduler
+              # should know that.
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              # ⚠️ Deliberately no CPU limit. A limit throttles the emulator thread against the CFS
+              # quota, which shows up as the game running slower than real time rather than as
+              # anything that looks like a resource problem.
+              memory: 1Gi
+          # Resuming reads a save state and rebuilds the world graph from ROM headers; it is fast,
+          # but the startup probe is what stops liveness counting against that.
+          startupProbe:
+            httpGet:
+              path: /api/healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          # ⚠️ This proves the HTTP server is answering, which is not the same as the agent making
+          # progress — `healthz` is served by axum and knows nothing about the emulator thread. The
+          # thing that catches a wedged *run* is W9's watchdog inside the process
+          # (GB_STUCK_TIMEOUT_SECS), not this probe. Restarting on a stuck run would be wrong
+          # anyway: the state is checkpointed, so the restart would resume into the same jam.
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 3
