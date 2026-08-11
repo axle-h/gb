@@ -149,6 +149,10 @@ function compact(json: string): string {
  * `overworld_action_completed` and `started_overworld_action` differ by a glyph the line itself
  * already carries (→ ✓ ✗ 📖), and spelling both out in full costs a quarter of the width. The exact
  * variant is the `title`, and the whole event is one click away.
+ *
+ * The `text_box` arm (and `.entry.text_box` in the stylesheet) is not reachable while
+ * `useEventStream`'s `UNLOGGED` drops that kind — kept because it is what the log looks like the
+ * moment anyone puts the dialogue back, which is a filter, not a rewrite.
  */
 function category(kind: string): string {
   if (kind.startsWith('battle')) return 'battle';

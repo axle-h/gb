@@ -66,12 +66,15 @@ export function StatusPanel({ status }: { status: Status | null }) {
       </ol>
 
       {/* `agent_state` is the single most useful field when a run looks stuck, so it is on screen
-          rather than in a console somewhere. */}
+          rather than in a console somewhere. It names its destination now — `move→the warp to
+          OaksLab@RedsHouse2F` rather than `move→Warp` — which is longer than this column, and
+          `.detail dd` ellipsises rather than wraps, so the full string is on the `title` (the same
+          reason each party nickname carries one). */}
       <dl className="detail">
         <dt>mode</dt>
         <dd>{game ? (game.in_battle ? `${game.mode} · battle` : game.mode) : '(no game state)'}</dd>
         <dt>agent</dt>
-        <dd>{status?.agent_state ?? '—'}</dd>
+        <dd title={status?.agent_state ?? undefined}>{status?.agent_state ?? '—'}</dd>
         <dt>speed</dt>
         <dd>{status ? describeSpeed(status) : '—'}</dd>
       </dl>

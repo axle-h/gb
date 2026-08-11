@@ -146,13 +146,59 @@ a `{:?}` in there puts `Fight { slot: 1, battle_move: PokemonMove { name: Growl,
 screen for every turn of every battle — which it did, on the deployed run, for months. It is also
 what `llm::prompt::describe_event` sends the *model*. `agent::tests::a_battle_turn_reads_as_a_sentence`
 is the only thing that looks at the prose. Relatedly, `BattleActionStarted` carries the acting
-Pokémon's nickname: nothing downstream can look it up, because the host formats events off the
-emulator thread and the party has moved on by then.
+Pokémon's nickname **and the opponent's species**: nothing downstream can look either up, because
+the host formats events off the emulator thread and the battle has moved on by then. ⚠️ The opponent
+is read at the **decision point**, not at `BattleStarted`: `InitWildBattle` sets `wIsInBattle`
+*before* `LoadEnemyMonData` and a trainer's lead is not loaded until they send it out, so anything
+reading the enemy as the battle starts reports whatever the previous battle left behind.
+
+⚠️ **An event that names no target is the same bug one level down.** Three quarters of a random
+run's log is the agent walking somewhere, and every one of those lines is a `MetaTile`'s `Display` —
+which was `strum`'s derive, so the page said `→ heading for Warp` / `✓ reached Warp` / `→ heading for
+Sprite` and never which warp, which map or who. Each variant now names its target
+(`the warp to OaksLab`, `the way into Route1`, `Mom`), as a **noun phrase**, because the same string
+has to read as English in four frames — the three `AgentEvent` sentences and `NoRoute`'s "there is no
+route to {tile}". ⚠️ **`MetaTile::kind` is the other half and must stay the variant name**:
+`llm::tools::overworld_id` mints `"PalletTown:5,6:Warp"` out of it, the model quotes that back, it is
+re-resolved by string equality, and `Conversation.tsx` prints it verbatim — so the prose is free to
+be reworded only because the key is a different function. `agent::tests::a_walk_says_where_it_is_going`
+and `an_id_keeps_the_variant_name_the_prose_left_behind` are the pair that hold it apart.
 
 ⚠️ **A textbox is detected before its characters are drawn**, so the reader emits a stream of empty
 ones — on the deployed run they were most of the log. `PokemonAgent::event` drops them, which is the
 funnel *every* event goes through (including the ones collected into `update`'s local `new_events`),
 so the transcript is clean as well as the page.
+
+⚠️ **Talking to someone is that action succeeding, and the text box is the only signal it ever
+gets.** The route to a sprite ends by facing it and pressing A, and it is re-derived every tick — so
+once the player is standing in front of the sprite that route is `[A]` for ever and the "the route
+ran out" branch that completes an ordinary walk is never reached. That is why a landed interaction is
+its own event (`AgentEvent::OverworldInteractionCompleted`) rather than an
+`OverworldActionCompleted`, and why it was reported as `OverworldActionAborted { reason: Textbox }`
+for so long: "✗ gave up on Mom — something was said", after a conversation that went perfectly. Not
+just a word on a page — an abort reason is what `llm::prompt` calls the most useful thing the agent
+can say, so every successful conversation was reported to the model as a failed one.
+
+Two traps in the detection, one paid for in each direction:
+
+- ⚠️ **It is what the player is *facing*, not what it set out for.** A script can open a box
+  mid-walk — the rival's, two tiles short of the aide in Oak's lab — and "my destination was a
+  sprite" calls that a conversation the run never had.
+  `mechanics::a_script_that_interrupts_a_walk_is_still_an_abort` is that case, on the fixture the
+  first version of the test was written against.
+- ⚠️ **A PC is not in `meta_tiles`**, so the tile in front of a player using one reads as
+  `Obstacle` and matching on the tile answers no — silently, and for PCs only. It is a hidden event,
+  indistinguishable from the wall it is drawn on, which is the whole reason `pc_locations_for` is a
+  transcribed table; the coordinate is the only thing that identifies one.
+
+⚠️ **What the page shows and what the model is told are two different lists, and the split is on the
+client.** `useEventStream`'s `fold` drops `text_box` and `overworld_interaction_completed` — the
+screen's dialogue is already on screen in the game's own font, and "✓ talked to Mom" says less than
+the line of Mom's that follows it. Both still go to the model (`describe_event` renders every
+`TextBox` into `### Since your last decision`) and both are still written to `transcript.jsonl`.
+⚠️ **Do not "simplify" this by filtering at the publish instead**: `run::transcript` writes what is
+published, so that deletes the dialogue from the run's archived record and from `/api/history`, which
+is the one copy nothing can rebuild.
 
 ⚠️ **The status heartbeat is sent on change, not on a timer.** Sampled at `GB_STATUS_HZ` and
 published only when it says something the last one did not, with a 2 s keepalive so an idle run still

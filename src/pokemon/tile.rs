@@ -1,7 +1,8 @@
+use std::fmt::Display;
 use crate::geometry::Point8;
 use crate::pokemon::map::Map;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, strum_macros::Display, Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, strum_macros::IntoStaticStr, Default)]
 pub enum MetaTile {
     #[default]
     Empty,
@@ -32,6 +33,56 @@ pub enum MetaTile {
     Grass,
 }
 
+impl MetaTile {
+    /// The variant's own name — `"Warp"`, `"Connection"`, `"Sprite"` — and the **stable** half of
+    /// the pair this type formats itself as.
+    ///
+    /// ⚠️ **This is what an action id is minted from**, not [`Display`]: `llm::tools::overworld_id`
+    /// builds `"PalletTown:5,6:Warp"`, the model quotes it back, and it is re-resolved against a
+    /// freshly recomputed action list by string equality. `Display` is prose written for a person
+    /// and is free to change wording; an id is a key and is not, so the two must not be the same
+    /// function. (`Conversation.tsx` shows those ids verbatim, which is the other reason.)
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+}
+
+impl Display for MetaTile {
+    /// **Prose, and a UI contract** — this is what the status log says the agent is walking to, via
+    /// `AgentEvent::{StartedOverworldAction, OverworldActionCompleted, OverworldActionAborted}`, and
+    /// what `observe::map_view` calls each action for the model.
+    ///
+    /// ⚠️ **A destination that does not name its target is not worth reporting.** This used to be
+    /// `strum`'s derive, so a random run's whole log was `→ heading for Warp` / `✓ reached Warp` /
+    /// `→ heading for Sprite` — the three most common lines on the page, and none of them said which
+    /// warp, which map or which person. Every variant that has a target names it here. A warp and a
+    /// connection are named by the map they come out on rather than by the landing coordinates that
+    /// go with it: the tile a viewer cares about is the one the run ends up standing on, and the
+    /// exact square is the agent's business (`OverworldAction`'s own `Display`, which is the menu
+    /// the model chooses from, still carries it).
+    ///
+    /// Each renders as a noun phrase, because the three sentences above and
+    /// `OverworldActionAbortedReason::NoRoute`'s "there is no route to {tile}" all have to read as
+    /// English with it substituted in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "an open tile"),
+            Self::Obstacle => write!(f, "an obstacle"),
+            Self::Water => write!(f, "water"),
+            Self::Jump(direction) => write!(f, "a ledge going {}", direction.compass()),
+            // Already a person's name ("Mom", "Gym Guide"), so it stands alone: "→ heading for Mom".
+            Self::Sprite(name) => write!(f, "{name}"),
+            Self::Warp { to_map, .. } => write!(f, "the warp to {to_map}"),
+            Self::Connection { to_map, .. } => write!(f, "the way into {to_map}"),
+            Self::ConnectionWater(to_map) => write!(f, "the water crossing into {to_map}"),
+            Self::Counter => write!(f, "a counter"),
+            Self::CutTree => write!(f, "a cuttable tree"),
+            Self::Pc => write!(f, "the PC"),
+            Self::Grass => write!(f, "tall grass"),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct WarpEvent {
     pub position: Point8,
@@ -54,4 +105,16 @@ pub enum JumpDirection {
     South,
     West,
     East,
+}
+
+impl JumpDirection {
+    /// Lower-cased, for the middle of a sentence — `Display` is the capitalised variant name and
+    /// reads as a shout inside "a ledge going south".
+    pub fn compass(&self) -> &'static str {
+        match self {
+            Self::South => "south",
+            Self::West => "west",
+            Self::East => "east",
+        }
+    }
 }

@@ -41,6 +41,92 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
     assert!(battle_in_grass, "agent should have successfully navigated into the grass and triggered a battle (if we got here, the ledge jump did not cause a Script abort)")
 }
 
+/// ⚠️ **A text box in answer to an A press is the interaction landing, not a failure.**
+///
+/// The route to a sprite ends by facing it and pressing A, and it is re-derived every tick — so once
+/// the player is standing in front of the sprite that route is `[A]` for ever, and the "the route ran
+/// out" branch that completes an ordinary walk is never reached. The *only* signal that talking to
+/// someone worked is the box that opens, which the agent read as an interruption and reported as
+/// `OverworldActionAborted { reason: Textbox }`: "✗ gave up on Scientist 1 — something was said",
+/// after a conversation that went perfectly. It reached the model too, in the field the prompt calls
+/// the most useful thing the agent can say.
+///
+/// Both interactions are here rather than in two tests because the second one is the trap: ⚠️ **a PC
+/// tile is not in `meta_tiles`** — it is a hidden event, indistinguishable from the wall it is drawn
+/// on — so the tile in front of a player using one reads as `Obstacle`, and the obvious "is the
+/// thing in front of me the thing I walked to?" test answers no. For PCs only, and silently.
+#[test]
+fn talking_to_a_sprite_is_a_success_not_an_abort() {
+    let mut fixture = TestFixture::new(
+        PALLET_TOWN_STATE,
+        Duration::from_secs(400),
+        vec![
+            PolicyStep::goto(Map::RedsHouse1F),
+            PolicyStep::Interact(MapSprite::REDSHOUSE1F_MOM),
+            PolicyStep::goto(Map::RedsHouse2F),
+            PolicyStep::UsePc { map: Map::RedsHouse2F },
+        ],
+    );
+
+    // ⚠️ Not `step_until_exhausted`: `Interact` pops when it has *issued* the walk, which can be
+    // before the conversation it asked for has started — the same gap `run_leg` warns about. So this
+    // runs until both outcomes have been emitted, with the fixture's cycle budget as the failsafe.
+    let mut landed: Vec<AgentEvent> = Vec::new();
+    let mut interrupted: Vec<AgentEvent> = Vec::new();
+    while landed.len() < 2 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            match event {
+                AgentEvent::OverworldInteractionCompleted { .. } => landed.push(event),
+                AgentEvent::OverworldActionAborted {
+                    destination: MetaTile::Sprite(_) | MetaTile::Pc,
+                    reason: OverworldActionAbortedReason::Textbox,
+                } => interrupted.push(event),
+                _ => {}
+            }
+        }
+    }
+
+    assert!(interrupted.is_empty(), "an answered A press is not an interruption; saw {interrupted:?}");
+    assert_eq!(
+        landed.iter().map(|event| format!("{event}")).collect::<Vec<_>>(),
+        ["✓ talked to Mom", "✓ used the PC"],
+    );
+}
+
+/// The other half, and the reason the check above is on what the player is **facing** rather than on
+/// "the destination was a sprite".
+///
+/// ⚠️ **A text box can open in the middle of a walk without being an answer to anything.** Here the
+/// rival's script fires two tiles short of the aide, at a spot where the tile in front is `Empty` —
+/// so this walk really did give up, and reporting it as a conversation would tell the model it had
+/// talked to someone it never reached. Found by writing the test above against this fixture first.
+#[test]
+fn a_script_that_interrupts_a_walk_is_still_an_abort() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/oaks-lab-just-got-squirtle.bin"),
+        Duration::from_secs(120),
+        vec![PolicyStep::Interact(MapSprite::OAKSLAB_SCIENTIST1)],
+    );
+
+    let outcome = 'walk: loop {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            match event {
+                AgentEvent::OverworldInteractionCompleted { .. }
+                | AgentEvent::OverworldActionAborted { .. } => break 'walk event,
+                _ => {}
+            }
+        }
+    };
+
+    assert_eq!(
+        format!("{outcome}"),
+        "✗ gave up on Scientist 1 — something was said",
+        "the aide was never reached, so this is the abort it always was; got {outcome:?}",
+    );
+}
+
 #[test]
 fn test_debouncing() {
     pub const STATE: &[u8] = include_bytes!("../data/oaks-lab-just-got-squirtle.bin");

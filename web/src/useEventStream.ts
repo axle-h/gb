@@ -89,6 +89,21 @@ function push(entries: Entry[], body: EntryBody, event: UiEvent): Entry[] {
 }
 
 /**
+ * Agent events that are said but not shown.
+ *
+ * ⚠️ **Dropped here rather than at the server**, and the distinction is the whole point: these still
+ * go to the model — dialogue is most of what `### Since your last decision` is made of — and they
+ * are still written to `transcript.jsonl`, so `/api/history` and the run's archived record keep
+ * every line. Only the page is quiet. Filtering them out of the publish instead would have deleted
+ * them from the record too.
+ *
+ * `text_box` is the screen's own dialogue, which the picture above the log is already showing, one
+ * character at a time, in the game's own font. `overworld_interaction_completed` is the "✓ talked to
+ * Mom" that the dialogue immediately after it says better.
+ */
+const UNLOGGED = new Set(['text_box', 'overworld_interaction_completed']);
+
+/**
  * Fold one event into the log.
  *
  * The only interesting case is `assistant_delta`: the worker publishes one event per fragment the
@@ -131,6 +146,7 @@ function fold(entries: Entry[], event: UiEvent): Entry[] {
         event,
       );
     case 'agent':
+      if (UNLOGGED.has(event.kind)) return entries;
       return push(entries, { type: 'agent', kind: event.kind, text: event.text }, event);
     case 'notice':
       return push(entries, { type: 'notice', level: event.level, message: event.message }, event);

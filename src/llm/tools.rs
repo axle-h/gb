@@ -989,9 +989,13 @@ pub struct MenuItem {
 
 /// The id of one overworld action: stable across a re-sort, unique within a map, and readable
 /// enough that a model quoting it back is obviously quoting the right thing.
+///
+/// ⚠️ **`MetaTile::kind`, never its `Display`.** The `Display` is prose written for the status log
+/// ("the warp to OaksLab") and is free to be reworded; an id is a key that a model quotes back and
+/// that is re-resolved by string equality, so it takes the variant name, which is not.
 pub fn overworld_id(state: &GameState, action: &OverworldAction) -> String {
     let destination = action.destination;
-    format!("{}:{},{}:{}", state.map.map, destination.x, destination.y, action.tile)
+    format!("{}:{},{}:{}", state.map.map, destination.x, destination.y, action.tile.kind())
 }
 
 /// Everything reachable from where the player is standing. Sorted, so two reads of an unchanged map
@@ -999,7 +1003,7 @@ pub fn overworld_id(state: &GameState, action: &OverworldAction) -> String {
 /// to a model as the world having moved.
 pub fn overworld_menu(state: &GameState) -> Vec<MenuItem> {
     let mut actions = state.map.actions();
-    actions.sort_by_key(|action| (action.destination.y, action.destination.x, format!("{}", action.tile)));
+    actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.kind()));
     actions
         .iter()
         .map(|action| MenuItem {

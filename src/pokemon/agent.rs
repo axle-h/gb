@@ -91,13 +91,27 @@ pub enum AgentEvent {
     StartedOverworldAction { destination: MetaTile },
     OverworldActionAborted { destination: MetaTile, reason: OverworldActionAbortedReason },
     OverworldActionCompleted { destination: MetaTile },
+    /// The agent walked to something interactable — a person, a PC — pressed A, and the game
+    /// answered.
+    ///
+    /// ⚠️ **A text box is the *only* success signal an interaction has**, which is why this is its
+    /// own event rather than an `OverworldActionCompleted`. The route to a sprite ends in an A
+    /// press, and it is re-derived every tick, so once the player is facing the sprite the route is
+    /// `[A]` for ever and the "route ran out" branch that completes a walk is never reached. A text
+    /// box opening *is* the arrival. It used to be reported as
+    /// `OverworldActionAborted { reason: Textbox }` — "✗ gave up on Mom — something was said" —
+    /// which read as a failure on the page and, worse, told the model its own successful
+    /// conversation had failed, in the one field the prompt calls the most useful thing the agent
+    /// can say.
+    OverworldInteractionCompleted { target: MetaTile },
     BattleStarted,
-    /// ⚠️ **`actor` is carried rather than looked up later** because nothing downstream can look it
-    /// up: the host formats events off the emulator thread and the party has moved on by then. It
-    /// is the acting party member's nickname, which is what turns
+    /// ⚠️ **`actor` and `opponent` are carried rather than looked up later** because nothing
+    /// downstream can look them up: the host formats events off the emulator thread and the battle
+    /// has moved on by then. `actor` is the acting party member's nickname, which is what turns
     /// `Fight { slot: 1, battle_move: PokemonMove { name: Growl, pp: 40 } }` into `BULBASAUR used
-    /// Growl`.
-    BattleActionStarted { actor: String, action: BattleAction },
+    /// Growl`; `opponent` is what it was aimed at, which is the only thing in the whole battle log
+    /// that says what the run is fighting.
+    BattleActionStarted { actor: String, opponent: String, action: BattleAction },
     BattleEnded,
     TextBox { message: String },
     /// **W9 / §14** — the agent went `stuck_for` of emulated time without reaching a decision point
@@ -143,18 +157,31 @@ impl Display for AgentEvent {
                 write!(f, "✗ gave up on {destination} — {reason}"),
             AgentEvent::OverworldActionCompleted { destination } =>
                 write!(f, "✓ reached {destination}"),
+            // Not rendered by the page — `useEventStream`'s `fold` drops the kind, because the
+            // dialogue that follows says everything this line does. It is still said to the model
+            // and still written to the transcript, which is the whole reason it is an event.
+            AgentEvent::OverworldInteractionCompleted { target } => match target {
+                MetaTile::Sprite(name) => write!(f, "✓ talked to {name}"),
+                other => write!(f, "✓ used {other}"),
+            },
             AgentEvent::BattleStarted =>
                 write!(f, "battle started"),
-            AgentEvent::BattleActionStarted { actor, action } => match action {
+            AgentEvent::BattleActionStarted { actor, opponent, action } => match action {
                 // The tense is deliberate: this is the action being *started*, not its outcome, so
                 // "used" is as far as it goes — whether the move hit is the next line's business.
-                BattleAction::Fight { battle_move, .. } => write!(f, "{actor} used {}", battle_move.name),
+                BattleAction::Fight { battle_move, .. } => write!(f, "{actor} used {} on {opponent}", battle_move.name),
+                // ⚠️ **A ball is thrown at the *enemy*.** Everything in the bag used to read as
+                // "used X on {actor}", so every Poké Ball in the log claimed to have been used on
+                // the party member throwing it. The split is by what the item does, not by where it
+                // sits in the bag.
+                BattleAction::UseItem { item, .. } if thrown_at_the_enemy(item.id) =>
+                    write!(f, "threw a {} at {opponent}", item.id),
                 BattleAction::UseItem { item, .. } => write!(f, "used {} on {actor}", item.id),
-                BattleAction::SwitchPokemon { pokemon, .. } => write!(f, "sent out {}", pokemon.species),
-                BattleAction::Run => write!(f, "{actor} tried to run"),
-                BattleAction::SafariBall => write!(f, "threw a Safari Ball"),
-                BattleAction::SafariBait => write!(f, "threw bait"),
-                BattleAction::SafariRock => write!(f, "threw a rock"),
+                BattleAction::SwitchPokemon { pokemon, .. } => write!(f, "sent out {} against {opponent}", pokemon.species),
+                BattleAction::Run => write!(f, "{actor} tried to run from {opponent}"),
+                BattleAction::SafariBall => write!(f, "threw a Safari Ball at {opponent}"),
+                BattleAction::SafariBait => write!(f, "threw bait to {opponent}"),
+                BattleAction::SafariRock => write!(f, "threw a rock at {opponent}"),
             },
             AgentEvent::BattleEnded =>
                 write!(f, "battle ended"),
@@ -179,6 +206,31 @@ fn active_pokemon_name(state: &GameState) -> String {
         .get(battle.active_party_slot as usize)
         .map(|mon| mon.nickname.to_default_string())
         .unwrap_or_else(|| format!("{}", battle.player.species))
+}
+
+/// What the other side is called, for [`AgentEvent::BattleActionStarted`].
+///
+/// The species rather than a nickname, because an enemy has none the player can see. Read at the
+/// **decision point**, which is the only moment it is trustworthy: `InitWildBattle` sets
+/// `wIsInBattle` *before* `LoadEnemyMonData` (`engine/battle/core.asm:6695`) and a trainer's first
+/// Pokémon is not loaded until they send it out, so anything reading the enemy at the moment the
+/// battle *starts* would report whatever the last battle left behind. By the time the battle menu is
+/// up and the policy is being asked, it is loaded.
+fn opponent_pokemon_name(state: &GameState) -> String {
+    match state.battle.as_ref() {
+        Some(battle) => format!("{}", battle.enemy.species),
+        // Not reachable from the one caller — the battle menu is up — but a name is going into a
+        // sentence, and "used Growl on " is worse than a vague noun.
+        None => "the foe".to_string(),
+    }
+}
+
+/// Whether using this item in battle aims it at the *enemy* rather than at the party member whose
+/// turn it is. Balls are the whole of it: everything else the agent can use in a battle — potions,
+/// the X items, the Poké Doll — acts on the player's own side.
+fn thrown_at_the_enemy(item: crate::pokemon::item::ItemId) -> bool {
+    use crate::pokemon::item::ItemId;
+    matches!(item, ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall | ItemId::SafariBall)
 }
 
 /// Ticks of B-mashing [`BattleState::WaitingForMenu`] does after the game refuses a move. See the
@@ -1061,7 +1113,36 @@ impl PokemonAgent {
         Ok(())
     }
 
-    fn assert_text_box_state(&mut self, game_mode: GameMode) {
+    /// Whether the text box that has just opened is the **answer** to the interaction the agent
+    /// walked over to perform, rather than something that interrupted the walk.
+    ///
+    /// ⚠️ **The destination kind alone is not enough.** A script can open a box mid-walk — Oak
+    /// stopping the player at the edge of Route 1 is the famous one — and "I was on my way to a
+    /// sprite" would call that a successful conversation. So the test is what the player is
+    /// *facing*: the route to a sprite or a PC ends by turning to it and pressing A, so if the tile
+    /// in front is the very thing that was routed to, this box is what the A press produced.
+    ///
+    /// Unreadable state answers `false`: the abort is the safe report, since it only costs the
+    /// policy another decision.
+    fn interaction_landed(&self, destination: MetaTile, api: &PokemonApi) -> bool {
+        if !matches!(destination, MetaTile::Sprite(_) | MetaTile::Pc) {
+            return false;
+        }
+        let Ok(state) = self.observe_state(api) else { return false };
+        let Some((at, tile)) = state.map.tile_in_front() else { return false };
+        match destination {
+            MetaTile::Sprite(_) => tile == destination,
+            // ⚠️ **A PC is not in `meta_tiles` and the tile in front reads as `Obstacle`.** It is a
+            // hidden event, so nothing distinguishes it from the wall it is drawn on — which is the
+            // whole reason `pc_locations` is a table at all (see `MetaTile::Pc`). Matching on the
+            // tile would therefore never fire, silently, and only for PCs: the coordinate is the
+            // only thing that identifies one.
+            MetaTile::Pc => crate::pokemon::tile_map::pc_locations_for(state.map.map).contains(&at),
+            _ => false,
+        }
+    }
+
+    fn assert_text_box_state(&mut self, game_mode: GameMode, api: &PokemonApi) {
         // wFontLoaded=1 while the naming screen is active too; NamingPokemon{decided:true}
         // handles its own exit, so don't interfere.
         if matches!(self.state, AgentState::NamingPokemon { decided: true, .. }) {
@@ -1071,7 +1152,15 @@ impl PokemonAgent {
             if !matches!(self.state, AgentState::ReadingTextBox { .. }) {
                 // text box opened
                 if let AgentState::OverworldMovement { destination, .. } = self.state {
-                    self.abort_overworld(destination, OverworldActionAbortedReason::Textbox);
+                    // Talking to someone *is* this action succeeding — see
+                    // `AgentEvent::OverworldInteractionCompleted`. Either way the state is left
+                    // behind: the `set_state(ReadingTextBox)` below is what clears it, exactly as
+                    // `abort_overworld`'s own `set_state(Idle)` used to be overwritten by it.
+                    if self.interaction_landed(destination, api) {
+                        self.event(AgentEvent::OverworldInteractionCompleted { target: destination });
+                    } else {
+                        self.abort_overworld(destination, OverworldActionAbortedReason::Textbox);
+                    }
                 }
                 let reader = if matches!(self.state, AgentState::Battle(_)) {
                     PokemonTextReader::message_box_only()
@@ -1197,7 +1286,7 @@ impl PokemonAgent {
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
         if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_) | AgentState::RedeemingPrize(_) | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::UsingBagItem(_) | AgentState::PushingBoulder { .. }) {
-            self.assert_text_box_state(game_mode);
+            self.assert_text_box_state(game_mode, api);
         }
 
         let mut new_events: Vec<AgentEvent> = vec!();
@@ -1749,6 +1838,7 @@ impl PokemonAgent {
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
                                 new_events.push(AgentEvent::BattleActionStarted {
                                     actor: active_pokemon_name(&game_state),
+                                    opponent: opponent_pokemon_name(&game_state),
                                     action,
                                 });
                                 // In-battle item use goes through the dedicated `HealingActive` driver:
@@ -3042,19 +3132,44 @@ mod tests {
     /// would notice it turning back into a debug dump.
     #[test]
     fn a_battle_turn_reads_as_a_sentence() {
-        let say = |action| format!("{}", AgentEvent::BattleActionStarted { actor: "BULBASAUR".into(), action });
+        let say = |action| format!("{}", AgentEvent::BattleActionStarted {
+            actor: "BULBASAUR".into(),
+            opponent: "Pidgey".into(),
+            action,
+        });
 
         assert_eq!(
             say(BattleAction::Fight { slot: 1, battle_move: PokemonMove::with_max_pp(PokemonMoveName::VineWhip) }),
-            "BULBASAUR used Vine Whip",
+            "BULBASAUR used Vine Whip on Pidgey",
             "the move's own Display already spaces and capitalises it",
         );
         assert_eq!(
             say(BattleAction::UseItem { slot: 0, item: BagItem::new(ItemId::Potion, 1) }),
             "used Potion on BULBASAUR",
         );
-        assert_eq!(say(BattleAction::Run), "BULBASAUR tried to run", "…tried: this is the action starting, not landing");
-        assert_eq!(say(BattleAction::SafariBall), "threw a Safari Ball");
+        assert_eq!(
+            say(BattleAction::Run),
+            "BULBASAUR tried to run from Pidgey",
+            "…tried: this is the action starting, not landing",
+        );
+        assert_eq!(say(BattleAction::SafariBall), "threw a Safari Ball at Pidgey");
+    }
+
+    /// ⚠️ **A ball is thrown at the enemy, and every other bag item is used on your own Pokémon.**
+    /// One arm covered both, so the log said a Poké Ball had been used *on the Pokémon throwing it*
+    /// — which is not a wording problem but a wrong statement of what happened.
+    #[test]
+    fn a_ball_is_thrown_at_the_enemy_and_a_potion_is_not() {
+        let say = |item| format!("{}", AgentEvent::BattleActionStarted {
+            actor: "BULBASAUR".into(),
+            opponent: "Pidgey".into(),
+            action: BattleAction::UseItem { slot: 0, item: BagItem::new(item, 1) },
+        });
+
+        assert_eq!(say(ItemId::PokeBall), "threw a PokeBall at Pidgey");
+        assert_eq!(say(ItemId::MasterBall), "threw a MasterBall at Pidgey");
+        assert_eq!(say(ItemId::SuperPotion), "used SuperPotion on BULBASAUR");
+        assert_eq!(say(ItemId::XAttack), "used XAttack on BULBASAUR", "an X item acts on your own side");
     }
 
     /// The abort reason is the most useful thing the agent says — it is what stops the model
@@ -3066,11 +3181,68 @@ mod tests {
             destination: MetaTile::Pc,
             reason: OverworldActionAbortedReason::Battle,
         };
-        assert_eq!(format!("{event}"), "✗ gave up on Pc — a battle started");
+        assert_eq!(format!("{event}"), "✗ gave up on the PC — a battle started");
         assert_eq!(
             format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass }),
-            "→ heading for Grass",
+            "→ heading for tall grass",
         );
+    }
+
+    /// ⚠️ **A walk that does not say where it is going is the commonest line in the log and the
+    /// least useful.** A random run's transcript was 23 × `→ heading for Warp`, 22 × `✓ reached
+    /// Warp` and 14 × `→ heading for Sprite` — a third of everything the page showed, and not one of
+    /// them said which warp, which map, or who was being talked to. The destination is a
+    /// [`MetaTile`], so naming the target is that type's `Display` and this is what watches it.
+    #[test]
+    fn a_walk_says_where_it_is_going() {
+        let started = |destination| format!("{}", AgentEvent::StartedOverworldAction { destination });
+        let reached = |destination| format!("{}", AgentEvent::OverworldActionCompleted { destination });
+
+        let warp = MetaTile::Warp { to_map: Map::OaksLab, to_position: Point8 { x: 5, y: 11 } };
+        assert_eq!(started(warp), "→ heading for the warp to OaksLab");
+        assert_eq!(reached(warp), "✓ reached the warp to OaksLab");
+
+        let connection = MetaTile::Connection { to_map: Map::Route1, to_position: Point8 { x: 9, y: 0 } };
+        assert_eq!(started(connection), "→ heading for the way into Route1");
+        assert_eq!(started(MetaTile::ConnectionWater(Map::Route20)), "→ heading for the water crossing into Route20");
+
+        assert_eq!(started(MetaTile::Sprite("Mom")), "→ heading for Mom");
+        assert_eq!(
+            format!("{}", OverworldActionAbortedReason::NoRoute(MetaTile::Sprite("Gym Guide"))),
+            "there is no route to Gym Guide",
+            "the same Display has to read as English inside the abort reason too",
+        );
+    }
+
+    /// ⚠️ **Talking to someone is that action *succeeding*.** It was reported as
+    /// `OverworldActionAborted { reason: Textbox }` — "✗ gave up on Mom — something was said" — for
+    /// the whole of the run's history, which is not just a word: an abort reason is what the prompt
+    /// calls the most useful thing the agent can tell the model, so every successful conversation
+    /// was reported to it as a failed one.
+    #[test]
+    fn an_interaction_that_landed_reads_as_one() {
+        assert_eq!(
+            format!("{}", AgentEvent::OverworldInteractionCompleted { target: MetaTile::Sprite("Mom") }),
+            "✓ talked to Mom",
+        );
+        assert_eq!(
+            format!("{}", AgentEvent::OverworldInteractionCompleted { target: MetaTile::Pc }),
+            "✓ used the PC",
+            "the same event covers a PC, which is not someone you talk to",
+        );
+    }
+
+    /// ⚠️ **The id a model quotes back is not the prose a viewer reads.** Both come off a
+    /// `MetaTile`, and the moment `Display` started naming targets the ids would have become
+    /// `PalletTown:5,11:the warp to OaksLab` — still self-consistent, so nothing would have failed,
+    /// but every id in the transcript, in `Conversation.tsx` and in the model's own history would
+    /// have changed shape.
+    #[test]
+    fn an_id_keeps_the_variant_name_the_prose_left_behind() {
+        assert_eq!(MetaTile::Warp { to_map: Map::OaksLab, to_position: Point8 { x: 5, y: 11 } }.kind(), "Warp");
+        assert_eq!(MetaTile::Sprite("Mom").kind(), "Sprite");
+        assert_eq!(MetaTile::ConnectionWater(Map::Route20).kind(), "ConnectionWater");
+        assert_eq!(MetaTile::Pc.kind(), "Pc");
     }
 
     /// ⚠️ **A textbox is detected before its characters are drawn**, so the reader produces a stream
@@ -3094,8 +3266,9 @@ mod tests {
             AgentEvent::StartedOverworldAction { destination: MetaTile::Pc },
             AgentEvent::OverworldActionAborted { destination: MetaTile::Pc, reason: OverworldActionAbortedReason::Unknown },
             AgentEvent::OverworldActionCompleted { destination: MetaTile::Pc },
+            AgentEvent::OverworldInteractionCompleted { target: MetaTile::Pc },
             AgentEvent::BattleStarted,
-            AgentEvent::BattleActionStarted { actor: "X".into(), action: BattleAction::SafariRock },
+            AgentEvent::BattleActionStarted { actor: "X".into(), opponent: "Y".into(), action: BattleAction::SafariRock },
             AgentEvent::BattleEnded,
             AgentEvent::TextBox { message: "hello".into() },
             AgentEvent::WatchdogFired { agent_state: "wait".into(), stuck_for: Duration::from_secs(300) },
