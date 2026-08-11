@@ -1,11 +1,15 @@
 # TLS is terminated here by traefik, with the certificate issued by cert-manager from Let's Encrypt.
 # Nothing inside the namespace knows or cares about it.
 #
-# ⚠️ Two of the five endpoints are Server-Sent Events streams that stay open for the life of the page
-# (`/api/events` and `/api/video`). Traefik forwards them unbuffered and with no response timeout by
-# default, so there is nothing to configure — but if this is ever put behind something else, that is
-# the property to check first, and the symptom of getting it wrong is a screen that never updates
-# rather than an error.
+# ⚠️ Two of the five endpoints stay open for the life of the page: `/api/events` (Server-Sent Events)
+# and `/api/video` (a chunked binary stream). Traefik forwards both unbuffered and with no response
+# timeout by default, so there is nothing to configure — but if this is ever put behind something
+# else, that is the property to check first, and the symptom of getting it wrong is a screen that
+# never updates rather than an error.
+#
+# ⚠️ `/api/video` carries its own deflate stream as `application/octet-stream` rather than declaring
+# `Content-Encoding`, precisely so no proxy in this path decides to inflate and re-deflate it —
+# which would buffer whole messages and turn the livestream into a slideshow.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

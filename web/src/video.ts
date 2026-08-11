@@ -1,7 +1,6 @@
-// The client half of the block-diff codec in `src/web/video.rs` (§5.1 of
-// docs/llm-web-playthrough-plan.md). This is a port of W2's hand-written decoder in
-// `web/dev/video.html`, which is the only version that has been checked against a real stream — the
-// wire format is small enough to rewrite and subtle enough that rewriting it would be a mistake.
+// The client half of the block-diff codec in `src/web/video.rs`. That module's docs are the wire
+// format's specification; this is a direct port of its `VideoDecoder`, which is the reference
+// implementation and the thing the Rust tests hold to.
 //
 // Deliberately DOM-free: it owns a plain RGBA buffer rather than an `ImageData`, so the whole
 // decoder can be exercised under node against a live server without a browser. `<Screen>` wraps the
@@ -12,13 +11,13 @@ export const HEIGHT = 144;
 
 const BLOCK = 8;
 const BLOCKS_X = WIDTH / BLOCK;
+const BLOCK_COUNT = (WIDTH / BLOCK) * (HEIGHT / BLOCK);
 const BLOCK_PIXELS = BLOCK * BLOCK;
+const BITMAP_BYTES = Math.ceil(BLOCK_COUNT / 8);
 
-const VERSION = 1;
+const VERSION = 2;
 const FLAG_KEYFRAME = 1;
-const MODE_RLE = 0;
-const MODE_RAW = 1;
-const MODE_PACKED = 2;
+const FLAG_BITMAP = 2;
 
 export interface AppliedMessage {
   seq: number;
@@ -31,8 +30,6 @@ export class VideoDecoder {
 
   /** Persists across messages: replaced outright by a keyframe, appended to by a delta. */
   private palette: number[][] = [];
-  /** Scratch, reused for every block so a 30 fps stream allocates nothing per frame. */
-  private readonly indices = new Uint8Array(BLOCK_PIXELS);
 
   constructor() {
     this.rgba.fill(255);
@@ -41,6 +38,7 @@ export class VideoDecoder {
   /** Throws on a malformed message rather than painting nonsense; the caller re-syncs. */
   apply(buffer: ArrayBuffer): AppliedMessage {
     const data = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
     let at = 0;
     const u8 = () => data.getUint8(at++);
     const u16 = () => {
@@ -50,62 +48,164 @@ export class VideoDecoder {
     };
 
     if (u8() !== VERSION) throw new Error('unsupported video version');
-    const keyframe = (u8() & FLAG_KEYFRAME) !== 0;
+    const flags = u8();
+    const keyframe = (flags & FLAG_KEYFRAME) !== 0;
     const seq = u16();
+    const bits = u8();
+    if (bits !== 1 && bits !== 2 && bits !== 4 && bits !== 8) {
+      throw new Error(`${bits} bits per pixel is not 1, 2, 4 or 8`);
+    }
 
     const paletteLength = u8();
     if (keyframe) this.palette = [];
     for (let i = 0; i < paletteLength; i++) this.palette.push([u8(), u8(), u8()]);
 
-    const blocks = u16();
-    for (let b = 0; b < blocks; b++) {
-      const block = u16();
-      const mode = u8();
-      if (mode === MODE_RLE) {
-        let slot = 0;
-        while (slot < BLOCK_PIXELS) {
-          const run = u8();
-          const index = u8();
-          this.indices.fill(index, slot, slot + run);
-          slot += run;
-        }
-      } else if (mode === MODE_RAW) {
-        for (let i = 0; i < BLOCK_PIXELS; i++) this.indices[i] = u8();
-      } else if (mode === MODE_PACKED) {
-        // Four palette indices, then 2 bits per pixel into them, low bits first.
-        const sub = [u8(), u8(), u8(), u8()];
-        for (let i = 0; i < BLOCK_PIXELS; i += 4) {
-          const bits = u8();
-          for (let j = 0; j < 4; j++) this.indices[i + j] = sub[(bits >> (j * 2)) & 3];
-        }
-      } else {
-        throw new Error(`unknown block mode ${mode}`);
+    // A keyframe's block list is implicit — every block, in order — which is what makes it
+    // standalone. A delta names its blocks either as a bitmap or as a list of indices, whichever the
+    // encoder found smaller.
+    const blocks: number[] = [];
+    if (keyframe) {
+      for (let b = 0; b < BLOCK_COUNT; b++) blocks.push(b);
+    } else if ((flags & FLAG_BITMAP) !== 0) {
+      const map = bytes.subarray(at, at + BITMAP_BYTES);
+      at += BITMAP_BYTES;
+      for (let b = 0; b < BLOCK_COUNT; b++) {
+        if ((map[b >> 3] & (1 << (b & 7))) !== 0) blocks.push(b);
       }
-      this.paint(block);
+    } else {
+      const count = u16();
+      for (let i = 0; i < count; i++) blocks.push(u16());
     }
+
+    const perByte = 8 / bits;
+    const mask = (1 << bits) - 1;
+    const payloadBytes = BLOCK_PIXELS / perByte;
+    for (const block of blocks) {
+      if (block >= BLOCK_COUNT) throw new Error(`block index ${block} out of range`);
+      if (at + payloadBytes > bytes.length) throw new Error('video message ended early');
+      this.paint(block, bytes.subarray(at, at + payloadBytes), bits, perByte, mask);
+      at += payloadBytes;
+    }
+    if (at !== bytes.length) throw new Error(`${bytes.length - at} trailing bytes`);
     return { seq, keyframe };
   }
 
-  private paint(block: number): void {
+  private paint(
+    block: number,
+    payload: Uint8Array,
+    bits: number,
+    perByte: number,
+    mask: number,
+  ): void {
     const x0 = (block % BLOCKS_X) * BLOCK;
     const y0 = Math.floor(block / BLOCKS_X) * BLOCK;
-    for (let dy = 0; dy < BLOCK; dy++) {
-      for (let dx = 0; dx < BLOCK; dx++) {
-        const colour = this.palette[this.indices[dy * BLOCK + dx]];
-        if (colour === undefined) throw new Error('block references a colour the palette never carried');
-        const offset = ((y0 + dy) * WIDTH + x0 + dx) * 4;
-        this.rgba[offset] = colour[0];
-        this.rgba[offset + 1] = colour[1];
-        this.rgba[offset + 2] = colour[2];
-      }
+    for (let slot = 0; slot < BLOCK_PIXELS; slot++) {
+      const index =
+        bits === 8 ? payload[slot] : (payload[(slot / perByte) | 0] >> ((slot % perByte) * bits)) & mask;
+      const colour = this.palette[index];
+      if (colour === undefined) throw new Error('a block referenced a colour the palette never carried');
+      const offset = ((y0 + ((slot / BLOCK) | 0)) * WIDTH + x0 + (slot % BLOCK)) * 4;
+      this.rgba[offset] = colour[0];
+      this.rgba[offset + 1] = colour[1];
+      this.rgba[offset + 2] = colour[2];
     }
   }
 }
 
-/** SSE carries the message base64'd on one `data:` line — see `Published::publish_video`. */
-export function base64ToBytes(text: string): ArrayBuffer {
-  const binary = atob(text);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out.buffer;
+/**
+ * `/api/video` is a length-prefixed binary stream, deflated across the whole connection — see the
+ * route's docs in `src/web/mod.rs` for the measurements that made it one. This turns the response
+ * body into the messages `VideoDecoder.apply` wants.
+ *
+ * ⚠️ **The compression is part of the protocol, not a `Content-Encoding`.** A declared encoding
+ * invites a proxy to decompress and recompress it, which buffers whole messages and shows up as
+ * stutter only in production. `DecompressionStream` is native and does the same job here, where we
+ * can see it.
+ *
+ * A zero-length message is the keep-alive and yields nothing.
+ */
+async function* readVideoStream(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): AsyncGenerator<ArrayBuffer> {
+  // Piped rather than `pipeThrough`ed so the abort signal reaches the *source*: aborting the reader
+  // alone leaves the response body draining in the background until the server notices.
+  // The cast is the DOM types being stricter than the spec: `DecompressionStream` accepts any
+  // `BufferSource`, which `Uint8Array` is, but the two `WritableStream`s are not assignable.
+  const inflating = new DecompressionStream('deflate');
+  body.pipeTo(inflating.writable as WritableStream<Uint8Array>, { signal }).catch(() => {});
+  const reader = (inflating.readable as ReadableStream<Uint8Array>).getReader();
+  // The tail of the last chunk that was not yet a whole message. A message spans chunk boundaries
+  // routinely — deflate's output has nothing to do with our framing.
+  let pending = new Uint8Array(0);
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done || signal.aborted) return;
+      const merged = new Uint8Array(pending.length + value.length);
+      merged.set(pending);
+      merged.set(value, pending.length);
+      pending = merged;
+
+      let at = 0;
+      for (;;) {
+        if (pending.length - at < 4) break;
+        const length = new DataView(pending.buffer, pending.byteOffset + at, 4).getUint32(0, true);
+        if (pending.length - at - 4 < length) break;
+        at += 4;
+        if (length > 0) {
+          yield pending.buffer.slice(pending.byteOffset + at, pending.byteOffset + at + length);
+        }
+        at += length;
+      }
+      pending = pending.subarray(at);
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * Keep `/api/video` open for the length of the run, reconnecting for as long as anyone is watching.
+ *
+ * `EventSource` used to do this part by itself; a `fetch` does not, so the retry is here. It is not
+ * a regression in robustness — `EventSource` gives up permanently on some errors and
+ * `useEventStream` already had to rebuild it — but it *is* the one thing binary framing costs.
+ *
+ * ⚠️ **A reconnect is also the resync.** Every connection opens with a keyframe, so a decoder that
+ * has lost the thread is repaired by dropping the connection and starting another. That is why the
+ * caller does not need a resync path of its own.
+ */
+export function subscribeVideo(
+  url: string,
+  onMessage: (message: ArrayBuffer) => void,
+  onConnection: (connection: 'connecting' | 'live' | 'reconnecting') => void,
+): () => void {
+  const controller = new AbortController();
+  const RETRY_MS = 1000;
+
+  (async () => {
+    let first = true;
+    while (!controller.signal.aborted) {
+      try {
+        onConnection(first ? 'connecting' : 'reconnecting');
+        const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+        if (!response.ok || !response.body) throw new Error(`/api/video answered ${response.status}`);
+        onConnection('live');
+        first = false;
+        for await (const message of readVideoStream(response.body, controller.signal)) {
+          onMessage(message);
+        }
+      } catch (failure) {
+        if (controller.signal.aborted) return;
+        console.error('video stream dropped, reconnecting', failure);
+      }
+      if (controller.signal.aborted) return;
+      onConnection('reconnecting');
+      await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+    }
+  })();
+
+  return () => controller.abort();
 }

@@ -519,6 +519,7 @@ dependencies = [
  "base64",
  "bincode",
  "bitflags 2.9.3",
+ "flate2",
  "fontdue",
  "image",
  "itertools 0.14.0",

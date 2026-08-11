@@ -149,7 +149,8 @@ fn a_frame_that_overflows_the_palette_degrades_without_desynchronising() {
     let mut following = VideoDecoder::default();
 
     let encoded = encoder.encode(&overflowing).expect("first frame");
-    assert_eq!(encoded.bytes[4], 255, "the palette filled to the cap and the length byte held it");
+    assert_eq!(encoded.bytes[4], 8, "255 entries need the full byte-wide index");
+    assert_eq!(encoded.bytes[5], 255, "the palette filled to the cap and the length byte held it");
     following.apply(&encoded.bytes).unwrap();
 
     // Lossy by construction — 400 colours will not fit in 255 slots — so this is *not* pixel-exact
@@ -165,69 +166,105 @@ fn a_frame_that_overflows_the_palette_degrades_without_desynchronising() {
     assert_eq!(joining.pixels(), following.pixels(), "the keyframe described the source, not what was sent");
 }
 
-/// All three modes have to be exercised by something, and each wins on a different shape of block.
+/// The index is exactly as wide as the palette needs and no wider — the whole reason v2 dropped
+/// v1's per-block sub-palette. On the game it is 2 bits; the wide cases have to keep working, and
+/// the widening has to be *per message*, since a frame that introduces a fifth colour widens only
+/// itself.
 #[test]
-fn every_block_mode_is_chosen_when_it_is_the_smallest() {
-    // Five or more colours per block, changing every pixel: RLE would spend 128 bytes and packing
-    // is not available at all, so raw's flat 64 has to win.
-    let mut noisy = Box::new([LcdColor::default(); PIXELS]);
-    for (p, pixel) in noisy.iter_mut().enumerate() {
-        let n = (p % 60) as u32 * 4;
-        *pixel = LcdColor::rgb(n as u8, (n >> 1) as u8, (n >> 2) as u8);
-    }
+fn the_index_is_as_wide_as_the_palette_needs() {
+    // Pokémon Red on a DMG is four shades, and four shades is two bits.
+    let frames = recorded_frames(4);
     let mut encoder = VideoEncoder::default();
-    let encoded = encoder.encode(&noisy).expect("first frame");
-    let counts = count_modes(&encoded.bytes);
-    assert!(counts[MODE_RAW as usize] > 0, "no block chose raw mode, so mode 1 is untested");
+    let first = encoder.encode(&frames[0]).expect("first frame");
+    assert_eq!(first.bytes[4], 2, "a four-shade screen must not spend more than 2 bits a pixel");
+    assert!(first.bytes[5] <= 4, "…and its palette is at most four entries");
 
+    // 200 colours is a byte-wide index, and the same decoder reads it.
+    let wide = synthetic_frame(200, 0);
+    let mut wide_encoder = VideoEncoder::default();
+    let encoded = wide_encoder.encode(&wide).expect("first frame");
+    assert_eq!(encoded.bytes[4], 8);
     let mut decoder = VideoDecoder::default();
     decoder.apply(&encoded.bytes).unwrap();
-    assert_eq!(decoder.pixels(), noisy.as_ref());
+    assert_eq!(decoder.pixels(), wide.as_ref());
 
-    // A real frame is four DMG shades: flat blocks go RLE, detailed ones pack, and nothing needs raw.
-    let frames = recorded_frames(1);
-    let mut plain = VideoEncoder::default();
-    let real = plain.encode(&frames[0]).unwrap();
-    let counts = count_modes(&real.bytes);
-    assert!(counts[MODE_RLE as usize] > 0, "no block chose RLE on a real frame");
-    assert!(counts[MODE_PACKED as usize] > 0, "no block packed on a real frame — mode 2 is dead weight");
-    assert_eq!(counts[MODE_RAW as usize], 0, "a four-shade frame should never need raw");
-
-    // The point of mode 2: without it this frame would cost meaningfully more. 20 bytes of payload
-    // against RLE's measured ~40 for the same blocks.
-    let packed_bytes: usize = counts[MODE_PACKED as usize] * (PACKED_COLOURS + BLOCK_PIXELS / 4);
-    assert!(packed_bytes < real.bytes.len(), "sanity: packed blocks are part of this message");
+    // Every width in between has to round-trip, including the ones the game never reaches.
+    for (colours, bits) in [(2usize, 1u8), (3, 2), (5, 4), (16, 4), (17, 8)] {
+        let mut frame = Box::new([LcdColor::default(); PIXELS]);
+        for (p, pixel) in frame.iter_mut().enumerate() {
+            *pixel = LcdColor::rgb((p % colours) as u8 * 8, 0, 0);
+        }
+        let mut encoder = VideoEncoder::default();
+        let encoded = encoder.encode(&frame).expect("first frame");
+        assert_eq!(encoded.bytes[4], bits, "{colours} colours should pack at {bits} bits");
+        let mut decoder = VideoDecoder::default();
+        decoder.apply(&encoded.bytes).unwrap();
+        assert_eq!(decoder.pixels(), frame.as_ref(), "{colours} colours did not round-trip");
+    }
 }
 
-/// Walk a message's block list counting each mode. Deliberately a second, dumber parse than
-/// [`VideoDecoder`] so a bug shared with the decoder cannot hide here too — and the length arithmetic
-/// per mode is exactly what a wire-format change breaks.
-fn count_modes(message: &[u8]) -> [usize; 3] {
-    let palette_len = message[4] as usize;
-    let mut at = 5 + palette_len * 3;
-    let blocks = u16::from_le_bytes([message[at], message[at + 1]]) as usize;
-    at += 2;
-    let mut counts = [0usize; 3];
-    for _ in 0..blocks {
-        at += 2; // block index
-        let mode = message[at];
-        at += 1;
-        counts[mode as usize] += 1;
-        match mode {
-            MODE_RLE => {
-                let mut covered = 0;
-                while covered < BLOCK_PIXELS {
-                    covered += message[at] as usize;
-                    at += 2;
-                }
-            }
-            MODE_RAW => at += BLOCK_PIXELS,
-            MODE_PACKED => at += PACKED_COLOURS + BLOCK_PIXELS / 4,
-            other => panic!("unknown mode {other}"),
+/// The block list has two shapes and the encoder picks the smaller. A `u16` each beats a 45-byte
+/// bitmap while few blocks move, and loses once many do — which is most frames in ordinary play.
+#[test]
+fn the_block_list_is_a_bitmap_only_when_that_is_smaller() {
+    let frames = recorded_frames(1);
+    let mut encoder = VideoEncoder::default();
+    let mut base = *frames[0];
+    encoder.encode(&base).expect("first frame");
+
+    // One block moved: a two-byte index, not a 45-byte bitmap.
+    base[0] = LcdColor::rgb(1, 2, 3);
+    let sparse = encoder.encode(&base).expect("one block changed");
+    assert_eq!(sparse.bytes[1] & 0b10, 0, "one changed block must not pay for a bitmap");
+
+    // Most of the screen moved: the bitmap wins.
+    for (p, pixel) in base.iter_mut().enumerate() {
+        if p % 3 == 0 {
+            *pixel = LcdColor::rgb(4, 5, 6);
         }
     }
-    assert_eq!(at, message.len(), "trailing bytes after {blocks} blocks");
-    counts
+    let dense = encoder.encode(&base).expect("most blocks changed");
+    assert_ne!(dense.bytes[1] & 0b10, 0, "a screen-wide change must not spend 720 bytes on indices");
+
+    // Both shapes decode, and to the same place.
+    let mut decoder = VideoDecoder::default();
+    decoder.apply(&encoder.keyframe().unwrap().bytes).unwrap();
+    assert_eq!(decoder.pixels(), &base);
+}
+
+/// The bytes v2 exists to save, pinned against real frames so a regression shows up as a number
+/// rather than as a bill. v1 spent 23 bytes on a changed block: 2 index, 1 mode, 4 sub-palette,
+/// 16 payload. v2 spends 16 plus a bit of a bitmap.
+#[test]
+fn a_changed_block_costs_its_payload_and_little_else() {
+    let frames = recorded_frames(120);
+    let mut encoder = VideoEncoder::default();
+    let (mut bytes, mut blocks) = (0usize, 0usize);
+    for frame in &frames {
+        let Some(encoded) = encoder.encode(frame) else { continue };
+        if encoded.keyframe {
+            continue;
+        }
+        bytes += encoded.bytes.len();
+        blocks += changed_block_count(&encoded.bytes);
+    }
+    assert!(blocks > 100, "only {blocks} blocks changed — this capture proved nothing");
+    let per_block = bytes as f64 / blocks as f64;
+    assert!(
+        per_block < 18.0,
+        "a changed block cost {per_block:.1} B; the 16-byte payload plus a bitmap is the budget"
+    );
+}
+
+/// Count a delta's blocks from its header alone. Deliberately a second, dumber parse than
+/// [`VideoDecoder`], so a bug shared with the decoder cannot hide here too.
+fn changed_block_count(message: &[u8]) -> usize {
+    let at = 6 + message[5] as usize * 3;
+    if message[1] & 0b10 != 0 {
+        message[at..at + BLOCK_COUNT.div_ceil(8)].iter().map(|b| b.count_ones() as usize).sum()
+    } else {
+        u16::from_le_bytes([message[at], message[at + 1]]) as usize
+    }
 }
 
 #[test]
@@ -247,10 +284,14 @@ fn a_corrupt_message_is_an_error_not_a_panic() {
     }
 
     // A delta whose palette index has never been sent is a desynchronised stream, not a black pixel.
-    let mut orphan = vec![VERSION, 0, 1, 0, 0];
-    orphan.extend_from_slice(&1u16.to_le_bytes());
-    orphan.extend_from_slice(&0u16.to_le_bytes());
-    orphan.push(MODE_RLE);
-    orphan.extend_from_slice(&[BLOCK_PIXELS as u8, 7]);
+    let mut orphan = vec![VERSION, 0, 1, 0, /* bits */ 2, /* palette */ 0];
+    orphan.extend_from_slice(&1u16.to_le_bytes()); // one block…
+    orphan.extend_from_slice(&0u16.to_le_bytes()); // …block 0
+    orphan.extend_from_slice(&[0b01_01_01_01; BLOCK_PIXELS / 4]);
     assert!(VideoDecoder::default().apply(&orphan).is_err());
+
+    // A width the format does not define is rejected before anything is read against it.
+    let mut silly = good.clone();
+    silly[4] = 3;
+    assert!(VideoDecoder::default().apply(&silly).is_err());
 }

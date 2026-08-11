@@ -1,7 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import type { Connection } from '../api';
-import { subscribe } from '../useEventStream';
-import { HEIGHT, VideoDecoder, WIDTH, base64ToBytes } from '../video';
+import { HEIGHT, VideoDecoder, WIDTH, subscribeVideo } from '../video';
 
 /**
  * The game screen: a 160×144 canvas, CSS-scaled, fed by `/api/video`.
@@ -25,12 +24,12 @@ export function Screen() {
     const image = new ImageData(decoder.rgba, WIDTH, HEIGHT);
     let broken = false;
 
-    return subscribe(
+    return subscribeVideo(
       '/api/video',
-      (data) => {
+      (message) => {
         if (broken) return;
         try {
-          decoder.apply(base64ToBytes(data));
+          decoder.apply(message);
         } catch (failure) {
           broken = true;
           console.error('video stream desynchronised, resyncing', failure);

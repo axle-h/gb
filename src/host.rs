@@ -653,10 +653,8 @@ mod tests {
         }
 
         let keyframe = published.latest_keyframe().expect("a keyframe should have been published");
-        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &*keyframe.data)
-            .expect("the host produced this");
         let mut decoder = VideoDecoder::default();
-        decoder.apply(&bytes).expect("the host's own keyframe should decode");
+        decoder.apply(&keyframe.bytes).expect("the host's own keyframe should decode");
 
         let snapshot = published.latest_frame();
         assert_eq!(snapshot.seq, keyframe.seq, "the frame and the keyframe describe the same moment");

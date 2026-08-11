@@ -17,7 +17,7 @@
 //! GET  /{*path}             its assets
 //! GET  /api/healthz         liveness
 //! GET  /api/events          SSE — status heartbeat at 10 Hz, plus agent events as they happen
-//! GET  /api/video           SSE — a keyframe, then base64 block deltas
+//! GET  /api/video           binary — a keyframe, then block deltas, deflated per connection
 //! GET  /api/badges.png      the eight gym badges, decoded from the cartridge
 //! GET  /api/history?since=  W7 — the transcript from a sequence number, for a page that just loaded
 //! POST /api/new-run         start the game over in a fresh run directory (needs GB_ADMIN_TOKEN)
@@ -41,7 +41,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use tokio_stream::{Stream, StreamExt};
 
 use crate::cli::ServePolicy;
@@ -49,10 +49,11 @@ use crate::game_boy::GameBoy;
 use crate::host::{EmulatorHost, HostConfig, NewRunRequests};
 use crate::pokemon::policy::RandomPolicy;
 use crate::run::{CurrentRun, Origin, RunDir, transcript};
-use published::{Published, VideoMessage};
+use published::Published;
 
-/// Proxies close an idle connection; a comment every two seconds stops that without costing
-/// anything a client has to parse.
+/// Proxies close an idle connection. Every two seconds `/api/events` sends a comment and
+/// `/api/video` an empty message — neither is anything a client has to parse, and an idle screen
+/// under `--policy llm` is a long silence, not a rare one.
 const KEEP_ALIVE: Duration = Duration::from_secs(2);
 
 /// The header `POST /api/new-run` reads its token from.
@@ -443,40 +444,166 @@ fn sse_event(event: published::UiEvent) -> Result<Event, Infallible> {
 /// here is a delta the keyframe already contains — which `seq` filters out. The opposite ordering
 /// loses a delta outright, and the loss is invisible: a stale eighth of the screen that never
 /// repairs.
-async fn video_stream(
-    State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+///
+/// ## Why this is not SSE any more
+///
+/// It was, for W2 through W9: one base64 line per message, read by an `EventSource`. `video/bench.rs`
+/// measured four minutes of real play through it at **565 kbit/s**, not the ~19 the README claimed
+/// — that number was an idle screen. Three things fixed it, and only the third needed the transport
+/// to change:
+///
+/// 1. the v2 wire format (see [`video`]) — 565 → 445 kbit/s;
+/// 2. **deflate across the connection rather than per message** — 445 → 21. A Game Boy screen is
+///    built of repeated 8×8 tiles, so the same payload bytes recur within a frame *and* across
+///    frames; a compressor with a window that spans the whole stream sees all of it. Per message
+///    it would be 54, so the shared window is worth 2.5× on its own;
+/// 3. **binary, because base64 costs far more after compression than before**. 33% before, but
+///    69–113% *after* — base64 shifts a repeating byte pattern into three alphabet phases and the
+///    LZ77 window stops recognising it. SSE cannot carry binary, so SSE had to go.
+///
+/// Not a WebSocket, though: nothing here is bidirectional and this module reaching the emulator is
+/// exactly the property the whole file is built to avoid. A chunked binary response needs no upgrade
+/// handshake, no ping/pong, and no second reconnection story — the client reads it with `fetch` and
+/// a `DecompressionStream`.
+///
+/// ⚠️ **The compression is `Content-Type`, not `Content-Encoding`.** A declared encoding is an
+/// invitation for a proxy to decompress and recompress it, which would buffer whole messages and
+/// hand a livestream a latency problem that only shows up in production. These are opaque bytes and
+/// the client inflates them itself.
+///
+/// The framing is a `u32` little-endian length before each message. Zero length is a keep-alive,
+/// which is also what keeps the deflate stream ticking over an idle screen.
+async fn video_stream(State(state): State<AppState>) -> Response {
     let (receiver, keyframe) = state.published.join_video();
     let mut floor = keyframe.as_ref().map_or(0, |k| k.seq);
     let published = Arc::clone(&state.published);
+    let mut stream = VideoStream::default();
 
-    let opening = tokio_stream::iter(keyframe.into_iter().map(sse_video));
-    let live = BroadcastStream::new(receiver).filter_map(move |item| match item {
-        Ok(message) if message.seq > floor => {
-            floor = message.seq;
-            Some(sse_video(message))
-        }
-        // Already covered by the keyframe this connection opened with.
-        Ok(_) => None,
-        // The client fell out of the ring buffer, so its palette and its screen are both suspect.
-        // A fresh keyframe repairs both; dropping the connection would work too, but re-syncing in
-        // place is invisible to the viewer.
-        Err(BroadcastStreamRecvError::Lagged(_)) => published.latest_keyframe().map(|keyframe| {
-            floor = keyframe.seq;
-            sse_video(keyframe)
-        }),
+    let opening = keyframe.map(|keyframe| stream.frame(&keyframe.bytes)).unwrap_or_default();
+
+    // Merged rather than `Sse::keep_alive`d: the keep-alive has to go through the same compressor as
+    // everything else, since a deflate stream is a single ordered thing and not a sequence of
+    // messages that can be interleaved with something else.
+    let mut interval = tokio::time::interval(KEEP_ALIVE);
+    // A starved task must not come back and fire every missed tick at once — the point is liveness,
+    // and a burst of keep-alives says nothing a single one does not.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let beats = IntervalStream::new(interval).map(|_| None);
+    let messages = BroadcastStream::new(receiver).map(Some);
+    let live = messages.merge(beats).filter_map(move |item| {
+        let message = match item {
+            // Keep-alive: an empty message, so a proxy sees traffic and the client sees nothing.
+            None => return Some(Ok::<_, Infallible>(stream.frame(&[]))),
+            Some(Ok(message)) if message.seq > floor => message,
+            // Already covered by the keyframe this connection opened with.
+            Some(Ok(_)) => return None,
+            // The client fell out of the ring buffer, so its palette and its screen are both
+            // suspect. A fresh keyframe repairs both; dropping the connection would work too, but
+            // re-syncing in place is invisible to the viewer.
+            Some(Err(BroadcastStreamRecvError::Lagged(_))) => published.latest_keyframe()?,
+        };
+        floor = message.seq;
+        Some(Ok(stream.frame(&message.bytes)))
     });
 
-    Sse::new(opening.chain(live)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
+    let body = tokio_stream::iter([Ok::<_, Infallible>(opening)]).chain(live);
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            // nginx-family proxies buffer an unknown-length body by default, which would turn a
+            // livestream into a slideshow. Traefik does not, but the header costs nothing.
+            (axum::http::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        axum::body::Body::from_stream(body),
+    )
+        .into_response()
 }
 
-fn sse_video(message: VideoMessage) -> Result<Event, Infallible> {
-    Ok(Event::default().data(&*message.data))
+/// One connection's compressor: a single deflate stream, flushed after every message.
+///
+/// ⚠️ **The flush is the whole design and it is not free to forget.** Without it the encoder holds a
+/// message back until its internal buffer fills, which is right for a file and useless for a
+/// livestream — the screen would arrive in bursts seconds apart. Flushing per message costs a few
+/// bytes of block boundary and keeps the window, which is where the compression actually comes from.
+///
+/// Per connection, so two viewers cost two compressors. That is the price of the shared window: at
+/// 30 fps and ~3 kB a message it is well under a percent of a core each, and the alternative —
+/// compressing once for everyone — is the per-message case that measured 2.5× worse.
+struct VideoStream {
+    deflate: flate2::write::ZlibEncoder<Vec<u8>>,
+}
+
+impl Default for VideoStream {
+    fn default() -> Self {
+        Self { deflate: flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6)) }
+    }
+}
+
+impl VideoStream {
+    fn frame(&mut self, message: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        // In-memory writes: the only way `write_all` fails here is an allocation failure, which is
+        // not something this connection can do anything about.
+        let _ = self.deflate.write_all(&(message.len() as u32).to_le_bytes());
+        let _ = self.deflate.write_all(message);
+        let _ = self.deflate.flush();
+        std::mem::take(self.deflate.get_mut())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The transport contract, end to end without a socket: what `/api/video` writes must inflate as
+    /// **one** deflate stream and split back into exactly the messages that went in.
+    ///
+    /// ⚠️ The interesting half is the *incremental* read. A test that inflated the whole body at the
+    /// end would pass even if the encoder buffered everything until the connection closed, which is
+    /// the one failure mode that matters here — a livestream that arrives in bursts. So each
+    /// message's bytes are inflated as they are produced, and the message has to come out then.
+    #[test]
+    fn the_video_stream_is_one_deflate_stream_of_length_prefixed_messages() {
+        use std::io::Write;
+        let messages: Vec<Vec<u8>> =
+            vec![vec![1, 2, 3], vec![], (0..5000u32).map(|n| (n % 7) as u8).collect(), vec![9]];
+
+        let mut stream = VideoStream::default();
+        let mut inflate = flate2::write::ZlibDecoder::new(Vec::new());
+        let mut compressed = 0usize;
+        for message in &messages {
+            let chunk = stream.frame(message);
+            compressed += chunk.len();
+            inflate.write_all(&chunk).expect("the chunk is a valid continuation");
+            inflate.flush().expect("…and a flushed one, so it decodes now rather than at the end");
+        }
+        let plain = inflate.finish().expect("in-memory");
+
+        let mut at = 0;
+        for (n, message) in messages.iter().enumerate() {
+            let length =
+                u32::from_le_bytes(plain[at..at + 4].try_into().expect("four bytes")) as usize;
+            at += 4;
+            assert_eq!(length, message.len(), "message {n} announced the wrong length");
+            assert_eq!(&plain[at..at + length], &message[..], "message {n} did not survive");
+            at += length;
+        }
+        assert_eq!(at, plain.len(), "trailing bytes after the last message");
+
+        // And it is actually compressing: 5 kB of a repeating pattern must not cost 5 kB.
+        assert!(compressed < plain.len() / 2, "{compressed} B for {} B of input", plain.len());
+    }
+
+    /// A zero-length message is the keep-alive, and it has to reach the wire — an idle screen that
+    /// sends nothing at all is a connection a proxy closes.
+    #[test]
+    fn a_keepalive_puts_bytes_on_the_wire_and_no_message_in_the_stream() {
+        let mut stream = VideoStream::default();
+        stream.frame(&[1, 2, 3]);
+        let beat = stream.frame(&[]);
+        assert!(!beat.is_empty(), "a keep-alive that produced no bytes keeps nothing alive");
+    }
 
     /// ⚠️ **The endpoint is off unless a token is set, and blank is not set.** A Kubernetes Secret
     /// with a placeholder value is usually the empty string, and the failure mode of getting this

@@ -26,7 +26,7 @@ sdl = ["dep:sdl2", "dep:fontdue"]
 # them. The cost is 57 extra crates on a build that already pulls 119. A server-only build still
 # drops SDL entirely:
 #   cargo build --release --no-default-features --features web
-web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed"]
+web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed", "dep:flate2"]
 # **W4** — the LLM: the OpenAI-compatible client (`src/llm/`) and the policy that drives the game
 # from it (`src/pokemon/llm_policy.rs`). Implies `web`, because the turn loop publishes into the same
 # `Published` buffers the browser reads and there is no configuration in which one is wanted without
@@ -78,7 +78,10 @@ diagnostics = []
 # Benchmarks. Compiled out entirely by default rather than `#[ignore]`d, so they do not show up
 # in the ignored count alongside genuinely blocked tests.
 #   cargo test --release --features bench --bin gb -- bench_ --nocapture
-bench = []
+#
+# `flate2` is here for the video bitrate bench only: it is the yardstick the codec is measured
+# against (what a generic compressor gets on top of it, and what `permessage-deflate` would).
+bench = ["dep:flate2"]
 # Let tests overwrite the committed fixtures they snapshot. Off by default: a normal test run must
 # leave the working tree clean, or every run silently changes the next run's inputs.
 #   cargo test --release --features regen-fixtures,slow-tests
@@ -113,7 +116,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "
 # `BroadcastStream` — the sync→async bridge in stream form, and the only thing that surfaces
 # `Lagged` so a viewer that fell out of the video ring buffer can be re-synced from a keyframe
 # instead of silently keeping a stale screen.
-tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync", "time"], optional = true }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.22", optional = true }
 # The built SPA (`web/dist`), baked into the binary so the container is one file. ⚠️ The folder must
@@ -124,6 +127,10 @@ rust-embed = { version = "8.12", optional = true }
 # `impl Read`, so streaming SSE is a `BufReader::lines()` loop on the worker's own `std::thread` and
 # there is no second async runtime in the process. `reqwest::blocking` would start one internally.
 ureq = { version = "3.3", optional = true }
+# `/api/video`'s per-connection deflate stream (`src/web/mod.rs`), and the yardstick the codec
+# is measured against in `src/web/video/bench.rs`. Pure Rust — `miniz_oxide`, no C — so it adds
+# nothing to what the container has to link.
+flate2 = { version = "1", optional = true }
 
 [build-dependencies]
 regex = "1.12.2"
