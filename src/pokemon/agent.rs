@@ -118,10 +118,14 @@ impl Display for AgentEvent {
     }
 }
 
+/// Ticks of B-mashing [`BattleState::WaitingForMenu`] does after the game refuses a move. See the
+/// ⚠️ at the top of that arm for why it is a countdown rather than a flag.
+const BACKING_OUT_TICKS: u16 = 100;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
-    WaitingForMenu { reader: PokemonTextReader, delay: DelayContext },
+    WaitingForMenu { reader: PokemonTextReader, delay: DelayContext, backing_out: u16 },
 
     /// Battle menu is up but policy hasn't returned an action yet.
     AwaitingPolicy { delay: DelayContext },
@@ -145,6 +149,7 @@ impl Default for BattleState {
         Self::WaitingForMenu {
             reader: PokemonTextReader::message_box_only(),
             delay: DelayContext::default(),
+            backing_out: 0,
         }
     }
 }
@@ -1493,7 +1498,25 @@ impl PokemonAgent {
                     return Ok(());
                 }
                 match battle_state {
-                    BattleState::WaitingForMenu { reader, delay } => {
+                    BattleState::WaitingForMenu { reader, delay, backing_out } => {
+                        // ⚠️ **Hoisted above everything, because the A presses that defeat it do not
+                        // come from the branch that detects the problem.** A move the game refuses —
+                        // out of PP, or disabled — drops back to the move list, and getting out takes
+                        // more than one B: the first dismisses the message, the second leaves the list.
+                        // In between, `battle_menu_state()` reads `None` while the message box is up
+                        // and the arm below hands to the text reader, which mashes A and re-selects the
+                        // same spent move. So the intent is latched here and held for a fixed run of
+                        // ticks, ahead of every branch that could press A.
+                        //
+                        // 100 ticks is 2 s of game time — about 50 rising edges, far more than the two
+                        // presses it takes. Overshooting is harmless: B at the main battle menu does
+                        // nothing. Counting down rather than latching a `bool` is what bounds it, and
+                        // if the list is *still* there afterwards the detection below simply re-latches.
+                        if *backing_out > 0 {
+                            *backing_out -= 1;
+                            api.toggle_button(JoypadButton::B);
+                            return Ok(());
+                        }
                         if let Some(menu_state) = api.menu_state() {
                             // A voluntary switch (PKMN → pick mon) pops the SWITCH/STATS/CANCEL
                             // sub-menu, which isn't a battle_menu_state. Drive its cursor to SWITCH
@@ -1530,9 +1553,19 @@ impl PokemonAgent {
                             // (`Pokemon::available_battle_moves`), so this is the case where the game
                             // and the party data disagree — Disable, or PP spent since the read — which
                             // is exactly the case a filter cannot cover.
+                            if screen.contains("No PP left") {
+                                // ⚠️ **Latch here, not in the `MoveList` arm below** — this check runs
+                                // first and returns, so the arm that "handles" a spent move is never
+                                // reached while the message is on screen. That is why the handling
+                                // already there (added after an earlier hours-long wedge) did not save
+                                // this one: it only ever saw the ticks where the message had *gone*,
+                                // and on those it pressed A and re-selected the same move.
+                                *backing_out = BACKING_OUT_TICKS;
+                                api.toggle_button(JoypadButton::B);
+                                return Ok(());
+                            }
                             if screen.contains("CANCEL")
-                                || screen.contains("isn't the time") || screen.contains("won by using")
-                                || screen.contains("No PP left") {
+                                || screen.contains("isn't the time") || screen.contains("won by using") {
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
                             }
@@ -1605,9 +1638,21 @@ impl PokemonAgent {
                                     // accept, and backing out of those changes move choice all over
                                     // the run (it re-tuned the playthrough's whole RNG line, and it
                                     // broke in two different places before this was narrowed).
+                                    //
+                                    // ⚠️ **Sticky, because one B is not enough and the message is not
+                                    // reliably on screen.** Two things defeated the plain check. The
+                                    // refusal renders a character at a time — `soak`'s fixture spends
+                                    // most of its ticks reading "No", "No P", "No PP lef" — so the
+                                    // `contains` is *false* on most of the ticks that matter. And even
+                                    // when it matched, the first B only dismissed the message and
+                                    // returned to this very list, where the next tick saw no message,
+                                    // pressed A, and re-selected the same spent move. Getting out takes
+                                    // B until the list itself is gone, so the intent is latched once and
+                                    // held until it is.
                                     let no_pp = api.on_screen_text(false).unwrap_or_default()
                                         .contains("No PP left");
                                     if disabled || no_pp {
+                                        *backing_out = BACKING_OUT_TICKS;
                                         api.toggle_button(JoypadButton::B);
                                     } else {
                                         api.toggle_button(JoypadButton::A);

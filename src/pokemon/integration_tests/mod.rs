@@ -65,6 +65,9 @@ mod saffron;
 mod cinnabar;
 mod endgame;
 mod playthrough;
+// Default tier: one case per jam `soak` has found, replayed from the save state it was found in.
+// Cheap, because each starts inside the jam instead of wandering into one. See the module docs.
+mod stalls;
 // Gated as a module: without the feature the test does not exist, so it never shows up as ignored.
 #[cfg(feature = "soak-tests")]
 mod soak;

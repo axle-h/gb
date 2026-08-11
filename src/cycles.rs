@@ -46,8 +46,19 @@ impl MachineCycles {
         Self(ticks / 4) // 4 tick = 1 machine cycle
     }
 
+    /// ⚠️ **The multiply is done in `u128`, and that is not defensive — `u64` overflows here after
+    /// about 73 minutes of emulated time.** `self.0 * 4_000_000_000` passes `u64::MAX` once `self.0`
+    /// reaches ~4.6e9 m-cycles, and in release builds that wraps silently rather than panicking: the
+    /// figure just becomes nonsense partway through a long run. It surfaced in `soak`, whose progress
+    /// line stopped appearing after 3600 s and looked like a bug in the test's own bookkeeping.
+    ///
+    /// Anything that reports emulated time over a long run was affected — `meta.json`'s `emulated_ms`
+    /// and the status heartbeat both go through here, so a deployed run's clock silently wrapped
+    /// every 73 minutes. `from_duration` already used `u128` for the same reason in the other
+    /// direction.
     pub const fn to_duration(self) -> Duration {
-        Duration::from_nanos((self.0 * 4_000_000_000) / Self::CPU_FREQ)
+        let nanos = (self.0 as u128 * 4_000_000_000) / Self::CPU_FREQ as u128;
+        Duration::from_nanos(nanos as u64)
     }
 
     /// Subtraction that clamps at zero. The plain [`Sub`] impl deliberately does **not** do this —
@@ -125,6 +136,19 @@ mod tests {
     fn from_duration() {
         let one_second = MachineCycles::from_duration(Duration::from_secs(1));
         assert_eq!(one_second, MachineCycles::from_m(MachineCycles::CPU_FREQ / 4));
+    }
+
+    /// ⚠️ `to_duration` multiplied by 4e9 in `u64`, which wraps past ~73 minutes — silently, in
+    /// release. A five-hour run's clock read as nonsense and nothing complained.
+    #[test]
+    fn to_duration_survives_a_long_run() {
+        for hours in [1u64, 2, 5, 24] {
+            let expected = Duration::from_secs(hours * 3600);
+            let round_tripped = MachineCycles::from_duration(expected).to_duration();
+            let drift = round_tripped.abs_diff(expected);
+            assert!(drift < Duration::from_millis(1),
+                    "{hours}h round-tripped to {round_tripped:?}, off by {drift:?}");
+        }
     }
 
     #[test]
