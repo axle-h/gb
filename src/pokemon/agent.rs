@@ -2003,11 +2003,21 @@ impl PokemonAgent {
                 /// "walking into a wall" and is reset on arrival by healthy pacing. An agent pacing
                 /// perfectly in grass where nothing will ever appear resets it for ever.
                 ///
-                /// 9000 ticks is 180 s of game time. The rarest grass in the game is 8/256 per step
-                /// (`data/wild/maps/*.asm`; most are 15 or 25), and a step is ~13 ticks — so 99.9%
-                /// of encounters on the *worst* map land inside ~218 steps, about 57 s. This is
-                /// three times that, which makes firing it a real signal rather than impatience.
-                const PACING_BUDGET_TICKS: u16 = 9000;
+                /// 3000 ticks is 60 s of game time.
+                ///
+                /// ⚠️ **This is not sized to guarantee an encounter, and the first attempt at it was.**
+                /// That reasoning gave 180 s — three times the ~57 s in which 99.9% of encounters on
+                /// the rarest map (Viridian Forest, 8/256 per step) should land. It was wrong twice
+                /// over: the pair is often grass↔plain, so only every *other* step rolls, which
+                /// doubles the figure; and more importantly, giving up is not a failure. The policy is
+                /// simply asked again, and if it picks grass again the pace resumes — the only thing
+                /// that changes is that the run stopped being silent.
+                ///
+                /// So what this actually bounds is **how long the agent may go without being asked
+                /// anything**, and 180 s of that is 60% of the watchdog. `soak` measured exactly that:
+                /// seed 1's worst healthy stretch was 182 s, which was this budget running to the end
+                /// in Viridian Forest and nothing else.
+                const PACING_BUDGET_TICKS: u16 = 3000;
 
                 let game_state = api.game_state()?;
                 if game_state.mode == GameMode::Overworld {
@@ -2020,7 +2030,7 @@ impl PokemonAgent {
                     if *paced >= PACING_BUDGET_TICKS {
                         self.event(AgentEvent::TextBox { message: format!(
                             "paced {tile_a}↔{tile_b} on {map} for {}s of game time with no encounter \
-                             — giving up", PACING_BUDGET_TICKS as u64 * AGENT_RESOLUTION.to_duration().as_millis() as u64 / 1000) });
+                             — re-deciding", PACING_BUDGET_TICKS as u64 * AGENT_RESOLUTION.to_duration().as_millis() as u64 / 1000) });
                         api.release_all_buttons();
                         self.set_state(AgentState::Idle);
                         return Ok(());

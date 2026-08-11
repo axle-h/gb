@@ -264,6 +264,21 @@ agent's state machine far more widely than any route.
 It watches `PokemonAgent::since_last_policy_poll` — the **same** value W9's watchdog reads — so it
 fails exactly when a deployed `LlmPolicy` would have its watchdog fire. One definition of stuck.
 
+⚠️ **It deliberately does *not* apply `FAST_FIXTURE_OPTIONS`**, unlike `TestFixture`. `gb serve` runs
+on the cartridge's own defaults — `InitOptions` sets `TEXT_DELAY_MEDIUM` with battle animations *on* —
+and the soak exists to reproduce the deployment, not to be cheap. That is not a detail: the no-PP jam
+was a race with the character-by-character text renderer, and fast text may well not reproduce it.
+
+⚠️ **`GB_SOAK_LIMIT_SECS` is how you find the *next* one.** The default is the watchdog's 300 s
+because that is the number production cares about, but seed 1's worst healthy stretch is **62 s**
+over the full five hours — so a near-miss can hide comfortably under the default for a long time.
+Running at `GB_SOAK_LIMIT_SECS=120` trips on anything twice as quiet as normal, and that is how the
+pacing budget was found: 182 s of silence in Viridian Forest that turned out to be
+`PACING_BUDGET_TICKS` running to the end on the rarest grass in the game (8/256), not a jam at all.
+⚠️ **A budget that bounds silence is not sized to guarantee success** — giving up just means the
+policy gets asked again, and the first version of that constant was three times too generous because
+it was sized to guarantee an encounter.
+
 ⚠️ **It is seeded (`GB_SOAK_SEED`, default 1) and must stay that way.** The first runs each failed
 somewhere different, which is worse than useless: a failure that vanishes when you go back to look at
 it cannot verify its own fix, and CI would flake. Seed 1 is the one that must stay green; vary the
