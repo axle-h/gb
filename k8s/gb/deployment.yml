@@ -23,6 +23,13 @@ spec:
       labels:
         app: gb
     spec:
+      # ⚠️ Not optional, and the failure is a crash loop with no obvious cause. Kubernetes injects
+      # Docker-link-style env vars for every Service in the namespace, named after the service in
+      # SHOUT_CASE — and this Service is `gb`, so the pod is handed `GB_PORT=tcp://<clusterIP>:80`.
+      # `gb` reads GB_PORT as the port to listen on, cannot parse that, and exits with its usage
+      # text. Every one of the app's own variables is `GB_*`, so any future service in this
+      # namespace whose name starts a collision would do the same thing.
+      enableServiceLinks: false
       # The image creates uid 10001 and owns /runs to it, but a fresh PersistentVolume is mounted
       # over that. `fsGroup` is what makes the mounted directory writable by the process rather than
       # by root.
