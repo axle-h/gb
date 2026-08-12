@@ -9,13 +9,38 @@ metadata:
   name: gb
 data:
   # Any OpenAI-compatible endpoint. Leave unset for api.openai.com.
-  OPENAI_BASE_URL: "https://api.openai.com/v1"
-  GB_MODEL: "gpt-5"
+  #
+  # This is LM Studio on the LAN, not a hosted API: the k3s node is 10.0.0.10 and the box serving the
+  # model is 10.0.0.161, so the pod reaches it directly and nothing leaves the house.
+  # ⚠️ **`OPENAI_API_KEY` is still required and must still be non-empty** — `--policy llm` refuses to
+  # start without one — but LM Studio ignores whatever it is given. The Secret's real key is left
+  # alone rather than replaced with a placeholder, so switching this back to api.openai.com is one
+  # line rather than a secret edit.
+  OPENAI_BASE_URL: "http://10.0.0.161:1234/v1"
+  GB_MODEL: "google/gemma-4-12b-qat"
 
   # Tokens of history the turn loop will carry before it compacts.
-  GB_CONTEXT_LIMIT: "128000"
-  GB_TEMPERATURE: "1.0"
+  #
+  # ⚠️ **This is the model's window, not a preference, and the default of 128000 is a lie against a
+  # local one.** LM Studio reports what it actually loaded as `loaded_context_length` on
+  # `GET /api/v0/models` — 60000 here, against the 262144 the weights allow — and a limit set above
+  # it means compaction never fires and every request past the real window fails instead.
+  GB_CONTEXT_LIMIT: "60000"
+  # How full it gets first. The default; stated here because the headroom it leaves is absolute
+  # rather than proportional, and 15% of 60000 is 9000 — enough for an in-flight turn and the
+  # summarising completion, where 5% would not be.
+  GB_COMPACT_ABOVE: "0.85"
+  # Below the 1.0 default: every action is chosen by copying an opaque id (`PalletTown:5,6:Warp`)
+  # back exactly, and a 12B at 1.0 fumbles them.
+  GB_TEMPERATURE: "0.6"
   GB_MAX_TOOL_STEPS: "16"
+
+  # How long the endpoint may take to answer before the request is abandoned. Raised from the 180 s
+  # default because this endpoint is a single GPU rather than a hosted API, and ⚠️ **abandoning is
+  # not free**: llama.cpp keeps processing a request after we hang up, so an expiry here leaves a
+  # generation running that nobody will read, on a server that answers one at a time. Waiting costs
+  # a stalled turn; giving up early costs the same turn and the next few minutes of the box.
+  GB_REQUEST_TIMEOUT_SECS: "600"
 
   # W9's watchdog: emulated seconds with the agent asking the policy nothing at all before the model
   # is asked for a nudge. `0` turns it off. Every firing is a bug report, not routine.

@@ -414,6 +414,7 @@ mod tests {
             compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
             temperature: 0.4,
             max_tool_steps: 4,
+            request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             stuck_timeout: None,
         };
         let messages = history(2, false);

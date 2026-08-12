@@ -295,6 +295,26 @@ decides thinks once per completion, so `useEventStream`'s fold appends only whil
 is still the *last* one — and `Conversation.tsx` reads that same fact as "still live", which is what
 makes the block collapse on its own when the tool call lands with no second event to say so.
 
+⚠️ **Giving up on a request is not free, and a timeout is not a transport failure.** A connection
+that never opened consumed nothing at the far end, so retrying it is free and correct — that is what
+`LlmError::Transport` means. A request the endpoint *accepted* is being worked on, and llama.cpp says
+so when we hang up: "Stopping generation… (If the model is busy processing the prompt, it will finish
+first.)". So `LlmError::Timeout` is a separate variant and is **not retryable**: on a server that
+runs one request at a time, the retry queues behind the very request it replaces and can never be
+faster, while adding a second generation nobody will read. `GB_REQUEST_TIMEOUT_SECS` (180) is the
+matching knob and wants to be *raised* for a local endpoint rather than lowered — waiting costs a
+stalled turn, giving up early costs the same turn plus the endpoint's next few minutes.
+
+⚠️ **A local endpoint's real limit is its KV cache, not its advertised window, and the arithmetic is
+per *slot*.** A run against LM Studio wedged for 28 minutes at a time with no error anywhere: llama.cpp
+was configured `n_parallel=4, n_ctx=60000, kv_unified=true`, so four request slots *shared* one
+60160-token cache. Anything that made the server pick a fresh slot rather than reuse the prefix left
+the old slot still holding its copy of the history, and four copies of a ~16 k conversation is 66 k
+against 60 k — after which no request could be allocated a slot at all. The log's tell is a
+`slot selection` line with **no `launch_slot_` after it**; prefill itself was never the problem
+(360–490 tokens/s, and prefix reuse made it ~8 s). One slot with the whole window is the fix, and it
+is the model server's setting, not ours.
+
 **`GB_COMPACT_ABOVE` (0.85) is what 0.70 used to be**, and the old number was never measured against
 anything: it was headroom picked for a 128 k window, where a fifth of the context is tens of
 thousands of tokens held empty and a summarising completion — the most expensive thing the loop does

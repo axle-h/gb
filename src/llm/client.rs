@@ -38,10 +38,6 @@ pub trait ChatEndpoint: Send {
 /// a long one is a model thinking, not a fault — but a connection that never produces a first byte
 /// would otherwise hang the worker for the rest of the run.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
-const TIMEOUT_FIRST_BYTE: Duration = Duration::from_secs(180);
-/// The gap between two chunks of a response already in progress. Generous, because a model pausing
-/// mid-sentence to think is normal; finite, because a half-open TCP connection looks exactly like it.
-const TIMEOUT_BETWEEN_CHUNKS: Duration = Duration::from_secs(180);
 
 pub struct OpenAiClient {
     agent: ureq::Agent,
@@ -57,8 +53,12 @@ impl OpenAiClient {
             // parameter it did not like, which is the single most useful thing in the whole error.
             .http_status_as_error(false)
             .timeout_connect(Some(TIMEOUT_CONNECT))
-            .timeout_recv_response(Some(TIMEOUT_FIRST_BYTE))
-            .timeout_recv_body(Some(TIMEOUT_BETWEEN_CHUNKS))
+            // Both deadlines are the same number and both are `GB_REQUEST_TIMEOUT_SECS`: one is how
+            // long the endpoint may take to *start* answering, the other the gap it may leave
+            // mid-answer, and an operator who has to lengthen one always means "be more patient with
+            // this endpoint" rather than one half of it.
+            .timeout_recv_response(Some(config.request_timeout))
+            .timeout_recv_body(Some(config.request_timeout))
             .user_agent("gb-pokemon-agent/0.1")
             .build()
             .into();
@@ -91,7 +91,14 @@ impl ChatEndpoint for OpenAiClient {
             // sputtering one for no bandwidth worth having on a link carrying a video feed anyway.
             .header("Accept-Encoding", "identity")
             .send(body)
-            .map_err(|e| LlmError::Transport(format!("POST {} failed: {e}", self.url)))?;
+            .map_err(|e| match e {
+                // The request is on the wire and the endpoint is sitting on it — not the same thing
+                // as never having reached it. See `LlmError::Timeout`.
+                ureq::Error::Timeout(_) => {
+                    LlmError::Timeout(format!("POST {} was not answered: {e}", self.url))
+                }
+                e => LlmError::Transport(format!("POST {} failed: {e}", self.url)),
+            })?;
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {

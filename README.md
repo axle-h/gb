@@ -249,6 +249,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_CONTEXT_LIMIT` | the context window, in tokens — set it to the model's, not the default 128 k |
 | `GB_COMPACT_ABOVE` | how full it gets before the turn loop compacts (`0.85`) |
 | `GB_TEMPERATURE`, `GB_MAX_TOOL_STEPS` | the turn loop's shape |
+| `GB_REQUEST_TIMEOUT_SECS` | how long an endpoint may take to answer (`180`) — raise it for a local one |
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog; `0` turns it off |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |
 | `GB_PORT`, `GB_STATUS_HZ` | the server |

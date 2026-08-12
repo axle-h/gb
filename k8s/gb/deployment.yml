@@ -56,10 +56,19 @@ spec:
           # `kubectl -n gb apply -f ./gb` silently switched the run to `--policy llm` against a
           # placeholder key and crash-looped it. `secret.axh.yml` closes the other half of that trap.
           #
-          # `--policy random` needs no API key and spends nothing, and it exercises the whole stack —
-          # the agent, the video pipeline, the page and the volume. To let a model play, put the real
-          # key in `secret.axh.yml` and change this to `--policy llm`; the two only make sense
-          # together.
+          # **`--policy random` right now, and that is a holding position rather than the intent.**
+          # The run was switched to `--policy llm` against LM Studio on the LAN (see
+          # `configmap.yml`) on 2026-08-12 and back again the same evening, because the model server
+          # was configured with four request slots sharing one 60 k KV cache and deadlocked once four
+          # copies of the conversation filled it. That is fixed on the server; this line goes back to
+          # `llm` the next time anyone deploys and watches it.
+          #
+          # ⚠️ `OPENAI_API_KEY` must be present and non-empty in the Secret for `--policy llm` even
+          # against an endpoint that ignores it, because the config block refuses to start without
+          # one. `--policy random` needs no endpoint at all and still exercises the whole stack — the
+          # agent, the video pipeline, the page and the volume — so it is what to switch back to if
+          # the model's box is off, rather than leaving the pod erroring at a machine that is not
+          # answering.
           #
           # `gb serve` RESUMES the newest run under $GB_RUN_DIR, which is what makes a pod restart
           # continue the playthrough instead of starting a new one. **To start the game over, do not
