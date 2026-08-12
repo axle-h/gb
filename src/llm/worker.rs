@@ -261,7 +261,7 @@ impl Worker {
         self.accounting = Accounting::new(self.config.context_limit);
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
-            message: "the game restarted — the conversation starts again from the system prompt"
+            message: "the game restarted; the conversation starts again from the system prompt"
                 .to_string(),
         });
     }
@@ -418,7 +418,7 @@ impl Worker {
                                 retry.of,
                                 retry.failure,
                                 retry.waiting,
-                                if retry.already_spoke { " — the reply will start again" } else { "" },
+                                if retry.already_spoke { " (the reply will start again)" } else { "" },
                             ),
                         });
                     },
@@ -769,7 +769,7 @@ impl Worker {
         if dropped > 0 {
             self.published.publish_event(UiEventBody::Notice {
                 level: "info",
-                message: format!("context is full — dropped the {dropped} oldest turns"),
+                message: format!("context is full; dropped the {dropped} oldest turns"),
             });
         }
     }

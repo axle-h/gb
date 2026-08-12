@@ -160,7 +160,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     published.publish_event(published::UiEventBody::Notice {
         level: "info",
         message: match origin {
-            Origin::Fresh => format!("new run {} — from the beginning of the game", run.run_id()),
+            Origin::Fresh => format!("new run {}, from the beginning of the game", run.run_id()),
             Origin::Resumed => format!("resumed run {} from its last checkpoint", run.run_id()),
         },
     });

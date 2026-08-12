@@ -437,7 +437,7 @@ impl EmulatorHost {
             // Names the directory, because this is not retried and filing it by hand is then a `cp`.
             Err(failure) => {
                 return self.complain(format!(
-                    "could not file the finished run: {failure} — {} won the game and is complete on \
+                    "could not file the finished run: {failure}. {} won the game and is complete on \
                      disk, but is not in the leaderboard",
                     job.run_dir.display(),
                 ));
@@ -453,7 +453,7 @@ impl EmulatorHost {
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
             message: format!(
-                "🏆 {} finished the game in {playtime} — filed as {}/{archived}",
+                "🏆 {} finished the game in {playtime}, filed as {}/{archived}",
                 run.run_id(),
                 crate::run::files::HALL_OF_FAME,
             ),
@@ -553,7 +553,7 @@ impl EmulatorHost {
         self.published.set_status(RunStatus::Playing);
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
-            message: format!("new run {run_id} — {previous} was checkpointed and left where it is"),
+            message: format!("new run {run_id}. {previous} was checkpointed and left where it is"),
         });
         println!("gb serve — new run {run_id} (was {previous})");
         Ok(run_id)
@@ -692,6 +692,16 @@ impl EmulatorHost {
             // Asked of the decider itself rather than configured alongside it: two places naming the
             // same thing is two places to disagree, and this one is a wire contract the page renders.
             policy: self.agent.policy_name(),
+            // Who is playing, for the page's title and header. Cloned per *published* heartbeat
+            // rather than per sample, and the heartbeat is send-on-change, so this is a handful of
+            // short strings a minute. `None` under `--policy random` — see the field.
+            model: self
+                .config
+                .run
+                .as_ref()
+                .map(|run| run.model())
+                .filter(|model| *model != "random")
+                .map(str::to_string),
             agent_state: self.agent.state_debug(),
             frame_seq: self.encoder.seq(),
             game,
@@ -718,7 +728,7 @@ struct Obituary(Arc<Published>);
 impl Drop for Obituary {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            let message = "the emulator thread panicked — the stream is frozen from here";
+            let message = "the emulator thread panicked; the stream is frozen from here";
             eprintln!("{message}");
             self.0.publish_event(UiEventBody::Notice { level: "error", message: message.to_string() });
         }

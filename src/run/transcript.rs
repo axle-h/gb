@@ -178,6 +178,7 @@ mod tests {
             emulated_ms: 0,
             target_speed: 1.0,
             policy: "random",
+            model: None,
             agent_state: "idle".into(),
             frame_seq: 0,
             game: None,

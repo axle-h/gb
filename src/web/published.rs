@@ -68,8 +68,29 @@ pub struct FrameSnapshot {
 pub struct UiEvent {
     /// Monotonic from process start. `GET /api/history?since=<seq>` in W7 replays from here.
     pub seq: u64,
+    /// Unix milliseconds — when this was published, on the *wall* clock.
+    ///
+    /// ⚠️ **Wall clock rather than the run's own clocks, and it is the only one that can answer the
+    /// question the page asks.** `StatusSnapshot`'s `wall_ms`/`emulated_ms` are elapsed times since
+    /// *this process* started, so a run resumed nightly restarts both — a log row stamped from
+    /// either would say a line arrived four minutes in when it arrived last Tuesday. This is
+    /// absolute, so it survives the resume, and it is stamped once here rather than at the browser
+    /// because `/api/history` replays a backlog that may be hours old: a client-side clock would
+    /// date the whole backfill to the moment the page loaded.
+    ///
+    /// A transcript written before this field existed has no `at`, which is why the SPA's copy is
+    /// optional — an old run's backlog is still readable, it just has no times.
+    pub at: u64,
     #[serde(flatten)]
     pub body: UiEventBody,
+}
+
+/// Now, in Unix milliseconds. Saturating rather than `expect`: a host whose clock is set before 1970
+/// should lose its timestamps, not its run.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -214,6 +235,13 @@ pub struct StatusSnapshot {
     pub target_speed: f64,
     /// `"random"` or `"llm"`.
     pub policy: &'static str,
+    /// `GB_MODEL` — who is actually playing. `None` under any policy that is not an LLM.
+    ///
+    /// ⚠️ **The same rule the leaderboard's column follows** (see `EmulatorHost::file_completed_run`):
+    /// `RunMeta::model` is the literal `"random"` under `--policy random`, and a page saying "random
+    /// plays Pokémon Red" as if that were a model would be a small lie. The page's own fallback is
+    /// the policy name, which is already beside it.
+    pub model: Option<String>,
     /// [`crate::pokemon::agent::PokemonAgent::state_debug`] — which arm of the state machine is
     /// driving. The single most useful field when a run looks stuck.
     pub agent_state: String,
@@ -237,9 +265,11 @@ impl StatusSnapshot {
     /// is most of the time, and nothing in the UI renders it; leaving it in would mean the picture
     /// moving forced a status resend, which is precisely the traffic this is here to remove.
     pub fn says_the_same_as(&self, previous: &Self) -> bool {
-        let Self { wall_ms: _, emulated_ms: _, frame_seq: _, target_speed, policy, agent_state, game, run } = self;
+        let Self { wall_ms: _, emulated_ms: _, frame_seq: _, target_speed, policy, model, agent_state, game, run } =
+            self;
         target_speed == &previous.target_speed
             && policy == &previous.policy
+            && model == &previous.model
             && agent_state == &previous.agent_state
             && game == &previous.game
             && run == &previous.run
@@ -364,7 +394,7 @@ impl Published {
             }
         }
         let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
-        let _ = self.events.send(UiEvent { seq, body });
+        let _ = self.events.send(UiEvent { seq, at: now_ms(), body });
         seq
     }
 
@@ -402,7 +432,7 @@ impl Published {
     /// the ordering is free and there is no reason for the two paths to differ.
     pub fn publish_status(&self, snapshot: StatusSnapshot) -> u64 {
         let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
-        let event = UiEvent { seq, body: UiEventBody::Status(Box::new(snapshot)) };
+        let event = UiEvent { seq, at: now_ms(), body: UiEventBody::Status(Box::new(snapshot)) };
         *self.latest_status.write().expect("status lock poisoned") = Some(event.clone());
         let _ = self.events.send(event);
         seq
@@ -582,6 +612,47 @@ mod tests {
         assert_eq!(resumed.publish_event(UiEventBody::Notice { level: "info", message: "later".into() }), 500);
     }
 
+    /// Every event is stamped with the wall clock, and the stamp survives to the wire.
+    ///
+    /// It is the only clock on the page that means anything across a restart — `wall_ms` and
+    /// `emulated_ms` are both elapsed times *since this process started*, so a run resumed nightly
+    /// reports both from zero. The browser cannot supply one either: `/api/history` replays a backlog
+    /// that may be hours old, and a client-side clock would date the whole of it to the page load.
+    #[test]
+    fn an_event_carries_the_time_it_was_published() {
+        let published = Published::new();
+        let mut receiver = published.subscribe_events();
+        let before = now_ms();
+        published.publish_event(UiEventBody::Notice { level: "info", message: "hello".into() });
+        published.publish_status(snapshot("wait", 1));
+        let after = now_ms();
+
+        let event = receiver.try_recv().expect("the notice");
+        assert!((before..=after).contains(&event.at), "{} is not between {before} and {after}", event.at);
+        let json = serde_json::to_value(&event).expect("serialises");
+        assert_eq!(json["at"], event.at, "the SPA reads `at` off the event itself, beside `seq`");
+
+        let heartbeat = receiver.try_recv().expect("the heartbeat");
+        assert!(heartbeat.at >= event.at, "the stamps are in publication order");
+    }
+
+    /// Who is playing rides on the heartbeat, because the page's title says it and a title that
+    /// waits for the first decision would be wrong for the first minute of every run.
+    #[test]
+    fn the_heartbeat_says_which_model_is_playing() {
+        let json = serde_json::to_value(snapshot("wait", 1)).expect("serialises");
+        assert_eq!(json["model"], "gpt-5");
+        assert_eq!(json["policy"], "llm");
+
+        let random = StatusSnapshot { policy: "random", model: None, ..snapshot("wait", 1) };
+        assert!(random.model.is_none(), "`random` is not a model name and must not be shown as one");
+        assert_eq!(serde_json::to_value(&random).expect("serialises")["model"], serde_json::Value::Null);
+
+        // ⚠️ And it takes part in the suppression, or the first heartbeat after a change would be
+        // held back for saying nothing new.
+        assert!(!random.says_the_same_as(&snapshot("wait", 1)));
+    }
+
     /// §9's status. The interesting part is the *silence*: `set_status` is called from loops that run
     /// at 50 Hz, so a repeat must not be an event.
     #[test]
@@ -615,6 +686,7 @@ mod tests {
             emulated_ms: wall_ms,
             target_speed: 1.0,
             policy: "llm",
+            model: Some("gpt-5".to_string()),
             agent_state: agent_state.to_string(),
             frame_seq: wall_ms / 33,
             game: None,
@@ -664,6 +736,7 @@ mod tests {
     fn a_run_status_serialises_flat_with_a_state_discriminator() {
         let json = serde_json::to_value(UiEvent {
             seq: 7,
+            at: 1_760_000_000_000,
             body: UiEventBody::Run { status: RunStatus::RunningTool { name: "read_map".into() } },
         })
         .expect("serialises");

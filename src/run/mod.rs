@@ -383,6 +383,14 @@ impl CurrentRun {
         &self.root
     }
 
+    /// What is playing: `GB_MODEL`, or the literal `"random"` under `--policy random`. It is a
+    /// property of the *process* rather than of the run directory — a resumed run is replayed by
+    /// whatever this build was told to use, which is why the model is written into `meta.json`
+    /// again on every open.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     /// The run directory as of now. Cheap enough for the transcript thread to ask per event.
     pub fn get(&self) -> Arc<RunDir> {
         Arc::clone(&self.inner.read().expect("current run lock poisoned"))

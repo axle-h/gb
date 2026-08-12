@@ -178,7 +178,7 @@ impl Display for AgentEvent {
             AgentEvent::StartedOverworldAction { destination } =>
                 write!(f, "→ heading for {destination}"),
             AgentEvent::OverworldActionAborted { destination, reason } =>
-                write!(f, "✗ gave up on {destination} — {reason}"),
+                write!(f, "✗ gave up on {destination}: {reason}"),
             AgentEvent::OverworldActionCompleted { destination } =>
                 write!(f, "✓ reached {destination}"),
             // Not rendered by the page — `useEventStream`'s `fold` drops the kind, because the
@@ -213,12 +213,12 @@ impl Display for AgentEvent {
                 write!(f, "📖 {message}"),
             AgentEvent::WatchdogFired { agent_state, stuck_for } =>
                 write!(f, "⚠️ stuck in `{agent_state}` for {}s of game time without asking for a \
-                           decision — asking for a nudge", stuck_for.as_secs()),
+                           decision; asking for a nudge", stuck_for.as_secs()),
             // The one line in the log that is not narration of a step but the end of the story, so
             // it says the three things someone reading it later will want: that it happened, how
             // long it took, and who did it.
             AgentEvent::HallOfFame { playtime, badges, party, .. } =>
-                write!(f, "🏆 entered the HALL OF FAME with {} badges after {playtime} of play — {}",
+                write!(f, "🏆 entered the HALL OF FAME with {} badges after {playtime} of play, with {}",
                        badges.count_ones(), party.join(", ")),
         }
     }
@@ -1516,7 +1516,7 @@ impl PokemonAgent {
         // cartridge's own text speed, and still well inside the watchdog's 300 s.
         if drives_its_own_menus(&self.state)
             && self.cycles_since_poll.to_duration() >= DRIVER_ESCAPE_SILENCE {
-            let abandoned = format!("{} got no answer from the game for {:?} — starting over",
+            let abandoned = format!("{} got no answer from the game for {:?}; starting over",
                                     self.state, DRIVER_ESCAPE_SILENCE);
             api.release_all_buttons();
             self.set_state(AgentState::Idle);
@@ -2284,7 +2284,7 @@ impl PokemonAgent {
                             if *ticks >= MAX_NAVIGATING_TICKS {
                                 // Formatted before the state is touched: `action` borrows from the
                                 // `battle_state` that `set_battle_state` replaces.
-                                let gave_up = format!("battle navigation to {action:?} got nowhere in 5s — re-deciding");
+                                let gave_up = format!("battle navigation to {action:?} got nowhere in 5s; re-deciding");
                                 api.release_all_buttons();
                                 // Latched: whatever this was navigating may have left a sub-menu open,
                                 // and `WaitingForMenu` opens by pressing A. See `BattleState::backing_out`.
@@ -2611,7 +2611,7 @@ impl PokemonAgent {
                         *stalled += 1;
                         if *stalled >= STALL_TICKS {
                             self.event(AgentEvent::TextBox { message: format!(
-                                "pacing {tile_a}↔{tile_b} on {map} is blocked at {pos} — re-picking") });
+                                "pacing {tile_a}↔{tile_b} on {map} is blocked at {pos}; re-picking") });
                             api.release_all_buttons();
                             self.set_state(AgentState::Idle);
                             return Ok(());
@@ -2988,7 +2988,7 @@ impl PokemonAgent {
                     api.toggle_button(JoypadButton::B);
                     self.set_state(AgentState::Idle);
                     self.event(AgentEvent::TextBox {
-                        message: format!("the game refused SURF at {water_pos} — treating it as land") });
+                        message: format!("the game refused SURF at {water_pos}; treating it as land") });
                     return Ok(());
                 }
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;
@@ -3366,7 +3366,7 @@ impl PokemonAgent {
                     // handlers rather than pulsing forever: the buffer still holds the name we wrote,
                     // so the (buffer-is-empty) naming detection cannot immediately re-fire.
                     self.event(AgentEvent::TextBox { message: format!(
-                        "naming screen for {species:?} never closed in {NAMING_BUDGET} ticks — giving up") });
+                        "naming screen for {species:?} never closed in {NAMING_BUDGET} ticks; giving up") });
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -3598,7 +3598,7 @@ mod tests {
             badges: 0xFF,
             party: vec!["VAPOREON".into(), "ARTICUNO".into()],
         });
-        assert_eq!(said, "🏆 entered the HALL OF FAME with 8 badges after 06:12:44 of play — VAPOREON, ARTICUNO");
+        assert_eq!(said, "🏆 entered the HALL OF FAME with 8 badges after 06:12:44 of play, with VAPOREON, ARTICUNO");
     }
 
     /// ⚠️ **A ball is thrown at the enemy, and every other bag item is used on your own Pokémon.**
@@ -3627,7 +3627,7 @@ mod tests {
             destination: MetaTile::Pc,
             reason: OverworldActionAbortedReason::Battle,
         };
-        assert_eq!(format!("{event}"), "✗ gave up on the PC — a battle started");
+        assert_eq!(format!("{event}"), "✗ gave up on the PC: a battle started");
         assert_eq!(
             format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass }),
             "→ heading for tall grass",

@@ -47,7 +47,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
 /// the player is standing in front of the sprite that route is `[A]` for ever, and the "the route ran
 /// out" branch that completes an ordinary walk is never reached. The *only* signal that talking to
 /// someone worked is the box that opens, which the agent read as an interruption and reported as
-/// `OverworldActionAborted { reason: Textbox }`: "✗ gave up on Scientist 1 — something was said",
+/// `OverworldActionAborted { reason: Textbox }`: "✗ gave up on Scientist 1: something was said",
 /// after a conversation that went perfectly. It reached the model too, in the field the prompt calls
 /// the most useful thing the agent can say.
 ///
@@ -122,7 +122,7 @@ fn a_script_that_interrupts_a_walk_is_still_an_abort() {
 
     assert_eq!(
         format!("{outcome}"),
-        "✗ gave up on Scientist 1 — something was said",
+        "✗ gave up on Scientist 1: something was said",
         "the aide was never reached, so this is the abort it always was; got {outcome:?}",
     );
 }

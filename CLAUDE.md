@@ -145,7 +145,11 @@ second bug fixed by the same line.
 a `{:?}` in there puts `Fight { slot: 1, battle_move: PokemonMove { name: Growl, pp: 40 } }` on
 screen for every turn of every battle — which it did, on the deployed run, for months. It is also
 what `llm::prompt::describe_event` sends the *model*. `agent::tests::a_battle_turn_reads_as_a_sentence`
-is the only thing that looks at the prose. Relatedly, `BattleActionStarted` carries the acting
+is the only thing that looks at the prose. ⚠️ **No em dashes in any of it** — not here, not in a
+`Notice`, not in a turn headline, not in a decision summary. A colon, a semicolon or a full stop says
+the same thing in a log row read at a glance on a phone; the punctuation in *this* file and in the
+code comments is a different audience and is not the rule. (Prose written for the model —
+`llm::prompt`, `llm::tools`, a rejection sentence — is that other audience too, and is left alone.) Relatedly, `BattleActionStarted` carries the acting
 Pokémon's nickname **and the opponent's species**: nothing downstream can look either up, because
 the host formats events off the emulator thread and the battle has moved on by then. ⚠️ The opponent
 is read at the **decision point**, not at `BattleStarted`: `InitWildBattle` sets `wIsInBattle`
@@ -208,7 +212,21 @@ byte-identical to the one before; it is now 5.2. Two consequences: `StatusSnapsh
 `says_the_same_as`, which excludes the clocks and `frame_seq` (a derived `PartialEq` would never
 match and the suppression would silently never fire), and `/api/events` **opens with the latest
 heartbeat** — `Published::join_events`, subscribe-then-read, the same handshake as the video keyframe
-— or a page opened during a quiet stretch shows an empty panel.
+— or a page opened during a quiet stretch shows an empty panel. ⚠️ Anything *added* to the snapshot
+has to be added to `says_the_same_as`'s destructuring **and** compared there: the pattern is
+exhaustive, so a new field is a compile error, but binding it and not comparing it is not — and a
+change nobody compares is a change nobody is told about. `model` (who is playing, for the page's
+title) is the newest one.
+
+⚠️ **Every `UiEvent` carries `at`, a Unix-millisecond wall-clock stamp, and it is the only clock the
+page can date a line by.** `wall_ms` and `emulated_ms` are both elapsed times *since this process
+started*, so a run resumed nightly reports them from zero; the browser cannot supply one either,
+because `/api/history` replays a backlog that may be hours old and a client-side clock would date the
+whole backfill to the page load. It is stamped in `publish_event`/`publish_status` and therefore
+lands in `transcript.jsonl` too. ⚠️ **The SPA's copy is optional and must stay optional** — the runs
+on disk predate the field. Also ⚠️ `useEventStream`'s `signature` excludes it, for the reason it
+excludes `seq`: it differs on every event, so leaving it in would stop identical rows ever collapsing
+into a `×3` again.
 
 ## The model's side
 
@@ -290,10 +308,21 @@ completion tokens of a trivial overworld step**. `read_stream` now reports a `Fr
 completion tokens; a copy in the history pays for it again on every turn for the rest of the run.
 `Usage::estimate` counts it anyway — the endpoint charged for it, and that estimate is the bill.
 
-⚠️ **A thought is closed by the next event, not by the turn ending.** A turn that reads before it
-decides thinks once per completion, so `useEventStream`'s fold appends only while the reasoning row
-is still the *last* one — and `Conversation.tsx` reads that same fact as "still live", which is what
-makes the block collapse on its own when the tool call lands with no second event to say so.
+⚠️ **A thought is closed by the next thing the *model* says — not by the turn ending, and not by the
+next event of any kind.** Both wider rules were tried and both are wrong in a different direction. On
+the turn: a turn that reads before it decides thinks once per completion, so grouping on `turn` welds
+two thoughts around the tool call between them. On the next event: **the emulator never pauses while
+the model thinks**, so the agent narrates over the top of every thought it has ("→ heading for Mom",
+"✓ reached the warp to PalletTown") — and a fold that closed on those shredded a one-minute thought
+into five rows, four of them collapsed to `thought for 9 words`. `useEventStream`'s `MODEL_SIDE` is
+the line, `lastModelSide` finds the row, and ⚠️ **`Conversation.tsx` must read liveness the same
+way** — one decides what the row contains and the other how it is drawn, and they cannot disagree.
+
+⚠️ **The live thought scrolls in a box of its own, and pinning the log does not pin it.** It is capped
+at a few lines so it cannot bury the log, which means the tokens arriving land *below* the visible
+part of it: measured on the deployed run mid-thought at 222px of text in a 117px box with `scrollTop`
+0, so what a viewer watched for the length of a completion was its first nine lines, frozen. The
+`.body` element is followed separately, on the same terms as the pane above it.
 
 ⚠️ **An uncapped completion is bounded only by the context window, and that is not a bound.** A
 reasoning model that falls into a repetition loop generates until the window fills: measured at

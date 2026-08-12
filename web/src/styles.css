@@ -42,13 +42,27 @@ header {
   background: var(--panel);
 }
 
+/* Who is playing, as one unit: it wraps and truncates together rather than the model name being
+   orphaned onto a line of its own. A model id can be `qwen/qwen3-coder-30b-a3b-instruct`, so it is
+   the part that gives way — the ellipsis is on the name and the full string is on its `title`. */
+header .who {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
 header .title {
   font-weight: 600;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 header .policy {
   color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 header .spacer {
@@ -177,7 +191,11 @@ main {
   width: 32px;
   height: 32px;
   background-image: url('/api/badges.png');
+  /* The sheet is eight 16×16 badges in a row, drawn at 2×; `--slot` is which one, set by the
+     component. Size, stride and offset are three views of the same number and are kept together, so
+     the phone block below can halve all three by restating them. */
   background-size: 256px 32px;
+  background-position: calc(var(--slot) * -32px) 0;
   background-repeat: no-repeat;
   image-rendering: pixelated;
   opacity: 0.16;
@@ -355,9 +373,20 @@ main {
 
 .entry {
   display: grid;
-  grid-template-columns: 10ch 1fr;
+  grid-template-columns: 8ch 10ch 1fr;
   gap: 10px;
   padding: 1px 0;
+}
+
+/* The clock. `tabular-nums` is not decoration: without it the column's own digits shift by a pixel
+   or two between rows on any font that has proportional figures, and a column of times that does not
+   line up is worse than no column. It is dimmer than the gutter beside it because it is the least
+   important thing on the row — you read it when you are asking *when*, and never otherwise. */
+.entry .at {
+  color: var(--dim);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .entry .chip {
@@ -447,12 +476,37 @@ main {
   cursor: pointer;
 }
 
+/* ── Narrow screens ─────────────────────────────────────────────────────────────────────────────
+   Two breakpoints, and they answer different questions. At 900px the two columns stop fitting side
+   by side and become two rows. At 640px — a phone — the question is no longer layout but *budget*:
+   there are about 700 usable pixels of height, the Game Boy screen alone wants 373 of them at full
+   width, and what is left over is the thing the page is actually for. So below 640 everything that
+   is not the screen or the log gives up height: the canvas is capped, the party halves, the header's
+   figures fold away and the operator's lines go. */
+
+/* One column: the screen and the panels above, the log below. Everything here follows from that
+   stacking rather than from the width — which is why the canvas cap lives at this breakpoint and not
+   only at the phone one. Side by side the picture is bounded by its column; stacked it is bounded by
+   nothing, and 744px of tablet width is a 670px-tall picture with a 240px log under it. */
 @media (width < 900px) {
   main {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(240px, 1fr);
+    grid-template-rows: minmax(0, auto) minmax(33vh, 1fr);
+  }
+
+  /* The height cap has to be written as a width — see the phone block below for why. */
+  .screen canvas {
+    width: min(100%, calc(38vh * 10 / 9));
+    height: auto;
+    display: block;
+    margin: 0 auto;
+  }
+
+  .left {
+    max-height: 58vh;
   }
 }
+
 
 /* ── The model's side of the conversation (W4) ───────────────────────────────────────────────── */
 
@@ -783,4 +837,175 @@ header .trophy:hover {
 .plan-items li.done .what {
   text-decoration: line-through;
   text-decoration-color: color-mix(in srgb, var(--dim) 60%, transparent);
+}
+
+@media (width < 640px) {
+  :root {
+    /* The log is a wall of monospace read at arm's length on a handset. 13px is a desk size. */
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  header {
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  /* The header's job on a phone is: who is playing, what are they doing, is this thing live. The
+     bar and the running bill are a desk's questions and they are most of what makes this row feel
+     like noise — the percentage stays, because it is the one figure that says the run has a
+     lifetime, and the rest is still on the tooltip. The trophy stays too: one glyph, and the only
+     way to the Hall of Fame. */
+  header .gauge,
+  header .context .spent {
+    display: none;
+  }
+
+  /* Without this the pill is pushed onto a line of its own by a flex spacer with nothing to space:
+     three short chips fit beside each other on a second line, and the header is two lines rather
+     than three. */
+  header .spacer {
+    display: none;
+  }
+
+  header .who .policy {
+    max-width: 22ch;
+  }
+
+  header .run {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  main {
+    gap: 8px;
+    padding: 8px;
+    /* The screen and the panels take what they need; the log takes everything else and is never
+       squeezed below 38% of the viewport. */
+    grid-template-rows: minmax(0, auto) minmax(38vh, 1fr);
+  }
+
+  /* ⚠️ **The top row needs a ceiling as well as a floor, and the party is why.** The screen is a
+     fixed fraction of the viewport but the panel under it is not: an empty party is ~140px and six
+     Pokémon is ~260, so a layout tuned on a fresh save quietly halves the log four badges in. Above
+     this the left column scrolls within itself — the same thing it does on a laptop, and the reason
+     it has always had `overflow-y: auto`. */
+  .left {
+    max-height: 52vh;
+    gap: 8px;
+  }
+
+  /* ⚠️ **The canvas is capped by height, and the cap has to be expressed as a width.** At 100% of a
+     414px viewport the picture is 373px tall — more than half the usable height on a phone, before
+     the party or a single line of log. But `max-height` on a replaced element whose width is already
+     100% squashes the aspect ratio rather than shrinking it, and `width: auto` drops it to the
+     intrinsic 160px. The Game Boy is 10:9, so the height cap *is* `28vh × 10/9` of width, and the
+     ordinary `height: auto` then keeps the picture square-pixelled. */
+  .screen canvas {
+    width: min(100%, calc(28vh * 10 / 9));
+  }
+
+  .status {
+    padding: 8px 10px;
+  }
+
+  .place {
+    font-size: 14px;
+  }
+
+  /* Eight badges at 32px is 270px of a 414px screen and 32 of its pixels tall. At 24 the strip says
+     the same thing in three quarters of the room. */
+  .badges {
+    margin: 4px 0 0;
+  }
+
+  .badge {
+    width: 24px;
+    height: 24px;
+    background-size: 192px 24px;
+    background-position: calc(var(--slot) * -24px) 0;
+  }
+
+  /* Two columns of three, with the sprite at 32px rather than 56. A six-Pokémon party goes from
+     ~360px of a phone's height to ~120 — which is the single biggest thing on this page that was
+     spending height on something a viewer glances at. */
+  .party {
+    margin-top: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 4px 10px;
+  }
+
+  .party li {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    column-gap: 6px;
+    row-gap: 2px;
+  }
+
+  .party .sprite {
+    width: 32px;
+    height: 32px;
+  }
+
+  .party .hp,
+  .party .meta {
+    font-size: 12px;
+  }
+
+  .detail {
+    margin-top: 8px;
+    padding-top: 6px;
+    line-height: 1.4;
+  }
+
+  .detail .speed {
+    display: none;
+  }
+
+  /* The plan is a paragraph per item and a long-running model keeps a dozen. It scrolls in a box of
+     its own rather than pushing the log off the bottom of the page. */
+  .plan {
+    max-height: 22vh;
+    overflow-y: auto;
+    padding: 8px 10px;
+  }
+
+  /* ⚠️ **The log stops being a grid.** Three columns of 8ch + 10ch + the rest leaves under half the
+     width for the words, so the time and the gutter become an inline prefix and the line wraps back
+     to the left margin under them — the shape every phone chat log has, for this reason. */
+  .conversation-list {
+    padding: 8px 10px;
+  }
+
+  .entry {
+    display: block;
+    padding: 2px 0;
+  }
+
+  .entry .at {
+    margin-right: 6px;
+    font-size: 12px;
+  }
+
+  .entry .chip {
+    display: inline;
+    margin-right: 6px;
+    text-align: left;
+    font-size: 12px;
+  }
+
+  .entry .body {
+    display: inline;
+  }
+
+  /* …except a live thought, which is still its own scrolling box — inline it would be unbounded. */
+  .entry.reasoning.live .body {
+    display: block;
+    max-height: 7em;
+  }
+
+  .entry.turn {
+    margin-top: 8px;
+  }
 }
