@@ -226,6 +226,8 @@ impl LlmPolicy {
 }
 
 impl Policy for LlmPolicy {
+    fn name(&self) -> &'static str { "llm" }
+
     /// ⚠️ Runs at every poll of every decision point — fifty times a second — so the common path
     /// here is a snapshot and an empty `try_recv`.
     fn service_tools(&mut self, state: &GameState, api: &mut PokemonApi<'_>, graph: &WorldGraph) {

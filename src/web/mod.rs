@@ -28,11 +28,13 @@
 //! GET  /api/badges.png              the eight gym badges, decoded from the cartridge
 //! GET  /api/pokemon/{dex}/front.png one Pokémon's front sprite, decompressed from the cartridge
 //! GET  /api/history?since=          W7 — the transcript from a sequence number, for a fresh page
+//! GET  /api/leaderboard?limit=      the runs that have finished the game, fastest first
 //! POST /api/new-run                 the same reset, for a script; `X-GB-Token`
 //! ```
 
 pub mod assets;
 pub mod badges;
+pub mod leaderboard;
 pub mod published;
 pub mod sprites;
 pub mod video;
@@ -130,7 +132,8 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let current = Arc::new(CurrentRun::new(root, model.clone(), run));
     let run = current.get();
     println!(
-        "gb serve — {} run {} in {}",
+        "gb serve {} — {} run {} in {}",
+        crate::cli::VERSION,
         match origin {
             Origin::Fresh => "new",
             Origin::Resumed => "resuming",
@@ -196,7 +199,6 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         make_policy,
         Arc::clone(&published),
         HostConfig {
-            policy_name: policy_name(policy),
             run: Some(Arc::clone(&current)),
             new_runs: Some(Arc::clone(&new_runs)),
             status_interval: status_interval()?,
@@ -241,13 +243,6 @@ fn status_interval() -> Result<Duration, String> {
     match value.trim().parse::<f64>() {
         Ok(hz) if (0.1..=60.0).contains(&hz) => Ok(Duration::from_secs_f64(1.0 / hz)),
         _ => Err(format!("`GB_STATUS_HZ={value}` is not a rate between 0.1 and 60")),
-    }
-}
-
-fn policy_name(policy: ServePolicy) -> &'static str {
-    match policy {
-        ServePolicy::Random => "random",
-        ServePolicy::Llm => "llm",
     }
 }
 
@@ -299,6 +294,7 @@ fn routes() -> Router<AppState> {
         .route("/api/healthz", get(healthz))
         .route("/api/events", get(events))
         .route("/api/history", get(history))
+        .route("/api/leaderboard", get(leaderboard::leaderboard))
         .route("/api/video", get(video_stream))
         .route("/api/badges.png", get(badges::badges))
         .route("/api/pokemon/{dex}/front.png", get(sprites::front_pic))
@@ -333,6 +329,9 @@ async fn shutdown_signal() {
 async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
+        // Here rather than only in a run's record, so "which build is this?" is answerable against a
+        // live deployment without reading a file off the volume.
+        "version": crate::cli::VERSION,
         "uptime_ms": state.started.elapsed().as_millis() as u64,
         "video_seq": state.published.latest_keyframe().map(|k| k.seq),
         // Read per request rather than captured: `POST /api/new-run` changes it, and a liveness

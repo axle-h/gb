@@ -554,3 +554,120 @@ header .run.error {
    a URL somebody types: the browser collects `GB_ADMIN_TOKEN` in its own password dialog, so this
    page holds no token, no `prompt()` and no error states — and nothing links to it, because a GET
    that resets the game must not be reachable by a prefetch or a middle-click. */
+
+/* ── The Hall of Fame (the leaderboard) ─────────────────────────────────────────────────────────
+   An overlay rather than a panel: the left column is the screen and the party, the right is the
+   log, and neither has room for eight columns of numbers a viewer looks at once an hour. */
+
+.entry.hall_of_fame .chip,
+.entry.hall_of_fame .body {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+header .trophy {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+header .trophy:hover {
+  border-color: var(--accent);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 60%);
+}
+
+.leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* `max-height` plus the scroller below, rather than letting the panel grow: a hundred rows would
+     otherwise push the header off the top of the viewport, and the header holds the only close
+     button. */
+  max-width: 900px;
+  max-height: 80vh;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 50%);
+}
+
+.leaderboard header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+}
+
+.leaderboard header .title {
+  font-weight: 700;
+}
+
+.leaderboard .close {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.leaderboard p {
+  margin: 4px 0;
+}
+
+/* ⚠️ `min-height: 0` on a flex child, or the scroller grows to fit its content and the panel's
+   `max-height` never takes effect — the same hazard the conversation pane carries. */
+.leaderboard .scroller {
+  min-height: 0;
+  overflow: auto;
+}
+
+.leaderboard table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+
+.leaderboard th {
+  position: sticky;
+  top: 0;
+  padding: 4px 10px 6px 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--dim);
+  font-weight: 400;
+  text-align: left;
+}
+
+.leaderboard td {
+  padding: 3px 10px 3px 0;
+}
+
+/* Numbers line up on the right so two runs' times can be compared by eye, which is the whole
+   purpose of putting them in a table. */
+.leaderboard .right {
+  text-align: right;
+}
+
+.leaderboard tbody tr:hover {
+  background: var(--bg);
+}

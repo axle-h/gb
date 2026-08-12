@@ -701,6 +701,8 @@ impl RecordingPolicy {
 }
 
 impl crate::pokemon::policy::Policy for RecordingPolicy {
+    fn name(&self) -> &'static str { "recording" }
+
     fn on_event(&mut self, event: &AgentEvent) {
         self.log.borrow_mut().events.push(format!("{event:?}"));
     }
@@ -799,6 +801,8 @@ fn a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it() {
         decided: bool,
     }
     impl crate::pokemon::policy::Policy for AsksForStart {
+        fn name(&self) -> &'static str { "asks-for-start" }
+
         fn take_manual_input(&mut self) -> Vec<JoypadButton> {
             match std::mem::take(&mut self.decided) {
                 true => vec![JoypadButton::Start],
@@ -870,6 +874,8 @@ impl WatchdogSpy {
 }
 
 impl crate::pokemon::policy::Policy for WatchdogSpy {
+    fn name(&self) -> &'static str { "watchdog-spy" }
+
     fn stuck_timeout(&self) -> Option<Duration> {
         self.timeout
     }

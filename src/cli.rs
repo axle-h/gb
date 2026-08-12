@@ -12,6 +12,16 @@
 //! gb serve --new-run        start from the beginning of the game rather than resuming (W7)
 //! ```
 
+/// The crate version, from `Cargo.toml`.
+///
+/// `CARGO_PKG_VERSION` is set by cargo for every crate it compiles, so this needs nothing from
+/// `build.rs` — which is worth saying out loud, because `build.rs` is where every *other* generated
+/// constant in this crate comes from and the obvious guess is that this one does too.
+///
+/// It is bumped **by hand**: a version here is a claim about the run recorded under it
+/// (`run::hall_of_fame`), not a build number, so it should move when someone decides it has.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub const USAGE: &str = "\
 gb — Game Boy emulator and Pokémon Red LLM agent
 
