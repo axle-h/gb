@@ -99,7 +99,13 @@ a tool catalogue scoped to that kind of decision — read tools that inspect the
 map or the screen, and one terminal tool that commits to the action. The model keeps its own
 notes: a `memories/` directory and a TODO list it edits itself, rendered back into the system prompt
 each turn, which is how a playthrough spanning thousands of turns keeps a thread. History is
-compacted when it grows: images are evicted first, then older turns are summarised.
+compacted once it passes `GB_COMPACT_ABOVE` of the window: images are evicted first, then older
+turns are summarised.
+
+A model that streams its thinking separately — `reasoning_content`, which most local servers send and
+OpenAI does not — has it shown live in the log and collapsed to a line once the thought ends. It is
+never sent back: reasoning is billed as completion tokens once, and a copy in the history would pay
+for it again on every turn after that.
 
 Anything the model does not decide, the agent handles: dialogue is advanced, menus are navigated,
 paths across the map are computed from a graph of all 248 maps built out of the ROM's own headers.
@@ -224,7 +230,8 @@ All environment variables, never flags — the API key has to be one, so the res
 | `OPENAI_API_KEY` | required for `--policy llm` |
 | `GB_MODEL` | required for `--policy llm` |
 | `OPENAI_BASE_URL` | any OpenAI-compatible endpoint |
-| `GB_CONTEXT_LIMIT` | tokens of history before the turn loop compacts |
+| `GB_CONTEXT_LIMIT` | the context window, in tokens — set it to the model's, not the default 128 k |
+| `GB_COMPACT_ABOVE` | how full it gets before the turn loop compacts (`0.85`) |
 | `GB_TEMPERATURE`, `GB_MAX_TOOL_STEPS` | the turn loop's shape |
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog; `0` turns it off |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |

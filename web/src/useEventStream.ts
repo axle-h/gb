@@ -106,20 +106,27 @@ const UNLOGGED = new Set(['text_box', 'overworld_interaction_completed']);
 /**
  * Fold one event into the log.
  *
- * The only interesting case is `assistant_delta`: the worker publishes one event per fragment the
- * model emits, and the reply is the concatenation of all of them. Appending to the last entry when
- * it belongs to the same turn is what turns a stream of tokens back into a paragraph — and it has to
- * happen *here*, in the updater, rather than in the batch, because a flush can land in the middle of
- * a reply.
+ * The interesting cases are `assistant_delta` and `assistant_reasoning`: the worker publishes one
+ * event per fragment the model emits, and the reply — or the thought — is the concatenation of all
+ * of them. Appending to the last entry when it belongs to the same turn is what turns a stream of
+ * tokens back into a paragraph, and it has to happen *here*, in the updater, rather than in the
+ * batch, because a flush can land in the middle of a reply.
+ *
+ * ⚠️ **A thought is closed by the next event, not by the turn ending.** A turn that reads before it
+ * decides thinks once per completion, so grouping on `turn` alone would weld two separate thoughts —
+ * with a tool call and its result between them — into one block. Appending only when the reasoning
+ * row is still the *last* one is what keeps them apart, and it is the same fact the renderer uses to
+ * decide which block is still live.
  */
 function fold(entries: Entry[], event: UiEvent): Entry[] {
-  if (event.type === 'assistant_delta') {
+  if (event.type === 'assistant_delta' || event.type === 'assistant_reasoning') {
+    const type = event.type === 'assistant_delta' ? 'assistant' : 'reasoning';
     const last = entries[entries.length - 1];
-    if (last?.type === 'assistant' && last.turn === event.turn) {
+    if (last?.type === type && last.turn === event.turn) {
       return [...entries.slice(0, -1), { ...last, text: last.text + event.text }];
     }
     // Not through `push`: a reply grows, so it must never be collapsed against the row above it.
-    return [...entries, { seq: event.seq, type: 'assistant', turn: event.turn, text: event.text, raw: event, count: 1 }];
+    return [...entries, { seq: event.seq, type, turn: event.turn, text: event.text, raw: event, count: 1 }];
   }
   switch (event.type) {
     case 'status':

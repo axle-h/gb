@@ -20,11 +20,14 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
   // watching the shape of a whole stretch of the stream at once.
   const [showAllRaw, setShowAllRaw] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  // Which finished thoughts the viewer has opened back up. Separate from `expanded` because the two
+  // are different questions about the same row — "what did it think" and "what came down the wire".
+  const [thoughts, setThoughts] = useState<Set<number>>(() => new Set());
 
   useLayoutEffect(() => {
     const element = list.current;
     if (pinned && element) element.scrollTop = element.scrollHeight;
-  }, [entries, pinned, showAllRaw, expanded]);
+  }, [entries, pinned, showAllRaw, expanded, thoughts]);
 
   const onScroll = () => {
     const element = list.current;
@@ -33,6 +36,13 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
 
   const toggle = (seq: number) =>
     setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(seq)) next.add(seq);
+      return next;
+    });
+
+  const toggleThought = (seq: number) =>
+    setThoughts((current) => {
       const next = new Set(current);
       if (!next.delete(seq)) next.add(seq);
       return next;
@@ -51,16 +61,30 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
       </div>
       <div className="conversation-list" ref={list} onScroll={onScroll}>
         {entries.length === 0 && <p className="dim">waiting for the agent…</p>}
-        {entries.map((entry) => {
-          const { gutter, body, title, modifier } = render(entry);
+        {entries.map((entry, index) => {
+          // ⚠️ A thought is live exactly while it is the last row: the worker publishes one block per
+          // completion and closes it by saying something else, so "still thinking" is a property of
+          // the log's shape rather than a flag on the event. The block therefore collapses on its own
+          // the moment the reply or the tool call lands, with no second event to wait for.
+          const live = entry.type === 'reasoning' && index === entries.length - 1;
+          const unfolded = live || thoughts.has(entry.seq);
+          const { gutter, body, title, modifier } = render(entry, unfolded);
           const open = showAllRaw || expanded.has(entry.seq);
+          const thinking = entry.type === 'reasoning';
           return (
-            <div key={entry.seq} className={`entry ${entry.type} ${modifier}${open ? ' open' : ''}`}>
+            <div
+              key={entry.seq}
+              className={`entry ${entry.type} ${modifier}${open ? ' open' : ''}${live ? ' live' : ''}`}
+            >
               <span className="chip" title={title}>
                 {gutter}
               </span>
               <span className="body">
-                <button className="line" onClick={() => toggle(entry.seq)} title="Show the JSON this line was made from">
+                <button
+                  className="line"
+                  onClick={() => (thinking ? toggleThought(entry.seq) : toggle(entry.seq))}
+                  title={thinking ? 'What the model thought on its way to this turn' : 'Show the JSON this line was made from'}
+                >
                   {body}
                 </button>
                 {/* A repeat says nothing new, so it costs three characters rather than a row. */}
@@ -90,7 +114,8 @@ interface Rendered {
   modifier: string;
 }
 
-function render(entry: Entry): Rendered {
+/** `unfolded` is only consulted for a `reasoning` row: every other kind renders the same either way. */
+function render(entry: Entry, unfolded: boolean): Rendered {
   switch (entry.type) {
     case 'agent':
       return { gutter: category(entry.kind), body: entry.text, title: entry.kind, modifier: entry.kind };
@@ -100,6 +125,18 @@ function render(entry: Entry): Rendered {
       return { gutter: `#${entry.turn}`, body: entry.headline, title: `${entry.kind} decision`, modifier: entry.kind };
     case 'assistant':
       return { gutter: 'model', body: entry.text, title: `turn ${entry.turn}`, modifier: '' };
+    case 'reasoning':
+      // Shown while it happens and summarised once it is over. A local reasoning model spends most
+      // of a turn's output here — three quarters of it on a trivial overworld step — so leaving the
+      // block open would bury the reply, the tool call and the decision under the thinking that led
+      // to them. Watching it arrive is worth a great deal; re-reading it afterwards rarely is, so
+      // that costs a click.
+      return {
+        gutter: 'think',
+        body: unfolded ? entry.text : summarise(entry.text),
+        title: `turn ${entry.turn} — the model's own reasoning`,
+        modifier: unfolded ? 'unfolded' : '',
+      };
     case 'tool':
       // Arguments are shown, not hidden: `choose_action {"id": "PalletTown:5,6:Warp"}` is the single
       // most informative line in the whole log, and `read_map {}` costs three characters.
@@ -131,6 +168,18 @@ function render(entry: Entry): Rendered {
       };
     }
   }
+}
+
+/**
+ * What a finished thought collapses to. A word count rather than the first sentence: a reasoning
+ * model opens with "Okay, so the user wants me to" about as often as with anything worth quoting,
+ * and the useful thing to know at a glance is how long it deliberated.
+ */
+function summarise(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed === '') return 'thought about it';
+  const words = trimmed.split(/\s+/).length;
+  return `thought for ${words.toLocaleString()} word${words === 1 ? '' : 's'}`;
 }
 
 /** Arguments arrive as the model sent them, which may be pretty-printed across several lines. */

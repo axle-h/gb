@@ -281,8 +281,12 @@ impl Usage {
     /// that is the point — a token gauge that degrades beats one that freezes at zero for a whole run.
     pub fn estimate(request: &[Message], completion: &Completion) -> Self {
         let prompt = request.iter().map(Message::approximate_tokens).sum();
+        // Reasoning counts here even though it never enters the history: the endpoint billed for it,
+        // and this is the bill. On a reasoning model it is most of the completion — leaving it out
+        // would report a run costing four times what the gauge showed.
         let reply = Message::assistant(completion.content.clone(), completion.tool_calls.clone())
-            .approximate_tokens();
+            .approximate_tokens()
+            + Message::assistant(completion.reasoning.clone(), Vec::new()).approximate_tokens();
         Self { prompt_tokens: prompt, completion_tokens: reply, total_tokens: prompt + reply, estimated: true }
     }
 }
@@ -291,6 +295,14 @@ impl Usage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Completion {
     pub content: String,
+    /// What the model thought on its way to `content`, for the endpoints that stream it separately.
+    ///
+    /// ⚠️ **It is shown and recorded, and never sent back.** Reasoning is billed as completion
+    /// tokens once; putting it into the next request's history would pay for it again on every turn
+    /// after that, and this model spends three quarters of a trivial turn's output on it. Nothing
+    /// downstream builds a `Message` out of this field — see [`Message::assistant`], which takes
+    /// `content` alone.
+    pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
     pub finish_reason: Option<String>,
@@ -298,16 +310,38 @@ pub struct Completion {
 
 // ── The streaming parser ─────────────────────────────────────────────────────────────────────────
 
+/// One piece of a completion as it arrives, tagged with which channel it came in on.
+///
+/// ⚠️ **Two channels, not one string.** A reasoning model streams its thinking and its answer
+/// separately, and they have to stay separate all the way to the UI: the thinking is shown in a
+/// block that collapses when it ends, and — unlike the answer — it is never sent back to the
+/// endpoint. Concatenating them at the parser is what makes both of those impossible later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fragment<'a> {
+    /// Assistant prose: the reply itself.
+    Content(&'a str),
+    /// The model's own thinking, from `reasoning_content` / `reasoning`.
+    Reasoning(&'a str),
+}
+
+impl<'a> Fragment<'a> {
+    pub fn text(self) -> &'a str {
+        match self {
+            Fragment::Content(text) | Fragment::Reasoning(text) => text,
+        }
+    }
+}
+
 /// Consume an SSE body to the end of the completion.
 ///
-/// `on_delta` is called with each fragment of assistant prose as it arrives — this is what makes the
-/// browser show the model thinking rather than a spinner. `cancelled` is checked **on every line**,
-/// which is one of §7.3's two cancel points: returning `Err(LlmError::Cancelled)` drops the reader,
-/// which aborts the HTTP request and stops the endpoint billing for a completion that is already
-/// answering a dead question.
+/// `on_delta` is called with each fragment as it arrives — this is what makes the browser show the
+/// model thinking rather than a spinner. `cancelled` is checked **on every line**, which is one of
+/// §7.3's two cancel points: returning `Err(LlmError::Cancelled)` drops the reader, which aborts the
+/// HTTP request and stops the endpoint billing for a completion that is already answering a dead
+/// question.
 pub fn read_stream(
     reader: impl BufRead,
-    on_delta: &mut dyn FnMut(&str),
+    on_delta: &mut dyn FnMut(Fragment<'_>),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Completion, LlmError> {
     let mut accumulator = StreamAccumulator::default();
@@ -328,6 +362,7 @@ pub fn read_stream(
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     content: String,
+    reasoning: String,
     /// Indexed by the `index` field of the delta, which is how the API identifies *which* of several
     /// parallel calls a fragment belongs to.
     calls: Vec<PartialCall>,
@@ -345,7 +380,11 @@ struct PartialCall {
 impl StreamAccumulator {
     /// Fold one raw SSE line in. Returns `true` when the stream has said it is finished, so the
     /// caller stops reading rather than waiting for the connection to close.
-    pub fn push_line(&mut self, line: &str, on_delta: &mut dyn FnMut(&str)) -> Result<bool, LlmError> {
+    pub fn push_line(
+        &mut self,
+        line: &str,
+        on_delta: &mut dyn FnMut(Fragment<'_>),
+    ) -> Result<bool, LlmError> {
         // Blank lines separate events and a leading `:` is a keep-alive comment. Anything that is not
         // a `data:` field — `event:`, `id:`, `retry:` — is not something this protocol uses.
         let Some(payload) = line.strip_prefix("data:") else { return Ok(false) };
@@ -372,8 +411,14 @@ impl StreamAccumulator {
         }
 
         for choice in chunk.choices {
+            // Thinking first: a chunk carries one or the other, and on the endpoints that ever send
+            // both together the reasoning is what led to the prose beside it.
+            if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+                on_delta(Fragment::Reasoning(&text));
+                self.reasoning.push_str(&text);
+            }
             if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
-                on_delta(&text);
+                on_delta(Fragment::Content(&text));
                 self.content.push_str(&text);
             }
             for delta in choice.delta.tool_calls {
@@ -420,6 +465,7 @@ impl StreamAccumulator {
     pub fn finish(self) -> Completion {
         Completion {
             content: self.content,
+            reasoning: self.reasoning,
             tool_calls: self
                 .calls
                 .into_iter()
@@ -464,6 +510,13 @@ struct StreamChoice {
 struct MessageDelta {
     #[serde(default)]
     content: Option<String>,
+    /// A reasoning model's thinking, which arrives on a channel of its own rather than in `content`.
+    ///
+    /// ⚠️ **The field has two spellings in the wild and neither is in OpenAI's own schema.** LM
+    /// Studio, vLLM and DeepSeek send `reasoning_content`; OpenRouter sends `reasoning`. An endpoint
+    /// that sends neither is the ordinary case and leaves this `None`.
+    #[serde(default, alias = "reasoning")]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCallDelta>,
 }
@@ -518,14 +571,21 @@ mod tests {
     fn drain(lines: &[&str]) -> Completion {
         let mut accumulator = StreamAccumulator::default();
         let mut seen = String::new();
+        let mut thought = String::new();
         for line in lines {
-            let done = accumulator.push_line(line, &mut |delta| seen.push_str(delta)).expect("parses");
+            let done = accumulator
+                .push_line(line, &mut |delta| match delta {
+                    Fragment::Content(text) => seen.push_str(text),
+                    Fragment::Reasoning(text) => thought.push_str(text),
+                })
+                .expect("parses");
             if done {
                 break;
             }
         }
         let completion = accumulator.finish();
         assert_eq!(seen, completion.content, "every content delta must be reported as it arrives");
+        assert_eq!(thought, completion.reasoning, "and so must every reasoning delta");
         completion
     }
 
@@ -596,6 +656,43 @@ mod tests {
         assert!(estimate.estimated);
         assert_eq!(estimate.prompt_tokens, 100);
         assert!(estimate.total_tokens > estimate.prompt_tokens);
+    }
+
+    /// A reasoning model streams its thinking on a channel of its own, and the two must not be
+    /// concatenated: `content` is what goes back into the history, `reasoning` is what the page shows
+    /// and then collapses. Before this the field was simply an unknown key and serde dropped it — the
+    /// model looked silent for the whole turn and the reply was empty prose plus a tool call.
+    #[test]
+    fn reasoning_is_a_separate_channel_from_the_reply() {
+        let completion = drain(&[
+            r#"data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"The lab is"}}]}"#,
+            r#"data: {"choices":[{"delta":{"reasoning_content":" north of here."}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"Heading north."}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"wait","arguments":"{}"}}]}}]}"#,
+            "data: [DONE]",
+        ]);
+
+        assert_eq!(completion.reasoning, "The lab is north of here.");
+        assert_eq!(completion.content, "Heading north.", "the thinking is not part of the reply");
+        assert_eq!(completion.tool_calls.len(), 1);
+
+        // ⚠️ It is billed as completion tokens even though it never enters the history, so the
+        // estimator has to count it — this model spends most of a turn's output on it.
+        let with = Usage::estimate(&[], &completion);
+        let without = Usage::estimate(&[], &Completion { reasoning: String::new(), ..completion });
+        assert!(with.completion_tokens > without.completion_tokens, "{with:?} vs {without:?}");
+    }
+
+    /// ⚠️ The field has two spellings and neither is OpenAI's: LM Studio, vLLM and DeepSeek send
+    /// `reasoning_content`, OpenRouter sends `reasoning`. A stream carrying the other one must not
+    /// silently lose the thought.
+    #[test]
+    fn the_other_spelling_of_the_reasoning_field_is_read_too() {
+        let completion = drain(&[
+            r#"data: {"choices":[{"delta":{"reasoning":"Thinking about it."}}]}"#,
+            "data: [DONE]",
+        ]);
+        assert_eq!(completion.reasoning, "Thinking about it.");
     }
 
     /// Two different calls arriving with no `index` at all must not be concatenated into one — the id

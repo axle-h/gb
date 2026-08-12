@@ -12,7 +12,7 @@
 //!   │     └─ terminal tool call  →  break
 //!   ├─ budget exhausted without a terminal call → force `wait`
 //!   ├─ send TurnOutcome
-//!   └─ over 70% of the context? → compact (W6 / §9)
+//!   └─ over GB_COMPACT_ABOVE of the context? → compact (W6 / §9)
 //! ```
 //!
 //! **Cancellation is a generation counter checked at exactly two points**, because those are the
@@ -39,7 +39,7 @@ use crate::llm::config::LlmConfig;
 use crate::llm::notes::Notes;
 use crate::llm::prompt;
 use crate::llm::screenshot;
-use crate::llm::protocol::{ChatRequest, Completion, Message, StreamOptions, ToolCall, Usage};
+use crate::llm::protocol::{ChatRequest, Completion, Fragment, Message, StreamOptions, ToolCall, Usage};
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
 use crate::web::published::{Published, RunStatus, UiEventBody};
@@ -132,14 +132,6 @@ impl TurnHandles {
 /// a dead endpoint fifty times a second would turn an outage into a log flood, and the game is not
 /// going anywhere.
 const FAILURE_WAIT_TICKS: u16 = 100;
-
-/// **W6 / §9** — the occupancy at which the history is compacted, as a fraction of
-/// `GB_CONTEXT_LIMIT`. Both stages trigger here: eviction first, and summarisation only if eviction
-/// left it still over.
-///
-/// Measured on the calibrated scale — see [`crate::llm::accounting`], whose whole reason for
-/// existing is that "70% full" has to mean the same thing before and after a message is removed.
-const COMPACT_ABOVE: f64 = 0.70;
 
 /// Where [`Worker::trim_history`] drops back to. That function is W4's stopgap, kept as W6's **last
 /// resort**: it throws whole turns away from the front of the history rather than summarising them,
@@ -320,9 +312,13 @@ impl Worker {
                     &request,
                     &mut |delta| {
                         published.set_status(RunStatus::Streaming);
-                        published.publish_event(UiEventBody::AssistantDelta {
-                            turn: id,
-                            text: delta.to_string(),
+                        published.publish_event(match delta {
+                            Fragment::Content(text) => {
+                                UiEventBody::AssistantDelta { turn: id, text: text.to_string() }
+                            }
+                            Fragment::Reasoning(text) => {
+                                UiEventBody::AssistantReasoning { turn: id, text: text.to_string() }
+                            }
                         });
                     },
                     &|| generation.load(Ordering::SeqCst) != id,
@@ -530,7 +526,7 @@ impl Worker {
     /// its context in pictures it has already acted on. Stage 2 costs a completion, so it runs only
     /// when stage 1 left the history still over the line.
     fn compact_if_needed(&mut self) {
-        if self.accounting.occupancy(&self.messages) < COMPACT_ABOVE {
+        if self.accounting.occupancy(&self.messages) < self.config.compact_above {
             return;
         }
         let resume = self.published.run_status();
@@ -539,7 +535,7 @@ impl Worker {
 
         let images_evicted = compaction::evict_images(&mut self.messages, compaction::KEEP_IMAGES);
         let mut summarised = false;
-        let still_over = self.accounting.occupancy(&self.messages) >= COMPACT_ABOVE;
+        let still_over = self.accounting.occupancy(&self.messages) >= self.config.compact_above;
         if still_over && compaction::worth_summarising(&self.messages, compaction::KEEP_MESSAGES) {
             if let Some(summary) = self.summarise() {
                 compaction::apply_summary(&mut self.messages, &summary, compaction::KEEP_MESSAGES);
@@ -551,7 +547,7 @@ impl Worker {
         }
         // Still over: the summary was refused, or what it kept is itself too big. Dropping the oldest
         // turns is the last resort, and it leaves the summary alone (`compaction::is_summary`).
-        if self.accounting.occupancy(&self.messages) >= COMPACT_ABOVE {
+        if self.accounting.occupancy(&self.messages) >= self.config.compact_above {
             self.trim_history();
         }
 

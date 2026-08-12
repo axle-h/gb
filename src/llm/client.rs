@@ -15,20 +15,21 @@ use std::time::Duration;
 
 use crate::llm::LlmError;
 use crate::llm::config::LlmConfig;
-use crate::llm::protocol::{ChatRequest, Completion, describe_error_body, read_stream};
+use crate::llm::protocol::{ChatRequest, Completion, Fragment, describe_error_body, read_stream};
 
 /// One streamed chat completion. A trait so the worker can be driven by a scripted endpoint in tests
 /// without a socket, and so W6's accounting has one place to wrap.
 pub trait ChatEndpoint: Send {
     /// Stream one completion.
     ///
-    /// `on_delta` receives assistant prose as it arrives. `cancelled` is consulted on every line of
+    /// `on_delta` receives each [`Fragment`] — prose and reasoning on separate channels — as it
+    /// arrives. `cancelled` is consulted on every line of
     /// the response — see §7.3: it is one of the two points a turn can be abandoned, and returning
     /// [`LlmError::Cancelled`] drops the reader, which aborts the request.
     fn stream_completion(
         &self,
         request: &ChatRequest,
-        on_delta: &mut dyn FnMut(&str),
+        on_delta: &mut dyn FnMut(Fragment<'_>),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Completion, LlmError>;
 }
@@ -73,7 +74,7 @@ impl ChatEndpoint for OpenAiClient {
     fn stream_completion(
         &self,
         request: &ChatRequest,
-        on_delta: &mut dyn FnMut(&str),
+        on_delta: &mut dyn FnMut(Fragment<'_>),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Completion, LlmError> {
         let body = serde_json::to_string(request)
@@ -163,7 +164,7 @@ pub fn stream_with_retries(
     policy: RetryPolicy,
     endpoint: &dyn ChatEndpoint,
     request: &ChatRequest,
-    on_delta: &mut dyn FnMut(&str),
+    on_delta: &mut dyn FnMut(Fragment<'_>),
     cancelled: &dyn Fn() -> bool,
     on_retry: &mut dyn FnMut(Retry<'_>),
 ) -> Result<Completion, LlmError> {
@@ -240,12 +241,12 @@ mod tests {
         fn stream_completion(
             &self,
             _request: &ChatRequest,
-            on_delta: &mut dyn FnMut(&str),
+            on_delta: &mut dyn FnMut(Fragment<'_>),
             _cancelled: &dyn Fn() -> bool,
         ) -> Result<Completion, LlmError> {
             self.attempts.set(self.attempts.get() + 1);
             if !self.says.is_empty() {
-                on_delta(self.says);
+                on_delta(Fragment::Content(self.says));
             }
             self.outcomes.borrow_mut().remove(0)
         }

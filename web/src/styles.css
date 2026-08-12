@@ -533,6 +533,52 @@ header .run.error {
   color: var(--text);
 }
 
+/* The model's thinking. Dimmer and italic than everything else on purpose: it is the one thing in
+   the log that is not an account of what happened, and while it is live it can be several hundred
+   words arriving at reading speed. Once it is over it collapses to a single line — see
+   `Conversation.tsx`, where "live" means "still the last row". */
+.entry.reasoning .chip,
+.entry.reasoning .body {
+  color: var(--dim);
+  font-style: italic;
+}
+
+/* A live thought is capped rather than allowed to fill the pane, and scrolls within its own box so
+   the rows above it stay where the viewer left them. */
+.entry.reasoning.live .body {
+  display: block;
+  max-height: 9em;
+  overflow-y: auto;
+}
+
+.entry.reasoning .chip::after {
+  content: '';
+}
+
+/* Three dots that only exist while the model is actually thinking. */
+.entry.reasoning.live .chip::after {
+  content: '…';
+  animation: thinking 1.2s steps(4, end) infinite;
+}
+
+@keyframes thinking {
+  0% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .entry.reasoning.live .chip::after {
+    animation: none;
+  }
+}
+
 .entry.tool .chip,
 .entry.tool .body {
   color: #7fa8d4;

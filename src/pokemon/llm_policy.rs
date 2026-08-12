@@ -507,7 +507,7 @@ mod tests {
     use crate::llm::LlmError;
     use crate::llm::client::ChatEndpoint;
     use crate::llm::config::LlmConfig;
-    use crate::llm::protocol::{ChatRequest, Completion, FunctionCall, Message, Role, ToolCall};
+    use crate::llm::protocol::{ChatRequest, Completion, Fragment, FunctionCall, Message, Role, ToolCall};
     use crate::llm::worker;
     use crate::pokemon::PokemonApiTrait;
     use crate::pokemon::actions::OverworldAction;
@@ -532,7 +532,7 @@ mod tests {
         fn stream_completion(
             &self,
             request: &ChatRequest,
-            on_delta: &mut dyn FnMut(&str),
+            on_delta: &mut dyn FnMut(Fragment<'_>),
             cancelled: &dyn Fn() -> bool,
         ) -> Result<Completion, LlmError> {
             self.seen.lock().unwrap().push(request.clone());
@@ -551,8 +551,13 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
+            // Both channels, in the order a real endpoint sends them: a reasoning model thinks
+            // before it speaks, and the worker publishes the two as different events.
+            if !reply.completion.reasoning.is_empty() {
+                on_delta(Fragment::Reasoning(&reply.completion.reasoning));
+            }
             if !reply.completion.content.is_empty() {
-                on_delta(&reply.completion.content);
+                on_delta(Fragment::Content(&reply.completion.content));
             }
             Ok(reply.completion)
         }
@@ -581,6 +586,12 @@ mod tests {
     fn saying_calls(text: &str, pairs: &[(&str, &str)]) -> Reply {
         let mut reply = calls(pairs);
         reply.completion.content = text.to_string();
+        reply
+    }
+
+    /// A reply that thinks before it speaks, which is what every local reasoning model does.
+    fn thinking(thought: &str, mut reply: Reply) -> Reply {
+        reply.completion.reasoning = thought.to_string();
         reply
     }
 
@@ -645,6 +656,7 @@ mod tests {
                 api_key: "none".into(),
                 model: "scripted".into(),
                 context_limit: 128_000,
+                compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
                 temperature: 1.0,
                 max_tool_steps: 4,
                 stuck_timeout: Some(Duration::from_secs(300)),
@@ -851,7 +863,7 @@ mod tests {
         fn stream_completion(
             &self,
             request: &ChatRequest,
-            on_delta: &mut dyn FnMut(&str),
+            on_delta: &mut dyn FnMut(Fragment<'_>),
             cancelled: &dyn Fn() -> bool,
         ) -> Result<Completion, LlmError> {
             self.0.stream_completion(request, on_delta, cancelled)
@@ -1153,6 +1165,53 @@ mod tests {
                 "a press decided for a jam that has cleared must not be delivered afterwards");
         assert!(rig.drained_events().iter().any(|event| matches!(event, UiEventBody::TurnCancelled { .. })),
                 "a cancelled turn is an event, never a silence (§17 risk 2b)");
+    }
+
+    /// A reasoning model's thinking reaches the page as its own kind of event, and **never reaches
+    /// the endpoint again**.
+    ///
+    /// ⚠️ Both halves matter and they pull in opposite directions. Publishing it is the whole point —
+    /// without it the local models stream three quarters of their output into a field nothing read,
+    /// and the page showed a blank turn for however long the model thought. Sending it back is the
+    /// mistake that would make the fix expensive: reasoning is billed once as completion tokens, and
+    /// a copy in the history pays for it again on every turn for the rest of the run.
+    #[test]
+    fn thinking_is_published_but_never_sent_back() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        rig.push(vec![
+            thinking("Oak's lab is north.", calls(&[("read_map", "{}")])),
+            thinking("Yes, north.", saying_calls("Heading north.", &[("choose_action", &format!(r#"{{"id":"{id}"}}"#))])),
+        ]);
+
+        rig.pump_overworld(&mut policy).expect("the turn lands");
+        let events = rig.events_until(Duration::from_secs(5), |event| matches!(event, UiEventBody::Decision { .. }));
+
+        let thoughts: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                UiEventBody::AssistantReasoning { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, ["Oak's lab is north.", "Yes, north."], "one block per completion, not per turn");
+
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                UiEventBody::AssistantDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["Heading north."], "the reply is still its own channel");
+
+        // Nothing the model thought may appear in any message of any request that follows.
+        for request in rig.requests() {
+            for message in &request.messages {
+                let text = message.text().unwrap_or_default();
+                assert!(!text.contains("north."), "the thinking was sent back to the endpoint: {text}");
+            }
+        }
     }
 
     /// §7.3's rollback. A batch is cancelled mid-turn; the assistant message whose calls were never
@@ -1509,8 +1568,10 @@ mod tests {
             calls(&[("choose_action", &choose)]),
             calls(&[("choose_action", &choose)]),
             calls(&[("choose_action", &choose)]),
-            // ~3 200 tokens of reasoning in one turn, which is what puts it over 70% of 6 000.
-            saying_calls(&"I am thinking very hard about this. ".repeat(320), &[("choose_action", &choose)]),
+            // ~4 900 tokens of prose in one turn, which is what puts it over `compact_above` (0.85)
+            // of 6 000. ⚠️ Sized against the *threshold*, so it moves when the default does — a turn
+            // that lands just under it makes this test pass by never compacting at all.
+            saying_calls(&"I am thinking very hard about this. ".repeat(500), &[("choose_action", &choose)]),
             says("I am in Oak's lab with a Squirtle, about to leave for Route 1."),
             calls(&[("choose_action", &choose)]),
         ]);

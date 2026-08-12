@@ -93,6 +93,15 @@ pub enum UiEventBody {
     TurnStarted { turn: u64, kind: &'static str, headline: String },
     /// One fragment of the assistant's prose, as it arrives.
     AssistantDelta { turn: u64, text: String },
+    /// One fragment of the model's *thinking*, as it arrives, for the endpoints that stream it
+    /// separately from the reply (`reasoning_content`).
+    ///
+    /// A separate event rather than an `AssistantDelta` because the page treats it differently — it
+    /// is shown live and then collapsed once the thought ends — and because it is the one thing the
+    /// model says that is never sent back to it. ⚠️ **The turn alone does not delimit a thought**:
+    /// a turn that reads before it decides thinks once per completion, so the client closes the
+    /// block on the next event of any other kind rather than on the turn changing.
+    AssistantReasoning { turn: u64, text: String },
     /// A tool the model called. `arguments` is the raw JSON string it sent.
     ToolCall { turn: u64, name: String, arguments: String },
     /// The terminal call that ended the turn.
