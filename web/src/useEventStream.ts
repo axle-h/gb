@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Connection, Entry, EntryBody, RunStatus, Status, UiEvent, UsageView } from './api';
+import type { Connection, Entry, EntryBody, RunStatus, Status, TodoView, UiEvent, UsageView } from './api';
 
 /** How long the conversation keeps. A run is hours long; the DOM is not the transcript (W7 is). */
 const MAX_ENTRIES = 500;
@@ -57,6 +57,14 @@ export interface EventStream {
   usage: UsageView | null;
   /** W6. From the transition event, which is instant; the heartbeat's copy is the late-joiner path. */
   run: RunStatus;
+  /**
+   * W6b. The model's plan, as of the last time it changed.
+   *
+   * ⚠️ **State, not a log row.** It is a *replacement* every time — the server publishes the whole
+   * list — so folding it into the conversation would print the entire plan again for every item the
+   * model ever ticks off, and the page's job is to show what the plan *is*.
+   */
+  plan: TodoView[];
 }
 
 /**
@@ -131,7 +139,8 @@ function fold(entries: Entry[], event: UiEvent): Entry[] {
   switch (event.type) {
     case 'status':
     case 'run_status':
-      return entries; // handled separately — neither may re-render the log
+    case 'plan':
+      return entries; // handled separately — none of these may re-render the log
     case 'turn_started':
       return push(entries, { type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }, event);
     case 'tool_call':
@@ -173,6 +182,7 @@ export function useEventStream(): EventStream {
   const [connection, setConnection] = useState<Connection>('connecting');
   const [usage, setUsage] = useState<UsageView | null>(null);
   const [run, setRun] = useState<RunStatus>({ state: 'booting' });
+  const [plan, setPlan] = useState<TodoView[]>([]);
   // Batched between animation frames: a burst of dialogue is many events in one tick, and a
   // streaming reply is one per token — each would otherwise be its own render.
   const pending = useRef<UiEvent[]>([]);
@@ -191,6 +201,12 @@ export function useEventStream(): EventStream {
           for (const event of backlog) {
             if (event.type === 'decision' && event.usage) setUsage((current) => current ?? event.usage!);
           }
+          // ⚠️ The **last** plan in the backlog, and only if the stream has not already delivered a
+          // newer one — the same "live wins" rule the entries below use. Each event carries the
+          // whole list, so replaying them in order and keeping the final one is the current plan.
+          const planned = backlog.filter((event) => event.type === 'plan');
+          const latest = planned[planned.length - 1];
+          if (latest?.type === 'plan') setPlan((live) => (live.length > 0 ? live : latest.items));
           const older = backlog.reduce(fold, [] as Entry[]);
           setEntries((live) => {
             // Anything the stream has already delivered wins; the transcript only fills in what
@@ -229,6 +245,10 @@ export function useEventStream(): EventStream {
           setRun(event.status);
           return;
         }
+        if (event.type === 'plan') {
+          setPlan(event.items);
+          return;
+        }
         if (event.type === 'decision' && event.usage) setUsage(event.usage);
         pending.current.push(event);
         // A backgrounded tab gets no animation frames, and a livestream is left in one for hours —
@@ -248,5 +268,5 @@ export function useEventStream(): EventStream {
 
   useEffect(() => () => cancelAnimationFrame(frame.current ?? 0), []);
 
-  return { status, entries, connection, usage, run };
+  return { status, entries, connection, usage, run, plan };
 }

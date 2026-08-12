@@ -173,7 +173,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         ServePolicy::Random => Box::new(|| Box::new(RandomPolicy::default())),
         #[cfg(feature = "llm")]
         ServePolicy::Llm => {
-            use crate::llm::{client::OpenAiClient, notes::Notes, worker};
+            use crate::llm::{client::OpenAiClient, todo::TodoList, worker};
             use crate::pokemon::llm_policy::LlmPolicy;
 
             let config = llm.expect("built above");
@@ -182,11 +182,11 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // **W9** — read off before `config` is moved into the worker. The watchdog belongs to
             // the policy (it is what the agent asks how long to wait), not to the turn loop.
             let stuck_timeout = config.stuck_timeout;
-            // **W6b** — the model's own notes live in the run directory, so they survive both a
+            // **W6b** — the model's own plan lives in the run directory, so it survives both a
             // compaction and a restart.
-            let notes = Notes::open(Some(run.path()));
+            let todo = TodoList::open(Some(run.path()));
             let (worker, handles) =
-                worker::channels(endpoint, config, Arc::clone(&published), notes);
+                worker::channels(endpoint, config, Arc::clone(&published), todo);
             // The worker outlives this function; it ends when the policy is dropped and its channels
             // close, which happens when the emulator thread stops.
             worker.spawn()?;

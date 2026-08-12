@@ -117,6 +117,13 @@ pub enum UiEventBody {
     /// to find out what is happening.
     #[serde(rename = "run_status")]
     Run { status: RunStatus },
+    /// **W6b / §10** — the model's plan, in full, whenever it changes.
+    ///
+    /// The one thing on this page that is neither the game nor the conversation: it is what the run
+    /// is *trying* to do, which a viewer cannot infer from either. Published on change rather than
+    /// on a timer, and replayed by `/api/history`, so a page opened an hour in shows the current
+    /// list — the fold keeps the latest and discards every earlier one.
+    Plan { items: Vec<TodoView> },
     /// §9 — the history was compacted. `before` and `after` are tokens, on the calibrated scale
     /// `llm::accounting` describes.
     Compacted {
@@ -160,6 +167,18 @@ pub enum RunStatus {
     /// The last turn could not be completed. Left in place until the next turn starts, because a
     /// status that flicks straight back to `Playing` is a status nobody ever sees.
     Error { message: String },
+}
+
+/// One item on the model's plan, as the page draws it.
+///
+/// ⚠️ **Its own type rather than `llm::todo::TodoItem`**, for the same reason [`RunStatus`] takes a
+/// `&'static str` where the worker has a `DecisionKind`: this module is the interface to the *web*
+/// half and must compile with the `llm` feature off.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TodoView {
+    pub id: u32,
+    pub text: String,
+    pub done: bool,
 }
 
 /// Context occupancy and the run's bill so far. Published with every decision, so a viewer sees the

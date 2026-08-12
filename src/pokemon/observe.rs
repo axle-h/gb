@@ -22,7 +22,6 @@ use crate::pokemon::PokemonApiTrait;
 use crate::pokemon::badge::Badge;
 use crate::pokemon::battle::BattleType;
 use crate::pokemon::map::Map;
-use crate::pokemon::policy::battle_options;
 use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::pokered_symbols;
 use crate::pokemon::symbols::DmgPointerRead;
@@ -43,33 +42,15 @@ macro_rules! view {
 
 // ── Trainer ──────────────────────────────────────────────────────────────────────────────────────
 
-view! {
-    /// Who the player is and what they have to show for it.
-    pub struct TrainerView {
-        pub name: String,
-        pub rival_name: String,
-        /// Badge names in the order the game awards them, e.g. `["BoulderBadge", "CascadeBadge"]`.
-        pub badges: Vec<String>,
-        pub badge_count: u32,
-        pub money: u32,
-        pub coins: u16,
-        pub has_pokedex: bool,
-        pub pokedex_owned: usize,
-        pub pokedex_seen: usize,
-        /// `HH:MM:SS` of in-game play time. Saturates at 255:59:59, as the game itself does — pokered
-        /// sets `wPlayTimeMaxed` and stops counting.
-        pub playtime: String,
-        pub playtime_maxed: bool,
-        /// `wNumHoFTeams` — non-zero once the game has been beaten. See
-        /// [`GameState::hall_of_fame_teams`].
-        pub hall_of_fame_teams: u8,
-    }
-}
+// ⚠️ **There was a `TrainerView` and a `read_trainer` here.** Everything it returned but the
+// Pokédex counts was already in the header of every turn request — badges, money, play time — and
+// the counts are one line, so they moved into the header too and the tool went. A read whose answer
+// the model was already holding is a round trip bought for nothing.
 
 /// `HH:MM:SS` of in-game play time. Saturates at 255:59:59, as the game itself does.
 ///
-/// Public because it is the one line of [`TrainerView`] a turn request wants without the other
-/// eleven — see [`crate::llm::prompt::ApiSnapshot`].
+/// Public because a turn request wants it in its header and the status heartbeat wants it too —
+/// see [`crate::llm::prompt::ApiSnapshot`].
 pub fn playtime(api: &PokemonApi<'_>) -> String {
     let (hours, minutes, seconds) = playtime_parts(api);
     format!("{hours:02}:{minutes:02}:{seconds:02}")
@@ -93,24 +74,6 @@ fn playtime_parts(api: &PokemonApi<'_>) -> (u8, u8, u8) {
         mmu.read_pointer(&pokered_symbols::wPlayTimeMinutes),
         mmu.read_pointer(&pokered_symbols::wPlayTimeSeconds),
     )
-}
-
-pub fn trainer(state: &GameState, api: &PokemonApi<'_>) -> TrainerView {
-    let mmu = api.mmu();
-    TrainerView {
-        name: state.name.to_default_string(),
-        rival_name: state.rival_name.to_default_string(),
-        badges: state.badges.iter_names().map(|(name, _)| name.to_string()).collect(),
-        badge_count: state.badges.bits().count_ones(),
-        money: state.money,
-        coins: state.coins,
-        has_pokedex: state.has_pokedex,
-        pokedex_owned: state.pokedex_owned.species().len(),
-        pokedex_seen: state.pokedex_seen.species().len(),
-        playtime: playtime(api),
-        playtime_maxed: mmu.read_pointer(&pokered_symbols::wPlayTimeMaxed) != 0,
-        hall_of_fame_teams: state.hall_of_fame_teams,
-    }
 }
 
 // ── Party ────────────────────────────────────────────────────────────────────────────────────────
@@ -272,21 +235,11 @@ view! {
 }
 
 view! {
-    /// An action the agent can execute right now, as the policy would receive it. `steps` is the
-    /// route length rather than the route itself — the button sequence is the agent's business and
-    /// forty `Up`/`Down` tokens tell a decider nothing that "23 steps" does not.
-    pub struct ActionView {
-        pub destination: Point,
-        /// What is there, named — `"the warp to OaksLab"`, `"the way into Route1"`, `"Mom"`. This is
-        /// [`MetaTile`](crate::pokemon::tile::MetaTile)'s prose and **not** the `MetaTile::kind` an
-        /// action id is minted from, so it is a thing to read rather than a thing to quote back; the
-        /// id to quote is in the turn's menu.
-        pub tile: String,
-        pub steps: usize,
-    }
-}
-
-view! {
+    /// ⚠️ **The reachable actions are deliberately not here.** They were, and they were a second
+    /// copy of the menu the turn request already renders — but *without the ids*, since an id is
+    /// minted from `MetaTile::kind` in the tool layer and this view never had one. A duplicate the
+    /// model cannot quote back is worse than no duplicate: it reads as a list of choices and every
+    /// one of them is rejected. The menu in the turn is the only list of actions there is.
     pub struct MapView {
         pub map: String,
         pub position: Point,
@@ -299,9 +252,6 @@ view! {
         pub sprites: Vec<SpriteView>,
         pub warps: Vec<WarpView>,
         pub connections: Vec<String>,
-        /// Everything reachable from where the player is standing, which is the menu a decider
-        /// actually chooses from. An empty list means the player is boxed in.
-        pub actions: Vec<ActionView>,
         pub is_dark: bool,
         pub can_use_cut: bool,
         pub can_use_surf: bool,
@@ -348,19 +298,6 @@ pub fn map_view(state: &GameState) -> MapView {
             connections.sort();
             connections
         },
-        actions: {
-            // Sorted for the same reason as `warps` below: `actions()` walks `warp_targets`, a
-            // `HashSet`, so the natural order changes between two calls on an unchanged map — which
-            // reads to a model as the world having moved under it.
-            let mut actions: Vec<ActionView> = map.actions().into_iter().map(|action| ActionView {
-                destination: action.destination.into(),
-                tile: format!("{}", action.tile),
-                steps: action.route.len(),
-            }).collect();
-            actions.sort_by(|a, b| (a.destination.y, a.destination.x, &a.tile)
-                .cmp(&(b.destination.y, b.destination.x, &b.tile)));
-            actions
-        },
         is_dark: state.map_is_dark,
         can_use_cut: state.can_use_cut,
         can_use_surf: state.can_use_surf,
@@ -398,50 +335,36 @@ pub fn screen_text(api: &PokemonApi<'_>) -> Option<String> {
 // ── World graph ──────────────────────────────────────────────────────────────────────────────────
 
 view! {
-    pub struct WorldGraphEdgeView {
-        pub from: Point,
-        pub to_map: String,
-        pub to_position: Point,
-        /// `"Warp"` or `"Connection"`.
-        pub kind: String,
-    }
-}
-
-view! {
-    pub struct WorldGraphNodeView {
+    /// One map on the way to somewhere. `via` is how it is entered — `"Warp"` or `"Connection"` —
+    /// and is absent on the first hop, which is the map already stood on.
+    pub struct RouteHopView {
         pub map: String,
-        /// Where the player entered this map. One map can hold several nodes, one per entrance.
-        pub entry: Point,
-        pub edges: Vec<WorldGraphEdgeView>,
+        pub via: Option<String>,
     }
 }
 
-view! {
-    /// ⚠️ **Only maps the player has physically stood on.** The graph is built incrementally by
-    /// [`WorldGraph::observe`], so an absent map means "not visited yet", never "does not exist" or
-    /// "unreachable". It answers "how do I get back to somewhere I have been", not "where is X".
-    pub struct WorldGraphView {
-        pub map_count: usize,
-        pub edge_count: usize,
-        pub nodes: Vec<WorldGraphNodeView>,
-    }
-}
-
-pub fn world_graph(graph: &WorldGraph) -> WorldGraphView {
-    let mut nodes: Vec<WorldGraphNodeView> = graph.nodes().into_iter()
-        .map(|((map, entry), edges)| WorldGraphNodeView {
-            map: format!("{map}"),
-            entry: entry.into(),
-            edges: edges.into_iter().map(|edge| WorldGraphEdgeView {
-                from: edge.from.location.into(),
-                to_map: format!("{}", edge.to.map),
-                to_position: edge.to.location.into(),
-                kind: format!("{:?}", edge.kind),
-            }).collect(),
-        }).collect();
-    // Same reason as `warps`: a stable order, so an unchanged world reads as unchanged.
-    nodes.sort_by(|a, b| (&a.map, a.entry.y, a.entry.x).cmp(&(&b.map, b.entry.y, b.entry.x)));
-    WorldGraphView { map_count: graph.map_count(), edge_count: graph.edge_count(), nodes }
+/// The maps between here and `to`, in order, or `None` if the walked graph does not join them.
+///
+/// ⚠️ **This replaced a view that serialised the whole graph**, and the reason is size rather than
+/// taste: every visited `(map, entry)` node with all of its edges is unbounded by construction and,
+/// by the late game, a meaningful fraction of a context window in one tool result. Nothing ever
+/// wanted the adjacency list — the question is always "which way is Celadon" — so the search runs
+/// here, where the graph already is, and what crosses into the context is the answer to it.
+///
+/// ⚠️ **Only maps the player has physically stood on.** The graph is built incrementally by
+/// [`WorldGraph::observe`], so `None` means "no route through ground you have walked", never "does
+/// not exist" or "unreachable".
+pub fn route(graph: &WorldGraph, from: Map, to: Map) -> Option<Vec<RouteHopView>> {
+    Some(
+        graph
+            .shortest_path(from, to)?
+            .into_iter()
+            .map(|step| RouteHopView {
+                map: format!("{}", step.map),
+                via: step.via.map(|kind| format!("{kind:?}")),
+            })
+            .collect(),
+    )
 }
 
 // ── Battle ───────────────────────────────────────────────────────────────────────────────────────
@@ -461,6 +384,9 @@ view! {
 }
 
 view! {
+    /// ⚠️ **The legal actions are deliberately not here**, for the same reason [`MapView`] does not
+    /// carry them: they were a second copy of the turn's own battle menu without the ids that menu
+    /// mints, so every one of them was a choice the model could not make.
     pub struct BattleView {
         /// `"Wild"`, `"Trainer"` or `"Safari"`.
         pub battle_type: String,
@@ -474,8 +400,6 @@ view! {
         pub enemy_trapping: bool,
         /// The live catch rate `ItemUseBall` compares against, after any Safari rock or bait.
         pub enemy_catch_rate: u8,
-        /// Every legal action, as the policy would be offered it.
-        pub options: Vec<String>,
     }
 }
 
@@ -502,8 +426,6 @@ pub fn battle(state: &GameState) -> Option<BattleView> {
         active_party_slot: battle.active_party_slot,
         enemy_trapping: battle.enemy_trapping,
         enemy_catch_rate: battle.enemy_catch_rate,
-        options: battle_options(state).unwrap_or_default()
-            .into_iter().map(|action| format!("{action}")).collect(),
     })
 }
 

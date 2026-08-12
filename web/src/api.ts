@@ -72,6 +72,20 @@ export interface Status {
   run: RunStatus;
 }
 
+/**
+ * `published::TodoView` — one item on the model's plan.
+ *
+ * ⚠️ **The only thing on this page that is neither the game nor the conversation.** It is what the
+ * run is *trying* to do, which a viewer cannot infer from watching either — and it is also the only
+ * thing the model writes that survives a compaction or a restart, so the two audiences want the
+ * same list for once.
+ */
+export interface TodoView {
+  id: number;
+  text: string;
+  done: boolean;
+}
+
 /** `published::UsageView` — context occupancy after a turn, and the run's bill so far. */
 export interface UsageView {
   /** Prompt + completion of the most recent response: how full the window was, last time we knew. */
@@ -101,6 +115,11 @@ export type UiEvent =
   | { seq: number; type: 'turn_cancelled'; turn: number; reason: string }
   // W6.
   | { seq: number; type: 'run_status'; status: RunStatus }
+  /**
+   * W6b. The model's plan, in full, whenever it changes — so the newest one wins and every earlier
+   * one is discarded, including the ones `/api/history` replays into a page that just loaded.
+   */
+  | { seq: number; type: 'plan'; items: TodoView[] }
   | {
       seq: number;
       type: 'compacted';
