@@ -1,5 +1,6 @@
 import { memo, useLayoutEffect, useRef, useState } from 'react';
 import type { Entry } from '../api';
+import { lastModelSide } from '../useEventStream';
 
 /** Within this many pixels of the bottom counts as following the stream. */
 const PIN_SLACK = 24;
@@ -13,6 +14,13 @@ const PIN_SLACK = 24;
  */
 export const Conversation = memo(function Conversation({ entries }: { entries: Entry[] }) {
   const list = useRef<HTMLDivElement>(null);
+  // ⚠️ **The live thought scrolls inside its own box, and that box has to be followed separately.**
+  // A thought is capped at a few lines so it cannot bury the log, which means the tokens arriving
+  // are appended *below* the visible part of it: the pane pins itself to the bottom of the list and
+  // the thought is still showing its first nine lines, frozen, for the whole minute the model
+  // thinks. Measured on the deployed run mid-thought — 222px of text in a 117px box, `scrollTop` 0.
+  const thought = useRef<HTMLSpanElement>(null);
+  const [thoughtPinned, setThoughtPinned] = useState(true);
   // Pinned to the bottom unless the viewer has scrolled up to read something — in which case the
   // stream must not yank them back down.
   const [pinned, setPinned] = useState(true);
@@ -29,9 +37,25 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
     if (pinned && element) element.scrollTop = element.scrollHeight;
   }, [entries, pinned, showAllRaw, expanded, thoughts]);
 
+  // The live thought follows its own tail, on the same terms as the list above it: pinned until the
+  // viewer scrolls back through it, and re-pinned when the next thought starts (a new row means a
+  // fresh element, so the ref changes and there is nothing left to have scrolled away from).
+  const openBlock = lastModelSide(entries);
+  const liveSeq = entries[openBlock]?.type === 'reasoning' ? entries[openBlock].seq : null;
+  useLayoutEffect(() => setThoughtPinned(true), [liveSeq]);
+  useLayoutEffect(() => {
+    const element = thought.current;
+    if (thoughtPinned && element) element.scrollTop = element.scrollHeight;
+  }, [entries, thoughtPinned]);
+
   const onScroll = () => {
     const element = list.current;
     if (element) setPinned(element.scrollTop + element.clientHeight >= element.scrollHeight - PIN_SLACK);
+  };
+
+  const onThoughtScroll = () => {
+    const element = thought.current;
+    if (element) setThoughtPinned(element.scrollTop + element.clientHeight >= element.scrollHeight - PIN_SLACK);
   };
 
   const toggle = (seq: number) =>
@@ -62,11 +86,14 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
       <div className="conversation-list" ref={list} onScroll={onScroll}>
         {entries.length === 0 && <p className="dim">waiting for the agent…</p>}
         {entries.map((entry, index) => {
-          // ⚠️ A thought is live exactly while it is the last row: the worker publishes one block per
-          // completion and closes it by saying something else, so "still thinking" is a property of
-          // the log's shape rather than a flag on the event. The block therefore collapses on its own
-          // the moment the reply or the tool call lands, with no second event to wait for.
-          const live = entry.type === 'reasoning' && index === entries.length - 1;
+          // ⚠️ A thought is live exactly while it is the last row **the model wrote**: the worker
+          // publishes one block per completion and closes it by saying something else, so "still
+          // thinking" is a property of the log's shape rather than a flag on the event. The block
+          // collapses on its own the moment the reply or the tool call lands, with no second event
+          // to wait for — and it stays open while the game narrates underneath it, which it does
+          // throughout, because the emulator never stops for the model. Same rule as `fold`'s, and
+          // it has to be: one decides what the row *contains* and the other how it is drawn.
+          const live = entry.type === 'reasoning' && index === openBlock;
           const unfolded = live || thoughts.has(entry.seq);
           const { gutter, body, title, modifier } = render(entry, unfolded);
           const open = showAllRaw || expanded.has(entry.seq);
@@ -76,10 +103,17 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
               key={entry.seq}
               className={`entry ${entry.type} ${modifier}${open ? ' open' : ''}${live ? ' live' : ''}`}
             >
+              {/* A `<time>` rather than a span: the row is prose with a timestamp in front of it,
+                  and the machine-readable value is the thing a reader hovering wants. A row from a
+                  transcript written before the server stamped times has none, and gets a blank of
+                  the same width so the column does not jump. */}
+              <time className="at" dateTime={entry.at ? new Date(entry.at).toISOString() : undefined} title={longTime(entry.at)}>
+                {shortTime(entry.at)}
+              </time>
               <span className="chip" title={title}>
                 {gutter}
               </span>
-              <span className="body">
+              <span className="body" ref={live ? thought : undefined} onScroll={live ? onThoughtScroll : undefined}>
                 <button
                   className="line"
                   onClick={() => (thinking ? toggleThought(entry.seq) : toggle(entry.seq))}
@@ -103,6 +137,23 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
     </div>
   );
 });
+
+/**
+ * The time column: `14:22:33`, in the **viewer's** timezone.
+ *
+ * Seconds and not milliseconds because the log is a narration rather than a trace — and no date,
+ * because a page shows a few minutes of a run at a time and a date on every one of five hundred rows
+ * is four fifths of the column saying today. The full stamp, date and all, is on the `title` for the
+ * one case that wants it: a backfilled row from a run that has been going since yesterday.
+ */
+function shortTime(at: number | undefined): string {
+  if (at === undefined) return '';
+  return new Date(at).toLocaleTimeString(undefined, { hour12: false });
+}
+
+function longTime(at: number | undefined): string | undefined {
+  return at === undefined ? undefined : new Date(at).toLocaleString();
+}
 
 interface Rendered {
   /** The left gutter: who is talking. */
@@ -134,7 +185,7 @@ function render(entry: Entry, unfolded: boolean): Rendered {
       return {
         gutter: 'think',
         body: unfolded ? entry.text : summarise(entry.text),
-        title: `turn ${entry.turn} — the model's own reasoning`,
+        title: `turn ${entry.turn}: the model's own reasoning`,
         modifier: unfolded ? 'unfolded' : '',
       };
     case 'tool':

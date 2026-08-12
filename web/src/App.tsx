@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import type { RunStatus, UsageView } from './api';
 import { Conversation } from './components/Conversation';
 import { Leaderboard } from './components/Leaderboard';
@@ -16,26 +16,46 @@ export function App() {
     [entries],
   );
 
+  // Who is playing. `null` under `--policy random`, where the run has no model and saying it has one
+  // would be a small lie — the policy name beside it is the honest answer there.
+  const player = status?.model ?? null;
+
+  // ⚠️ **The tab is a third audience, and it is the one that is read while the page is not.** A
+  // livestream lives in a background tab for hours, where the title is the whole of the UI, so it
+  // says who is playing rather than what the site is called. `index.html` still ships a title for
+  // the moment before the first heartbeat lands.
+  useEffect(() => {
+    document.title = player ? `${player} plays Pokémon Red` : 'Pokémon Red';
+  }, [player]);
+
   return (
     <div className="app">
       <header>
-        <span className="title">Pokémon Red</span>
-        <span className="dim">·</span>
-        <span className="policy">{status?.policy ?? '…'}</span>
+        {/* Two groups: who is playing, and what the run is doing. The split is what the narrow
+            layout hangs off — the identity stays and the figures fold away, rather than every item
+            in a flat row wrapping into a paragraph of chips. */}
+        <span className="who">
+          <span className="title">Pokémon Red</span>
+          <span className="dim">played by</span>
+          <span className="policy" title={player ? `GB_MODEL=${player}` : `--policy ${status?.policy ?? ''}`}>
+            {player ?? status?.policy ?? '…'}
+          </span>
+        </span>
+        <span className="dim sep">·</span>
         <span className={`run ${run.state}`} title={describeRun(run)}>
           {describeRun(run)}
         </span>
         <span className="spacer" />
         {/* W6's gauge. It appears only once a turn has reported figures, rather than as a
             placeholder zero, and it says when the numbers are our own estimate rather than the
-            endpoint's — a guess presented as a measurement is worse than no number. */}
+            endpoint's: a guess presented as a measurement is worse than no number. */}
         {usage && (
           <span className="context" title={describeUsage(usage)}>
             <span className="gauge">
               <span className="fill" style={{ width: `${occupancy(usage)}%` }} />
             </span>
             context {Math.round(occupancy(usage))}%{usage.estimated ? '~' : ''}
-            <span className="dim"> · {compactTokens(usage.prompt_tokens + usage.completion_tokens)} spent</span>
+            <span className="dim spent"> · {compactTokens(usage.prompt_tokens + usage.completion_tokens)} spent</span>
           </span>
         )}
         <Leaderboard wins={wins} />
@@ -72,7 +92,7 @@ function compactTokens(tokens: number): string {
 }
 
 function describeUsage(usage: UsageView): string {
-  const source = usage.estimated ? 'estimated — the endpoint reports no usage' : 'reported by the endpoint';
+  const source = usage.estimated ? 'estimated, since the endpoint reports no usage' : 'reported by the endpoint';
   return [
     `${usage.context_tokens.toLocaleString()} of ${usage.context_limit.toLocaleString()} tokens in context`,
     `${usage.prompt_tokens.toLocaleString()} prompt + ${usage.completion_tokens.toLocaleString()} completion`,

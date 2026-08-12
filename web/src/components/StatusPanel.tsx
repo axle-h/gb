@@ -1,7 +1,5 @@
+import type { CSSProperties } from 'react';
 import type { Status } from '../api';
-
-/** Both the badge sprite's on-screen size and its stride in the sheet — 16 px doubled. */
-const BADGE_PX = 32;
 
 /** Where the player is, what they have, and how the party is holding up. */
 export function StatusPanel({ status }: { status: Status | null }) {
@@ -25,8 +23,14 @@ export function StatusPanel({ status }: { status: Status | null }) {
             <span
               key={badge.name}
               className={badge.earned ? 'badge on' : 'badge'}
-              style={{ backgroundPosition: `-${index * BADGE_PX}px 0` }}
-              title={`${spaced(badge.name)}${badge.earned ? '' : ' — not earned'}`}
+              // ⚠️ **The slot, not the offset.** The offset is the slot times the sprite's on-screen
+              // size, and that size is a *responsive* number — the strip is drawn at 24px on a phone
+              // and 32 elsewhere. Computing the pixels here meant the stylesheet could shrink the
+              // badges and the sheet would still be sliced at the old stride: eight badges each
+              // showing a quarter of the next one along. The multiplication belongs beside the
+              // number it multiplies.
+              style={{ '--slot': index } as CSSProperties}
+              title={`${spaced(badge.name)}${badge.earned ? '' : ' (not earned)'}`}
             />
           ))}
         </span>
@@ -70,13 +74,16 @@ export function StatusPanel({ status }: { status: Status | null }) {
           OaksLab@RedsHouse2F` rather than `move→Warp` — which is longer than this column, and
           `.detail dd` ellipsises rather than wraps, so the full string is on the `title` (the same
           reason each party nickname carries one). */}
+      {/* Each row is classed so the narrow layout can drop the ones a phone has no room for. The
+          speed line is the operator's — a livestream that has fallen behind real time is worth
+          seeing on a desk, and is three quarters of this block's width on a handset. */}
       <dl className="detail">
         <dt>mode</dt>
         <dd>{game ? (game.in_battle ? `${game.mode} · battle` : game.mode) : '(no game state)'}</dd>
         <dt>agent</dt>
         <dd title={status?.agent_state ?? undefined}>{status?.agent_state ?? '—'}</dd>
-        <dt>speed</dt>
-        <dd>{status ? describeSpeed(status) : '—'}</dd>
+        <dt className="speed">speed</dt>
+        <dd className="speed">{status ? describeSpeed(status) : '—'}</dd>
       </dl>
     </div>
   );

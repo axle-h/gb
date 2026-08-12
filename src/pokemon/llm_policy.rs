@@ -192,7 +192,7 @@ impl LlmPolicy {
                 let situation =
                     prompt::situation(kind, state, &self.snapshot, &self.events, &menu, context);
                 let headline = format!(
-                    "{} — {} at ({}, {})",
+                    "{} · {} at ({}, {})",
                     kind.label(),
                     state.map.map,
                     state.map.player_position.x,

@@ -64,6 +64,11 @@ export interface Status {
   target_speed: number;
   /** `"random"` or `"llm"`. */
   policy: string;
+  /**
+   * `GB_MODEL` — who is playing. `null` under any policy that is not an LLM, which is the same rule
+   * the leaderboard's column follows: `"random"` is not a model name and must not be shown as one.
+   */
+  model: string | null;
   /** Which arm of the agent's state machine is driving — the field that says why a run looks stuck. */
   agent_state: string;
   frame_seq: number;
@@ -99,8 +104,19 @@ export interface UsageView {
   estimated: boolean;
 }
 
+/**
+ * When an event was published, in Unix milliseconds.
+ *
+ * ⚠️ **Optional, and it has to stay optional.** `/api/history` replays a transcript written by
+ * whatever build was running at the time, and the runs on disk predate this field — a required `at`
+ * would be a type that lies about half the backlog. Everything that renders one treats its absence
+ * as "no time known" rather than as the epoch.
+ */
+export type At = { at?: number };
+
 /** One `data:` line of `/api/events`. `Status` is flattened into the event by serde, not nested. */
-export type UiEvent =
+export type UiEvent = At &
+  (
   | ({ seq: number; type: 'status' } & Status)
   | { seq: number; type: 'agent'; kind: string; text: string }
   | { seq: number; type: 'notice'; level: string; message: string }
@@ -127,7 +143,8 @@ export type UiEvent =
       after: number;
       images_evicted: number;
       summarised: boolean;
-    };
+    }
+  );
 
 /**
  * What the conversation pane renders, before the bookkeeping every row carries.
@@ -165,6 +182,12 @@ export type Entry = EntryBody & {
   raw: UiEvent;
   /** How many identical rows this one stands for. `1` unless the agent repeated itself. */
   count: number;
+  /**
+   * When the row's **first** event was published. A row that grew (a streamed reply) or repeated
+   * (`×3`) is stamped when it started rather than when it stopped, which is what a reader watching
+   * the log scroll past expects a time beside a line to mean.
+   */
+  at?: number;
 };
 
 export type Connection = 'connecting' | 'live' | 'reconnecting';

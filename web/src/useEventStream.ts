@@ -72,7 +72,10 @@ export interface EventStream {
  * with the same signature are the same line and are collapsed into one with a count.
  */
 function signature(entry: Entry): string {
-  const { seq: _seq, raw: _raw, count: _count, ...body } = entry;
+  // ⚠️ `at` is excluded for the reason `seq` is: it differs on every event by construction, so
+  // leaving it in would mean no two rows ever compared equal and the collapsing below would silently
+  // never fire again.
+  const { seq: _seq, raw: _raw, count: _count, at: _at, ...body } = entry;
   return JSON.stringify(body);
 }
 
@@ -88,7 +91,7 @@ function signature(entry: Entry): string {
  * on — a key that changed as the count rose would remount the row on every repeat.
  */
 function push(entries: Entry[], body: EntryBody, event: UiEvent): Entry[] {
-  const entry: Entry = { ...body, seq: event.seq, raw: event, count: 1 };
+  const entry: Entry = { ...body, seq: event.seq, raw: event, count: 1, at: event.at };
   const last = entries[entries.length - 1];
   if (last && signature(last) === signature(entry)) {
     return [...entries.slice(0, -1), { ...last, count: last.count + 1 }];
@@ -112,29 +115,64 @@ function push(entries: Entry[], body: EntryBody, event: UiEvent): Entry[] {
 const UNLOGGED = new Set(['text_box', 'overworld_interaction_completed']);
 
 /**
+ * Rows the **model** produced, as against rows the game narrated.
+ *
+ * The distinction exists for exactly one reason: it is what closes a block of streaming text. See
+ * [`fold`](#fold) — and note that a `turn` row is model-side, because a new turn certainly ends the
+ * thought before it.
+ */
+const MODEL_SIDE = new Set(['reasoning', 'assistant', 'tool', 'decision', 'turn', 'cancelled', 'compacted']);
+
+/**
+ * The most recent row the model produced, or `-1`. The rows after it are the game talking.
+ */
+export function lastModelSide(entries: Entry[]): number {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (MODEL_SIDE.has(entries[index].type)) return index;
+  }
+  return -1;
+}
+
+/**
  * Fold one event into the log.
  *
  * The interesting cases are `assistant_delta` and `assistant_reasoning`: the worker publishes one
  * event per fragment the model emits, and the reply — or the thought — is the concatenation of all
- * of them. Appending to the last entry when it belongs to the same turn is what turns a stream of
- * tokens back into a paragraph, and it has to happen *here*, in the updater, rather than in the
- * batch, because a flush can land in the middle of a reply.
+ * of them. Appending to the row those fragments belong to is what turns a stream of tokens back into
+ * a paragraph, and it has to happen *here*, in the updater, rather than in the batch, because a
+ * flush can land in the middle of a reply.
  *
- * ⚠️ **A thought is closed by the next event, not by the turn ending.** A turn that reads before it
- * decides thinks once per completion, so grouping on `turn` alone would weld two separate thoughts —
- * with a tool call and its result between them — into one block. Appending only when the reasoning
- * row is still the *last* one is what keeps them apart, and it is the same fact the renderer uses to
- * decide which block is still live.
+ * ⚠️ **A thought is closed by the next thing the *model* says, not by the turn ending and not by the
+ * next event of any kind.** Two failures, one on each side of that line:
+ *
+ * - Grouping on `turn` alone welds two thoughts together. A turn that reads before it decides thinks
+ *   once per completion, so the tool call and its result sit between two separate blocks.
+ * - Closing on the next event *of any kind* shreds a single thought into a dozen. ⚠️ **The emulator
+ *   never pauses while the model thinks** — that is the property the whole agent is built on — so
+ *   the game narrates over the top of every thought it has: "→ heading for Mom", "✓ reached the warp
+ *   to PalletTown". Each of those used to end the block, so a thought that took the model a minute
+ *   arrived as five rows, four of them collapsed to `thought for 9 words`, and none of them the
+ *   thing the viewer was watching.
+ *
+ * So the fragment is appended to the last row the *model* wrote, however many lines the game has said
+ * since. The row keeps its place in the log, which is where it belongs: it started when it started.
  */
-function fold(entries: Entry[], event: UiEvent): Entry[] {
+export function fold(entries: Entry[], event: UiEvent): Entry[] {
   if (event.type === 'assistant_delta' || event.type === 'assistant_reasoning') {
     const type = event.type === 'assistant_delta' ? 'assistant' : 'reasoning';
-    const last = entries[entries.length - 1];
-    if (last?.type === type && last.turn === event.turn) {
-      return [...entries.slice(0, -1), { ...last, text: last.text + event.text }];
+    const index = lastModelSide(entries);
+    const open = index < 0 ? undefined : entries[index];
+    if (open?.type === type && open.turn === event.turn) {
+      const grown = { ...open, text: open.text + event.text };
+      return [...entries.slice(0, index), grown, ...entries.slice(index + 1)];
     }
     // Not through `push`: a reply grows, so it must never be collapsed against the row above it.
-    return [...entries, { seq: event.seq, type, turn: event.turn, text: event.text, raw: event, count: 1 }];
+    // The block keeps the `at` of its **first** fragment: a thought is timed from when the model
+    // started thinking, which is the interesting number, not from the token that ended it.
+    return [
+      ...entries,
+      { seq: event.seq, type, turn: event.turn, text: event.text, raw: event, count: 1, at: event.at },
+    ];
   }
   switch (event.type) {
     case 'status':
