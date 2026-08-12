@@ -46,7 +46,11 @@ pub fn render_font_string(indexes: &[usize], menu_characters: bool) -> String {
             62 => result += "'t",
             63 => result += "'v",
             64..=95 => result.push(' '),
-            96 => result.push(','),
+            // ⚠️ Glyph 96 is `'`, not `,`. They are the same mark drawn in different halves of the
+            // cell — 96 (charmap `$E0`) sits against the top, 116 (`$F4`) against the bottom — and
+            // this said `,` for both, so every contraction the game printed came back as
+            // "Let,s go". `charmap.asm:160` and the sheet itself both say apostrophe.
+            96 => result.push('\''),
             97 => result += "Poké",
             98 => result += "mon",
             99 => result.push('-'),
