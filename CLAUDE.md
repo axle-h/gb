@@ -362,7 +362,7 @@ before.**
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + web/host/llm.
-# ~20s, 1206 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each.
+# ~20s, 1209 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.
@@ -418,7 +418,10 @@ goes behind a Cargo feature, so the ignored list stays a readable backlog:
 | `diagnostics` | `probe_*`, `dump_fixture_states`, `capture_golden_input` — tools that print a report rather than assert. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal: two legitimately end by exhausting their cycle budget *after* printing what was asked for |
 | `bench` | `bench_core_throughput`, `bench_emulation_throughput`, `web::video::bench` (which also pulls in `flate2`) |
 | `soak-tests` | `integration_tests::soak` — the fuzzer. Gated as a **module**, not with `#[ignore]`, so it never appears in the ignored list |
-| `hwtests` | The mooneye MBC suite and its ROMs. 22 MB raw, committed lz4-compressed (149 KB) and decompressed in memory by the fixture, so a default build carries none of it |
+
+The mooneye MBC suite used to be a tier of its own (`hwtests`). It is not: three tests, 0.7 s, so it
+runs by default. Its ROMs are `cfg(test)` rather than feature-gated, which keeps them out of the
+shipped binary — the only thing the feature was really buying.
 
 With every tier feature on and the tool features off, the ignored list is **18 blocked emulator
 tests** and nothing else — 9 `oam_bug` and 9 `mem_timing`/`halt_bug`. (It was 19 until the combined

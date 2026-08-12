@@ -896,7 +896,6 @@ mod tests {
     /// as the plan predicted — **no `LD B,B` CPU hook is needed at all**.
     ///
     /// The ROMs are committed lz4-compressed; see [`crate::roms::mooneye`].
-    #[cfg(feature = "hwtests")]
     mod mooneye {
         use super::*;
 
