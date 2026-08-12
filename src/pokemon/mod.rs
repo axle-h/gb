@@ -31,6 +31,7 @@ pub mod badge;
 pub mod rom_gfx;
 pub mod badge_gfx;
 pub mod mon_gfx;
+pub mod map_gfx;
 pub mod map;
 pub mod pokemon;
 pub mod status;
@@ -68,7 +69,7 @@ pub mod wild;
 pub mod postgame;
 
 #[cfg(test)]
-mod integration_tests;
+pub(crate) mod integration_tests;
 pub mod data;
 mod options;
 pub mod map_metadata;

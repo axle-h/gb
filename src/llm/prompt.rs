@@ -8,8 +8,8 @@
 //! - [`situation`] is rebuilt for every turn, and is deliberately *rich*. §7.1's finding is that the
 //!   larger win is not batching read tools efficiently but not needing them: a turn that opens with
 //!   the location, the party, the on-screen text, what happened since the last decision and the menu
-//!   itself should need **zero** read calls. Tools are then for what does not fit — the map grid, the
-//!   full bag, a route back to somewhere already walked.
+//!   itself should need **zero** read calls. Tools are then for what does not fit — a picture of
+//!   the map, the full bag, a route back to somewhere already walked.
 //!
 //! ⚠️ **Anything a read can answer from the situation should be in the situation, and then the read
 //! should be deleted.** `read_screen_text` and `read_trainer` both were: a round trip whose answer

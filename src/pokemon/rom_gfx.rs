@@ -41,16 +41,34 @@ pub fn tile_grid_shades(first_tile: DmgPointer, tiles_wide: usize, tiles_high: u
     let mut shades = vec![0u8; width * tiles_high * 8];
     for tile in 0..tiles_wide * tiles_high {
         let (left, top) = ((tile % tiles_wide) * 8, (tile / tiles_wide) * 8);
-        let tile = &bytes[tile * TILE_BYTES..(tile + 1) * TILE_BYTES];
+        let pixels = decode_tile(&bytes[tile * TILE_BYTES..(tile + 1) * TILE_BYTES]);
         for y in 0..8 {
-            let (low, high) = (tile[y * 2], tile[y * 2 + 1]);
-            for x in 0..8 {
-                let bit = 7 - x;
-                shades[(top + y) * width + left + x] = ((high >> bit) & 1) << 1 | ((low >> bit) & 1);
-            }
+            shades[(top + y) * width + left..(top + y) * width + left + 8]
+                .copy_from_slice(&pixels[y * 8..y * 8 + 8]);
         }
     }
     shades
+}
+
+/// One 8×8 tile of 2bpp, as shade indices `0` (lightest) to `3` (darkest), row-major.
+///
+/// The inner loop of [`tile_grid_shades`], on its own because a **tileset** is not a rectangle of
+/// consecutive tiles: a map's blockset is an indirection, `block id → 16 tile ids → 16 tiles
+/// scattered through the sheet`, so the map renderer asks for one tile at a time by index.
+///
+/// # Panics
+/// If `tile` is not exactly [`TILE_BYTES`] long.
+pub fn decode_tile(tile: &[u8]) -> [u8; 64] {
+    assert_eq!(tile.len(), TILE_BYTES, "a 2bpp tile is {TILE_BYTES} bytes");
+    let mut pixels = [0u8; 64];
+    for y in 0..8 {
+        let (low, high) = (tile[y * 2], tile[y * 2 + 1]);
+        for x in 0..8 {
+            let bit = 7 - x;
+            pixels[y * 8 + x] = ((high >> bit) & 1) << 1 | ((low >> bit) & 1);
+        }
+    }
+    pixels
 }
 
 /// The overworld Poké Ball — the sprite an item lying on the floor is drawn with, 2×2 uncompressed

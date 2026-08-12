@@ -1080,9 +1080,14 @@ fn observation_views_describe_the_snapshot() {
     assert_eq!(observe::screen_text(&api), None);
 }
 
-/// The map grid is the single densest thing the model reads, and three ways of getting it wrong are
-/// invisible from the outside: rows that do not match the declared width, a legend that has fallen
-/// behind `impl Display for MetaTileMap`, and an order that reshuffles between two identical reads.
+/// What `read_map` says about the map, and the picture that goes with it.
+///
+/// The grid this used to check is gone — the model is sent a rendered map now
+/// ([`crate::llm::map_image`], which holds the render's own tests). What is left here is the JSON
+/// half, and the three ways it goes wrong invisibly: a position that disagrees with the map it is
+/// on, a warp list that reshuffles between two identical reads, and — the reason the grid could be
+/// dropped at all — a `Display` that still has to work, because every dump and probe prints through
+/// it and the renderer falls back to it for a map it cannot draw.
 #[test]
 fn map_view_is_well_formed_stable_and_fully_documented() {
     use crate::pokemon::observe;
@@ -1100,33 +1105,39 @@ fn map_view_is_well_formed_stable_and_fully_documented() {
         let state = fixture.game_state();
         let view = observe::map_view(&state);
 
-        assert_eq!(view.grid.len(), view.height, "{name}: row count vs declared height");
-        for (y, row) in view.grid.iter().enumerate() {
-            assert_eq!(row.chars().count(), view.width, "{name}: row {y} is {row:?}");
+        assert!(view.position.x < view.width as u8 && view.position.y < view.height as u8,
+                "{name}: the player is at {:?} on a {}x{} map", view.position, view.width, view.height);
+        for warp in &view.warps {
+            assert!(warp.at.x < view.width as u8 && warp.at.y < view.height as u8,
+                    "{name}: warp at {:?} is off a {}x{} map", warp.at, view.width, view.height);
         }
-        assert_eq!(view.grid.iter().flat_map(|r| r.chars()).filter(|c| *c == 'P').count(), 1,
-                   "{name}: exactly one player on the map");
-        assert_eq!(view.grid[view.position.y as usize].chars().nth(view.position.x as usize), Some('P'),
-                   "{name}: the reported position must be where the P is");
-
-        // The legend travels with the grid, so a new symbol in `Display for MetaTileMap` that nobody
-        // documented shows up here rather than as an unexplained character in a context window.
-        for c in view.grid.iter().flat_map(|r| r.chars()) {
-            assert!(legend.contains(&c), "{name}: grid uses '{c}', which MAP_LEGEND does not explain");
-        }
-        assert_eq!(view.legend.len(), observe::MAP_LEGEND.len());
 
         // `warp_targets` and the action list come off a `HashSet`. Two reads of an unchanged map must
         // still be equal, or the model sees churn that is not there.
         assert_eq!(view, observe::map_view(&state), "{name}: two reads of one state disagree");
-        for warp in &view.warps {
-            // 'P' is painted over whatever the player is standing on, and standing on a warp is
-            // exactly what a door looks like the tick after you walk through it — so the `warps`
-            // list, not the grid, is what tells you the warp is there.
-            let drawn = view.grid[warp.at.y as usize].chars().nth(warp.at.x as usize);
-            assert!(drawn == Some('W') || warp.at == view.position,
-                    "{name}: warp at {:?} is drawn as {drawn:?}", warp.at);
+
+        // ⚠️ `Display for MetaTileMap` is no longer what the model reads, so nothing else would
+        // notice it rotting — and it is still what the agent log, every probe and the renderer's own
+        // no-metadata fallback print. Its alphabet must stay documented by `MAP_LEGEND`.
+        let drawn = format!("{}", state.map);
+        let grid: Vec<&str> = drawn.trim_end_matches('\n').lines().collect();
+        assert_eq!(grid.len(), view.height, "{name}: row count vs declared height");
+        for (y, row) in grid.iter().enumerate() {
+            assert_eq!(row.chars().count(), view.width, "{name}: row {y} is {row:?}");
         }
+        assert_eq!(grid.iter().flat_map(|r| r.chars()).filter(|c| *c == 'P').count(), 1,
+                   "{name}: exactly one player on the map");
+        assert_eq!(grid[view.position.y as usize].chars().nth(view.position.x as usize), Some('P'),
+                   "{name}: the reported position must be where the P is");
+        for c in grid.iter().flat_map(|r| r.chars()) {
+            assert!(legend.contains(&c), "{name}: grid uses '{c}', which MAP_LEGEND does not explain");
+        }
+
+        // And the picture the model is actually sent draws without complaint.
+        let canvas = crate::llm::map_image::render(&state.map).expect("a fixture is a real map");
+        assert_eq!(canvas.width() as usize,
+                   crate::llm::map_image::RULER_LEFT + view.width * crate::llm::map_image::CELL_PX,
+                   "{name}: the picture and the JSON disagree about the width");
     }
 }
 
@@ -1236,7 +1247,13 @@ fn observation_views_serialise_to_json() {
     assert_eq!(json["map"], format!("{}", state.map.map));
     // `Point` is a struct so the coordinates are named rather than a pair a model has to guess at.
     assert_eq!(json["position"]["x"], state.map.player_position.x);
-    assert_eq!(json["grid"].as_array().expect("grid is an array").len(), state.map.height);
+    // The terrain is a picture now, so what has to survive serialisation is the half of the map a
+    // picture cannot carry: names, and coordinates the model can quote back.
+    assert!(json["warps"].is_array(), "warps is an array");
+    assert!(json["sprites"].is_array(), "sprites is an array");
+    assert_eq!(json["height"], state.map.height);
+    assert!(json.get("grid").is_none() && json.get("legend").is_none(),
+            "the ASCII grid was replaced by the rendered map, not kept beside it");
 
     for value in [serde_json::to_value(observe::party(&state)).unwrap(),
                   serde_json::to_value(observe::status(&state, &fixture.api())).unwrap(),

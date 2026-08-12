@@ -50,10 +50,62 @@ pub struct ImageUrl {
     /// A `data:image/png;base64,…` URL. Nothing is hosted: the run has no public address, and a
     /// screenshot that outlived the turn would be a privacy question nobody asked for.
     pub url: String,
-    /// `"low"` — which on OpenAI is a flat [`IMAGE_TOKENS`] regardless of size, against roughly a
-    /// thousand for `"high"`. The Game Boy screen is 160×144 in four shades; there is no detail for
-    /// the expensive tier to find, and §8's ⚠️ is that screenshots dominate the token cost of a run.
+    /// `"low"` or `"high"`. A screenshot is `"low"`: the Game Boy screen is 160×144 in four shades,
+    /// so there is no detail for the expensive tier to find, and §8's ⚠️ is that pictures dominate
+    /// the token cost of a run. A **map** is `"high"` — it is up to 1600 px on a side and squashing
+    /// it into one 512×512 tile would turn forty squares of terrain into mush.
     pub detail: String,
+    /// What this picture is estimated to cost, from its pixel dimensions at the moment it was
+    /// encoded.
+    ///
+    /// ⚠️ **`serde(skip)`, because it is ours and not the wire's** — and defaulted on the way back
+    /// in, so a history deserialised from anywhere prices its images at the `"low"` flat rate rather
+    /// than at zero.
+    #[serde(skip, default = "default_image_tokens")]
+    pub tokens: u64,
+}
+
+fn default_image_tokens() -> u64 { IMAGE_TOKENS }
+
+/// How much detail the endpoint is asked to look at, and therefore what the picture costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageDetail {
+    Low,
+    High,
+}
+
+impl ImageDetail {
+    fn as_str(self) -> &'static str {
+        match self {
+            ImageDetail::Low => "low",
+            ImageDetail::High => "high",
+        }
+    }
+}
+
+/// Roughly what a `width × height` picture costs at `detail`.
+///
+/// OpenAI's published tiling: fit inside 2048×2048, scale the *shortest* side to 768, then
+/// `85 + 170 × ⌈w/512⌉ × ⌈h/512⌉`. Other providers differ — Anthropic caps the long edge and charges
+/// about `w·h/750` — but every one of them charges by area, and the estimate only ever has to be
+/// closer than the flat 85 it replaces.
+///
+/// ⚠️ **It has to be roughly right, not exact.** [`Usage::estimate`] is what decides when the history
+/// is compacted, and a `"high"` map priced at 85 is out by 10–45×, so a genuinely full context would
+/// never compact at all on an endpoint that reports no `usage` of its own. That is the failure this
+/// function exists to prevent, not a billing question.
+pub fn image_tokens(detail: ImageDetail, width: u32, height: u32) -> u64 {
+    if detail == ImageDetail::Low || width == 0 || height == 0 {
+        return IMAGE_TOKENS;
+    }
+    let (mut w, mut h) = (width as f64, height as f64);
+    let fit = (2048.0 / w.max(h)).min(1.0);
+    w *= fit;
+    h *= fit;
+    let short = 768.0 / w.min(h);
+    w *= short;
+    h *= short;
+    IMAGE_TOKENS + 170 * (w / 512.0).ceil() as u64 * (h / 512.0).ceil() as u64
 }
 
 /// One message in the conversation, in the shape the endpoint wants it back.
@@ -110,11 +162,21 @@ impl Message {
     /// sentence and the picture follows as a user message — which every endpoint accepts, and which
     /// keeps §7.3's rule that every `tool_call` has exactly one matching result.
     pub fn user_with_image(caption: impl Into<String>, data_url: String) -> Self {
+        Self::user_with_image_detail(caption, data_url, ImageDetail::Low, IMAGE_TOKENS)
+    }
+
+    /// As [`Self::user_with_image`], for a picture whose size makes the flat `"low"` price a lie —
+    /// see [`image_tokens`].
+    pub fn user_with_image_detail(
+        caption: impl Into<String>, data_url: String, detail: ImageDetail, tokens: u64,
+    ) -> Self {
         Self {
             role: Role::User,
             content: Some(Content::Parts(vec![
                 ContentPart::Text { text: caption.into() },
-                ContentPart::ImageUrl { image_url: ImageUrl { url: data_url, detail: "low".to_string() } },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl { url: data_url, detail: detail.as_str().to_string(), tokens },
+                },
             ])),
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -157,7 +219,17 @@ impl Message {
     pub fn approximate_tokens(&self) -> u64 {
         let text = self.text().unwrap_or("").len()
             + self.tool_calls.iter().map(|c| c.function.name.len() + c.function.arguments.len()).sum::<usize>();
-        (text as f64 / CHARS_PER_TOKEN).ceil() as u64 + if self.has_image() { IMAGE_TOKENS } else { 0 }
+        // ⚠️ Each picture is charged what *it* costs, not a flat rate. A map is `detail: "high"` and
+        // up to forty-five times the price of a screenshot; charging both 85 would leave a full
+        // context reading as a nearly empty one, and compaction would never run.
+        let images: u64 = match self.content.as_ref() {
+            Some(Content::Parts(parts)) => parts.iter().map(|part| match part {
+                ContentPart::ImageUrl { image_url } => image_url.tokens,
+                ContentPart::Text { .. } => 0,
+            }).sum(),
+            _ => 0,
+        };
+        (text as f64 / CHARS_PER_TOKEN).ceil() as u64 + images
     }
 }
 
@@ -566,6 +638,27 @@ pub fn describe_error_body(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// ⚠️ A rendered map is `detail: "high"` and up to forty-five times a screenshot's price. The
+    /// flat 85 that was charged for every image is what [`Usage::estimate`] feeds
+    /// `Accounting::occupancy`, and therefore what decides when the history is compacted — so
+    /// under-pricing a map does not cost money, it stops a genuinely full context from ever being
+    /// summarised on an endpoint that reports no `usage` of its own.
+    #[test]
+    fn a_high_detail_map_is_not_priced_like_a_screenshot() {
+        use super::{image_tokens, ImageDetail, IMAGE_TOKENS};
+        // The Game Boy screen at `screenshot::SCALE`, which is what `low` is for.
+        assert_eq!(image_tokens(ImageDetail::Low, 480, 432), IMAGE_TOKENS);
+
+        // Pallet Town, Celadon and Route 17 — the median map, a big city, and the long thin route
+        // that is the worst case, because a narrow strip is scaled *up* until its short side is 768.
+        assert_eq!(image_tokens(ImageDetail::High, 344, 330), 765);
+        assert_eq!(image_tokens(ImageDetail::High, 856, 586), 1105);
+        assert!(image_tokens(ImageDetail::High, 344, 2314) > 3_000);
+
+        // A degenerate size must not divide by zero on the way to an estimate.
+        assert_eq!(image_tokens(ImageDetail::High, 0, 0), IMAGE_TOKENS);
+    }
+
     use super::*;
 
     fn drain(lines: &[&str]) -> Completion {

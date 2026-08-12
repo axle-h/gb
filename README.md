@@ -116,6 +116,12 @@ OpenAI does not — has it shown live in the log and collapsed to a line once th
 never sent back: reasoning is billed as completion tokens once, and a copy in the history would pay
 for it again on every turn after that.
 
+`read_map` answers with a **picture**, not a description: the whole map the player is standing on,
+drawn from the cartridge's own tile graphics, with every NPC where they are standing and facing where
+they are facing, warps and map edges labelled with where they lead, ground the player cannot reach
+dimmed, and a coordinate ruler so a square on the picture and a square in the JSON are the same
+square. It is rendered on the worker thread, never the emulator's.
+
 Anything the model does not decide, the agent handles: dialogue is advanced, menus are navigated,
 paths across the map are computed from a graph of all 248 maps built out of the ROM's own headers.
 
@@ -168,8 +174,9 @@ the same process that runs the emulator. Nine read-only endpoints and two that a
 The screen is streamed as block deltas rather than as images because it is a 160×144 screen that
 mostly does not change; the decoder is a TypeScript port of the encoder, in `web/src/video.ts`.
 
-**No graphics are committed to this repo.** The badges, the party sprites and the favicon are all
-read out of the ROM at run time. The Pokémon sprites are the interesting ones: Gen 1 pics are
+**No graphics are committed to this repo.** The badges, the party sprites, the favicon, and every
+tile, person and letter in the map pictures the model is sent are all read out of the ROM at run
+time. The Pokémon sprites are the interesting ones: Gen 1 pics are
 compressed, so `src/pokemon/mon_gfx.rs` is a port of pokered's `UncompressSpriteData` — a bitstream
 of two 1bpp planes, run-length-encoded zeros and an XOR delta between the planes. All 151 are checked
 byte-for-byte against upstream's own build output.
@@ -304,6 +311,7 @@ src/
 │   ├── tools.rs         — the tool catalogue, scoped per decision kind; ids; servicing
 │   ├── prompt.rs        — the system prompt and the per-turn situation
 │   ├── screenshot.rs    — one published frame as a PNG data URL, encoded on the worker thread
+│   ├── map_image.rs     — the whole current map as a labelled picture, ditto
 │   ├── accounting.rs    — tokens reported vs tokens estimated, and the calibration between them
 │   ├── todo.rs          — the model's plan: the only thing it writes that survives a restart
 │   ├── compaction.rs    — image eviction + summarising compaction, as pure functions over the history
@@ -339,6 +347,7 @@ src/
     ├── rom_gfx.rs        — reading ROM graphics: bank windowing, 2bpp tiles, the Poké Ball
     ├── badge_gfx.rs      — the badge sprites, decoded from the trainer card's ROM graphics
     ├── mon_gfx.rs        — the front pics, a port of pokered's `UncompressSpriteData`
+    ├── map_gfx.rs        — tileset sheets, overworld sprite sheets and the game's own font
     ├── delay.rs          — DelayContext: cycle-accurate waits between agent steps
     ├── text.rs           — PokemonTextReader: reads on-screen text from VRAM
     ├── integration_tests/ — agent end-to-end tests, tiered by emulated game time

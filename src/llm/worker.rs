@@ -38,8 +38,10 @@ use crate::llm::compaction;
 use crate::llm::config::LlmConfig;
 use crate::llm::todo::TodoList;
 use crate::llm::prompt;
+use crate::llm::map_image;
 use crate::llm::screenshot;
-use crate::llm::protocol::{ChatRequest, Completion, Fragment, Message, StreamOptions, ToolCall, Usage};
+use crate::llm::protocol::{self, ChatRequest, Completion, Fragment, ImageDetail, Message, StreamOptions, ToolCall, Usage};
+use crate::pokemon::tile_map::MetaTileMap;
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
 use crate::web::published::{Published, RunStatus, TodoView, UiEventBody};
@@ -78,10 +80,30 @@ pub struct ToolBatch {
     pub calls: Vec<ToolCall>,
 }
 
+/// One read tool's answer, as the emulator thread hands it back.
+///
+/// ⚠️ **`map` is data, not a picture.** `read_map` answers with a `MetaTileMap` and the *worker*
+/// draws it — the emulator thread cannot afford to encode a PNG of up to three quarters of a million
+/// pixels while the game is running. See [`crate::llm::map_image`]'s module note. The clone is one
+/// the policy is already making once per poll, so this costs the emulator thread nothing new.
+#[derive(Debug, Clone)]
+pub struct ToolAnswer {
+    pub json: String,
+    pub map: Option<Box<MetaTileMap>>,
+    /// Whether the map is unlit — a `GameState` fact the `MetaTileMap` does not carry.
+    pub is_dark: bool,
+}
+
+impl ToolAnswer {
+    pub fn text(json: impl Into<String>) -> Self {
+        Self { json: json.into(), map: None, is_dark: false }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ToolBatchResult {
     /// One entry per call, in the order they were sent.
-    Answered(Vec<String>),
+    Answered(Vec<ToolAnswer>),
     /// The decision kind changed before the batch could be serviced. The tools were **not** run.
     Cancelled,
 }
@@ -510,9 +532,44 @@ impl Worker {
             let mut pictures: Vec<Message> = Vec::new();
             for (call, classification) in completion.tool_calls.iter().zip(&classified) {
                 let content = match classification {
-                    CallKind::Read => answers.next().unwrap_or_else(|| {
-                        "{\"error\": \"the agent returned no result for this call\"}".to_string()
-                    }),
+                    CallKind::Read => {
+                        let answer = answers.next().unwrap_or_else(|| ToolAnswer::text(
+                            "{\"error\": \"the agent returned no result for this call\"}"));
+                        match answer.map {
+                            None => answer.json,
+                            // ⚠️ Same shape as `screenshot` below, and for the same reason: the tool
+                            // result is text saying a picture follows, and the picture is a `user`
+                            // message appended after every result.
+                            Some(map) => match map_image::render(&map) {
+                                // ⚠️ **The ASCII grid is the safety net, not dead code.** A map with
+                                // no `MapMetadata` cannot be drawn, and answering `read_map` with
+                                // names and no terrain at all would be worse than answering it the
+                                // old way. `Display for MetaTileMap` is still what every dump and
+                                // probe prints, so this costs nothing to keep.
+                                None => format!(
+                                    "{}\n\nThis map could not be drawn, so here it is as characters \
+                                     instead — one per square, {} wide, and you are the `P`:\n{map}",
+                                    answer.json, map.width),
+                                Some(mut canvas) => {
+                                    if answer.is_dark {
+                                        map_image::darken(&mut canvas);
+                                    }
+                                    let (width, height) = canvas.dimensions();
+                                    let caption = map_image::caption(&map, answer.is_dark);
+                                    pictures.push(Message::user_with_image_detail(
+                                        caption.clone(),
+                                        map_image::data_url(&canvas),
+                                        // ⚠️ `high`: a map is up to 1600 px on a side, and one
+                                        // 512x512 tile would turn forty squares of terrain to mush.
+                                        ImageDetail::High,
+                                        protocol::image_tokens(ImageDetail::High, width, height),
+                                    ));
+                                    format!("{}\n\n{caption} It is attached to the message after \
+                                             this one.", answer.json)
+                                }
+                            },
+                        }
+                    }
                     CallKind::Screenshot => {
                         self.published.set_status(RunStatus::RunningTool { name: "screenshot".into() });
                         let frame = self.published.latest_frame();
@@ -540,7 +597,7 @@ impl Worker {
 
     /// Hand a batch to the policy and block until it comes back. `None` is [`ToolBatchResult::Cancelled`]
     /// or a policy that has gone away.
-    fn run_batch(&mut self, id: u64, calls: Vec<ToolCall>) -> Option<Vec<String>> {
+    fn run_batch(&mut self, id: u64, calls: Vec<ToolCall>) -> Option<Vec<ToolAnswer>> {
         // ⚠️ **Nothing may stop the emulator between here and the answer.** The batch is serviced by
         // `Policy::service_tools`, which only runs when `gb.run` advances the agent — so anything
         // that pauses emulation across this round trip hangs the run on the first `read_map`. That is

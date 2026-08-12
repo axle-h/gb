@@ -358,9 +358,10 @@ of the first.
 
 ## Graphics out of the cartridge
 
-No image is committed to this repo. The badges, the party sprites and the favicon are all read from
-`POKERED` at run time — `src/pokemon/rom_gfx.rs` has the primitives, `badge_gfx`/`mon_gfx` the two
-decoders, and `src/web/sprites.rs` the palettes and the endpoints.
+No image is committed to this repo. The badges, the party sprites, the favicon and every tile,
+person and letter of the map picture the model is sent are all read from `POKERED` at run time —
+`src/pokemon/rom_gfx.rs` has the primitives, `badge_gfx`/`mon_gfx`/`map_gfx` the decoders, and
+`src/web/sprites.rs` and `src/llm/map_image.rs` the palettes.
 
 ⚠️ **Bank 0 is not windowed and every other bank is.** A ROM pointer's address is a raw file offset
 in bank 0 and a `0x4000`-based window everywhere else; `rom_gfx::rom_slice` is the one place that
@@ -407,6 +408,82 @@ load-bearing rather than a refinement: shade 0 is a body's *white fill* as well 
 calling it transparent outright renders the whole Pokédex as wireframes (all 151 use it as fill),
 and not finding it at all renders them as solid white blocks. A diagonal step leaks through any
 outline drawn on the diagonal, which is why the fill is four-way.
+
+## The map the model is sent
+
+`read_map` answers with a rendered picture of the whole current map, not an ASCII grid.
+`src/pokemon/map_gfx.rs` reads the graphics; `src/llm/map_image.rs` composes and colours them. Five
+things were paid for building it.
+
+⚠️ **The picture is drawn on the *worker* thread, and `service_read` must keep handing over data
+rather than pixels.** Celadon is 460k pixels and Route 17 is 737k — tens to hundreds of milliseconds
+of PNG encode, against an `AGENT_RESOLUTION` of 20 ms. Rendering inside `service_read` would spend
+ten agent ticks inside one of them on nearly every overworld turn. What crosses the channel is a
+`MetaTileMap` (`ToolAnswer.map`), which the policy already clones once per poll; `rom_gfx` reads a
+`&'static` ROM slice so the worker needs no emulator. Same rule, same reason as `screenshot`.
+
+⚠️ **`wSpriteStateData1 + 9` is `$0` down, `$4` up, `$8` left, `$C` right** (`ram/wram.asm:96`), and
+that is **not** `PlayerFacingDirection`'s encoding (`Up = 8, Down = 4, Left = 2, Right = 1`, on
+`wPlayerDirection`). The two collide on `4` and `8` meaning different things, so reading one with the
+other's table points half the people on a map the wrong way and nothing fails.
+`sprite_facing_is_the_sprite_bytes_encoding_and_not_the_players` is the guard.
+
+⚠️ **Read the OAM layout out of `SpriteFacingAndAnimationTable`; do not mirror the sprite by hand.**
+`.FlippedOAM` swaps the left and right *columns* as well as setting `OAM_XFLIP`, so assembling the
+16×16 and flipping it is right only by coincidence. And ⚠️ **an immobile sprite falls back
+wholesale**: item balls and boulders are 4-tile sheets, and pokered answers every facing from a
+second half of the table that is `.StandingDown, .NormalOAM` — swapping only the tile ids and keeping
+the flipped layout draws a right-facing Poké Ball as a *mirrored* one, which is a different picture.
+
+⚠️ **`FontGraphics` is 1bpp**, 0x400 bytes, and `src/pokemon/font.rs`'s `FONT_BYTES` is the
+compile-time doubling into 2bpp. Character code `C` → font tile `C - 0x80`, because
+`LoadFontTilePatterns` copies the sheet to `vFont` (`$8800`) where the tile index and the character
+code are the same number. The reverse charmap reuses `PokemonString::from_string` rather than
+transcribing `charmap.asm` a third time, and `the_font_round_trips_through_the_decoder` pins it
+against `render_font_string` — which is how a **six-year-old bug** surfaced: glyph 96 was decoded as
+`,` when it is `'`. Same mark, different half of the cell (`,` is 116), so every contraction the game
+printed came back through the text reader as "Let,s go".
+
+⚠️ **A tileset sheet can run off the end of its bank.** `LoadTilesetTilePatternData` copies a fixed
+`$60` tiles whatever the tileset's real size, so several sheets overrun their own label into the
+blockset behind them, and `Underground` (`1b:7d60`) overruns the bank itself by 864 bytes. On
+hardware nothing references a tile id that high. `map_gfx` clamps the sheet to the bank and answers a
+blank tile for an id past the end.
+
+⚠️ **A connection strip has its own tileset and it is often not the bordered map's** — Route 23 is
+`Plateau` against Route 22's `Overworld`. `ConnectedMapStrip` carries `tileset` and `tileset_data`
+for exactly this; drawing a strip against the map's own sheet produces plausible rubble rather than
+an error. `MapMetadata::strip_cells` is shared between the classification and the drawing so the two
+cannot place a strip differently — the arithmetic is four sign-sensitive cases and a border row one
+tile out of true looks perfectly reasonable.
+
+⚠️ **Labels are drawn last, so they can cover the player.** The red ring is where every coordinate
+the model reads is measured from, so `layout_labels` reserves the player's cell before placing
+anything. Vermilion is the map that found it. Relatedly, ⚠️ **a connection groups across the whole
+edge and a warp only with its neighbours**: every cell of a map edge leads to the same place by
+definition, but the strip is broken up by whatever is drawn along it, and Pallet Town's northern
+fence line had the picture saying "Route1" four times. Two doors into the same building are *not*
+the same door (Mt Moon B1F), so warps may not be merged on destination alone.
+
+⚠️ **`MetaTileMap::reachable_tiles` is "routable to", not "standable on", and reading it the obvious
+way produces a picture that still looks like a map.** It is the key set of `bfs_from_player`, which
+records *every* neighbour of an open square — walls included — and only declines to expand them,
+because a route has to be allowed to end at a door, a counter, a cut tree or a person. Dimming its
+complement therefore lit every wall touching open floor and darkened only cells walled in on all four
+sides: 18% of Pallet Town, in a pattern with no relation to anything, and it shipped in the first
+screenshots. The renderer subtracts obstacles and un-surfable water itself;
+`a_wall_is_dimmed_even_though_the_agent_can_route_to_it` is the guard.
+
+⚠️ **Nothing in the renderer may iterate a `HashSet`.** `reachable_tiles`, `warp_targets` and
+`connection_targets` are all sets, and a picture whose content depends on hash iteration order reads
+to the model as the world having moved, and makes any committed render checksum flake rather than
+fail. Every pass walks `meta_tiles` in index order.
+
+⚠️ **`IMAGE_TOKENS = 85` is the `detail: "low"` price and a map is not that.** Measured across all 226
+sized maps at 1× with OpenAI's tiling: median 765, mean 1041, max 3825 — the tail is twelve long thin
+routes, because a narrow strip is scaled *up* until its short side is 768. `image_tokens` prices each
+picture from its own dimensions, and it matters because `Accounting::occupancy` is what decides when
+the history compacts: a full context priced at 85 an image never compacts at all.
 
 ## Starting a new run in place
 
@@ -554,6 +631,12 @@ cargo test --release --bin gb -- pokemon::integration_tests::mechanics::test_deb
 
 # The PPU comparisons: dmg-acid2, cgb-acid2, Pokémon Red in colour.
 cargo test --release --bin gb -- game_boy::tests::ppu
+
+# The map pictures `read_map` sends the model, as real PNGs in target/map-renders/, with each one's
+# size and estimated token cost. ⚠️ The only way to know the render is *right* rather than merely
+# non-blank — look at these before touching the palette, the labels or the tile lookup.
+cargo test --release --features diagnostics --bin gb -- \
+  llm::map_image::tests::probe_map_images --exact --ignored --nocapture
 
 # The diagnostics and probes.
 cargo test --release --features diagnostics,slow-tests --bin gb -- probe_ --ignored --nocapture

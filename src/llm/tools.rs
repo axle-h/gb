@@ -28,6 +28,7 @@ use crate::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
 use crate::llm::todo::{MAX_TEXT as MAX_TODO_TEXT, TodoCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
+use crate::llm::worker::ToolAnswer;
 use crate::pokemon::GameState;
 use crate::pokemon::PokemonApi;
 use crate::pokemon::actions::OverworldAction;
@@ -316,9 +317,11 @@ pub struct ReadTool {
 pub const READ_TOOLS: &[ReadTool] = &[
     ReadTool {
         name: "read_map",
-        description: "The current map as an ASCII grid with a legend, plus every visible sprite and \
-                      every warp with its destination. The actions you can actually take are in the \
-                      turn's own action menu, not here.",
+        description: "A picture of the whole map, drawn from the game's own graphics: everyone \
+                      where they stand and face, warps and map edges labelled with where they lead, \
+                      unreachable ground dimmed, and a coordinate ruler along the top and left. It \
+                      arrives as an image after the result, with the sprites and warps as data. The \
+                      actions you can take are in the turn's action menu, not here.",
         // Not in a battle: there is no map on screen and nothing on it can be acted on.
         kinds: &[DecisionKind::Overworld, DecisionKind::Stuck],
         parameters: None,
@@ -1003,7 +1006,15 @@ pub fn service_read(
     state: &GameState,
     api: &PokemonApi<'_>,
     graph: &WorldGraph,
-) -> String {
+) -> ToolAnswer {
+    // ⚠️ **The picture is not drawn here.** `read_map` hands the worker the map it already has and
+    // the worker renders it — see [`crate::llm::map_image`]'s module note on why a PNG encode must
+    // not happen on the thread running the game. The clone is of a `MetaTileMap` the policy is
+    // already cloning once per poll.
+    let map = match call.function.name.as_str() {
+        "read_map" => Some(Box::new(state.map.clone())),
+        _ => None,
+    };
     let value = match call.function.name.as_str() {
         "read_map" => serde_json::to_value(observe::map_view(state)),
         "read_party" => serde_json::to_value(observe::party(state)),
@@ -1013,10 +1024,11 @@ pub fn service_read(
         other => Ok(json!({ "error": format!("`{other}` is not a read tool") })),
     };
     match value.and_then(|value| serde_json::to_string(&value)) {
-        Ok(json) => json,
+        Ok(json) => ToolAnswer { json, map, is_dark: state.map_is_dark },
         // Serialising a view cannot fail in practice, but a tool result is a string and the
         // alternative to this line is an `unwrap` on the worker's critical path.
-        Err(failure) => format!("{{\"error\": \"could not encode the result: {failure}\"}}"),
+        Err(failure) => ToolAnswer::text(
+            format!("{{\"error\": \"could not encode the result: {failure}\"}}")),
     }
 }
 

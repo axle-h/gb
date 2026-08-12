@@ -295,6 +295,12 @@ impl TestFixture {
         self.api().game_state().unwrap()
     }
 
+    /// As [`Self::game_state`], for a caller sweeping *every* committed fixture — some are captured
+    /// mid-transition or in a battle, where `game_state` legitimately has no map to report.
+    pub fn try_game_state(&mut self) -> Result<GameState, String> {
+        self.api().game_state()
+    }
+
     /// Rewrite a committed fixture — **only** with `--features regen-fixtures`.
     ///
     /// Every leg test snapshots its end state for the next leg to start from, which is how the chain

@@ -7,7 +7,7 @@ use crate::mmu::MMU;
 use crate::pokemon::bag::BagReader;
 use crate::pokemon::map::Map;
 use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader, TileSetId};
-use crate::pokemon::sprite::{PictureId, Sprite};
+use crate::pokemon::sprite::{PictureId, Sprite, SpriteFacing};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::tile::{JumpDirection, MetaTile, WarpEvent};
 use crate::ram::ROM;
@@ -56,6 +56,17 @@ pub struct MapMetadata {
     /// `0xFF` marks border/connection-strip cells that have no source-map tile. Needed to
     /// evaluate `tile_pair_collisions` during pathfinding.
     pub raw_tile_ids: Vec<u8>,
+}
+
+/// ⚠️ **Deliberately a summary, not `#[derive(Debug)]`.** This is reachable from `MetaTileMap`'s
+/// `Debug`, which is what every failing `assert!` in the agent prints — and a derived impl would put
+/// the whole block map, the whole blockset and every connection strip into that message. Four facts
+/// identify a `MapMetadata`; the rest is a wall.
+impl std::fmt::Debug for MapMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MapMetadata({}, {}x{} blocks, tileset {:?})",
+               self.map, self.map_header.width, self.map_header.height, self.map_header.tileset)
+    }
 }
 
 impl MapMetadata {
@@ -182,31 +193,44 @@ impl MapMetadata {
         }
 
         // Fill the extra border rows/columns from connected map strips.
-        for strip in &self.connected_strips {
-            let strip_meta = strip.strip_length as usize * Self::TILES_PER_META;
-            match strip.direction {
-                MapConnectionDirection::North | MapConnectionDirection::South => {
-                    let x_start = strip.meta_align_offset + dimensions.west_extra;
-                    let row = if strip.direction == MapConnectionDirection::North { 0 } else { dimensions.north_extra + dimensions.meta_height };
-                    for i in 0..strip_meta {
-                        let mx = x_start + i;
-                        if mx >= exp_width { break; }
-                        result[mx + row * exp_width] = strip.meta_tile_at(i);
-                    }
-                }
-                MapConnectionDirection::West | MapConnectionDirection::East => {
-                    let y_start = strip.meta_align_offset + dimensions.north_extra;
-                    let col = if strip.direction == MapConnectionDirection::West { 0 } else { dimensions.west_extra + dimensions.meta_width };
-                    for i in 0..strip_meta {
-                        let my = y_start + i;
-                        if my >= exp_height { break; }
-                        result[col + my * exp_width] = strip.meta_tile_at(i);
-                    }
-                }
-            }
+        for (strip, strip_idx, mx, my) in self.strip_cells() {
+            result[mx + my * exp_width] = strip.meta_tile_at(strip_idx);
         }
 
         result
+    }
+
+    /// Every connection-strip meta-tile and where it lands in the **expanded** grid, as
+    /// `(strip, strip_idx, mx, my)`.
+    ///
+    /// Shared so that the classification in [`Self::build_meta_tiles_base`] and the *drawing* in
+    /// [`crate::llm::map_image`] cannot place the same strip differently — the arithmetic is four
+    /// sign-sensitive cases and the failure mode of getting one wrong is a border row that looks
+    /// perfectly reasonable one tile out of true.
+    pub fn strip_cells(&self) -> impl Iterator<Item = (&ConnectedMapStrip, usize, usize, usize)> {
+        let dimensions = self.dimensions();
+        let (exp_width, exp_height) = (dimensions.full_width(), dimensions.full_height());
+        self.connected_strips.iter().flat_map(move |strip| {
+            let strip_meta = strip.strip_length as usize * Self::TILES_PER_META;
+            (0..strip_meta).filter_map(move |i| match strip.direction {
+                MapConnectionDirection::North | MapConnectionDirection::South => {
+                    let mx = strip.meta_align_offset + dimensions.west_extra + i;
+                    let my = match strip.direction == MapConnectionDirection::North {
+                        true => 0,
+                        false => dimensions.north_extra + dimensions.meta_height,
+                    };
+                    (mx < exp_width).then_some((strip, i, mx, my))
+                }
+                MapConnectionDirection::West | MapConnectionDirection::East => {
+                    let my = strip.meta_align_offset + dimensions.north_extra + i;
+                    let mx = match strip.direction == MapConnectionDirection::West {
+                        true => 0,
+                        false => dimensions.west_extra + dimensions.meta_width,
+                    };
+                    (my < exp_height).then_some((strip, i, mx, my))
+                }
+            })
+        })
     }
 
     /// Build the bottom-left raw tile ID grid parallel to `meta_tiles_base`.
@@ -499,13 +523,19 @@ pub struct ConnectedMapStrip {
 }
 
 impl ConnectedMapStrip {
-    /// Returns the MetaTile for position `strip_idx` (0..strip_length*2) in this border strip.
-    fn meta_tile_at(&self, strip_idx: usize) -> MetaTile {
+    /// The four graphical tile ids that draw the meta-tile at `strip_idx`, as **top-left,
+    /// top-right, bottom-left, bottom-right** — what the strip *looks like*, as against
+    /// [`Self::meta_tile_at`]'s answer to what it means.
+    ///
+    /// `None` for a strip position with no block behind it; a `None` element for a block whose
+    /// blockset was truncated (`tileset_data` is sized to the blocks a map actually references).
+    ///
+    /// ⚠️ **The strip has its own [`Self::tileset`], and it is often not the bordered map's** —
+    /// Route 23 is `Plateau` against Route 22's `Overworld`. Drawing these ids against the wrong
+    /// sheet produces plausible rubble rather than an error.
+    pub fn tile_ids_at(&self, strip_idx: usize) -> Option<[Option<u8>; 4]> {
         let block_idx = strip_idx / 2 + self.border_blocks_start_offset;
-        if block_idx >= self.border_blocks.len() {
-            return MetaTile::Obstacle;
-        }
-        let block_id = self.border_blocks[block_idx];
+        let block_id = *self.border_blocks.get(block_idx)?;
 
         // For N/S: strip_idx selects left(0)/right(1) within each block; sub_offset is the row.
         // For E/W: strip_idx selects top(0)/bottom(1) within each block; sub_offset is the col.
@@ -519,17 +549,20 @@ impl ConnectedMapStrip {
         // Indices of the four graphical tiles that form this 2×2 meta-tile within the block.
         // tile_offset = tx_in_block + ty_in_block * BLOCK_TILE_WIDTH (4)
         let base = sub_col * 2 + sub_row * 8;
-        let tile_indices = [base, base + 1, base + 4, base + 5];
         let block_start = block_id as usize * MapMetadata::BLOCK_TILES;
+        Some([base, base + 1, base + 4, base + 5]
+            .map(|idx| self.tileset_data.get(block_start + idx).copied()))
+    }
+
+    /// Returns the MetaTile for position `strip_idx` (0..strip_length*2) in this border strip.
+    fn meta_tile_at(&self, strip_idx: usize) -> MetaTile {
+
+        let Some(tile_indices) = self.tile_ids_at(strip_idx) else { return MetaTile::Obstacle };
 
         let mut has_water = false;
         let mut has_walkable = false;
-        for &idx in &tile_indices {
-            let pos = block_start + idx;
-            if pos >= self.tileset_data.len() {
-                continue;
-            }
-            let tile_id = self.tileset_data[pos];
+        for tile_id in tile_indices {
+            let Some(tile_id) = tile_id else { continue };
             if self.is_water_tile(tile_id) {
                 has_water = true;
             }
@@ -1147,6 +1180,11 @@ impl MMU {
             };
 
             let sprite_image_index = self.read(pokered_symbols::wSpritePlayerStateData1ImageIndex.address | offset);
+            // ⚠️ `SpriteFacing`, not `PlayerFacingDirection` — different byte, different encoding.
+            // An unrecognised value means the slot is mid-update; down is what the game draws.
+            let facing = SpriteFacing::from_repr(
+                self.read(pokered_symbols::wSpritePlayerStateData1FacingDirection.address | offset)
+            ).unwrap_or_default();
 
             let sprite = Sprite {
                 index: index as u8,
@@ -1165,6 +1203,7 @@ impl MMU {
                 },
                 on_screen: sprite_image_index != 0xFF,
                 hidden,
+                facing,
                 name: map_sprite.name
             };
             sprites.push(sprite);
