@@ -43,8 +43,41 @@ impl From<PokemonStatusFlags> for PokemonStatus {
 }
 
 impl From<u8> for PokemonStatus {
+    /// ⚠️ **Truncating, because the byte is read from a running game and not every bit of it is a
+    /// status.** `from_bits` returns `None` for any bit outside the set above and this used to
+    /// `unwrap` that — a panic on whatever thread was reading, which in `gb serve` is the emulator
+    /// thread, and a panic there freezes the run for good (`host::Obituary` says so and nothing
+    /// restarts it). The agent samples RAM every 20 ms with no regard for what the game is in the
+    /// middle of: `wEnemyMonStatus` holds whatever the last battle left there until
+    /// `LoadEnemyMonData` runs, and bit 7 is unused by the game rather than guaranteed clear. The
+    /// bits we do model still decode, so an unknown one is noise to drop, not a reason to die.
+    /// `soak` found it in a Fuchsia Gym battle, 1250 seeds in.
     fn from(value: u8) -> Self {
-        PokemonStatusFlags::from_bits(value).unwrap().into()
+        PokemonStatusFlags::from_bits_truncate(value).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every byte a running game can put there decodes to *something*.
+    ///
+    /// Exhaustive because it costs nothing and the alternative — asserting the handful of values
+    /// someone thought of — is what the `unwrap` this replaced effectively did.
+    #[test]
+    fn every_status_byte_decodes_without_panicking() {
+        for byte in 0..=u8::MAX {
+            let status = PokemonStatus::from(byte);
+            // The four exclusive statuses win over sleep, and sleep reports its counter; nothing else
+            // is representable, so this is really asserting "it returned".
+            if byte & 0b0100_0000 != 0 {
+                assert_eq!(status, PokemonStatus::Paralyzed, "{byte:#010b}");
+            }
+        }
+        assert_eq!(PokemonStatus::from(0b1000_0000), PokemonStatus::None, "an unmodelled bit alone");
+        assert_eq!(PokemonStatus::from(0b1000_0011), PokemonStatus::Asleep { counter: 3 },
+                   "an unmodelled bit beside a sleep counter");
     }
 }
 
