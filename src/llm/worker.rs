@@ -382,6 +382,8 @@ impl Worker {
                     messages: self.messages.clone(),
                     tools: specs.clone(),
                     parallel_tool_calls: Some(true),
+                    max_tokens: self.config.max_tokens,
+                    reasoning_effort: self.config.reasoning_effort.clone(),
                     temperature: self.config.temperature,
                     stream: true,
                     stream_options: StreamOptions { include_usage: true },
@@ -443,11 +445,20 @@ impl Worker {
 
             if completion.tool_calls.is_empty() {
                 // §7.5's fallback. One nudge quoting the rule, then the rule is enforced for it.
+                // `length` means `GB_MAX_TOKENS` stopped it mid-thought rather than the model
+                // choosing to say nothing, which is a different correction to ask for.
+                let truncated = completion.finish_reason.as_deref() == Some("length");
                 if nudged {
-                    return Some(self.give_up(id, "the model replied twice with no tool call"));
+                    return Some(self.give_up(id, match truncated {
+                        true => "the model twice ran past the length limit without deciding",
+                        false => "the model replied twice with no tool call",
+                    }));
                 }
                 nudged = true;
-                self.messages.push(Message::user(prompt::nudge(kind)));
+                self.messages.push(Message::user(match truncated {
+                    true => prompt::truncated_nudge(kind),
+                    false => prompt::nudge(kind),
+                }));
                 continue;
             }
 

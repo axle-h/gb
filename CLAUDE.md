@@ -295,6 +295,23 @@ decides thinks once per completion, so `useEventStream`'s fold appends only whil
 is still the *last* one — and `Conversation.tsx` reads that same fact as "still live", which is what
 makes the block collapse on its own when the tool call lands with no second event to say so.
 
+⚠️ **An uncapped completion is bounded only by the context window, and that is not a bound.** A
+reasoning model that falls into a repetition loop generates until the window fills: measured at
+**~26 000 tokens** on turns that normally cost 24–2 000, twice in twenty-five minutes, each one
+holding a single-slot endpoint for the full ten minutes our deadline allowed. `GB_MAX_TOKENS` (8192)
+is the ceiling and `0` removes it. ⚠️ **A truncated reply is nudged differently from a silent one**
+(`prompt::truncated_nudge`): told only "that reply contained no tool call", a model cut off
+mid-thought concludes it forgot to call one and tries again at the same length, into the same
+ceiling.
+
+⚠️ **`reasoning_effort` is an on/off switch on LM Studio, not a dial — and it was measured rather
+than assumed.** With gemma-4: `none` takes reasoning to *exactly zero* tokens while still answering
+correctly, `low` is indistinguishable from the default (174 → 159 tokens, noise), and
+`chat_template_kwargs` in either spelling (`thinking`, `enable_thinking` — the Qwen convention) is
+accepted and silently ignored. `GB_REASONING_EFFORT` passes the string through unvalidated, because
+the vocabulary belongs to the endpoint and refusing a value it would have taken is worse than
+forwarding one it rejects in a 400 whose body we keep.
+
 ⚠️ **Giving up on a request is not free, and a timeout is not a transport failure.** A connection
 that never opened consumed nothing at the far end, so retrying it is free and correct — that is what
 `LlmError::Transport` means. A request the endpoint *accepted* is being worked on, and llama.cpp says

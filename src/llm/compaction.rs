@@ -104,6 +104,10 @@ pub fn summary_request(config: &LlmConfig, messages: &[Message]) -> ChatRequest 
         messages,
         tools: Vec::new(),
         parallel_tool_calls: None,
+        // The cap applies here too: a summary that runs away is the same outage, and this request is
+        // the one that exists to stop the *next* one failing.
+        max_tokens: config.max_tokens,
+        reasoning_effort: config.reasoning_effort.clone(),
         temperature: config.temperature,
         stream: true,
         stream_options: StreamOptions { include_usage: true },
@@ -415,6 +419,8 @@ mod tests {
             temperature: 0.4,
             max_tool_steps: 4,
             request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+            max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
+            reasoning_effort: None,
             stuck_timeout: None,
         };
         let messages = history(2, false);

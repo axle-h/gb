@@ -389,6 +389,21 @@ pub fn nudge(kind: DecisionKind) -> String {
     )
 }
 
+/// [`nudge`] for the case the reply was *cut off* rather than finished — `GB_MAX_TOKENS` was reached.
+///
+/// ⚠️ **Worth telling apart, because the two ask for opposite corrections.** A model nudged with
+/// "that reply contained no tool call" and no other information reasonably concludes it forgot to
+/// call one, and tries again at the same length — into the same ceiling. What it needs to know is
+/// that the thinking, not the tool call, is what ran out of room.
+pub fn truncated_nudge(kind: DecisionKind) -> String {
+    format!(
+        "That reply was cut off before it finished: it hit the maximum length, so it carried no \
+         tool call and nothing happened in the game. Think more briefly this time — a decision here \
+         rarely needs more than a few sentences of reasoning. {}",
+        contract(kind),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
