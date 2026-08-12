@@ -237,6 +237,32 @@ fn thrown_at_the_enemy(item: crate::pokemon::item::ItemId) -> bool {
 /// ⚠️ at the top of that arm for why it is a countdown rather than a flag.
 const BACKING_OUT_TICKS: u16 = 100;
 
+/// How long the agent may reach **no decision point at all** before [`AgentState::ReadingTextBox`]
+/// stops confirming what is on screen and starts trying to leave it.
+///
+/// ⚠️ **Measured as silence, not as time in the state.** The obvious version — a counter in the
+/// `ReadingTextBox` variant — was written first and does not work: escaping a menu takes the game
+/// through the one it was opened from, so the state flickers to `Idle`/`AwaitingOverworldAction` for
+/// a tick or two on the way out, the counter restarts, and the reader goes back to mashing A into the
+/// START menu it had almost left. The Surf refusal loops through exactly that flicker every 30 s.
+/// [`PokemonAgent::since_last_policy_poll`] cannot be reset by anything except the thing that means
+/// the escape worked — the policy being asked something — so it survives the whole way out.
+///
+/// It is also the same measure the watchdog and `soak` read, which is what makes the number
+/// defensible: 30 s is well past every scripted conversation `full_playthrough` crosses at the
+/// cartridge's own medium text speed, well past ordinary play's ~6 s longest silence, and well inside
+/// both the 90 s the `stalls` tier allows and the watchdog's 300 s.
+const TEXT_BOX_ESCAPE_SILENCE: Duration = Duration::from_secs(30);
+
+/// How long a driver that runs its own menus ([`drives_its_own_menus`]) may go without the agent
+/// reaching a decision point before it is abandoned and the policy asked again. See the ⚠️ at the
+/// call site for why this is one rule rather than nineteen tick budgets.
+///
+/// 60 s matches the walk's bound and leaves the slowest legitimate driver — a multi-item mart trip, a
+/// PC deposit, a Fly — far inside it; the leg chain and `full_playthrough` are what say so. It is a
+/// *net*, not a schedule: anything that needs it has already failed to notice something.
+const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
@@ -249,14 +275,24 @@ enum BattleState {
     /// the difference between "this decision is taking a while" and "the policy is never asked again".
     Navigating { action: BattleAction, delay: DelayContext, ticks: u16 },
 
-    /// Dedicated driver for using a healing item on the *active* Pokémon in battle. The generic
-    /// navigator can't handle the "use on which POKéMON?" party menu that follows selecting a potion,
-    /// so this walks the whole flow with clean press/release rising edges: battle grid → ITEM → bag
-    /// list → the potion → the active mon → confirm. `item_index` is the potion's bag position;
-    /// `start_qty` is its count on entry (completion = the count dropped). `confirmed` marks that the
-    /// active mon has been selected, so we don't re-press A during the heal-animation lag and burn the
-    /// whole stack. `press` gives the two-tick press/release cadence.
-    HealingActive { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16 },
+    /// Dedicated driver for using **any** bag item in battle. The generic navigator can't handle the
+    /// bag list — it walks menu *geometry*, and a bag list is a scrolling list of the player's own
+    /// items — so this walks the whole flow with clean press/release rising edges: battle grid →
+    /// ITEM → bag list → the item (found by [`PokemonApiTrait::bag_item_position`], not by cursor
+    /// luck) → the "use on which POKéMON?" party menu where there is one → confirm. `start_qty` is
+    /// the item's count on entry (completion = the count dropped). `confirmed` marks that the active
+    /// mon has been selected, so we don't re-press A during the heal-animation lag and burn the whole
+    /// stack. `press` gives the two-tick press/release cadence.
+    ///
+    /// ⚠️ **Every `UseItem` comes here, not just the ones that work.** It used to take a hand-written
+    /// list of item ids and let everything else fall through to `Navigating`, which hands the open bag
+    /// list to `WaitingForMenu`, which pressed A on **whatever the cursor happened to be sitting on**.
+    /// On a bag holding a TM or a key item that is "OAK: <PLAYER>! This isn't the time to use that!",
+    /// which drops straight back to the bag list with the cursor untouched — the PC menus' closed loop
+    /// in a third costume — and reachable from any bag holding a TM or a key item, which is to say
+    /// nearly all of them. Selecting by id also means a refusal is the *chosen* item's refusal, so the
+    /// policy learns something from it.
+    UsingItem { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16 },
 }
 
 impl Default for BattleState {
@@ -267,6 +303,65 @@ impl Default for BattleState {
             backing_out: 0,
         }
     }
+}
+
+impl BattleState {
+    /// [`Self::default`], but already latched into backing out of whatever sub-menu is open.
+    ///
+    /// ⚠️ **This is what a give-up path owes the next state.** Every driver here can stop early — a
+    /// navigation that got nowhere, an item the game refused, a tick budget spent — and each used to
+    /// hand back a plain [`Self::default`]. But `WaitingForMenu` starts by *pressing A*, and a bag or
+    /// party list is still on screen at that moment, so "give up" meant "select whatever is under the
+    /// cursor" and the loop began again one item along. Handing back latched means the same B-mash
+    /// that gets out of a refused move gets out of a refused item.
+    fn backing_out() -> Self {
+        Self::WaitingForMenu {
+            reader: PokemonTextReader::message_box_only(),
+            delay: DelayContext::default(),
+            backing_out: BACKING_OUT_TICKS,
+        }
+    }
+}
+
+/// The game's own refusals inside a battle, as they read once fully rendered.
+///
+/// Every one drops back to the menu that offered the choice with the cursor untouched, so every one is
+/// a closed loop under A. ⚠️ **A refusal is not a reliable *detector*** — the box renders a character
+/// at a time, so most ticks of one see a prefix that matches nothing — which is why the caller latches
+/// [`BACKING_OUT_TICKS`] rather than pressing B once.
+///
+/// ⚠️ **Dismissing one is not optional even when the driver "knows" what to do next**, which is the
+/// trap the last entry cost. A message box over a menu swallows *directional* input, so the
+/// forced-switch arm below — which correctly wants to walk the cursor off a fainted Pokémon — pressed
+/// Up into a message box that only A or B can clear, for ever. `soak` hit that from four different
+/// seeds. Clearing the box first is what makes the cursor arm's presses land.
+const BATTLE_REFUSALS: &[&str] = &[
+    "isn't the time",     // a key item or a TM in battle: "OAK: <PLAYER>! This isn't the time…"
+    "won by using",       // "You can't win by using that!"
+    "isn't yours",        // someone else's item
+    "any effect",         // "It won't have any effect."
+    "blocked the BALL",   // a ball thrown at a trainer's Pokémon
+    "no will to fight",   // a fainted Pokémon chosen from the party menu
+];
+
+/// Whether the screen is showing one of [`BATTLE_REFUSALS`].
+fn shows_battle_refusal(screen: &str) -> bool {
+    BATTLE_REFUSALS.iter().any(|r| screen.contains(r))
+}
+
+/// States that press their own buttons through their own menus, and so must not have the generic
+/// text reader pressing A underneath them.
+///
+/// One list, two readers: the text-box handover skips these, and the give-up net bounds them. They
+/// were the same list written twice until the net was added, which is the kind of pair that drifts.
+fn drives_its_own_menus(state: &AgentState) -> bool {
+    matches!(state,
+        AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. }
+        | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. }
+        | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. }
+        | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_)
+        | AgentState::RedeemingPrize(_) | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }
+        | AgentState::UsingFieldItem { .. } | AgentState::UsingBagItem(_) | AgentState::PushingBoulder { .. })
 }
 
 /// State machine for navigating a Pokémart purchase sequence.
@@ -477,7 +572,7 @@ impl Display for AgentState {
                 BattleState::WaitingForMenu { .. } => write!(f, "battle:wait"),
                 BattleState::AwaitingPolicy { .. } => write!(f, "battle:policy"),
                 BattleState::Navigating { action, .. } => write!(f, "battle:{:?}", action),
-                BattleState::HealingActive { item, confirmed, .. } => write!(f, "battle:heal({item:?},confirmed={confirmed})"),
+                BattleState::UsingItem { item, confirmed, .. } => write!(f, "battle:item({item:?},confirmed={confirmed})"),
             },
             AgentState::PokemartShopping(s)           => write!(f, "{s}"),
             AgentState::TeachingMove { item, .. } => write!(f, "teach:{item:?}"),
@@ -543,12 +638,14 @@ pub struct PokemonAgent {
     /// zero, and only genuinely sitting still accumulates.
     ///
     /// ⚠️ **The states that need it are the ones that never poll the policy.** `soak` found four of
-    /// them one at a time — `OverworldMovement`, `Navigating`, `HealingActive`, `PacingForEncounters`
+    /// them one at a time — `OverworldMovement`, `Navigating`, `UsingItem`, `PacingForEncounters`
     /// — and the shape was identical every time: a driver waiting for something that had already
     /// stopped coming, pressing buttons in silence until a deployed watchdog would have fired. Each
     /// bound below hands back to a state that re-reads the screen and asks the policy again, so the
     /// cost of being wrong is one re-decided turn.
-    state_ticks: u16,
+    /// Set when the text reader decides it is looping inside menus rather than reading a conversation,
+    /// cleared by [`Self::poll_policy`]. See the ⚠️ in the `ReadingTextBox` arm.
+    escaping_menus: bool,
 
     // ── W9: the stuck-run watchdog ───────────────────────────────────────────────────────────────
     /// Emulated time since the policy was last polled, in cycles. Reset by [`Self::poll_policy`] and
@@ -591,7 +688,7 @@ impl PokemonAgent {
             door_open_attempts: 0,
             manual_input: VecDeque::new(),
             manual_input_held: 0,
-            state_ticks: 0,
+            escaping_menus: false,
         }
     }
 
@@ -622,7 +719,6 @@ impl PokemonAgent {
         self.door_open_attempts = 0;
         self.manual_input.clear();
         self.manual_input_held = 0;
-        self.state_ticks = 0;
         self.cycles_since_poll = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
     }
@@ -698,6 +794,8 @@ impl PokemonAgent {
     /// would look like a jam forever. One seam, and the compiler finds anything that bypasses it.
     fn poll_policy(&mut self, game_state: &GameState, api: &mut PokemonApi) {
         self.cycles_since_poll = MachineCycles::ZERO;
+        // Reaching a decision point is what "out of the menus" means — see the ⚠️ in `ReadingTextBox`.
+        self.escaping_menus = false;
         self.stuck_reported_at = MachineCycles::ZERO;
         self.policy.service_tools(game_state, api, &self.world_graph);
     }
@@ -892,6 +990,17 @@ impl PokemonAgent {
             PlayerFacingDirection::Left  => Point8 { x: p.x.wrapping_sub(1), y: p.y },
             PlayerFacingDirection::Right => Point8 { x: p.x + 1, y: p.y },
         };
+        // ⚠️ **Giving up has to be remembered, or it is not giving up.** The branch below blocks the
+        // tile and resets the counter — and the next overworld tick starts a fresh run of forty A
+        // presses at the same door, because nothing here read what the last one concluded. Each press
+        // prints "Darn! It needs a CARD KEY!", which is a text box, which is another tick of A from
+        // the reader, and the run never leaves: `soak` found the agent doing this on Silph Co 2F from
+        // four separate seeds, for the whole of every run. `blocked_tiles` already holds the verdict;
+        // this is the line that consults it.
+        if self.blocked_tiles.contains(&(state.map.map, faced)) {
+            self.door_open_attempts = 0;
+            return false;
+        }
         self.door_open_attempts += 1;
         if self.door_open_attempts > Self::DOOR_OPEN_ATTEMPTS {
             // Won't open — it's a decorative wall. Block it and let the caller reroute.
@@ -908,11 +1017,6 @@ impl PokemonAgent {
 
     pub(crate) fn set_state(&mut self, state: AgentState) {
         if self.state != state {
-            // Every state change restarts the walk clock. Kept here rather than in the variant
-            // because the `OverworldMovement` arm binds its fields by value and calls `&mut self`
-            // methods (`abort_overworld`, `set_state`) throughout — a `ref mut` field there would
-            // borrow `self.state` across all of them.
-            self.state_ticks = 0;
             self.state = state;
 
             if self.state != AgentState::Idle {
@@ -1169,7 +1273,7 @@ impl PokemonAgent {
                 };
                 self.set_state(AgentState::ReadingTextBox { reader });
             }
-        } else if let AgentState::ReadingTextBox { reader } = &self.state {
+        } else if let AgentState::ReadingTextBox { reader, .. } = &self.state {
             // text box closed
             self.event(AgentEvent::text_box_from_reader(&reader));
             self.set_state(AgentState::Idle);
@@ -1285,8 +1389,37 @@ impl PokemonAgent {
         self.assert_pokemart_state(game_mode, api)?;
         // Skip generic text-box handling while shopping or teaching a move — those state machines
         // drive their own menu input.
-        if !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. } | AgentState::Surfing { .. } | AgentState::UsingFieldMove { .. } | AgentState::TossingItem { .. } | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. } | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_) | AgentState::RedeemingPrize(_) | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. } | AgentState::UsingFieldItem { .. } | AgentState::UsingBagItem(_) | AgentState::PushingBoulder { .. }) {
+        if !drives_its_own_menus(&self.state) {
             self.assert_text_box_state(game_mode, api);
+        }
+
+        // ⚠️ **The net under every driver that drives its own menus.** Each of them is a private
+        // conversation with the game: it presses its own buttons, it is excluded from the text reader
+        // above, and it polls nothing. So each one is a place the run can stop for ever if the game
+        // answers something the driver did not plan for — and the game refuses things constantly.
+        // `soak` found the shape in `Surfing`: the policy picked SURF in Saffron City, the driver
+        // opened the party menu and pressed it, the game said "No SURFing on <mon> here!", and the
+        // driver's only exit (`entered_menu && back in the overworld`) never came round. It sat there
+        // for the rest of the run.
+        //
+        // Rather than a tick budget per driver — nineteen of them, each needing its own number and
+        // each a place to forget — this is one rule over the measure that already means *nothing is
+        // happening*. Dropping to `Idle` mid-menu is safe because it composes with the escape in
+        // `ReadingTextBox`: the open menu is a text box, the silence is by definition already past
+        // [`TEXT_BOX_ESCAPE_SILENCE`], so the reader backs out of it on the very next tick.
+        //
+        // ⚠️ **It must stay well clear of the legitimately slow drivers**, which is what sets the
+        // number rather than the jam: a mart shop of several items, a PC deposit, a Fly animation and
+        // an elevator ride all run without a poll. 120 s is several times the slowest of those at the
+        // cartridge's own text speed, and still well inside the watchdog's 300 s.
+        if drives_its_own_menus(&self.state)
+            && self.cycles_since_poll.to_duration() >= DRIVER_ESCAPE_SILENCE {
+            let abandoned = format!("{} got no answer from the game for {:?} — starting over",
+                                    self.state, DRIVER_ESCAPE_SILENCE);
+            api.release_all_buttons();
+            self.set_state(AgentState::Idle);
+            self.event(AgentEvent::TextBox { message: abandoned });
+            return Ok(());
         }
 
         let mut new_events: Vec<AgentEvent> = vec!();
@@ -1490,12 +1623,25 @@ impl PokemonAgent {
                 // into the same blocked step — presses buttons for ever without the policy being asked
                 // anything. `soak` found it in Oak's Lab: 300 s of game time walking at a sprite.
                 //
-                // 4500 ticks is 90 s of game time. A tile step is ~13 ticks, so that is over 300 tiles
-                // — further than any single map is wide, and still under a third of the watchdog's
-                // 300 s. Giving up aborts the action, which returns to the policy for a new one.
-                const MAX_MOVEMENT_TICKS: u16 = 4500;
-                self.state_ticks += 1;
-                if self.state_ticks >= MAX_MOVEMENT_TICKS {
+                // ⚠️ **Measured as silence rather than as ticks in this state, because something else
+                // resets the state.** This was a `state_ticks` counter on the agent, and
+                // `OverworldMovement` was believed to be the one state where that works, since it does
+                // not rebuild itself. It has a second way of being torn down: anything that *interrupts*
+                // it. Seafoam Islands B4F is the case — the water current takes the player every few
+                // seconds, the agent passes through `RunningScript` and back, and each pass hands the
+                // walk a fresh 90 s. `soak` found it swimming into the same current for the rest of the
+                // run, 119 s of silence and counting. `cycles_since_poll` is cleared by exactly one
+                // thing: the policy being asked something, which is what this bound exists to force.
+                //
+                // 60 s of game time is 200 tile steps — further than any single map is wide — and a
+                // fifth of the watchdog. It is lower than the 90 s of ticks it replaces for a reason
+                // beyond taste: `stalls` fails a case that takes 90 s to escape, so a bound at 90 s
+                // could not be regression-tested by the tier built to regression-test it. An
+                // interrupted walk is *more* generous than it was, not less: a battle in the middle
+                // polls, which resets the clock. Giving up aborts the action, which returns to the
+                // policy for a new one.
+                const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
+                if self.cycles_since_poll.to_duration() >= MAX_MOVEMENT_SILENCE {
                     api.release_all_buttons();
                     self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination));
                     self.set_state(AgentState::Idle);
@@ -1639,17 +1785,82 @@ impl PokemonAgent {
                 // `UsingPcBox` and `UsingItemPc` are both excluded from `assert_text_box_state`, so
                 // neither ever reaches `ReadingTextBox`. It *does* cover their abort paths, which
                 // drop to `Idle` while the menu is still open and would otherwise A-mash for ever.
-                let button = if api.in_pc_menu() { JoypadButton::B } else { JoypadButton::A };
+                //
+                // ⚠️ **The PC is not the only closed loop under A, so the second half of this is a
+                // *rule* rather than another named place.** `soak` found two more in one run, and
+                // naming them one at a time is how the PC fix aged badly:
+                //
+                //   • the man in the Cerulean badge house is a literal `.loop` — print "which BADGE
+                //     should I describe?", show the list, describe the badge under the cursor, jump
+                //     back — whose only exit is `jr c, .done`, i.e. **B**;
+                //   • the party menu's field-move box is the same shape whenever the move is refused:
+                //     A on SURF → "No SURFing on <mon> here!" → back to the party menu, cursor
+                //     untouched. Every "you can't use that here" in the game is this.
+                //
+                // So after [`TEXT_BOX_ESCAPE_SILENCE`] without the agent reaching *any* decision point,
+                // the reader stops confirming and starts leaving. B is safe to hold: in Gen 1 it
+                // advances a text box exactly like A, and everywhere it differs — a list, a party
+                // menu, a field-move box — differing is the point.
+                //
+                // ⚠️ **Silence alone is not the trigger, and this is the whole of what makes the
+                // hatch safe.** The first version pressed B on *anything* once the agent had been
+                // quiet for 30 s, on the reasoning that B advances a text box exactly like A. It does
+                // — and it still took `full_playthrough` apart: the run blacked out in Mt Moon and sat
+                // on step 52 of 516 until its budget ran out. Ordinary conversations are routinely
+                // longer than 30 s (the TM man's "a new technique, pick the POKéMON…" is 40), so the
+                // hatch was firing constantly, and "identical on a message box" turns out not to
+                // survive contact with a whole run.
+                //
+                // So it fires only when there is something to *leave*: a **list** menu or the party
+                // screen's **field-move box**. Those are the two shapes every closed loop returns to —
+                // the badge house's list, the party menu behind a refused SURF — and neither is ever
+                // on screen during a conversation that is merely long. A plain message box is left to
+                // A, which is what a conversation needs.
+                //
+                // ⚠️ **And not in a battle.** A text box in a battle belongs to the battle driver —
+                // the agent passes through here between turns — and B there is not "leave the
+                // conversation", it is "cancel the move I am choosing". A gym leader is routinely
+                // quieter than 30 s (`soak` measures `battle:policy` gaps of 25–40 s in ordinary
+                // play). Battles do their own refusal handling in [`BattleState`]; this is for the
+                // overworld.
+                //
+                // ⚠️ **Latched on the agent, because getting out takes more menus than the one that
+                // gave it away.** The refused SURF is three deep — field-move box over party list over
+                // START menu — and only the innermost of them is a shape worth reacting to. Deciding
+                // per tick therefore gets one level out and A-mashes straight back in, which is what
+                // it did: B on the field-move box, A on the party list underneath, and round again for
+                // ever. Once the loop has been recognised the agent keeps pressing B until it reaches
+                // a decision point, which is the definition of having got out — and is what clears the
+                // flag, in `poll_policy`, the one place that means it.
+                //
+                //
+                // The third shape has no list menu *and* no field-move box: Bill's own PC, whose
+                // "Which POKéMON do you want to see?" is drawn in an ordinary message box. What it
+                // does have is a **CANCEL entry**, which is what every Gen 1 pick-one-of-these menu
+                // offers and what no conversation ever shows — so that word on screen is the third
+                // way in. (`soak` found eleven seeds standing in Bill's house watching the Eevee
+                // evolutions cycle.)
+                let in_battle = api.mmu().read_pointer(&pokered_symbols::wIsInBattle) != 0;
+                if !in_battle && self.cycles_since_poll.to_duration() >= TEXT_BOX_ESCAPE_SILENCE
+                    && (api.menu_state().map_or(false, |m| m.is_list_menu() || m.is_field_move_menu())
+                        || api.on_screen_text(false).map_or(false, |t| t.contains("CANCEL"))) {
+                    self.escaping_menus = true;
+                }
+                let button = if api.in_pc_menu() || self.escaping_menus { JoypadButton::B } else { JoypadButton::A };
                 reader.update_with(api, button);
             }
             AgentState::Battle(ref mut battle_state) => {
-                // Global safety net: an unusable-item message ("This isn't the time to use that!") can
-                // appear if a menu transition desyncs and a move/heal drive lands on a key item in the
-                // bag. Dismiss it with B from any battle sub-state and re-sync via WaitingForMenu, rather
-                // than letting whichever driver is active spin on it forever.
-                if api.on_screen_text(false).map_or(false, |t| t.contains("isn't the time") || t.contains("won by using")) {
+                // Global safety net: the game has refused the item that was just selected. Back out
+                // from whichever sub-state is driving, rather than letting it spin.
+                //
+                // ⚠️ **Latched, not a single B.** This is the bug the whole `BATTLE_REFUSALS` comment is
+                // about: dismissing the message with one B lands back on the *bag list*, and the plain
+                // `BattleState::default()` this used to hand back presses A there — reselecting the
+                // same item, for ever. `soak` caught it from eleven different starting states at once,
+                // every one of them a bag with a TM or a key item in it.
+                if api.on_screen_text(false).map_or(false, |t| shows_battle_refusal(&t)) {
                     api.toggle_button(JoypadButton::B);
-                    self.set_battle_state(BattleState::default());
+                    self.set_battle_state(BattleState::backing_out());
                     return Ok(());
                 }
                 match battle_state {
@@ -1719,8 +1930,27 @@ impl PokemonAgent {
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
                             }
-                            if screen.contains("CANCEL")
-                                || screen.contains("isn't the time") || screen.contains("won by using") {
+                            // ⚠️ **Left unlatched deliberately.** A refusal never reaches here — the net
+                            // at the top of the battle arm catches it first and latches — and the bag
+                            // list is now caught by its own arm below, whatever it is scrolled to. So
+                            // what is left is the ordinary end of an item turn, where one B per tick is
+                            // exactly right and a 2 s latch is 2 s of the next turn's menu ignored.
+                            if screen.contains("CANCEL") || shows_battle_refusal(&screen) {
+                                api.toggle_button(JoypadButton::B);
+                                return Ok(());
+                            }
+                            // ⚠️ **The SHIFT prompt, which only exists because the soak stopped using
+                            // the harness's options.** With battle style SHIFT — the cartridge's own
+                            // default, and therefore the deployment's — every enemy switch asks
+                            // "<TRAINER> is about to use <MON>! Will <PLAYER> change POKéMON?" over a
+                            // yes/no box. A opens the party menu, the party arm below backs out of
+                            // it, and the prompt comes round again — for the rest of the battle.
+                            //
+                            // B is *no*, which is the right default: switching is a decision, and the
+                            // policy makes it at the menu that follows. ⚠️ **Only this prompt, not
+                            // yes/no in general** — "Use next #MON?" after a faint is also a yes/no
+                            // box, and B there flees the battle rather than sending out the next mon.
+                            if screen.contains("change") && menu_state.is_yes_no_menu() {
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
                             }
@@ -1731,14 +1961,49 @@ impl PokemonAgent {
                                 return Ok(());
                             }
                             match menu_state.battle_menu_state() {
-                                // Main menu is ready: normal battle opens on FIGHT, Safari on BALL.
-                                Some(BattleMenuState::Fight) | Some(BattleMenuState::SafariBall) => {
+                                // The main menu is ready: the turn is the policy's to decide.
+                                //
+                                // ⚠️ **All three Safari positions, and FIGHT.** The Safari menu keeps
+                                // its cursor between turns, so naming only the position a *fresh* menu
+                                // opens on (BALL) left BAIT and ROCK to the `Some(_)` arm below, which
+                                // presses A — re-throwing whatever the last turn had chosen with the
+                                // policy never asked. `soak` found the agent baiting the same Rhyhorn
+                                // for the rest of the run.
+                                //
+                                // ⚠️ **And deliberately *not* ITEM/PKMN/RUN in an ordinary battle**,
+                                // though the symmetry is tempting: that menu resets its cursor to
+                                // FIGHT, so those arms are only ever reached on a transient misread —
+                                // and handing those to the policy re-times every battle in the game.
+                                // Tried: `full_playthrough` blacked out in Mt Moon and stalled at step
+                                // 87 of 516. The rule here is the ⚠️ from `with_original_battle_timing`
+                                // — a change that re-rolls the RNG stream has to earn it.
+                                Some(BattleMenuState::Fight)
+                                | Some(BattleMenuState::SafariBall) | Some(BattleMenuState::SafariBait)
+                                | Some(BattleMenuState::SafariRock) => {
                                     new_events.push(AgentEvent::text_box_from_reader(reader));
 
                                     api.release_all_buttons();
                                     self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
                                 }
                                 Some(BattleMenuState::PokemonList { index }) => {
+                                    // ⚠️ **Only if the party list is what is actually on screen.**
+                                    // `battle_menu_state` reads this off `wTopMenuItemX/Y`, which
+                                    // *linger*: the geometry still says "party list at (0,1)" long
+                                    // after a message box has been drawn over it. Every branch below
+                                    // then presses a direction, which a message box swallows — the
+                                    // screen freezes exactly as it did for "There's no will to fight!",
+                                    // and `soak` found this half of it in a Ditto battle on Route 15,
+                                    // 180 s on one frame reading "It's super effective!".
+                                    //
+                                    // The party list shows an HP bar per member, so two or more `/`
+                                    // means a list; a battle message box shows the active mon's alone.
+                                    // Same heuristic `UsingItem` uses to spot the "use on which?" menu,
+                                    // and the same answer as the refusals: clear the box first, drive
+                                    // the cursor once it is gone.
+                                    if api.on_screen_text(false).map_or(0, |t| t.matches('/').count()) < 2 {
+                                        api.toggle_button(JoypadButton::A);
+                                        return Ok(());
+                                    }
                                     // A party list is only ours to drive here for a FORCED switch — the
                                     // active mon fainted and the game demands a replacement. Send the
                                     // first alive member. If instead the active mon is ALIVE, this party
@@ -1813,6 +2078,30 @@ impl PokemonAgent {
                                         api.toggle_button(JoypadButton::A);
                                     }
                                 },
+                                Some(BattleMenuState::ItemList { .. }) => {
+                                    // ⚠️ **A bag list here is always a leak, and A is always the wrong
+                                    // button.** Nothing hands the bag to this state on purpose any
+                                    // more: `UsingItem` owns it from the grid to the confirm, and
+                                    // every give-up path backs out. So whatever is under the cursor is
+                                    // an item *nobody chose* — and if it happens to be a TM or a key
+                                    // item, A is the refusal loop that wedged eleven soak states.
+                                    //
+                                    // The "CANCEL" test above catches this only when the list is
+                                    // scrolled far enough for CANCEL to be on screen, which is exactly
+                                    // the kind of half-covering check that reads as handled. Keying on
+                                    // the menu instead covers it wherever the list is scrolled to.
+                                    //
+                                    // ⚠️ **One B per tick, not a latch.** The list is what is being
+                                    // detected, so the detection holds for as long as the problem does
+                                    // — a latch buys nothing and costs everything if the read is
+                                    // wrong. And it can be: the comment above records that a leaked
+                                    // bag list and the next turn's FIGHT menu both read as
+                                    // `(5,4)`/`ListMenuBox`, so a misclassified tick would otherwise
+                                    // ignore two seconds of a perfectly good battle menu. The case a
+                                    // latch is genuinely needed for — the refusal message covering the
+                                    // list, so `menu_state` reads `MessageBox` — is the net's, above.
+                                    api.toggle_button(JoypadButton::B);
+                                },
                                 Some(_) => {
                                     // battle menu is showing, do not read the text
                                     api.toggle_button(JoypadButton::A);
@@ -1841,39 +2130,32 @@ impl PokemonAgent {
                                     opponent: opponent_pokemon_name(&game_state),
                                     action,
                                 });
-                                // In-battle item use goes through the dedicated `HealingActive` driver:
-                                // it opens the bag and confirms the item with A, whereas the generic
-                                // navigator hands off to `WaitingForMenu`, which backs out of the bag on
-                                // its "CANCEL" entry before the use commits. This covers both healing
-                                // items (which also need the "use on which POKéMON?" party menu) and
-                                // Poké Balls (thrown straight at the enemy, no party menu — the driver
-                                // gates that step to heal items). Completion for both = the item's count
-                                // in the bag drops.
+                                // In-battle item use goes through the dedicated `UsingItem` driver: it
+                                // opens the bag, finds the item **by id** and confirms it, including
+                                // the "use on which POKéMON?" party menu where the item opens one.
+                                // Completion is the item's count in the bag dropping.
+                                //
+                                // ⚠️ **Every item, not a list of the ones known to work.** This used
+                                // to gate on sixteen ids — the potions, the balls, the stat items —
+                                // and let everything else fall through to `Navigating`. That path
+                                // cannot select an item at all: it walks menu geometry, so it opened
+                                // the bag and handed it to `WaitingForMenu`, which pressed A on
+                                // whatever the cursor was resting on. So *use Antidote* meant "use
+                                // whatever is under the cursor", and on a bag holding a TM or a key
+                                // item it meant the "This isn't the time to use that!" loop. Reaching
+                                // the driver by default makes the list a tuning knob (which items
+                                // open a party menu) rather than the thing that decides whether an
+                                // item can be used at all.
                                 if let BattleAction::UseItem { item, .. } = action {
-                                    use crate::pokemon::item::ItemId;
-                                    // **Workstream I3/I4** widened this list. The seven stat items and
-                                    // the Poké Doll behave exactly like a thrown ball as far as this
-                                    // driver is concerned — they are confirmed straight from the bag
-                                    // with no party menu (`data/items/use_party.asm` lists none of
-                                    // them for the in-battle path) and they are consumed on use, which
-                                    // is the completion test. Without them here the generic navigator
-                                    // takes over and backs out of the bag on CANCEL before the use
-                                    // commits, so nothing is ever spent.
-                                    if matches!(item.id, ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion
-                                        | ItemId::MaxPotion | ItemId::FullRestore
-                                        | ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall
-                                        | ItemId::XAttack | ItemId::XDefend | ItemId::XSpeed | ItemId::XSpecial
-                                        | ItemId::XAccuracy | ItemId::GuardSpec | ItemId::DireHit | ItemId::PokeDoll) {
-                                        let start_qty = game_state.bag.iter()
-                                            .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
-                                        let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
-                                        let entry_hp = game_state.pokemon.get(active as usize).map(|p| p.current_hp).unwrap_or(0);
-                                        self.set_battle_state(BattleState::HealingActive { ticks: 0,
-                                            item: item.id, start_qty, entry_hp, press: true, confirmed: false,
-                                            delay: DelayContext::default(),
-                                        });
-                                        return Ok(());
-                                    }
+                                    let start_qty = game_state.bag.iter()
+                                        .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
+                                    let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
+                                    let entry_hp = game_state.pokemon.get(active as usize).map(|p| p.current_hp).unwrap_or(0);
+                                    self.set_battle_state(BattleState::UsingItem { ticks: 0,
+                                        item: item.id, start_qty, entry_hp, press: true, confirmed: false,
+                                        delay: DelayContext::default(),
+                                    });
+                                    return Ok(());
                                 }
                                 self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default(), ticks: 0 });
                             }
@@ -1902,7 +2184,9 @@ impl PokemonAgent {
                                 // `battle_state` that `set_battle_state` replaces.
                                 let gave_up = format!("battle navigation to {action:?} got nowhere in 5s — re-deciding");
                                 api.release_all_buttons();
-                                self.set_battle_state(BattleState::default());
+                                // Latched: whatever this was navigating may have left a sub-menu open,
+                                // and `WaitingForMenu` opens by pressing A. See `BattleState::backing_out`.
+                                self.set_battle_state(BattleState::backing_out());
                                 self.event(AgentEvent::TextBox { message: gave_up });
                                 return Ok(());
                             }
@@ -2039,7 +2323,7 @@ impl PokemonAgent {
                         }
                     }
 
-                    BattleState::HealingActive { item, start_qty, entry_hp, press, confirmed, delay: _, ticks } => {
+                    BattleState::UsingItem { item, start_qty, entry_hp, press, confirmed, delay: _, ticks } => {
                         // ⚠️ Same bound and same reason as `Navigating`: this drives six menus deep on
                         // a decision the policy already made and polls nothing on the way. `soak` found
                         // it wedged at `confirmed=false` in Viridian Forest for 300 s — the bag list
@@ -2051,6 +2335,15 @@ impl PokemonAgent {
                         // state each time and resets anything counting from outside — which is exactly
                         // how the first attempt at this bound silently never fired. 250 ticks is 5 s
                         // of game time; a real heal is well inside it, animation included.
+                        //
+                        // ⚠️ **This budget must NOT back out latched, though a refused item makes it
+                        // tempting.** It fires on a *slow* use as readily as on a refused one — a ball
+                        // whose throw animation outruns 5 s is the common case — and at that moment the
+                        // bag may still be open with the throw uncommitted, so B-mashing cancels it.
+                        // Tried, and it cost `can_get_the_super_rod_and_catch_a_tentacool` all 60 of
+                        // its casts: every ball backed out of the bag instead of being thrown, and the
+                        // leg burned its 90-minute budget catching nothing. A refusal does not need
+                        // this anyway — the refusal net above catches it in a fraction of the time.
                         const MAX_HEALING_TICKS: u16 = 250;
                         let ticks = *ticks;
                         if ticks >= MAX_HEALING_TICKS {
@@ -2092,24 +2385,36 @@ impl PokemonAgent {
                         if active_hp > entry_hp {
                             // Heal bar filling — wait, don't touch the (still-open) party menu.
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1 });
+                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1 });
                             return Ok(());
                         }
                         // Two-tick press/release cadence for clean rising edges.
                         if !press {
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
+                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
                             return Ok(());
                         }
 
                         // "Use on which POKéMON?" party menu — recognized PokemonList (0,1) or party text.
-                        // Only healing items open it; a Poké Ball is thrown straight at the enemy, so for
-                        // a ball this stays false (else the enemy-HP "n/m" bars would look like party text
-                        // and drive a phantom party menu). The battle-screen slash count is compared while
-                        // `bms` is momentarily unreadable.
-                        let is_heal = matches!(item, ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion
-                            | ItemId::MaxPotion | ItemId::FullRestore);
-                        let party_showing = is_heal && (matches!(bms, Some(BattleMenuState::PokemonList { .. }))
+                        // A Poké Ball is thrown straight at the enemy, so for a ball this stays false
+                        // (else the enemy-HP "n/m" bars would look like party text and drive a phantom
+                        // party menu). The battle-screen slash count is compared while `bms` is
+                        // momentarily unreadable.
+                        //
+                        // ⚠️ **The list is which items open a party menu, and it is not the potions.**
+                        // In battle the status heals, the revives and the PP restores all ask "use on
+                        // which POKéMON?" too — pokered's `UsableItems_PartyMenu` — and each of them
+                        // reached this driver the moment `UseItem` stopped being gated on a list of
+                        // sixteen ids. Leaving them out does not fail loudly: the party menu is not a
+                        // recognized `battle_menu_state`, so the fallback below presses A and the item
+                        // lands on whichever mon the cursor started on.
+                        let opens_party_menu = matches!(item,
+                            ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion
+                            | ItemId::FullRestore | ItemId::FullHeal | ItemId::Antidote | ItemId::BurnHeal
+                            | ItemId::IceHeal | ItemId::Awakening | ItemId::ParlyzHeal
+                            | ItemId::Revive | ItemId::MaxRevive
+                            | ItemId::Ether | ItemId::MaxEther | ItemId::Elixer | ItemId::MaxElixer);
+                        let party_showing = opens_party_menu && (matches!(bms, Some(BattleMenuState::PokemonList { .. }))
                             || (bms.is_none() && api.on_screen_text(false).map_or(false, |t| t.matches('/').count() >= 2)));
 
                         let next_confirmed = confirmed;
@@ -2145,7 +2450,7 @@ impl PokemonAgent {
 
                         api.release_all_buttons();
                         if let Some(b) = button { api.press_button(b); }
-                        self.set_battle_state(BattleState::HealingActive { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
+                        self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
                     }
                 }
             }
@@ -2559,6 +2864,29 @@ impl PokemonAgent {
                         self.event(AgentEvent::TextBox { message: format!("Surfed onto the water at {water_pos}") });
                     }
                     self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // ⚠️ **A refused surf has to be *remembered*, or the same tile is chosen again.** "No
+                // SURFing on <mon> here!" means the agent's map and the game disagree about that
+                // tile — Saffron City has one the tile reader calls water — and nothing about
+                // re-deciding changes the disagreement, so a random walker picks it again within the
+                // minute. Blocking it is the same answer `handle_card_key_door` gives a door that will
+                // not open, and it uses the same set, so `observe_state` overlays it as an obstacle
+                // and the router (and the action list the policy is offered) stops naming it.
+                //
+                // ⚠️ It also has to be handled *here*, not left to the reader: this state drives its
+                // own menus, so it is excluded from the text reader, and while the refusal box is up
+                // the party-menu geometry is still what `field_move_menu_button` sees — it presses Up
+                // and Down at a message box that only A or B can clear. That is the fainted-switch
+                // lesson again, and without it the only thing that ends the attempt is
+                // `DRIVER_ESCAPE_SILENCE`, a minute later.
+                if api.on_screen_text(false).map_or(false, |t| t.contains("No SURFing")) {
+                    let map = api.game_state().map(|g| g.map.map).unwrap_or(self.last_map.unwrap_or(Map::PalletTown));
+                    self.blocked_tiles.insert((map, water_pos));
+                    api.toggle_button(JoypadButton::B);
+                    self.set_state(AgentState::Idle);
+                    self.event(AgentEvent::TextBox {
+                        message: format!("the game refused SURF at {water_pos} — treating it as land") });
                     return Ok(());
                 }
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;

@@ -140,6 +140,13 @@ impl MenuState {
         }
     }
 
+    /// True when a scrolling **list** menu is what is on screen — the bag, a mart's stock, a lift's
+    /// floors, the badge descriptions. All of them are left with B, and several are closed loops
+    /// under A, which is why the agent's text reader asks.
+    pub fn is_list_menu(&self) -> bool {
+        self.text_box_id == TextBoxId::ListMenuBox
+    }
+
     pub fn is_mart_buy_sell_menu(&self) -> bool {
         matches!(self.text_box_id, TextBoxId::BuySellQuitMenu | TextBoxId::BuySellQuitMenuTemplate)
     }
