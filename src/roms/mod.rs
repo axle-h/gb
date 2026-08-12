@@ -158,8 +158,10 @@ pub mod blargg_oam_bug {
 ///
 /// Regenerate with [`mooneye::tests::compress_mooneye_roms`] if the upstream set ever changes.
 ///
-/// Behind the `hwtests` feature so a default build carries none of it.
-#[cfg(feature = "hwtests")]
+/// ⚠️ **`cfg(test)`, not a feature.** The suite is three tests and 0.7 s, so it belongs in the
+/// default tier — and gating on `test` rather than on a feature means the shipped binary carries
+/// none of these bytes either way, which is what the `hwtests` feature was really buying.
+#[cfg(test)]
 pub mod mooneye {
     /// Decompress one of the ROMs below into a real cartridge image.
     pub fn rom(compressed: &[u8]) -> Vec<u8> {
@@ -212,12 +214,14 @@ pub mod mooneye {
         ///
         /// ```text
         /// MOONEYE_SRC=/path/to/mooneye-test-suite/emulator-only \
-        ///   cargo test --release --features hwtests --bin gb -- compress_mooneye_roms --ignored --nocapture
+        ///   cargo test --release --features diagnostics --bin gb -- compress_mooneye_roms --ignored --nocapture
         /// ```
         ///
-        /// Same shape as the blip golden-vector regeneration: a tool, not an assertion, so it is
-        /// `#[ignore]`d on top of its feature gate.
+        /// Same shape as the blip golden-vector regeneration: a tool, not an assertion, so it sits
+        /// behind `diagnostics` and is `#[ignore]`d on top of that — the ignored list is a backlog of
+        /// *blocked* tests, and a tool in it reads as one.
         #[test]
+        #[cfg(feature = "diagnostics")]
         #[ignore = "tool: rebuilds the committed mooneye ROMs from an extracted release"]
         fn compress_mooneye_roms() {
             let src = std::env::var("MOONEYE_SRC").expect("set MOONEYE_SRC to .../emulator-only");

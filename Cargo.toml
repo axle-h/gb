@@ -86,11 +86,6 @@ bench = ["dep:flate2"]
 # leave the working tree clean, or every run silently changes the next run's inputs.
 #   cargo test --release --features regen-fixtures,slow-tests
 regen-fixtures = []
-# The mooneye MBC test ROMs (D10) — 28 ROMs, 22 MB raw. They are committed **lz4-compressed** to
-# `src/roms/mooneye/` (~90 KB) because they are almost entirely padding, and decompressed at test
-# time. Gated because that decompression is pure cost for anyone not running them.
-#   cargo test --release --features hwtests --bin gb -- mooneye
-hwtests = []
 
 [dependencies]
 strum = "0.27"
