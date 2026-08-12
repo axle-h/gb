@@ -63,6 +63,31 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
+      # What `GET /version` serves and what the startup line prints. The binary cannot know any of
+      # it: `CARGO_PKG_VERSION` is in the crate, but "when" and "from what" only exist out here.
+      #
+      # ⚠️ **`github.head_ref || github.ref_name`, in that order.** On a pull request `ref_name` is
+      # the synthetic `123/merge`, which names no branch anyone has; `head_ref` is the branch the PR
+      # came from and is empty on a push. Same story one line down: `github.sha` on a PR is the merge
+      # commit, so the head SHA is the one that identifies what was built. Neither case reaches the
+      # registry — the push steps are main-only — but the smoke test below reads this back, and a
+      # value that is only ever right on main is a value nobody can trust on a PR.
+      - name: Work out what we are building
+        id: build_info
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "branch=$BRANCH"
+            # Seven characters: git's own default minimum, and the prefix of the full SHA the image
+            # is tagged with, so one pastes into `git show` and greps the other.
+            echo "sha=$(printf '%s' "$REVISION" | cut -c1-7)"
+            echo "revision=$REVISION"
+          } >> "$GITHUB_OUTPUT"
+
       # ⚠️ `type=gha` caches **layers**, not BuildKit cache mounts. The cargo registry, the cargo
       # target directory and the pnpm store are all `--mount=type=cache` and start empty on every
       # runner, so an invalidated stage 3 pays a full cold `cargo build --release`. What the cache
@@ -77,6 +102,14 @@ jobs:
           tags: gb:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # ⚠️ These are consumed in the *runtime* stage, below the `COPY` of the binary — see the
+          # ⚠️ in the Dockerfile. `GB_BUILD_DATE` changes on every run, so an arg the cargo stage
+          # read would mean a full cold `cargo build --release` every time this workflow fires.
+          build-args: |
+            GB_BUILD_DATE=${{ steps.build_info.outputs.date }}
+            GB_GIT_BRANCH=${{ steps.build_info.outputs.branch }}
+            GB_GIT_SHA=${{ steps.build_info.outputs.sha }}
+            GB_GIT_REVISION=${{ steps.build_info.outputs.revision }}
 
       # An image that builds is not the claim worth making — the interesting failures are an empty
       # `web/dist` baked in, or a ROM the Pokémon layer cannot read, and both build perfectly.
@@ -100,6 +133,24 @@ jobs:
             sleep 2
           done
           curl -fsS http://localhost:8080/api/healthz
+
+          # The injection above actually reached the image. This is the one thing about /version
+          # that can break silently: the endpoint answers either way, with nulls where the build
+          # args did not arrive, and an image that cannot say which commit it is looks perfectly
+          # healthy right up until someone needs to know.
+          curl -fsS -o version.json http://localhost:8080/version
+          cat version.json
+          python3 - <<'PY'
+          import json, sys
+          got = json.load(open("version.json"))
+          missing = [k for k in ("version", "build_date", "branch", "commit") if not got.get(k)]
+          if missing:
+              print(f"::error::/version did not receive {', '.join(missing)} — check the build-args")
+              sys.exit(1)
+          PY
+          test "$(python3 -c 'import json;print(json.load(open("version.json"))["commit"])')" \
+            = "${{ steps.build_info.outputs.sha }}" \
+            || { echo "::error::/version reports a commit that is not the one we built"; exit 1; }
 
           # Stage 2 landed in the binary. The failure this catches is a *successful* build with an
           # empty web/dist, which serves the "UI is not built" placeholder instead of the SPA.

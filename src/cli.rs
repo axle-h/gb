@@ -47,6 +47,11 @@ ENVIRONMENT (any policy):
     GB_PORT                     Port to listen on; --port wins
     GB_RUN_DIR                  Where runs are kept [default: ./runs]
     GB_STATUS_HZ                How often the status panel is sampled [default: 2]
+    GB_BUILD_DATE, GB_GIT_BRANCH, GB_GIT_SHA
+                                Set by the container image, not by you: the build date, branch
+                                and short commit that GET /version serves and `gb serve` prints
+                                on the way up. Unset outside an image, and reported as null
+                                rather than guessed at
     GB_ADMIN_TOKEN              Enables POST /api/new-run, which starts the game over in a
                                 fresh run directory without restarting the process. Callers
                                 send it as the X-GB-Token header. Unset — the default — and

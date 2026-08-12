@@ -722,6 +722,16 @@ every one is a `make` output.
 checkpoints the run. A shell in between means `docker stop` loses everything since the last periodic
 checkpoint.
 
+⚠️ **The build stamp (`/version`) is `ENV` in the runtime stage and must stay below the `COPY` of
+the binary.** `GB_BUILD_DATE` changes on every build, so an `ARG` the cargo stage read would
+invalidate stage 3 every single CI run — and `type=gha` caches *layers*, not the cache mounts the
+cargo registry and target directory live on, so that is a full cold `cargo build --release` each
+time rather than a cheap re-link. Below the binary's own layer there is nothing but metadata, so the
+same three facts cost nothing. That is also why they are `std::env::var` in `src/web/version.rs`
+rather than `env!()`, and why a `build.rs` git fallback was not added: it would either recompile the
+crate on every commit or go quietly stale between them, and `null` is the honest answer for a build
+nobody stamped.
+
 **CI** (`.github/workflows/container.yml`) builds the image, smoke-tests the running container, and
 only then pushes it to ghcr.io, tagged `latest` and the commit. ⚠️ The push steps are main-only: a
 fork PR's `GITHUB_TOKEN` is read-only whatever the workflow's `permissions:` asks for.

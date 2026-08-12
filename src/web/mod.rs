@@ -22,6 +22,7 @@
 //! GET  /{*path}                     its assets
 //! GET  /favicon.png, /favicon.ico   the overworld Poké Ball, decoded from the cartridge
 //! GET  /reset-game                  start the game over; HTTP Basic (needs GB_ADMIN_TOKEN)
+//! GET  /version                     which build this is: crate version, build date, branch, commit
 //! GET  /api/healthz                 liveness
 //! GET  /api/events                  SSE — the status heartbeat, plus agent events as they happen
 //! GET  /api/video                   binary — a keyframe, then block deltas, deflated per connection
@@ -37,6 +38,7 @@ pub mod badges;
 pub mod leaderboard;
 pub mod published;
 pub mod sprites;
+pub mod version;
 pub mod video;
 
 use std::convert::Infallible;
@@ -133,7 +135,9 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let run = current.get();
     println!(
         "gb serve {} — {} run {} in {}",
-        crate::cli::VERSION,
+        // The same four facts `/version` serves: the first question asked of a container that is
+        // behaving oddly is which build it is, and its log is the first place anyone looks.
+        version::BuildInfo::current().summary(),
         match origin {
             Origin::Fresh => "new",
             Origin::Resumed => "resuming",
@@ -302,6 +306,9 @@ fn routes() -> Router<AppState> {
         .route("/reset-game", get(reset_game))
         .route("/favicon.png", get(sprites::favicon))
         .route("/favicon.ico", get(sprites::favicon))
+        // At the root rather than under `/api`, because it is not the SPA's business — it is the
+        // one URL an operator types to find out what is deployed.
+        .route("/version", get(version::version))
         // Last, so the catch-all cannot shadow an API route it happens to match.
         .route("/", get(assets::index))
         .route("/{*path}", get(assets::asset))
