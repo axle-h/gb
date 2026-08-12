@@ -48,11 +48,17 @@ data:
   # whole run stopped for as long as it took. 8192 is far above any legitimate turn here.
   GB_MAX_TOKENS: "8192"
 
-  # `none` is the only value that measurably does anything on this endpoint: it takes reasoning to
-  # zero tokens, where `low` is indistinguishable from the default. Worth knowing what it costs —
-  # this model puts *everything* in the reasoning channel and almost nothing in `content`, so with
-  # thinking off the conversation pane shows the tool calls and little else.
-  GB_REASONING_EFFORT: "none"
+  # ⚠️ **Deliberately unset — thinking is ON, and `none` was tried and reverted the same night.**
+  # It works exactly as advertised (reasoning to zero tokens, turns down to 12–28 tokens and ~4
+  # seconds, a tenth of the cost) and the model got measurably *worse* at the game: it dropped
+  # straight into a rigid two-cycle in Oak's lab — `wait`, interact, `wait`, interact — where with
+  # thinking on it had at least explored different sprites, and had escaped that room before. Speed
+  # is not the scarce resource here; the model working out what to do next is.
+  #
+  # `GB_MAX_TOKENS` is what bounds a runaway now, which is the job this was doing by accident.
+  # Values, if it is ever wanted again: `none` is the only one that does anything on LM Studio with
+  # gemma-4 — `low` measured 174 → 159 reasoning tokens, which is noise.
+  # GB_REASONING_EFFORT: "none"
 
   # W9's watchdog: emulated seconds with the agent asking the policy nothing at all before the model
   # is asked for a nudge. `0` turns it off. Every firing is a bug report, not routine.
