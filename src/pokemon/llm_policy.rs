@@ -669,7 +669,7 @@ mod tests {
                 config,
                 Arc::clone(&published),
                 // No run directory: the note tools work, they simply keep nothing (W6b).
-                crate::llm::notes::Notes::open(None),
+                crate::llm::todo::TodoList::open(None),
             );
             let handle = worker.spawn().expect("the worker thread starts");
 
@@ -1059,6 +1059,85 @@ mod tests {
         assert_eq!(tools::battle_id(&action), "run");
     }
 
+    /// **W6b / §10 — the plan is in the history exactly once, and the prefix in front of it never
+    /// moves.**
+    ///
+    /// ⚠️ **Both halves are the point, and they are what this replaced.** The list used to be
+    /// rendered into the *system* message on every request, so a `todo_add` changed message 0 — and
+    /// a prompt cache is keyed on the prefix, so one edit to the model's own plan threw away the
+    /// cached prefill of the entire conversation. Here the system message must be byte-identical
+    /// across every request of the run, and the plan must appear once rather than accumulating a
+    /// stale copy per turn.
+    #[test]
+    fn the_plan_is_carried_once_and_never_disturbs_the_cacheable_prefix() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        rig.push(vec![
+            // Turn 1 decides without touching the plan at all.
+            calls(&[("choose_action", &choose)]),
+            // Turn 2 adds to it *and* decides in one message — the "remember this, and go north"
+            // shape the worker has to service rather than discard.
+            calls(&[
+                ("todo_add", r#"{"text":"come back to Route 12 with the Poke Flute"}"#),
+                ("choose_action", &choose),
+            ]),
+            // Turns 3 and 4 change nothing, so neither may move the plan.
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+        ]);
+        for turn in 1..=4 {
+            assert!(rig.pump_overworld(&mut policy).is_some(), "turn {turn} decides");
+        }
+
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 4);
+        let plans = |request: &ChatRequest| -> Vec<String> {
+            request.messages.iter().filter(|m| crate::llm::prompt::is_plan(m))
+                .filter_map(Message::text).map(str::to_string).collect()
+        };
+
+        // The prefix. Nothing the model did may have touched it.
+        for (n, request) in requests.iter().enumerate() {
+            assert_eq!(request.messages[0].role, Role::System);
+            assert_eq!(request.messages[0], requests[0].messages[0],
+                       "request {n}'s system message differs — the whole prefix cache is gone");
+        }
+
+        // Exactly one copy, every time, and it says the current thing.
+        for (n, request) in requests.iter().enumerate() {
+            assert_eq!(plans(request).len(), 1, "request {n} carries {:?}", plans(request));
+        }
+        assert!(!plans(&requests[0])[0].contains("Poke Flute"), "nothing was planned yet");
+        assert!(plans(&requests[2])[0].contains("Poke Flute"),
+                "the item added mid-turn is in the next turn: {}", plans(&requests[2])[0]);
+
+        // ⚠️ **The property that makes it cheap: an unchanged plan is not re-emitted.** Turn 3 is
+        // where the new item lands — the copy in front of it was stale, so it moved, and that is the
+        // one turn that pays. Turn 4 changes nothing, so everything turn 3 sent must still be a
+        // *prefix* of what turn 4 sends: the history grew purely by append and the endpoint's cache
+        // is intact all the way back to the system message.
+        let sent = &requests[2].messages;
+        assert_eq!(&requests[3].messages[..sent.len()], &sent[..],
+                   "turn 4 rewrote history turn 3 had already sent — the prefix cache is gone");
+
+        // The page is told too — a viewer reads the plan as what the run is trying to do.
+        let published: Vec<Vec<String>> = rig
+            .drained_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                UiEventBody::Plan { items } => Some(items.into_iter().map(|item| item.text).collect()),
+                _ => None,
+            })
+            .collect();
+        // Two publishes across four turns: the opening one and the edit. ⚠️ **The opening one is
+        // not noise** — a resumed run loads a plan off disk with no event to announce it, so
+        // without a publish from the first turn the panel would stay empty until the model next
+        // happened to touch its own list, which can be an hour.
+        assert_eq!(published, [vec![], vec!["come back to Route 12 with the Poke Flute".to_string()]],
+                   "published on change, not on a timer");
+    }
+
     /// §2.1 and §7.3 together: several reads in one assistant message are answered **all at once,
     /// from one observed `GameState`** — which is what lets a cancelled turn roll back exactly one
     /// step and still leave a history the endpoint will accept.
@@ -1068,7 +1147,7 @@ mod tests {
         let id = rig.first_action_id();
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
-            replies.push_back(calls(&[("read_map", "{}"), ("read_party", "{}"), ("read_trainer", "{}")]));
+            replies.push_back(calls(&[("read_map", "{}"), ("read_party", "{}"), ("read_bag", "{}")]));
             replies.push_back(calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]));
         }
 
@@ -1090,7 +1169,7 @@ mod tests {
         let expected = format!("\"{map}\"");
         assert!(results[0].contains(&expected), "read_map: {}", &results[0][..results[0].len().min(200)]);
         assert!(results[1].contains("\"slot\":0"), "read_party: {}", results[1]);
-        assert!(results[2].contains("\"badges\""), "read_trainer: {}", results[2]);
+        assert!(results[2].contains("\"slots_total\":20"), "read_bag: {}", results[2]);
     }
 
     /// **W9 / §14** — a stuck turn is an ordinary turn in every respect except how its answer

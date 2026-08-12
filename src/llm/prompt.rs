@@ -3,12 +3,17 @@
 //! Two pieces, and the split matters:
 //!
 //! - [`SYSTEM_PROMPT`] is written once and **never compacted** (W6), so it is the copy of the turn
-//!   contract that survives everything.
+//!   contract that survives everything. ⚠️ It is also byte-identical for the whole run — see
+//!   [`system_message`] for why nothing dynamic may go back into it.
 //! - [`situation`] is rebuilt for every turn, and is deliberately *rich*. §7.1's finding is that the
 //!   larger win is not batching read tools efficiently but not needing them: a turn that opens with
 //!   the location, the party, the on-screen text, what happened since the last decision and the menu
 //!   itself should need **zero** read calls. Tools are then for what does not fit — the map grid, the
-//!   world graph, the full bag.
+//!   full bag, a route back to somewhere already walked.
+//!
+//! ⚠️ **Anything a read can answer from the situation should be in the situation, and then the read
+//! should be deleted.** `read_screen_text` and `read_trainer` both were: a round trip whose answer
+//! the model is already holding costs a completion and teaches it that a turn opens by reading.
 //!
 //! The contract is restated at the bottom of every turn (§7.5's second line of defence), which costs
 //! two lines of tokens and makes the rule the most recent instruction in the context every time.
@@ -17,15 +22,39 @@ use crate::llm::tools::{DecisionKind, MenuItem, terminal_names};
 use crate::pokemon::GameState;
 use crate::pokemon::agent::AgentEvent;
 
-/// The system prompt as it goes into the history: [`SYSTEM_PROMPT`] plus the model's own notes
-/// (**W6b / §10**), re-rendered every turn.
+/// Index 0 of the history, and — since the notes came out of it — **byte-identical for the whole
+/// run**.
 ///
-/// ⚠️ **The notes have to be in the *system* message, not a user one.** Index 0 is the one message
-/// compaction never touches (§9), which is the whole reason the notes are the thing that outlives a
-/// compaction. Rebuilding it each turn costs the endpoint's prompt cache only when the notes
-/// actually change, which is rarely.
-pub fn system_message(notes: &crate::llm::notes::Notes) -> crate::llm::protocol::Message {
-    crate::llm::protocol::Message::system(format!("{SYSTEM_PROMPT}{}", notes.render()))
+/// ⚠️ **Nothing dynamic may go back in here.** It used to carry the model's TODO list, re-rendered
+/// on every request; a prompt cache is keyed on the *prefix*, so each edit the model made to its own
+/// plan invalidated the entire conversation for the next request. On a hosted endpoint that is the
+/// cache discount thrown away, and on a local server it is re-prefilling tens of thousands of tokens
+/// before a single new one is produced. The plan now rides in [`plan_message`], near the tail.
+pub fn system_message() -> crate::llm::protocol::Message {
+    crate::llm::protocol::Message::system(SYSTEM_PROMPT)
+}
+
+/// **W6b / §10** — the model's plan, as the message that carries it.
+///
+/// A message of its own rather than a block inside the situation, because the worker has to be able
+/// to take the stale copy back *out* — see `Worker::sync_plan`. Removing a whole message is exact;
+/// editing a slice out of the middle of one is a parser.
+pub fn plan_message(todo: &crate::llm::todo::TodoList) -> crate::llm::protocol::Message {
+    crate::llm::protocol::Message::user(todo.render())
+}
+
+/// Whether this is a message [`plan_message`] produced.
+///
+/// ⚠️ **A plan is not a turn boundary** — see [`compaction::is_turn_start`]. It sits immediately
+/// before the situation it belongs to, so a cut taken between the two would keep a turn whose plan
+/// had been dropped. Being un-cuttable means the plan is only ever dropped *with* the turn after it,
+/// and the next turn re-emits it because [`Worker::sync_plan`] cannot find one.
+///
+/// [`compaction::is_turn_start`]: crate::llm::compaction::is_turn_start
+/// [`Worker::sync_plan`]: crate::llm::worker::Worker
+pub fn is_plan(message: &crate::llm::protocol::Message) -> bool {
+    message.role == crate::llm::protocol::Role::User
+        && message.text().is_some_and(|text| text.starts_with(crate::llm::todo::PLAN_HEADING))
 }
 
 /// Never compacted. Everything that must stay true for the whole run lives here.
@@ -51,7 +80,8 @@ How the interface works:
 - Read tools (`read_map`, `read_party`, …) do not end the turn. Request every read you need in a \
   single message; they are all answered from one consistent snapshot of the game. Most turns should \
   need none of them: the situation you are shown already carries the party, the money, the badges, \
-  what is on screen and the menu.
+  what is on screen and the menu. Which reads exist depends on what is being decided, and the list \
+  at the bottom of each turn is the one that applies.
 - `screenshot` shows you the actual screen. It costs far more than a read does, so use it when you \
   want to see something the other tools do not describe, not as a matter of routine.
 - Not everything is walking. `use_field_move` covers cutting a tree you are facing, using Strength \
@@ -61,9 +91,11 @@ How the interface works:
   agent was doing, and the agent is better at menus than you are. Reach for it only where the game \
   is somewhere the action menu does not describe.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
-  everything not in that summary is gone. `memory_write` and `todo_add` are what survive it — and a \
-  restart of the program as well. Use them for anything you will still need in an hour: a plan, a \
-  place you have not been yet, something a person asked you for, something that did not work.
+  everything not in that summary is gone. Your plan — `todo_add` and `todo_complete`, shown to you \
+  every turn under 'Your plan' — is what survives that, and a restart of the program as well. It is \
+  the only thing that does, so put anything you will still need in an hour there, with the reason \
+  attached: somewhere you could not get into, something a person asked you for, something that did \
+  not work.
 
 Things worth knowing about this particular game:
 
@@ -84,7 +116,7 @@ pub fn contract(kind: DecisionKind) -> String {
          These do not end the turn ({}) — call as many as you need, in one message, then finish \
          with a terminal call.",
         terminal_names(kind).join(", "),
-        crate::llm::tools::non_terminal_names().join(", "),
+        crate::llm::tools::non_terminal_names(kind).join(", "),
     )
 }
 
@@ -212,6 +244,16 @@ pub fn situation(
         state.money,
         snapshot.playtime,
     ));
+    // The two lines that used to justify `read_trainer`. The rival's name is what half the game's
+    // dialogue calls him, and the dex counts are the only measure of exploration the game keeps —
+    // both are constants-per-turn a read should never have had to be spent on.
+    out.push_str(&format!(
+        "Trainer: {} (rival {})   Pokédex: {} owned / {} seen\n",
+        state.name.to_default_string(),
+        state.rival_name.to_default_string(),
+        state.pokedex_owned.species().len(),
+        state.pokedex_seen.species().len(),
+    ));
 
     out.push_str("\n### Party\n");
     if state.pokemon.len() == 0 {
@@ -225,12 +267,12 @@ pub fn situation(
             .map(|m| format!("{} {}pp", m.name, m.pp))
             .collect();
         out.push_str(&format!(
-            "{slot}. {} Lv{} — {}/{} HP, {} — {}\n",
+            "{slot}. {} Lv{} — {}/{} HP{} — {}\n",
             mon.nickname.to_default_string(),
             mon.level,
             mon.current_hp,
             mon.stats.hp,
-            mon.status,
+            ailment(mon.status),
             if moves.is_empty() { "no moves".to_string() } else { moves.join(", ") },
         ));
     }
@@ -238,7 +280,8 @@ pub fn situation(
     if let Some(battle) = state.battle.as_ref() {
         out.push_str("\n### Battle\n");
         let side = |who: &str, mon: &crate::pokemon::pokemon::PokemonSummary| {
-            format!("{who}: {:?} Lv{} — {}/{} HP, {}\n", mon.species, mon.level, mon.current_hp, mon.stats.hp, mon.status)
+            format!("{who}: {:?} Lv{} — {}/{} HP{}\n",
+                    mon.species, mon.level, mon.current_hp, mon.stats.hp, ailment(mon.status))
         };
         out.push_str(&format!("{:?} battle\n", battle.battle_type));
         out.push_str(&side("Yours", &battle.player));
@@ -298,6 +341,19 @@ pub fn situation(
     out
 }
 
+/// A status worth mentioning, or nothing at all.
+///
+/// ⚠️ **`PokemonStatus`' `Display` is `strum`'s derive, so a healthy Pokémon prints `None`** — and
+/// every party line said `20/20 HP, None`, which reads as a missing value rather than as good news
+/// and cost six characters per member of every turn for the privilege. Poisoned is worth a word;
+/// healthy is worth silence, and the HP beside it already says how the mon is doing.
+fn ailment(status: crate::pokemon::status::PokemonStatus) -> String {
+    match status {
+        crate::pokemon::status::PokemonStatus::None => String::new(),
+        other => format!(", {other}"),
+    }
+}
+
 /// The events since the last turn, most useful last.
 ///
 /// Consecutive duplicates are collapsed: the agent emits one `TextBox` per screen of dialogue and a
@@ -344,14 +400,7 @@ mod tests {
     /// something false at the end of every single turn.
     #[test]
     fn the_contract_names_every_tool_the_turn_is_actually_sent() {
-        for kind in [
-            DecisionKind::Overworld,
-            DecisionKind::Battle,
-            DecisionKind::Nickname,
-            DecisionKind::MartPurchase,
-            DecisionKind::ForgetMove,
-            DecisionKind::Stuck,
-        ] {
+        for kind in crate::llm::tools::ALL_KINDS {
             let contract = contract(kind);
             for tool in crate::llm::tools::for_kind(kind) {
                 assert!(contract.contains(tool.function.name),
@@ -361,15 +410,28 @@ mod tests {
         }
         assert!(SYSTEM_PROMPT.contains("do not end the turn"),
                 "the system prompt is the copy of the contract that survives compaction");
+    }
 
-        // **W6b.** The notes are rendered into the system message, which is the message a compaction
-        // never touches — that is the whole reason they are where the long-horizon plan lives.
-        let mut notes = crate::llm::notes::Notes::open(None);
-        notes.apply(crate::llm::notes::NoteCall::TodoAdd { text: "beat Brock".into() });
-        let system = system_message(&notes);
-        let text = system.text().expect("prose");
-        assert!(text.starts_with(SYSTEM_PROMPT), "the fixed part comes first and is unchanged");
-        assert!(text.contains("beat Brock"), "the TODO list is in every request: {text}");
+    /// ⚠️ **The system message is a constant, and this is the test that keeps it one.** It used to
+    /// carry the model's TODO list and was rebuilt on every request, so every edit the model made to
+    /// its own plan changed message 0 — and a prompt cache keyed on the prefix is worth nothing once
+    /// the first message moves. The plan is a message of its own now; §9 still cannot compact it,
+    /// because `is_turn_start` refuses to cut there and the worker re-emits it if it goes.
+    #[test]
+    fn the_system_message_never_changes_and_the_plan_is_not_in_it() {
+        let mut todo = crate::llm::todo::TodoList::open(None);
+        let before = system_message();
+        todo.apply(crate::llm::todo::TodoCall::Add { text: "beat Brock".into() });
+        assert_eq!(system_message(), before, "writing a TODO must not touch the cacheable prefix");
+        assert_eq!(before.text().expect("prose"), SYSTEM_PROMPT);
+
+        let plan = plan_message(&todo);
+        assert!(plan.text().expect("prose").contains("beat Brock"), "{plan:?}");
+        assert!(is_plan(&plan), "the worker finds the stale copy with this");
+        assert!(!crate::llm::compaction::is_turn_start(&plan),
+                "a cut between the plan and its turn would drop the one thing meant to survive");
+        assert!(!is_plan(&crate::llm::protocol::Message::user("Location: PalletTown")),
+                "an ordinary turn is not a plan");
     }
 
     /// A scrolling conversation emits the same line repeatedly. Twenty identical sentences is not

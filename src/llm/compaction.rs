@@ -174,8 +174,17 @@ pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) ->
 /// becomes once [`evict_images`] has been over it — eviction turns an image into text, and without
 /// this second check a message in the *middle* of a turn would silently become a legal cut point the
 /// moment stage 1 ran.
+///
+/// ⚠️ **W6b's plan is a `user` message and is not a boundary either.** It sits immediately before
+/// the situation it belongs to, so a cut taken between the two keeps a turn whose plan has just been
+/// thrown away — and the plan is the one thing in the history that is *supposed* to outlive a
+/// compaction. Excluded here, it can only be dropped along with the turn that follows it, and
+/// `Worker::sync_plan` puts a fresh one back on the very next turn.
 pub fn is_turn_start(message: &Message) -> bool {
-    message.role == Role::User && !message.has_image() && !is_evicted_image(message)
+    message.role == Role::User
+        && !message.has_image()
+        && !is_evicted_image(message)
+        && !crate::llm::prompt::is_plan(message)
 }
 
 fn is_evicted_image(message: &Message) -> bool {

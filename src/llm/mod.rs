@@ -32,10 +32,10 @@ pub mod accounting;
 pub mod client;
 pub mod compaction;
 pub mod config;
-pub mod notes;
 pub mod prompt;
 pub mod protocol;
 pub mod screenshot;
+pub mod todo;
 pub mod tools;
 pub mod worker;
 

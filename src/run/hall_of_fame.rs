@@ -187,6 +187,9 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
         follow_transcript(&rotated, &into.join("transcript.jsonl.1.gz"), u64::MAX)?;
     }
 
+    // `memories/` is legacy — nothing has written one since W6b's two note mechanisms became one —
+    // but a run old enough to have one is exactly the kind whose archive should be complete.
+    // `copy_tree` is a no-op when the directory is not there.
     copy_tree(&job.run_dir.join(files::MEMORIES), &into.join(files::MEMORIES))?;
     let todo = job.run_dir.join(files::TODO);
     if todo.exists() {
@@ -384,6 +387,7 @@ mod tests {
             "{\"seq\":0,\"type\":\"notice\"}\n{\"seq\":41,\"type\":\"agent\",\"kind\":\"hall_of_fame\"}\n",
         )
         .expect("a transcript");
+        // A run old enough to have a `memories/` directory, which the archive must still carry.
         std::fs::create_dir_all(run.path().join(files::MEMORIES)).expect("memories");
         std::fs::write(run.path().join(files::MEMORIES).join("plan.md"), "beat brock").expect("a memory");
         std::fs::write(run.path().join(files::TODO), "[]").expect("a todo list");
@@ -404,7 +408,7 @@ mod tests {
         assert_eq!(std::fs::read(into.join(files::STATE)).unwrap(), b"GBSTwinning");
         assert_eq!(std::fs::read(into.join(files::SRAM)).unwrap(), b"sram");
         assert_eq!(std::fs::read_to_string(into.join(files::MEMORIES).join("plan.md")).unwrap(), "beat brock");
-        assert!(into.join(files::TODO).is_file(), "the model's todo list travels with the run");
+        assert!(into.join(files::TODO).is_file(), "the model's plan travels with the run");
         assert!(into.join(files::META).is_file(), "the archive is self-describing without the ledger");
 
         // The transcript is gzipped and stops at the event that announced the win.

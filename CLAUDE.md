@@ -212,6 +212,74 @@ heartbeat** — `Published::join_events`, subscribe-then-read, the same handshak
 
 ## The model's side
 
+⚠️ **Message 0 is a constant, and it has to stay one.** A prompt cache is keyed on the *prefix*, so
+anything dynamic in the system message throws away the cached prefill of the **entire** conversation
+the next time it changes — the cache discount on a hosted endpoint, and seconds of re-prefill on a
+local one. The model's plan used to live there, re-rendered on every request, which meant every
+`todo_add` paid that. It is now `prompt::plan_message`, a `user` message of its own, and
+`Worker::sync_plan` emits it **only when it differs from the copy already in the history**:
+
+- unchanged → nothing happens, the history grows purely by append and the cache is intact;
+- changed → the stale copy is removed and a fresh one appended, so the break is at the last turn the
+  plan changed rather than at the top. A model that edits often pays little, one that edits rarely
+  pays rarely;
+- absent (a compaction took it) → appended, which is what makes the whole thing self-healing.
+
+⚠️ It is deliberately **not** a turn boundary (`compaction::is_turn_start` excludes it), or a cut
+taken between the plan and the situation it belongs to would drop the one thing meant to survive.
+`the_plan_is_carried_once_and_never_disturbs_the_cacheable_prefix` holds both halves.
+
+⚠️ **There is one notes mechanism and there used to be two.** `memory_write`/`memory_read` over a
+`memories/` directory sat beside `todo_add`/`todo_complete` doing the same job in a different shape:
+four tools' worth of schema in every request, two places for the same sentence, and a choice for the
+model to get wrong. The plan won — it is the one that renders on the page, for both audiences — and
+the freeform role it gave up is filled better by the compaction summary, which is written with the
+whole history in view. What only the plan does is survive a *process* restart, since the history is
+never persisted; that is why `MAX_TEXT` is long enough for an item to carry its own reason.
+`run::files::MEMORIES` survives only so an archive of a run made before this is still complete.
+
+⚠️ **A read the situation already answered is worse than no read at all** — it is a round trip bought
+for nothing, and it teaches the model that a turn opens by reading. `read_screen_text` answered from
+the same `observe::screen_text` the turn renders under `### On screen`; `read_trainer` returned
+badges, money and play time, all of which are in the turn's header (its two genuinely absent figures,
+the dex counts, moved there and the tool went). Same trap one level down: `MapView` carried `actions`
+and `BattleView` carried `options`, which were second copies of the turn's own menus **without the
+ids** — a list of choices every one of which would be rejected, since an id is minted in the tool
+layer from `MetaTile::kind` and those views never had one.
+
+⚠️ **Reads are scoped per decision kind, not just terminals.** Every kind used to be offered all
+eight: a battle turn paid for `read_map`, a naming screen carried the whole catalogue to answer with
+one word. Beyond the tokens, a tool that can only ever answer `null` is an invitation to spend a
+round trip finding that out. `ReadTool::kinds` is the table; `non_terminal_names` is therefore
+per-kind too, or the contract at the bottom of a turn would name a tool the request did not carry.
+⚠️ A read that exists but is not offered *here* is rejected by name with the reason — falling through
+to "there is no tool called `read_map`" is a lie the model cannot act on.
+
+⚠️ **A menu row must not repeat its own id, but the id itself may not be trimmed.** The row is
+`` `{map}:{x},{y}:{kind}` — {what the id cannot say} ``, and it used to be
+`` `OaksLab:5,11:Warp` — Warp → PalletTown (12, 11) — 10 steps ``: the verb is the `kind` said twice,
+and `(12, 11)` is a coordinate on a map the model has not seen and cannot choose — it picks *which*
+warp, never where it lands. A city menu is a couple of dozen rows in every overworld turn, so that
+is 17% of the longest block in the request. `OverworldAction`'s `Display` still says it the long way
+for the SDL console, where there is no id beside it — hence `overworld_description`, and
+`a_menu_row_does_not_repeat_its_own_id`. ⚠️ **The `{map}` prefix looks like the same redundancy and
+is the opposite of it**: `resolve_overworld` re-mints ids against the map the player is on *now*, and
+an answer can land after a warp — so without it, `5,6:Warp` chosen in Oak's lab could match a warp
+that happens to sit at (5, 6) in Pallet Town and be carried out silently.
+
+⚠️ **`PokemonStatus`' `Display` is `strum`'s derive, so a healthy Pokémon prints `None`** — and every
+party line in every turn read `20/20 HP, None`, which is a missing value rather than good news.
+`prompt::ailment` says nothing at all when there is nothing to say; the HP beside it already reports
+how the mon is doing. Same class of bug as `MetaTile`'s old `strum` `Display` (see the agent
+section): a derive is a debugging default, and every one of these strings is prose a model reads.
+
+⚠️ **`read_route` runs the search; `read_world_graph` shipped the graph.** The old tool serialised
+every visited `(map, entry)` node with all its edges — unbounded by construction, and by the late
+game a meaningful fraction of the window in a single tool result. Nothing ever wanted the adjacency
+list; the question is always "which way is Celadon". ⚠️ Its `None` is **negative**, and the wording
+has to keep saying so: no route means "you have not walked there yet", never "unreachable" — a run
+that read it the other way would stop exploring.
+
 ⚠️ **A reasoning model streams its thinking on a channel of its own, and it is not `content`.** LM
 Studio, vLLM and DeepSeek send `reasoning_content`; OpenRouter sends `reasoning`; OpenAI sends
 neither. Before `MessageDelta` knew the field, serde dropped it as an unknown key — the page showed a

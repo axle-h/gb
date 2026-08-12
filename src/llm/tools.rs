@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
-use crate::llm::notes::{MAX_BODY, MAX_MEMORIES, MAX_TODO_TEXT, NoteCall};
+use crate::llm::todo::{MAX_TEXT as MAX_TODO_TEXT, TodoCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
 use crate::pokemon::GameState;
 use crate::pokemon::PokemonApi;
@@ -137,9 +137,9 @@ pub enum CallKind {
     /// `screenshot`. Answered by the **worker**, from the frame the host already published — see
     /// [`crate::llm::screenshot`]. It never reaches the emulator thread.
     Screenshot,
-    /// **W6b** — a note or TODO operation. Answered by the worker too: none of it needs the
-    /// emulator, so making it a batch for `service_tools` would cost a round trip for a file write.
-    Note(NoteCall),
+    /// **W6b** — a TODO operation. Answered by the worker too: none of it needs the emulator, so
+    /// making it a batch for `service_tools` would cost a round trip for a file write.
+    Todo(TodoCall),
     /// The turn is over.
     Terminal(Terminal),
     /// Nothing this turn can use — an unknown name, a terminal tool belonging to the other decision
@@ -294,48 +294,74 @@ const PARTY_MOVES: &[(&str, PokemonMoveName, &str)] = &[
 pub struct ReadTool {
     pub name: &'static str,
     pub description: &'static str,
+    /// ⚠️ **Which turns this read is offered in, and it is not "all of them".** Every kind used to
+    /// carry every read: a battle turn paid for `read_map`, a naming screen paid for the whole
+    /// catalogue in order to answer with a word. Worse than the tokens is what an irrelevant tool
+    /// invites — `read_battle` in the overworld can only ever answer `null`, and a model that calls
+    /// it has spent a round trip finding that out.
+    pub kinds: &'static [DecisionKind],
+    /// `None` for the reads that take no arguments, which is all of them but [`READ_ROUTE`].
+    pub parameters: Option<fn() -> Value>,
 }
 
-/// Non-terminal, callable any number of times within a turn, and available under every decision
-/// kind. Most turns should need none of them — the turn request already carries the situation
-/// (§7.1) — so these are for what does not fit or is rarely wanted.
+/// Non-terminal, callable any number of times within a turn. Most turns should need none of them —
+/// the turn request already carries the situation (§7.1) — so these are for what does not fit or is
+/// rarely wanted.
+///
+/// ⚠️ **Nothing here may duplicate the situation.** `read_screen_text` and `read_trainer` were both
+/// deleted for it: the first answered from the very same `observe::screen_text` the turn already
+/// renders under `### On screen`, and everything the second returned but the Pokédex counts was in
+/// the turn's header. A read whose answer the model was already holding is a round trip bought for
+/// nothing, and it teaches the model that reading is how a turn starts.
 pub const READ_TOOLS: &[ReadTool] = &[
     ReadTool {
         name: "read_map",
-        description: "The current map as an ASCII grid with a legend, plus every visible sprite, \
-                      every warp and its destination, the adjacent maps, and the full list of \
-                      actions reachable from where the player is standing.",
+        description: "The current map as an ASCII grid with a legend, plus every visible sprite and \
+                      every warp with its destination. The actions you can actually take are in the \
+                      turn's own action menu, not here.",
+        // Not in a battle: there is no map on screen and nothing on it can be acted on.
+        kinds: &[DecisionKind::Overworld, DecisionKind::Stuck],
+        parameters: None,
     },
     ReadTool {
         name: "read_party",
         description: "Every party member: species, nickname, level, HP, status, types, stats and \
                       all four moves with their remaining PP.",
+        kinds: &[
+            DecisionKind::Overworld,
+            DecisionKind::Battle,
+            DecisionKind::Nickname,
+            DecisionKind::MartPurchase,
+            DecisionKind::ForgetMove,
+        ],
+        parameters: None,
     },
     ReadTool {
         name: "read_bag",
         description: "Every item in the bag with its quantity and shop price, plus money and how \
                       many of the bag's 20 slots are used.",
-    },
-    ReadTool {
-        name: "read_trainer",
-        description: "Name, rival's name, badges earned, money, Pokédex owned/seen and play time.",
-    },
-    ReadTool {
-        name: "read_screen_text",
-        description: "The text currently on screen, decoded from video memory. Returns null in the \
-                      overworld — no dialogue font is loaded there, so there is genuinely nothing \
-                      to read, and that is not an error.",
+        // The one read the situation genuinely cannot supply: the bag is nowhere in a turn request,
+        // and `use_field_move` needs an item named exactly as the bag names it.
+        kinds: &[DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::MartPurchase],
+        parameters: None,
     },
     ReadTool {
         name: "read_battle",
-        description: "The live battle: both sides' species, level, HP, status and moves, the enemy's \
-                      catch rate, and every legal battle action. Returns null outside a battle.",
+        description: "The live battle: both sides' species, level, HP, status and moves, the \
+                      enemy's catch rate, and which of your moves Disable has locked out. The \
+                      actions you can take are in the turn's own battle menu, not here.",
+        // ⚠️ `ForgetMove` legitimately fires mid-fight, and which move to drop is a battle question.
+        kinds: &[DecisionKind::Battle, DecisionKind::ForgetMove],
+        parameters: None,
     },
     ReadTool {
-        name: "read_world_graph",
-        description: "Every map the player has physically stood on and how they connect. An absent \
-                      map means 'not visited yet', never 'does not exist'. Use it to plan a route \
-                      back to somewhere you have already been.",
+        name: READ_ROUTE,
+        description: "How to get somewhere you have already been. With `to`, the sequence of maps \
+                      from here to that one; without it, every map you have set foot on. It knows \
+                      only what has been walked, so a map missing from it means 'not visited yet', \
+                      never 'does not exist'.",
+        kinds: &[DecisionKind::Overworld],
+        parameters: Some(read_route_arguments),
     },
     ReadTool {
         name: SCREENSHOT,
@@ -344,6 +370,10 @@ pub const READ_TOOLS: &[ReadTool] = &[
                       precise as one of the other reads; ask for this when you want to see \
                       something they do not model, such as an unfamiliar menu or an animation you \
                       are not sure has finished.",
+        // Every kind: it is the only tool that can answer "what on earth is on screen", which is
+        // exactly the question a nickname prompt, a mart menu or a wedged agent raises.
+        kinds: &ALL_KINDS,
+        parameters: None,
     },
 ];
 
@@ -351,67 +381,78 @@ pub const READ_TOOLS: &[ReadTool] = &[
 /// the emulator thread. See [`CallKind::Screenshot`].
 pub const SCREENSHOT: &str = "screenshot";
 
-fn is_read_tool(name: &str) -> bool {
-    READ_TOOLS.iter().any(|tool| tool.name == name)
+/// **The world graph, asked the question a model actually has.** It replaced `read_world_graph`,
+/// which serialised every visited `(map, entry)` node with all of its edges — unbounded by
+/// construction, and by the late game large enough to be a meaningful fraction of the window in a
+/// single call. Nothing wanted the adjacency list; what a turn wants is "which way is Celadon", so
+/// the routing runs here, where the graph already is, and what crosses into the context is the
+/// answer.
+pub const READ_ROUTE: &str = "read_route";
+
+fn read_route_arguments() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "to": {
+                "type": "string",
+                "description": "A map to route to, e.g. `CeruleanCity`. Omit to list the maps you \
+                                have visited.",
+            }
+        },
+        "additionalProperties": false,
+    })
 }
 
-// ── W6b: the notes (§10) ─────────────────────────────────────────────────────────────────────────
+/// Every [`DecisionKind`], for the reads that are offered in all of them — and, in the tests, so a
+/// loop that meant "all of them" cannot quietly stop meaning it when a seventh is added.
+pub const ALL_KINDS: [DecisionKind; 6] = [
+    DecisionKind::Overworld,
+    DecisionKind::Battle,
+    DecisionKind::Nickname,
+    DecisionKind::MartPurchase,
+    DecisionKind::ForgetMove,
+    DecisionKind::Stuck,
+];
 
-/// The four note tools, by name. Non-terminal like the reads, and named in the turn contract for the
-/// same reason: a model that thinks `memory_write` ends the turn stops playing.
-pub const NOTE_TOOL_NAMES: &[&str] = &["memory_write", "memory_read", "todo_add", "todo_complete"];
+fn read_tool(name: &str) -> Option<&'static ReadTool> {
+    READ_TOOLS.iter().find(|tool| tool.name == name)
+}
 
-/// Their specs. A function rather than a const because two of them take arguments and a JSON Schema
-/// is not a `const` expression.
-pub fn note_tools() -> Vec<ToolSpec> {
+fn reads_for(kind: DecisionKind) -> impl Iterator<Item = &'static ReadTool> {
+    READ_TOOLS.iter().filter(move |tool| tool.kinds.contains(&kind))
+}
+
+// ── W6b: the plan (§10) ──────────────────────────────────────────────────────────────────────────
+
+/// The two TODO tools, by name. Non-terminal like the reads, and named in the turn contract for the
+/// same reason: a model that thinks `todo_add` ended its turn stops playing.
+///
+/// ⚠️ **There were four.** `memory_write` and `memory_read` sat beside these, doing the same job in
+/// a different shape — see [`crate::llm::todo`]'s module docs for why one mechanism beat two.
+pub const TODO_TOOL_NAMES: &[&str] = &["todo_add", "todo_complete"];
+
+/// Their specs. A function rather than a const because a JSON Schema is not a `const` expression.
+pub fn todo_tools() -> Vec<ToolSpec> {
     vec![
-        ToolSpec::new(
-            "memory_write",
-            format!(
-                "Write a note to yourself, under a short name. Notes survive a context compaction \
-                 and a restart, which nothing else in this conversation does — use them for what \
-                 you would otherwise have to rediscover: what a person wanted, where a route was \
-                 blocked, what you have already tried. Writing to a name you have used before \
-                 replaces it. At most {MAX_MEMORIES} notes of {MAX_BODY} characters, and the first \
-                 line of every one is in your system prompt."
-            ),
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "A short name, e.g. `mt-moon` or `rival team`." },
-                    "body": { "type": "string", "description": "The note itself." },
-                },
-                "required": ["name", "body"],
-                "additionalProperties": false,
-            }),
-        ),
-        ToolSpec::new(
-            "memory_read",
-            "Read one of your notes back in full. The names are listed in your system prompt.",
-            json!({
-                "type": "object",
-                "properties": { "name": { "type": "string", "description": "The note's name." } },
-                "required": ["name"],
-                "additionalProperties": false,
-            }),
-        ),
         ToolSpec::new(
             "todo_add",
             format!(
-                "Add something to your TODO list. The whole list is in your system prompt every \
-                 turn, so this is how a plan outlives the conversation that made it: `beat Brock`, \
-                 `come back here with Surf`. At most {MAX_TODO_TEXT} characters."
+                "Add something to your plan. The list is shown to you every turn and it is the only \
+                 thing you write that survives this conversation being summarised away, or the \
+                 program restarting — so say the reason as well as the intent: `come back to Route \
+                 12 with the Poké Flute, the Snorlax blocks the path south`. At most \
+                 {MAX_TODO_TEXT} characters."
             ),
             json!({
                 "type": "object",
-                "properties": { "text": { "type": "string", "description": "What to do." } },
+                "properties": { "text": { "type": "string", "description": "What to do, and why." } },
                 "required": ["text"],
                 "additionalProperties": false,
             }),
         ),
         ToolSpec::new(
             "todo_complete",
-            "Mark one of your TODO items done, by the number shown beside it in your system prompt.",
+            "Mark one item on your plan done, by the number shown beside it.",
             json!({
                 "type": "object",
                 "properties": { "id": { "type": "integer", "minimum": 1, "description": "The item's number." } },
@@ -422,36 +463,29 @@ pub fn note_tools() -> Vec<ToolSpec> {
     ]
 }
 
-fn classify_note(name: &str, arguments: &Value) -> Option<CallKind> {
+fn classify_todo(name: &str, arguments: &Value) -> Option<CallKind> {
     let call = match name {
-        "memory_write" => match (string_argument(arguments, "name"), string_argument(arguments, "body")) {
-            (Ok(name), Ok(body)) => NoteCall::Write { name, body },
-            (Err(complaint), _) | (_, Err(complaint)) => return Some(CallKind::Rejected(complaint)),
-        },
-        "memory_read" => match string_argument(arguments, "name") {
-            Ok(name) => NoteCall::Read { name },
-            Err(complaint) => return Some(CallKind::Rejected(complaint)),
-        },
         "todo_add" => match string_argument(arguments, "text") {
-            Ok(text) => NoteCall::TodoAdd { text },
+            Ok(text) => TodoCall::Add { text },
             Err(complaint) => return Some(CallKind::Rejected(complaint)),
         },
         "todo_complete" => match arguments.get("id").and_then(Value::as_u64) {
-            Some(id) => NoteCall::TodoComplete { id: id.min(u64::from(u32::MAX)) as u32 },
+            Some(id) => TodoCall::Complete { id: id.min(u64::from(u32::MAX)) as u32 },
             None => return Some(CallKind::Rejected("`todo_complete` needs the item's `id`.".to_string())),
         },
         _ => return None,
     };
-    Some(CallKind::Note(call))
+    Some(CallKind::Todo(call))
 }
 
 /// The `tools` array for one decision kind — §7.5's first line of defence.
 pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
-    let mut tools: Vec<ToolSpec> = READ_TOOLS
-        .iter()
-        .map(|tool| ToolSpec::new(tool.name, tool.description, no_arguments()))
+    let mut tools: Vec<ToolSpec> = reads_for(kind)
+        .map(|tool| {
+            ToolSpec::new(tool.name, tool.description, tool.parameters.map_or_else(no_arguments, |f| f()))
+        })
         .collect();
-    tools.extend(note_tools());
+    tools.extend(todo_tools());
 
     match kind {
         DecisionKind::Overworld => {
@@ -668,12 +702,14 @@ fn press_buttons_spec() -> ToolSpec {
     )
 }
 
-/// The terminal tool names a turn of this kind may end with, for the contract restated in the prompt.
-/// Every tool that does **not** end a turn: the reads, the screenshot and W6b's notes. The contract
-/// at the bottom of each turn names them all, because a model that believes `memory_write` was its
-/// terminal call simply stops playing.
-pub fn non_terminal_names() -> Vec<&'static str> {
-    READ_TOOLS.iter().map(|tool| tool.name).chain(NOTE_TOOL_NAMES.iter().copied()).collect()
+/// Every tool that does **not** end a turn, *for this kind*: the reads this kind is offered, the
+/// screenshot and W6b's TODO tools. The contract at the bottom of each turn names them all, because
+/// a model that believes `todo_add` was its terminal call simply stops playing.
+///
+/// ⚠️ **Per kind, since the reads are.** A contract that named a read the request did not carry
+/// would be inviting exactly the call `classify` has to reject.
+pub fn non_terminal_names(kind: DecisionKind) -> Vec<&'static str> {
+    reads_for(kind).map(|tool| tool.name).chain(TODO_TOOL_NAMES.iter().copied()).collect()
 }
 
 pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
@@ -698,11 +734,21 @@ pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
 /// told the battle menu is over there, not have its turn silently discarded.
 pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
     let name = call.function.name.as_str();
-    if name == SCREENSHOT {
-        return CallKind::Screenshot;
-    }
-    if is_read_tool(name) {
-        return CallKind::Read;
+    // ⚠️ A read that exists but is not offered in *this* kind is answered like a terminal tool from
+    // the wrong kind: named, with the reason. Falling through to "there is no tool called
+    // `read_map`" would be a lie, and one a model in a battle could not act on.
+    if let Some(tool) = read_tool(name) {
+        if !tool.kinds.contains(&kind) {
+            return CallKind::Rejected(format!(
+                "`{name}` is not available in a {} turn. The reads you have here are {}.",
+                kind.label(),
+                non_terminal_names(kind).join(", "),
+            ));
+        }
+        return match name == SCREENSHOT {
+            true => CallKind::Screenshot,
+            false => CallKind::Read,
+        };
     }
 
     let arguments = match call.arguments() {
@@ -714,8 +760,8 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
         }
     };
 
-    if let Some(note) = classify_note(name, &arguments) {
-        return note;
+    if let Some(todo) = classify_todo(name, &arguments) {
+        return todo;
     }
 
     match name {
@@ -796,7 +842,7 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
         other => CallKind::Rejected(format!(
             "There is no tool called `{other}`. The tools that do not end the turn are {}; end the \
              turn with one of: {}.",
-            non_terminal_names().join(", "),
+            non_terminal_names(kind).join(", "),
             terminal_names(kind).join(", "),
         )),
     }
@@ -962,12 +1008,8 @@ pub fn service_read(
         "read_map" => serde_json::to_value(observe::map_view(state)),
         "read_party" => serde_json::to_value(observe::party(state)),
         "read_bag" => serde_json::to_value(observe::bag(state, api)),
-        "read_trainer" => serde_json::to_value(observe::trainer(state, api)),
-        // `null` is the answer in the overworld, and the tool's description says so — a model told
-        // "error" would try again, a model told `null` moves on.
-        "read_screen_text" => serde_json::to_value(json!({ "text": observe::screen_text(api) })),
         "read_battle" => serde_json::to_value(observe::battle(state)),
-        "read_world_graph" => serde_json::to_value(observe::world_graph(graph)),
+        READ_ROUTE => serde_json::to_value(route_answer(call, state, graph)),
         other => Ok(json!({ "error": format!("`{other}` is not a read tool") })),
     };
     match value.and_then(|value| serde_json::to_string(&value)) {
@@ -975,6 +1017,48 @@ pub fn service_read(
         // Serialising a view cannot fail in practice, but a tool result is a string and the
         // alternative to this line is an `unwrap` on the worker's critical path.
         Err(failure) => format!("{{\"error\": \"could not encode the result: {failure}\"}}"),
+    }
+}
+
+/// [`READ_ROUTE`], answered. Four outcomes, and each is a different thing for the model to do next,
+/// which is why none of them is an `error` string:
+///
+/// - **no `to`** — the maps that have been walked, which is the only set `to` can be drawn from.
+/// - **a name that is not a map** — a spelling problem, and correctable.
+/// - **a map that has not been visited** — genuinely useful: the way there has to be *found*, not
+///   recalled, and the graph is saying so rather than failing.
+/// - **a route** — the maps in order, with how each one is entered.
+fn route_answer(call: &ToolCall, state: &GameState, graph: &WorldGraph) -> Value {
+    let requested = call
+        .arguments()
+        .ok()
+        .and_then(|arguments| arguments.get("to").and_then(Value::as_str).map(str::to_string))
+        .filter(|name| !name.trim().is_empty());
+
+    let visited = || -> Vec<String> {
+        observe::known_maps(graph).into_iter().map(|map| format!("{map}")).collect()
+    };
+
+    let Some(requested) = requested else {
+        return json!({ "from": format!("{}", state.map.map), "visited": visited() });
+    };
+    let Some(to) = map_by_name(&requested) else {
+        return json!({
+            "to": requested,
+            "error": format!("`{requested}` is not a map in this game. `{READ_ROUTE}` with no `to` \
+                              lists the ones you have visited."),
+        });
+    };
+
+    match observe::route(graph, state.map.map, to) {
+        Some(hops) => json!({ "from": format!("{}", state.map.map), "to": format!("{to}"), "route": hops }),
+        None => json!({
+            "to": format!("{to}"),
+            "reachable": false,
+            "note": format!("You have not been to {to} — or no route to it crosses ground you have \
+                             already walked. You will have to explore towards it. `{READ_ROUTE}` \
+                             with no `to` lists where you have been."),
+        }),
     }
 }
 
@@ -993,9 +1077,40 @@ pub struct MenuItem {
 /// ⚠️ **`MetaTile::kind`, never its `Display`.** The `Display` is prose written for the status log
 /// ("the warp to OaksLab") and is free to be reworded; an id is a key that a model quotes back and
 /// that is re-resolved by string equality, so it takes the variant name, which is not.
+///
+/// ⚠️ **The map prefix looks redundant beside the turn's own header and is not.** `resolve_overworld`
+/// re-mints ids against whatever map the player is on *now*, and the answer to a turn can land after
+/// a warp — so without the prefix, `5,6:Warp` chosen in Oak's lab could match a warp that happens to
+/// sit at (5, 6) in Pallet Town and be carried out silently. With it, a stale id simply fails to
+/// resolve, which is a sentence the model is told.
 pub fn overworld_id(state: &GameState, action: &OverworldAction) -> String {
     let destination = action.destination;
     format!("{}:{},{}:{}", state.map.map, destination.x, destination.y, action.tile.kind())
+}
+
+/// What one menu row says *beyond* its id.
+///
+/// ⚠️ **Not `OverworldAction`'s `Display`, and the difference is what this exists for.** That prose
+/// is written for a person reading the SDL console — it leads with a verb and names the tile — so
+/// beside an id that already ends in `:Warp` or `:Sprite` it repeats the row's own key: "`…:Warp` —
+/// Warp → PalletTown (12, 11)". Here the kind is in the id, so the row carries only what the id
+/// cannot: *which* map, *which* person.
+///
+/// ⚠️ **A warp's `to_position` is dropped outright.** It is a coordinate on a map the model has not
+/// seen and cannot act on — it does not choose where to land, only which warp to take — so it was
+/// nine characters of noise on every door in the game.
+fn overworld_description(action: &OverworldAction) -> String {
+    let steps = action.route.len();
+    let target = match action.tile {
+        crate::pokemon::tile::MetaTile::Warp { to_map, .. }
+        | crate::pokemon::tile::MetaTile::Connection { to_map, .. } => format!("to {to_map}, "),
+        crate::pokemon::tile::MetaTile::ConnectionWater(to_map) => format!("surf to {to_map}, "),
+        crate::pokemon::tile::MetaTile::Sprite(name) => format!("{name}, "),
+        // Grass, a PC, a tree to cut: the variant name in the id is the whole of what it is, and
+        // "Walk in grass" beside `…:Grass` says it a second time.
+        _ => String::new(),
+    };
+    format!("{target}{steps} steps")
 }
 
 /// Everything reachable from where the player is standing. Sorted, so two reads of an unchanged map
@@ -1008,7 +1123,7 @@ pub fn overworld_menu(state: &GameState) -> Vec<MenuItem> {
         .iter()
         .map(|action| MenuItem {
             id: overworld_id(state, action),
-            description: format!("{action} — {} steps", action.route.len()),
+            description: overworld_description(action),
         })
         .collect()
 }
@@ -1104,16 +1219,103 @@ mod tests {
         { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }.expect("the fixture has a readable state")
     }
 
-    /// Every kind, so a loop that meant "all of them" cannot quietly stop meaning it when a sixth
+    /// Every kind, so a loop that meant "all of them" cannot quietly stop meaning it when a seventh
     /// is added.
-    const KINDS: [DecisionKind; 6] = [
-        DecisionKind::Overworld,
-        DecisionKind::Battle,
-        DecisionKind::Nickname,
-        DecisionKind::MartPurchase,
-        DecisionKind::ForgetMove,
-        DecisionKind::Stuck,
-    ];
+    const KINDS: [DecisionKind; 6] = ALL_KINDS;
+
+    /// **A menu row carries what its id cannot, and nothing else.**
+    ///
+    /// The action menu is in every overworld turn and is the longest thing in one — a city map runs
+    /// to a couple of dozen rows — so what each row repeats, it repeats a couple of dozen times a
+    /// turn, for the length of the run.
+    #[test]
+    fn a_menu_row_does_not_repeat_its_own_id() {
+        let state = fixture_state();
+        let menu = overworld_menu(&state);
+        let rows: Vec<String> =
+            menu.iter().map(|item| format!("- `{}` — {}", item.id, item.description)).collect();
+
+        assert!(rows.contains(&"- `OaksLab:5,11:Warp` — to PalletTown, 10 steps".to_string()), "{rows:#?}");
+        assert!(rows.contains(&"- `OaksLab:2,2:Sprite` — Pokedex 1, 9 steps".to_string()), "{rows:#?}");
+
+        for item in &menu {
+            // ⚠️ The verb is the id's own `kind` said twice: `…:Warp` — "Warp → …", `…:Sprite` —
+            // "Talk to …". `OverworldAction`'s `Display` still says it that way for the SDL console,
+            // where there is no id beside it.
+            let kind = item.id.rsplit(':').next().expect("an id ends in its kind");
+            assert!(!item.description.contains(kind),
+                    "`{}` — {} repeats the kind already in its id", item.id, item.description);
+            // …and a warp's landing coordinates are not in it either: the model picks which warp to
+            // take, never where it comes out, so they were nine characters of noise per door.
+            assert!(!item.description.contains('('), "{item:?} still carries a coordinate");
+        }
+    }
+
+    /// **What the `tools` array costs, per kind, with a ceiling on each.**
+    ///
+    /// ⚠️ **It is paid per *completion*, not per turn.** The whole array goes out again with every
+    /// request, and a turn that reads before it decides is several — so a tool description is
+    /// multiplied by `GB_MAX_TOOL_STEPS` before anything the model actually says is counted.
+    ///
+    /// The ceilings are generous enough that rewording a description never trips them and tight
+    /// enough that adding a tool to every kind, or unscoping the reads again, has to be a deliberate
+    /// edit to this list. They are bytes of JSON — roughly four to the token — because that is what
+    /// is measurable here; the token count depends on the endpoint's tokeniser.
+    #[test]
+    fn the_tool_array_stays_within_its_budget() {
+        // Overworld is the big one: it carries `use_field_move`, which is a dozen field actions
+        // behind one `move` discriminant precisely so it is one entry rather than twelve.
+        for (kind, ceiling) in [
+            // Measured 2026-08-12: 6875, 3773, 2530, 2952, 2848, 2877.
+            (DecisionKind::Overworld, 7_600),
+            (DecisionKind::Battle, 4_200),
+            (DecisionKind::Nickname, 2_800),
+            (DecisionKind::MartPurchase, 3_300),
+            (DecisionKind::ForgetMove, 3_200),
+            (DecisionKind::Stuck, 3_200),
+        ] {
+            let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
+            assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
+        }
+    }
+
+    /// [`READ_ROUTE`]'s four answers, which is the whole of it — and none of them is an `error`
+    /// string, because each is a different thing for the model to do next.
+    ///
+    /// ⚠️ **An empty graph is the interesting case.** The tool replaced one that dumped every
+    /// visited node, and the guarantee both share is *negative*: nothing here has been walked, so
+    /// every route is `reachable: false` — which means "you have not been there", never "it does not
+    /// exist". A run that read this as unreachable would stop exploring.
+    #[test]
+    fn a_route_answers_the_four_questions_and_never_bluffs() {
+        let state = fixture_state();
+        let graph = WorldGraph::new();
+        let ask = |arguments: &str| -> Value {
+            route_answer(&call(READ_ROUTE, arguments), &state, &graph)
+        };
+
+        // No `to`: what has been walked. Empty here, and an empty list is an answer.
+        assert_eq!(ask("{}")["visited"], json!([]));
+        assert_eq!(ask("{}")["from"], json!(format!("{}", state.map.map)));
+        assert_eq!(ask(r#"{"to":""}"#)["visited"], json!([]), "a blank name is no name");
+
+        // A name that is not a map at all: correctable, and it says how.
+        let nonsense = ask(r#"{"to":"Kanto Safari Wildlife Park"}"#);
+        assert!(nonsense["error"].as_str().expect("a sentence").contains("not a map"), "{nonsense}");
+
+        // A real map nobody has walked to. ⚠️ Not an error: the way there has to be *found*.
+        let unwalked = ask(r#"{"to":"CeruleanCity"}"#);
+        assert_eq!(unwalked["reachable"], json!(false));
+        assert_eq!(unwalked["to"], json!(format!("{}", Map::CeruleanCity)));
+        assert!(unwalked["note"].as_str().expect("a sentence").contains("not been to"), "{unwalked}");
+
+        // ⚠️ Spelled the way a model spells things, not the way the enum does — `map_by_name`
+        // normalises, and a rejection over a space would be a rejection over nothing.
+        assert_eq!(ask(r#"{"to":"cerulean city"}"#), unwalked);
+
+        // The whole graph is never serialised, whatever is asked. That was the point.
+        assert!(!ask("{}").to_string().contains("edges"));
+    }
 
     /// §7.5's first line of defence: the model cannot end a turn the wrong way because the wrong way
     /// is not in the array it was sent.
@@ -1165,9 +1367,6 @@ mod tests {
         for kind in KINDS {
             let offered = names(kind);
             assert!(offered.contains(&"wait"), "{kind:?} must always be able to wait");
-            for read in READ_TOOLS {
-                assert!(offered.contains(&read.name), "{kind:?} is missing {}", read.name);
-            }
             // The contract restated in the prompt has to match the array actually sent, or the two
             // drift and the model is told about a tool it does not have.
             for terminal in terminal_names(kind) {
@@ -1175,10 +1374,45 @@ mod tests {
             }
             assert_eq!(
                 offered.len(),
-                READ_TOOLS.len() + NOTE_TOOL_NAMES.len() + terminal_names(kind).len(),
-                "every turn is offered the reads, W6b's notes, and its own terminal tools",
+                reads_for(kind).count() + TODO_TOOL_NAMES.len() + terminal_names(kind).len(),
+                "a turn is offered its own reads, W6b's TODO tools, and its own terminal tools",
             );
         }
+    }
+
+    /// **The reads are scoped too, and the reason is not only tokens.** A tool that can only ever
+    /// answer `null` — `read_battle` in the overworld, a map in a battle — is a round trip the model
+    /// has to spend to find that out, and an invitation to spend it. A nickname prompt used to carry
+    /// the whole catalogue in order to answer with one word.
+    #[test]
+    fn reads_are_scoped_per_kind_too() {
+        assert!(!names(DecisionKind::Battle).contains(&"read_map"), "there is no map in a battle");
+        assert!(!names(DecisionKind::Battle).contains(&READ_ROUTE));
+        assert!(!names(DecisionKind::Overworld).contains(&"read_battle"), "it can only answer null");
+
+        // ⚠️ The forget-move prompt legitimately fires mid-fight — it is the one menu kind that
+        // pre-empts a battle turn — so which move to drop is a question the battle can answer.
+        assert!(names(DecisionKind::ForgetMove).contains(&"read_battle"));
+
+        // The screen is the only thing that can explain an unfamiliar menu or a wedged agent, so it
+        // is the one read every kind keeps.
+        for kind in KINDS {
+            assert!(names(kind).contains(&SCREENSHOT), "{kind:?} cannot look at the screen");
+        }
+
+        // A single-question turn carries almost nothing. Stated as a number so that adding a read
+        // back to every kind has to be a deliberate edit to this line: naming a Pokémon used to
+        // arrive with all eight reads and four note tools — fourteen entries to answer with a word.
+        assert_eq!(names(DecisionKind::Nickname), ["read_party", SCREENSHOT, "todo_add", "todo_complete",
+                                                   "set_nickname", "wait"]);
+
+        // ⚠️ A read that exists but is not offered *here* is told which turn it belongs to. Falling
+        // through to "there is no tool called `read_map`" would be a lie the model cannot act on.
+        let rejected = classify(DecisionKind::Battle, &call("read_map", "{}"));
+        let CallKind::Rejected(complaint) = rejected else { panic!("read_map is not a battle read") };
+        assert!(complaint.contains("not available in a battle turn"), "{complaint}");
+        assert!(complaint.contains("read_battle"), "it has to name what *is* here: {complaint}");
+        assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", "{}")), CallKind::Read));
     }
 
     /// Every schema must be a JSON Schema object with the properties it claims — a malformed one is

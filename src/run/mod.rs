@@ -41,7 +41,12 @@ pub mod files {
     pub const STATE: &str = "state.gbst";
     pub const SRAM: &str = "sram.bin";
     pub const TRANSCRIPT: &str = "transcript.jsonl";
+    /// ⚠️ **Legacy, and only ever read by the archiver now.** W6b's freeform `memories/` directory
+    /// was folded into [`TODO`] — one mechanism instead of two, see `llm::todo` — so nothing writes
+    /// this any more. It stays named here because runs made before that change still have one on
+    /// disk, and an archive that silently dropped it would be an incomplete copy of the run.
     pub const MEMORIES: &str = "memories";
+    /// The model's plan: the one thing it writes that outlives its own conversation.
     pub const TODO: &str = "todo.json";
     /// Where finished runs are filed, one level below the root — see [`super::hall_of_fame`], whose
     /// module docs explain why that level of nesting is load-bearing rather than tidiness.

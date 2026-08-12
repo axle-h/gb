@@ -36,13 +36,13 @@ use crate::llm::accounting::Accounting;
 use crate::llm::client::{ChatEndpoint, RetryPolicy, stream_with_retries};
 use crate::llm::compaction;
 use crate::llm::config::LlmConfig;
-use crate::llm::notes::Notes;
+use crate::llm::todo::TodoList;
 use crate::llm::prompt;
 use crate::llm::screenshot;
 use crate::llm::protocol::{ChatRequest, Completion, Fragment, Message, StreamOptions, ToolCall, Usage};
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
-use crate::web::published::{Published, RunStatus, UiEventBody};
+use crate::web::published::{Published, RunStatus, TodoView, UiEventBody};
 
 /// One question, from the policy to the worker.
 #[derive(Debug, Clone)]
@@ -108,7 +108,7 @@ pub struct TurnHandles {
 /// because the policy bumps the generation on its way past — cancelling whatever was in flight.
 #[derive(Debug, Clone, Default)]
 pub struct Restart {
-    /// The **new** run directory, which is where the model's notes now live. `None` keeps them in
+    /// The **new** run directory, which is where the model's plan now lives. `None` keeps it in
     /// memory only, as the tests do.
     pub run_dir: Option<PathBuf>,
 }
@@ -152,12 +152,15 @@ pub struct Worker {
     tool_calls: Sender<ToolBatch>,
     tool_results: Receiver<ToolBatchResult>,
 
-    /// The conversation. Index 0 is the system prompt and is never removed — it is rebuilt from
-    /// [`Self::notes`] at the top of every request (**W6b**).
+    /// The conversation. Index 0 is the system prompt; it is never removed and, since **W6b**'s
+    /// plan moved out of it, never rewritten either — see [`prompt::system_message`].
     messages: Vec<Message>,
-    /// **W6b / §10** — the model's memory files and TODO list. Answered here rather than at the
-    /// policy poll: none of it needs the emulator.
-    notes: Notes,
+    /// **W6b / §10** — the model's plan. Answered here rather than at the policy poll: none of it
+    /// needs the emulator.
+    todo: TodoList,
+    /// What the page was last told the plan is, so [`Self::publish_todo`] can be called from every
+    /// moment it might have changed without publishing the same list twice.
+    published_plan: Option<Vec<TodoView>>,
     /// **W6** — tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
     accounting: Accounting,
     /// **`POST /api/new-run`** — taken at the top of every turn. See [`Restart`].
@@ -170,7 +173,7 @@ pub fn channels(
     endpoint: Box<dyn ChatEndpoint>,
     config: LlmConfig,
     published: Arc<Published>,
-    notes: Notes,
+    todo: TodoList,
 ) -> (Worker, TurnHandles) {
     let (turn_tx, turn_rx) = mpsc::channel();
     let (outcome_tx, outcome_rx) = mpsc::channel();
@@ -190,8 +193,9 @@ pub fn channels(
         outcomes: outcome_tx,
         tool_calls: call_tx,
         tool_results: result_rx,
-        messages: vec![prompt::system_message(&notes)],
-        notes,
+        messages: vec![prompt::system_message()],
+        todo,
+        published_plan: None,
         accounting,
         restart: Arc::clone(&restart),
     };
@@ -224,13 +228,14 @@ impl Worker {
     /// Start the conversation again, about the game that is playing now.
     ///
     /// The three things thrown away are the three that are about the old game: the history, the
-    /// notes read out of the old run directory, and the token accounting that was measuring that
+    /// plan read out of the old run directory, and the token accounting that was measuring that
     /// history. Everything else — the endpoint, the config, the retry policy, the channels — belongs
     /// to the *process*, and rebuilding any of it would mean rebuilding this thread.
     fn apply_restart(&mut self, restart: Restart) {
-        self.notes = Notes::open(restart.run_dir.as_deref());
+        self.todo = TodoList::open(restart.run_dir.as_deref());
+        self.publish_todo();
         // Index 0 is the system prompt and is never removed, so the history *is* this vec.
-        self.messages = vec![prompt::system_message(&self.notes)];
+        self.messages = vec![prompt::system_message()];
         self.accounting = Accounting::new(self.config.context_limit);
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
@@ -251,6 +256,8 @@ impl Worker {
         let TurnRequest { id, kind, situation, headline } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 
+        self.sync_plan();
+        self.publish_todo();
         self.messages.push(Message::user(situation));
         let outcome = self.decide(id, kind);
         match outcome {
@@ -280,6 +287,62 @@ impl Worker {
         self.compact_if_needed();
     }
 
+    /// **W6b / §10** — put the model's plan in front of it, in exactly one place, at the cheapest
+    /// moment.
+    ///
+    /// Called immediately before a turn's situation is appended, so the plan is the second-newest
+    /// message when the request goes out: recent enough to be read as current, and never the last
+    /// thing, which the contract has to be.
+    ///
+    /// ⚠️ **The whole design is "only when it changed", and that is what makes it cheap.** Three
+    /// cases, and the common one costs nothing:
+    ///
+    /// - the copy in the history already says this → **do nothing**, so the history grows purely by
+    ///   append and the endpoint's prefix cache is intact all the way back to the system prompt;
+    /// - the copy says something else → remove it and append a fresh one, which invalidates the
+    ///   cache from wherever that copy sat. It sat at the last turn the plan changed, so a model
+    ///   that edits often pays little and a model that edits rarely pays rarely;
+    /// - there is no copy — a compaction took it, or this is the first turn → append one.
+    ///
+    /// The alternative it replaced was re-rendering the plan into message 0, which invalidated the
+    /// entire conversation every time the model touched its own list. See [`prompt::system_message`].
+    fn sync_plan(&mut self) {
+        let plan = prompt::plan_message(&self.todo);
+        match self.messages.iter().position(|message| prompt::is_plan(message)) {
+            Some(at) if self.messages[at] == plan => return,
+            Some(at) => {
+                self.messages.remove(at);
+            }
+            None => {}
+        }
+        self.messages.push(plan);
+    }
+
+    /// One TODO call, applied and published. The UI gets the whole list — a viewer reads it as what
+    /// the run is trying to do — while [`TodoList::render`] gives the model the shorter version.
+    fn apply_todo(&mut self, call: crate::llm::todo::TodoCall) -> String {
+        let answer = self.todo.apply(call);
+        self.publish_todo();
+        answer
+    }
+
+    /// Tell the page, if there is anything new to tell it.
+    ///
+    /// ⚠️ **The dedupe is what makes it safe to call from everywhere**, and it has to be, because
+    /// there are three unrelated moments the page can be behind: the model edited the list; a
+    /// `POST /api/new-run` swapped the list for the new run's; and — the one that is easy to miss —
+    /// **the process opened a run that already had a plan on disk**. That last case has no event of
+    /// its own at all, so without a publish from the first turn a resumed run would show an empty
+    /// panel until the model next happened to touch its own list, which can be an hour.
+    fn publish_todo(&mut self) {
+        let items: Vec<TodoView> = self.todo.items().iter().map(TodoView::from).collect();
+        if self.published_plan.as_ref() == Some(&items) {
+            return;
+        }
+        self.published_plan = Some(items.clone());
+        self.published.publish_event(UiEventBody::Plan { items });
+    }
+
     /// `None` means the turn was cancelled and abandoned.
     fn decide(&mut self, id: u64, kind: DecisionKind) -> Option<Terminal> {
         let specs = tools::for_kind(kind);
@@ -291,9 +354,6 @@ impl Worker {
             }
 
             self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
-            // **W6b.** Rebuilt every request rather than once, so a note written two tool calls ago
-            // is in the system prompt of the very next one.
-            self.messages[0] = prompt::system_message(&self.notes);
             let completion = {
                 let request = ChatRequest {
                     model: self.config.model.clone(),
@@ -384,9 +444,9 @@ impl Worker {
             // committed, so running the reads would be answering a question it stopped asking. They
             // still get a result message, because every `tool_call` needs one.
             //
-            // ⚠️ **W6b's notes are the exception, and it is not a detail.** A read is a question
-            // whose answer is worthless once the turn is over; `memory_write` and `todo_add` are
-            // *side effects the model asked for*. "Remember this, and go north" is a completely
+            // ⚠️ **W6b's TODO calls are the exception, and it is not a detail.** A read is a
+            // question whose answer is worthless once the turn is over; `todo_add` is a *side
+            // effect the model asked for*. "Remember this, and go north" is a completely
             // natural thing to say in one message — dropping the first half of it silently loses
             // exactly the long-horizon intent §10 exists to keep. Found by watching a mock do it on
             // its very first turn.
@@ -401,7 +461,7 @@ impl Worker {
                              what happened."
                                 .to_string()
                         }
-                        CallKind::Note(note) => self.notes.apply(note.clone()),
+                        CallKind::Todo(call) => self.apply_todo(call.clone()),
                         CallKind::Rejected(complaint) => complaint.clone(),
                         _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
                     };
@@ -463,7 +523,7 @@ impl Worker {
                         ));
                         format!("{caption} It is attached to the message after this one.")
                     }
-                    CallKind::Note(note) => self.notes.apply(note.clone()),
+                    CallKind::Todo(call) => self.apply_todo(call.clone()),
                     CallKind::Rejected(complaint) => complaint.clone(),
                     CallKind::Terminal(_) => unreachable!("handled above"),
                 };

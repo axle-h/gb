@@ -78,7 +78,7 @@ cargo run --release
 ```
 
 `gb serve` **resumes** by default: the newest run under `$GB_RUN_DIR` (`./runs`) is continued in
-place, notes and all. `--new-run` starts the game over in a directory of its own — or, on something
+place, plan and all. `--new-run` starts the game over in a directory of its own — or, on something
 already running, opening `/reset-game` does the same thing without a restart (see below).
 
 ## How the model plays
@@ -95,12 +95,21 @@ fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>>;
 ```
 
 `LlmPolicy` is the interesting implementation. It turns each decision into a conversation turn with
-a tool catalogue scoped to that kind of decision — read tools that inspect the party, the bag, the
-map or the screen, and one terminal tool that commits to the action. The model keeps its own
-notes: a `memories/` directory and a TODO list it edits itself, rendered back into the system prompt
-each turn, which is how a playthrough spanning thousands of turns keeps a thread. History is
-compacted once it passes `GB_COMPACT_ABOVE` of the window: images are evicted first, then older
-turns are summarised.
+a tool catalogue scoped to that kind of decision — a battle turn is offered no map, a naming screen
+is offered almost nothing — and one terminal tool that commits to the action. The turn itself is
+built to make reading unnecessary: the location, the party, the money, the badges, what is on screen
+and the menu of what can be done are all in the request already, so most turns should need no read
+at all.
+
+The model keeps a **plan** it edits itself, shown to it every turn and drawn on the page beside the
+game. It is the only thing it writes that survives both a context compaction and a restart of the
+program, so an item is meant to carry its reason as well as its intent. History is compacted once it
+passes `GB_COMPACT_ABOVE` of the window: images are evicted first, then older turns are summarised.
+
+⚠️ The plan rides in a message of its own near the end of the history rather than in the system
+prompt, and is re-sent only when it has actually changed. A prompt cache is keyed on the prefix, so
+the obvious placement — re-rendering the list into message 0 every request — throws the whole
+conversation's cached prefill away every time the model ticks something off.
 
 A model that streams its thinking separately — `reasoning_content`, which most local servers send and
 OpenAI does not — has it shown live in the log and collapsed to a line once the thought ends. It is
@@ -129,7 +138,7 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `state.gbst` | the save state — the emulator, exactly as it was |
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
-| `memories/`, `todo.json` | the model's own notes |
+| `todo.json` | the model's own plan — the one thing it writes that outlives its conversation |
 
 Copy that directory and the run moves with it. `gb` checkpoints periodically and on the way out —
 Ctrl-C and SIGTERM both — so a restart, a rollout or a reboot resumes rather than starts over.
@@ -183,7 +192,7 @@ title screen. That is the moment of victory, with the winning party still in mem
 the record is taken.
 
 What happens then, in order: the run is checkpointed, copied whole into
-`$GB_RUN_DIR/hall-of-fame/<date>-<run-id>/` — save state, SRAM, the model's notes and the run's entire
+`$GB_RUN_DIR/hall-of-fame/<date>-<run-id>/` — save state, SRAM, the model's plan and the run's entire
 transcript, gzipped — one line describing it is appended to `hall-of-fame/ledger.jsonl`, and the next
 run starts automatically. Nothing is deleted: the finished run directory is left exactly where it was
 and is still resumable.
@@ -296,7 +305,7 @@ src/
 │   ├── prompt.rs        — the system prompt and the per-turn situation
 │   ├── screenshot.rs    — one published frame as a PNG data URL, encoded on the worker thread
 │   ├── accounting.rs    — tokens reported vs tokens estimated, and the calibration between them
-│   ├── notes.rs         — the model's memory files and TODO list, rendered into the system prompt
+│   ├── todo.rs          — the model's plan: the only thing it writes that survives a restart
 │   ├── compaction.rs    — image eviction + summarising compaction, as pure functions over the history
 │   └── worker.rs        — the turn loop: stream → tool batch → terminal call, with cancellation
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)

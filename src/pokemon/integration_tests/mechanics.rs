@@ -714,7 +714,7 @@ impl crate::pokemon::policy::Policy for RecordingPolicy {
         use crate::pokemon::observe;
         assert_eq!(observe::map_view(state).map, format!("{}", state.map.map),
                    "the facade must describe the state it was given");
-        assert!(observe::trainer(state, api).badge_count <= 8);
+        assert_eq!(observe::bag(state, api).slots_used, state.bag.len());
         assert_eq!(observe::party(state).len(), state.pokemon.len());
         self.log.borrow_mut().tool_polls.push((state.map.map, graph.map_count()));
     }
@@ -1019,13 +1019,14 @@ fn observation_views_describe_the_snapshot() {
     let state = fixture.game_state();
     let api = fixture.api();
 
-    let trainer = observe::trainer(&state, &api);
-    assert_eq!(trainer.badge_count as usize, trainer.badges.len(), "badge count vs badge list");
-    assert!(trainer.badge_count <= 8);
-    assert_eq!(trainer.playtime.len(), 8, "playtime should read HH:MM:SS, got {}", trainer.playtime);
-    assert!(trainer.pokedex_owned <= trainer.pokedex_seen,
-            "you cannot own more species than you have seen ({} > {})",
-            trainer.pokedex_owned, trainer.pokedex_seen);
+    // `TrainerView` is gone — every field of it a turn wanted is in the situation's header now —
+    // but the two figures that came from `PokemonApi` rather than `GameState` still have to hold.
+    assert_eq!(observe::playtime(&api).len(), 8, "playtime should read HH:MM:SS");
+    assert_eq!(observe::playtime_seconds(&api), {
+        let clock = observe::playtime(&api);
+        let parts: Vec<u32> = clock.split(':').map(|p| p.parse().expect("digits")).collect();
+        parts[0] * 3600 + parts[1] * 60 + parts[2]
+    }, "the sortable clock and the printed one must be the same instant");
 
     let party = observe::party(&state);
     assert_eq!(party.len(), state.pokemon.len());
@@ -1041,20 +1042,20 @@ fn observation_views_describe_the_snapshot() {
     let bag = observe::bag(&state, &api);
     assert_eq!(bag.slots_used, bag.items.len());
     assert_eq!(bag.slots_total, 20);
-    assert_eq!(bag.money, trainer.money);
+    assert_eq!(bag.money, state.money);
 
     let status = observe::status(&state, &api);
     assert_eq!(status.badges.len(), 8, "the status reports every badge, earned or not");
     assert_eq!(
         status.badges.iter().filter(|badge| badge.earned).count() as u32,
-        trainer.badge_count,
+        state.badges.bits().count_ones(),
     );
     assert_eq!(
         status.badges.iter().filter(|badge| badge.earned).map(|badge| badge.name.clone()).collect::<Vec<_>>(),
-        trainer.badges,
-        "the two views must agree on which badges, not merely how many",
+        state.badges.iter_names().map(|(name, _)| name.to_string()).collect::<Vec<_>>(),
+        "the heartbeat and the state must agree on which badges, not merely how many",
     );
-    assert_eq!(status.playtime, trainer.playtime);
+    assert_eq!(status.playtime, observe::playtime(&api));
     assert_eq!(status.party.len(), party.len());
     // The heartbeat's party is what the status panel draws, so every field it draws has to be there
     // — and `dex` in particular is a *request*: the client turns it into
@@ -1175,7 +1176,9 @@ fn battle_view_describes_a_live_battle() {
     assert!(battle.player.hp <= battle.player.max_hp);
     assert!(battle.enemy.hp <= battle.enemy.max_hp);
     assert!(battle.player.level > 0 && battle.enemy.level > 0);
-    assert!(!battle.options.is_empty(), "a battle with no legal action would deadlock the agent");
+    // The legal actions are the *turn's* battle menu, not this view — see `BattleView`'s ⚠️.
+    assert!(!crate::pokemon::policy::battle_options(&state).unwrap_or_default().is_empty(),
+            "a battle with no legal action would deadlock the agent");
     assert!(!battle.player.moves.is_empty(), "the active Pokémon knows no moves");
     assert_eq!(observe::status(&state, &fixture.api()).in_battle, true);
     assert_eq!(battle.active_party_slot as usize, {
@@ -1186,30 +1189,36 @@ fn battle_view_describes_a_live_battle() {
 }
 
 /// The world graph is built as the player walks, so its guarantee is negative: an absent map means
-/// unvisited, never unreachable. The view has to hold that line and stay ordered.
+/// unvisited, never unreachable. `read_route` has to hold that line — and answer the question the
+/// graph dump it replaced only ever supplied the raw material for.
 #[test]
-fn world_graph_view_reports_only_visited_maps() {
+fn a_route_is_only_ever_over_ground_already_walked() {
     use crate::pokemon::observe;
 
     let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60),
                                        vec![PolicyStep::goto(Map::Route1)]);
-    let empty = observe::world_graph(fixture.agent.world_graph());
-    assert_eq!(empty.map_count, 0, "nothing has been walked yet");
-    assert!(empty.nodes.is_empty());
+    assert!(observe::known_maps(fixture.agent.world_graph()).is_empty(), "nothing has been walked yet");
+    assert!(observe::route(fixture.agent.world_graph(), Map::PalletTown, Map::Route1).is_none(),
+            "a route cannot be known before the ground under it has been");
 
     fixture.step_until_exhausted();
 
-    let graph = observe::world_graph(fixture.agent.world_graph());
-    assert!(graph.map_count > 0, "walking to Route 1 should have observed at least one map");
-    assert_eq!(graph.nodes.len(), graph.map_count);
-    assert_eq!(graph.edge_count, graph.nodes.iter().map(|n| n.edges.len()).sum::<usize>());
-    assert_eq!(graph, observe::world_graph(fixture.agent.world_graph()),
-               "two reads of one graph must agree");
+    let known = observe::known_maps(fixture.agent.world_graph());
+    assert!(known.contains(&Map::PalletTown), "Pallet Town was walked; saw {known:?}");
 
-    let names: Vec<&str> = graph.nodes.iter().map(|n| n.map.as_str()).collect();
-    assert!(names.iter().any(|n| *n == format!("{}", Map::PalletTown)),
-            "Pallet Town was walked; saw {names:?}");
-    assert_eq!(observe::known_maps(fixture.agent.world_graph()).len(), graph.map_count);
+    let route = observe::route(fixture.agent.world_graph(), Map::PalletTown, Map::Route1)
+        .expect("Route 1 was walked to, so there is a way back to it");
+    assert_eq!(route.first().map(|hop| hop.map.as_str()), Some(format!("{}", Map::PalletTown).as_str()),
+               "a route opens on the map it starts from: {route:?}");
+    assert_eq!(route.last().map(|hop| hop.map.as_str()), Some(format!("{}", Map::Route1).as_str()),
+               "…and ends on the one asked for: {route:?}");
+    assert!(route[0].via.is_none(), "the first hop is stood on, not entered");
+    assert!(route[1..].iter().all(|hop| hop.via.is_some()), "every later hop says how: {route:?}");
+
+    // ⚠️ The negative guarantee, which is the whole reason this is not a "where is X" tool: an
+    // unvisited map is `None`, and `None` means "you have not been there", never "it does not
+    // exist". Cinnabar is on the far side of the game from a fixture that has walked to Route 1.
+    assert!(observe::route(fixture.agent.world_graph(), Map::PalletTown, Map::CinnabarIsland).is_none());
 }
 
 /// Under `--features web` the views serialise. Worth its own test because `cfg_attr` failing to

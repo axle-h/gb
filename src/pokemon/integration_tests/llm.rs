@@ -253,7 +253,7 @@ fn the_llm_plays_from_a_fixture() {
             Box::new(OpenAiClient::new(&config)),
             config,
             Arc::clone(&published),
-            crate::llm::notes::Notes::open(None),
+            crate::llm::todo::TodoList::open(None),
         );
     let _worker = worker.spawn().expect("the worker thread starts");
 
@@ -327,7 +327,7 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
         Box::new(OpenAiClient::new(&config)),
         config,
         Arc::clone(&published),
-        crate::llm::notes::Notes::open(None),
+        crate::llm::todo::TodoList::open(None),
     );
     let _worker = worker.spawn().expect("the worker thread starts");
 
