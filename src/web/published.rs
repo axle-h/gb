@@ -231,6 +231,22 @@ pub struct Published {
     /// **W6** — the current [`RunStatus`]. A lock rather than an event-stream fold, because the
     /// heartbeat has to be able to ask for it and a fold cannot answer a question.
     status: RwLock<RunStatus>,
+    /// The last [`UsageView`] a decision carried, and how many decisions have landed.
+    ///
+    /// ⚠️ **A fold, and it is here for the reason `status` is** (see its ⚠️): the emulator thread
+    /// has to be able to *ask* what the run has spent — at the moment it finishes the game, so it
+    /// can write it into the run's permanent record — and a broadcast channel cannot answer a
+    /// question. `Accounting` lives on the LLM worker thread and this module is the whole interface
+    /// between the two halves, so the answer travels the interface that already exists rather than
+    /// growing a second one.
+    ///
+    /// ⚠️ **Folded inside [`Self::publish_event`], not at a second call site.** The one thing that
+    /// must not happen is a decision that reaches the page but not the record.
+    usage: RwLock<Option<UsageView>>,
+    /// ⚠️ **Decisions that landed, not `max(turn)`.** A turn id is `llm::worker`'s cancellation
+    /// generation: it counts turns that were abandoned as well, and it restarts at 1 in every
+    /// process, so it is not a count of anything a run's record wants.
+    turns: AtomicU64,
     /// The most recent heartbeat, for a client that has just connected.
     ///
     /// ⚠️ **This is what makes send-on-change safe, and it is one cell rather than one per client.**
@@ -262,6 +278,8 @@ impl Published {
             next_event_seq: AtomicU64::new(next_seq),
             status: RwLock::new(RunStatus::Booting),
             latest_status: RwLock::new(None),
+            usage: RwLock::new(None),
+            turns: AtomicU64::new(0),
         })
     }
 
@@ -306,11 +324,42 @@ impl Published {
     }
 
     /// Stamp a sequence number on an event body and broadcast it. Returns the sequence number, which
-    /// W7's transcript writer needs.
+    /// W7's transcript writer needs — and which the host uses to know how far a finished run's
+    /// transcript has to be followed before it is archived.
     pub fn publish_event(&self, body: UiEventBody) -> u64 {
+        // The fold behind `usage()`/`turns()`. See their fields for why it is here and not at the
+        // call site that builds the event.
+        if let UiEventBody::Decision { usage, .. } = &body {
+            self.turns.fetch_add(1, Ordering::Relaxed);
+            if let Some(view) = usage {
+                *self.usage.write().expect("usage lock poisoned") = Some(*view);
+            }
+        }
         let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
         let _ = self.events.send(UiEvent { seq, body });
         seq
+    }
+
+    /// What the run has spent, as of the last decision that reported figures. `None` under any
+    /// policy that is not an LLM, and until the first decision under one.
+    pub fn usage(&self) -> Option<UsageView> {
+        *self.usage.read().expect("usage lock poisoned")
+    }
+
+    /// Decisions that have landed in this process. See the field for why this is not a turn id.
+    pub fn turns(&self) -> u64 {
+        self.turns.load(Ordering::Relaxed)
+    }
+
+    /// Forget what the *previous* run spent, when a new one becomes current.
+    ///
+    /// ⚠️ The LLM worker rebuilds its `Accounting` on a restart, but it does so asynchronously and
+    /// only reports again at its next decision — so without this, a checkpoint landing in the gap
+    /// credits a run seconds old with the whole bill of the one before it. `turns` is deliberately
+    /// *not* reset: the host subtracts a mark it takes at the same moment, which is the same answer
+    /// without a counter that can go backwards under a concurrent reader.
+    pub fn forget_usage(&self) {
+        *self.usage.write().expect("usage lock poisoned") = None;
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<UiEvent> {
@@ -372,6 +421,57 @@ impl Published {
 mod tests {
     use super::*;
     use crate::web::video::{VideoDecoder, VideoEncoder};
+
+    /// The fold behind `usage()`/`turns()`, which the emulator thread reads when it files a finished
+    /// run. ⚠️ It counts **decisions that landed**: a turn that was abandoned cost tokens but did
+    /// not decide anything, and a heartbeat is not a turn at all.
+    #[test]
+    fn a_decision_is_what_counts_towards_a_runs_bill() {
+        let published = Published::new();
+        assert_eq!(published.turns(), 0);
+        assert!(published.usage().is_none(), "nothing has been spent under --policy random, ever");
+
+        let spent = |prompt| UsageView {
+            context_tokens: 100,
+            context_limit: 1000,
+            prompt_tokens: prompt,
+            completion_tokens: 7,
+            completions: 3,
+            estimated: false,
+        };
+        published.publish_event(UiEventBody::Decision {
+            turn: 41,
+            summary: "walk to Oak's lab".into(),
+            usage: Some(spent(1_000)),
+        });
+        assert_eq!(published.turns(), 1);
+        assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(1_000));
+
+        // A turn the endpoint reported no usage for still decided something.
+        published.publish_event(UiEventBody::Decision { turn: 42, summary: "fight".into(), usage: None });
+        assert_eq!(published.turns(), 2);
+        assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(1_000), "the last real figure stands");
+
+        published.publish_event(UiEventBody::Decision {
+            turn: 43,
+            summary: "fight".into(),
+            usage: Some(spent(2_500)),
+        });
+        assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(2_500), "and is replaced when one arrives");
+
+        let before = published.turns();
+        published.publish_event(UiEventBody::TurnCancelled { turn: 44, reason: "the game moved on".into() });
+        published.publish_event(UiEventBody::Agent { kind: "text_box", text: "HELLO".into() });
+        assert_eq!(published.turns(), before, "an abandoned turn and a text box are not decisions");
+
+        // ⚠️ A new run must not inherit the last one's bill — the worker's own reset is
+        // asynchronous, so between the swap and the next decision this cell is the only thing that
+        // says whose tokens these were.
+        published.forget_usage();
+        assert!(published.usage().is_none());
+        assert_eq!(published.turns(), before, "…and the turn counter is a mark the host subtracts, \
+                                               not something that goes backwards under a reader");
+    }
 
     /// A frame that differs from its neighbours in a handful of blocks — enough for a delta to be
     /// non-empty, which is all the ordering test needs. Codec fidelity is `video::tests`' job.

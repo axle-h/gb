@@ -157,5 +157,8 @@ function compact(json: string): string {
 function category(kind: string): string {
   if (kind.startsWith('battle')) return 'battle';
   if (kind === 'text_box') return 'text';
+  // The end of the game gets the gutter the badge strip uses, because it is the one line in the
+  // whole log that someone scrolling back is actually looking for.
+  if (kind === 'hall_of_fame') return '🏆';
   return kind.includes('overworld') ? 'overworld' : kind.replace(/_/g, ' ');
 }

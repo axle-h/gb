@@ -65,7 +65,7 @@ you find yourself about to write a legacy struct, check first whether you can re
 instead — that is how CGB support cost zero fixture regeneration, by keeping `wram`/`ppu`'s shipped
 first value and appending the new banks as a second.
 
-The **101** committed fixtures in `src/pokemon/data/*.bin` are `include_bytes!`'d;
+The **102** committed fixtures in `src/pokemon/data/*.bin` are `include_bytes!`'d;
 `every_committed_fixture_decodes` in the default tier fails in seconds if a layout change breaks
 them. ⚠️ **That test walks the directory and `load_state`s every `.bin` in it**, so `data/` is for
 save states and nothing else — anything else goes in a subdirectory (`data/gfx/` is the one).
@@ -348,6 +348,68 @@ everything after the **first** colon — a generated token may well contain one.
 Basic credentials for the session, so a *refresh* of that page starts another run; the page says so,
 because a viewer who does not expect it has no other way to find out.
 
+## When the game ends
+
+A win is **`wNumHoFTeams` going up**, and nothing else. pokered increments it at the top of
+`AnimateHallOfFame` (`engine/movie/hall_of_fame.asm:27-32`) — the first frame of the ceremony, before
+the party parade, the credits, the game's own save and its `jp Init` back to the title screen. It
+saturates rather than wrapping and it lives inside the `wMainDataStart..wMainDataEnd` block
+`engine/menus/save.asm` round-trips through SRAM, so it survives the credits' soft reset; the ROM's
+own main menu reads it to warp a returning Champion home. `PokemonAgent::check_hall_of_fame` watches
+the rising edge and emits `AgentEvent::HallOfFame`; `EmulatorHost::file_completed_run` archives the
+run and starts the next one.
+
+⚠️ **The two obvious alternatives are both wrong.** `badges.bits() == 255` is Viridian Gym, a good
+hour early. `map == Map::HallOfFame` is a three-minute cutscene ending in a soft reset — an edge at
+best, a level never — and `scripts/HallOfFame.asm` puts *three* script stages between arriving on
+that map and the counter moving (the walk-in, Oak's congratulation, then
+`HallOfFameResetEventsAndSaveScript` → `predef HallOfFamePC` → `AnimateHallOfFame`). That last fact
+also means **`post-hall-of-fame.bin` has `wNumHoFTeams == 0`**: it is captured on arrival, so it is
+the right *seed* for a detection test and a useless thing to assert against as loaded.
+
+⚠️ **The detector reads the MMU, not `game_state()`**, and sits above `update`'s
+`game_mode().ok_or(…)?`. That `?` returns on every screen transition and a ceremony is made of them.
+
+⚠️ **The first tick only seeds the baseline** (`Option<u8>`, not `u8`). Seeding from RAM rather than
+from zero is what stops a nightly resume — or any postgame fixture — from re-announcing a victory
+that happened in another process. `RunMeta::completed` is the second guard, for the case the agent
+cannot see: a process restarted from a checkpoint taken a moment *before* the increment replays those
+seconds and detects it again.
+
+**The archive** is `$GB_RUN_DIR/hall-of-fame/<stamp>-<run-id>/`, with `ledger.jsonl` beside it.
+⚠️ **That one level of nesting is load-bearing.** `run::resumable` lists the *direct* children of
+`$GB_RUN_DIR` holding a `state.gbst` and continues the newest; an archive is a complete run directory
+written *after* the run it copied, so beside the runs it would be the newest resumable thing on the
+volume and the next `gb serve` would resume a game that had already been won and filed.
+`hall_of_fame::tests::an_archive_is_written_and_is_not_resumable` is the guard.
+
+⚠️ **The transcript is followed, not copied.** The completion event is *published* in the tick the
+archive is triggered from and written by a different thread, so `fs::copy` produces an archive of a
+victory with no victory in it — and can catch a torn line between `writeln!` and `flush`.
+`publish_event` returns the seq; the follow reads whole lines until it sees it, with a 5 s deadline.
+⚠️ **And the whole archive happens before `start_new_run`**, blocking, because `transcript.rs`
+re-reads the path *per event*: once a new run is current, an event published before the swap lands in
+the new run's file.
+
+⚠️ **A JSONL ledger, not SQLite** — a deliberate choice, not an oversight. Ten rows read and sorted in
+memory is not a query workload, and `rusqlite` with `bundled` compiles SQLite's C amalgamation into a
+container whose only non-Rust dependency is `ring`'s. Ranking is on the **cartridge's** clock
+(`wPlayTime`), which survives every resume with no bookkeeping at all. ⚠️ Stored as *seconds*: the
+hours field runs to 255, so `HH:MM:SS` is two digits below 100 hours and three above, and a lexical
+sort puts `255:59:59` before `06:12:44`.
+
+⚠️ **A run's figures used to be a process's.** `RunDir::checkpoint` *assigned* `emulated_ms` against a
+host that always starts its clock at zero, so a run resumed nightly for a week reported the last night
+as the whole playthrough — plausible, and therefore silent. `RunProgress` is now rebased onto the
+baseline read at open. Tokens and turns reach the emulator thread through `Published`, which folds
+them out of the `Decision` events the worker already publishes: ⚠️ **decisions that landed, not
+`max(turn)`** — a turn id is `llm::worker`'s cancellation generation, which counts abandoned turns
+and restarts per process.
+
+⚠️ **After the credits pokered clears WRAM**, so `agent.update` answers `Err("Not in game")` on every
+tick for ever. The host publishes an agent failure **on change only** for that reason; without it a
+finished run puts fifty notices a second into the transcript and every open browser.
+
 ## Tests
 
 `src/pokemon/integration_tests/` is tiered by how much **game time** a test emulates, which is what
@@ -362,7 +424,9 @@ before.**
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + web/host/llm.
-# ~20s, 1209 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each.
+# ~22s, 1220 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each. The
+# one deliberate exception to the tiering is `the_hall_of_fame_is_announced_once_when_the_ceremony_
+# starts` (1.7 s of real ROM), which buys the only proof that the end of the game is detected at all.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.

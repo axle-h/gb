@@ -24,6 +24,22 @@ use crate::pokemon::world_graph::WorldGraph;
 /// All methods return `Option<_>`. `None` means "not ready yet — ask again next frame".
 /// This keeps the game loop running while the policy waits for input.
 pub trait Policy {
+    /// What this decider is called: `"llm"`, `"random"`, `"console"` or `"scripted"`.
+    ///
+    /// ⚠️ **Required rather than defaulted**, which is unusual on this trait. It reaches two places
+    /// that outlive the process — `StatusSnapshot::policy`, which the page renders, and the row
+    /// `run::hall_of_fame` writes for a finished run — and a default would be a plausible-looking
+    /// lie in the one place it matters. There are four implementations and the compiler finds them
+    /// all.
+    ///
+    /// ⚠️ **`"llm"` and `"random"` are a wire contract**, not free text: the SPA reads
+    /// `StatusSnapshot.policy` and the deployment's status line is built from it.
+    ///
+    /// The *model* is deliberately not part of this. `run::RunMeta::model` already holds `GB_MODEL`,
+    /// and `LlmPolicy` could not answer anyway — `LlmConfig` is moved into the worker thread when
+    /// the policy is built.
+    fn name(&self) -> &'static str;
+
     /// Choose the next overworld action.
     ///
     /// `world_graph` is the agent's **incrementally-built** map graph — it only contains
@@ -217,6 +233,8 @@ impl RandomPolicy {
 }
 
 impl Policy for RandomPolicy {
+    fn name(&self) -> &'static str { "random" }
+
     fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         let actions = state.map.actions();
         match &mut self.rng {
@@ -264,6 +282,8 @@ impl Default for ConsolePolicy {
 }
 
 impl Policy for ConsolePolicy {
+    fn name(&self) -> &'static str { "console" }
+
     fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         let actions = state.map.actions();
         if actions.is_empty() { return None; }
@@ -2340,6 +2360,8 @@ impl DeterministicPolicy {
 }
 
 impl Policy for DeterministicPolicy {
+    fn name(&self) -> &'static str { "scripted" }
+
 
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction> {
         // Back in the overworld = the previous battle is over; clear the per-battle grind participation flag.

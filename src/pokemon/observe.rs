@@ -60,6 +60,9 @@ view! {
         /// sets `wPlayTimeMaxed` and stops counting.
         pub playtime: String,
         pub playtime_maxed: bool,
+        /// `wNumHoFTeams` — non-zero once the game has been beaten. See
+        /// [`GameState::hall_of_fame_teams`].
+        pub hall_of_fame_teams: u8,
     }
 }
 
@@ -68,11 +71,28 @@ view! {
 /// Public because it is the one line of [`TrainerView`] a turn request wants without the other
 /// eleven — see [`crate::llm::prompt::ApiSnapshot`].
 pub fn playtime(api: &PokemonApi<'_>) -> String {
-    let mmu = api.mmu();
-    let hours = mmu.read_pointer(&pokered_symbols::wPlayTimeHours);
-    let minutes = mmu.read_pointer(&pokered_symbols::wPlayTimeMinutes);
-    let seconds = mmu.read_pointer(&pokered_symbols::wPlayTimeSeconds);
+    let (hours, minutes, seconds) = playtime_parts(api);
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// The same clock as a plain count of seconds.
+///
+/// ⚠️ **Anything that sorts or compares play times must use this, not [`playtime`].** The hours field
+/// runs to 255, so the string is two digits below 100 hours and three above it, and a lexical
+/// comparison puts `255:59:59` *before* `06:12:44` — a ranking that inverts itself only for the runs
+/// that took longest, which is exactly the kind nobody checks. `run::hall_of_fame` ranks on this.
+pub fn playtime_seconds(api: &PokemonApi<'_>) -> u32 {
+    let (hours, minutes, seconds) = playtime_parts(api);
+    u32::from(hours) * 3600 + u32::from(minutes) * 60 + u32::from(seconds)
+}
+
+fn playtime_parts(api: &PokemonApi<'_>) -> (u8, u8, u8) {
+    let mmu = api.mmu();
+    (
+        mmu.read_pointer(&pokered_symbols::wPlayTimeHours),
+        mmu.read_pointer(&pokered_symbols::wPlayTimeMinutes),
+        mmu.read_pointer(&pokered_symbols::wPlayTimeSeconds),
+    )
 }
 
 pub fn trainer(state: &GameState, api: &PokemonApi<'_>) -> TrainerView {
@@ -89,6 +109,7 @@ pub fn trainer(state: &GameState, api: &PokemonApi<'_>) -> TrainerView {
         pokedex_seen: state.pokedex_seen.species().len(),
         playtime: playtime(api),
         playtime_maxed: mmu.read_pointer(&pokered_symbols::wPlayTimeMaxed) != 0,
+        hall_of_fame_teams: state.hall_of_fame_teams,
     }
 }
 

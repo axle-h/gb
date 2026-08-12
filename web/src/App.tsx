@@ -1,11 +1,19 @@
+import { useMemo } from 'react';
 import type { RunStatus, UsageView } from './api';
 import { Conversation } from './components/Conversation';
+import { Leaderboard } from './components/Leaderboard';
 import { Screen } from './components/Screen';
 import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 
 export function App() {
   const { status, entries, connection, usage, run } = useEventStream();
+  // The leaderboard's only cue that it is stale. A win is rare enough that this counter changes at
+  // most once per run, and the log is already carrying the event that says so.
+  const wins = useMemo(
+    () => entries.filter((entry) => entry.type === 'agent' && entry.kind === 'hall_of_fame').length,
+    [entries],
+  );
 
   return (
     <div className="app">
@@ -29,6 +37,7 @@ export function App() {
             <span className="dim"> · {compactTokens(usage.prompt_tokens + usage.completion_tokens)} spent</span>
           </span>
         )}
+        <Leaderboard wins={wins} />
         <span className={`pill ${connection}`}>
           {connection === 'live' ? status?.game?.mode ?? 'connected' : connection}
         </span>

@@ -123,6 +123,30 @@ pub enum AgentEvent {
     /// the UI, to the transcript and to stdout — all four, so that a watchdog that quietly rescues a
     /// run cannot turn an agent bug into an invisible ongoing cost.
     WatchdogFired { agent_state: String, stuck_for: Duration },
+    /// **The game was beaten.** `wNumHoFTeams` went up, which happens exactly once per Hall of Fame
+    /// ceremony, at its very first frame — see [`crate::pokemon::GameState::hall_of_fame_teams`] for
+    /// why that byte and not another.
+    ///
+    /// ⚠️ **Fired at the *top* of the ceremony**, before the party parade, the credits, the game's
+    /// own save and its soft reset back to the title screen. Everything after this point is three
+    /// emulated minutes of cutscene that the run may or may not survive; the record is banked first.
+    ///
+    /// ⚠️ **The payload is carried rather than looked up later**, for the reason
+    /// [`Self::BattleActionStarted`] carries `actor`: this is read by the host and the archiver *off*
+    /// the emulator thread, and by the time either of them gets to it the ceremony has cleared the
+    /// party out of the display and the clock has moved on.
+    HallOfFame {
+        /// `wNumHoFTeams` after the increment. `1` is a first championship; `2` a second one in the
+        /// same save.
+        teams: u8,
+        /// `HH:MM:SS` off the cartridge's own clock. `playtime_seconds` is the same value in the
+        /// form anything that ranks runs must use — see [`crate::pokemon::observe::playtime_seconds`].
+        playtime: String,
+        playtime_seconds: u32,
+        badges: u8,
+        /// The winning party, nicknames in slot order.
+        party: Vec<String>,
+    },
 }
 
 impl AgentEvent {
@@ -190,6 +214,12 @@ impl Display for AgentEvent {
             AgentEvent::WatchdogFired { agent_state, stuck_for } =>
                 write!(f, "⚠️ stuck in `{agent_state}` for {}s of game time without asking for a \
                            decision — asking for a nudge", stuck_for.as_secs()),
+            // The one line in the log that is not narration of a step but the end of the story, so
+            // it says the three things someone reading it later will want: that it happened, how
+            // long it took, and who did it.
+            AgentEvent::HallOfFame { playtime, badges, party, .. } =>
+                write!(f, "🏆 entered the HALL OF FAME with {} badges after {playtime} of play — {}",
+                       badges.count_ones(), party.join(", ")),
         }
     }
 }
@@ -657,6 +687,11 @@ pub struct PokemonAgent {
     /// `cycles_since_poll` as of the last [`AgentEvent::WatchdogFired`], so a jam is reported when it
     /// starts and once per timeout after that rather than fifty times a second.
     stuck_reported_at: MachineCycles,
+
+    // ── The end of the game ──────────────────────────────────────────────────────────────────────
+    /// `wNumHoFTeams` as of the last tick, and `None` until the first one — see
+    /// [`Self::check_hall_of_fame`], where the whole of the edge trigger lives.
+    hall_of_fame_teams: Option<u8>,
 }
 
 impl Default for PokemonAgent {
@@ -689,6 +724,7 @@ impl PokemonAgent {
             manual_input: VecDeque::new(),
             manual_input_held: 0,
             escaping_menus: false,
+            hall_of_fame_teams: None,
         }
     }
 
@@ -721,6 +757,10 @@ impl PokemonAgent {
         self.manual_input_held = 0;
         self.cycles_since_poll = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
+        // Back to `None`, not to `Some(0)`: the next tick re-seeds from whatever the freshly loaded
+        // cartridge says. `POST /api/new-run` loads the start-of-game state, so that is 0 — but a
+        // future caller that restarts from something else must not be told it has just won.
+        self.hall_of_fame_teams = None;
     }
 
     /// Queue raw button presses, one per agent tick, pre-empting the state machine.
@@ -800,6 +840,12 @@ impl PokemonAgent {
         self.policy.service_tools(game_state, api, &self.world_graph);
     }
 
+    /// What the decider calls itself — [`Policy::name`], which the host reports on every heartbeat
+    /// and writes into a finished run's record.
+    pub fn policy_name(&self) -> &'static str {
+        self.policy.name()
+    }
+
     /// Emulated time the agent has gone without reaching a decision point of any kind. Zero on any
     /// tick that polled the policy.
     pub fn since_last_policy_poll(&self) -> Duration {
@@ -839,6 +885,55 @@ impl PokemonAgent {
         self.policy.service_tools(&game_state, api, &self.world_graph);
         self.policy.pick_unstick(&game_state, jam);
         true
+    }
+
+    /// Notice the game being beaten, and say so exactly once.
+    ///
+    /// `wNumHoFTeams` is incremented at the top of `AnimateHallOfFame`
+    /// (`engine/movie/hall_of_fame.asm:27-32`) — the first frame of the ceremony, before the party
+    /// parade, the credits, the game's own save and its `jp Init` back to the title screen. So the
+    /// rising edge of that byte *is* the moment of victory, and it is the only signal that is one:
+    ///
+    /// - **All eight badges is not it.** That is Viridian Gym, a good hour early.
+    /// - **`map == Map::HallOfFame` is not it either.** That is a three-minute cutscene which ends
+    ///   in a soft reset, so it is an edge at best and a level never — and the map is already
+    ///   `HallOfFame` for three script stages *before* the counter moves
+    ///   (`scripts/HallOfFame.asm`: the walk-in, Oak's congratulation, then
+    ///   `HallOfFameResetEventsAndSaveScript` → `predef HallOfFamePC` → `AnimateHallOfFame`).
+    ///
+    /// ⚠️ **The first tick only seeds the baseline.** Resuming a save that has already won — every
+    /// postgame fixture, and the deployed run on the day after it finished — must not re-announce a
+    /// victory that happened in another process. Seeding from what is in RAM rather than from zero is
+    /// the whole of that, and it is why this is an `Option` and not a `u8`.
+    ///
+    /// ⚠️ **Read straight from the MMU, not from `game_state()`.** That call is fallible and answers
+    /// `Err` through exactly the screen transitions this has to fire during. The `GameState` field of
+    /// the same name exists for the model and the tests, not for this.
+    fn check_hall_of_fame(&mut self, api: &mut PokemonApi) {
+        use crate::pokemon::encoding::PokemonEncoding;
+        use crate::pokemon::symbols::pokered_symbols as sym;
+        let teams = api.mmu().read_pointer(&sym::wNumHoFTeams);
+        match self.hall_of_fame_teams {
+            None => {
+                self.hall_of_fame_teams = Some(teams);
+                return;
+            }
+            Some(seen) if teams > seen => self.hall_of_fame_teams = Some(teams),
+            Some(_) => return,
+        }
+
+        // ⚠️ Read *now*, on the emulator thread, and carried on the event: the host formats events
+        // off-thread and `run::hall_of_fame` archives later still, by which time the ceremony has
+        // cleared the party out of WRAM's display buffers.
+        let playtime = crate::pokemon::observe::playtime(api);
+        let playtime_seconds = crate::pokemon::observe::playtime_seconds(api);
+        let badges = api.mmu().read_pointer(&sym::wObtainedBadges);
+        let party = api
+            .mmu()
+            .read_player_pokemon_party()
+            .map(|party| party.iter().map(|mon| mon.nickname.to_default_string()).collect())
+            .unwrap_or_default();
+        self.event(AgentEvent::HallOfFame { teams, playtime, playtime_seconds, badges, party });
     }
 
     /// Emit an event: to the policy first, then to the buffer the host drains.
@@ -1321,6 +1416,13 @@ impl PokemonAgent {
         // machine keeps running underneath it, and if the jam clears itself the next ordinary poll
         // resets the clock and nothing more is said.
         self.run_watchdog(api);
+
+        // ── The end of the game ───────────────────────────────────────────────────
+        // ⚠️ **Above the `?` below, and that placement is the whole reason this is a separate
+        // check.** `game_mode()` answers `None` through every screen transition, and a Hall of Fame
+        // ceremony is made of them — a fade to black, a party parade, the credits. Anything hung off
+        // `game_state()` or off the state machine below would miss the one frame that matters.
+        self.check_hall_of_fame(api);
 
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
@@ -3481,6 +3583,22 @@ mod tests {
             "…tried: this is the action starting, not landing",
         );
         assert_eq!(say(BattleAction::SafariBall), "threw a Safari Ball at Pidgey");
+    }
+
+    /// The last line of a playthrough, and the one most likely to be read by someone who was not
+    /// watching. Same contract as the battle prose above: the page prints this verbatim and
+    /// `llm::prompt::describe_event` sends it to the model, so a `{:?}` here would tell the winner
+    /// `HallOfFame { teams: 1, playtime: "06:12:44", .. }`.
+    #[test]
+    fn a_win_reads_as_a_sentence() {
+        let said = format!("{}", AgentEvent::HallOfFame {
+            teams: 1,
+            playtime: "06:12:44".into(),
+            playtime_seconds: 22_364,
+            badges: 0xFF,
+            party: vec!["VAPOREON".into(), "ARTICUNO".into()],
+        });
+        assert_eq!(said, "🏆 entered the HALL OF FAME with 8 badges after 06:12:44 of play — VAPOREON, ARTICUNO");
     }
 
     /// ⚠️ **A ball is thrown at the enemy, and every other bag item is used on your own Pokémon.**

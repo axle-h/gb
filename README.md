@@ -128,16 +128,20 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 Copy that directory and the run moves with it. `gb` checkpoints periodically and on the way out —
 Ctrl-C and SIGTERM both — so a restart, a rollout or a reboot resumes rather than starts over.
 
+Beside the runs is `$GB_RUN_DIR/hall-of-fame/`: a copy of every run that has finished the game, and
+an append-only `ledger.jsonl` of one line each. See below.
+
 ## The web UI
 
 `web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed` and served by
-the same process that runs the emulator. Six read-only endpoints and two that are not:
+the same process that runs the emulator. Seven read-only endpoints and two that are not:
 
 | | |
 |---|---|
 | `/api/events` | SSE: status heartbeat, published on change, plus agent events as they happen |
 | `/api/video` | binary: a keyframe, then 8×8 block deltas, deflated per connection — about 21 kbit/s |
 | `/api/history?since=` | the transcript backlog, so a page that just loaded is not empty |
+| `/api/leaderboard?limit=` | the runs that have finished the game, fastest first |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's own trainer-card graphics |
 | `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, decompressed from the cartridge |
 | `/favicon.png` | the overworld Poké Ball, ditto |
@@ -163,6 +167,25 @@ is repeated 8×8 tiles and a shared window sees every repeat), and dropping base
 before compression but 69–113% *after* it.
 For comparison, the same footage through x264 is 45 kbit/s losslessly and 25 at a quality that
 visibly mangles pixel art, so a real video codec was measured and rejected rather than assumed away.
+
+### When a run finishes the game
+
+A win is one byte: `wNumHoFTeams`, which pokered increments on the **first frame** of the Hall of Fame
+ceremony — before the party parade, the credits, and the game's own save-and-soft-reset back to the
+title screen. That is the moment of victory, with the winning party still in memory, so that is where
+the record is taken.
+
+What happens then, in order: the run is checkpointed, copied whole into
+`$GB_RUN_DIR/hall-of-fame/<date>-<run-id>/` — save state, SRAM, the model's notes and the run's entire
+transcript, gzipped — one line describing it is appended to `hall-of-fame/ledger.jsonl`, and the next
+run starts automatically. Nothing is deleted: the finished run directory is left exactly where it was
+and is still resumable.
+
+The ledger row is the run's whole story in numbers: how long it took by the cartridge's own clock and
+by ours, tokens spent, turns taken, which policy and model decided them, which version of `gb` played
+it, how many times it was resumed, and what it finished with. `/api/leaderboard` reads it back and the
+🏆 in the page's header shows the top ten, **fastest by in-game time** — the one figure that survives
+a resume without any bookkeeping, because it lives in the save file.
 
 ### Starting a new run without a restart
 
@@ -231,13 +254,15 @@ src/
 ├── host.rs              — headless emulator host: GameBoy + PokemonAgent + video encoder on one thread
 ├── run/                 — the run directory (`web` feature): checkpoint, resume, transcript
 │   ├── mod.rs           — $GB_RUN_DIR/<run-id>/: meta.json, state.gbst, sram.bin; atomic writes
-│   └── transcript.rs    — transcript.jsonl writer thread + the /api/history backlog reader
+│   ├── transcript.rs    — transcript.jsonl writer thread + the /api/history backlog reader
+│   └── hall_of_fame.rs  — a finished run: the archive, the ledger, and the leaderboard read back
 ├── web/                 — the axum server (`web` feature); read-only but for the reset
 │   ├── published.rs     — the only interface between the emulator thread and HTTP
 │   ├── video.rs         — 8×8 block-diff video codec + the reference decoder
 │   │   └── bench.rs     — what the stream costs, and every alternative it was chosen over
 │   ├── assets.rs        — the SPA: `web/dist` embedded, or read from disk under GB_WEB_DEV=1
 │   ├── badges.rs        — /api/badges.png: the eight badges, decoded from the cartridge
+│   ├── leaderboard.rs   — /api/leaderboard: the runs that have finished the game
 │   └── sprites.rs       — /api/pokemon/{dex}/front.png and /favicon.png, ditto
 ├── llm/                 — the LLM client and turn loop (`llm` feature)
 │   ├── config.rs        — the environment block: OPENAI_*, GB_MODEL, GB_MAX_TOOL_STEPS, …

@@ -55,6 +55,13 @@ No rollout, no downtime, nothing to remember to undo — the current run is chec
 complete on the volume, and the page follows the new one on its own. ⚠️ Both 404 while
 `GB_ADMIN_TOKEN` is unset *or blank*, which is the shape a placeholder Secret takes.
 
+⚠️ **The volume now grows on its own, because a run that finishes the game files itself.** The win is
+archived to `/runs/hall-of-fame/<date>-<run-id>/` — save state, SRAM, the model's notes and the whole
+transcript, gzipped — and the next run starts automatically. The transcript is the big part and
+compresses ten- to twentyfold, so an archive is typically a few hundred kilobytes against the PVC's
+1 Gi; but it is unbounded in the number of wins, and nothing prunes it. `kubectl -n gb exec deploy/gb
+-- du -sh /runs/hall-of-fame` is the thing to look at if the volume ever fills.
+
 The old way still works and is the fallback if the process is not answering: uncomment the `args:`
 line in `gb/deployment.yml` for one rollout and then take it back out. ⚠️ Left in place, every
 restart would wipe the run — which is the reason the endpoint exists.

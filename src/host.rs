@@ -23,7 +23,7 @@ use crate::pokemon::agent::{AgentEvent, PokemonAgent};
 use crate::pokemon::map_metadata::MapMetadataCache;
 use crate::pokemon::policy::Policy;
 use crate::pokemon::{PokemonApi, PokemonApiTrait, observe};
-use crate::run::CurrentRun;
+use crate::run::{CurrentRun, RunProgress};
 use crate::web::published::{FrameSnapshot, Published, RunStatus, StatusSnapshot, UiEventBody};
 use crate::web::video::{Frame, VideoEncoder};
 
@@ -57,8 +57,6 @@ pub struct HostConfig {
     /// /api/events` ticking is the cheapest liveness check there is — an emulator thread that has
     /// died should show up as *absence*, not as a stream that was always quiet.
     pub status_keepalive: Duration,
-    /// What the status heartbeat reports as the decider — `"random"` or `"llm"`.
-    pub policy_name: &'static str,
     /// **W7** — where to checkpoint, and how often. `None` is a host that keeps nothing, which is
     /// what every test wants and what `gb serve` never is.
     pub run: Option<Arc<CurrentRun>>,
@@ -130,7 +128,6 @@ impl Default for HostConfig {
             // the picture is streamed at 30 fps and is where movement is actually watched.
             status_interval: Duration::from_millis(500),
             status_keepalive: Duration::from_secs(2),
-            policy_name: "random",
             run: None,
             checkpoint_interval: Duration::from_secs(60),
             new_runs: None,
@@ -163,6 +160,29 @@ pub struct EmulatorHost {
     /// Whether the first cycle has been emulated — see the `RunStatus::Playing` transition in
     /// [`Self::tick`].
     booted: bool,
+
+    // ── What this process has contributed to the run ─────────────────────────────────────────────
+    /// When the **current run** started being played here. ⚠️ Not `started`, which is the process's
+    /// uptime and is what `/api/healthz` and `StatusSnapshot::wall_ms` mean; this one is reset by
+    /// [`Self::start_new_run`] because it measures *this game*.
+    run_started: Instant,
+    /// [`Published::turns`] as of the moment this run became current. Turns are counted per process,
+    /// so the run's share is the difference.
+    turns_at_run_start: u64,
+    /// [`AgentEvent::WatchdogFired`]s seen this run. Counted here rather than on the agent because
+    /// this is where events are already being walked.
+    watchdog_firings: u64,
+    /// The completion event and the sequence number it was published with, parked for the top of the
+    /// next tick — see [`Self::file_completed_run`] for why it is not acted on where it is found.
+    completed: Option<(AgentEvent, u64)>,
+    /// The last `agent.update` failure that was published.
+    ///
+    /// ⚠️ **Publishing every failure is a flood, and the game reaches a state that produces one on
+    /// every tick.** After the credits pokered does `jp Init`: WRAM is cleared, `game_mode()` is
+    /// `None`, and `agent.update` answers `Err("Not in game")` fifty times a second — into the
+    /// transcript, into every open browser, for as long as the process lives. Publishing only on
+    /// change keeps the report and drops the flood.
+    last_agent_failure: Option<String>,
 }
 
 impl EmulatorHost {
@@ -188,6 +208,10 @@ impl EmulatorHost {
         let now = Instant::now();
         let cycle_duration = REALTIME_CYCLE_DURATION.div_f64(config.target_speed.max(f64::MIN_POSITIVE));
         let first_checkpoint = now + config.checkpoint_interval;
+        // Zero in every caller today, since `Published` is built beside the host — read rather than
+        // assumed so that a future one that shares a buffer does not silently credit this run with
+        // someone else's turns.
+        let turns_at_run_start = published.turns();
         Ok(Self {
             gb,
             agent: PokemonAgent::new(policy),
@@ -210,6 +234,11 @@ impl EmulatorHost {
             last_status: None,
             last_status_at: now,
             booted: false,
+            run_started: now,
+            turns_at_run_start,
+            watchdog_firings: 0,
+            completed: None,
+            last_agent_failure: None,
         })
     }
 
@@ -289,13 +318,185 @@ impl EmulatorHost {
                 return;
             }
         };
-        let emulated_ms = self.emulated.to_duration().as_millis() as u64;
-        if let Err(failure) = run.checkpoint(&state, &self.gb.dump_sram(), emulated_ms) {
+        if let Err(failure) = run.checkpoint(&state, &self.gb.dump_sram(), self.progress()) {
             self.published.publish_event(UiEventBody::Notice {
                 level: "error",
                 message: format!("could not checkpoint the run: {failure}"),
             });
         }
+    }
+
+    /// What **this process** has contributed to the current run since it opened it.
+    ///
+    /// ⚠️ Cumulative since the run became current, not since the last checkpoint:
+    /// [`RunDir::checkpoint`] rebases it onto the baseline it read at open, so a delta here would be
+    /// counted once per checkpoint. [`crate::run::RunProgress`] has the argument in full.
+    fn progress(&self) -> RunProgress {
+        let usage = self.published.usage();
+        RunProgress {
+            emulated_ms: self.emulated.to_duration().as_millis() as u64,
+            wall_ms: self.run_started.elapsed().as_millis() as u64,
+            prompt_tokens: usage.map_or(0, |u| u.prompt_tokens),
+            completion_tokens: usage.map_or(0, |u| u.completion_tokens),
+            completions: usage.map_or(0, |u| u.completions),
+            turns: self.published.turns().saturating_sub(self.turns_at_run_start),
+            watchdog_firings: self.watchdog_firings,
+        }
+    }
+
+    /// File a finished run in the Hall of Fame and begin the next one.
+    ///
+    /// Called at the top of [`Self::tick`], beside the new-run mailbox, for the same reason: it is
+    /// the one point in the process where nothing is half-done. The order is the design:
+    ///
+    /// 1. **Checkpoint**, so the save state at the moment of victory is on disk in the live run
+    ///    directory as well as in the archive.
+    /// 2. **Archive, blocking, before the swap.** ⚠️ `transcript.rs` re-reads
+    ///    `CurrentRun::get().transcript_path()` *per event*, so once a new run is current, an event
+    ///    published before the swap but written after it lands in the new run's transcript. Doing
+    ///    the follow first is what makes "which file is the victory in?" a question with an answer.
+    /// 3. **Stamp `meta.json`**, so a process restarted from a checkpoint taken a moment before the
+    ///    counter moved does not replay those seconds and file the same win twice. The agent's edge
+    ///    trigger cannot see across a process boundary; this can.
+    /// 4. **Start the next run**, which checkpoints again (harmless) and leaves the finished
+    ///    directory exactly where it is.
+    ///
+    /// ⚠️ **A failed archive must not restart the run.** A run that won and could not be recorded is
+    /// better left playing — the next `/reset-game` is a human decision, and the directory is still
+    /// intact and resumable.
+    ///
+    /// ⚠️ **And it is not retried, which loses the trophy.** The edge is a rising edge: the counter
+    /// has already moved, so nothing will fire again, and a process restarted from the checkpoint
+    /// taken above seeds its baseline from a save that has already won and stays silent. A retry
+    /// loop is not the answer — this runs fifty times a second, and a disk that is full now is full
+    /// in 20 ms — so the failure notice names the directory instead, because filing it by hand is
+    /// then a `cp`. If this ever happens in practice, a delayed bounded retry is the fix, not a busy
+    /// one.
+    fn file_completed_run(&mut self, event: &AgentEvent, seq: u64) {
+        let AgentEvent::HallOfFame { teams, playtime, playtime_seconds, .. } = event else { return };
+        let Some(current) = self.config.run.clone() else { return };
+        let run = current.get();
+        if run.already_archived(*teams) {
+            return;
+        }
+
+        self.checkpoint();
+        let state = match self.gb.save_state() {
+            Ok(state) => state,
+            Err(failure) => return self.complain(format!("could not save the winning state: {failure}")),
+        };
+
+        // Read before the archive, because `game_state()` needs the emulator and the archive does
+        // not. A failure here costs the row its final-team detail, not the archive.
+        let (badges, pokedex_owned, pokedex_seen, money, party, playtime_maxed) = self.final_state();
+        // ⚠️ After the checkpoint above, which is what folds this process's figures onto the run's
+        // baseline. Reading it first would file the run with the totals it had a minute ago.
+        let meta = run.meta();
+        let usage = self.published.usage();
+        let job = crate::run::hall_of_fame::ArchiveJob {
+            root: current.root().to_path_buf(),
+            run_dir: run.path().to_path_buf(),
+            state,
+            sram: self.gb.dump_sram(),
+            until_seq: seq,
+            completion: crate::run::hall_of_fame::Completion {
+                archive: String::new(), // filled in by `archive`, which chooses the directory
+                run_id: meta.run_id.clone(),
+                teams: *teams,
+                completed_at: crate::run::iso8601(std::time::SystemTime::now()),
+                started_at: meta.started_at.clone(),
+                app_version: crate::cli::VERSION.to_string(),
+                policy: self.agent.policy_name().to_string(),
+                // `RunMeta::model` is the literal `"random"` under `--policy random`; a leaderboard
+                // column that says "random" as if it were a model name would be a small lie.
+                model: (meta.model != "random").then(|| meta.model.clone()),
+                playtime_seconds: *playtime_seconds,
+                playtime: playtime.clone(),
+                playtime_maxed,
+                emulated_ms: meta.emulated_ms,
+                wall_ms: meta.wall_ms,
+                turns: meta.turns,
+                completions: meta.completions,
+                prompt_tokens: meta.prompt_tokens,
+                completion_tokens: meta.completion_tokens,
+                tokens_estimated: usage.is_some_and(|u| u.estimated),
+                watchdog_firings: meta.watchdog_firings,
+                resumes: meta.resumed_from.len(),
+                checkpoints: meta.checkpoints,
+                badges,
+                pokedex_owned,
+                pokedex_seen,
+                money,
+                party,
+            },
+            meta,
+        };
+
+        let archived = match crate::run::hall_of_fame::archive(&job) {
+            Ok(name) => name,
+            // Names the directory, because this is not retried and filing it by hand is then a `cp`.
+            Err(failure) => {
+                return self.complain(format!(
+                    "could not file the finished run: {failure} — {} won the game and is complete on \
+                     disk, but is not in the leaderboard",
+                    job.run_dir.display(),
+                ));
+            }
+        };
+        if let Err(failure) = run.record_completion(crate::run::hall_of_fame::recorded(*teams, archived.clone())) {
+            // The archive is written and the ledger row is appended; only the idempotence stamp
+            // failed. Say so and carry on — a duplicate row is a much smaller problem than refusing
+            // to start the next run.
+            self.complain(format!("could not stamp the finished run's meta.json: {failure}"));
+        }
+
+        self.published.publish_event(UiEventBody::Notice {
+            level: "info",
+            message: format!(
+                "🏆 {} finished the game in {playtime} — filed as {}/{archived}",
+                run.run_id(),
+                crate::run::files::HALL_OF_FAME,
+            ),
+        });
+        println!("gb serve — {} finished the game, filed as {archived}", run.run_id());
+
+        match self.start_new_run() {
+            Ok(run_id) => println!("gb serve — playing again as {run_id}"),
+            Err(failure) => self.complain(format!("could not start the next run: {failure}")),
+        }
+    }
+
+    /// The winning run's final tally, for the ledger row. Zeroes if the game is momentarily
+    /// unreadable — which it may well be, this being the first frame of a cutscene.
+    fn final_state(&mut self) -> (u32, usize, usize, u32, Vec<crate::run::hall_of_fame::PartyMember>, bool) {
+        use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
+        let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+        let maxed = api.mmu().read_pointer(&pokered_symbols::wPlayTimeMaxed) != 0;
+        let Ok(state) = api.game_state() else { return (0, 0, 0, 0, Vec::new(), maxed) };
+        let party = state
+            .pokemon
+            .iter()
+            .map(|mon| crate::run::hall_of_fame::PartyMember {
+                nickname: mon.nickname.to_default_string(),
+                species: format!("{:?}", mon.species),
+                level: mon.level,
+            })
+            .collect();
+        (
+            state.badges.bits().count_ones(),
+            state.pokedex_owned.species().len(),
+            state.pokedex_seen.species().len(),
+            state.money,
+            party,
+            maxed,
+        )
+    }
+
+    /// Publish an error notice and print it. Every failure in the completion path takes this route:
+    /// none of them is worth stopping a run that is otherwise playing perfectly well.
+    fn complain(&self, message: String) {
+        eprintln!("gb serve — {message}");
+        self.published.publish_event(UiEventBody::Notice { level: "error", message });
     }
 
     /// Abandon the current run and start the game again in a fresh run directory, without stopping.
@@ -337,6 +538,14 @@ impl EmulatorHost {
         self.encoder.restart();
         self.last_status = None;
         self.emulated = MachineCycles::ZERO;
+        // Everything that measures *this game* rather than this process starts again with it. The
+        // agent's own Hall of Fame baseline is reset by `agent.restart` above.
+        self.run_started = Instant::now();
+        self.turns_at_run_start = self.published.turns();
+        self.published.forget_usage();
+        self.watchdog_firings = 0;
+        self.completed = None;
+        self.last_agent_failure = None;
         self.ahead_by_cycles = MachineCycles::ZERO;
         self.since_last_update = Duration::ZERO;
         self.last_iteration = Instant::now();
@@ -363,6 +572,12 @@ impl EmulatorHost {
         // path unconditionally.
         if let Some(sender) = self.config.new_runs.as_ref().and_then(|mailbox| mailbox.take()) {
             let _ = sender.send(self.start_new_run());
+        }
+        // **The end of the game**, answered here for the reason above and not where the event is
+        // found: filing a run swaps the run directory out from under the transcript thread, and the
+        // middle of a tick is not where that should happen. See `file_completed_run`.
+        if let Some((event, seq)) = self.completed.take() {
+            self.file_completed_run(&event, seq);
         }
 
         let now = Instant::now();
@@ -395,18 +610,39 @@ impl EmulatorHost {
             self.ahead_by_cycles += ran - min_cycles;
 
             let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
-            if let Err(failure) = self.agent.update(&mut api, ran) {
-                self.published.publish_event(UiEventBody::Notice {
-                    level: "error",
-                    message: format!("agent tick failed: {failure}"),
-                });
+            // ⚠️ **On change, not on every failure.** `agent.update` answers `Err("Not in game")`
+            // for as long as the game is unreadable, which after the Hall of Fame credits — pokered
+            // ends them with `jp Init`, clearing WRAM — is *for ever*. Publishing each one would put
+            // fifty notices a second into the transcript and every open browser. See
+            // `last_agent_failure`.
+            match self.agent.update(&mut api, ran) {
+                Ok(()) => self.last_agent_failure = None,
+                Err(failure) => {
+                    if self.last_agent_failure.as_deref() != Some(failure.as_str()) {
+                        self.last_agent_failure = Some(failure.clone());
+                        self.published.publish_event(UiEventBody::Notice {
+                            level: "error",
+                            message: format!("agent tick failed: {failure}"),
+                        });
+                    }
+                }
             }
             let events = self.agent.drain_events();
             for event in events {
-                self.published.publish_event(UiEventBody::Agent {
+                let seq = self.published.publish_event(UiEventBody::Agent {
                     kind: event_kind(&event),
                     text: format!("{event}"),
                 });
+                match event {
+                    AgentEvent::WatchdogFired { .. } => self.watchdog_firings += 1,
+                    // Parked rather than acted on: the run directory is about to be swapped, and
+                    // the top of the next tick is the place for that. The seq travels with it —
+                    // `hall_of_fame::archive` follows the transcript up to this line.
+                    event @ AgentEvent::HallOfFame { .. } => {
+                        self.completed.get_or_insert((event, seq));
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -453,7 +689,9 @@ impl EmulatorHost {
             wall_ms: now.duration_since(self.started).as_millis() as u64,
             emulated_ms: self.emulated.to_duration().as_millis() as u64,
             target_speed: self.config.target_speed,
-            policy: self.config.policy_name,
+            // Asked of the decider itself rather than configured alongside it: two places naming the
+            // same thing is two places to disagree, and this one is a wire contract the page renders.
+            policy: self.agent.policy_name(),
             agent_state: self.agent.state_debug(),
             frame_seq: self.encoder.seq(),
             game,
@@ -511,6 +749,10 @@ fn event_kind(event: &AgentEvent) -> &'static str {
         // **W9.** Styled loudly by the page, and the one agent event that is a bug report rather
         // than a narration — see `AgentEvent::WatchdogFired`.
         AgentEvent::WatchdogFired { .. } => "watchdog",
+        // ⚠️ **Must not join the kinds `useEventStream`'s `fold` drops.** This is the one line the
+        // whole log exists to arrive at, and it is also what [`Self::tick`] keys off to archive the
+        // run — so the string is read in two places, not one.
+        AgentEvent::HallOfFame { .. } => "hall_of_fame",
     }
 }
 
@@ -526,6 +768,14 @@ mod tests {
     }
 
     fn host_with(published: Arc<Published>, tweak: impl FnOnce(&mut HostConfig)) -> EmulatorHost {
+        host_from(crate::pokemon::data::START_OF_GAME, published, tweak)
+    }
+
+    fn host_from(
+        state: &[u8],
+        published: Arc<Published>,
+        tweak: impl FnOnce(&mut HostConfig),
+    ) -> EmulatorHost {
         let mut config = HostConfig {
             // Fast enough that a fraction of a second of wall clock is seconds of game time, so the
             // test is not at the mercy of how quickly the scheduler comes back to it.
@@ -535,13 +785,8 @@ mod tests {
             ..HostConfig::default()
         };
         tweak(&mut config);
-        EmulatorHost::new(
-            crate::pokemon::data::START_OF_GAME,
-            Box::new(RandomPolicy::default()),
-            published,
-            config,
-        )
-        .expect("the committed start-of-game fixture should load")
+        EmulatorHost::new(state, Box::new(RandomPolicy::default()), published, config)
+            .expect("the committed fixture should load")
     }
 
     /// The W1 acceptance criterion, without the `curl`: status heartbeats arrive, they carry a game
@@ -812,6 +1057,102 @@ mod tests {
         host.publish_video();
         assert!(published.latest_keyframe().is_some_and(|frame| frame.keyframe),
                 "the video encoder was not restarted");
+    }
+
+    /// **The whole ending, in one test**: the win is noticed, the run is filed, and the next one
+    /// starts — with the emulator, a real run directory and the transcript thread all in play.
+    ///
+    /// Seeded from `post-hall-of-fame.bin`, which is a few emulated seconds short of
+    /// `AnimateHallOfFame` (see `postgame::phase0::the_hall_of_fame_is_announced_once_…` for why
+    /// that fixture and not one further on). `RandomPolicy` never reaches a decision point during a
+    /// cutscene, so what drives the ceremony here is the agent's own text-box reader — which is
+    /// exactly what drives it in the deployment.
+    #[test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "drives a cutscene; run with --features slow-tests")]
+    fn a_finished_run_is_filed_and_the_next_one_starts() {
+        use crate::run::{RunDir, files, hall_of_fame};
+
+        let scratch = crate::run::tests::Scratch::new("host-hall-of-fame");
+        let validate = |bytes: &[u8]| GameBoy::dmg(crate::pokemon::roms::POKERED).load_state(bytes).is_ok();
+        let (run, _, _) = RunDir::open(&scratch.0, false, "gpt-test", &validate).expect("a fresh run");
+
+        let published = Published::new();
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "gpt-test".to_string(), run));
+        let finished = current.get();
+        let finished_id = finished.run_id();
+        // The transcript thread is running, because the archive follows the file it writes — the one
+        // ordering hazard in the whole path, and the thing this test exists to exercise.
+        let stop = Arc::new(AtomicBool::new(false));
+        let transcript = crate::run::transcript::spawn(
+            Arc::clone(&current),
+            Arc::clone(&published),
+            Arc::clone(&stop),
+        )
+        .expect("a transcript writer");
+
+        let mut host = host_from(
+            include_bytes!("pokemon/data/post-hall-of-fame.bin"),
+            Arc::clone(&published),
+            |config| {
+                config.run = Some(Arc::clone(&current));
+                // Longer than this test runs, so nothing periodic can write and every file below can
+                // only have been written by the completion path.
+                config.checkpoint_interval = Duration::from_secs(3_600);
+            },
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while current.get().run_id() == finished_id && Instant::now() < deadline {
+            host.tick();
+        }
+        stop.store(true, Ordering::Relaxed);
+
+        assert_ne!(current.get().run_id(), finished_id,
+                   "the game was won and nothing started the next run");
+
+        // The ledger has it, and it points at an archive that is really there.
+        let rows = hall_of_fame::top(&scratch.0, 10);
+        assert_eq!(rows.len(), 1, "one championship, one row");
+        let row = &rows[0];
+        assert_eq!(row.run_id, finished_id);
+        assert_eq!(row.teams, 1);
+        assert_eq!(row.policy, "random", "the decider names itself");
+        assert_eq!(row.model, Some("gpt-test".into()));
+        assert_eq!(row.app_version, crate::cli::VERSION);
+        assert_eq!(row.badges, 8, "the winning tally is read at the moment of victory");
+        assert!(row.playtime_seconds > 0 && !row.playtime_maxed);
+
+        let archive = scratch.0.join(files::HALL_OF_FAME).join(&row.archive);
+        assert!(archive.join(files::STATE).is_file(), "the save state at the moment of victory");
+        assert!(archive.join(files::SRAM).is_file());
+        assert!(archive.join(files::META).is_file());
+        assert!(archive.join("transcript.jsonl.gz").is_file(),
+                "the run's own story is the point of keeping the directory at all");
+
+        // ⚠️ The victory is *in* the archived transcript. This is what the seq-bounded follow buys:
+        // a plain `fs::copy` at this moment gets a file the writer has not reached the end of.
+        let gz = std::fs::read(archive.join("transcript.jsonl.gz")).expect("the transcript");
+        let mut story = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&gz[..]), &mut story)
+            .expect("it inflates");
+        assert!(story.contains("hall_of_fame"),
+                "the archived transcript stops short of the event it is a record of");
+
+        // The outgoing directory is complete and stamped, so a resume of it never files this twice.
+        assert!(finished.path().join(files::STATE).is_file(), "the outgoing run was checkpointed");
+        assert_eq!(finished.meta().completed.len(), 1);
+        assert!(finished.already_archived(1));
+
+        // ⚠️ And the archive is invisible to the resume scan — otherwise the next `gb serve` would
+        // continue a game that has already been won and filed.
+        let (resumed, _, _) = RunDir::open(&scratch.0, false, "gpt-test", &validate).expect("a resume");
+        assert_ne!(resumed.run_id(), row.archive, "hall-of-fame/ must not be resumable");
+
+        // ⚠️ The writer is a `blocking_recv` loop, so it only notices `stop` when something wakes
+        // it — the same reason `web::run` publishes a parting notice before joining. Without this
+        // the test hangs on a run that has nothing left to say.
+        published.publish_event(UiEventBody::Notice { level: "info", message: "done".into() });
+        let _ = transcript.join();
     }
 
     /// The mailbox refuses a second request only while someone is still listening for the first —

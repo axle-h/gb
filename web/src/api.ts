@@ -141,3 +141,53 @@ export type Entry = EntryBody & {
 };
 
 export type Connection = 'connecting' | 'live' | 'reconnecting';
+
+/**
+ * `run::hall_of_fame::Completion` — one run that finished the game, as `/api/leaderboard` returns it.
+ *
+ * The rows arrive already ranked (fastest `playtime_seconds` first, a maxed clock last), so nothing
+ * here re-sorts them.
+ */
+export interface Completion {
+  /** The archive directory's name under `$GB_RUN_DIR/hall-of-fame/`. */
+  archive: string;
+  run_id: string;
+  /** `wNumHoFTeams` after the increment: 1 is a first championship, 2 a second in the same save. */
+  teams: number;
+  completed_at: string;
+  started_at: string;
+  app_version: string;
+  /** `Policy::name()` — `llm`, `random`, `console` or `scripted`. */
+  policy: string;
+  /** `GB_MODEL`, or `null` under any policy that is not an LLM. */
+  model: string | null;
+
+  /**
+   * The cartridge's own play clock, in seconds — **the ranking key**. Emulated time from our side is
+   * `emulated_ms`; these differ, and the game's own clock is the one a player would quote.
+   */
+  playtime_seconds: number;
+  /** The same clock as `HH:MM:SS`. ⚠️ Never sort on this — see the Rust field. */
+  playtime: string;
+  /** The clock stopped at 255:59:59 and the real figure is unknown. */
+  playtime_maxed: boolean;
+  emulated_ms: number;
+  /** Wall clock actually spent playing, summed over every process that played the run. */
+  wall_ms: number;
+
+  turns: number;
+  completions: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  /** The endpoint reported no usage and the token figures are our own estimate. Say so. */
+  tokens_estimated: boolean;
+  watchdog_firings: number;
+  resumes: number;
+  checkpoints: number;
+
+  badges: number;
+  pokedex_owned: number;
+  pokedex_seen: number;
+  money: number;
+  party: { nickname: string; species: string; level: number }[];
+}

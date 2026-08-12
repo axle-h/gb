@@ -433,6 +433,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             // BIT_STRENGTH_ACTIVE = bit 0 of wStatusFlags1 — set by using Strength from the party menu,
             // reset on every map change. Required before a boulder will move when pushed.
             strength_active: mmu.read_pointer(&pokered_symbols::wStatusFlags1) & 0x01 != 0,
+            hall_of_fame_teams: mmu.read_pointer(&pokered_symbols::wNumHoFTeams),
             repel_steps: postgame::items::repel_steps(mmu),
             on_bicycle: postgame::items::on_bicycle(mmu),
             safari: postgame::safari::read_state(mmu),
@@ -711,6 +712,19 @@ pub struct GameState {
     /// True while Strength is active (BIT_STRENGTH_ACTIVE in `wStatusFlags1`) — set by using Strength
     /// from the party menu, reset on every map change. A boulder only moves when pushed with this set.
     pub strength_active: bool,
+    /// `wNumHoFTeams` — how many times this save has entered the Hall of Fame. **Non-zero means the
+    /// game has been beaten**, and it is the only byte that means that both during the ceremony and
+    /// long after it: `AnimateHallOfFame` increments it at its very first frame
+    /// (`engine/movie/hall_of_fame.asm:27-32`), saturating rather than wrapping, and it sits inside
+    /// the `wMainDataStart..wMainDataEnd` block that `engine/menus/save.asm` round-trips through SRAM
+    /// — so the credits' save-and-soft-reset carries it across. It is what the ROM's own main menu
+    /// reads to warp a returning Champion home (`main_menu.asm:116-125`).
+    ///
+    /// ⚠️ **This is not what [`agent::PokemonAgent`]'s completion detector reads.** `game_state` is
+    /// fallible and answers `Err` through every screen transition, and a Hall of Fame ceremony is
+    /// made of them; the detector reads the byte straight out of the MMU for that reason. This field
+    /// is here so the model and the tests can see it.
+    pub hall_of_fame_teams: u8,
     /// **I5** — `wRepelRemainingSteps`: overworld steps left before the Repel wears off. Repel sets
     /// 100, Super Repel 200, Max Repel 250, and the counter is decremented one per step; while it is
     /// non-zero the ROM suppresses any wild encounter whose level is below the lead's.

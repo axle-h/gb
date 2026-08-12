@@ -37,6 +37,98 @@ pub fn drive_out_of_hall_of_fame(fixture: &mut TestFixture) -> GameState {
     }
 }
 
+/// **The end of the game is noticed, once, at the frame the ceremony starts.**
+///
+/// `post-hall-of-fame.bin` is captured on *arrival* at the map, and — this is the thing to know
+/// before reading the assertions — `wNumHoFTeams` is still **0** there. `scripts/HallOfFame.asm`
+/// puts three script stages between arriving and the counter moving: the walk-in
+/// (`HallOfFameDefaultScript`), Oak's congratulation, then `HallOfFameResetEventsAndSaveScript` →
+/// `predef HallOfFamePC` → `AnimateHallOfFame`, which increments it on its first frame. So the
+/// fixture is the *seed* for this test, a few emulated seconds short of the edge, and a version of
+/// this test that asserted against it as loaded would assert nothing at all.
+///
+/// What is pinned:
+///
+/// - the event fires, **before** the credits and while the map is still the Hall of Fame — the
+///   record has to be banked while the winning party is still in memory, not three minutes later
+///   after a soft reset has cleared WRAM;
+/// - it fires **once**, however long the ceremony runs;
+/// - and an agent seeded from a state that has already won says **nothing**, which is what stops a
+///   nightly resume from re-announcing a victory that happened last week.
+///
+/// **In the default tier**, unusually for anything in this module: measured at 1.7 s, against a tier
+/// that runs in about twenty. It buys the only proof against the real ROM that the one signal this
+/// whole feature hangs off is read from the right byte at the right frame, and a detector that is
+/// wrong here is wrong in a way no unit test can see.
+#[test]
+fn the_hall_of_fame_is_announced_once_when_the_ceremony_starts() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../../data/post-hall-of-fame.bin"),
+        Duration::from_mins(20),
+        vec![],
+    );
+    assert_eq!(
+        fixture.api().mmu().read_pointer(&pokered_symbols::wNumHoFTeams), 0,
+        "the fixture is captured on arrival, three script stages before AnimateHallOfFame",
+    );
+
+    // A-mash exactly as `drive_out_of_hall_of_fame` does, but stop at the announcement.
+    let mut wins = Vec::new();
+    let mut tick = 0u32;
+    while wins.is_empty() {
+        {
+            let mut api = fixture.api();
+            if tick % 2 == 0 { api.press_button(JoypadButton::A); } else { api.release_all_buttons(); }
+        }
+        fixture.step();
+        tick += 1;
+        wins.extend(
+            fixture.agent.drain_events().into_iter()
+                .filter(|event| matches!(event, AgentEvent::HallOfFame { .. })),
+        );
+        assert!(tick < 60_000, "the ceremony never started");
+    }
+
+    let AgentEvent::HallOfFame { teams, playtime, playtime_seconds, badges, party } = &wins[0] else {
+        unreachable!("filtered above")
+    };
+    assert_eq!(*teams, 1, "a first championship");
+    assert_eq!(*badges, 0xFF, "all eight badges, read at the moment of victory");
+    assert!(!party.is_empty(), "the winning party is carried on the event, not looked up later");
+    assert_eq!(
+        *playtime_seconds,
+        crate::pokemon::observe::playtime_seconds(&fixture.api()),
+        "the two readings of the cartridge's clock agree",
+    );
+    assert!(playtime.len() == 8, "HH:MM:SS, got {playtime}");
+    assert_eq!(
+        fixture.api().mmu().read_pointer(&pokered_symbols::wCurMap), Map::HallOfFame as u8,
+        "it fires at the start of the ceremony — the credits and the soft reset are still to come",
+    );
+    println!("the game was won at {playtime} after {tick} agent ticks in the ceremony");
+
+    // Once, however long the ceremony runs.
+    for _ in 0..2_000 {
+        fixture.step();
+        assert!(
+            !fixture.agent.drain_events().iter().any(|e| matches!(e, AgentEvent::HallOfFame { .. })),
+            "the counter is monotonic, so the edge happens exactly once",
+        );
+    }
+
+    // ⚠️ And a fresh agent seeded from a state that has already won is silent. This is the whole
+    // reason the baseline is `Option<u8>` seeded from RAM rather than a `u8` starting at zero.
+    let won = fixture.gb.save_state().expect("a state past the increment");
+    let mut resumed = TestFixture::new(&won, Duration::from_mins(1), vec![]);
+    for _ in 0..500 {
+        resumed.step();
+        assert!(
+            !resumed.agent.drain_events().iter().any(|e| matches!(e, AgentEvent::HallOfFame { .. })),
+            "resuming a finished run must not re-announce a victory from another process",
+        );
+    }
+}
+
 /// **Task 0.35** — the postgame root fixture. Emulates ~3 min of game time (≈8 s wall clock).
 ///
 /// `post-hall-of-fame.bin` is captured on *arrival* in the Hall of Fame, so it is three minutes of
