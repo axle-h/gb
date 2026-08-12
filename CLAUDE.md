@@ -65,7 +65,7 @@ you find yourself about to write a legacy struct, check first whether you can re
 instead — that is how CGB support cost zero fixture regeneration, by keeping `wram`/`ppu`'s shipped
 first value and appending the new banks as a second.
 
-The **91** committed fixtures in `src/pokemon/data/*.bin` are `include_bytes!`'d;
+The **101** committed fixtures in `src/pokemon/data/*.bin` are `include_bytes!`'d;
 `every_committed_fixture_decodes` in the default tier fails in seconds if a layout change breaks
 them. ⚠️ **That test walks the directory and `load_state`s every `.bin` in it**, so `data/` is for
 save states and nothing else — anything else goes in a subdirectory (`data/gfx/` is the one).
@@ -362,11 +362,11 @@ before.**
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + web/host/llm.
-# ~7s, 1162 tests.
+# ~20s, 1206 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each.
 cargo test --release
 
 # Leg chain: one test per PolicyStep::*_steps() leg, each seeded from a committed snapshot.
-# 131 tests in ~50s of wall clock (measured 2026-08-11; it took ~131s before Phase C).
+# 142 tests in ~55s of wall clock (measured 2026-08-12; it took ~131s before Phase C).
 cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
 
 # The one leg that costs more game time than the whole leg chain combined: the Safari dex sweep,
@@ -380,9 +380,10 @@ cargo test --release --features slow-tests,very-slow-tests --bin gb -- can_sweep
 # The whole game from a fresh save, ~5 min of wall clock (was ~11 min before Phase C).
 cargo test --release --features full-playthrough full_playthrough
 
-# The stall hunt: 5 h of game time under RandomPolicy, ~4.5 min of wall clock. Fails if the agent
-# ever goes longer without reaching a decision point than the watchdog allows. Seeded — vary
-# GB_SOAK_SEED to hunt for new jams; seed 1 is the one that must stay green.
+# The stall hunt: 40 min of game time under RandomPolicy from each of 13 starting states, in
+# parallel, ~60 s of wall clock. Fails if the agent ever goes longer without reaching a decision
+# point than the watchdog allows. Seeded — vary GB_SOAK_SEED to hunt for new jams (GB_SOAK_MINUTES
+# to go deeper from one state); seed 1 is the one that must stay green.
 cargo test --release --features soak-tests --bin gb -- soak --nocapture
 
 # A single test with output (file module included in the path).
@@ -438,17 +439,42 @@ agent's state machine far more widely than any route.
 It watches `PokemonAgent::since_last_policy_poll` — the **same** value W9's watchdog reads — so it
 fails exactly when a deployed `LlmPolicy` would have its watchdog fire. One definition of stuck.
 
-⚠️ **It deliberately does *not* apply `FAST_FIXTURE_OPTIONS`**, unlike `TestFixture`. `gb serve` runs
-on the cartridge's own defaults — `InitOptions` sets `TEXT_DELAY_MEDIUM` with battle animations *on* —
-and the soak exists to reproduce the deployment, not to be cheap. That is not a detail: the no-PP jam
-was a race with the character-by-character text renderer, and fast text may well not reproduce it.
+⚠️ **Breadth beats depth here, and the reason is what a random walker actually does.** It does not
+explore, it *diffuses*: it picks uniformly from the tiles the current map offers, so hours from one
+starting point re-cross the same few maps and the second hour visits what the first did. So the
+budget buys **starting points** rather than depth — one test per entry in `STATES`, 40 minutes each,
+over thirteen committed fixtures, run in parallel for less wall clock than the single five-hour test
+it replaced. ⚠️ **A state earns its place by what it makes *reachable***, not by progression: a
+bicycle, a Safari step counter, a boulder, a PC with something in it, a bag with a TM in it. A fresh
+save's bag is empty, which is why no amount of play from it can reach an item the game refuses in
+battle — and why that jam survived five hours a day of fuzzing. More badges than its neighbour buys
+nothing.
+
+⚠️ **Those options are not book-keeping — whole screens hang off them.** Battle style SHIFT asks
+"<TRAINER> is about to use <MON>! Will <PLAYER> change POKéMON?" on every enemy switch, and since
+every `TestFixture` overwrites the options with SET, **no other test in the suite ever sees that
+prompt**. The agent answers *no* (switching is a decision, and the policy makes it at the menu that
+follows); A there opens the party menu, which the party arm backs out of, which brings the prompt
+round again.
+
+⚠️ **It forces the cartridge's own options** — `InitOptions`' `TEXT_DELAY_MEDIUM`, battle animations
+*on*, battle style SHIFT — rather than `TestFixture`'s `FAST_FIXTURE_OPTIONS`. `gb serve` runs on
+those and the soak exists to reproduce the deployment, not to be cheap: the no-PP jam was a race with
+the character-by-character text renderer, and fast text may well not reproduce it. It has to *write*
+them, not merely leave them alone, because every fixture past `start-of-game-state.bin` was captured
+mid-leg by `TestFixture` and carries fast text baked into `wOptions`.
 
 ⚠️ **`GB_SOAK_LIMIT_SECS` is how you find the *next* one.** The default is the watchdog's 300 s
-because that is the number production cares about, but seed 1's worst healthy stretch is **62 s**
-over the full five hours — so a near-miss can hide comfortably under the default for a long time.
-Running at `GB_SOAK_LIMIT_SECS=120` trips on anything twice as quiet as normal, and that is how the
-pacing budget was found: 182 s of silence in Viridian Forest that turned out to be
+because that is the number production cares about, but seed 1's worst healthy stretch across all
+thirteen states is **62 s** (2026-08-12) — so a near-miss can hide comfortably under the default for a
+long time. Running at `GB_SOAK_LIMIT_SECS=120`–150 trips on anything twice as quiet as normal, and
+that is how the pacing budget was found: 182 s of silence in Viridian Forest that turned out to be
 `PACING_BUDGET_TICKS` running to the end on the rarest grass in the game (8/256), not a jam at all.
+Note that 62 s is now *by construction* — `MAX_MOVEMENT_SILENCE` gives up on a walk at 60 — so the
+healthy distribution bunches just under it. ⚠️ **But its tail is much longer than that, and a limit
+below ~150 s finds the tail rather than a bug**: a paralysed Pokémon in a wrap chain gets no menu for
+several turns, because Gen 1 skips the player's input while WRAP/BIND runs, and on Route 15's line of
+trainers that measures **124 s** of perfectly legitimate silence (seed 837).
 ⚠️ **A budget that bounds silence is not sized to guarantee success** — giving up just means the
 policy gets asked again, and the first version of that constant was three times too generous because
 it was sized to guarantee an encounter.
@@ -459,17 +485,64 @@ it cannot verify its own fix, and CI would flake. Seed 1 is the one that must st
 seed to hunt.
 
 **Every jam it finds gets promoted to `integration_tests::stalls`**, in the *default* tier: the save
-state at the moment the agent went quiet, replayed against a fresh agent, about a second each. That
+state at the moment the agent went quiet, replayed against a fresh agent, about two seconds each.
+`stalls::probe_stall_artifacts` (`--features diagnostics`, `GB_STALL_DIR=…`) is the bulk form — it
+replays a whole directory of artifacts and prints which still reproduce, which is what a sweep across
+seeds leaves you holding, and what tells you a fix covered four cases out of five. That
 is what makes the fix loop tolerable — the difference between a 4½-minute reproduction and a
 one-second one. ⚠️ **Not every stall survives the trip**, because the save state holds the emulator
 and not the agent: a jam the game's own screen re-creates reproduces perfectly, a jam that lived in
 the agent's own state (an `OverworldMovement` route) does not. Watch a new case go red before
 committing it, or it may be asserting nothing.
 
-The states it has caught all had the same shape — a driver waiting for something that had stopped
-coming, pressing buttons in silence. Two traps in fixing them, both paid for twice:
+⚠️ **Its artifacts are named per state *and* per seed** (`soak-<state>-seed<N>.{bin,png}`), because a
+hunt that sweeps every state under every seed would otherwise have each failure overwrite the last —
+and the artifact is the whole value of a failure, since it is what gets promoted into `stalls`.
 
-- ⚠️ **A counter outside the variant is reset by `set_state`.** `HealingActive` and `WaitingForMenu`
+**Nearly everything it finds is one shape: a closed loop under A.** A menu or a script the agent's
+own A press re-enters, with the cursor untouched — the PC menus, a spent move, a key item in battle,
+the Cerulean badge house, Bill's PC, a refused field move, a Card Key door, the Safari menu's sticky
+cursor. Three rules cover the class, and they are worth knowing before adding another special case:
+
+- ⚠️ **A give-up in a battle hands back *latched into B*** (`BattleState::backing_out`), because a
+  plain `WaitingForMenu` opens by pressing A — into whatever menu is still on screen, which is how
+  "give up" came to mean "select whatever is under the cursor".
+- ⚠️ **The text reader escapes menus, not conversations.** After 30 s in which the agent reaches *no
+  decision point*, and only when what is on screen is a list menu, a field-move box, or a menu
+  offering CANCEL, it presses B until a poll happens (which is what clears it — `poll_policy`, on the
+  agent, so a flicker through `Idle` cannot reset it). ⚠️ **Not on a yes/no**, where B is an answer,
+  and ⚠️ **not in a battle**, where B cancels the move being chosen and gym leaders are routinely
+  quieter than 30 s. Without those two conditions it fires mid-fight and `full_playthrough` loses the
+  Brock fight.
+- ⚠️ **Silence bounds the drivers, not tick budgets.** A driver that runs its own menus is abandoned
+  after `DRIVER_ESCAPE_SILENCE`, and a walk after `MAX_MOVEMENT_SILENCE`, rather than each of the
+  nineteen carrying a counter of its own. ⚠️ It has to be *silence*: a tick counter belongs to a
+  state, and a state torn down by an interruption starts it over — the Seafoam current takes the
+  player every few seconds and handed the walk a fresh budget each time.
+
+⚠️ **Each of those rules is a frame-timing change, so `full_playthrough` is the only thing that can
+price one.** The ⚠️s in `agent.rs` name four wider versions that look obviously right and are not:
+latching the item driver's tick budget cancels a ball mid-throw; escaping *any* text box after 30 s,
+or on a count of reopened boxes, blacks the mainline out in Mt Moon; handing the turn to the policy
+from every battle-menu position re-times every battle in the game. Same lesson as
+`with_original_battle_timing` — the leg chain and `stalls` cannot see any of it.
+
+The rest of what it catches is a driver waiting for something that stopped coming, pressing buttons
+in silence. Traps in fixing those:
+
+- ⚠️ **A message box swallows directional input**, so a driver that is right about the next button
+  still has to clear what is on top of it first. The forced-switch arm correctly wanted to walk the
+  cursor off a fainted Pokémon and pressed Up into "There's no will to fight!", for ever.
+  ⚠️ **And it is not always a message you can name**: `battle_menu_state` reads `wTopMenuItemX/Y`,
+  which *linger*, so an ordinary battle line ("It's super effective!") over the party list reports as
+  the party list. What tells them apart is the screen — a party list draws an HP bar per member, a
+  message box draws the active mon's alone, so `>= 2` slashes means the list is really there. That is
+  the same heuristic the item driver uses for "use on which POKéMON?".
+- ⚠️ **A give-up that is not remembered is not a give-up.** `handle_card_key_door` spends 40 A presses
+  on a door, declares it a wall and blocks it — then started another forty on the next tick because
+  nothing read `blocked_tiles` back. Every press reprints "Darn! It needs a CARD KEY!", which is a
+  text box, which is another A.
+- ⚠️ **A counter outside the variant is reset by `set_state`.** `UsingItem` and `WaitingForMenu`
   rebuild themselves every tick with a `press`/toggle field flipped, so `set_state` sees a *new*
   state and zeroes anything counting from `PokemonAgent`. The first bound on each silently never
   fired. `OverworldMovement` is the one state where the agent-level `state_ticks` works, because it
