@@ -255,6 +255,8 @@ fn the_llm_plays_from_a_fixture() {
         temperature: 1.0,
         max_tool_steps: 6,
         request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+        max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
+        reasoning_effort: None,
         stuck_timeout: None,
     };
     let published = Published::new();
@@ -350,6 +352,8 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
         temperature: 1.0,
         max_tool_steps: 6,
         request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+        max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
+        reasoning_effort: None,
         stuck_timeout: Some(Duration::from_secs(1)),
     };
     let published = Published::new();

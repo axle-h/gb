@@ -42,6 +42,18 @@ data:
   # a stalled turn; giving up early costs the same turn and the next few minutes of the box.
   GB_REQUEST_TIMEOUT_SECS: "600"
 
+  # ⚠️ Without a ceiling a completion is bounded only by the context window. This model fell into a
+  # repetition loop twice in twenty-five minutes and generated ~26 000 tokens each time — against
+  # turns that normally cost 24–2 000 — and since the endpoint answers one request at a time, the
+  # whole run stopped for as long as it took. 8192 is far above any legitimate turn here.
+  GB_MAX_TOKENS: "8192"
+
+  # `none` is the only value that measurably does anything on this endpoint: it takes reasoning to
+  # zero tokens, where `low` is indistinguishable from the default. Worth knowing what it costs —
+  # this model puts *everything* in the reasoning channel and almost nothing in `content`, so with
+  # thinking off the conversation pane shows the tool calls and little else.
+  GB_REASONING_EFFORT: "none"
+
   # W9's watchdog: emulated seconds with the agent asking the policy nothing at all before the model
   # is asked for a nudge. `0` turns it off. Every firing is a bug report, not routine.
   GB_STUCK_TIMEOUT_SECS: "300"

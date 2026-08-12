@@ -56,12 +56,14 @@ spec:
           # `kubectl -n gb apply -f ./gb` silently switched the run to `--policy llm` against a
           # placeholder key and crash-looped it. `secret.axh.yml` closes the other half of that trap.
           #
-          # **`--policy random` right now, and that is a holding position rather than the intent.**
-          # The run was switched to `--policy llm` against LM Studio on the LAN (see
-          # `configmap.yml`) on 2026-08-12 and back again the same evening, because the model server
-          # was configured with four request slots sharing one 60 k KV cache and deadlocked once four
-          # copies of the conversation filled it. That is fixed on the server; this line goes back to
-          # `llm` the next time anyone deploys and watches it.
+          # **`--policy llm`**, against LM Studio on the LAN — see `configmap.yml` for the endpoint,
+          # the model and the context limit read off its `loaded_context_length`.
+          #
+          # It spent one evening on `--policy random` (2026-08-12) while the model server was
+          # reconfigured: it had four request slots sharing a single 60 k KV cache, so four copies of
+          # a growing conversation filled it and no request could be allocated a slot at all. One
+          # slot with the whole window is the fix, and it is the server's setting rather than
+          # anything here — but `GB_REQUEST_TIMEOUT_SECS` in the ConfigMap exists because of it.
           #
           # ⚠️ `OPENAI_API_KEY` must be present and non-empty in the Secret for `--policy llm` even
           # against an endpoint that ignores it, because the config block refuses to start without
@@ -76,7 +78,7 @@ spec:
           # (see ../README.md). `--new-run` here is the fallback for a process that is not answering,
           # and ⚠️ left in place it would wipe the run on *every* restart, which is why it is not the
           # first thing this comment offers any more.
-          args: ["gb", "serve", "--policy", "random"]
+          args: ["gb", "serve", "--policy", "llm"]
           envFrom:
             - configMapRef:
                 name: gb

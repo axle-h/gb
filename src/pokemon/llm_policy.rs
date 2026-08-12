@@ -595,6 +595,14 @@ mod tests {
         reply
     }
 
+    /// A reply the endpoint cut off at `GB_MAX_TOKENS` — prose, no tool call, `finish_reason:
+    /// "length"`.
+    fn truncated(text: &str) -> Reply {
+        let mut reply = says(text);
+        reply.completion.finish_reason = Some("length".to_string());
+        reply
+    }
+
     fn held(mut reply: Reply, release: &Arc<AtomicBool>) -> Reply {
         reply.release = Some(Arc::clone(release));
         reply
@@ -660,6 +668,8 @@ mod tests {
                 temperature: 1.0,
                 max_tool_steps: 4,
                 request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+                max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
+                reasoning_effort: None,
                 stuck_timeout: Some(Duration::from_secs(300)),
             };
             tweak(&mut config);
@@ -1292,6 +1302,31 @@ mod tests {
                 assert!(!text.contains("north."), "the thinking was sent back to the endpoint: {text}");
             }
         }
+    }
+
+    /// A reply cut off by `GB_MAX_TOKENS` is nudged differently from one that simply said nothing.
+    ///
+    /// ⚠️ **The distinction is not cosmetic.** Told only "that reply contained no tool call", a model
+    /// that was cut off mid-thought concludes it forgot to call one and tries again at the same
+    /// length — into the same ceiling, for as many attempts as it is given. What it has to be told is
+    /// that the *thinking* ran out of room.
+    #[test]
+    fn a_reply_cut_off_by_the_token_cap_is_told_that_rather_than_that_it_said_nothing() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        rig.push(vec![
+            truncated(&"I should think about this very carefully. ".repeat(20)),
+            calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
+        ]);
+
+        rig.pump_overworld(&mut policy).expect("the turn lands on the second attempt");
+
+        let requests = rig.requests();
+        assert!(requests.len() >= 2, "the truncated reply was nudged rather than accepted");
+        let nudge = last_user_message(&requests[1]);
+        assert!(nudge.contains("cut off"), "{nudge}");
+        assert!(nudge.contains("briefly"), "the correction asked for is a shorter thought: {nudge}");
+        assert!(nudge.contains("choose_action"), "and it still quotes the contract: {nudge}");
     }
 
     /// §7.3's rollback. A batch is cancelled mid-turn; the assistant message whose calls were never

@@ -230,6 +230,8 @@ mod tests {
             messages: vec![Message::user("go")],
             tools: Vec::new(),
             parallel_tool_calls: Some(true),
+            max_tokens: None,
+            reasoning_effort: None,
             temperature: 1.0,
             stream: true,
             stream_options: StreamOptions { include_usage: true },

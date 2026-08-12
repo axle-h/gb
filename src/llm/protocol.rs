@@ -320,6 +320,26 @@ pub struct ChatRequest {
     /// the run rather than costing a turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    /// A ceiling on the completion. `None` omits the key, which is what every endpoint reads as
+    /// "until you are finished or the window is full".
+    ///
+    /// ⚠️ **The window is not a ceiling worth relying on.** A local run produced two completions of
+    /// ~26 000 tokens against turns that normally take 24–2 000, and with no cap each ran for the ten
+    /// minutes our own deadline allowed before we hung up — on a server that answers one request at a
+    /// time, so nothing else could be decided meanwhile. A cap turns that into a truncated reply and
+    /// a nudge, which the turn loop already knows how to handle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// How hard the model should think, for endpoints that expose it. `None` omits the key.
+    ///
+    /// ⚠️ **Measured, not assumed, and it is an on/off switch rather than a dial** — at least on LM
+    /// Studio with gemma-4: `"none"` takes reasoning to exactly zero tokens while still answering
+    /// correctly, `"low"` is indistinguishable from the default, and `chat_template_kwargs`
+    /// (`thinking` / `enable_thinking`, the Qwen spelling) is accepted and ignored. A string rather
+    /// than an enum because the accepted values are the endpoint's to define, and an enum here would
+    /// mean a release of this crate every time one of them adds a level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub temperature: f32,
     pub stream: bool,
     /// ⚠️ Several endpoints report no `usage` on a streamed response unless asked. Some report none
@@ -890,11 +910,27 @@ mod tests {
             ],
             tools: vec![ToolSpec::new("wait", "do nothing", serde_json::json!({"type": "object"}))],
             parallel_tool_calls: Some(true),
+            max_tokens: None,
+            reasoning_effort: None,
             temperature: 1.0,
             stream: true,
             stream_options: StreamOptions { include_usage: true },
         };
         let json = serde_json::to_value(&request).expect("serialises");
+        // Both optional keys are *absent* rather than null when unset: an endpoint that has never
+        // heard of `reasoning_effort` must see a request identical to the one it saw before it
+        // existed, and a `max_tokens: null` is a 400 on several of them.
+        assert!(json.get("max_tokens").is_none(), "{json}");
+        assert!(json.get("reasoning_effort").is_none(), "{json}");
+
+        let capped = ChatRequest {
+            max_tokens: Some(8192),
+            reasoning_effort: Some("none".to_string()),
+            ..request.clone()
+        };
+        let json_capped = serde_json::to_value(&capped).expect("serialises");
+        assert_eq!(json_capped["max_tokens"], 8192);
+        assert_eq!(json_capped["reasoning_effort"], "none");
 
         assert_eq!(json["stream_options"]["include_usage"], true);
         assert_eq!(json["parallel_tool_calls"], true);

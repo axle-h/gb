@@ -15,6 +15,8 @@
 //! | `GB_TEMPERATURE` | `1.0` | |
 //! | `GB_MAX_TOOL_STEPS` | `12` | Non-terminal calls per turn before a decision is forced |
 //! | `GB_REQUEST_TIMEOUT_SECS` | `180` | How long an endpoint may take to answer; see [`LlmConfig::request_timeout`] |
+//! | `GB_MAX_TOKENS` | `8192` | Ceiling on one completion; `0` removes it |
+//! | `GB_REASONING_EFFORT` | — | Passed through as `reasoning_effort` when set (`none`/`low`/…) |
 //! | `GB_STUCK_TIMEOUT_SECS` | `300` | **W9** — emulated seconds with the agent asking nothing before the watchdog does; `0` is off |
 //! | `GB_PORT` | `8080` | Read in `cli.rs`, since it applies to `--policy random` too |
 //! | `GB_RUN_DIR` | `runs` | Read in `web/mod.rs`, for the same reason (**W7**) |
@@ -76,6 +78,21 @@ pub struct LlmConfig {
     /// costs a stalled turn; giving up early costs the same stalled turn *and* the endpoint's next
     /// few minutes.
     pub request_timeout: std::time::Duration,
+    /// A ceiling on one completion, or `None` for whatever the endpoint does by default.
+    ///
+    /// ⚠️ **The context window is not a usable ceiling.** An uncapped reasoning model that falls into
+    /// a repetition loop generates until the window is full — measured at ~26 000 tokens against
+    /// turns that normally cost 24–2 000 — and on a single-slot local endpoint nothing else can be
+    /// decided for as long as that takes. The default is deliberately far above any observed
+    /// legitimate turn (a compaction summary, the longest thing the loop asks for, runs to a couple
+    /// of thousand) so that hitting it means something has gone wrong rather than that the number is
+    /// too small.
+    pub max_tokens: Option<u32>,
+    /// `reasoning_effort`, passed straight through when set. See [`ChatRequest::reasoning_effort`]
+    /// for what the values actually do — it is the endpoint's vocabulary, not ours.
+    ///
+    /// [`ChatRequest::reasoning_effort`]: crate::llm::protocol::ChatRequest::reasoning_effort
+    pub reasoning_effort: Option<String>,
     /// **W9 / §14** — how much *emulated* time the agent may go without reaching a decision point of
     /// any kind before the watchdog asks for a nudge on its behalf. `None` when
     /// `GB_STUCK_TIMEOUT_SECS=0`, which turns it off.
@@ -104,6 +121,10 @@ pub const DEFAULT_MAX_TOOL_STEPS: usize = 12;
 /// Three minutes. Enough for any hosted endpoint and for a local one that is merely slow; see
 /// [`LlmConfig::request_timeout`] for why the number wants to grow rather than shrink.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 180;
+/// Generous by design — see [`LlmConfig::max_tokens`]. `GB_MAX_TOKENS=0` removes the cap entirely,
+/// which is the pre-2026-08-12 behaviour and a footgun on any endpoint that serves one request at a
+/// time.
+pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 /// Five minutes of *emulated* time. **W9 / §14.**
 pub const DEFAULT_STUCK_TIMEOUT_SECS: u64 = 300;
 
@@ -152,6 +173,16 @@ impl LlmConfig {
             },
             temperature: number(env, "GB_TEMPERATURE", DEFAULT_TEMPERATURE)?,
             max_tool_steps: number(env, "GB_MAX_TOOL_STEPS", DEFAULT_MAX_TOOL_STEPS)?,
+            max_tokens: match number(env, "GB_MAX_TOKENS", DEFAULT_MAX_TOKENS)? {
+                0 => None,
+                cap => Some(cap),
+            },
+            // Not validated against a list: the accepted values belong to the endpoint, and refusing
+            // one it would have taken is worse than passing through one it rejects — which it says
+            // so, in a 400 whose body we keep.
+            reasoning_effort: env("GB_REASONING_EFFORT")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             request_timeout: std::time::Duration::from_secs(number(
                 env,
                 "GB_REQUEST_TIMEOUT_SECS",
@@ -205,6 +236,8 @@ mod tests {
         assert_eq!(config.context_limit, DEFAULT_CONTEXT_LIMIT);
         assert_eq!(config.compact_above, DEFAULT_COMPACT_ABOVE);
         assert_eq!(config.request_timeout.as_secs(), DEFAULT_REQUEST_TIMEOUT_SECS);
+        assert_eq!(config.max_tokens, Some(DEFAULT_MAX_TOKENS));
+        assert_eq!(config.reasoning_effort, None, "the key is omitted unless it is asked for");
         assert_eq!(config.max_tool_steps, DEFAULT_MAX_TOOL_STEPS);
         assert_eq!(config.stuck_timeout, Some(std::time::Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)));
     }
@@ -274,6 +307,35 @@ mod tests {
         pairs.push(("GB_REQUEST_TIMEOUT_SECS", "900"));
         let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(900));
+    }
+
+    /// ⚠️ Zero is "no ceiling", not "a ceiling of zero" — the same reading as `GB_STUCK_TIMEOUT_SECS`,
+    /// and the only one that makes the variable a way to restore the endpoint's own default.
+    #[test]
+    fn a_zero_token_cap_removes_the_ceiling_rather_than_setting_it_to_nothing() {
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_MAX_TOKENS", "0"));
+        assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").max_tokens, None);
+
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_MAX_TOKENS", "2048"));
+        assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").max_tokens, Some(2048));
+    }
+
+    /// Passed through verbatim and *not* validated: the vocabulary is the endpoint's. On LM Studio
+    /// with gemma-4, `none` is the only value that measurably does anything.
+    #[test]
+    fn the_reasoning_effort_is_whatever_the_endpoint_calls_it() {
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_REASONING_EFFORT", "none"));
+        let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
+        assert_eq!(config.reasoning_effort.as_deref(), Some("none"));
+
+        // Blank is not a value: it is the variable being present in a template and never filled in,
+        // which must read the same as unset or the endpoint gets an empty string it will reject.
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_REASONING_EFFORT", "   "));
+        assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").reasoning_effort, None);
     }
 
     /// A trailing slash in `OPENAI_BASE_URL` is the single most common way to get a 404 out of a
