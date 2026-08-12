@@ -659,6 +659,7 @@ mod tests {
                 compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
                 temperature: 1.0,
                 max_tool_steps: 4,
+                request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
                 stuck_timeout: Some(Duration::from_secs(300)),
             };
             tweak(&mut config);

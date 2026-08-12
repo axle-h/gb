@@ -421,12 +421,30 @@ pub fn read_stream(
         if cancelled() {
             return Err(LlmError::Cancelled);
         }
-        let line = line.map_err(|e| LlmError::Transport(format!("the response stream broke: {e}")))?;
+        let line = line.map_err(|e| {
+            let detail = format!("the response stream broke: {e}");
+            match is_timeout(&e) {
+                true => LlmError::Timeout(detail),
+                false => LlmError::Transport(detail),
+            }
+        })?;
         if accumulator.push_line(&line, on_delta)? {
             break;
         }
     }
     Ok(accumulator.finish())
+}
+
+/// Whether an `io::Error` from the body reader is the deadline expiring rather than the connection
+/// breaking, so it can become an [`LlmError::Timeout`] rather than a retryable transport fault.
+///
+/// ⚠️ **Both a kind and a string check, and the string is not belt-and-braces.** A read deadline
+/// reaches us as `ErrorKind::TimedOut` on most paths, but ureq wraps its own `Error::Timeout` in an
+/// `io::Error` on the streaming-body path, where the kind is whatever the wrapper chose — and
+/// getting this wrong silently restores the old behaviour rather than failing a test.
+fn is_timeout(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::TimedOut
+        || format!("{error}").to_ascii_lowercase().contains("timeout")
 }
 
 /// The state machine [`read_stream`] drives, separated from the reader so a test can feed it lines

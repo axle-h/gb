@@ -14,6 +14,7 @@
 //! | `GB_COMPACT_ABOVE` | `0.85` | That fraction. `0.2`–`0.95`; see [`LlmConfig::compact_above`] |
 //! | `GB_TEMPERATURE` | `1.0` | |
 //! | `GB_MAX_TOOL_STEPS` | `12` | Non-terminal calls per turn before a decision is forced |
+//! | `GB_REQUEST_TIMEOUT_SECS` | `180` | How long an endpoint may take to answer; see [`LlmConfig::request_timeout`] |
 //! | `GB_STUCK_TIMEOUT_SECS` | `300` | **W9** — emulated seconds with the agent asking nothing before the watchdog does; `0` is off |
 //! | `GB_PORT` | `8080` | Read in `cli.rs`, since it applies to `--policy random` too |
 //! | `GB_RUN_DIR` | `runs` | Read in `web/mod.rs`, for the same reason (**W7**) |
@@ -63,6 +64,18 @@ pub struct LlmConfig {
     pub temperature: f32,
     /// Non-terminal tool calls a single turn may make before the worker forces `wait` (§7.3).
     pub max_tool_steps: usize,
+    /// How long the endpoint may take to start answering, and to keep answering, before the request
+    /// is abandoned as an [`LlmError::Timeout`](crate::llm::LlmError::Timeout).
+    ///
+    /// ⚠️ **Abandoning is not free, so this wants to be generous rather than tight.** A hosted API
+    /// answers in milliseconds and a dead one never answers at all, which is the case the default was
+    /// sized for. A local server is neither: it accepts the request, works on it, and keeps working
+    /// after we hang up — llama.cpp prints "Stopping generation… (If the model is busy processing the
+    /// prompt, it will finish first.)" — so every expiry here leaves a piece of work running that
+    /// nobody will ever read, on a machine that may serve only one request at a time. Waiting longer
+    /// costs a stalled turn; giving up early costs the same stalled turn *and* the endpoint's next
+    /// few minutes.
+    pub request_timeout: std::time::Duration,
     /// **W9 / §14** — how much *emulated* time the agent may go without reaching a decision point of
     /// any kind before the watchdog asks for a nudge on its behalf. `None` when
     /// `GB_STUCK_TIMEOUT_SECS=0`, which turns it off.
@@ -88,6 +101,9 @@ pub const DEFAULT_COMPACT_ABOVE: f64 = 0.85;
 pub const COMPACT_ABOVE_RANGE: std::ops::RangeInclusive<f64> = 0.2..=0.95;
 pub const DEFAULT_TEMPERATURE: f32 = 1.0;
 pub const DEFAULT_MAX_TOOL_STEPS: usize = 12;
+/// Three minutes. Enough for any hosted endpoint and for a local one that is merely slow; see
+/// [`LlmConfig::request_timeout`] for why the number wants to grow rather than shrink.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 180;
 /// Five minutes of *emulated* time. **W9 / §14.**
 pub const DEFAULT_STUCK_TIMEOUT_SECS: u64 = 300;
 
@@ -136,6 +152,11 @@ impl LlmConfig {
             },
             temperature: number(env, "GB_TEMPERATURE", DEFAULT_TEMPERATURE)?,
             max_tool_steps: number(env, "GB_MAX_TOOL_STEPS", DEFAULT_MAX_TOOL_STEPS)?,
+            request_timeout: std::time::Duration::from_secs(number(
+                env,
+                "GB_REQUEST_TIMEOUT_SECS",
+                DEFAULT_REQUEST_TIMEOUT_SECS,
+            )?),
             // Zero is "off" rather than "fire on every tick", which is the only reading that makes
             // the variable a way to turn the watchdog off.
             stuck_timeout: match number(env, "GB_STUCK_TIMEOUT_SECS", DEFAULT_STUCK_TIMEOUT_SECS)? {
@@ -183,6 +204,7 @@ mod tests {
         assert_eq!(config.completions_url(), "https://api.openai.com/v1/chat/completions");
         assert_eq!(config.context_limit, DEFAULT_CONTEXT_LIMIT);
         assert_eq!(config.compact_above, DEFAULT_COMPACT_ABOVE);
+        assert_eq!(config.request_timeout.as_secs(), DEFAULT_REQUEST_TIMEOUT_SECS);
         assert_eq!(config.max_tool_steps, DEFAULT_MAX_TOOL_STEPS);
         assert_eq!(config.stuck_timeout, Some(std::time::Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)));
     }
@@ -242,6 +264,16 @@ mod tests {
             COMPACT_ABOVE_RANGE.contains(&DEFAULT_COMPACT_ABOVE),
             "the default has to be a value the variable would accept",
         );
+    }
+
+    /// The patience knob. Its whole purpose is to be raised for a local endpoint, so the test that
+    /// matters is that a big number survives the parse rather than that the default is 180.
+    #[test]
+    fn the_request_timeout_can_be_lengthened_for_a_slow_endpoint() {
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_REQUEST_TIMEOUT_SECS", "900"));
+        let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(900));
     }
 
     /// A trailing slash in `OPENAI_BASE_URL` is the single most common way to get a 404 out of a
