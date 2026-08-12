@@ -23,6 +23,7 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 
 use crate::llm::client::OpenAiClient;
+use crate::llm::map_image;
 use crate::llm::screenshot::SCALE;
 use crate::llm::config::LlmConfig;
 use crate::llm::worker;
@@ -48,7 +49,9 @@ struct Mock {
     map_result: Arc<std::sync::Mutex<Option<String>>>,
     /// **W5** — the `image_url` the `screenshot` answer put into the history, as the endpoint saw it.
     /// This is the only place the multi-part content form is exercised over a real socket.
-    picture: Arc<std::sync::Mutex<Option<String>>>,
+    /// Every `(data_url, detail)` the endpoint was sent, in arrival order and deduplicated —
+    /// a turn that reads the map and takes a screenshot sends two.
+    picture: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// **W9** — the situation of the first watchdog turn, and the terminal tools it was sent with.
     /// `None` until one arrives, which for the test below is the whole question.
     stuck_turn: Arc<std::sync::Mutex<Option<(String, Vec<String>)>>>,
@@ -90,17 +93,23 @@ async fn completions(State(mock): State<Mock>, body: String) -> impl IntoRespons
 
     // The picture arrives as a *user* message in the multi-part form, never on the tool result —
     // see `Message::user_with_image`. Finding it here is finding it exactly where an endpoint would.
-    if let Some(url) = request["messages"]
+    // ⚠️ **Every** image part, not the first. A turn that reads the map *and* takes a screenshot
+    // sends two, and which one arrives first is the order the model called the tools in.
+    for part in request["messages"]
         .as_array()
         .expect("messages")
         .iter()
         .filter(|message| message["role"] == "user")
         .filter_map(|message| message["content"].as_array())
         .flatten()
-        .find(|part| part["type"] == "image_url")
-        .and_then(|part| part["image_url"]["url"].as_str())
+        .filter(|part| part["type"] == "image_url")
     {
-        *mock.picture.lock().expect("not poisoned") = Some(url.to_string());
+        let url = part["image_url"]["url"].as_str().expect("a data URL").to_string();
+        let detail = part["image_url"]["detail"].as_str().unwrap_or_default().to_string();
+        let mut seen = mock.picture.lock().expect("not poisoned");
+        if !seen.iter().any(|(existing, _)| *existing == url) {
+            seen.push((url, detail));
+        }
     }
 
     let turn = mock.turns.fetch_add(1, Ordering::SeqCst);
@@ -275,26 +284,45 @@ fn the_llm_plays_from_a_fixture() {
     let read = mock.map_result.lock().expect("not poisoned").clone();
     let read = read.expect("`read_map` was never answered — the tool round trip did not complete");
     assert!(read.contains("\"PalletTown\""), "read_map answered from the wrong state: {read:.200}");
-    assert!(read.contains("\"grid\"") && read.contains("\"legend\""), "read_map lost its shape: {read:.200}");
+    assert!(read.contains("\"warps\"") && read.contains("\"is_dark\""), "read_map lost its shape: {read:.200}");
+    // ⚠️ The grid and its legend were *replaced* by the picture, not supplemented — a model given
+    // both would be reading the same map twice, in two coordinate systems, for twice the tokens.
+    assert!(!read.contains("\"grid\"") && !read.contains("\"legend\""),
+            "read_map is still shipping the ASCII grid: {read:.200}");
 
-    // **W5** — and the screenshot in the same assistant message came back too, encoded by the worker
+    // **W5** — and both pictures from that assistant message came back too, encoded by the worker
     // and carried to the endpoint in the multi-part content form. This is the only test in which
-    // that form goes through the real client, and a PNG that decodes is a PNG the endpoint would
-    // have accepted.
-    let picture = mock.picture.lock().expect("not poisoned").clone();
-    let picture = picture.expect("`screenshot` never reached the endpoint as an image part");
-    let payload = picture
-        .strip_prefix("data:image/png;base64,")
-        .unwrap_or_else(|| panic!("not a PNG data URL: {picture:.60}"));
-    let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload)
-        .expect("the worker encoded this");
+    // that form goes through the real client, so it is the only place a PNG the endpoint would have
+    // accepted is actually proved to be one.
     use image::GenericImageView;
-    let decoded = image::load_from_memory(&png).expect("a PNG the worker produced");
-    assert_eq!(
-        decoded.dimensions(),
-        ((crate::ppu::LCD_WIDTH * SCALE) as u32, (crate::ppu::LCD_HEIGHT * SCALE) as u32),
-        "the picture is the Game Boy screen, upscaled",
+    let pictures = mock.picture.lock().expect("not poisoned").clone();
+    assert!(!pictures.is_empty(), "no picture reached the endpoint as an image part");
+    let decoded: Vec<_> = pictures
+        .iter()
+        .map(|(url, detail)| {
+            let payload = url
+                .strip_prefix("data:image/png;base64,")
+                .unwrap_or_else(|| panic!("not a PNG data URL: {url:.60}"));
+            let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload)
+                .expect("the worker encoded this");
+            (image::load_from_memory(&png).expect("a PNG the worker produced").dimensions(),
+             detail.clone())
+        })
+        .collect();
+
+    let screen = ((crate::ppu::LCD_WIDTH * SCALE) as u32, (crate::ppu::LCD_HEIGHT * SCALE) as u32);
+    assert!(decoded.iter().any(|(size, detail)| *size == screen && detail == "low"),
+            "no `detail: low` screenshot at {screen:?} among {decoded:?}");
+
+    // The map of Pallet Town, at one pixel per game pixel plus the coordinate ruler. ⚠️ `high` —
+    // the flat `low` price is a lie for a picture this size, and one 512x512 tile would squash the
+    // whole town into mush.
+    let map = (
+        (map_image::RULER_LEFT + 10 * 2 * map_image::CELL_PX) as u32,
+        (map_image::RULER_TOP + (9 * 2 + 2) * map_image::CELL_PX) as u32,
     );
+    assert!(decoded.iter().any(|(size, detail)| *size == map && detail == "high"),
+            "no `detail: high` map at {map:?} among {decoded:?}");
 }
 
 /// **W9's acceptance (§14): fires on a deliberately jammed agent.**

@@ -33,7 +33,10 @@ pub const KEEP_MESSAGES: usize = 8;
 /// What an evicted picture leaves behind. Kept short, and kept *present*: a model that is told the
 /// screenshot is gone will ask for another one if it needs it, whereas a silently vanished image
 /// makes the surrounding conversation read as if it hallucinated looking at the screen.
-pub const EVICTED: &str = "[screenshot removed to save context]";
+// ⚠️ "image", not "screenshot": `read_map` puts a rendered map in the history too, and a
+// line claiming a screenshot went away where a map did is a small lie the model has no way
+// to check. `is_evicted_image` matches on this constant, so the wording is free to change.
+pub const EVICTED: &str = "[image removed to save context]";
 
 /// The rule that must outlive every compaction, restated verbatim inside the summary. Deliberately
 /// kind-independent: the per-kind list of terminal tools is regenerated at the bottom of every turn

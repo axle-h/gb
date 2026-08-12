@@ -48,7 +48,7 @@ use crate::pokemon::tile::MetaTile;
 use crate::pokemon::map::MapSprite;
 use crate::ram::{RAM, ROM};
 
-mod fixture;
+pub(crate) mod fixture;
 pub use fixture::TestFixture;
 
 mod mechanics;

@@ -196,9 +196,14 @@ pub fn bag(state: &GameState, api: &PokemonApi<'_>) -> BagView {
 
 // ── Map ──────────────────────────────────────────────────────────────────────────────────────────
 
-/// What each character in [`MapView::grid`] means. Kept beside the grid in every response rather
-/// than in a system prompt: the model reads the two together, and a legend that can drift out of
-/// sync with `impl Display for MetaTileMap` is worse than none.
+/// What each character of `impl Display for MetaTileMap` means.
+///
+/// ⚠️ **`read_map` no longer ships this.** The model is sent a *picture* now — see
+/// [`crate::llm::map_image`] — and a legend describing an ASCII grid it is not being given would be
+/// pure confusion. `Display` itself stays, because every dump and probe in the repo prints through
+/// it and the renderer falls back to it for a map with no metadata, so this stays as the
+/// documentation of that alphabet.
+#[allow(dead_code)]
 pub const MAP_LEGEND: &[(char, &str)] = &[
     ('P', "the player"),
     ('_', "walkable"),
@@ -240,15 +245,17 @@ view! {
     /// minted from `MetaTile::kind` in the tool layer and this view never had one. A duplicate the
     /// model cannot quote back is worse than no duplicate: it reads as a list of choices and every
     /// one of them is rejected. The menu in the turn is the only list of actions there is.
+    ///
+    /// ⚠️ **Neither is the terrain.** This carried a `grid` of ASCII and the `legend` that explained
+    /// it; `read_map` now answers with a rendered picture ([`crate::llm::map_image`]) and this is
+    /// what the picture cannot say — names, and exact coordinates for a model to quote back. Sending
+    /// both would be the same map twice, in two coordinate systems, for twice the tokens.
     pub struct MapView {
         pub map: String,
         pub position: Point,
         pub facing: String,
         pub width: usize,
         pub height: usize,
-        /// One line per row, `width` characters each. See [`MAP_LEGEND`].
-        pub grid: Vec<String>,
-        pub legend: Vec<(char, String)>,
         pub sprites: Vec<SpriteView>,
         pub warps: Vec<WarpView>,
         pub connections: Vec<String>,
@@ -270,19 +277,12 @@ impl From<Point8> for Point {
 
 pub fn map_view(state: &GameState) -> MapView {
     let map = &state.map;
-    // `impl Display for MetaTileMap` renders exactly this grid and is what every existing
-    // dump/probe prints, so the model and the debugging output see the same picture. It ends with a
-    // blank line (a `writeln!` after the row loop) — trimmed rather than `take(height)`d, so that a
-    // future change to the renderer shows up as a row-count mismatch instead of being cut off.
-    let grid = format!("{map}").trim_end_matches('\n').lines().map(str::to_string).collect();
     MapView {
         map: format!("{}", map.map),
         position: map.player_position.into(),
         facing: format!("{:?}", map.player_direction),
         width: map.width,
         height: map.height,
-        grid,
-        legend: MAP_LEGEND.iter().map(|(c, meaning)| (*c, meaning.to_string())).collect(),
         // Hidden sprites are absent from the map the player sees; reporting them would invite the
         // model to try to talk to someone who is not there.
         sprites: map.sprites.iter().filter(|s| !s.hidden).map(|s| SpriteView {

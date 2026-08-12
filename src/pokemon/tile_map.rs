@@ -74,6 +74,20 @@ pub struct MetaTileMap {
     /// `wGrassRate != 0`. See [`CurrentMap::grass_encounter_rate`] for why this is not the same
     /// question as whether the map *has* grass tiles.
     pub has_grass_encounters: bool,
+    /// The metadata these tiles were classified from, kept so anything that wants the map's
+    /// *pixels* — [`crate::pokemon::map_gfx`] and the picture the model is sent — can reach the
+    /// block map, the blockset and the connection strips without re-reading the MMU.
+    ///
+    /// ⚠️ **The point is that it is the *same* metadata**, not an equivalent one. It carries the
+    /// runtime block map for the eleven maps in `map_uses_runtime_blocks` and the door overlays
+    /// already applied, so a renderer using it cannot draw a wall where `meta_tiles` says there is
+    /// an open door. Re-reading it through `PokemonApi` could, and would also pay
+    /// `find_outdoor_entry_map`'s scan of up to 248 map headers.
+    ///
+    /// ⚠️ `Option` only because this struct derives `Default` (and so does [`GameState`], which
+    /// `postgame::fishing`'s tests construct). [`MapMetadata`] has no `Default` and must not gain
+    /// one — a default block map is a map of nothing that renders as a plausible empty room.
+    pub metadata: Option<std::sync::Arc<crate::pokemon::map_metadata::MapMetadata>>,
 }
 
 /// Strength boulder-switch tiles per map (raw object/script coords, no connection offset), from the
@@ -218,6 +232,8 @@ impl MetaTileMap {
                 .map(|h| (Point8 { x: h.at.x + dimensions.west_extra as u8,
                                    y: h.at.y + dimensions.north_extra as u8 }, h.item))
                 .collect(),
+            // Already `Arc`'d and cached in `MapMetadataCache`, so this is a refcount bump.
+            metadata: Some(std::sync::Arc::clone(&map.metadata)),
         }
     }
 
@@ -331,6 +347,16 @@ impl MetaTileMap {
     }
 
     /// The set of tiles reachable from the player (debug/diagnostic aid for maze mapping).
+    /// Every tile the player can **route to** from where they are standing.
+    ///
+    /// ⚠️ **Not the tiles they can stand on.** This is the key set of [`Self::bfs_from_player`],
+    /// which records every neighbour of an open square and only declines to *expand* the ones that
+    /// cannot be walked through — because a route has to be allowed to end at a door, a counter, a
+    /// cut tree or a person, none of which the player ever occupies. So a wall touching open floor
+    /// is in here, and the only things missing are tiles walled in on every side.
+    ///
+    /// A caller that wants "where can I actually go" has to subtract the walls itself; see
+    /// [`crate::llm::map_image`]'s `draw_unreachable`, which shipped the picture of the mistake.
     pub fn reachable_tiles(&self) -> std::collections::HashSet<Point8> {
         self.bfs_from_player().0.into_keys().collect()
     }
@@ -1160,6 +1186,7 @@ mod boulder_solver_tests {
                         meta[idx] = MetaTile::Empty;
                         sprites.push(Sprite { index: d as u8, picture_id: PictureId::Monster,
                             position: p, on_screen: true, hidden: false,
+                            facing: crate::pokemon::sprite::SpriteFacing::Down,
                             name: Box::leak(format!("Boulder {d}").into_boxed_str()) });
                     }
                     _ => panic!("bad char {c}"),
@@ -1176,6 +1203,8 @@ mod boulder_solver_tests {
             spinners: HashMap::new(), can_surf: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
             hidden_items: vec![], has_grass_encounters: false,
+            // A hand-built grid for the boulder solver; there is no ROM map behind it to draw.
+            metadata: None,
         }, switch)
     }
 
