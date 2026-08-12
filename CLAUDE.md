@@ -210,6 +210,37 @@ match and the suppression would silently never fire), and `/api/events` **opens 
 heartbeat** — `Published::join_events`, subscribe-then-read, the same handshake as the video keyframe
 — or a page opened during a quiet stretch shows an empty panel.
 
+## The model's side
+
+⚠️ **A reasoning model streams its thinking on a channel of its own, and it is not `content`.** LM
+Studio, vLLM and DeepSeek send `reasoning_content`; OpenRouter sends `reasoning`; OpenAI sends
+neither. Before `MessageDelta` knew the field, serde dropped it as an unknown key — the page showed a
+blank turn for however long the model thought, and on a local 12B that is **three quarters of the
+completion tokens of a trivial overworld step**. `read_stream` now reports a `Fragment::Content` or a
+`Fragment::Reasoning`, which is two channels rather than one string because they have opposite fates:
+⚠️ **the reply goes back into the history and the thinking never does.** It is billed once as
+completion tokens; a copy in the history pays for it again on every turn for the rest of the run.
+`Usage::estimate` counts it anyway — the endpoint charged for it, and that estimate is the bill.
+
+⚠️ **A thought is closed by the next event, not by the turn ending.** A turn that reads before it
+decides thinks once per completion, so `useEventStream`'s fold appends only while the reasoning row
+is still the *last* one — and `Conversation.tsx` reads that same fact as "still live", which is what
+makes the block collapse on its own when the tool call lands with no second event to say so.
+
+**`GB_COMPACT_ABOVE` (0.85) is what 0.70 used to be**, and the old number was never measured against
+anything: it was headroom picked for a 128 k window, where a fifth of the context is tens of
+thousands of tokens held empty and a summarising completion — the most expensive thing the loop does
+— is bought sooner and more often than it needs to be. ⚠️ **What the headroom actually has to cover
+is absolute, not proportional**: compaction runs *between* turns, so a turn already under way grows
+unchecked to `GB_MAX_TOOL_STEPS` completions and their results; and stage 2's request carries the
+whole history plus room for the summary written back. 15% of 128 k is 19 k and comfortable, 15% of a
+local model's 60 k is 9 k and merely adequate, 5% of 60 k will not fit a summary at all — which is
+why the variable is refused outside 0.2–0.95 rather than clamped into it. Going over is not fatal in
+either direction (a failed summary falls back to `trim_history`, a failed turn to a wait), but each
+one costs the run its memory or a turn. ⚠️ The threshold is also a **test fixture**:
+`a_full_context_is_summarised_and_the_next_turn_carries_the_summary` sizes its prose against it, and
+a turn that lands under it makes that test pass by never compacting at all.
+
 ## The video stream
 
 ⚠️ **Quote the number for a screen that is *moving*.** W2 measured this honestly — the plan's §5.1

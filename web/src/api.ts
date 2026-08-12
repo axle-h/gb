@@ -94,6 +94,8 @@ export type UiEvent =
   // one block per token.
   | { seq: number; type: 'turn_started'; turn: number; kind: string; headline: string }
   | { seq: number; type: 'assistant_delta'; turn: number; text: string }
+  /** The model's thinking, for endpoints that stream it apart from the reply (`reasoning_content`). */
+  | { seq: number; type: 'assistant_reasoning'; turn: number; text: string }
   | { seq: number; type: 'tool_call'; turn: number; name: string; arguments: string }
   | { seq: number; type: 'decision'; turn: number; summary: string; usage: UsageView | null }
   | { seq: number; type: 'turn_cancelled'; turn: number; reason: string }
@@ -111,14 +113,20 @@ export type UiEvent =
 /**
  * What the conversation pane renders, before the bookkeeping every row carries.
  *
- * `assistant` is the one entry that is not one event: the deltas of a turn are folded into a single
- * growing block by [`fold`](./useEventStream), because a hundred one-token rows is not a reply.
+ * `assistant` and `reasoning` are the entries that are not one event: the deltas of a turn are
+ * folded into a single growing block by [`fold`](./useEventStream), because a hundred one-token rows
+ * is not a reply.
  */
 export type EntryBody =
   | { type: 'agent'; kind: string; text: string }
   | { type: 'notice'; level: string; message: string }
   | { type: 'turn'; turn: number; kind: string; headline: string }
   | { type: 'assistant'; turn: number; text: string }
+  /**
+   * One block of thinking. It has no "finished" flag of its own and does not need one: a thought
+   * ends when anything else is said, so the row is live exactly while it is the last one in the log.
+   */
+  | { type: 'reasoning'; turn: number; text: string }
   | { type: 'tool'; turn: number; name: string; arguments: string }
   | { type: 'decision'; turn: number; summary: string }
   | { type: 'cancelled'; turn: number; reason: string }

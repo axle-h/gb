@@ -10,7 +10,8 @@
 //! | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any compatible endpoint |
 //! | `OPENAI_API_KEY` | — | Required for `--policy llm` |
 //! | `GB_MODEL` | — | Required |
-//! | `GB_CONTEXT_LIMIT` | `128000` | The window W6's compaction triggers at 70% of |
+//! | `GB_CONTEXT_LIMIT` | `128000` | The window W6's compaction triggers a fraction of |
+//! | `GB_COMPACT_ABOVE` | `0.85` | That fraction. `0.2`–`0.95`; see [`LlmConfig::compact_above`] |
 //! | `GB_TEMPERATURE` | `1.0` | |
 //! | `GB_MAX_TOOL_STEPS` | `12` | Non-terminal calls per turn before a decision is forced |
 //! | `GB_STUCK_TIMEOUT_SECS` | `300` | **W9** — emulated seconds with the agent asking nothing before the watchdog does; `0` is off |
@@ -37,6 +38,28 @@ pub struct LlmConfig {
     pub model: String,
     /// The context window in tokens. W4 only reports against it; W6 compacts on it.
     pub context_limit: u64,
+    /// **W6 / §9** — the occupancy at which the history is compacted, as a fraction of
+    /// [`Self::context_limit`]. Both stages trigger here: eviction first, and summarisation only if
+    /// eviction left it still over.
+    ///
+    /// Measured on the calibrated scale — see [`crate::llm::accounting`], whose whole reason for
+    /// existing is that "85% full" has to mean the same thing before and after a message is removed.
+    ///
+    /// ⚠️ **What the remaining fraction has to pay for is not one message — it is a whole turn and a
+    /// summary.** Compaction runs *between* turns, so once a turn has started the history grows
+    /// unchecked until it ends: up to `GB_MAX_TOOL_STEPS` completions, their tool results and two
+    /// screenshots. And stage 2's request carries the entire history *plus* room for the summary the
+    /// model writes back, which on a reasoning model is the summary plus everything it thought on the
+    /// way to it. Both of those are absolute token counts, so the headroom that matters is
+    /// `(1 - compact_above) × context_limit` rather than the percentage: 15% of 128 k is 19 k and
+    /// comfortable, 15% of 60 k is 9 k and merely adequate, 5% of 60 k is 3 k and will not fit a
+    /// summary.
+    ///
+    /// Going over is not fatal — a failed summary falls back to [`trim_history`] and a failed turn
+    /// resolves to a wait — but each one costs the run either its memory or a turn.
+    ///
+    /// [`trim_history`]: crate::llm::worker
+    pub compact_above: f64,
     pub temperature: f32,
     /// Non-terminal tool calls a single turn may make before the worker forces `wait` (§7.3).
     pub max_tool_steps: usize,
@@ -52,6 +75,17 @@ pub struct LlmConfig {
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_CONTEXT_LIMIT: u64 = 128_000;
+/// **W6 / §9.** 0.70 originally, which was never measured against anything — it was headroom chosen
+/// on the assumption of a large window, where 30% is tens of thousands of tokens. What the headroom
+/// actually has to cover is bounded and small (see [`LlmConfig::compact_above`]), so the cost of
+/// 0.70 was real and paid every turn: a fifth of a paid-for window held empty, and a summarising
+/// completion — the most expensive thing the loop does — bought sooner and more often than needed.
+pub const DEFAULT_COMPACT_ABOVE: f64 = 0.85;
+/// The range [`DEFAULT_COMPACT_ABOVE`] may be moved through. The ceiling is not superstition: above
+/// it, the remaining window cannot hold the summary that compaction exists to produce, so the run
+/// silently degrades to the last-resort trim. The floor keeps a typo like `0.05` from summarising
+/// on every single turn.
+pub const COMPACT_ABOVE_RANGE: std::ops::RangeInclusive<f64> = 0.2..=0.95;
 pub const DEFAULT_TEMPERATURE: f32 = 1.0;
 pub const DEFAULT_MAX_TOOL_STEPS: usize = 12;
 /// Five minutes of *emulated* time. **W9 / §14.**
@@ -87,6 +121,19 @@ impl LlmConfig {
             api_key: required("OPENAI_API_KEY")?,
             model: required("GB_MODEL")?,
             context_limit: number(env, "GB_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT)?,
+            // Rejected rather than clamped: a run started with `GB_COMPACT_ABOVE=95` meant to say
+            // 0.95, and quietly playing on at 0.85 would hide that for the length of the run.
+            compact_above: match number(env, "GB_COMPACT_ABOVE", DEFAULT_COMPACT_ABOVE)? {
+                fraction if COMPACT_ABOVE_RANGE.contains(&fraction) => fraction,
+                fraction => {
+                    return Err(format!(
+                        "`GB_COMPACT_ABOVE={fraction}` is outside {:?}–{:?}; it is the fraction of \
+                         GB_CONTEXT_LIMIT the history is compacted at",
+                        COMPACT_ABOVE_RANGE.start(),
+                        COMPACT_ABOVE_RANGE.end(),
+                    ));
+                }
+            },
             temperature: number(env, "GB_TEMPERATURE", DEFAULT_TEMPERATURE)?,
             max_tool_steps: number(env, "GB_MAX_TOOL_STEPS", DEFAULT_MAX_TOOL_STEPS)?,
             // Zero is "off" rather than "fire on every tick", which is the only reading that makes
@@ -135,6 +182,7 @@ mod tests {
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.completions_url(), "https://api.openai.com/v1/chat/completions");
         assert_eq!(config.context_limit, DEFAULT_CONTEXT_LIMIT);
+        assert_eq!(config.compact_above, DEFAULT_COMPACT_ABOVE);
         assert_eq!(config.max_tool_steps, DEFAULT_MAX_TOOL_STEPS);
         assert_eq!(config.stuck_timeout, Some(std::time::Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)));
     }
@@ -169,6 +217,31 @@ mod tests {
                 assert!(failure.contains(missing), "{failure}");
             }
         }
+    }
+
+    /// **W6 / §9.** The threshold moves, and an unusable one is refused rather than clamped: the
+    /// window it is a fraction of can be as small as a local model's 60 k, where the last few percent
+    /// are the only room the summarising completion has to be written in.
+    #[test]
+    fn the_compaction_threshold_can_be_moved_but_not_off_the_end() {
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_COMPACT_ABOVE", "0.9"));
+        assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").compact_above, 0.9);
+
+        // The two shapes of typo that matter: a percentage written as one, and a fraction written
+        // upside down. Both would otherwise be a run that compacts every turn or never at all.
+        for bad in ["90", "0.05", "1.0", "-0.5"] {
+            let mut pairs = MINIMAL.to_vec();
+            pairs.push(("GB_COMPACT_ABOVE", bad));
+            let env = lookup(&pairs);
+            let failure = LlmConfig::from_lookup(&env).expect_err("`{bad}` is not a usable fraction");
+            assert!(failure.contains("GB_COMPACT_ABOVE"), "{failure}");
+        }
+
+        assert!(
+            COMPACT_ABOVE_RANGE.contains(&DEFAULT_COMPACT_ABOVE),
+            "the default has to be a value the variable would accept",
+        );
     }
 
     /// A trailing slash in `OPENAI_BASE_URL` is the single most common way to get a 404 out of a

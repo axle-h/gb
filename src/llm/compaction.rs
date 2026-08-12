@@ -1,7 +1,7 @@
 //! **W6 / §9** — keeping the history inside the context window.
 //!
 //! Two stages, cheapest first, both triggered at the same occupancy threshold
-//! ([`worker::COMPACT_ABOVE`](crate::llm::worker)):
+//! ([`LlmConfig::compact_above`](crate::llm::config::LlmConfig::compact_above), `GB_COMPACT_ABOVE`):
 //!
 //! 1. **Image eviction.** Every screenshot except the two most recent becomes one line of text. A
 //!    run that looks at the screen often spends most of its context on pictures it has already acted
@@ -399,6 +399,7 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
             context_limit: 1000,
+            compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
             temperature: 0.4,
             max_tool_steps: 4,
             stuck_timeout: None,
