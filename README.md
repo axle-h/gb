@@ -134,7 +134,7 @@ an append-only `ledger.jsonl` of one line each. See below.
 ## The web UI
 
 `web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed` and served by
-the same process that runs the emulator. Seven read-only endpoints and two that are not:
+the same process that runs the emulator. Nine read-only endpoints and two that are not:
 
 | | |
 |---|---|
@@ -146,6 +146,7 @@ the same process that runs the emulator. Seven read-only endpoints and two that 
 | `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, decompressed from the cartridge |
 | `/favicon.png` | the overworld Poké Ball, ditto |
 | `/api/healthz` | liveness |
+| `/version` | which build is running: crate version, build date, branch, short commit |
 | `/reset-game` | start the game over, in place — HTTP Basic, off unless `GB_ADMIN_TOKEN` is set |
 | `POST /api/new-run` | the same thing for a script, with an `X-GB-Token` header |
 
@@ -242,6 +243,21 @@ OPENAI_API_KEY=sk-… GB_MODEL=… docker compose up -d
 docker compose run --rm --service-ports gb gb serve --policy random   # no API key, no spend
 ```
 
+### Which build is that?
+
+```shell
+curl -s https://your-host/version
+# → {"version":"1.0.0","build_date":"2026-08-12T14:22:33Z","branch":"main","commit":"a1b2c3d"}
+```
+
+The crate version comes from `Cargo.toml`; the other three are stamped into the image by CI as build
+args, and read from the environment (`GB_BUILD_DATE`, `GB_GIT_BRANCH`, `GB_GIT_SHA`) rather than
+compiled in — the timestamp changes on every build, and an `env!()` would put it in the cargo layer's
+inputs and buy a full cold `cargo build --release` on every CI run. `docker inspect` sees the same
+commit as `org.opencontainers.image.revision`, in full. `gb serve` prints the lot on the way up, so
+`docker logs` answers the question too, and a binary built from a working tree reports `null` for
+what nobody told it. Nothing about this is on the page: it is an operator's question.
+
 `k8s/` has manifests for k3s — one namespace, one pod, a volume for the run directory, and TLS
 terminated outside by traefik and cert-manager. See [`k8s/README.md`](k8s/README.md).
 
@@ -263,7 +279,8 @@ src/
 │   ├── assets.rs        — the SPA: `web/dist` embedded, or read from disk under GB_WEB_DEV=1
 │   ├── badges.rs        — /api/badges.png: the eight badges, decoded from the cartridge
 │   ├── leaderboard.rs   — /api/leaderboard: the runs that have finished the game
-│   └── sprites.rs       — /api/pokemon/{dex}/front.png and /favicon.png, ditto
+│   ├── sprites.rs       — /api/pokemon/{dex}/front.png and /favicon.png, ditto
+│   └── version.rs       — /version: the crate version, and what CI stamped into the image
 ├── llm/                 — the LLM client and turn loop (`llm` feature)
 │   ├── config.rs        — the environment block: OPENAI_*, GB_MODEL, GB_MAX_TOOL_STEPS, …
 │   ├── protocol.rs      — OpenAI wire types + the SSE accumulator (no HTTP; pure and testable)

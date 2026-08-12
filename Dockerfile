@@ -135,6 +135,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /usr/local/bin/gb /usr/local/bin/gb
 
+# ── which build this is ──────────────────────────────────────────────────────────────────────────
+#
+# `GET /version` serves these three beside the crate version, and `gb serve` prints them on the way
+# up. CI fills them in (`.github/workflows/container.yml`); a local `docker build` leaves them empty,
+# which reads as `null` rather than as a wrong answer.
+#
+# ⚠️ **Here, and not `env!()` in the binary, because of the build cache.** `GB_BUILD_DATE` changes on
+# every build, so an ARG the cargo layer consumed would invalidate stage 3 every single run — and
+# `type=gha` caches layers, not the cache mounts the cargo registry and target directory live on, so
+# that is a full cold `cargo build --release` each time. Below the `COPY` above, the only layers left
+# are metadata and rebuilding them is free.
+#
+# ⚠️ **And they must stay below it**: an ARG referenced above the COPY puts the timestamp back into
+# the image's own layer graph and costs the binary layer instead.
+ARG GB_BUILD_DATE=""
+ARG GB_GIT_BRANCH=""
+ARG GB_GIT_SHA=""
+ENV GB_BUILD_DATE=$GB_BUILD_DATE \
+    GB_GIT_BRANCH=$GB_GIT_BRANCH \
+    GB_GIT_SHA=$GB_GIT_SHA
+# The same facts where `docker inspect` and GHCR's package page look for them. ⚠️ `revision` is the
+# **full** commit, not `$GB_GIT_SHA`: the label is not the place to abbreviate, and the full hash is
+# what `$IMAGE:$GITHUB_SHA` is tagged with. No `image.version` label — OCI means the packaged
+# software's version by that, so it would be the crate's, and one more build arg to carry a constant
+# that is already in the binary and in `/version` is not worth the layer.
+ARG GB_GIT_REVISION=""
+LABEL org.opencontainers.image.revision="$GB_GIT_REVISION" \
+      org.opencontainers.image.created="$GB_BUILD_DATE"
+
 # The run directory is the whole of a run's state — `meta.json`, `state.gbst`, `sram.bin`,
 # `transcript.jsonl` and the model's `memories/` and `todo.json` (`src/run/mod.rs`). Mount it and a
 # run survives the container being replaced, not merely restarted. Owned by `gb` above, so an
