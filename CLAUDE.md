@@ -271,6 +271,25 @@ same subscribe-then-read handshake as the heartbeat and the video keyframe, and 
 `Plan` event is *absolutely* stated — the whole list, every time — so replaying the newest is
 complete. ⚠️ **Anything else that becomes send-on-change belongs in `join_events` too.**
 
+⚠️ **Both keepalives are load-bearing on the client, because a dead connection is otherwise
+indistinguishable from a quiet one.** The page's two retry loops were error-driven — `onerror` on the
+`EventSource`, `catch` on the video `fetch` — and both are right about every case that *produces* an
+error: the server closing, a refused connection, a restart. A network going away produces none. No
+FIN and no RST arrive, the socket stays open as far as the browser is concerned, and a stream we only
+ever read from sends nothing that could time out, so the page froze on its last frame **still showing
+the green live pill**, for as long as it was left open. Measured at 75 s and it was not going to
+recover. `STALE_MS` (`web/src/api.ts`, 4× the server's 2 s `KEEP_ALIVE`) is the fix: silence, not an
+error, is the signal. Two traps in feeding it. ⚠️ **Not the SSE keep-alive** — that is a comment line
+and `EventSource` hands it to no callback, so a watchdog on it starves and reconnects every 8 s for
+ever; the status heartbeat is the one that arrives. ⚠️ **On the video side, not the messages
+`readVideoStream` yields** — its keepalive is a zero-length message that yields nothing, on purpose,
+so a watchdog fed from the messages would fire on a screen that is merely not moving. It is fed from
+the inflated chunks instead. ⚠️ And `subscribeVideo` needs **one `AbortController` per attempt**,
+chained to the caller's: aborting the caller's own signal is how that loop is told the component
+unmounted, so a watchdog that used it would kill the retry along with the connection. Reproduce with
+`kill -STOP` on the process — a blackhole, where `docker stop` or Ctrl-C is a clean close and
+exercises the path that already worked.
+
 ⚠️ **Every `UiEvent` carries `at`, a Unix-millisecond wall-clock stamp, and it is the only clock the
 page can date a line by.** `wall_ms` and `emulated_ms` are both elapsed times *since this process
 started*, so a run resumed nightly reports them from zero; the browser cannot supply one either,

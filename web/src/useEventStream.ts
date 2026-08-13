@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { STALE_MS } from './api';
 import type { Connection, Entry, EntryBody, RunStatus, Status, TodoView, UiEvent, UsageView } from './api';
 
 /** How long the conversation keeps. A run is hours long; the DOM is not the transcript (W7 is). */
@@ -14,6 +15,13 @@ const RETRY_MS = 1000;
  * notably the server not being there yet, which is exactly what happens when the page is open while
  * `gb serve` restarts. So on `CLOSED` we rebuild it. Shared by both streams; the video one is not a
  * hook because its data must never reach React state.
+ *
+ * ⚠️ **The error path is only half of it: a stream can die without ever erroring.** See `STALE_MS` —
+ * silence is the only symptom a dropped network has, so the watchdog below is what makes this
+ * recover rather than freeze. Its signal is the status heartbeat, which arrives at least every 2 s
+ * whether or not anything changed. ⚠️ **Not the SSE keep-alive**, which is a comment line
+ * (`Sse::keep_alive` in `src/web/mod.rs`) and is deliberately invisible to every `EventSource`
+ * handler — a watchdog fed from that would starve and reconnect every 8 s for ever.
  */
 export function subscribe(
   url: string,
@@ -22,23 +30,37 @@ export function subscribe(
 ): () => void {
   let source: EventSource | null = null;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
+
+  /** Throw this connection away and start another. */
+  const rebuild = (delay: number) => {
+    clearTimeout(watchdog);
+    onConnection('reconnecting');
+    source?.close();
+    source = null;
+    retry = setTimeout(open, delay);
+  };
+
+  const alive = () => {
+    onConnection('live');
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => rebuild(0), STALE_MS);
+  };
 
   const open = () => {
     if (stopped) return;
     source = new EventSource(url);
-    source.onopen = () => onConnection('live');
+    source.onopen = alive;
     source.onmessage = (message) => {
-      onConnection('live');
+      alive();
       onMessage(message.data);
     };
     source.onerror = () => {
       onConnection('reconnecting');
-      if (source?.readyState === EventSource.CLOSED) {
-        source.close();
-        source = null;
-        retry = setTimeout(open, RETRY_MS);
-      }
+      // A `CONNECTING` source is the browser retrying on its own, which is left to it — but the
+      // watchdog stays armed underneath, since that retry can stall in exactly the same silence.
+      if (source?.readyState === EventSource.CLOSED) rebuild(RETRY_MS);
     };
   };
   open();
@@ -46,6 +68,7 @@ export function subscribe(
   return () => {
     stopped = true;
     clearTimeout(retry);
+    clearTimeout(watchdog);
     source?.close();
   };
 }

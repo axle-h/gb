@@ -6,6 +6,8 @@
 // decoder can be exercised under node against a live server without a browser. `<Screen>` wraps the
 // buffer in an `ImageData` once, with no copy.
 
+import { STALE_MS } from './api';
+
 export const WIDTH = 160;
 export const HEIGHT = 144;
 
@@ -122,11 +124,15 @@ export class VideoDecoder {
  * stutter only in production. `DecompressionStream` is native and does the same job here, where we
  * can see it.
  *
- * A zero-length message is the keep-alive and yields nothing.
+ * A zero-length message is the keep-alive and yields nothing — which is why `alive` is called with
+ * every inflated *chunk* rather than beside the `yield`. ⚠️ **A watchdog fed from the messages this
+ * yields would fire on a screen that simply is not moving**: the keep-alive exists precisely for the
+ * case where there is no delta to send, and it is the only traffic a paused game produces.
  */
 async function* readVideoStream(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal,
+  alive: () => void,
 ): AsyncGenerator<ArrayBuffer> {
   // Piped rather than `pipeThrough`ed so the abort signal reaches the *source*: aborting the reader
   // alone leaves the response body draining in the background until the server notices.
@@ -143,6 +149,7 @@ async function* readVideoStream(
     for (;;) {
       const { done, value } = await reader.read();
       if (done || signal.aborted) return;
+      alive();
       const merged = new Uint8Array(pending.length + value.length);
       merged.set(pending);
       merged.set(value, pending.length);
@@ -176,6 +183,10 @@ async function* readVideoStream(
  * ⚠️ **A reconnect is also the resync.** Every connection opens with a keyframe, so a decoder that
  * has lost the thread is repaired by dropping the connection and starting another. That is why the
  * caller does not need a resync path of its own.
+ *
+ * ⚠️ **`catch` is only half the story: a body can stall for ever without throwing.** See `STALE_MS`.
+ * A dropped network gives this loop nothing to catch, so the watchdog aborts the attempt itself and
+ * lets the loop below treat it as any other failure.
  */
 export function subscribeVideo(
   url: string,
@@ -188,18 +199,34 @@ export function subscribeVideo(
   (async () => {
     let first = true;
     while (!controller.signal.aborted) {
+      // ⚠️ **One controller per attempt, chained to the outer one.** The watchdog has to be able to
+      // abandon a connection *without* ending the loop, which aborting the caller's own signal would
+      // do — the checks below read it as "the component unmounted" and return.
+      const attempt = new AbortController();
+      const abandon = () => attempt.abort();
+      controller.signal.addEventListener('abort', abandon, { once: true });
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      const alive = () => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(abandon, STALE_MS);
+      };
+
       try {
         onConnection(first ? 'connecting' : 'reconnecting');
-        const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+        const response = await fetch(url, { signal: attempt.signal, cache: 'no-store' });
         if (!response.ok || !response.body) throw new Error(`/api/video answered ${response.status}`);
         onConnection('live');
         first = false;
-        for await (const message of readVideoStream(response.body, controller.signal)) {
+        alive();
+        for await (const message of readVideoStream(response.body, attempt.signal, alive)) {
           onMessage(message);
         }
       } catch (failure) {
         if (controller.signal.aborted) return;
         console.error('video stream dropped, reconnecting', failure);
+      } finally {
+        clearTimeout(watchdog);
+        controller.signal.removeEventListener('abort', abandon);
       }
       if (controller.signal.aborted) return;
       onConnection('reconnecting');
