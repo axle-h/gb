@@ -168,6 +168,18 @@ re-resolved by string equality, and `Conversation.tsx` prints it verbatim — so
 be reworded only because the key is a different function. `agent::tests::a_walk_says_where_it_is_going`
 and `an_id_keeps_the_variant_name_the_prose_left_behind` are the pair that hold it apart.
 
+⚠️ **The word "sprite" does not appear anywhere a model reads, and `MetaTile::id_kind` is where that
+is enforced.** It is the emulator's vocabulary for a moving object on a screen and the model has no
+screen: it read as jargon, it was the same word for Professor Oak and for a boulder, and the menu row
+beside `…:Sprite` then had to spend the name again to say who was actually standing there. So an id
+ends in the **person's name** — `OaksLab:2,2:Pokedex1` — and the row is the bare distance. Two things
+follow. ⚠️ **Spaces are stripped, and that is not cosmetic**: several `MapSprite` names have them
+("Middle Aged Woman"), and an id resolved by string equality must not be whitespace-sensitive. ⚠️
+**`MapView`'s key is `people`, spelled the id's way** (`Pokedex1`, not `Pokedex 1`) and built by
+calling `id_kind` rather than by a second function that agrees with it — two spellings of one person
+across two blocks of the same request is a way to be wrong with no upside. `kind()` still returns the
+variant name, for the sort key and for the tests; `id_kind` is what ids are minted from.
+
 ⚠️ **A textbox is detected before its characters are drawn**, so the reader emits a stream of empty
 ones — on the deployed run they were most of the log. `PokemonAgent::event` drops them, which is the
 funnel *every* event goes through (including the ones collected into `update`'s local `new_events`),
@@ -204,6 +216,24 @@ the line of Mom's that follows it. Both still go to the model (`describe_event` 
 published, so that deletes the dialogue from the run's archived record and from `/api/history`, which
 is the one copy nothing can rebuild.
 
+⚠️ **A tool call and its result are two events and one row.** `UiEventBody::ToolCall` carries the
+endpoint's own call `id` and `CallKind`'s label; `ToolResult` is paired to it by that id, in
+`useEventStream`'s `attachResult`. ⚠️ **Paired on the id, never on position or name** — a turn can
+call several tools in one message and they are answered as a batch, so the second result is not the
+second-to-last row and two `read_party` calls in a turn are indistinguishable by name. ⚠️ **Neither
+row may go through `push`**, for the reason a streamed reply does not: a row that grows must never be
+collapse-matched, or an answer attaches to the wrong call.
+
+⚠️ **A tool's *picture* is referenced, never carried.** A map render is a couple of hundred kilobytes
+and every published event is also a line of `transcript.jsonl`, so putting it on the event would grow
+the archive by a base64'd PNG per read for the length of the run — the same arithmetic that took
+base64 out of the video path. `ToolResult.image` is a flag; the bytes live in a 16-entry ring in
+`Published` keyed by the **seq of the event that announced them** (so the publish must happen before
+the `put`), and `/api/tool-image/{seq}/image.png` serves them. ⚠️ **A 404 there is the expected
+answer, not a fault** — anything older than the last handful is gone and the page shows the caption
+alone. The text is truncated at `MAX_TOOL_RESULT` for the same reason, server-side: a truncation the
+client applies is one that has already been broadcast and written to disk.
+
 ⚠️ **The status heartbeat is sent on change, not on a timer.** Sampled at `GB_STATUS_HZ` and
 published only when it says something the last one did not, with a 2 s keepalive so an idle run still
 proves it is alive and `curl -N /api/events` still ticks. At the original 10 Hz unconditional it
@@ -217,6 +247,17 @@ has to be added to `says_the_same_as`'s destructuring **and** compared there: th
 exhaustive, so a new field is a compile error, but binding it and not comparing it is not — and a
 change nobody compares is a change nobody is told about. `model` (who is playing, for the page's
 title) is the newest one.
+
+⚠️ **Send-on-change needs a cell per thing sent, and the plan was the one without.** `join_events`
+opened with the heartbeat alone, so the model's plan — published only when it *changes*, which can be
+an hour — was never replayed to a page that had just loaded. The other route was no better:
+`/api/history` keeps the most recent `MAX_BACKLOG` (2000) events, and a reasoning model publishes one
+event **per streamed token**, so the last `Plan` falls off the end within minutes. Both failed for
+different reasons and the symptom was neither: `PlanPanel` renders nothing for an empty list, so the
+panel was simply absent and it read as a styling bug. `Published::latest_plan` is the fix, on the
+same subscribe-then-read handshake as the heartbeat and the video keyframe, and it works because a
+`Plan` event is *absolutely* stated — the whole list, every time — so replaying the newest is
+complete. ⚠️ **Anything else that becomes send-on-change belongs in `join_events` too.**
 
 ⚠️ **Every `UiEvent` carries `at`, a Unix-millisecond wall-clock stamp, and it is the only clock the
 page can date a line by.** `wall_ms` and `emulated_ms` are both elapsed times *since this process
@@ -246,6 +287,22 @@ local one. The model's plan used to live there, re-rendered on every request, wh
 ⚠️ It is deliberately **not** a turn boundary (`compaction::is_turn_start` excludes it), or a cut
 taken between the plan and the situation it belongs to would drop the one thing meant to survive.
 `the_plan_is_carried_once_and_never_disturbs_the_cacheable_prefix` holds both halves.
+
+⚠️ **Every terminal tool takes a required `summary`, and it is the only thing the model says about a
+turn that outlives the turn.** Reasoning arrives on a channel that is deliberately never sent back,
+and most models emit no `content` at all beside a tool call — so the assistant side of the history
+was a column of bare JSON: every turn saying what it did, not one saying why. A model reading that
+back has no record of having *tried* anything, which is the state in which it walks into the same
+building for the fourth time. It rides on the terminal call's own arguments rather than in a message
+of its own, because that is the one place a sentence costs no extra round trip, cannot be separated
+from the decision it explains, and lands in the history by itself (`Message::assistant` carries
+`tool_calls` verbatim). ⚠️ **Required in the schema, optional in the parser** (`tools::call_summary`):
+*enforcing* it would not get it filled in, because a rejected call does not end the turn — it becomes
+another tool result and spends another of `GB_MAX_TOOL_STEPS`, pushing a forgetful model towards the
+forced `wait` rather than towards remembering. ⚠️ It is added by `add_summary_argument` post-hoc in
+`for_kind`, so it scales with the *number of terminals a kind offers* rather than with the catalogue
+— which is what moved `the_tool_array_stays_within_its_budget`'s ceilings, deliberately. It reaches
+the page as `Decision.narration`, beside `worker::describe`'s mechanical `summary`.
 
 ⚠️ **There is one notes mechanism and there used to be two.** `memory_write`/`memory_read` over a
 `memories/` directory sat beside `todo_add`/`todo_complete` doing the same job in a different shape:
@@ -280,7 +337,8 @@ and `(12, 11)` is a coordinate on a map the model has not seen and cannot choose
 warp, never where it lands. A city menu is a couple of dozen rows in every overworld turn, so that
 is 17% of the longest block in the request. `OverworldAction`'s `Display` still says it the long way
 for the SDL console, where there is no id beside it — hence `overworld_description`, and
-`a_menu_row_does_not_repeat_its_own_id`. ⚠️ **The `{map}` prefix looks like the same redundancy and
+`a_menu_row_does_not_repeat_its_own_id`. (A person's row is now the distance alone, since `id_kind`
+puts the name in the id — see the agent section.) ⚠️ **The `{map}` prefix looks like the same redundancy and
 is the opposite of it**: `resolve_overworld` re-mints ids against the map the player is on *now*, and
 an answer can land after a warp — so without it, `5,6:Warp` chosen in Oak's lab could match a warp
 that happens to sit at (5, 6) in Pallet Town and be carried out silently.
@@ -560,6 +618,28 @@ drift. `host::NewRunRequests` is the whole of it: no data travels inwards, only 
 asked, and it is answered at the **top of `EmulatorHost::tick`**, which is the one point where
 nothing is half-done.
 
+⚠️ **A new game is named by the policy with a RAM write, because there is no screen left to type it
+on.** `Policy::player_name` → `PokemonApiTrait::write_player_name` → `wPlayerName`, called from
+`EmulatorHost::new` when `HostConfig::fresh_game` and from `start_new_run` always. The reason it
+cannot go through the game's own name entry is that a run starts from `data::START_OF_GAME`, a save
+state captured in Red's bedroom — past the title screen, past Oak's speech and past both name screens
+— and the intro is invisible to the agent anyway (`game_mode` answers `None` throughout it, so
+`agent.update` returns `Err("Not in game")` and no policy is ever polled). Every run before this was
+called `CLAUDE`, which is what a human typed once when the fixture was captured.
+
+⚠️ **Seven characters, not the nickname's ten** (`MAX_PLAYER_NAME`) — `naming_screen.asm` checks
+player and rival names against `PLAYER_NAME_LENGTH - 1`. ⚠️ **A resume must never be renamed**: the
+name is part of the save and the game has already printed it in a dozen places, so a process
+restarted under a different `GB_MODEL` would silently rename a trainer mid-run. Random draws from a
+list off its *seed* (not its stream, so a seeded soak run is unchanged), console is `HUMAN`, scripted
+declines — a fixture chain that renamed the trainer would differ from every state it was captured
+against — and LLM is `GB_MODEL` shortened by `config::player_name_for`. ⚠️ That shortening keeps
+**whole segments** and stops at the first that will not fit: truncating the joined string invents
+version numbers (`gemma-3-12b` → `GEMMA31`), and *skipping* a segment to fit a later one assembles a
+different model (`gpt-4o-2024-08-06` → `GPT4O08`, the month). It is deliberately not asked of the
+model: the name is written before the emulator's first instruction, so a completion there would put a
+round trip, a timeout and a retry policy in front of every new run.
+
 ⚠️ **A run directory has exactly one writer, and five things had a copy of which one it was** — the
 checkpointer, the transcript thread's open file, `/api/history`'s path, `/api/healthz`'s run id, and
 the LLM worker's notes. They all read `run::CurrentRun` now. The transcript thread in particular
@@ -703,6 +783,14 @@ cargo test --release --bin gb -- game_boy::tests::ppu
 # non-blank — look at these before touching the palette, the labels or the tile lookup.
 cargo test --release --features diagnostics --bin gb -- \
   llm::map_image::tests::probe_map_images --exact --ignored --nocapture
+
+# Every decision kind's first request, whole, in target/turn-requests/: the `.json` is the literal
+# ChatRequest body, the `.md` is the same with the newlines put back (a prompt read through JSON's
+# `\n` escaping is not reviewable). ⚠️ The only way to see what the model is actually sent — reading
+# it is what found `BattleAction`'s `{:?}` switch rows, ~500 bytes of Rust syntax per party member
+# in the menu of every battle turn.
+cargo test --release --features diagnostics --bin gb -- \
+  llm::prompt::tests::probe_turn_requests --exact --ignored --nocapture
 
 # The diagnostics and probes.
 cargo test --release --features diagnostics,slow-tests --bin gb -- probe_ --ignored --nocapture

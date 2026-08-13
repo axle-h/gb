@@ -846,6 +846,12 @@ impl PokemonAgent {
         self.policy.name()
     }
 
+    /// What the policy would like the player called on a new game — [`Policy::player_name`]. `None`
+    /// keeps whatever the starting state was captured with.
+    pub fn policy_player_name(&self) -> Option<String> {
+        self.policy.player_name()
+    }
+
     /// Emulated time the agent has gone without reaching a decision point of any kind. Zero on any
     /// tick that polled the policy.
     pub fn since_last_policy_poll(&self) -> Duration {
@@ -3689,6 +3695,29 @@ mod tests {
         assert_eq!(MetaTile::Sprite("Mom").kind(), "Sprite");
         assert_eq!(MetaTile::ConnectionWater(Map::Route20).kind(), "ConnectionWater");
         assert_eq!(MetaTile::Pc.kind(), "Pc");
+    }
+
+    /// ⚠️ **A person is named in the id; everything else is its variant.** "Sprite" is the
+    /// emulator's word for a moving object on a screen and the model has no screen — it read as
+    /// jargon, it was the same word for Professor Oak and for a boulder, and the menu row beside it
+    /// then had to spend the name again to say who was there.
+    ///
+    /// The spaces go because the id is resolved by string equality: `"Middle Aged Woman"` in a key a
+    /// model re-types is three chances to lose a walk to whitespace. `Display` keeps them, because
+    /// that half is prose.
+    #[test]
+    fn a_person_is_named_by_their_id_and_not_called_a_sprite() {
+        assert_eq!(MetaTile::Sprite("Mom").id_kind(), "Mom");
+        assert_eq!(MetaTile::Sprite("Middle Aged Woman").id_kind(), "MiddleAgedWoman");
+        assert_eq!(MetaTile::Sprite("Pokedex 1").id_kind(), "Pokedex1");
+
+        // Every other variant is unchanged: the kind *is* what the model is choosing.
+        assert_eq!(MetaTile::Warp { to_map: Map::OaksLab, to_position: Point8 { x: 5, y: 11 } }.id_kind(), "Warp");
+        assert_eq!(MetaTile::Pc.id_kind(), "Pc");
+        assert_eq!(MetaTile::Grass.id_kind(), "Grass");
+
+        // …and the prose is untouched, spaces and all.
+        assert_eq!(format!("{}", MetaTile::Sprite("Middle Aged Woman")), "Middle Aged Woman");
     }
 
     /// ⚠️ **A textbox is detected before its characters are drawn**, so the reader produces a stream

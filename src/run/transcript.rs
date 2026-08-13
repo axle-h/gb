@@ -203,6 +203,7 @@ mod tests {
         published.publish_event(UiEventBody::Decision {
             turn: 1,
             summary: "wait 1 ticks".into(),
+            narration: None,
             usage: None,
         });
 

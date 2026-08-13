@@ -80,6 +80,10 @@ pub struct LlmPolicy {
     /// Raw presses waiting for the agent to collect them at the top of its next tick
     /// ([`Policy::take_manual_input`]).
     manual: Vec<JoypadButton>,
+    /// What to call the player when a **new** game starts — `GB_MODEL`, shortened to what the game
+    /// allows. Resolved at construction because `LlmConfig` is moved into the worker thread a line
+    /// later and this is the only side of the pair that is ever asked for it.
+    player_name: Option<String>,
     /// Prepended to the next turn: what went wrong with the last decision, in the model's own terms.
     note: Option<String>,
     /// **W9** — `GB_STUCK_TIMEOUT_SECS`, handed to the agent once at construction
@@ -88,10 +92,15 @@ pub struct LlmPolicy {
 }
 
 impl LlmPolicy {
-    pub fn new(handles: TurnHandles, stuck_timeout: Option<std::time::Duration>) -> Self {
+    pub fn new(
+        handles: TurnHandles,
+        stuck_timeout: Option<std::time::Duration>,
+        player_name: Option<String>,
+    ) -> Self {
         Self {
             handles,
             stuck_timeout,
+            player_name,
             pending: None,
             waiting: None,
             events: Vec::new(),
@@ -227,6 +236,14 @@ impl LlmPolicy {
 
 impl Policy for LlmPolicy {
     fn name(&self) -> &'static str { "llm" }
+
+    /// The run is played by a model, so the trainer is named after it — `GB_MODEL` shortened to the
+    /// seven characters the game allows by [`crate::llm::config::player_name_for`].
+    ///
+    /// `None` only in the tests, which build this policy without a configuration.
+    fn player_name(&self) -> Option<String> {
+        self.player_name.clone()
+    }
 
     /// ⚠️ Runs at every poll of every decision point — fifty times a second — so the common path
     /// here is a snapshot and an empty `try_recv`.
@@ -692,7 +709,7 @@ mod tests {
                 events,
                 worker: Some(handle),
             };
-            (rig, LlmPolicy::new(handles, config_stuck_timeout))
+            (rig, LlmPolicy::new(handles, config_stuck_timeout, None))
         }
 
         /// A trainer just spotted the player. Swapping the loaded state is exactly what that looks
@@ -1302,6 +1319,44 @@ mod tests {
                 assert!(!text.contains("north."), "the thinking was sent back to the endpoint: {text}");
             }
         }
+    }
+
+    /// **The one sentence about a turn that outlives it**, and the other half of the test above.
+    ///
+    /// ⚠️ Thinking is never sent back and most models write no `content` beside a tool call, so
+    /// without this the assistant side of the history is a column of bare JSON — every turn saying
+    /// what it did and none saying why, which is the state a model walks into the same building four
+    /// times from. It rides on the terminal call's own arguments, so it lands in the history by
+    /// itself: `Message::assistant` carries `tool_calls` verbatim.
+    #[test]
+    fn the_reason_for_a_decision_is_carried_into_the_next_turn() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let why = "Oak wants to see me before I leave town.";
+        rig.push(vec![
+            calls(&[("choose_action", &format!(r#"{{"id":"{id}","summary":"{why}"}}"#))]),
+            calls(&[("choose_action", &format!(r#"{{"id":"{id}","summary":"and now inside"}}"#))]),
+        ]);
+
+        rig.pump_overworld(&mut policy).expect("the first turn lands");
+        let events = rig.events_until(Duration::from_secs(5), |event| matches!(event, UiEventBody::Decision { .. }));
+        let narration = events.iter().find_map(|event| match event {
+            UiEventBody::Decision { narration, .. } => narration.clone(),
+            _ => None,
+        });
+        assert_eq!(narration.as_deref(), Some(why), "the page is told the model's own reason");
+
+        // The second turn's request carries the first turn's reason, because the assistant message
+        // holding that tool call is still in the history.
+        rig.pump_overworld(&mut policy).expect("the second turn lands");
+        let requests = rig.requests();
+        let latest = requests.last().expect("a second request");
+        assert!(
+            latest.messages.iter().any(|message| {
+                message.tool_calls.iter().any(|call| call.function.arguments.contains(why))
+            }),
+            "the reason for the last decision is not in the history the next turn was built on",
+        );
     }
 
     /// A reply cut off by `GB_MAX_TOKENS` is nudged differently from one that simply said nothing.

@@ -64,6 +64,13 @@ pub struct HostConfig {
     /// `POST /api/new-run`'s mailbox. `None` — the default, and every test — means the endpoint has
     /// nothing to talk to and the emulator never checks.
     pub new_runs: Option<Arc<NewRunRequests>>,
+    /// Whether the state this host is starting from is a **new game** rather than a resumed one.
+    ///
+    /// The only thing it decides is whether the player is renamed from the policy
+    /// ([`Policy::player_name`]). ⚠️ **A resume must not be**: the name is part of the save, so a
+    /// process restarted under a different `GB_MODEL` would silently rename a trainer mid-run — and
+    /// the game has already printed it in a dozen places by then.
+    pub fresh_game: bool,
 }
 
 /// ⚠️ **The one channel from the HTTP layer back into the emulator thread**, and deliberately the
@@ -131,6 +138,9 @@ impl Default for HostConfig {
             run: None,
             checkpoint_interval: Duration::from_secs(60),
             new_runs: None,
+            // Every test loads a fixture of a game already in progress, so the default is the one
+            // that leaves the trainer's name alone.
+            fresh_game: false,
         }
     }
 }
@@ -212,7 +222,7 @@ impl EmulatorHost {
         // assumed so that a future one that shares a buffer does not silently credit this run with
         // someone else's turns.
         let turns_at_run_start = published.turns();
-        Ok(Self {
+        let mut host = Self {
             gb,
             agent: PokemonAgent::new(policy),
             map_cache: MapMetadataCache::default(),
@@ -239,7 +249,41 @@ impl EmulatorHost {
             watchdog_firings: 0,
             completed: None,
             last_agent_failure: None,
-        })
+        };
+        if host.config.fresh_game {
+            host.name_the_player();
+        }
+        Ok(host)
+    }
+
+    /// Put the policy's name on the trainer card, if it has one.
+    ///
+    /// ⚠️ **A RAM write, because there is no screen left to type it on.** A run starts from
+    /// `data::START_OF_GAME` — a save state captured in Red's bedroom, past the title screen, past
+    /// Oak's speech and past both name screens — so the name entry the game itself offers happened
+    /// once, when the fixture was made, and cannot happen again. (It is not merely inconvenient to
+    /// get back to: `game_mode` answers `None` for the whole intro, so `agent.update` returns
+    /// `Err("Not in game")` and no policy is polled at any point during it.)
+    ///
+    /// ⚠️ **Only on a new game.** See `HostConfig::fresh_game`.
+    ///
+    /// A failure here is reported and stepped over. The name is on the trainer card and in the
+    /// game's own prose; it is not worth refusing to play over.
+    fn name_the_player(&mut self) {
+        let Some(name) = self.agent.policy_player_name() else { return };
+        let written = {
+            let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+            api.write_player_name(&name)
+        };
+        match written {
+            Ok(()) => println!("gb — the player is called {name}"),
+            Err(error) => {
+                self.published.publish_event(UiEventBody::Notice {
+                    level: "warn",
+                    message: format!("could not name the player {name}: {error}"),
+                });
+            }
+        }
     }
 
     /// Build a host on a new thread and run it there until `shutdown` is set.
@@ -534,6 +578,9 @@ impl EmulatorHost {
             .map_err(|e| format!("could not load the start-of-game state: {e}"))?;
         self.map_cache = MapMetadataCache::default();
         self.agent.restart(Some(run.path()));
+        // A new run is a new game, so the trainer is named again — the policy may well have changed
+        // under a process that has been up for days.
+        self.name_the_player();
 
         self.encoder.restart();
         self.last_status = None;

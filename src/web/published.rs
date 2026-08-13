@@ -12,6 +12,7 @@
 //! is told it lagged and re-syncs from a keyframe) and acceptable for events (the client recovers via
 //! `/api/history` in W7).
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -124,9 +125,38 @@ pub enum UiEventBody {
     /// block on the next event of any other kind rather than on the turn changing.
     AssistantReasoning { turn: u64, text: String },
     /// A tool the model called. `arguments` is the raw JSON string it sent.
-    ToolCall { turn: u64, name: String, arguments: String },
+    ///
+    /// `id` is the endpoint's own call id, and it is here for one reason: it is the only thing that
+    /// pairs this with the [`Self::ToolResult`] that answers it. A turn can call several tools in
+    /// one message and they are answered as a batch, so position and arrival order are both
+    /// unreliable. `kind` is `tools::CallKind`'s discriminant — `read`, `todo`, `terminal`,
+    /// `rejected` — which the client cannot work out from the name alone and which is what lets it
+    /// show a refused call as refused rather than as a call that did nothing.
+    ToolCall { turn: u64, id: String, kind: &'static str, name: String, arguments: String },
+    /// What one tool call answered, paired with its [`Self::ToolCall`] by `id`.
+    ///
+    /// ⚠️ **`content` is what the *model* was told, truncated.** It is the same string that went
+    /// into the history, so the page shows the conversation rather than a second rendering of it —
+    /// but a `read_map` answer is a few kilobytes of JSON and every one of these lands in
+    /// `transcript.jsonl` for the length of the run, so it is cut at [`MAX_TOOL_RESULT`] with a note
+    /// saying so.
+    ///
+    /// ⚠️ **A picture is referenced, never carried.** `read_map` and `screenshot` answer with a
+    /// caption *and* an image; the image is a couple of hundred kilobytes of PNG, which would be a
+    /// third as much again as base64 in an SSE frame and would then be written to the transcript
+    /// on top of that. `image` says only that there is one, and it is fetched from
+    /// `/api/tool-image/{seq}.png` against this event's own seq — served out of a small ring in
+    /// [`Published`], so a live viewer gets it and a page replaying an hour-old backlog gets a 404
+    /// and shows the caption alone. Same reasoning as the video stream's: never put bytes on a
+    /// channel that is also an archive.
+    ToolResult { turn: u64, id: String, name: String, ok: bool, content: String, image: bool },
     /// The terminal call that ended the turn.
-    Decision { turn: u64, summary: String, usage: Option<UsageView> },
+    ///
+    /// `summary` is *ours* — `worker::describe`, the mechanical account of what the agent was told
+    /// to do. `narration` is the **model's**, from the `summary` argument every terminal tool
+    /// carries: one or two sentences of why. It is `None` when the model omitted it and on the
+    /// forced wait, which is the loop's decision and not the model's.
+    Decision { turn: u64, summary: String, narration: Option<String>, usage: Option<UsageView> },
     /// The turn was abandoned — the game moved on to a different question, or the model would not
     /// produce a decision. §17's risk 2b is that this becomes a *rate*, so it is an event rather
     /// than a silence.
@@ -312,7 +342,33 @@ pub struct Published {
     /// stretch would otherwise stare at an empty panel until something moved. Same shape as the
     /// video keyframe (§5.2): subscribe, then read the latest.
     latest_status: RwLock<Option<UiEvent>>,
+    /// The model's plan, as last published, for a client that has just connected.
+    ///
+    /// ⚠️ **The plan is published on change and a change can be an hour apart, so without this a
+    /// reload showed no plan at all.** It looked like a client bug and was not: the panel is fed by
+    /// `UiEventBody::Plan`, `join_events` opened with the heartbeat alone, and the other route —
+    /// `/api/history` — keeps only the most recent `MAX_BACKLOG` events. A reasoning model publishes
+    /// one event *per streamed token*, so a couple of turns is thousands of rows and the last `Plan`
+    /// is off the end of the window within minutes. Both paths failed for different reasons, which
+    /// is why the fix is here, in the one place that cannot be outrun: the same subscribe-then-read
+    /// handshake as the heartbeat and the video keyframe.
+    ///
+    /// The plan is *absolutely* stated — every event carries the whole list — so replaying the last
+    /// one is complete, and a duplicate is idempotent at the client.
+    latest_plan: RwLock<Option<UiEvent>>,
+    /// The last few pictures a tool answered with, keyed by the seq of the `ToolResult` naming them.
+    ///
+    /// ⚠️ **Bounded, and a miss is an expected answer rather than an error.** A map render is a
+    /// couple of hundred kilobytes; the point of holding them here is that a viewer watching live
+    /// can open the picture the model was just looking at, not that the run keeps every one it ever
+    /// drew. Old entries fall off the back and the page shows the caption without the picture.
+    tool_images: RwLock<VecDeque<(u64, Arc<Vec<u8>>)>>,
 }
+
+/// How many tool pictures [`Published::tool_images`] holds. Sized for "what is on screen in the
+/// conversation log right now" rather than for history — a Celadon render is ~200 KB, so this is a
+/// few megabytes at worst.
+const TOOL_IMAGE_CACHE: usize = 16;
 
 impl Published {
     pub fn new() -> Arc<Self> {
@@ -336,6 +392,8 @@ impl Published {
             next_event_seq: AtomicU64::new(next_seq),
             status: RwLock::new(RunStatus::Booting),
             latest_status: RwLock::new(None),
+            latest_plan: RwLock::new(None),
+            tool_images: RwLock::new(VecDeque::new()),
             usage: RwLock::new(None),
             turns: AtomicU64::new(0),
         })
@@ -394,8 +452,33 @@ impl Published {
             }
         }
         let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
-        let _ = self.events.send(UiEvent { seq, at: now_ms(), body });
+        let event = UiEvent { seq, at: now_ms(), body };
+        // Kept **before** the send, for the reason `publish_status` gives: a client that joins in
+        // the gap should see a stale plan rather than none.
+        if matches!(event.body, UiEventBody::Plan { .. }) {
+            *self.latest_plan.write().expect("plan lock poisoned") = Some(event.clone());
+        }
+        let _ = self.events.send(event);
         seq
+    }
+
+    /// Keep a picture a tool answered with, under the seq of the `ToolResult` that announced it.
+    ///
+    /// Called by the worker immediately after publishing that event, so the seq it is filed under
+    /// is the one the page will ask for. See [`Self::tool_images`] for why this is a small ring.
+    pub fn put_tool_image(&self, seq: u64, png: Vec<u8>) {
+        let mut images = self.tool_images.write().expect("tool image lock poisoned");
+        images.push_back((seq, Arc::new(png)));
+        while images.len() > TOOL_IMAGE_CACHE {
+            images.pop_front();
+        }
+    }
+
+    /// A picture by the seq of the event that named it. `None` once it has fallen off the ring,
+    /// which is an ordinary 404 rather than a fault.
+    pub fn tool_image(&self, seq: u64) -> Option<Arc<Vec<u8>>> {
+        let images = self.tool_images.read().expect("tool image lock poisoned");
+        images.iter().find(|(at, _)| *at == seq).map(|(_, png)| Arc::clone(png))
     }
 
     /// What the run has spent, as of the last decision that reported figures. `None` under any
@@ -438,15 +521,30 @@ impl Published {
         seq
     }
 
-    /// Subscribe, **then** take the heartbeat to open with — never the other way round.
+    /// Subscribe, **then** take the events to open with — never the other way round.
     ///
     /// The duplicate this can produce (a client that subscribed just before the heartbeat it also
-    /// reads here) is harmless in a way the video path's would not be: every status is complete in
-    /// itself, and the browser folds it into one piece of state rather than appending it to a list.
-    pub fn join_events(&self) -> (broadcast::Receiver<UiEvent>, Option<UiEvent>) {
+    /// reads here) is harmless in a way the video path's would not be: a status and a plan are each
+    /// complete in themselves, and the browser folds each into one piece of state rather than
+    /// appending it to a list.
+    ///
+    /// ⚠️ **Two cells, and the plan is the one that is easy to forget.** Both are published on
+    /// change; the heartbeat changes every couple of seconds and the plan can go an hour, so the
+    /// plan is the one where "wait for the next one" means an empty panel for the length of a
+    /// viewing. Anything else that becomes send-on-change belongs here too.
+    ///
+    /// Returned oldest-first so the page applies them in the order they happened.
+    pub fn join_events(&self) -> (broadcast::Receiver<UiEvent>, Vec<UiEvent>) {
         let receiver = self.events.subscribe();
-        let latest = self.latest_status.read().expect("status lock poisoned").clone();
-        (receiver, latest)
+        let mut opening: Vec<UiEvent> = [
+            self.latest_plan.read().expect("plan lock poisoned").clone(),
+            self.latest_status.read().expect("status lock poisoned").clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        opening.sort_by_key(|event| event.seq);
+        (receiver, opening)
     }
 
     /// **W6 / §9** — record what the run is doing, and say so **if it changed**.
@@ -500,19 +598,21 @@ mod tests {
         published.publish_event(UiEventBody::Decision {
             turn: 41,
             summary: "walk to Oak's lab".into(),
+            narration: None,
             usage: Some(spent(1_000)),
         });
         assert_eq!(published.turns(), 1);
         assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(1_000));
 
         // A turn the endpoint reported no usage for still decided something.
-        published.publish_event(UiEventBody::Decision { turn: 42, summary: "fight".into(), usage: None });
+        published.publish_event(UiEventBody::Decision { turn: 42, summary: "fight".into(), narration: None, usage: None });
         assert_eq!(published.turns(), 2);
         assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(1_000), "the last real figure stands");
 
         published.publish_event(UiEventBody::Decision {
             turn: 43,
             summary: "fight".into(),
+            narration: None,
             usage: Some(spent(2_500)),
         });
         assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(2_500), "and is replaced when one arrives");
@@ -711,13 +811,14 @@ mod tests {
     #[test]
     fn a_joiner_is_handed_the_last_heartbeat_rather_than_an_empty_panel() {
         let published = Published::new();
-        assert!(published.join_events().1.is_none(), "nothing has been published yet");
+        assert!(published.join_events().1.is_empty(), "nothing has been published yet");
 
         published.publish_status(snapshot("wait", 100));
         published.publish_status(snapshot("move→Warp", 600));
 
-        let (mut receiver, latest) = published.join_events();
-        let latest = latest.expect("the joiner opens with the most recent one");
+        let (mut receiver, opening) = published.join_events();
+        assert_eq!(opening.len(), 1, "no plan has been published, so only the heartbeat");
+        let latest = opening.into_iter().next().expect("the joiner opens with the most recent one");
         let UiEventBody::Status(status) = latest.body else { panic!("a status") };
         assert_eq!(status.agent_state, "move→Warp");
         assert_eq!(latest.seq, 1, "…and it keeps the sequence number it was published with");
@@ -728,6 +829,59 @@ mod tests {
             panic!("a status")
         };
         assert_eq!(next.agent_state, "wait", "and the stream carries on from there");
+    }
+
+    /// ⚠️ **The plan is the send-on-change event a reload could not recover**, and it failed
+    /// silently: the panel simply was not there (`PlanPanel` renders nothing for an empty list), so
+    /// it read as a styling problem rather than as a missing event.
+    ///
+    /// Its two delivery routes both had a hole. The stream opened with the heartbeat alone, and the
+    /// backlog `/api/history` replays is capped — at a length a reasoning model, which publishes an
+    /// event per streamed token, walks past in minutes. So the last `Plan` was reliably older than
+    /// both windows, and the panel came back only when the model next edited its own list, which can
+    /// be an hour.
+    #[test]
+    fn a_joiner_is_handed_the_plan_as_well_as_the_heartbeat() {
+        let published = Published::new();
+        let item = |id: u32, text: &str| TodoView { id, text: text.to_string(), done: false };
+
+        published.publish_event(UiEventBody::Plan { items: vec![item(1, "get the Boulder Badge")] });
+        // …a turn's worth of noise on top, which is what used to bury it.
+        for _ in 0..50 {
+            published.publish_event(UiEventBody::AssistantReasoning { turn: 1, text: "…".into() });
+        }
+        published.publish_status(snapshot("wait", 100));
+
+        let (_receiver, opening) = published.join_events();
+        assert_eq!(opening.len(), 2, "the plan and the heartbeat: {opening:#?}");
+        // Oldest first, so the page applies them in the order they happened.
+        let UiEventBody::Plan { items } = &opening[0].body else { panic!("the plan first") };
+        assert_eq!(items.len(), 1);
+        assert!(matches!(opening[1].body, UiEventBody::Status(_)), "then the heartbeat");
+
+        // Absolutely stated, so the newest one is the whole answer and replaces the last.
+        published.publish_event(UiEventBody::Plan { items: vec![item(1, "done"), item(2, "Cerulean")] });
+        let (_receiver, opening) = published.join_events();
+        let plan = opening.iter().find_map(|event| match &event.body {
+            UiEventBody::Plan { items } => Some(items),
+            _ => None,
+        });
+        assert_eq!(plan.map(Vec::len), Some(2), "the latest list, not an accumulation of every one");
+        assert!(opening.windows(2).all(|pair| pair[0].seq < pair[1].seq), "oldest first: {opening:#?}");
+    }
+
+    /// A picture is referenced by seq and fetched separately, so the ring is what decides whether a
+    /// viewer can still open it. A miss is an ordinary answer — the page shows the caption alone.
+    #[test]
+    fn a_tool_picture_is_kept_for_a_while_and_then_is_not() {
+        let published = Published::new();
+        for seq in 0..(TOOL_IMAGE_CACHE as u64 + 4) {
+            published.put_tool_image(seq, vec![seq as u8]);
+        }
+        assert!(published.tool_image(0).is_none(), "the oldest have fallen off the back");
+        assert!(published.tool_image(3).is_none());
+        let newest = TOOL_IMAGE_CACHE as u64 + 3;
+        assert_eq!(published.tool_image(newest).as_deref(), Some(&vec![newest as u8]));
     }
 
     /// The wire shape, because the SPA's `api.ts` is written against it by hand: a run status is one

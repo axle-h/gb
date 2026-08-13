@@ -76,6 +76,10 @@ pub mod map_metadata;
 pub mod tile;
 mod pokedex;
 
+/// The longest player name the game itself allows: `PLAYER_NAME_LENGTH - 1`, checked by
+/// `naming_screen.asm` for the player and the rival. A Pokémon's nickname gets ten.
+pub const MAX_PLAYER_NAME: usize = 7;
+
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
     fn press_button(&mut self, button: JoypadButton);
@@ -171,6 +175,22 @@ pub trait PokemonApiTrait {
     /// Writes `nickname` (or an empty terminator for `None`) directly into the
     /// naming screen's string buffer so pressing START submits it immediately.
     fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String>;
+
+    /// Rename the player, by writing `wPlayerName` directly.
+    ///
+    /// ⚠️ **There is no other way to do it, because nothing here ever sees the name screen.** A run
+    /// starts from `data::START_OF_GAME`, which is a save state captured in Red's bedroom — past
+    /// the title screen, past Oak's speech and past both name screens, with a name a human typed
+    /// once when the fixture was made. Everything before that point is invisible to the agent
+    /// anyway: `game_mode` returns `None` for the whole intro (`wPlayerName` still holds
+    /// `DebugNewGamePlayerName`), so `agent.update` answers `Err("Not in game")` and no policy is
+    /// ever asked anything.
+    ///
+    /// ⚠️ **Seven characters, not ten.** `naming_screen.asm` checks the length against
+    /// `PLAYER_NAME_LENGTH - 1` for a player or rival and `NAME_LENGTH - 1` for a Pokémon, so the
+    /// cap here is the game's own for this field — the storage is eleven bytes either way, and a
+    /// longer name would be one the game's own UI could never have produced.
+    fn write_player_name(&mut self, name: &str) -> Result<(), String>;
 
     fn read_game_options(&self) -> Result<GameOptions, String>;
     fn write_game_options(&mut self, options: &GameOptions) -> Result<(), String>;
@@ -647,6 +667,27 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             }
         };
         self.mmu_mut().write_pointer_slice(&pokered_symbols::wStringBuffer, &bytes)
+    }
+
+    fn write_player_name(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            // ⚠️ No em dash: this reaches the page inside a `Notice`.
+            return Err("a player name cannot be empty; the game's own screen refuses one".to_string());
+        }
+        let mut bytes = PokemonString::from_string(name).0;
+        match bytes.iter().position(|&b| b == PokemonString::TERMINATOR) {
+            Some(end) if end > MAX_PLAYER_NAME => {
+                bytes[MAX_PLAYER_NAME] = PokemonString::TERMINATOR;
+                bytes.truncate(MAX_PLAYER_NAME + 1);
+            }
+            Some(_) => {}
+            None => {
+                bytes.truncate(MAX_PLAYER_NAME);
+                bytes.push(PokemonString::TERMINATOR);
+            }
+        }
+        self.mmu_mut().write_pointer_slice(&pokered_symbols::wPlayerName, &bytes)
     }
 
     fn read_game_options(&self) -> Result<GameOptions, String> {

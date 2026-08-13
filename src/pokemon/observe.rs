@@ -25,6 +25,7 @@ use crate::pokemon::map::Map;
 use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::pokered_symbols;
 use crate::pokemon::symbols::DmgPointerRead;
+use crate::pokemon::tile::MetaTile;
 use crate::pokemon::world_graph::WorldGraph;
 use crate::geometry::Point8;
 
@@ -209,7 +210,7 @@ pub const MAP_LEGEND: &[(char, &str)] = &[
     ('_', "walkable"),
     ('O', "obstacle"),
     ('X', "water — needs Surf"),
-    ('S', "a sprite (person, item ball, boulder); see `sprites`"),
+    ('S', "someone or something you can interact with (person, item ball, boulder); see `people`"),
     ('W', "a warp — door, stairs, cave mouth; see `warps`"),
     ('C', "a connection to the adjacent map; see `connections`"),
     ('~', "water leading to the adjacent map"),
@@ -223,7 +224,13 @@ pub const MAP_LEGEND: &[(char, &str)] = &[
 ];
 
 view! {
-    pub struct SpriteView {
+    /// One person (or item ball, or boulder) standing on the map.
+    ///
+    /// ⚠️ **`name` is the id form, not the pretty one.** It is spelled exactly as the last field of
+    /// the action id the menu offers — `Pokedex1`, not `Pokedex 1` — because the only thing the
+    /// model does with a name is find the row that talks to them. Two spellings of the same person
+    /// across two blocks of the same request is a way to be wrong that has no upside.
+    pub struct PersonView {
         pub index: u8,
         pub name: String,
         pub position: Point,
@@ -256,7 +263,7 @@ view! {
         pub facing: String,
         pub width: usize,
         pub height: usize,
-        pub sprites: Vec<SpriteView>,
+        pub people: Vec<PersonView>,
         pub warps: Vec<WarpView>,
         pub connections: Vec<String>,
         pub is_dark: bool,
@@ -283,11 +290,13 @@ pub fn map_view(state: &GameState) -> MapView {
         facing: format!("{:?}", map.player_direction),
         width: map.width,
         height: map.height,
-        // Hidden sprites are absent from the map the player sees; reporting them would invite the
+        // Hidden people are absent from the map the player sees; reporting them would invite the
         // model to try to talk to someone who is not there.
-        sprites: map.sprites.iter().filter(|s| !s.hidden).map(|s| SpriteView {
+        people: map.sprites.iter().filter(|s| !s.hidden).map(|s| PersonView {
             index: s.index,
-            name: s.name.to_string(),
+            // Through `MetaTile::id_kind` so this is the same spelling as the action id, by
+            // construction rather than by two functions agreeing.
+            name: MetaTile::Sprite(s.name).id_kind().into_owned(),
             position: s.position.into(),
             on_screen: s.on_screen,
         }).collect(),

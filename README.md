@@ -81,6 +81,11 @@ cargo run --release
 place, plan and all. `--new-run` starts the game over in a directory of its own — or, on something
 already running, opening `/reset-game` does the same thing without a restart (see below).
 
+A new game names its trainer after whoever is about to play it: `GB_MODEL` shortened to the seven
+characters Gen 1 allows (`google/gemma-3-12b` → `GEMMA3`), `HUMAN` at the desktop, something drawn
+from a list under `--policy random`. A resume keeps the name it already has, because by then the game
+has printed it in a dozen places.
+
 ## How the model plays
 
 `PokemonAgent` advances the emulator 20 ms at a time and works out, from the game's memory, what
@@ -115,6 +120,14 @@ A model that streams its thinking separately — `reasoning_content`, which most
 OpenAI does not — has it shown live in the log and collapsed to a line once the thought ends. It is
 never sent back: reasoning is billed as completion tokens once, and a copy in the history would pay
 for it again on every turn after that.
+
+Which leaves a gap, and every tool that ends a turn is asked to fill it: each takes a required
+`summary`, one or two sentences in the model's own words about what it is doing and why. Nothing else
+it says about a turn survives the turn — the thinking is dropped by the paragraph above, and most
+models write no prose at all beside a tool call — so without it the model's half of the conversation
+is a column of bare JSON saying what it did and never once why, which is a good way to walk into the
+same building four times. It rides on the terminal call's arguments, so it costs no extra round trip
+and lands in the history by itself. It is also the line the page leads the decision with.
 
 `read_map` answers with a **picture**, not a description: the whole map the player is standing on,
 drawn from the cartridge's own tile graphics, with every NPC where they are standing and facing where
@@ -155,7 +168,7 @@ an append-only `ledger.jsonl` of one line each. See below.
 ## The web UI
 
 `web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed` and served by
-the same process that runs the emulator. Nine read-only endpoints and two that are not:
+the same process that runs the emulator. Ten read-only endpoints and two that are not:
 
 | | |
 |---|---|
@@ -165,6 +178,7 @@ the same process that runs the emulator. Nine read-only endpoints and two that a
 | `/api/leaderboard?limit=` | the runs that have finished the game, fastest first |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's own trainer-card graphics |
 | `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, decompressed from the cartridge |
+| `/api/tool-image/{seq}/image.png` | the picture a tool answered with, while it is still held |
 | `/favicon.png` | the overworld Poké Ball, ditto |
 | `/api/healthz` | liveness |
 | `/version` | which build is running: crate version, build date, branch, short commit |
@@ -173,6 +187,13 @@ the same process that runs the emulator. Nine read-only endpoints and two that a
 
 The screen is streamed as block deltas rather than as images because it is a 160×144 screen that
 mostly does not change; the decoder is a TypeScript port of the encoder, in `web/src/video.ts`.
+
+Every tool the model calls is a line in the log, as a sentence rather than as a wire call — "Read the
+map", "Chose `PalletTown:5,6:Warp`", "Planned: get the Boulder Badge" — and every one of them opens
+onto what was asked and what came back, the map picture included. The picture is *fetched* rather
+than carried on the event, out of a small ring on the server: a map render is a couple of hundred
+kilobytes and everything published is also a line of the transcript, so a page watching live can open
+the map the model was looking at, and one replaying an old backlog gets the caption on its own.
 
 **No graphics are committed to this repo.** The badges, the party sprites, the favicon, and every
 tile, person and letter in the map pictures the model is sent are all read out of the ROM at run

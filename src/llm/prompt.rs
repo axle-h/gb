@@ -112,7 +112,9 @@ Things worth knowing about this particular game:
 /// call per turn. Regenerated per kind so it names only the tools that turn actually has.
 pub fn contract(kind: DecisionKind) -> String {
     format!(
-        "End this turn by calling exactly one of: {}.\n\
+        "End this turn by calling exactly one of: {}. Every one of them takes a `summary`: one or \
+         two sentences saying what you are doing and why. Your thinking is not kept, so that \
+         sentence is the only thing you will still have of this turn when you take the next one.\n\
          These do not end the turn ({}) — call as many as you need, in one message, then finish \
          with a terminal call.",
         terminal_names(kind).join(", "),
@@ -207,7 +209,9 @@ pub fn situation(
     match context {
         TurnContext::None => {}
         TurnContext::Nickname(species) => out.push_str(&format!(
-            "The naming screen is open for a {species}. It has just been caught, hatched or given \
+            // No article: a species name is one, and "a Eevee" / "a Omanyte" is what picking one
+            // blind gets you in a sentence printed on every naming screen of the run.
+            "The naming screen is open for {species}. It has just been caught, hatched or given \
              to you.\n\n",
         )),
         TurnContext::ForgetMove { new, .. } => out.push_str(&format!(
@@ -409,6 +413,202 @@ mod tests {
     use super::*;
     use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason};
     use crate::pokemon::tile::MetaTile;
+
+    /// **Every decision kind's first request, written out whole, so a person can read what the model
+    /// is actually sent.**
+    ///
+    /// Two files per kind in `target/turn-requests/`: the `.json` is the literal `ChatRequest` body
+    /// that would go to the endpoint, assembled the way [`crate::llm::worker::Worker::decide`]
+    /// assembles it, and the `.md` is the same thing with the newlines put back — a prompt read
+    /// through JSON's `\n` escaping is not a prompt anyone can review.
+    ///
+    /// ⚠️ **Prints a report rather than asserting, so it is `#[ignore]`d on top of its feature
+    /// gate**, as `CLAUDE.md`'s table requires of every `probe_`.
+    ///
+    /// ⚠️ **Two of the six situations cannot come from a save state alone, and the files say so.**
+    /// A mart's stock lives in `wCurMart`, which is empty everywhere except inside a shop, and no
+    /// committed fixture is standing at a counter; the forget-move prompt needs a move the party is
+    /// about to learn, which is a fact about an event and not about memory. Both are supplied here.
+    /// Everything else — the map, the party, the bag, the battle, the menus and their ids — is read
+    /// out of a real fixture by the same functions the run uses.
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    #[ignore]
+    fn probe_turn_requests() {
+        use crate::llm::protocol::{ChatRequest, Message, StreamOptions};
+        use crate::llm::tools;
+        use crate::pokemon::integration_tests::fixture::TestFixture;
+        use crate::pokemon::item::ItemId;
+        use crate::pokemon::move_name::PokemonMoveName;
+        use crate::pokemon::species::PokemonSpecies;
+        use std::time::Duration;
+
+        let out = std::path::Path::new("target/turn-requests");
+        std::fs::create_dir_all(out).expect("a writable target directory");
+
+        // A mid-game overworld save: eight badges' worth of bag, a full party, and a town with
+        // enough on it that the action menu is a realistic length rather than a doorway.
+        let overworld = include_bytes!("../pokemon/data/at-celadon.bin");
+        let battle = include_bytes!("../pokemon/data/battle-state.bin");
+
+        // What the agent said since the last decision. Rendered through `describe_event`, which is
+        // the same funnel the live buffer goes through.
+        let events: Vec<String> = [
+            AgentEvent::StartedOverworldAction { destination: MetaTile::Sprite("Gym Guide") },
+            AgentEvent::OverworldInteractionCompleted { target: MetaTile::Sprite("Gym Guide") },
+            AgentEvent::TextBox { message: "Hey! You look weak! Let me give you some advice!".into() },
+            AgentEvent::OverworldActionAborted {
+                destination: MetaTile::Warp { to_map: crate::pokemon::map::Map::CeladonGym, to_position: crate::geometry::Point8 { x: 4, y: 17 } },
+                reason: OverworldActionAbortedReason::Textbox,
+            },
+        ]
+        .iter()
+        .map(describe_event)
+        .collect();
+
+        // A plan with something in it, because an empty one is not what a run looks like after the
+        // first ten minutes — and because it is a message of its own in every request after it
+        // changes (see `worker::sync_plan`).
+        let mut todo = crate::llm::todo::TodoList::open(None);
+        for item in [
+            "beat Erika for the Rainbow Badge; the gym is the one behind the trees, cut them",
+            "buy a Poke Doll in Celadon before Lavender: it is the only way past the Marowak ghost",
+            "come back to Route 12 with the Poke Flute, the Snorlax blocks the only path south",
+        ] {
+            todo.apply(crate::llm::todo::TodoCall::Add { text: item.to_string() });
+        }
+
+        let config = LlmConfigForProbe::default();
+
+        for kind in tools::ALL_KINDS {
+            let mut fixture = TestFixture::new(
+                match kind {
+                    DecisionKind::Battle => battle,
+                    _ => overworld,
+                },
+                Duration::from_secs(10),
+                vec![],
+            );
+            let state = fixture.game_state();
+            let mut snapshot = ApiSnapshot::read(&fixture.api());
+
+            // The two facts no fixture carries. Prices are still the cartridge's own.
+            if kind == DecisionKind::MartPurchase {
+                let api = fixture.api();
+                snapshot.mart_stock = [
+                    ItemId::PokeBall, ItemId::GreatBall, ItemId::Potion,
+                    ItemId::SuperPotion, ItemId::Antidote, ItemId::Repel,
+                ]
+                .into_iter()
+                .map(|item| (item, { use crate::pokemon::PokemonApiTrait; api.item_price(item) }))
+                .collect();
+            }
+            // `forget_menu` takes the four slots as the party stores them, `None` included.
+            let party_moves: Vec<_> = state
+                .pokemon
+                .iter()
+                .next()
+                .map(|mon| mon.moves.iter().flatten().cloned().collect())
+                .unwrap_or_default();
+
+            let context = match kind {
+                DecisionKind::Nickname => TurnContext::Nickname(PokemonSpecies::Eevee),
+                DecisionKind::ForgetMove => {
+                    TurnContext::ForgetMove { current: &party_moves, new: PokemonMoveName::Surf }
+                }
+                DecisionKind::Stuck => TurnContext::Stuck {
+                    agent_state: "text→ReadingTextBox",
+                    stuck_for: Duration::from_secs(300),
+                },
+                _ => TurnContext::None,
+            };
+            let menu = match kind {
+                DecisionKind::Overworld => tools::overworld_menu(&state),
+                DecisionKind::Battle => tools::battle_menu(&state),
+                DecisionKind::MartPurchase => tools::mart_menu(&snapshot),
+                DecisionKind::ForgetMove => tools::forget_menu(&party_moves),
+                DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
+            };
+
+            // The message list a first turn goes out with, in the order `worker::run_one` appends
+            // them: the constant system message, the plan, then the situation.
+            let messages = vec![
+                system_message(),
+                plan_message(&todo),
+                Message::user(situation(kind, &state, &snapshot, &events, &menu, context)),
+            ];
+            let request = ChatRequest {
+                model: config.model.clone(),
+                messages: messages.clone(),
+                tools: tools::for_kind(kind),
+                parallel_tool_calls: Some(true),
+                max_tokens: config.max_tokens,
+                reasoning_effort: None,
+                temperature: config.temperature,
+                stream: true,
+                stream_options: StreamOptions { include_usage: true },
+            };
+
+            let label = kind.label();
+            let json = serde_json::to_string_pretty(&request).expect("a request serialises");
+            std::fs::write(out.join(format!("{label}.json")), &json).expect("writable");
+            std::fs::write(out.join(format!("{label}.md")), readable(&request)).expect("writable");
+
+            let prose: usize = messages.iter().filter_map(|m| m.text()).map(str::len).sum();
+            let schema = serde_json::to_string(&request.tools).expect("specs serialise").len();
+            println!(
+                "{label:<14} {:>6} bytes of prose + {:>6} bytes of tool schema ({} tools) → {}",
+                prose, schema, request.tools.len(), out.join(format!("{label}.md")).display(),
+            );
+        }
+    }
+
+    /// The request as something to read: the messages with their newlines intact, then one block per
+    /// tool. The JSON beside it is the wire truth; this is the reviewable copy.
+    #[cfg(feature = "diagnostics")]
+    fn readable(request: &crate::llm::protocol::ChatRequest) -> String {
+        let mut out = String::new();
+        for message in &request.messages {
+            out.push_str(&format!(
+                "{}\n=== {:?} message ({} bytes) ===\n{}\n\n",
+                "─".repeat(100),
+                message.role,
+                message.text().map_or(0, str::len),
+                message.text().unwrap_or("(no text)"),
+            ));
+        }
+        out.push_str(&format!("{}\n=== tools ({}) ===\n\n", "─".repeat(100), request.tools.len()));
+        for tool in &request.tools {
+            out.push_str(&format!(
+                "── {} ──\n{}\n\nparameters:\n{}\n\n",
+                tool.function.name,
+                tool.function.description,
+                serde_json::to_string_pretty(&tool.function.parameters).expect("a schema"),
+            ));
+        }
+        out
+    }
+
+    /// The knobs the probe needs off an [`LlmConfig`](crate::llm::LlmConfig) without reading the
+    /// environment — a probe that failed because `GB_MODEL` was unset would be reporting on the
+    /// shell rather than on the prompt.
+    #[cfg(feature = "diagnostics")]
+    struct LlmConfigForProbe {
+        model: String,
+        temperature: f32,
+        max_tokens: Option<u32>,
+    }
+
+    #[cfg(feature = "diagnostics")]
+    impl Default for LlmConfigForProbe {
+        fn default() -> Self {
+            Self {
+                model: "gpt-5".to_string(),
+                temperature: 1.0,
+                max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
+            }
+        }
+    }
 
     /// §7.5's third and fourth lines of defence are the same sentence in two places. If the tool
     /// catalogue grows a terminal tool and the contract does not mention it, the model is being told

@@ -29,10 +29,18 @@ pub const SCALE: usize = 3;
 
 /// The frame as a `data:image/png;base64,…` URL, ready to go straight into an `image_url` part.
 pub fn data_url(frame: &Frame) -> String {
-    let png = encode(frame);
+    png_data_url(&encode(frame))
+}
+
+/// Wrap already-encoded PNG bytes as a `data:` URL.
+///
+/// Split out because the same picture now has two destinations — the model's message, and the ring
+/// in [`Published`](crate::web::published::Published) the page fetches it from — and encoding it
+/// twice to serve both would be a second PNG compression per tool call.
+pub fn png_data_url(png: &[u8]) -> String {
     let mut url = String::with_capacity(png.len() * 4 / 3 + 32);
     url.push_str("data:image/png;base64,");
-    base64::engine::general_purpose::STANDARD.encode_string(&png, &mut url);
+    base64::engine::general_purpose::STANDARD.encode_string(png, &mut url);
     url
 }
 
@@ -46,7 +54,7 @@ pub fn caption(seq: u64) -> String {
     )
 }
 
-fn encode(frame: &Frame) -> Vec<u8> {
+pub fn encode(frame: &Frame) -> Vec<u8> {
     let mut image =
         image::RgbImage::new((LCD_WIDTH * SCALE) as u32, (LCD_HEIGHT * SCALE) as u32);
     for y in 0..LCD_HEIGHT {
