@@ -49,6 +49,25 @@ pub trait Policy {
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction>;
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction>;
 
+    /// What the player is called, asked once when a **new** game starts.
+    ///
+    /// `None` — the default — keeps whatever `data::START_OF_GAME` was captured with, which is the
+    /// right answer for anything replaying a scripted route: a fixture chain that renamed the
+    /// trainer would differ from every state it was captured against.
+    ///
+    /// ⚠️ **Not a poll, unlike every other `pick_*` on this trait.** The other methods return
+    /// `Option` to mean "ask me again next frame", because they are answered by a model that may be
+    /// mid-completion. This one is answered before the emulator has run a single instruction, so
+    /// there is nobody to wait for and `None` gets to mean what it reads as. Anything that needed a
+    /// round trip would have to name the player *after* the game had started, which the game's own
+    /// screens can no longer do.
+    ///
+    /// Trimmed to [`MAX_PLAYER_NAME`](crate::pokemon::MAX_PLAYER_NAME) by
+    /// `PokemonApiTrait::write_player_name`, which is the game's own limit for this field.
+    fn player_name(&self) -> Option<String> {
+        None
+    }
+
     /// Called when the nickname-entry screen opens for `species`.
     ///
     /// - `None`          → not ready yet; will be called again next frame.
@@ -223,17 +242,43 @@ pub struct RandomPolicy {
     /// a failure is gone the moment you go looking for it, and a pass proves only that *this* draw
     /// was clean. `soak` therefore seeds it and prints the seed.
     rng: Option<StdRng>,
+    /// The seed, kept beside the stream it built. Only [`Policy::player_name`] reads it, and it does
+    /// so rather than drawing from `rng` because that method takes `&self`: the name is chosen
+    /// without disturbing the sequence the run is played from.
+    seed: Option<u64>,
 }
 
 impl RandomPolicy {
     /// A policy whose choices are fixed by `seed` — the same seed always plays the same game.
     pub fn seeded(seed: u64) -> Self {
-        Self { rng: Some(StdRng::seed_from_u64(seed)) }
+        Self { rng: Some(StdRng::seed_from_u64(seed)), seed: Some(seed) }
     }
 }
 
+/// What [`RandomPolicy`] might call itself. Seven characters or fewer, because that is the game's
+/// own limit for a player name — a list rather than random letters, since the name is on the trainer
+/// card, in every "…used STRENGTH!" line and at the top of the page.
+const RANDOM_NAMES: &[&str] = &[
+    "DICEY", "CHANCE", "FLUKE", "RANDOM", "SHUFFLE", "ROLL", "COINTOS", "HAZARD", "LOTTO", "WHIM",
+    "SCATTER", "DRIFT", "ENTROPY", "JITTER", "NOISE", "STRAY",
+];
+
 impl Policy for RandomPolicy {
     fn name(&self) -> &'static str { "random" }
+
+    /// ⚠️ **Off `self.rng` when there is one, so a seeded run stays a seeded run.** `soak` and the
+    /// stall hunt both build this with an explicit seed precisely so a failure can be gone back to,
+    /// and a name drawn from the thread RNG would be one more thing differing between two runs of
+    /// the same seed.
+    fn player_name(&self) -> Option<String> {
+        // `pick_*` take `&mut self`; this does not, so the seeded stream is advanced by neither —
+        // the seed picks the name directly and the sequence the run plays from is untouched.
+        let index = match &self.rng {
+            Some(_) => self.seed.unwrap_or(0) as usize % RANDOM_NAMES.len(),
+            None => rand::random::<u64>() as usize % RANDOM_NAMES.len(),
+        };
+        Some(RANDOM_NAMES[index].to_string())
+    }
 
     fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         let actions = state.map.actions();
@@ -283,6 +328,11 @@ impl Default for ConsolePolicy {
 
 impl Policy for ConsolePolicy {
     fn name(&self) -> &'static str { "console" }
+
+    /// The one policy with a person behind it, so the trainer card says so.
+    fn player_name(&self) -> Option<String> {
+        Some("HUMAN".to_string())
+    }
 
     fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         let actions = state.map.actions();

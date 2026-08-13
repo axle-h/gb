@@ -124,6 +124,45 @@ const UNLOGGED = new Set(['text_box', 'overworld_interaction_completed']);
 const MODEL_SIDE = new Set(['reasoning', 'assistant', 'tool', 'decision', 'turn', 'cancelled', 'compacted']);
 
 /**
+ * How far back to look for the call a result belongs to.
+ *
+ * A tool result arrives one round trip through the emulator after its call, and the agent narrates
+ * over the top of that — so the call is never the last row, but it is always within the last few.
+ * Bounded rather than a full scan because this runs per event on a 500-row log.
+ */
+const RESULT_LOOKBACK = 40;
+
+/**
+ * Attach a tool's answer to the row that asked for it, matched on the call id.
+ *
+ * ⚠️ **Matched on `id`, never on position or on name.** A turn may call three tools in one message
+ * and they come back as a batch, so the second result is not the second-to-last row and two
+ * `read_party` calls in one turn are indistinguishable by name. The id is the endpoint's own and is
+ * the only thing that pairs them.
+ *
+ * A result with no call to attach to is *dropped*, not shown on its own: it means the call scrolled
+ * off the top of the window, and a bare answer to a question nobody can see says nothing.
+ */
+function attachResult(
+  entries: Entry[],
+  event: Extract<UiEvent, { type: 'tool_result' }>,
+): Entry[] {
+  const floor = Math.max(0, entries.length - RESULT_LOOKBACK);
+  for (let index = entries.length - 1; index >= floor; index -= 1) {
+    const row = entries[index];
+    if (row.type !== 'tool' || row.id !== event.id || row.result !== undefined) continue;
+    const grown: Entry = {
+      ...row,
+      result: event.content,
+      ok: event.ok,
+      ...(event.image ? { imageSeq: event.seq } : {}),
+    };
+    return [...entries.slice(0, index), grown, ...entries.slice(index + 1)];
+  }
+  return entries;
+}
+
+/**
  * The most recent row the model produced, or `-1`. The rows after it are the game talking.
  */
 export function lastModelSide(entries: Entry[]): number {
@@ -182,9 +221,36 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
     case 'turn_started':
       return push(entries, { type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }, event);
     case 'tool_call':
-      return push(entries, { type: 'tool', turn: event.turn, name: event.name, arguments: event.arguments }, event);
+      // ⚠️ Not through `push`: this row is waiting for its result and will grow, so collapsing it
+      // against an identical call above it would attach the answer to the wrong one.
+      return [
+        ...entries,
+        {
+          seq: event.seq,
+          type: 'tool',
+          turn: event.turn,
+          id: event.id,
+          kind: event.kind,
+          name: event.name,
+          arguments: event.arguments,
+          raw: event,
+          count: 1,
+          at: event.at,
+        },
+      ];
+    case 'tool_result':
+      return attachResult(entries, event);
     case 'decision':
-      return push(entries, { type: 'decision', turn: event.turn, summary: event.summary }, event);
+      return push(
+        entries,
+        {
+          type: 'decision',
+          turn: event.turn,
+          summary: event.summary,
+          ...(event.narration ? { narration: event.narration } : {}),
+        },
+        event,
+      );
     case 'turn_cancelled':
       return push(entries, { type: 'cancelled', turn: event.turn, reason: event.reason }, event);
     case 'compacted':

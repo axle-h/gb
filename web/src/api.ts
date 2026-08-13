@@ -126,8 +126,50 @@ export type UiEvent = At &
   | { seq: number; type: 'assistant_delta'; turn: number; text: string }
   /** The model's thinking, for endpoints that stream it apart from the reply (`reasoning_content`). */
   | { seq: number; type: 'assistant_reasoning'; turn: number; text: string }
-  | { seq: number; type: 'tool_call'; turn: number; name: string; arguments: string }
-  | { seq: number; type: 'decision'; turn: number; summary: string; usage: UsageView | null }
+  /**
+   * `id` pairs this with the `tool_result` that answers it — a turn can call several tools in one
+   * message and they are answered as a batch, so neither position nor arrival order will do it.
+   * `kind` is what the call turned out to be: `read`, `todo`, `terminal`, `rejected`.
+   */
+  | {
+      seq: number;
+      type: 'tool_call';
+      turn: number;
+      id: string;
+      kind: string;
+      name: string;
+      arguments: string;
+    }
+  /**
+   * What that call answered. `content` is the text the *model* was sent, truncated server-side.
+   *
+   * ⚠️ `image` is a flag, not a picture: the PNG is fetched from `/api/tool-image/{seq}/image.png`
+   * against **this event's** seq, and it is served out of a small ring — so a live viewer gets it
+   * and a page replaying an old backlog gets a 404 and shows the text on its own.
+   */
+  | {
+      seq: number;
+      type: 'tool_result';
+      turn: number;
+      id: string;
+      name: string;
+      ok: boolean;
+      content: string;
+      image: boolean;
+    }
+  /**
+   * `summary` is the agent's mechanical account of what it was told to do; `narration` is the
+   * model's own sentence about why, from the `summary` argument every terminal tool carries. Null
+   * when the model omitted it, and on the wait the loop forces when a turn will not decide.
+   */
+  | {
+      seq: number;
+      type: 'decision';
+      turn: number;
+      summary: string;
+      narration: string | null;
+      usage: UsageView | null;
+    }
   | { seq: number; type: 'turn_cancelled'; turn: number; reason: string }
   // W6.
   | { seq: number; type: 'run_status'; status: RunStatus }
@@ -163,8 +205,27 @@ export type EntryBody =
    * ends when anything else is said, so the row is live exactly while it is the last one in the log.
    */
   | { type: 'reasoning'; turn: number; text: string }
-  | { type: 'tool'; turn: number; name: string; arguments: string }
-  | { type: 'decision'; turn: number; summary: string }
+  /**
+   * One tool call and, once it arrives, its answer — **one row, not two**. They are separate events
+   * because the answer can be a round trip through the emulator away, but a call and its result are
+   * one thing that happened, and splitting them would put "read the map" and what the map said at
+   * opposite ends of whatever the agent narrated in between.
+   *
+   * ⚠️ A row that grows must never be collapse-matched; see `signature` in `useEventStream`.
+   */
+  | {
+      type: 'tool';
+      turn: number;
+      id: string;
+      kind: string;
+      name: string;
+      arguments: string;
+      result?: string;
+      ok?: boolean;
+      /** The seq to fetch the picture from, when the answer had one. */
+      imageSeq?: number;
+    }
+  | { type: 'decision'; turn: number; summary: string; narration?: string }
   | { type: 'cancelled'; turn: number; reason: string }
   | { type: 'compacted'; before: number; after: number; images_evicted: number; summarised: boolean };
 

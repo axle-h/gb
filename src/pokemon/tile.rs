@@ -42,8 +42,33 @@ impl MetaTile {
     /// freshly recomputed action list by string equality. `Display` is prose written for a person
     /// and is free to change wording; an id is a key and is not, so the two must not be the same
     /// function. (`Conversation.tsx` shows those ids verbatim, which is the other reason.)
+    ///
+    /// ⚠️ **[`Self::id_kind`] is what an id actually ends in**, and it differs for exactly one
+    /// variant — see there.
     pub fn kind(&self) -> &'static str {
         self.into()
+    }
+
+    /// The last field of an action id: [`Self::kind`] for everything except a person, who is named.
+    ///
+    /// ⚠️ **`Sprite` is the one variant whose *kind* is not worth saying.** Every other id ends in a
+    /// word that tells the model what it is choosing — `:Warp`, `:Grass`, `:CutTree` — but "sprite"
+    /// is the emulator's vocabulary for a moving object on a screen, and the model does not have a
+    /// screen. It reads as jargon, it is the same word for Professor Oak and for a boulder, and the
+    /// row beside it then had to spend the name a second time to say who was actually there. So the
+    /// id carries the name — `OaksLab:2,2:ProfessorOak` — and the row carries only the distance.
+    ///
+    /// ⚠️ **Spaces are stripped, and that is not cosmetic.** The names come from
+    /// [`MapSprite`](crate::pokemon::map::MapSprite) and several have them ("Middle Aged Woman"), so
+    /// an id built straight off one would be whitespace-sensitive under a string-equality resolve —
+    /// a model that re-spaced or collapsed it would silently miss. `Display` keeps the spaces,
+    /// because that half is prose.
+    pub fn id_kind(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Sprite(name) if name.contains(' ') => name.replace(' ', "").into(),
+            Self::Sprite(name) => (*name).into(),
+            other => other.kind().into(),
+        }
     }
 }
 

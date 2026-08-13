@@ -155,6 +155,11 @@ impl TurnHandles {
 /// going anywhere.
 const FAILURE_WAIT_TICKS: u16 = 100;
 
+/// How much of a tool's answer the page and the transcript keep. The model is always sent all of it;
+/// this is the copy that is broadcast to every viewer and appended to `transcript.jsonl`, and a
+/// `read_map` answer runs to a few kilobytes of JSON. Long enough to read a party or a route in full.
+const MAX_TOOL_RESULT: usize = 2_000;
+
 /// Where [`Worker::trim_history`] drops back to. That function is W4's stopgap, kept as W6's **last
 /// resort**: it throws whole turns away from the front of the history rather than summarising them,
 /// and it runs only when a summarisation could not be had — the endpoint was down, or the model
@@ -283,10 +288,11 @@ impl Worker {
         self.messages.push(Message::user(situation));
         let outcome = self.decide(id, kind);
         match outcome {
-            Some(decision) => {
+            Some((decision, narration)) => {
                 self.published.publish_event(UiEventBody::Decision {
                     turn: id,
                     summary: describe(&decision),
+                    narration,
                     usage: self.accounting.has_figures().then(|| self.accounting.view()),
                 });
                 let _ = self.outcomes.send(TurnOutcome { id, kind, decision });
@@ -366,7 +372,11 @@ impl Worker {
     }
 
     /// `None` means the turn was cancelled and abandoned.
-    fn decide(&mut self, id: u64, kind: DecisionKind) -> Option<Terminal> {
+    ///
+    /// The second half of the pair is the model's own account of what it just decided and why
+    /// ([`tools::call_summary`]) — absent when the model left the argument out, and absent by
+    /// construction on the forced wait, which is the loop's decision rather than the model's.
+    fn decide(&mut self, id: u64, kind: DecisionKind) -> Option<(Terminal, Option<String>)> {
         let specs = tools::for_kind(kind);
         let mut nudged = false;
 
@@ -435,7 +445,7 @@ impl Worker {
                         // The request is still the last thing in the history and was never answered.
                         // Drop it so the next turn does not open on a dangling question.
                         self.messages.pop_if_user();
-                        return Some(Terminal::Wait { ticks: FAILURE_WAIT_TICKS });
+                        return Some((Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None));
                     }
                 }
             };
@@ -449,10 +459,10 @@ impl Worker {
                 // choosing to say nothing, which is a different correction to ask for.
                 let truncated = completion.finish_reason.as_deref() == Some("length");
                 if nudged {
-                    return Some(self.give_up(id, match truncated {
+                    return Some((self.give_up(id, match truncated {
                         true => "the model twice ran past the length limit without deciding",
                         false => "the model replied twice with no tool call",
-                    }));
+                    }), None));
                 }
                 nudged = true;
                 self.messages.push(Message::user(match truncated {
@@ -462,16 +472,20 @@ impl Worker {
                 continue;
             }
 
-            for call in &completion.tool_calls {
+            let classified: Vec<CallKind> =
+                completion.tool_calls.iter().map(|call| tools::classify(kind, call)).collect();
+
+            // Published *after* classification, not before, so each call arrives at the page already
+            // labelled — a rejected call reads as rejected rather than as one that never answered.
+            for (call, classification) in completion.tool_calls.iter().zip(&classified) {
                 self.published.publish_event(UiEventBody::ToolCall {
                     turn: id,
+                    id: call.id.clone(),
+                    kind: classification.label(),
                     name: call.function.name.clone(),
                     arguments: call.function.arguments.clone(),
                 });
             }
-
-            let classified: Vec<CallKind> =
-                completion.tool_calls.iter().map(|call| tools::classify(kind, call)).collect();
 
             // A message that mixes reads with a terminal call ends the turn: the model has already
             // committed, so running the reads would be answering a question it stopped asking. They
@@ -486,6 +500,10 @@ impl Worker {
             if let Some(position) = classified.iter().position(|c| matches!(c, CallKind::Terminal(_))) {
                 let CallKind::Terminal(decision) = &classified[position] else { unreachable!() };
                 let decision = decision.clone();
+                // Read off the call rather than carried through `CallKind`: it is prose for the
+                // page and for the model's own memory, and nothing between here and the emulator
+                // has any use for it.
+                let summary = tools::call_summary(&completion.tool_calls[position]);
                 let ended_with = completion.tool_calls[position].function.name.clone();
                 for (index, call) in completion.tool_calls.iter().enumerate() {
                     let content = match &classified[index] {
@@ -498,9 +516,10 @@ impl Worker {
                         CallKind::Rejected(complaint) => complaint.clone(),
                         _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
                     };
+                    self.publish_tool_result(id, call, &classified[index], &content, None);
                     self.messages.push(Message::tool_result(&call.id, content));
                 }
-                return Some(decision);
+                return Some((decision, summary));
             }
 
             // No terminal call, so this is a read step. Anything rejected is answered here; anything
@@ -542,6 +561,9 @@ impl Worker {
             // endpoints reject outright.
             let mut pictures: Vec<Message> = Vec::new();
             for (call, classification) in completion.tool_calls.iter().zip(&classified) {
+                // The encoded picture, when this call answered with one, so the page can be offered
+                // the same image the model was — see `publish_tool_result`.
+                let mut png: Option<Vec<u8>> = None;
                 let content = match classification {
                     CallKind::Read => {
                         let answer = answers.next().unwrap_or_else(|| ToolAnswer::text(
@@ -567,9 +589,14 @@ impl Worker {
                                     }
                                     let (width, height) = canvas.dimensions();
                                     let caption = map_image::caption(&map, answer.is_dark);
+                                    // Encoded once and used twice: the model's message and the
+                                    // page's ring. `data_url` would compress it a second time.
+                                    let encoded = map_image::encode(&canvas);
+                                    let url = screenshot::png_data_url(&encoded);
+                                    png = Some(encoded);
                                     pictures.push(Message::user_with_image_detail(
                                         caption.clone(),
-                                        map_image::data_url(&canvas),
+                                        url,
                                         // ⚠️ `high`: a map is up to 1600 px on a side, and one
                                         // 512x512 tile would turn forty squares of terrain to mush.
                                         ImageDetail::High,
@@ -585,16 +612,17 @@ impl Worker {
                         self.published.set_status(RunStatus::RunningTool { name: "screenshot".into() });
                         let frame = self.published.latest_frame();
                         let caption = screenshot::caption(frame.seq);
-                        pictures.push(Message::user_with_image(
-                            caption.clone(),
-                            screenshot::data_url(&frame.pixels),
-                        ));
+                        let encoded = screenshot::encode(&frame.pixels);
+                        let url = screenshot::png_data_url(&encoded);
+                        png = Some(encoded);
+                        pictures.push(Message::user_with_image(caption.clone(), url));
                         format!("{caption} It is attached to the message after this one.")
                     }
                     CallKind::Todo(call) => self.apply_todo(call.clone()),
                     CallKind::Rejected(complaint) => complaint.clone(),
                     CallKind::Terminal(_) => unreachable!("handled above"),
                 };
+                self.publish_tool_result(id, call, classification, &content, png);
                 self.messages.push(Message::tool_result(&call.id, content));
             }
             self.messages.extend(pictures);
@@ -603,7 +631,48 @@ impl Worker {
             }
         }
 
-        Some(self.give_up(id, "the model used its whole tool budget without deciding"))
+        Some((self.give_up(id, "the model used its whole tool budget without deciding"), None))
+    }
+
+    /// Say on the page what one tool call answered, and park its picture where the page can fetch it.
+    ///
+    /// ⚠️ **The content is cut here, not at the client.** Every one of these is broadcast to every
+    /// viewer *and* appended to `transcript.jsonl` for the length of the run, and a `read_map`
+    /// answer is a few kilobytes of JSON — so a truncation the client applies is a truncation that
+    /// has already been paid for twice. What is cut is said in the text, because a JSON object that
+    /// simply stops looks like a bug in the encoder.
+    ///
+    /// ⚠️ **The picture is filed under the seq of the event that announces it**, which is why the
+    /// publish has to happen before the `put`: the seq does not exist until the event is sent. A
+    /// viewer that asks for one that has fallen off the ring gets a 404 and shows the caption, which
+    /// is the whole answer the model got in text anyway.
+    fn publish_tool_result(
+        &self,
+        turn: u64,
+        call: &ToolCall,
+        classification: &CallKind,
+        content: &str,
+        png: Option<Vec<u8>>,
+    ) {
+        let (content, truncated) = match content.char_indices().nth(MAX_TOOL_RESULT) {
+            None => (content.to_string(), false),
+            Some((cut, _)) => (content[..cut].to_string(), true),
+        };
+        let content = match truncated {
+            false => content,
+            true => format!("{content}\n\n… (truncated for the log; the model was sent all of it)"),
+        };
+        let seq = self.published.publish_event(UiEventBody::ToolResult {
+            turn,
+            id: call.id.clone(),
+            name: call.function.name.clone(),
+            ok: !matches!(classification, CallKind::Rejected(_)),
+            content,
+            image: png.is_some(),
+        });
+        if let Some(png) = png {
+            self.published.put_tool_image(seq, png);
+        }
     }
 
     /// Hand a batch to the policy and block until it comes back. `None` is [`ToolBatchResult::Cancelled`]

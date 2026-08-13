@@ -60,7 +60,26 @@ impl Display for BattleAction {
         match self {
             BattleAction::Fight { battle_move, .. } => write!(f, "FIGHT  {}  PP {}", battle_move.name, battle_move.pp),
             BattleAction::UseItem { item, .. } => write!(f, "ITEM   {} ×{}", item.id, item.quantity),
-            BattleAction::SwitchPokemon { pokemon, .. } => write!(f, "PKMN   {:?}", pokemon),
+            // ⚠️ **Not `{:?}`, which is what this was.** `llm::tools::battle_menu` puts this string
+            // straight into the turn request, so every switchable party member cost ~500 bytes of
+            // Rust debug syntax — `PokemonSummary { species: Charizard, current_hp: 360, status:
+            // None, types: [Fire, Flying], moves: [Some(PokemonMove { … }), …] }` — in the menu of
+            // every battle turn. Same class of bug as `MetaTile`'s and `PokemonStatus`'s old `strum`
+            // derives: a derive is a debugging default, and these strings are prose a model reads.
+            // Found by reading `probe_turn_requests`' output, which is what it is for.
+            //
+            // The stats and the full move list are deliberately *not* restated: `read_party` answers
+            // that, and the point of a menu row is which Pokémon to send out.
+            BattleAction::SwitchPokemon { pokemon, .. } => {
+                write!(f, "PKMN   {} Lv{} — {}/{} HP",
+                       pokemon.species, pokemon.level, pokemon.current_hp, pokemon.stats.hp)?;
+                // ⚠️ `PokemonStatus`' `Display` is `strum`'s, so a healthy Pokémon prints `None` —
+                // a missing value rather than good news. Say nothing when there is nothing to say.
+                match pokemon.status {
+                    PokemonStatus::None => Ok(()),
+                    status => write!(f, ", {status}"),
+                }
+            }
             BattleAction::Run => write!(f, "RUN"),
             BattleAction::SafariBall => write!(f, "BALL"),
             BattleAction::SafariBait => write!(f, "BAIT"),

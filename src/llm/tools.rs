@@ -149,6 +149,20 @@ pub enum CallKind {
     Rejected(String),
 }
 
+impl CallKind {
+    /// The discriminant, for the page. Not `strum`'s derive: `Todo(TodoCall)` and
+    /// `Terminal(Terminal)` would drag their payloads' names into a string the client matches on,
+    /// and these four words are a wire contract with `api.ts`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Read | Self::Screenshot => "read",
+            Self::Todo(_) => "todo",
+            Self::Terminal(_) => "terminal",
+            Self::Rejected(_) => "rejected",
+        }
+    }
+}
+
 // ── Field moves ──────────────────────────────────────────────────────────────────────────────────
 
 /// A `use_field_move` call, parsed but not yet resolved. [`resolve_field_move`] turns one of these
@@ -320,8 +334,8 @@ pub const READ_TOOLS: &[ReadTool] = &[
         description: "A picture of the whole map, drawn from the game's own graphics: everyone \
                       where they stand and face, warps and map edges labelled with where they lead, \
                       unreachable ground dimmed, and a coordinate ruler along the top and left. It \
-                      arrives as an image after the result, with the sprites and warps as data. The \
-                      actions you can take are in the turn's action menu, not here.",
+                      arrives as an image after the result, with everyone on the map and the warps \
+                      as data. The actions you can take are in the turn's action menu, not here.",
         // Not in a battle: there is no map on screen and nothing on it can be acted on.
         kinds: &[DecisionKind::Overworld, DecisionKind::Stuck],
         parameters: None,
@@ -594,7 +608,78 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
             "additionalProperties": false,
         }),
     ));
+
+    for tool in &mut tools {
+        if terminal_names(kind).contains(&tool.function.name) {
+            add_summary_argument(tool);
+        }
+    }
     tools
+}
+
+/// How long a turn summary may be. Long enough for the intent *and* the reason — "heading to
+/// Viridian for Poké Balls, I have none and the grass north of here is where I can catch a second
+/// mon" — and short enough that carrying one per turn for the length of a run is not what fills the
+/// context window.
+pub const MAX_SUMMARY: usize = 300;
+
+/// Bolt a required `summary` onto a terminal tool's schema.
+///
+/// ⚠️ **This is the only thing the model says that survives its own turn.** A reasoning model's
+/// thinking arrives on a channel of its own and is deliberately never sent back (it is billed as
+/// completion tokens once, and a copy in the history pays for it again every turn afterwards), and
+/// most models emit no `content` at all beside a tool call. So the assistant side of the history was
+/// a column of bare JSON: what was done, never once why. A model reading that back has no record of
+/// having *tried* anything, which is exactly the state in which it walks into the same building for
+/// the fourth time.
+///
+/// It rides on the terminal call's own arguments rather than in a message of its own because that
+/// is the one place a sentence can go that costs no extra round trip, cannot be separated from the
+/// decision it explains, and lands in the history by itself — `Message::assistant` already carries
+/// `tool_calls` verbatim, arguments included.
+///
+/// ⚠️ **Required in the schema, optional in the parser.** Saying it is required is what gets it
+/// filled in; *enforcing* it would not, because a rejected call does not end the turn — it becomes
+/// another tool result and spends another of `GB_MAX_TOOL_STEPS`, so a model that forgets it would
+/// be pushed towards the forced `wait` rather than towards remembering. See `call_summary`.
+fn add_summary_argument(tool: &mut ToolSpec) {
+    let Some(properties) = tool.function.parameters.get_mut("properties").and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    properties.insert(
+        "summary".to_string(),
+        json!({
+            "type": "string",
+            "maxLength": MAX_SUMMARY,
+            "description": "One or two sentences, in your own words, saying what you are doing and \
+                            why. This is the only note you keep: your thinking is not retained, so \
+                            on later turns this sentence is all you will have of this one. Say what \
+                            you expect to happen, so a turn that did not work is one you can \
+                            recognise instead of repeating.",
+        }),
+    );
+    match tool.function.parameters.get_mut("required").and_then(Value::as_array_mut) {
+        Some(required) => required.push(json!("summary")),
+        None => {
+            tool.function.parameters["required"] = json!(["summary"]);
+        }
+    }
+}
+
+/// The model's own account of a terminal call, if it gave one.
+///
+/// Trimmed and length-capped here rather than trusted: `maxLength` in a schema is a request, not a
+/// guarantee, and this string goes to the page, the transcript and every later request.
+pub fn call_summary(call: &ToolCall) -> Option<String> {
+    let summary = call.arguments().ok()?.get("summary")?.as_str()?.trim().to_string();
+    if summary.is_empty() {
+        return None;
+    }
+    Some(match summary.char_indices().nth(MAX_SUMMARY) {
+        Some((cut, _)) => summary[..cut].to_string(),
+        None => summary,
+    })
 }
 
 /// A zero-parameter tool still needs a schema, and an empty object is what every endpoint accepts.
@@ -1086,9 +1171,10 @@ pub struct MenuItem {
 /// The id of one overworld action: stable across a re-sort, unique within a map, and readable
 /// enough that a model quoting it back is obviously quoting the right thing.
 ///
-/// ⚠️ **`MetaTile::kind`, never its `Display`.** The `Display` is prose written for the status log
-/// ("the warp to OaksLab") and is free to be reworded; an id is a key that a model quotes back and
-/// that is re-resolved by string equality, so it takes the variant name, which is not.
+/// ⚠️ **`MetaTile::id_kind`, never its `Display`.** The `Display` is prose written for the status
+/// log ("the warp to OaksLab") and is free to be reworded; an id is a key that a model quotes back
+/// and that is re-resolved by string equality, so it takes the variant name — except for a person,
+/// who is named instead of being called a "sprite". See `MetaTile::id_kind`.
 ///
 /// ⚠️ **The map prefix looks redundant beside the turn's own header and is not.** `resolve_overworld`
 /// re-mints ids against whatever map the player is on *now*, and the answer to a turn can land after
@@ -1097,16 +1183,20 @@ pub struct MenuItem {
 /// resolve, which is a sentence the model is told.
 pub fn overworld_id(state: &GameState, action: &OverworldAction) -> String {
     let destination = action.destination;
-    format!("{}:{},{}:{}", state.map.map, destination.x, destination.y, action.tile.kind())
+    format!("{}:{},{}:{}", state.map.map, destination.x, destination.y, action.tile.id_kind())
 }
 
 /// What one menu row says *beyond* its id.
 ///
 /// ⚠️ **Not `OverworldAction`'s `Display`, and the difference is what this exists for.** That prose
 /// is written for a person reading the SDL console — it leads with a verb and names the tile — so
-/// beside an id that already ends in `:Warp` or `:Sprite` it repeats the row's own key: "`…:Warp` —
-/// Warp → PalletTown (12, 11)". Here the kind is in the id, so the row carries only what the id
-/// cannot: *which* map, *which* person.
+/// beside an id that already ends in `:Warp` it repeats the row's own key: "`…:Warp` — Warp →
+/// PalletTown (12, 11)". Here the kind is in the id, so the row carries only what the id cannot:
+/// *which* map a door leads to.
+///
+/// ⚠️ **A person's row is now the bare distance**, because `MetaTile::id_kind` puts the name in the
+/// id itself: `` `OaksLab:2,2:Pokedex1` — 9 steps ``. Naming them again here would be the same
+/// repetition this function exists to avoid, one variant later.
 ///
 /// ⚠️ **A warp's `to_position` is dropped outright.** It is a coordinate on a map the model has not
 /// seen and cannot act on — it does not choose where to land, only which warp to take — so it was
@@ -1117,8 +1207,7 @@ fn overworld_description(action: &OverworldAction) -> String {
         crate::pokemon::tile::MetaTile::Warp { to_map, .. }
         | crate::pokemon::tile::MetaTile::Connection { to_map, .. } => format!("to {to_map}, "),
         crate::pokemon::tile::MetaTile::ConnectionWater(to_map) => format!("surf to {to_map}, "),
-        crate::pokemon::tile::MetaTile::Sprite(name) => format!("{name}, "),
-        // Grass, a PC, a tree to cut: the variant name in the id is the whole of what it is, and
+        // Grass, a PC, a tree to cut, a person: the id's last field is the whole of what it is, and
         // "Walk in grass" beside `…:Grass` says it a second time.
         _ => String::new(),
     };
@@ -1130,7 +1219,9 @@ fn overworld_description(action: &OverworldAction) -> String {
 /// to a model as the world having moved.
 pub fn overworld_menu(state: &GameState) -> Vec<MenuItem> {
     let mut actions = state.map.actions();
-    actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.kind()));
+    // `id_kind`, not `kind`: two people can share the tile an action approaches them from, and
+    // "Sprite" == "Sprite" leaves that pair to `sort_by_key`'s stability over a `HashSet` walk.
+    actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.id_kind()));
     actions
         .iter()
         .map(|action| MenuItem {
@@ -1248,7 +1339,12 @@ mod tests {
             menu.iter().map(|item| format!("- `{}` — {}", item.id, item.description)).collect();
 
         assert!(rows.contains(&"- `OaksLab:5,11:Warp` — to PalletTown, 10 steps".to_string()), "{rows:#?}");
-        assert!(rows.contains(&"- `OaksLab:2,2:Sprite` — Pokedex 1, 9 steps".to_string()), "{rows:#?}");
+        // ⚠️ A person is *named by the id* and the row is the bare distance. The old pair was
+        // "`OaksLab:2,2:Sprite` — Pokedex 1, 9 steps", which spends a word of the emulator's own
+        // vocabulary on the key and then has to say who is there anyway.
+        assert!(rows.contains(&"- `OaksLab:2,2:Pokedex1` — 9 steps".to_string()), "{rows:#?}");
+        assert!(!rows.iter().any(|row| row.contains("Sprite")),
+                "no row may call a person a sprite: {rows:#?}");
 
         for item in &menu {
             // ⚠️ The verb is the id's own `kind` said twice: `…:Warp` — "Warp → …", `…:Sprite` —
@@ -1278,13 +1374,21 @@ mod tests {
         // Overworld is the big one: it carries `use_field_move`, which is a dozen field actions
         // behind one `move` discriminant precisely so it is one entry rather than twelve.
         for (kind, ceiling) in [
-            // Measured 2026-08-12: 6875, 3773, 2530, 2952, 2848, 2877.
-            (DecisionKind::Overworld, 7_600),
-            (DecisionKind::Battle, 4_200),
-            (DecisionKind::Nickname, 2_800),
-            (DecisionKind::MartPurchase, 3_300),
-            (DecisionKind::ForgetMove, 3_200),
-            (DecisionKind::Stuck, 3_200),
+            // Measured 2026-08-13, after `summary` was added to every terminal tool: 8589, 4849,
+            // 3220, 3642, 3538, 3953. Each ceiling has ~10% of headroom for rewording.
+            //
+            // ⚠️ **The jump from the 2026-08-12 figures (6875, 3773, 2530, 2952, 2848, 2877) is
+            // `add_summary_argument`, and it is bought rather than leaked.** It is one property
+            // repeated across every terminal tool a kind offers — `Stuck` has two and pays twice —
+            // so it is the one addition here that scales with the *number* of terminals rather than
+            // with the catalogue. What it buys is the only sentence the model keeps about its own
+            // turn; see that function.
+            (DecisionKind::Overworld, 9_400),
+            (DecisionKind::Battle, 5_300),
+            (DecisionKind::Nickname, 3_500),
+            (DecisionKind::MartPurchase, 4_000),
+            (DecisionKind::ForgetMove, 3_900),
+            (DecisionKind::Stuck, 4_300),
         ] {
             let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
             assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
@@ -1327,6 +1431,111 @@ mod tests {
 
         // The whole graph is never serialised, whatever is asked. That was the point.
         assert!(!ask("{}").to_string().contains("edges"));
+    }
+
+    /// ⚠️ **A battle menu row is prose, and `BattleAction`'s `Display` is what makes it so.**
+    ///
+    /// The switch rows were `{:?}` — `PKMN   PokemonSummary { species: Charizard, current_hp: 360,
+    /// status: None, types: [Fire, Flying], moves: [Some(PokemonMove { name: Flamethrower, pp: 15
+    /// }), …] }` — which is around 500 bytes of Rust syntax per switchable party member, in the menu
+    /// of every battle turn for the length of a run. Same class of bug as `MetaTile`'s and
+    /// `PokemonStatus`' old `strum` derives, and found the same way one would hope: by reading
+    /// `prompt::tests::probe_turn_requests`' output.
+    #[test]
+    fn a_battle_menu_row_is_a_sentence_and_not_a_debug_dump() {
+        let switch = BattleAction::SwitchPokemon {
+            slot: 1,
+            pokemon: crate::pokemon::pokemon::PokemonSummary {
+                species: crate::pokemon::species::PokemonSpecies::Charizard,
+                current_hp: 200,
+                status: crate::pokemon::status::PokemonStatus::None,
+                types: [crate::pokemon::pokemon::PokemonType::Fire; 2],
+                level: 100,
+                moves: [None, None, None, None],
+                stats: crate::pokemon::pokemon::PokemonStats {
+                    attack: 1, defense: 1, speed: 1, special: 1, hp: 360,
+                },
+                disabled_move_slot: None,
+            },
+        };
+        assert_eq!(format!("{switch}"), "PKMN   Charizard Lv100 — 200/360 HP");
+
+        // A healthy Pokémon says nothing about its status; `PokemonStatus`' own `Display` is
+        // `strum`'s, so an unconditional one would read `, None` — a missing value, not good news.
+        assert!(!format!("{switch}").contains("None"));
+        let poisoned = match switch {
+            BattleAction::SwitchPokemon { slot, mut pokemon } => {
+                pokemon.status = crate::pokemon::status::PokemonStatus::Poisoned;
+                BattleAction::SwitchPokemon { slot, pokemon }
+            }
+            other => other,
+        };
+        assert_eq!(format!("{poisoned}"), "PKMN   Charizard Lv100 — 200/360 HP, Poisoned");
+    }
+
+    /// **Every terminal tool asks for a summary, and nothing else does.**
+    ///
+    /// ⚠️ This is the only sentence the model keeps about its own turn. Reasoning arrives on a
+    /// channel that is never sent back, and most models emit no `content` beside a tool call, so
+    /// without it the assistant side of the history is a column of bare JSON: what was done, never
+    /// why. A model reading that back has no record of having *tried* anything.
+    ///
+    /// It is not on the reads because a read is not a decision — one per turn is the point, and
+    /// asking for one on `read_party` would buy the same sentence three times at three times the
+    /// price.
+    #[test]
+    fn every_terminal_tool_asks_the_model_to_say_why() {
+        for kind in ALL_KINDS {
+            for tool in for_kind(kind) {
+                let has_summary = tool.function.parameters["properties"].get("summary").is_some();
+                let required = tool.function.parameters["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|name| name == "summary"));
+                match terminal_names(kind).contains(&tool.function.name) {
+                    true => {
+                        assert!(has_summary, "{kind:?}'s `{}` has no summary", tool.function.name);
+                        assert!(required, "{kind:?}'s `{}` does not require it", tool.function.name);
+                    }
+                    false => assert!(!has_summary, "`{}` is not a decision", tool.function.name),
+                }
+                // ⚠️ Every terminal schema is `additionalProperties: false`, so an argument that is
+                // not declared is not merely ignored — the call is schema-invalid.
+                assert_eq!(tool.function.parameters["additionalProperties"], json!(false),
+                           "`{}` would accept an undeclared argument", tool.function.name);
+            }
+        }
+    }
+
+    /// ⚠️ **Required of the model, optional to the parser**, and the asymmetry is deliberate:
+    /// rejecting a terminal call for a missing summary would not end the turn — it becomes another
+    /// tool result and spends another of `GB_MAX_TOOL_STEPS` — so a model that forgot it would be
+    /// pushed towards the forced `wait` rather than towards remembering.
+    #[test]
+    fn a_summary_is_read_off_the_call_and_never_demanded() {
+        let call = |arguments: &str| ToolCall {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: crate::llm::protocol::FunctionCall {
+                name: "wait".to_string(),
+                arguments: arguments.to_string(),
+            },
+        };
+
+        assert_eq!(
+            call_summary(&call(r#"{"ticks": 5, "summary": "  letting the battle text finish  "}"#)),
+            Some("letting the battle text finish".to_string()),
+            "trimmed, because it is printed on a page",
+        );
+        // A turn that omits it is still a turn: the decision is carried out either way.
+        assert_eq!(call_summary(&call(r#"{"ticks": 5}"#)), None);
+        assert_eq!(call_summary(&call(r#"{"ticks": 5, "summary": "   "}"#)), None, "blank is absent");
+        assert_eq!(call_summary(&call("not json")), None, "and a broken call is not a panic");
+
+        // `maxLength` in a schema is a request. This string reaches the page, the transcript and
+        // every later request, so the cap is applied here rather than trusted.
+        let long = "x".repeat(MAX_SUMMARY * 2);
+        let capped = call_summary(&call(&format!(r#"{{"summary": "{long}"}}"#))).expect("present");
+        assert_eq!(capped.chars().count(), MAX_SUMMARY);
     }
 
     /// §7.5's first line of defence: the model cannot end a turn the wrong way because the wrong way

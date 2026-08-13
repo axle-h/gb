@@ -33,6 +33,67 @@
 //! round trip hung the run on the first `read_map`. Keeping a knob whose *on* position is a footgun,
 //! for a behaviour nobody wants, is worse than not having it.
 
+/// A player name for the trainer holding the controller, derived from `GB_MODEL`.
+///
+/// The game allows seven characters ([`MAX_PLAYER_NAME`](crate::pokemon::MAX_PLAYER_NAME)) and a
+/// model id is routinely four times that, so this is a shortening rather than a copy: drop the
+/// vendor prefix and any `:tag`, split on the separators a model id actually uses, then take whole
+/// segments from the front while they fit. Whole segments, because the alternative — truncating the
+/// joined string — turns `gemma-3-12b` into `GEMMA31`, which reads as a version number that does not
+/// exist.
+///
+/// ```text
+/// gpt-5                        → GPT5
+/// gpt-5-mini                   → GPT5      (MINI does not fit, and the family is the point)
+/// google/gemma-3-12b           → GEMMA3
+/// qwen3-30b-a3b                → QWEN3
+/// claude-opus-5                → CLAUDE    (OPUS will not fit, and that is where it stops)
+/// deepseek-r1-distill-qwen-32b → DEEPSEE   (the first segment alone is over, so it is cut)
+/// ```
+///
+/// ⚠️ **Deliberately not asked of the model, though it is the obvious place to.** The name has to be
+/// written before the emulator runs its first instruction — the run starts from a save state that is
+/// already past the game's own name screen, so there is no later moment when the game would accept
+/// one — and a completion there would put a network round trip, a timeout and a retry policy in
+/// front of the first frame of every new run. It would also be one more thing that differs between
+/// two runs of the same configuration.
+pub fn player_name_for(model: &str) -> String {
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    // Ollama and LM Studio both spell a variant as `model:tag`, and the tag is a size or a
+    // quantisation — never the half worth keeping.
+    let bare = bare.split(':').next().unwrap_or(bare);
+
+    let mut name = String::new();
+    for segment in bare.split(['-', '_', '.', ' ']) {
+        let segment: String =
+            segment.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
+        if segment.is_empty() {
+            continue;
+        }
+        // ⚠️ **Stop at the first segment that will not fit; do not skip it and take a later one.**
+        // Skipping looks like it gets more of the name in and actually assembles a different one:
+        // `gpt-4o-2024-08-06` drops the year and picks up the *month*, for `GPT4O08`.
+        if name.len() + segment.len() > crate::pokemon::MAX_PLAYER_NAME {
+            break;
+        }
+        name.push_str(&segment);
+    }
+    if !name.is_empty() {
+        return name;
+    }
+
+    // Nothing fitted, so the first segment is longer than the whole allowance on its own. Cut it —
+    // the alternative is a name that says nothing at all.
+    let flattened: String =
+        bare.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
+    match flattened.is_empty() {
+        // A model id of nothing but punctuation is not a thing, but an empty name is one the game's
+        // own screen refuses, so it cannot be what comes out of here.
+        true => "AI".to_string(),
+        false => flattened.chars().take(crate::pokemon::MAX_PLAYER_NAME).collect(),
+    }
+}
+
 /// Everything the worker and the client need, resolved once at startup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmConfig {
@@ -227,6 +288,42 @@ mod tests {
     }
 
     const MINIMAL: &[(&str, &str)] = &[("OPENAI_API_KEY", "sk-test"), ("GB_MODEL", "gpt-test")];
+
+    /// **Seven characters is the game's limit and a model id is nothing like seven characters**, so
+    /// the whole question is what to throw away. Whole segments from the front, because the family
+    /// and its version are what a viewer recognises — and because truncating the joined string
+    /// instead invents version numbers (`gemma-3-12b` → `GEMMA31`).
+    #[test]
+    fn a_model_becomes_a_name_that_fits_on_the_trainer_card() {
+        for (model, expected) in [
+            ("gpt-5", "GPT5"),
+            // The size and the tier do not fit, and are the half worth losing.
+            ("gpt-5-mini", "GPT5"),
+            ("gpt-4o-2024-08-06", "GPT4O"),
+            ("qwen3-30b-a3b", "QWEN3"),
+            // A vendor prefix is routing, not identity.
+            ("google/gemma-3-12b", "GEMMA3"),
+            // OPUS will not fit after CLAUDE, and the stop is there rather than a skip past it.
+            ("claude-opus-5", "CLAUDE"),
+            // Ollama and LM Studio spell the variant as a tag; it is a quantisation, never a name.
+            ("llama3:70b-instruct-q4_K_M", "LLAMA3"),
+            ("o3", "O3"),
+        ] {
+            assert_eq!(player_name_for(model), expected, "{model}");
+        }
+
+        // The first segment alone is over the allowance, so there is nothing to do but cut it.
+        assert_eq!(player_name_for("deepseek-r1-distill-qwen-32b"), "DEEPSEE");
+
+        // ⚠️ Whatever comes out has to be something the game will take: never empty (its own screen
+        // refuses one) and never longer than the field.
+        for model in ["", "---", "/", "a-very-long-model-name-indeed", "GPT-5", "x".repeat(80).as_str()] {
+            let name = player_name_for(model);
+            assert!(!name.is_empty(), "{model:?} produced nothing");
+            assert!(name.len() <= crate::pokemon::MAX_PLAYER_NAME, "{model:?} produced {name:?}");
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric()), "{model:?} produced {name:?}");
+        }
+    }
 
     #[test]
     fn the_two_required_variables_are_the_only_two_required() {

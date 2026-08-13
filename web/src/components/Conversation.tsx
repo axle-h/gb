@@ -117,13 +117,29 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
                 <button
                   className="line"
                   onClick={() => (thinking ? toggleThought(entry.seq) : toggle(entry.seq))}
-                  title={thinking ? 'What the model thought on its way to this turn' : 'Show the JSON this line was made from'}
+                  title={
+                    thinking
+                      ? 'What the model thought on its way to this turn'
+                      : entry.type === 'tool'
+                        ? 'What was asked and what came back'
+                        : 'Show the JSON this line was made from'
+                  }
                 >
                   {body}
+                  {/* A tool row has something underneath it whether or not it has been opened, and
+                      an affordance is cheaper than discovering that by clicking every row. */}
+                  {entry.type === 'tool' && <span className="disclose">{open ? '▾' : '▸'}</span>}
                 </button>
                 {/* A repeat says nothing new, so it costs three characters rather than a row. */}
                 {entry.count > 1 && <span className="repeat">×{entry.count}</span>}
-                {open && <pre className="raw">{JSON.stringify(entry.raw, null, 2)}</pre>}
+                {/* ⚠️ A tool row opens onto what was *asked and answered*, not onto its own wire
+                    event — that is the question a reader of this log actually has. The raw JSON is
+                    still one toggle away, on the `raw` switch above, which is the operator's view
+                    rather than the viewer's. */}
+                {open && entry.type === 'tool' && <ToolDetail entry={entry} />}
+                {open && (entry.type !== 'tool' || showAllRaw) && (
+                  <pre className="raw">{JSON.stringify(entry.raw, null, 2)}</pre>
+                )}
               </span>
             </div>
           );
@@ -189,16 +205,28 @@ function render(entry: Entry, unfolded: boolean): Rendered {
         modifier: unfolded ? 'unfolded' : '',
       };
     case 'tool':
-      // Arguments are shown, not hidden: `choose_action {"id": "PalletTown:5,6:Warp"}` is the single
-      // most informative line in the whole log, and `read_map {}` costs three characters.
+      // ⚠️ **A sentence, not the wire call.** This row used to be `read_map {}` — the tool's own
+      // identifier and an empty object — which is the log telling a reader what the *protocol* did
+      // rather than what happened. The arguments are not lost: they are one click away, beside the
+      // answer, which is where they are worth reading anyway.
       return {
         gutter: 'tool',
-        body: `${entry.name} ${compact(entry.arguments)}`,
-        title: `turn ${entry.turn}`,
-        modifier: '',
+        body: describeTool(entry),
+        title: `turn ${entry.turn}: ${entry.name}`,
+        // A call the turn layer would not run reads as refused from the moment it appears, without
+        // waiting for the result that says so — `kind` already carries the verdict.
+        modifier: entry.ok === false || entry.kind === 'rejected' ? 'refused' : entry.kind,
       };
     case 'decision':
-      return { gutter: '→', body: entry.summary, title: `turn ${entry.turn}`, modifier: '' };
+      // The model's own sentence when it wrote one, and the agent's account of what it was told to
+      // do underneath it. Its `summary` argument is the only thing it says about a turn that
+      // survives the turn, so it is also the only thing here worth leading with.
+      return {
+        gutter: '→',
+        body: entry.narration ?? entry.summary,
+        title: `turn ${entry.turn}: ${entry.summary}`,
+        modifier: '',
+      };
     case 'cancelled':
       return { gutter: 'dropped', body: entry.reason, title: `turn ${entry.turn}`, modifier: '' };
     case 'compacted': {
@@ -218,6 +246,138 @@ function render(entry: Entry, unfolded: boolean): Rendered {
         modifier: 'compacted',
       };
     }
+  }
+}
+
+/**
+ * One tool call as a sentence a person would say.
+ *
+ * ⚠️ **Named cases, with a fallback that is still readable.** The temptation is a generic
+ * `verb(name) + arguments` renderer; the reason it is a table is that the interesting part differs
+ * per tool — a route read is about *where*, a nickname about *what*, a wait about *how long* — and
+ * a renderer that does not know that produces "use field move {move: cut, ...}", which is the wire
+ * call with the punctuation moved around. Anything unlisted falls through to exactly that, which is
+ * the right answer for a tool this table has not been taught yet.
+ */
+function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
+  const args = parseArguments(entry.arguments);
+  const text = (key: string): string | undefined => {
+    const value = args[key];
+    return typeof value === 'string' && value !== '' ? value : undefined;
+  };
+  switch (entry.name) {
+    case 'read_map':
+      return 'Read the map';
+    case 'read_party':
+      return 'Read the party';
+    case 'read_bag':
+      return 'Read the bag';
+    case 'read_battle':
+      return 'Read the battle';
+    case 'read_route': {
+      const to = text('to');
+      return to ? `Asked the way to ${to}` : 'Asked the way';
+    }
+    case 'screenshot':
+      return 'Looked at the screen';
+    case 'todo_add': {
+      const item = text('text');
+      return item ? `Planned: ${item}` : 'Added to the plan';
+    }
+    case 'todo_complete':
+      return args.id === undefined ? 'Ticked something off' : `Ticked off plan item ${args.id}`;
+    case 'choose_action':
+    case 'choose_battle_action': {
+      const id = text('id');
+      return id ? `Chose ${id}` : 'Chose an action';
+    }
+    case 'use_field_move': {
+      const move = text('move');
+      return move ? `Used ${move}` : 'Used a field move';
+    }
+    case 'press_buttons': {
+      const buttons = Array.isArray(args.buttons) ? args.buttons.join(', ') : undefined;
+      return buttons ? `Pressed ${buttons}` : 'Pressed buttons';
+    }
+    case 'set_nickname': {
+      const name = text('name');
+      // Omitting the argument is the ordinary answer here, not a missing one.
+      return name ? `Named it ${name}` : 'Kept the default name';
+    }
+    case 'buy_item': {
+      const item = text('item');
+      const quantity = typeof args.quantity === 'number' ? ` ×${args.quantity}` : '';
+      return item ? `Bought ${item}${quantity}` : 'Bought nothing';
+    }
+    case 'forget_move':
+      return args.slot === undefined ? 'Declined the new move' : `Forgot the move in slot ${args.slot}`;
+    case 'wait':
+      return args.ticks === undefined ? 'Waited' : `Waited ${args.ticks} ticks`;
+    default: {
+      const rest = compact(entry.arguments);
+      return rest ? `${entry.name} ${rest}` : entry.name;
+    }
+  }
+}
+
+/** The model's arguments, or an empty object — a call whose JSON will not parse is one to show raw. */
+function parseArguments(json: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(json.trim() || '{}');
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * What a tool row reveals when it is opened: what was asked, what came back, and the picture if
+ * there was one.
+ *
+ * ⚠️ **The picture is fetched, not carried.** `imageSeq` addresses it in a small server-side ring —
+ * a map render is a couple of hundred kilobytes — so a page replaying an old backlog gets a 404 and
+ * the caption on its own. `onError` hides the element rather than leaving a broken-image icon,
+ * because "that was a while ago" is not an error worth drawing.
+ */
+function ToolDetail({ entry }: { entry: Extract<Entry, { type: 'tool' }> }) {
+  const args = compact(entry.arguments);
+  return (
+    <div className="tool-detail">
+      {args && (
+        <>
+          <span className="tool-label">asked</span>
+          <pre className="raw">{pretty(entry.arguments)}</pre>
+        </>
+      )}
+      {entry.result !== undefined && (
+        <>
+          <span className="tool-label">{entry.ok === false ? 'refused' : 'answered'}</span>
+          <pre className="raw">{entry.result}</pre>
+        </>
+      )}
+      {entry.result === undefined && <span className="tool-label pending">waiting for an answer…</span>}
+      {entry.imageSeq !== undefined && (
+        <img
+          className="tool-image"
+          src={`/api/tool-image/${entry.imageSeq}/image.png`}
+          alt={`what ${entry.name} answered with`}
+          loading="lazy"
+          onError={(event) => {
+            event.currentTarget.style.display = 'none';
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Arguments as the model sent them, re-indented — this one is read rather than skimmed. */
+function pretty(json: string): string {
+  const trimmed = json.trim();
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return trimmed;
   }
 }
 

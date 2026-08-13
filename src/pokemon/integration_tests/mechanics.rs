@@ -1250,7 +1250,11 @@ fn observation_views_serialise_to_json() {
     // The terrain is a picture now, so what has to survive serialisation is the half of the map a
     // picture cannot carry: names, and coordinates the model can quote back.
     assert!(json["warps"].is_array(), "warps is an array");
-    assert!(json["sprites"].is_array(), "sprites is an array");
+    // ⚠️ `people`, not `sprites`. "Sprite" is the emulator's word for a moving object on a screen
+    // and the model has no screen; it was jargon in the one block of the request that names who is
+    // standing where.
+    assert!(json["people"].is_array(), "people is an array");
+    assert!(json.get("sprites").is_none(), "and nothing is called a sprite");
     assert_eq!(json["height"], state.map.height);
     assert!(json.get("grid").is_none() && json.get("legend").is_none(),
             "the ASCII grid was replaced by the rendered map, not kept beside it");

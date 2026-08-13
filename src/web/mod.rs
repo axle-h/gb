@@ -28,6 +28,7 @@
 //! GET  /api/video                   binary — a keyframe, then block deltas, deflated per connection
 //! GET  /api/badges.png              the eight gym badges, decoded from the cartridge
 //! GET  /api/pokemon/{dex}/front.png one Pokémon's front sprite, decompressed from the cartridge
+//! GET  /api/tool-image/{seq}/image.png  the picture a tool answered with, while it is still held
 //! GET  /api/history?since=          W7 — the transcript from a sequence number, for a fresh page
 //! GET  /api/leaderboard?limit=      the runs that have finished the game, fastest first
 //! POST /api/new-run                 the same reset, for a script; `X-GB-Token`
@@ -48,8 +49,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -182,6 +183,8 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // **W9** — read off before `config` is moved into the worker. The watchdog belongs to
             // the policy (it is what the agent asks how long to wait), not to the turn loop.
             let stuck_timeout = config.stuck_timeout;
+            // Ditto: the trainer is named after whoever is playing, and only a *new* run uses it.
+            let player_name = crate::llm::config::player_name_for(&config.model);
             // **W6b** — the model's own plan lives in the run directory, so it survives both a
             // compaction and a restart.
             let todo = TodoList::open(Some(run.path()));
@@ -190,7 +193,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // The worker outlives this function; it ends when the policy is dropped and its channels
             // close, which happens when the emulator thread stops.
             worker.spawn()?;
-            Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout)))
+            Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout, Some(player_name))))
         }
         #[cfg(not(feature = "llm"))]
         ServePolicy::Llm => unreachable!("rejected above"),
@@ -206,6 +209,9 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             run: Some(Arc::clone(&current)),
             new_runs: Some(Arc::clone(&new_runs)),
             status_interval: status_interval()?,
+            // A resume must keep the trainer it already has; only a game starting from
+            // `START_OF_GAME` is named after whoever is about to play it.
+            fresh_game: matches!(origin, Origin::Fresh),
             ..HostConfig::default()
         },
         Arc::clone(&shutdown),
@@ -302,6 +308,7 @@ fn routes() -> Router<AppState> {
         .route("/api/video", get(video_stream))
         .route("/api/badges.png", get(badges::badges))
         .route("/api/pokemon/{dex}/front.png", get(sprites::front_pic))
+        .route("/api/tool-image/{seq}/image.png", get(tool_image))
         .route("/api/new-run", post(new_run))
         .route("/reset-game", get(reset_game))
         .route("/favicon.png", get(sprites::favicon))
@@ -534,13 +541,14 @@ async fn history(State(state): State<AppState>, Query(query): Query<Since>) -> J
 /// The conversation and status stream. One JSON object per message, exactly the shape W7 appends to
 /// `transcript.jsonl`.
 ///
-/// ⚠️ **It opens with the most recent heartbeat**, because the host only sends one when the status
-/// has actually changed. Subscribe first, then read the latest — [`Published::join_events`], the
-/// same ordering and the same reason as the video keyframe (§5.2). Without it a page opened while
-/// the game is standing still shows an empty status panel until something moves.
+/// ⚠️ **It opens with the most recent heartbeat and the model's current plan**, because the host
+/// only sends either when it has actually changed. Subscribe first, then read the latest —
+/// [`Published::join_events`], the same ordering and the same reason as the video keyframe (§5.2).
+/// Without it a page opened while the game is standing still shows an empty status panel until
+/// something moves, and one opened at any time at all shows no plan until the model next edits it.
 async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let (receiver, latest) = state.published.join_events();
-    let opening = tokio_stream::iter(latest.into_iter().map(sse_event));
+    let (receiver, opening) = state.published.join_events();
+    let opening = tokio_stream::iter(opening.into_iter().map(sse_event));
     let live = BroadcastStream::new(receiver).filter_map(|item| {
         // A lagged client has missed events it cannot recover here; W7's `/api/history?since=` is
         // where it catches up. Dropping the notification is the right call — the alternative is
@@ -548,6 +556,34 @@ async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<
         Some(sse_event(item.ok()?))
     });
     Sse::new(opening.chain(live)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
+}
+
+/// The picture a tool answered with, by the seq of the `tool_result` event that named it.
+///
+/// ⚠️ **A 404 here is ordinary, not an error.** The pictures live in a small ring in
+/// [`Published`](published::Published) — a map render is a couple of hundred kilobytes and the run
+/// draws one most overworld turns — so anything older than the last handful is gone and the page
+/// shows the tool's caption on its own. That is the whole reason the image is fetched rather than
+/// carried on the event: `transcript.jsonl` would otherwise grow by a PNG per read, base64'd, for
+/// the length of the run.
+///
+/// ⚠️ **The path gives the parameter a segment of its own** — `{seq}/image.png`, not `{seq}.png` —
+/// for the reason [`routes`] gives: a static suffix after a parameter is a panic when the router is
+/// built, not a 404 when it is called.
+async fn tool_image(State(state): State<AppState>, Path(seq): Path<u64>) -> Response {
+    match state.published.tool_image(seq) {
+        // Immutable: a seq is never reused within a process, so the one answer this URL has ever had
+        // is the one it will always have.
+        Some(png) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            png.to_vec(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "that picture is no longer held").into_response(),
+    }
 }
 
 fn sse_event(event: published::UiEvent) -> Result<Event, Infallible> {
