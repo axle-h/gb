@@ -276,6 +276,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog; `0` turns it off |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
+| `GB_HARDWARE` | which Game Boy the cartridge runs on: `dmg` (default) or `cgb` |
 | `GB_ADMIN_TOKEN` | enables `/reset-game` and `POST /api/new-run`; unset means both 404 |
 
 ## Deployment

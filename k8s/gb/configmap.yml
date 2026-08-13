@@ -67,3 +67,21 @@ data:
   # The status heartbeat is sampled at this rate and published only on change (2 Hz ≈ 5 kbit/s per
   # viewer; it was 50 at 10 Hz unconditional).
   GB_STATUS_HZ: "2"
+
+  # Which Game Boy the cartridge runs on. Pokémon Red is DMG-only, so `cgb` is *compatibility mode*:
+  # the boot ROM picks a palette from the title checksum and the same picture comes out red-tinted,
+  # exactly as it does on real hardware. The game is unaffected — `full_playthrough` on a CGB ends on
+  # the same tile with the same party, money and bag as on a DMG, because at single speed nothing the
+  # cartridge can observe moves and the RNG stream it feeds does not re-roll.
+  #
+  # ⚠️ **It costs bandwidth.** Six colours rather than four takes the video stream from 2 bits per
+  # pixel to 4: measured 22.9 → 40.8 kbit/s per viewer on the same policy, which is under the 2× the
+  # raw payload doubles by, because deflate is already matching most of the extra bits. The wire
+  # format needed no change at all — `bits_per_pixel` has always been chosen per message.
+  #
+  # ⚠️ Switching this is safe mid-run *now*. Every `state.gbst` on the volume was written by a DMG,
+  # carrying that machine's all-white CGB palette RAM, and restoring it over the boot palette used to
+  # render the whole screen blank while the game played on underneath. `MMU::read_sections`
+  # re-installs the palette after the load; the guard is
+  # `a_dmg_save_state_does_not_blank_a_compatibility_mode_screen`.
+  GB_HARDWARE: "cgb"

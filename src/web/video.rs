@@ -25,8 +25,10 @@
 //! `src/web/video/bench.rs` measured them against four minutes of real play and the answer was that
 //! the cleverness was costing bytes rather than saving them. Two facts did it in:
 //!
-//! - **`gb serve` runs `GameBoy::dmg`, so the screen is four shades and nothing else** — the bench
-//!   asserts it. v1's packed mode therefore spent 4 of its 23 bytes naming a per-block sub-palette
+//! - **`gb serve` runs `GameBoy::dmg` by default, so the screen is four shades** — the bench asserts
+//!   it. (`GB_HARDWARE=cgb` makes it six, and the format carries that by widening `bits_per_pixel`
+//!   to 4 rather than by changing: measured at 1.63× the bytes on real footage, against the 2× it
+//!   costs before deflate.) v1's packed mode therefore spent 4 of its 23 bytes naming a per-block sub-palette
 //!   that was always a permutation of `0,1,2,3`, and another 3 on a block index and a mode tag. The
 //!   payload underneath was 16 bytes. **A third of the stream was describing the encoding rather
 //!   than the picture.**

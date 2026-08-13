@@ -51,8 +51,22 @@ impl TestFixture {
     /// the stall detector, the cycle budget — is identical, so a test that needs to observe what the
     /// agent asks its policy gets the whole harness rather than hand-rolling a `GameBoy` beside it.
     pub fn with_policy(save_state: &[u8], max_game_time: Duration, policy: Box<dyn crate::pokemon::policy::Policy>) -> Self {
-        let mut gb = GameBoy::dmg(roms::POKERED);
+        // `GB_TEST_MODEL=cgb` runs the same fixture on a Game Boy Color, which for this DMG-only
+        // cartridge means compatibility mode. An experiment, not a supported tier: every committed
+        // fixture is a DMG capture, so its `cgb` section overwrites the boot ROM's title-derived
+        // palette with the DMG machine's empty one and the picture comes out uncoloured. Nothing the
+        // agent reads is a colour, so a playthrough still says what it is meant to say — whether the
+        // CGB core plays the game, and how far the re-rolled RNG stream moves the scripted route.
+        let cgb = matches!(std::env::var("GB_TEST_MODEL").as_deref(), Ok("cgb"));
+        let mut gb = if cgb { GameBoy::cgb(roms::POKERED) } else { GameBoy::dmg(roms::POKERED) };
         gb.load_state(save_state).expect("failed to load save state");
+        if cgb {
+            // The load is the part that could quietly undo the switch: a fixture carries a `cart`
+            // section and a `cgb` section written by a DMG machine, so this asserts the machine is
+            // still the one that was asked for rather than trusting it.
+            assert_eq!(gb.core().mmu().color_mode(), crate::model::ColorMode::CgbCompat,
+                "GB_TEST_MODEL=cgb, so the loaded state must still be a CGB in compatibility mode");
+        }
 
         // The agent builds its world graph incrementally as it traverses.
         let steps_at_start = policy.steps_remaining();
@@ -592,5 +606,51 @@ fn bench_emulation_throughput() {
         let game_secs = (fixture.total_cycles.m_cycles() - before.m_cycles()) as f64 / 1_048_576.0;
         println!("[full agent.step]  {game_secs:.1}s game in {wall:.3}s → {:.1}x realtime ({} steps)",
             game_secs / wall, n);
+    }
+}
+
+/// **Experiment (2026-08-13)** — what a committed fixture looks like on a **Game Boy Color**, and
+/// how many distinct colours reach the screen, which is what picks `bits_per_pixel` in
+/// [`crate::web::video`].
+///
+/// ⚠️ **The fixture's vintage decides whether the picture survives the load.** A state captured
+/// before Phase B carries no `cgb` section, so a CGB machine keeps the boot ROM's title-derived
+/// palette and renders in colour. A state captured *after* it carries the DMG machine's CGB palette
+/// RAM — [`crate::cgb_palette::PaletteBank::default`], which is all-ones, i.e. **white** — and
+/// restoring that over the boot palette renders the whole screen blank. Compatibility mode also
+/// refuses palette writes, so it cannot be repaired from outside the MMU; that is what the third
+/// machine below demonstrates by changing nothing.
+#[test]
+#[cfg(feature = "diagnostics")]
+#[ignore = "probe — run with --features diagnostics --ignored --nocapture"]
+fn probe_cgb_screen_colours() {
+    use std::collections::BTreeSet;
+
+    for (label, state) in [
+        ("start-of-game (2026-08-05, pre-Phase-B capture)", &include_bytes!("../data/start-of-game-state.bin")[..]),
+        ("stall-seafoam-current (2026-08-12, newest)", &include_bytes!("../data/stall-seafoam-current.bin")[..]),
+        ("at-celadon (2026-08-05)", &include_bytes!("../data/at-celadon.bin")[..]),
+    ] {
+      for (machine, mut gb) in [
+        ("dmg", GameBoy::dmg(roms::POKERED)),
+        ("cgb as committed", GameBoy::cgb(roms::POKERED)),
+        ("cgb boot palette re-applied", GameBoy::cgb(roms::POKERED)),
+      ] {
+        let reapply = machine.contains("re-applied");
+        gb.load_state(state).expect("load");
+        if reapply {
+            let p = crate::boot_palette::for_cartridge(roms::POKERED);
+            let mmu = gb.core_mut().mmu_mut();
+            mmu.write(0xFF68, 0x80);
+            for byte in p.background { mmu.write(0xFF69, byte); }
+            mmu.write(0xFF6A, 0x80);
+            for byte in p.object0.iter().chain(p.object1.iter()) { mmu.write(0xFF6B, *byte); }
+        }
+        gb.run(MachineCycles::from_duration(Duration::from_secs(2)));
+        let shot = gb.core().mmu().ppu().screenshot();
+        let colours: BTreeSet<[u8; 3]> = shot.pixels().map(|p| p.0).collect();
+        println!("{label:50} {machine:28} mode={:?} {} colours {:02X?}",
+            gb.core().mmu().color_mode(), colours.len(), colours);
+      }
     }
 }

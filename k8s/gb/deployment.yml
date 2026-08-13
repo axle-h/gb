@@ -78,7 +78,7 @@ spec:
           # (see ../README.md). `--new-run` here is the fallback for a process that is not answering,
           # and ⚠️ left in place it would wipe the run on *every* restart, which is why it is not the
           # first thing this comment offers any more.
-          args: ["gb", "serve", "--policy", "llm"]
+          args: ["gb", "serve", "--policy", "random"]
           envFrom:
             - configMapRef:
                 name: gb

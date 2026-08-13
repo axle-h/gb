@@ -52,6 +52,18 @@ it never can; MBC2/MBC5/HuC1 have their own rules again. Same two operations, op
 different answer — and it is what makes blargg's combined `dmg_sound.gb` terminate. `src/mbc.rs`'s
 module docs have the table.
 
+⚠️ **A save state is not tied to the machine that wrote it, and a DMG state in a CGB used to blank
+the screen.** `GB_HARDWARE=cgb` runs the cartridge on a Game Boy Color, which for this DMG-only ROM
+means compatibility mode and the boot ROM's title-derived palette. But every committed fixture and
+every deployed `state.gbst` is a **DMG** capture, and a DMG's CGB palette RAM is
+`PaletteBank::default()` — all-ones, i.e. white — so restoring that section painted the boot palette
+out and rendered every shade white while the game underneath played perfectly. It cannot be repaired
+from outside either: compatibility mode leaves `FF68`-`FF6B` unmapped, so the palette is a
+**constant** rather than initial state. `MMU::read_sections` therefore re-installs it last, after the
+`cgb` section has been read; `a_dmg_save_state_does_not_blank_a_compatibility_mode_screen` is the
+guard. ⚠️ Fixture vintage is what made this look intermittent — states captured before the `cgb`
+section existed carry no palette to restore and were always fine.
+
 ⚠️ **The RTC's time source is injectable and anything replayable must pin it**
 (`MMU::set_rtc_time_source`) — the default is the host clock, so an RTC cartridge under a
 fixture-driven test would fail only sometimes. Nothing committed has an RTC: `pokered.gbc` is `0x13`,
@@ -468,7 +480,15 @@ kbit/s, and each layer earned its place against a measured alternative:
   `-crf 28`, which visibly mangles four-shade pixel art. A macroblock DCT has nothing to offer a
   screen whose pixels take four values.
 
-⚠️ **`gb serve` runs `GameBoy::dmg`, so the screen is four shades — the format is built on it.** v1
+⚠️ **`gb serve` runs `GameBoy::dmg` unless `GB_HARDWARE=cgb`, so the screen is four shades — the
+format is built on it.** On a CGB it is six (compatibility mode: BG and OBJ1 share the red ramp,
+OBJ0 is the green one, white and black are common to both), which widens `bits_per_pixel` from 2 to
+4 and measured **1.63× on the wire** — less than the 2× it costs before deflate, because the extra
+bits repeat what the compressor is already matching. Nothing in the format changed to allow it: the
+width has always been per message. ⚠️ **Non-power-of-two widths are not the saving they look like** —
+3bpp for six colours is 25% fewer raw bits than 4bpp but only **13%** fewer on the wire, because an
+unaligned bitstream shifts an identical tile payload into eight phases and LZ77 stops matching it.
+Same mechanism as base64. v1
 spent 4 bytes of every 23 on a per-block sub-palette that was always a permutation of `0,1,2,3`, plus
 a mode tag and a block index, to carry a 16-byte payload. v2 has one index width for the whole
 message (`bits_per_pixel`, 1/2/4/8, wide enough for the palette *after* this message's new entries)
