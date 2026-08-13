@@ -325,7 +325,14 @@ impl MMU {
             }
         }
         self.ppu.read_sections(reader)?;
-        self.audio.read_sections(reader)
+        self.audio.read_sections(reader)?;
+        // ⚠️ **Last, and after the `cgb` section has been read**, so it overwrites whatever palette
+        // RAM the state carried. See [`MMU::install_compat_boot_palette`]: in compatibility mode the
+        // palette is the boot ROM's and the cartridge cannot change it, so a state written by a
+        // *DMG* — which is every fixture in this repo and every `state.gbst` on a deployed volume —
+        // would otherwise restore an all-white palette over it and blank the screen.
+        self.install_compat_boot_palette();
+        Ok(())
     }
 
     pub fn high_ram(&self) -> &[u8] {
@@ -428,6 +435,21 @@ impl MMU {
         self.ppu.palette_mut().object0_mut().set_from_byte(0xFF);
         self.ppu.palette_mut().object1_mut().set_from_byte(0xFF);
 
+        self.install_compat_boot_palette();
+    }
+
+    /// The boot ROM's title-derived palette, installed into CGB palette RAM. A no-op on anything
+    /// that is not a DMG cartridge in a Game Boy Color.
+    ///
+    /// ⚠️ **In compatibility mode this is not initial state, it is a constant.** `cgb_features` is
+    /// false there, so `FF68`-`FF6B` are unmapped and the cartridge can never write a palette — the
+    /// boot ROM's choice is what the machine displays for its whole life. That is why
+    /// [`MMU::read_sections`] re-installs it rather than trusting what a save state carried: a state
+    /// captured on a **DMG** carries that machine's CGB palette RAM, which is
+    /// [`crate::cgb_palette::PaletteBank::default`] — all-ones, i.e. **white** — and restoring it
+    /// paints the boot palette out. The screen then renders every shade as white, which looks like a
+    /// blank display rather than like a save-state bug.
+    fn install_compat_boot_palette(&mut self) {
         if self.color_mode != ColorMode::CgbCompat {
             return;
         }
@@ -1621,6 +1643,36 @@ mod tests {
             mmu.write(0xFF68, 0x80);
             mmu.write(0xFF69, 0x00);
             assert_eq!(&mmu.ppu().cgb_background_palettes().data()[..8], &expected.background);
+        }
+
+        /// ⚠️ **A save state written by a DMG must not blank a CGB's screen.**
+        ///
+        /// Every committed fixture and every `state.gbst` on a deployed volume is a DMG capture, and
+        /// a DMG's CGB palette RAM is [`crate::cgb_palette::PaletteBank::default`] — all-ones, which
+        /// is **white**. Restoring that section into a compatibility-mode machine used to paint the
+        /// boot ROM's palette out, so the whole screen rendered white while the game underneath it
+        /// played perfectly: found in a CGB `full_playthrough` (2026-08-13), where the fixtures
+        /// captured before the `cgb` section existed rendered in colour and the ones captured after
+        /// it rendered blank. There is nothing to repair it from outside, either — compatibility
+        /// mode refuses palette writes, which is the test above.
+        #[test]
+        fn a_dmg_save_state_does_not_blank_a_compatibility_mode_screen() {
+            let expected = crate::boot_palette::for_cartridge(crate::pokemon::roms::POKERED);
+
+            let dmg = MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+            assert_eq!(dmg.ppu().cgb_background_palettes(), &crate::cgb_palette::PaletteBank::default(),
+                "the test is vacuous unless the DMG really does carry a blank palette to restore");
+            let mut writer = crate::savestate::SectionWriter::new();
+            dmg.write_sections(&mut writer).unwrap();
+            let state = writer.finish();
+
+            let mut compat = compat();
+            compat.read_sections(&crate::savestate::SectionReader::parse(&state).unwrap()).unwrap();
+
+            assert_eq!(&compat.ppu().cgb_background_palettes().data()[..8], &expected.background);
+            assert_eq!(&compat.ppu().cgb_object_palettes().data()[..8], &expected.object0);
+            assert_eq!(&compat.ppu().cgb_object_palettes().data()[8..16], &expected.object1);
+            assert_eq!(compat.ppu().object_priority_register() & 0x01, 1);
         }
 
         /// A DMG never gets a boot palette, whatever its cartridge title says.

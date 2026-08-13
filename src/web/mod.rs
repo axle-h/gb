@@ -61,6 +61,7 @@ use tokio_stream::{Stream, StreamExt};
 use crate::cli::ServePolicy;
 use crate::game_boy::GameBoy;
 use crate::host::{EmulatorHost, HostConfig, NewRunRequests};
+use crate::model::Model;
 use crate::pokemon::policy::RandomPolicy;
 use crate::run::{CurrentRun, Origin, RunDir, transcript};
 use published::Published;
@@ -209,6 +210,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             run: Some(Arc::clone(&current)),
             new_runs: Some(Arc::clone(&new_runs)),
             status_interval: status_interval()?,
+            model: hardware_model(std::env::var("GB_HARDWARE").ok().as_deref())?,
             // A resume must keep the trainer it already has; only a game starting from
             // `START_OF_GAME` is named after whoever is about to play it.
             fresh_game: matches!(origin, Origin::Fresh),
@@ -253,6 +255,28 @@ fn status_interval() -> Result<Duration, String> {
     match value.trim().parse::<f64>() {
         Ok(hz) if (0.1..=60.0).contains(&hz) => Ok(Duration::from_secs_f64(1.0 / hz)),
         _ => Err(format!("`GB_STATUS_HZ={value}` is not a rate between 0.1 and 60")),
+    }
+}
+
+/// Which Game Boy the cartridge runs on, from `GB_HARDWARE`. **`dmg` unless asked otherwise.**
+///
+/// `cgb` runs Pokémon Red the way a real Game Boy Color does: it is a DMG-only cartridge, so the
+/// boot ROM colours it from the title checksum and the same picture comes out red-tinted. The game
+/// itself is unaffected — `full_playthrough` ends on the same tile with the same party either way.
+///
+/// ⚠️ **The cost is on the wire, not in the emulator.** Six colours rather than four takes
+/// [`crate::web::video`] from 2 bits per pixel to 4, measured at **1.63×** the bytes against real
+/// footage. The format needed no change to carry it: `bits_per_pixel` has always been per message.
+///
+/// Unset or blank is the default rather than an error, because that is the shape a placeholder
+/// value takes in a Deployment. Anything else is refused: a container that quietly ignored
+/// `GB_HARDWARE=color` would serve the wrong picture and say nothing.
+fn hardware_model(value: Option<&str>) -> Result<Model, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(HostConfig::default().model),
+        Some(value) if value.eq_ignore_ascii_case("dmg") => Ok(Model::Dmg),
+        Some(value) if value.eq_ignore_ascii_case("cgb") => Ok(Model::Cgb),
+        Some(value) => Err(format!("`GB_HARDWARE={value}` is not `dmg` or `cgb`")),
     }
 }
 
@@ -709,6 +733,24 @@ impl VideoStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GB_HARDWARE` picks the machine, and **the default is the DMG** — the whole test suite and
+    /// every committed fixture were captured on one, and the video bench asserts a four-shade screen.
+    #[test]
+    fn the_hardware_variable_defaults_to_a_dmg_and_refuses_anything_it_does_not_know() {
+        assert_eq!(hardware_model(None), Ok(Model::Dmg));
+        // Blank counts as unset, for the reason `GB_ADMIN_TOKEN` does: that is the shape a
+        // placeholder value takes in a Deployment.
+        assert_eq!(hardware_model(Some("   ")), Ok(Model::Dmg));
+        assert_eq!(hardware_model(Some("dmg")), Ok(Model::Dmg));
+        assert_eq!(hardware_model(Some("cgb")), Ok(Model::Cgb));
+        assert_eq!(hardware_model(Some(" CGB ")), Ok(Model::Cgb), "trimmed and case-insensitive");
+
+        // ⚠️ Refused rather than ignored: a container that silently served the wrong picture would
+        // be diagnosed by looking at the video codec, which is the wrong place entirely.
+        let error = hardware_model(Some("color")).unwrap_err();
+        assert!(error.contains("GB_HARDWARE") && error.contains("color"), "{error}");
+    }
 
     /// The transport contract, end to end without a socket: what `/api/video` writes must inflate as
     /// **one** deflate stream and split back into exactly the messages that went in.

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::cycles::MachineCycles;
 use crate::game_boy::GameBoy;
+use crate::model::Model;
 use crate::pokemon::agent::{AgentEvent, PokemonAgent};
 use crate::pokemon::map_metadata::MapMetadataCache;
 use crate::pokemon::policy::Policy;
@@ -64,6 +65,25 @@ pub struct HostConfig {
     /// `POST /api/new-run`'s mailbox. `None` — the default, and every test — means the endpoint has
     /// nothing to talk to and the emulator never checks.
     pub new_runs: Option<Arc<NewRunRequests>>,
+    /// Which Game Boy the cartridge runs on, from `GB_HARDWARE`. **[`Model::Dmg`] by default.**
+    ///
+    /// [`Model::Cgb`] puts Pokémon Red in compatibility mode, where the boot ROM's title-derived
+    /// palette colours the same picture (see [`crate::boot_palette`]) — the red tint a real Game Boy
+    /// Color gives it. The game plays identically: `full_playthrough` on a CGB ends on the same tile
+    /// with the same party, the same money and the same bag as on a DMG, because at single speed
+    /// nothing the cartridge can observe moves and the RNG stream it feeds does not re-roll.
+    ///
+    /// ⚠️ **It costs bandwidth, and the video format absorbs it without a change.** Six distinct
+    /// colours rather than four widens [`crate::web::video`]'s `bits_per_pixel` from 2 to 4, which
+    /// measured **1.63× on the wire** against the same footage — well under the 2× it costs before
+    /// deflate, because the extra bits are mostly repeats of what the compressor is already
+    /// matching.
+    ///
+    /// ⚠️ **A state is not tied to the machine that wrote it, and this is what makes that safe**:
+    /// every fixture and every deployed `state.gbst` is a DMG capture carrying a DMG's all-white CGB
+    /// palette RAM, and [`crate::mmu::MMU::read_sections`] re-installs the boot palette over it. Without
+    /// that, switching this to `Cgb` renders every resumed run as a blank white screen.
+    pub model: Model,
     /// Whether the state this host is starting from is a **new game** rather than a resumed one.
     ///
     /// The only thing it decides is whether the player is renamed from the policy
@@ -141,6 +161,9 @@ impl Default for HostConfig {
             // Every test loads a fixture of a game already in progress, so the default is the one
             // that leaves the trainer's name alone.
             fresh_game: false,
+            // ⚠️ **The DMG is the default and the tests depend on it.** `web::video::bench` asserts
+            // a four-shade screen, and every fixture in the suite was captured on one.
+            model: Model::Dmg,
         }
     }
 }
@@ -199,16 +222,17 @@ impl EmulatorHost {
     /// Build a host running `policy` from `save_state`.
     ///
     /// The state is a **DMG** save — every committed fixture is, including the one `gb serve` starts
-    /// from — so the emulator is built as a DMG to match. Colour is reachable through the API (see
-    /// `CLAUDE.md`) but a CGB emulator restoring a DMG snapshot is not a combination anything has
-    /// ever exercised, and the video path is hard enough to debug without it.
+    /// from — but the machine it is restored into is [`HostConfig::model`]'s, which `GB_HARDWARE`
+    /// chooses. A DMG snapshot in a Game Boy Color is a supported combination now rather than an
+    /// untried one: `MMU::read_sections` re-installs the compatibility palette the state cannot
+    /// carry, and `full_playthrough` passes on both.
     pub fn new(
         save_state: &[u8],
         policy: Box<dyn Policy>,
         published: Arc<Published>,
         config: HostConfig,
     ) -> Result<Self, String> {
-        let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+        let mut gb = GameBoy::new(crate::pokemon::roms::POKERED, config.model);
         gb.load_state(save_state).map_err(|e| format!("could not load the starting state: {e}"))?;
         // ⚠️ **§12's note, left here because this is where it will bite.** `Audio::set_output_sample_rate`
         // is not serialised, so anything that loads a state has to re-apply it — see the `F9` handler
@@ -572,7 +596,7 @@ impl EmulatorHost {
         let run = current.start_new()?;
         let run_id = run.run_id();
 
-        self.gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+        self.gb = GameBoy::new(crate::pokemon::roms::POKERED, self.config.model);
         self.gb
             .load_state(crate::pokemon::data::START_OF_GAME)
             .map_err(|e| format!("could not load the start-of-game state: {e}"))?;
