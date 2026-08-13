@@ -22,11 +22,12 @@ export function App() {
 
   // ⚠️ **The tab is a third audience, and it is the one that is read while the page is not.** A
   // livestream lives in a background tab for hours, where the title is the whole of the UI, so it
-  // says who is playing rather than what the site is called. `index.html` still ships a title for
-  // the moment before the first heartbeat lands.
+  // says who is playing rather than what the site is called — and under a policy with nobody to
+  // name, how it is being played. `index.html` still ships a title for the moment before the first
+  // heartbeat lands.
   useEffect(() => {
-    document.title = player ? `${player} plays Pokémon Red` : 'Pokémon Red';
-  }, [player]);
+    document.title = describeTitle(player, status?.policy ?? null);
+  }, [player, status?.policy]);
 
   return (
     <div className="app">
@@ -104,6 +105,30 @@ function describeUsage(usage: UsageView): string {
  * What the run is doing, in the fewest words that still distinguish the cases. `playing` is the
  * quiet one and reads as such; everything else is something a viewer might want to act on.
  */
+/**
+ * The tab, which is a sentence rather than a label — see the `useEffect` that sets it.
+ *
+ * A model plays under its **full** `GB_MODEL`, not the seven characters the trainer card had to be
+ * shortened to: the tab has room, and `gemma-3-12b` and `gemma-3-27b` are the same `GEMMA3` on the
+ * card. Every other policy has no model to name, so it says how the game is being played instead —
+ * `Pokémon Red` alone reads as a fan site rather than as a run of one.
+ */
+function describeTitle(player: string | null, policy: string | null): string {
+  if (player) return `${player} plays Pokémon Red`;
+  switch (policy) {
+    case 'random':
+      return 'Randomly playing Pokémon Red';
+    case 'console':
+      return 'Playing Pokémon Red by hand';
+    case 'scripted':
+      return 'Scripted playthrough of Pokémon Red';
+    // `llm` with no model cannot happen (the model is what the policy is built from), and an
+    // unknown policy is a build newer than this page. Both want the plain name.
+    default:
+      return 'Pokémon Red';
+  }
+}
+
 function describeRun(run: RunStatus): string {
   switch (run.state) {
     case 'booting':
