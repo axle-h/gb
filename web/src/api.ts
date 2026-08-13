@@ -254,6 +254,25 @@ export type Entry = EntryBody & {
 export type Connection = 'connecting' | 'live' | 'reconnecting';
 
 /**
+ * How long either live stream may say nothing before it is assumed dead and rebuilt.
+ *
+ * ⚠️ **A connection that dies silently reports nothing at all, so nothing that waits for an error
+ * will ever recover.** Both retry loops here are error-driven, and both are right about the cases
+ * that produce one — the server closing, a refused connection, a restart. A *network* going away is
+ * not one of those: no FIN and no RST arrive, the socket stays open as far as the browser is
+ * concerned, and a stream we only ever read from sends nothing that could time out. `onerror` never
+ * fires, a `fetch` body simply never yields again, and the page freezes on its last frame still
+ * claiming to be live. That is the failure this constant exists for, and it is only detectable as
+ * silence.
+ *
+ * 4× the server's `KEEP_ALIVE` (`src/web/mod.rs`, 2 s), which **both** routes send unconditionally —
+ * `/api/events` as a real status heartbeat and `/api/video` as an empty frame. So silence this long
+ * means the connection, not an idle game. The margin is for a stalled tokio task, a long GC and a
+ * throttled background tab; overshooting costs a late reconnect, undershooting costs a needless one.
+ */
+export const STALE_MS = 8000;
+
+/**
  * `run::hall_of_fame::Completion` — one run that finished the game, as `/api/leaderboard` returns it.
  *
  * The rows arrive already ranked (fastest `playtime_seconds` first, a maxed clock last), so nothing
