@@ -44,6 +44,36 @@ const IDLE_SLEEP: Duration = Duration::from_millis(1);
 /// reason. Better to drop the time.
 const MAX_CATCHUP: Duration = Duration::from_millis(250);
 
+/// The emulator thread's stack.
+///
+/// ⚠️ **The default 2 MiB is not enough to *construct* the machine in a debug build**, and the
+/// failure is an abort inside `Core::try_new` before a single cycle is emulated — a stack overflow,
+/// so no panic message, no backtrace by default, and nothing that points at a cause. It looks like
+/// the emulator is broken; it is the build profile.
+///
+/// The machine is large by value (`MMU` 142 KiB, `Core` and `GameBoy` 142 KiB, `PPU` 107 KiB,
+/// `EmulatorHost` 143 KiB) and the construction chain moves it four times. Optimised, every one of
+/// those moves is elided; unoptimised, each intermediate gets a slot of its own, which the stack
+/// probes measure as:
+///
+/// | frame | debug | release |
+/// |---|---|---|
+/// | `EmulatorHost::new` | 568 KiB | 424 KiB |
+/// | `GameBoy::new` | 140 KiB | elided |
+/// | `Core::new` | 140 KiB | elided |
+/// | `Core::try_new` | 848 KiB | 280 KiB |
+/// | on the way down | **~1.7 MiB** | ~0.7 MiB |
+///
+/// So release has always fitted with room to spare and debug has always been just over. ⚠️ **This
+/// costs release nothing**: a thread stack is reserved address space, and only the pages actually
+/// touched are ever committed — so raising the number does not raise the process's footprint by a
+/// byte. It buys `cargo run` behaving the same way as `cargo run --release`, which is worth more
+/// than the tidiness of leaving the default alone.
+///
+/// ⚠️ Note this is the *construction* peak, not a running one: nothing in `tick` comes close, so
+/// this is not a ceiling that ordinary work is growing towards.
+const EMULATOR_STACK: usize = 8 * 1024 * 1024;
+
 pub struct HostConfig {
     /// Emulation speed as a multiple of real time. 1.0 for a livestream; the tests use a large
     /// number so a bounded run covers real game time in a fraction of the wall clock.
@@ -343,6 +373,7 @@ impl EmulatorHost {
         let obituary = Obituary(Arc::clone(&published));
         let handle = std::thread::Builder::new()
             .name("emulator".to_string())
+            .stack_size(EMULATOR_STACK)
             .spawn(move || {
                 let _obituary = obituary;
                 let mut host = match Self::new(&save_state, policy(), published, config) {

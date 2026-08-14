@@ -477,6 +477,15 @@ view! {
     /// The cheap subset the web UI polls at 10 Hz. Everything but the clock is already in
     /// `GameState`, so this costs one clone of a few small fields and three byte reads.
     pub struct StatusView {
+        /// The name on the save, which is whoever the run was started for — `GB_MODEL` shortened to
+        /// the seven characters Gen 1 allows, or `HUMAN`, or a random draw. Not the same thing as
+        /// the header's `model`: a resume keeps the name it was given, so a process restarted under
+        /// a different `GB_MODEL` shows one of each, and that difference is worth being able to see.
+        pub trainer: String,
+        /// `wPlayerID`. Sent as the number and formatted by the client, because the game itself
+        /// prints it five digits wide with leading zeroes (`PrintNumber`, `LEADING_ZEROES | 2, 5`)
+        /// and that is what a player recognises as their ID.
+        pub trainer_id: u16,
         pub map: String,
         pub position: Point,
         pub mode: String,
@@ -492,6 +501,8 @@ view! {
 
 pub fn status(state: &GameState, api: &PokemonApi<'_>) -> StatusView {
     StatusView {
+        trainer: state.name.to_default_string(),
+        trainer_id: state.player_id,
         map: format!("{}", state.map.map),
         position: state.map.player_position.into(),
         mode: format!("{:?}", state.mode),
