@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import type { Status } from '../api';
 
 /** Where the player is, what they have, and how the party is holding up. */
-export function StatusPanel({ status }: { status: Status | null }) {
+export function StatusPanel({ status, speed }: { status: Status | null; speed: number | null }) {
   const game = status?.game ?? null;
   const badges = game?.badges ?? [];
 
@@ -93,20 +93,33 @@ export function StatusPanel({ status }: { status: Status | null }) {
         <dt>agent</dt>
         <dd title={status?.agent_state ?? undefined}>{status?.agent_state ?? '—'}</dd>
         <dt className="speed">speed</dt>
-        <dd className="speed">{status ? describeSpeed(status) : '—'}</dd>
+        <dd className="speed">{status ? describeSpeed(status, speed) : '—'}</dd>
       </dl>
     </div>
   );
 }
 
 /**
- * The speed the emulator is *achieving* against the speed it is targeting. A livestream targets 1.0×,
- * so anything below it is the host failing to keep up — which is worth being able to see.
+ * The speed the emulator is achieving *now* against the speed it is targeting. A livestream targets
+ * 1.0×, so anything below it is the host failing to keep up — which is worth being able to see.
+ *
+ * ⚠️ **`speed` is measured between heartbeats and must not go back to `emulated_ms / wall_ms`**,
+ * which is what this was. That ratio is the whole run's average, and the host deliberately drops
+ * emulated time whenever an iteration overruns (`host::MAX_CATCHUP`) — so a single busy startup is
+ * subtracted from it for ever and it can only approach the true speed from below, never reach it.
+ * A host measured at its 1.0007× ceiling read 0.95× here for as long as anyone watched, which said
+ * "this server cannot run the game at full speed" about a server doing exactly that. What that ratio
+ * was really reporting is `dropped_ms`, now shown as itself: a number that appears once and then
+ * stops moving is time lost and recovered from, and is a different thing from being behind now.
  */
-function describeSpeed(status: Status): string {
-  const achieved = status.wall_ms > 0 ? status.emulated_ms / status.wall_ms : 0;
+function describeSpeed(status: Status, speed: number | null): string {
   const target = status.target_speed === 1 ? 'realtime' : `target ${status.target_speed}×`;
-  return `${achieved.toFixed(2)}× ${target} · ${formatDuration(status.emulated_ms)} played`;
+  // `null` only until the first window closes, or for one heartbeat after a new run resets both
+  // counters. Reporting the played time alone beats reporting a rate nothing has measured yet.
+  const achieved = speed === null ? '—' : `${speed.toFixed(2)}×`;
+  const dropped =
+    status.dropped_ms > 0 ? ` · ${formatDuration(status.dropped_ms)} dropped` : '';
+  return `${achieved} ${target} · ${formatDuration(status.emulated_ms)} played${dropped}`;
 }
 
 /**

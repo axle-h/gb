@@ -269,11 +269,22 @@ pub struct UsageView {
 /// diagnose than one that arrives saying it could not read the game.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatusSnapshot {
-    /// Wall-clock milliseconds since the host started.
+    /// Wall-clock milliseconds since the **current run** started being played by this process, minus
+    /// whatever it has spent parked on a spent quota.
     pub wall_ms: u64,
-    /// Emulated milliseconds since the host started. The ratio of the two is the speed the emulator
-    /// is actually achieving, as against the speed it is targeting.
+    /// Emulated milliseconds over that same span.
+    ///
+    /// ⚠️ **The ratio of the two is a lifetime average and is not the speed the emulator is
+    /// achieving** — which is what this said, and what the page used to render. The catch-up clamp
+    /// drops time deliberately (`host::MAX_CATCHUP`), so one busy startup subtracts from that ratio
+    /// for the rest of the run and it converges towards the true speed without ever reaching it: a
+    /// host measured at its 1.0007× ceiling displayed 0.95×. The page derives the rate from the
+    /// difference between consecutive heartbeats instead; `dropped_ms` below is what the ratio was
+    /// really reporting, stated outright.
     pub emulated_ms: u64,
+    /// Emulated milliseconds the catch-up clamp has discarded on this run. Zero on a host that has
+    /// kept up throughout; a one-off number is a stall that has already been recovered from.
+    pub dropped_ms: u64,
     pub target_speed: f64,
     /// `"random"` or `"llm"`.
     pub policy: &'static str,
@@ -306,10 +317,24 @@ impl StatusSnapshot {
     /// `frame_seq` is excluded too. It advances at 30 Hz whenever *anything* on screen moves, which
     /// is most of the time, and nothing in the UI renders it; leaving it in would mean the picture
     /// moving forced a status resend, which is precisely the traffic this is here to remove.
+    /// `dropped_ms` **is** compared, unlike the two clocks beside it. It is monotone and stands still
+    /// on a host that is keeping up, so in a healthy run it forces no heartbeat at all; the moment it
+    /// moves is the moment worth telling a viewer about.
     pub fn says_the_same_as(&self, previous: &Self) -> bool {
-        let Self { wall_ms: _, emulated_ms: _, frame_seq: _, target_speed, policy, model, agent_state, game, run } =
-            self;
-        target_speed == &previous.target_speed
+        let Self {
+            wall_ms: _,
+            emulated_ms: _,
+            frame_seq: _,
+            dropped_ms,
+            target_speed,
+            policy,
+            model,
+            agent_state,
+            game,
+            run,
+        } = self;
+        dropped_ms == &previous.dropped_ms
+            && target_speed == &previous.target_speed
             && policy == &previous.policy
             && model == &previous.model
             && agent_state == &previous.agent_state
@@ -831,6 +856,7 @@ mod tests {
         StatusSnapshot {
             wall_ms,
             emulated_ms: wall_ms,
+            dropped_ms: 0,
             target_speed: 1.0,
             policy: "llm",
             model: Some("gpt-5".to_string()),
@@ -851,6 +877,21 @@ mod tests {
         let mut moved = snapshot("wait", 100);
         moved.run = RunStatus::Streaming;
         assert!(!moved.says_the_same_as(&snapshot("wait", 100)), "the run status is state, not clock");
+
+        // ⚠️ `dropped_ms` sits beside the two clocks and is the opposite of them. They move on every
+        // sample, so comparing them would mean nothing was ever equal and the suppression would
+        // silently never fire; this one stands still on a host that is keeping up, so it costs
+        // nothing — and the moment it moves is the moment a viewer wants a heartbeat.
+        let mut behind = snapshot("wait", 100);
+        behind.dropped_ms = 400;
+        assert!(
+            !behind.says_the_same_as(&snapshot("wait", 100)),
+            "time the host dropped is news, not a clock",
+        );
+        assert!(
+            behind.says_the_same_as(&StatusSnapshot { dropped_ms: 400, ..snapshot("wait", 9_000) }),
+            "and having dropped the same amount a while ago is not news again",
+        );
     }
 
     /// ⚠️ The other half of send-on-change: a page that opens while nothing is happening must not

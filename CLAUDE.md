@@ -287,8 +287,44 @@ heartbeat** — `Published::join_events`, subscribe-then-read, the same handshak
 — or a page opened during a quiet stretch shows an empty panel. ⚠️ Anything *added* to the snapshot
 has to be added to `says_the_same_as`'s destructuring **and** compared there: the pattern is
 exhaustive, so a new field is a compile error, but binding it and not comparing it is not — and a
-change nobody compares is a change nobody is told about. `model` (who is playing, for the page's
-title) is the newest one.
+change nobody compares is a change nobody is told about. `dropped_ms` is the newest one, and is the
+counter-example to the exclusion above: it is a clock and it *is* compared, because it stands still
+on a host that is keeping up, so it forces no heartbeat in a healthy run and the moment it moves is
+the moment worth telling a viewer about.
+
+⚠️ **A lifetime average is not a rate, and `emulated_ms / wall_ms` is the average.** The page's speed
+line was that ratio, and it read below 1× for ever on a host running at full speed. Two mechanisms,
+both permanent, neither recoverable — an average can only ever converge on the truth from below:
+
+- **`MAX_CATCHUP` drops emulated time on purpose** (`host.rs`, and its own comment says "Better to
+  drop the time"), so any iteration that overruns 250 ms — a busy container start, a long
+  checkpoint, a descheduled process — is subtracted from the numerator for the rest of the run. The
+  deployed run measured a **14.85 s** startup debt it was still carrying five minutes later, against
+  an instantaneous speed of exactly 1×.
+- ⚠️ **`wall_ms` was measured from a clock stamped at construction while `emulated` is zeroed by
+  `start_new_run`.** Pairing a counter that resets with one that does not meant a run started in a
+  process that had been up for hours opened by reporting its first seconds against those hours: the
+  panel read near-0× after every `/reset-game` and Hall of Fame swap and crept up for hours.
+  `progress()` had always used the correctly-paired `run_started`; the heartbeat now does too, and
+  the construction clock is gone. (The comment that justified keeping it claimed it was what
+  `/api/healthz` reports as uptime. It never was — that is `state.started` on the HTTP state.)
+
+⚠️ **The tell that it was accounting and not the emulator is that the deficit was *constant*.** Two
+`/api/events` samples 90 s apart put `wall_ms − emulated_ms` at 14908 ms and 14845 ms — shrinking by
+0.0704 ms/s, which is `MachineCycles::to_duration` truncating 953.674 ns to 953: the loop spends
+953 ns of wall clock per m-cycle and reports them back at the exact rate, so **1.0007× is the ceiling
+and a healthy host reads exactly that**. A genuinely slow host shows a *growing* gap. `dropped_ms` on
+the heartbeat now says it outright, and the page derives speed from the difference between
+consecutive heartbeats (`useEventStream`'s `sampleSpeed`, a 500 ms window because at `GB_STATUS_HZ`'s
+default two samples can be 100 ms apart and `ahead_by_cycles` makes a window that short meaningless).
+⚠️ **A park needs no case in that and must not be given one**: the host stops the emulator *and*
+subtracts the wait from `wall_ms`, so both counters freeze, no window closes, and the last live
+reading is held under the PAUSED plate — where a `dw > 0` guard would report `0.00×`.
+
+⚠️ **`RunProgress::wall_ms` was the same bug's other half**: the field doc said `paused_total` "is
+subtracted from the `wall_ms` this run reports" and it was true of the heartbeat and false of
+`progress()`, which is what `meta.json` and `hall-of-fame/ledger.jsonl` record — so a run parked
+overnight on a spent quota wrote the whole night down as play. Both paths subtract it now.
 
 ⚠️ **Send-on-change needs a cell per thing sent, and the plan was the one without.** `join_events`
 opened with the heartbeat alone, so the model's plan — published only when it *changes*, which can be

@@ -76,8 +76,18 @@ export type RunStatus =
 
 /** `published::StatusSnapshot` — the 10 Hz heartbeat. */
 export interface Status {
+  /** Since the **current run** started being played by this process, less any time it spent parked. */
   wall_ms: number;
+  /**
+   * Emulated milliseconds over that same span.
+   *
+   * ⚠️ **Not a speed when divided by `wall_ms`** — see `EventStream.speed`, which measures the rate
+   * between two of these instead. The host discards emulated time on purpose whenever an iteration
+   * overruns, so that ratio only ever converges on the truth from below.
+   */
   emulated_ms: number;
+  /** How much emulated time the host has discarded on this run. Zero when it has kept up throughout. */
+  dropped_ms: number;
   target_speed: number;
   /** `"random"` or `"llm"`. */
   policy: string;

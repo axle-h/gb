@@ -78,6 +78,18 @@ export interface EventStream {
   entries: Entry[];
   connection: Connection;
   usage: UsageView | null;
+  /**
+   * How fast the emulator is running against real time **right now**, smoothed — or `null` until the
+   * first window has closed.
+   *
+   * ⚠️ **Derived from the difference between two heartbeats, never from `emulated_ms / wall_ms`.**
+   * That ratio is a lifetime average, and the host drops emulated time on purpose whenever an
+   * iteration overruns (`host::MAX_CATCHUP`), so a single busy startup is subtracted from it for the
+   * rest of the run. A host measured at its 1.0007× ceiling reported 0.95× that way, and could only
+   * ever converge on the truth from below. What was really being shown is `status.dropped_ms`, which
+   * says it in the units it happened in.
+   */
+  speed: number | null;
   /** W6. From the transition event, which is instant; the heartbeat's copy is the late-joiner path. */
   run: RunStatus;
   /**
@@ -310,6 +322,9 @@ export function useEventStream(): EventStream {
   const [usage, setUsage] = useState<UsageView | null>(null);
   const [run, setRun] = useState<RunStatus>({ state: 'booting' });
   const [plan, setPlan] = useState<TodoView[]>([]);
+  const [speed, setSpeed] = useState<number | null>(null);
+  // The heartbeat the current speed window is measured from — see `SPEED_WINDOW_MS`.
+  const anchor = useRef<{ wall: number; emulated: number } | null>(null);
   // Batched between animation frames: a burst of dialogue is many events in one tick, and a
   // streaming reply is one per token — each would otherwise be its own render.
   const pending = useRef<UiEvent[]>([]);
@@ -363,6 +378,7 @@ export function useEventStream(): EventStream {
         if (event.type === 'status') {
           const { seq: _seq, type: _type, ...rest } = event;
           setStatus(rest);
+          sampleSpeed(rest, anchor, setSpeed);
           // The heartbeat carries the run status too, which is how a page opened mid-turn shows the
           // right thing without waiting for the next transition.
           setRun(rest.run);
@@ -395,5 +411,57 @@ export function useEventStream(): EventStream {
 
   useEffect(() => () => cancelAnimationFrame(frame.current ?? 0), []);
 
-  return { status, entries, connection, usage, run, plan };
+  return { status, entries, connection, usage, run, plan, speed };
+}
+
+/**
+ * The shortest span two heartbeats may be apart and still be measured.
+ *
+ * `GB_STATUS_HZ` defaults to 10, so consecutive samples can be 100 ms apart — and over a span that
+ * short the reading is dominated by the host's own cadence rather than by its speed: `gb.run`
+ * overshoots the cycles it was asked for, the overshoot is spent down against `ahead_by_cycles`
+ * before any more are requested, and the iterations in between emulate nothing at all and sleep.
+ * Half a second covers enough of that cycle to be stable, and still reacts within about a second.
+ */
+const SPEED_WINDOW_MS = 500;
+
+/** How much of each closed window to believe, against the running value. */
+const SPEED_SMOOTHING = 0.3;
+
+/**
+ * Fold one heartbeat into the running speed, if it closes a window.
+ *
+ * ⚠️ **A park needs no case here and must not be given one.** The host stops the emulator and
+ * subtracts the wait from `wall_ms`, so *both* counters stand still and no window ever closes: the
+ * last live reading is held while `PausedOverlay` says what is actually going on. Guarding on
+ * `dw > 0` instead would close windows on the rounding between two frozen samples and report `0.00×`
+ * under the PAUSED plate.
+ */
+function sampleSpeed(
+  status: Status,
+  // Structural rather than a `RefObject`, which has changed shape between React majors and is the
+  // only thing this needs from one.
+  anchor: { current: { wall: number; emulated: number } | null },
+  setSpeed: (next: (current: number | null) => number | null) => void,
+): void {
+  const previous = anchor.current;
+  if (!previous) {
+    anchor.current = { wall: status.wall_ms, emulated: status.emulated_ms };
+    return;
+  }
+  const dw = status.wall_ms - previous.wall;
+  const de = status.emulated_ms - previous.emulated;
+  // Both counters are reset together by `start_new_run`, so either going backwards means the run
+  // under us changed and everything measured against the old one is meaningless.
+  if (dw < 0 || de < 0) {
+    anchor.current = { wall: status.wall_ms, emulated: status.emulated_ms };
+    setSpeed(() => null);
+    return;
+  }
+  if (dw < SPEED_WINDOW_MS) return;
+  anchor.current = { wall: status.wall_ms, emulated: status.emulated_ms };
+  const sample = de / dw;
+  setSpeed((current) =>
+    current === null ? sample : current + (sample - current) * SPEED_SMOOTHING,
+  );
 }
