@@ -349,6 +349,38 @@ forced `wait` rather than towards remembering. ⚠️ It is added by `add_summar
 — which is what moved `the_tool_array_stays_within_its_budget`'s ceilings, deliberately. It reaches
 the page as `Decision.narration`, beside `worker::describe`'s mechanical `summary`.
 
+⚠️ **`press_buttons` is an escape hatch and the *only* thing that keeps it one is that every use is
+recorded.** The deployed run reached for it on ordinary turns that had a perfectly good menu, and no
+amount of "a last resort" in the description changed that, because prose cannot be checked
+afterwards. Two things do. The tool takes a required **`why`** — which action was looked for and not
+found — read post-hoc by `tools::call_reason`; and `Worker::record_press` files
+`$GB_RUN_DIR/<run-id>/press-buttons/turn-<id>/{incident.json,screen.png}` through `llm::incident`.
+Five ⚠️s in it, each paid for once:
+
+- **`why` is required in the schema and optional in the parser**, the same trade `summary` makes and
+  for the same reason: a rejection does not end the turn, it spends another `GB_MAX_TOOL_STEPS` and
+  pushes the model towards the forced `wait`. A press with no reason still presses; the record says
+  it did not say.
+- **It costs 239 bytes and that number was worked for.** One property on **one** tool, so unlike
+  `summary` it scales with nothing — which is the whole reason it was affordable as a lock-down when
+  more prompt prose was not. The first draft spent 403 by listing what the action menu covers (the
+  menu said twice) and by explaining what "why" means. No ceiling in
+  `the_tool_array_stays_within_its_budget` had to move; if one ever does, say what bought it.
+- **A `Stuck` record is not a fault.** The watchdog's turn offers `press_buttons` and `wait` and no
+  menu at all, so a press there is the model doing as it was asked. Everything is recorded and the
+  `kind` field tells them apart — filtering at the record would mean the one number worth knowing
+  (how often the hatch is used against how often it was *needed*) could not be counted. The wording
+  in both the tool and the system prompt is conditioned on **a menu being on offer** for the same
+  reason.
+- **The conversation slice is image-evicted, and that is not an optimisation.** Three turns, cut on
+  `compaction::is_turn_start`, through `compaction::evict_images(.., 0)`. A history holding a map
+  render is hundreds of kilobytes of base64 *per message*, and a model that has decided to press
+  buttons tends to do it again next turn.
+- **Nothing new is published and no picture rides on an event** — same arithmetic as the tool-image
+  ring. The page already shows the press as `Pressed a, b` off the `Decision` event. And the path is
+  re-read from `run::CurrentRun` per record, never captured, or a press after `POST /api/new-run`
+  lands in the run that was already set aside.
+
 ⚠️ **A tool call the model writes badly poisons the conversation, not the turn, and a router is what
 made that a daily event.** `arguments` is a JSON string the *model* produces, and the assistant
 message carrying it is replayed on every request for the rest of the run. So one completion emitting

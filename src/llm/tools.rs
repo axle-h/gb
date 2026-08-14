@@ -623,6 +623,11 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
 /// context window.
 pub const MAX_SUMMARY: usize = 300;
 
+/// How long `press_buttons`' `why` may be. Shorter than a summary on purpose: it answers one narrow
+/// question — which action was looked for and not found — and a model given room to write an essay
+/// there writes one instead of reconsidering.
+pub const MAX_REASON: usize = 200;
+
 /// Bolt a required `summary` onto a terminal tool's schema.
 ///
 /// ⚠️ **This is the only thing the model says that survives its own turn.** A reasoning model's
@@ -672,13 +677,30 @@ fn add_summary_argument(tool: &mut ToolSpec) {
 /// Trimmed and length-capped here rather than trusted: `maxLength` in a schema is a request, not a
 /// guarantee, and this string goes to the page, the transcript and every later request.
 pub fn call_summary(call: &ToolCall) -> Option<String> {
-    let summary = call.arguments().ok()?.get("summary")?.as_str()?.trim().to_string();
-    if summary.is_empty() {
+    call_string(call, "summary", MAX_SUMMARY)
+}
+
+/// `press_buttons`' `why`: which action the model looked for and could not find.
+///
+/// ⚠️ **Required in the schema, optional here**, and it is the same trade `call_summary` makes for
+/// the same reason — rejecting a press that forgot to explain itself does not end the turn, it
+/// spends another of `GB_MAX_TOOL_STEPS` and pushes the model towards the forced `wait`. A press
+/// with no reason is still recorded; the missing reason is itself worth reading.
+pub fn call_reason(call: &ToolCall) -> Option<String> {
+    call_string(call, "why", MAX_REASON)
+}
+
+/// One free-text argument, trimmed and length-capped rather than trusted: `maxLength` in a schema is
+/// a request, not a guarantee, and these strings go to the page, the transcript, the record on disk
+/// and every later request.
+fn call_string(call: &ToolCall, field: &str, cap: usize) -> Option<String> {
+    let value = call.arguments().ok()?.get(field)?.as_str()?.trim().to_string();
+    if value.is_empty() {
         return None;
     }
-    Some(match summary.char_indices().nth(MAX_SUMMARY) {
-        Some((cut, _)) => summary[..cut].to_string(),
-        None => summary,
+    Some(match value.char_indices().nth(cap) {
+        Some((cut, _)) => value[..cut].to_string(),
+        None => value,
     })
 }
 
@@ -763,16 +785,28 @@ fn field_move_names() -> Vec<&'static str> {
 /// walk the player into a wall. It exists because the action menu is the agent's model of the game
 /// rather than the game — §17's risk 1 — and somewhere it is incomplete a raw button is the only way
 /// through.
+///
+/// ⚠️ **`why` is friction, and that is the whole of its job.** Saying "a last resort" in prose was
+/// not enough on the deployed run: the model pressed buttons on ordinary turns that had a perfectly
+/// good menu. A required field it has to fill in makes the model state, before it presses, which
+/// action it looked for and could not find — and it is the headline of the record
+/// [`crate::llm::incident`] writes for every press, which is what makes the claim checkable
+/// afterwards. It is one property on one tool rather than anything the catalogue pays for.
+///
+/// ⚠️ The wording is conditioned on **a menu being on offer**, because `DecisionKind::Stuck` is the
+/// one turn where a press is the right answer and there is no menu at all. Telling the model off for
+/// pressing there would be telling it off for doing as it was asked.
 fn press_buttons_spec() -> ToolSpec {
     ToolSpec::new(
         "press_buttons",
         format!(
             "ENDS THE TURN. Press these buttons in order, one at a time, then hand control back to \
-             the agent. **A last resort.** The agent normally does all the button pressing, and \
-             pressing them yourself interrupts whatever it was doing — use this only when the game \
-             is somewhere the action menu does not describe, such as an unmodelled menu or a screen \
-             that has stopped responding. Up to {MANUAL_INPUT_CAPACITY} presses; anything past that \
-             is dropped."
+             the agent. **An escape hatch, not a shortcut: every use is recorded and read \
+             afterwards.** The agent is better at menus than you are, and a raw press pre-empts \
+             whatever it was doing. If this turn shows you an action menu, the answer is in it. Use \
+             this only where the game is somewhere no action describes: an unmodelled menu, or a \
+             screen that has stopped responding. Up to {MANUAL_INPUT_CAPACITY} presses; anything \
+             past that is dropped."
         ),
         json!({
             "type": "object",
@@ -782,9 +816,15 @@ fn press_buttons_spec() -> ToolSpec {
                     "minItems": 1,
                     "maxItems": MANUAL_INPUT_CAPACITY,
                     "items": { "type": "string", "enum": ["up", "down", "left", "right", "a", "b", "start", "select"] },
-                }
+                },
+                "why": {
+                    "type": "string",
+                    "maxLength": MAX_REASON,
+                    "description": "Which action you looked for and could not find. If one could \
+                                    have done this, use that instead.",
+                },
             },
-            "required": ["buttons"],
+            "required": ["buttons", "why"],
             "additionalProperties": false,
         }),
     )
@@ -1374,8 +1414,15 @@ mod tests {
         // Overworld is the big one: it carries `use_field_move`, which is a dozen field actions
         // behind one `move` discriminant precisely so it is one entry rather than twelve.
         for (kind, ceiling) in [
-            // Measured 2026-08-13, after `summary` was added to every terminal tool: 8589, 4849,
-            // 3220, 3642, 3538, 3953. Each ceiling has ~10% of headroom for rewording.
+            // Measured 2026-08-14, after `press_buttons` was asked to say `why`: 8826, 5153, 3305,
+            // 3727, 3623, 4066. Each ceiling has ~10% of headroom for rewording.
+            //
+            // ⚠️ **`why` cost 239 bytes and no ceiling had to move, and that was worked for.** The
+            // first draft of the reword spent 403 — the tool description had grown a clause listing
+            // what the action menu covers, which is the menu said twice, and the `why` description
+            // had grown a sentence explaining what "why" means. It is one property on **one** tool,
+            // so unlike `summary` below it scales with nothing at all; that is the whole reason it
+            // was affordable as a lock-down when more prose was not.
             //
             // ⚠️ **The jump from the 2026-08-12 figures (6875, 3773, 2530, 2952, 2848, 2877) is
             // `add_summary_argument`, and it is bought rather than leaked.** It is one property
@@ -1536,6 +1583,42 @@ mod tests {
         let long = "x".repeat(MAX_SUMMARY * 2);
         let capped = call_summary(&call(&format!(r#"{{"summary": "{long}"}}"#))).expect("present");
         assert_eq!(capped.chars().count(), MAX_SUMMARY);
+    }
+
+    /// `press_buttons`' `why`: the friction that is supposed to make a model check the action menu
+    /// before it reaches past it, and the headline of the record `llm::incident` writes.
+    ///
+    /// ⚠️ **Required in the schema, optional in the parser**, the same trade `summary` makes — a
+    /// rejection here would not get it filled in, it would spend another `GB_MAX_TOOL_STEPS` and
+    /// push the model towards the forced `wait`. So a press with no reason still presses, and the
+    /// record says it did not say.
+    #[test]
+    fn a_press_is_asked_why_and_is_carried_out_either_way() {
+        let schema = &press_buttons_spec().function.parameters;
+        assert_eq!(schema["required"], json!(["buttons", "why"]), "the model is asked for it");
+
+        let press = |arguments: &str| call("press_buttons", arguments);
+        assert_eq!(
+            call_reason(&press(r#"{"buttons":["a"], "why": "  no action opens the PC  "}"#)),
+            Some("no action opens the PC".to_string()),
+        );
+        assert_eq!(call_reason(&press(r#"{"buttons":["a"]}"#)), None, "absent is not an error");
+        assert_eq!(call_reason(&press(r#"{"buttons":["a"], "why": " "}"#)), None, "blank is absent");
+
+        // And the press itself still lands, whatever the model did or did not say about it.
+        for arguments in [r#"{"buttons":["a"]}"#, r#"{"buttons":["a"], "why": "because"}"#] {
+            assert!(
+                matches!(
+                    classify(DecisionKind::Overworld, &press(arguments)),
+                    CallKind::Terminal(Terminal::PressButtons { .. }),
+                ),
+                "{arguments}",
+            );
+        }
+
+        let long = "x".repeat(MAX_REASON * 2);
+        let capped = call_reason(&press(&format!(r#"{{"why": "{long}"}}"#))).expect("present");
+        assert_eq!(capped.chars().count(), MAX_REASON, "a schema's maxLength is a request");
     }
 
     /// §7.5's first line of defence: the model cannot end a turn the wrong way because the wrong way

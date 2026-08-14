@@ -129,6 +129,17 @@ is a column of bare JSON saying what it did and never once why, which is a good 
 same building four times. It rides on the terminal call's arguments, so it costs no extra round trip
 and lands in the history by itself. It is also the line the page leads the decision with.
 
+One tool is deliberately hard to reach for. `press_buttons` presses the joypad directly, going round
+the agent's whole state machine, and it exists only because the action menu is a *model* of the game
+rather than the game — somewhere that model is incomplete, a raw button is the only way through. A
+model that reaches for it instead of choosing an action walks the player into a wall, and saying "a
+last resort" in the description turned out not to be enough. So it takes a required `why` naming the
+action that was looked for and could not be found, and every use of it writes a directory:
+`press-buttons/turn-<id>/`, holding that reason, the screen at the moment of the press, and the last
+three turns of conversation with the pictures taken out. Prose the model is asked to believe cannot
+be checked afterwards; a directory of presses can. The watchdog's turn is the exception and is
+recorded as one: there is no menu there, so a press is the right answer and the record says so.
+
 `read_map` answers with a **picture**, not a description: the whole map the player is standing on,
 drawn from the cartridge's own tile graphics, with every NPC where they are standing and facing where
 they are facing, warps and map edges labelled with where they lead, ground the player cannot reach
@@ -166,6 +177,7 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
 | `todo.json` | the model's own plan — the one thing it writes that outlives its conversation |
+| `press-buttons/` | one directory per use of the escape hatch: why, the screen, and the conversation |
 
 Copy that directory and the run moves with it. `gb` checkpoints periodically and on the way out —
 Ctrl-C and SIGTERM both — so a restart, a rollout or a reboot resumes rather than starts over.

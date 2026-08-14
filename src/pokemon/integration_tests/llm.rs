@@ -128,7 +128,9 @@ async fn completions(State(mock): State<Mock>, body: String) -> impl IntoRespons
                 .collect();
             *seen = Some((last_user.clone(), terminals));
         }
-        vec![("press_buttons", serde_json::json!({ "buttons": ["a"] }))]
+        // `why` is required of the model and read back out of the record it lands in — see
+        // `the_watchdog_asks_the_model_for_a_nudge_and_delivers_it`.
+        vec![("press_buttons", serde_json::json!({ "buttons": ["a"], "why": "the agent is wedged" }))]
     } else if tools.contains(&"choose_battle_action") {
         // Nothing should start a battle here, but a wild encounter is never impossible and a mock
         // that only knows how to run would hang the test in a trainer fight.
@@ -363,7 +365,13 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
         Arc::clone(&published),
         crate::llm::todo::TodoList::open(None),
     );
-    let _worker = worker.spawn().expect("the worker thread starts");
+    // A real run directory, so the press is recorded the way a deployed one would be.
+    let scratch = crate::run::tests::Scratch::new("watchdog");
+    let (run, _, _) = crate::run::RunDir::open(&scratch.0, true, "mock", &|_| false)
+        .expect("a fresh run directory");
+    let run_path = run.path().to_path_buf();
+    let current = Arc::new(crate::run::CurrentRun::new(scratch.0.clone(), "mock".into(), run));
+    let _worker = worker.with_run(current).spawn().expect("the worker thread starts");
 
     let mut fixture = TestFixture::with_policy(
         FIXTURE,
@@ -400,4 +408,20 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
 
     assert!(reported, "a firing has to be reported — §14: every one of them is a bug report");
     assert!(delivered, "the model's press never reached the joypad");
+
+    // And the press left a record: the reason the model gave, the screen at the time, and the
+    // conversation that led to it. ⚠️ This is the only end-to-end proof of the wiring — the unit
+    // tests in `llm::incident` never go through the worker, and `with_run` is one line to forget.
+    let records = run_path.join(crate::run::files::PRESS_BUTTONS);
+    let record = std::fs::read_dir(&records)
+        .unwrap_or_else(|e| panic!("no records in {records:?}: {e}"))
+        .next()
+        .expect("a press was delivered, so a record must exist")
+        .expect("a readable entry")
+        .path();
+    assert!(record.join("screen.png").exists(), "a record without its screen is half a record");
+    let json = std::fs::read_to_string(record.join("incident.json")).expect("incident.json");
+    assert!(json.contains("the agent is wedged"), "the model's reason is the point of it: {json:.400}");
+    assert!(json.contains("\"kind\": \"stuck\""), "a sanctioned press has to be tellable apart");
+    assert!(json.contains("## Decision: the game is stuck"), "the turn that asked is in the slice");
 }

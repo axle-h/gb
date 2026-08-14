@@ -48,6 +48,10 @@ pub mod files {
     pub const MEMORIES: &str = "memories";
     /// The model's plan: the one thing it writes that outlives its own conversation.
     pub const TODO: &str = "todo.json";
+    /// One subdirectory per use of the `press_buttons` escape hatch — see [`crate::llm::incident`].
+    /// A debugging artefact rather than part of the run: nothing reads it back, and a run directory
+    /// without one is complete.
+    pub const PRESS_BUTTONS: &str = "press-buttons";
     /// Where finished runs are filed, one level below the root — see [`super::hall_of_fame`], whose
     /// module docs explain why that level of nesting is load-bearing rather than tidiness.
     pub const HALL_OF_FAME: &str = "hall-of-fame";

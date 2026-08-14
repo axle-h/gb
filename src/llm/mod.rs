@@ -32,6 +32,7 @@ pub mod accounting;
 pub mod client;
 pub mod compaction;
 pub mod config;
+pub mod incident;
 pub mod prompt;
 pub mod map_image;
 pub mod protocol;
