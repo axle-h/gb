@@ -84,7 +84,11 @@ already running, opening `/reset-game` does the same thing without a restart (se
 A new game names its trainer after whoever is about to play it: `GB_MODEL` shortened to the seven
 characters Gen 1 allows (`google/gemma-3-12b` → `GEMMA3`), `HUMAN` at the desktop, something drawn
 from a list under `--policy random`. A resume keeps the name it already has, because by then the game
-has printed it in a dozen places.
+has printed it in a dozen places. The vendor is dropped because it is routing rather than identity,
+except on the handful of ids where that is backwards and the tail names a tier rather than a model:
+`openrouter/free` is `OR/FREE`, not `FREE`. The name and the trainer ID are both on the status panel,
+which is the one place the run says who it is by the save rather than by `GB_MODEL` — a process
+restarted under a different model shows one of each.
 
 ## How the model plays
 

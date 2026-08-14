@@ -32,6 +32,13 @@ export interface PartyMonView {
 
 /** `observe::StatusView` — what the status panel renders. */
 export interface GameView {
+  /**
+   * The name on the save. Not the same thing as `Status.model`: a run keeps the name it was started
+   * with, so a process restarted under a different `GB_MODEL` legitimately shows one of each.
+   */
+  trainer: string;
+  /** `wPlayerID`, as the number. The game prints it five digits wide with leading zeroes. */
+  trainer_id: number;
   map: string;
   position: { x: number; y: number };
   mode: string;

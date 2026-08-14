@@ -8,6 +8,16 @@ export function StatusPanel({ status }: { status: Status | null }) {
 
   return (
     <div className="status">
+      {/* The trainer card's two facts, above the place, because they are the run's identity rather
+          than its position. The header says which *model* is playing; this says what the save calls
+          it, and the two come apart on a resume — a run started under one `GB_MODEL` keeps its name
+          when the process comes back under another, since the game has already printed it in a
+          dozen places. */}
+      <div className="status-line">
+        <span className="trainer">{game ? game.trainer : '—'}</span>
+        <span className="dim">{game ? `ID №${idNo(game.trainer_id)}` : ''}</span>
+      </div>
+
       <div className="status-line">
         <span className="place">{game ? game.map : '—'}</span>
         <span className="dim">{game ? `(${game.position.x}, ${game.position.y})` : ''}</span>
@@ -97,6 +107,15 @@ function describeSpeed(status: Status): string {
   const achieved = status.wall_ms > 0 ? status.emulated_ms / status.wall_ms : 0;
   const target = status.target_speed === 1 ? 'realtime' : `target ${status.target_speed}×`;
   return `${achieved.toFixed(2)}× ${target} · ${formatDuration(status.emulated_ms)} played`;
+}
+
+/**
+ * The ID as the cartridge itself prints it: five digits wide, leading zeroes kept
+ * (`PrintNumber`, `LEADING_ZEROES | 2, 5` on the status screen). A player recognises `00042`; `42`
+ * is the same number and not the same thing.
+ */
+function idNo(id: number): string {
+  return `${id}`.padStart(5, '0');
 }
 
 /** `BoulderBadge` → `Boulder Badge`, for the tooltip. The wire name is the game's flag name. */

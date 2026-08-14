@@ -218,9 +218,18 @@ main {
   gap: 10px;
 }
 
+/* The trainer's name and the map read as one pair of headings — who is playing and where they are
+   — so they share a size rather than one outranking the other. */
+.trainer,
 .place {
   font-size: 15px;
   font-weight: 600;
+}
+
+/* The ID is a fixed five digits beside a name of any width; tabular figures stop the digits
+   shuffling as the panel re-renders several times a second. */
+.trainer + .dim {
+  font-variant-numeric: tabular-nums;
 }
 
 .dim {
@@ -1019,6 +1028,7 @@ header .trophy:hover {
     padding: 8px 10px;
   }
 
+  .trainer,
   .place {
     font-size: 14px;
   }

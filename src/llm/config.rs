@@ -33,6 +33,26 @@
 //! round trip hung the run on the first `read_map`. Keeping a knob whose *on* position is a footgun,
 //! for a behaviour nobody wants, is worse than not having it.
 
+/// Model ids whose last segment is not a model name, and the vendor abbreviation that goes in front
+/// of it.
+///
+/// The rule the shortening is built on — a vendor prefix is routing, not identity — inverts on these:
+/// `openrouter/free` names a *tier*, so keeping the tail alone produced `FREE`, which reads as a
+/// model that does not exist. The vendor is the only identifying half, and abbreviating it is what
+/// makes room for both (`OR/FREE` is exactly the seven characters the game allows).
+///
+/// ⚠️ **Matched on the vendor as well as the tail.** `free` and `auto` are ordinary words; a model
+/// legitimately called `something/auto`, or a vendor called `free`, must not be caught by this.
+///
+/// ⚠️ **A list, deliberately, rather than a rule that infers it.** The tempting generalisation is
+/// "a real model name carries a version number and a tier word does not" — true of everything we
+/// have seen and still a guess about ids nobody has written yet, which would silently rename models
+/// that read perfectly well today. Two rows that change nothing they do not name beat a heuristic
+/// with an opinion about all of them. Adding a row when a new one shows up is the intended
+/// maintenance.
+const PREFIXED_TAILS: [(&str, &str, &str); 2] =
+    [("openrouter", "free", "OR"), ("openrouter", "auto", "OR")];
+
 /// A player name for the trainer holding the controller, derived from `GB_MODEL`.
 ///
 /// The game allows seven characters ([`MAX_PLAYER_NAME`](crate::pokemon::MAX_PLAYER_NAME)) and a
@@ -42,6 +62,8 @@
 /// joined string — turns `gemma-3-12b` into `GEMMA31`, which reads as a version number that does not
 /// exist.
 ///
+/// [`PREFIXED_TAILS`] is the exception, for the ids where the vendor is the identifying half.
+///
 /// ```text
 /// gpt-5                        → GPT5
 /// gpt-5-mini                   → GPT5      (MINI does not fit, and the family is the point)
@@ -49,6 +71,7 @@
 /// qwen3-30b-a3b                → QWEN3
 /// claude-opus-5                → CLAUDE    (OPUS will not fit, and that is where it stops)
 /// deepseek-r1-distill-qwen-32b → DEEPSEE   (the first segment alone is over, so it is cut)
+/// openrouter/free              → OR/FREE   (the tail is a tier, so the vendor comes with it)
 /// ```
 ///
 /// ⚠️ **Deliberately not asked of the model, though it is the obvious place to.** The name has to be
@@ -62,6 +85,21 @@ pub fn player_name_for(model: &str) -> String {
     // Ollama and LM Studio both spell a variant as `model:tag`, and the tag is a size or a
     // quantisation — never the half worth keeping.
     let bare = bare.split(':').next().unwrap_or(bare);
+
+    // The ids where the tail alone would name nothing. ⚠️ The fit is checked rather than assumed:
+    // both rows fit today, and a longer one added later should quietly fall through to the ordinary
+    // shortening rather than hand the game a name it has to truncate mid-word.
+    if let Some((vendor, _)) = model.rsplit_once('/') {
+        let prefixed = PREFIXED_TAILS.iter().find(|(known_vendor, known_tail, _)| {
+            known_vendor.eq_ignore_ascii_case(vendor) && known_tail.eq_ignore_ascii_case(bare)
+        });
+        if let Some((_, _, abbreviation)) = prefixed {
+            let name = format!("{abbreviation}/{}", bare.to_uppercase());
+            if name.len() <= crate::pokemon::MAX_PLAYER_NAME {
+                return name;
+            }
+        }
+    }
 
     let mut name = String::new();
     for segment in bare.split(['-', '_', '.', ' ']) {
@@ -308,6 +346,13 @@ mod tests {
             // Ollama and LM Studio spell the variant as a tag; it is a quantisation, never a name.
             ("llama3:70b-instruct-q4_K_M", "LLAMA3"),
             ("o3", "O3"),
+            // ⚠️ The one shape where the vendor is the identifying half. `openrouter/free` names a
+            // tier, so the tail alone read as a model called FREE.
+            ("openrouter/free", "OR/FREE"),
+            ("openrouter/auto", "OR/AUTO"),
+            // Matched on both halves: neither word alone is enough to trip it.
+            ("acme/free", "FREE"),
+            ("openrouter/gpt-5", "GPT5"),
         ] {
             assert_eq!(player_name_for(model), expected, "{model}");
         }
@@ -316,12 +361,29 @@ mod tests {
         assert_eq!(player_name_for("deepseek-r1-distill-qwen-32b"), "DEEPSEE");
 
         // ⚠️ Whatever comes out has to be something the game will take: never empty (its own screen
-        // refuses one) and never longer than the field.
-        for model in ["", "---", "/", "a-very-long-model-name-indeed", "GPT-5", "x".repeat(80).as_str()] {
-            let name = player_name_for(model);
+        // refuses one), never longer than the field, and made only of characters the cartridge's own
+        // charmap has a glyph for.
+        //
+        // ⚠️ **That last one is the check, not "alphanumeric".** It used to be, and `OR/FREE` would
+        // have failed it while being perfectly writable: `/` is `$F3`
+        // (`pokered/constants/charmap.asm`) and `PokemonString::from_string` already encodes it. What
+        // actually matters is that nothing falls through to that encoder's `0x00`, which the game
+        // draws as a blank.
+        let inputs: Vec<String> = ["", "---", "/", "a-very-long-model-name-indeed", "GPT-5"]
+            .into_iter()
+            .map(String::from)
+            .chain(std::iter::once("x".repeat(80)))
+            .chain(PREFIXED_TAILS.iter().map(|(vendor, tail, _)| format!("{vendor}/{tail}")))
+            .collect();
+        for model in inputs {
+            let name = player_name_for(&model);
             assert!(!name.is_empty(), "{model:?} produced nothing");
             assert!(name.len() <= crate::pokemon::MAX_PLAYER_NAME, "{model:?} produced {name:?}");
-            assert!(name.chars().all(|c| c.is_ascii_alphanumeric()), "{model:?} produced {name:?}");
+            let encoded = crate::pokemon::strings::PokemonString::from_string(&name).0;
+            assert!(
+                !encoded.contains(&0x00),
+                "{model:?} produced {name:?}, which the game has no glyph for"
+            );
         }
     }
 
