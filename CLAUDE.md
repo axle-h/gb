@@ -159,6 +159,22 @@ both checks. `UsingPcBox`/`UsingItemPc` cannot collide with this: they are exclu
 `assert_text_box_state`, so they never reach `ReadingTextBox`. Their *abort* paths do, which is a
 second bug fixed by the same line.
 
+⚠️ **The START menu is six rows before the Pokédex and seven after it, so a cursor index does not
+mean the same row in both.** `DrawStartMenu` omits the POKéDEX row until `EVENT_GOT_POKEDEX` and
+`home/start_menu.asm`'s `.displayMenuItem` puts it back with an `inc a`, so **index 2 is ITEM with
+the Pokédex and the player-name row without it** — `StartMenu_TrainerInfo`, which
+`WaitForTextScrollButtonPress` leaves on A *or* B straight into `jp RedisplayStartMenu` with the
+cursor restored from `wBattleAndStartSavedMenuItem`. A closed loop under A, and one that flashes the
+screen white twice a cycle (`GBPalWhiteOut` at each end), which is what it looks like on the page.
+`start_menu_row` is the one place that knows; three drivers hardcoded the 2 and said so in the
+comment. ⚠️ **The window is not a corner** — Oak's Parcel is delivered *before* the Pokédex, so every
+run passes through it; the deployed run spent 55 minutes wedged there in ViridianMart, escaping only
+because the model eventually guessed B. ⚠️ **And no test tier could have caught it**: `RandomPolicy`
+implements only `pick_overworld_action`/`pick_battle_action`, so `soak` can never issue a field move
+and never enters those drivers, while the leg chain and `full_playthrough` reach them long after the
+Pokédex. Pre-Pokédex, they are reachable by an LLM policy and nothing else — which is the general
+lesson, not a fact about this menu.
+
 ⚠️ **`impl Display for AgentEvent` is a UI contract, not debugging output.** `host.rs` does
 `format!("{event}")` straight into `UiEventBody::Agent { text }` and the page prints it verbatim, so
 a `{:?}` in there puts `Fight { slot: 1, battle_move: PokemonMove { name: Growl, pp: 40 } }` on
@@ -1057,14 +1073,15 @@ and the artifact is the whole value of a failure, since it is what gets promoted
 **Nearly everything it finds is one shape: a closed loop under A.** A menu or a script the agent's
 own A press re-enters, with the cursor untouched — the PC menus, a spent move, a key item in battle,
 the Cerulean badge house, Bill's PC, a refused field move, a Card Key door, the Safari menu's sticky
-cursor. Three rules cover the class, and they are worth knowing before adding another special case:
+cursor, the START menu left open on the trainer card. Four rules cover the class, and they are worth
+knowing before adding another special case:
 
 - ⚠️ **A give-up in a battle hands back *latched into B*** (`BattleState::backing_out`), because a
   plain `WaitingForMenu` opens by pressing A — into whatever menu is still on screen, which is how
   "give up" came to mean "select whatever is under the cursor".
 - ⚠️ **The text reader escapes menus, not conversations.** After 30 s in which the agent reaches *no
-  decision point*, and only when what is on screen is a list menu, a field-move box, or a menu
-  offering CANCEL, it presses B until a poll happens (which is what clears it — `poll_policy`, on the
+  decision point*, and only when what is on screen is a list menu, a field-move box, a menu offering
+  CANCEL, or the **START menu**, it presses B until a poll happens (which is what clears it — `poll_policy`, on the
   agent, so a flicker through `Idle` cannot reset it). ⚠️ **Not on a yes/no**, where B is an answer,
   and ⚠️ **not in a battle**, where B cancels the move being chosen and gym leaders are routinely
   quieter than 30 s. Without those two conditions it fires mid-fight and `full_playthrough` loses the
@@ -1074,6 +1091,28 @@ cursor. Three rules cover the class, and they are worth knowing before adding an
   nineteen carrying a counter of its own. ⚠️ It has to be *silence*: a tick counter belongs to a
   state, and a state torn down by an interruption starts it over — the Seafoam current takes the
   player every few seconds and handed the walk a fresh budget each time.
+- ⚠️ **A menu the agent did not open is closed, not confirmed** — `MENU_HANDOVER_TICKS`, armed in
+  `assert_text_box_state`. That function is the funnel for "start reading a text box" and everything
+  that drives menus on purpose is excluded from it by `drives_its_own_menus`, so arriving there with
+  a *menu* on screen means something **left one behind**: a driver abandoned by
+  `DRIVER_ESCAPE_SILENCE`, an aborted PC, a `press_buttons` batch. It reuses `escaping_menus`, so it
+  is the 30 s rule above acting immediately on evidence it can already trust. ⚠️ **It cannot be the
+  single transition tick**, which is the version that was written first and detects nothing:
+  `wFontLoaded` flips a third of a second *before* the menu draws itself — measured on the START
+  menu, geometry is the previous menu's until tick 18 and `EXIT` does not reach the tile map until
+  tick 21, against the reader's first A on tick 26. ⚠️ And it must stay a **short window** rather
+  than becoming a per-tick test: bounded, it only has to be right about the moment a box opens with
+  no driver behind it; unbounded, it has to be right about every screen of every conversation, which
+  is the Mt Moon failure one paragraph down.
+- ⚠️ **A rule that runs at every text box may believe only the *screen*, never a lingering id —
+  `MenuEvidence`.** `wTextBoxID` is written when a box is drawn and never cleared, so it goes on
+  naming a menu that closed several maps ago; the 30 s rule can trust it because 30 s of silence has
+  itself ruled out a conversation, and the hand-over rule cannot, because it fires on conversations
+  by definition. Getting that the same way round for both cost a nickname: the Silph Co lift left
+  `ListMenuBox` behind, the agent talked to the rescued worker a few maps later, and B — an exit on a
+  list, an **answer** on a yes/no — declined "Do you want to give a nickname to LAPRAS?".
+  `a_full_party_sends_the_silph_lapras_to_the_box` is the only test in the suite that crosses a lift
+  into a yes/no, and it is now the guard for both things.
 
 ⚠️ **Each of those rules is a frame-timing change, so `full_playthrough` is the only thing that can
 price one.** The ⚠️s in `agent.rs` name four wider versions that look obviously right and are not:

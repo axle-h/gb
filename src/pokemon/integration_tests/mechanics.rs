@@ -608,8 +608,9 @@ fn item_prices_match_the_rom_table() {
 /// START is the clearest case: no `OverworldAction` can express it, and the agent never presses it of
 /// its own accord in the overworld, so a menu on screen afterwards can only have come from the queue.
 ///
-/// Checked on the tick the queue drains, before the agent has resumed and started reading the menu
-/// as a text box — one tick later it is already mashing A through it.
+/// Checked on the tick the queue drains, before the agent has resumed and looked at the menu at all.
+/// What it does next is a different property, and `a_menu_left_open_is_closed_rather_than_confirmed`
+/// is where that one lives: it closes the menu rather than pressing into it.
 #[test]
 fn manual_input_presses_a_button_the_agent_never_would() {
     use crate::joypad::JoypadButton;
@@ -1338,3 +1339,98 @@ fn the_generic_pc_menu_is_backed_out_of_rather_than_mashed() {
     assert_eq!(fixture.game_state().map.map, Map::RedsHouse1F,
                "the agent should have logged off and walked downstairs");
 }
+
+// ── The START menu: the row index, and never A-mashing one that was left open ────────────────────
+
+/// **The row a cursor index selects on the START menu depends on whether the player has the
+/// Pokédex, and three drivers used to assume it did not.**
+///
+/// `DrawStartMenu` omits the POKéDEX row until `EVENT_GOT_POKEDEX` and `home/start_menu.asm`'s
+/// `.displayMenuItem` compensates with an `inc a`, so the hardcoded `2` that means ITEM after the
+/// Pokédex means the **player-name row** before it — `StartMenu_TrainerInfo`, a closed loop under A.
+/// Oak's Parcel is delivered before the Pokédex, so every run passes through that window; the
+/// deployed run spent 55 minutes in it, in ViridianMart, with the parcel undelivered.
+///
+/// ⚠️ **The index is asserted *and* the game is made to agree.** Asserting `start_menu_row` alone
+/// would only restate the constant; running a real driver through the real menu is what proves the
+/// mapping, and it is the half that fails with `TIME/ 0 16 BADGES` on screen if the `2` comes back.
+#[test]
+fn the_item_row_of_the_start_menu_is_found_without_the_pokedex() {
+    use crate::pokemon::agent::{start_menu_row, AgentState, StartMenuRow};
+    use crate::pokemon::item::ItemId;
+    use crate::pokemon::pokedex::PokedexReader;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60), vec![]);
+    for _ in 0..20 { fixture.step(); }
+    assert!(!fixture.api().mmu().read_has_pokedex(),
+            "this fixture has to predate the Pokédex or the test asserts nothing");
+    assert_eq!(start_menu_row(&fixture.api(), StartMenuRow::Item), 1,
+               "without the Pokédex, ITEM is row 1 — row 2 is the trainer card");
+    assert_eq!(start_menu_row(&fixture.api(), StartMenuRow::Pokemon), 0,
+               "without the Pokédex, POKéMON is row 0");
+
+    // Now make the game agree, by running a driver that navigates START → ITEM in exactly that
+    // window. `TossingItem` is the shortest of the three, and it is in `drives_its_own_menus`, so
+    // nothing else touches the menu while it works. It needs a fixture with something in the bag —
+    // it gives up the moment `bag_item_position` answers `None` — so this half runs from Route 1,
+    // which is also still pre-Pokédex.
+    let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(60), vec![]);
+    for _ in 0..20 { fixture.step(); }
+    assert!(!fixture.api().mmu().read_has_pokedex(), "Route 1 has to predate the Pokédex too");
+    let item: ItemId = fixture.api().game_state().expect("game state")
+        .bag.iter().next().expect("Route 1's bag should not be empty").id;
+
+    fixture.agent.set_state(AgentState::TossingItem { item, press: true, entered_menu: false });
+
+    let mut reached_the_bag = false;
+    for _ in 0..600 {
+        fixture.step();
+        // `DrawTrainerInfo` is the failure mode, and BADGES is the word no other screen here shows.
+        if let Some(text) = fixture.api().on_screen_text(false) {
+            assert!(!text.contains("BADGES"),
+                    "the driver opened the trainer card instead of the bag: {text:?}");
+            if text.contains("CANCEL") {
+                reached_the_bag = true;
+                break;
+            }
+        }
+    }
+    assert!(reached_the_bag, "the toss driver never reached the bag");
+}
+
+/// **A menu the agent did not open is closed, not confirmed.**
+///
+/// Everything that drives menus on purpose is excluded from `assert_text_box_state`, so a text box
+/// arriving there with a *menu* on screen means something left one behind — a driver abandoned by
+/// `DRIVER_ESCAPE_SILENCE`, or a `press_buttons` batch. The old behaviour was to press A into it,
+/// and the menus that get left behind are closed loops under A.
+///
+/// START is the clearest way to set one up: no `OverworldAction` can express it and the agent
+/// presses it nowhere in the overworld, so the menu on screen afterwards can only have come from the
+/// queue. Before the hand-over rule the agent pressed A here and opened the party screen; now it
+/// presses B and is back in the overworld, without waiting out `TEXT_BOX_ESCAPE_SILENCE`.
+#[test]
+fn a_menu_left_open_is_closed_rather_than_confirmed() {
+    use crate::joypad::JoypadButton;
+
+    let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60), vec![]);
+    for _ in 0..20 { fixture.step(); }
+    assert_eq!(fixture.api().game_mode(), Some(GameMode::Overworld), "expected a quiet overworld");
+
+    fixture.agent.queue_manual_input([JoypadButton::Start]);
+    for _ in 0..MANUAL_INPUT_TICKS_PER_PRESS { fixture.step(); }
+    assert_eq!(fixture.api().game_mode(), Some(GameMode::TextBox), "START should have opened the menu");
+
+    // Well inside `TEXT_BOX_ESCAPE_SILENCE` (30 s = 1500 ticks): the hand-over rule acts as soon as
+    // the menu has drawn itself, which is a third of a second.
+    let mut closed = false;
+    for _ in 0..400 {
+        fixture.step();
+        if fixture.api().game_mode() == Some(GameMode::Overworld) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "the agent should have left the START menu rather than pressing A into it");
+}
+

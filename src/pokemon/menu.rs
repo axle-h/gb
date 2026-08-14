@@ -44,6 +44,40 @@ pub fn is_forget_move_prompt(on_screen_text: &str) -> bool {
     on_screen_text.contains("forgotten")
 }
 
+/// The cursor origin `DrawStartMenu` writes on every redraw: `wTopMenuItemY = 2`,
+/// `wTopMenuItemX = $0b` (`engine/menus/draw_start_menu.asm`). Shared rather than copied, because
+/// four hand-copies of the field-move test drifted apart the first time anything was learned about
+/// it — see [`MenuState::is_field_move_menu`].
+pub const START_MENU_ORIGIN: (u8, u8) = (11, 2);
+
+/// True when the game's own START menu is what is on screen.
+///
+/// ⚠️ **This cannot be a [`MenuState`] method, and that is the whole reason the START menu was
+/// invisible to the agent.** `DrawStartMenu` calls `TextBoxBorder` **directly** and never writes
+/// `wTextBoxID`, so the byte still names whatever box was last *drawn* — and
+/// [`MmuExt::read_menu_state`] answers `None` outright when that stale byte decodes to nothing.
+/// A `MenuState` predicate would therefore be unreachable in exactly the case it is needed. The
+/// raw geometry from `PokemonApiTrait::menu_geometry` is the only way in.
+///
+/// Both halves are required, for the reason [`MenuState::is_field_move_menu`] needs both:
+///
+/// - `wTopMenuItemX/Y` **linger**, so geometry alone keeps reporting the START menu for as long as
+///   whatever it opened is up. The screen that matters here is the trainer card, which writes no
+///   text of its own that we match, so the anchor answers *no* there — and that is fine rather than
+///   a gap: the caller latches, and the card falls back to the START menu on the next press either
+///   way.
+/// - `EXIT` is the anchor because `draw_start_menu.asm` is its **only** occurrence in the ROM, and
+///   it is present in both the six-row and the seven-row menu. The SAVE row is no use — it reads
+///   `RESET` on a link cable.
+///
+/// Nothing where B is the wrong answer can match. `ld a, 11` into `wTopMenuItemX` happens three
+/// times in the ROM — here at Y=2, `DisplayChangeBoxMenu` at Y=1, and the link cable club — so only
+/// the START menu writes (11, 2); and every two-option menu rewrites both bytes from its own
+/// `b`/`c` and shows no `EXIT`, which is what keeps "never B on a yes/no" true for this way in.
+pub fn is_start_menu(top_menu_item_x: u8, top_menu_item_y: u8, on_screen_text: &str) -> bool {
+    (top_menu_item_x, top_menu_item_y) == START_MENU_ORIGIN && on_screen_text.contains("EXIT")
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BattleMenuState {
     Fight,
@@ -260,6 +294,33 @@ impl MenuState {
 mod tests {
     use super::*;
     use TextBoxId::*;
+
+    /// The START menu is recognised on **both** halves, and each half is wrong alone.
+    ///
+    /// The strings are the real thing, read off the tile map with the menu actually open — six rows
+    /// because the fixture predates the Pokédex, and `LLM` because that is what the trainer is
+    /// called there. `on_screen_text` joins the rows with spaces, which is why they read as one line.
+    #[test]
+    fn the_start_menu_is_matched_on_geometry_and_its_own_word() {
+        const OPEN: &str = "POKéMON ITEM LLM SAVE OPTION EXIT";
+
+        assert!(is_start_menu(11, 2, OPEN), "the menu's own origin and its own word");
+        assert!(is_start_menu(11, 2, "POKéDEX POKéMON ITEM LLM SAVE OPTION EXIT"),
+                "seven rows once the Pokédex is owned, same origin, same word");
+
+        // ⚠️ Geometry alone is not enough: `wTopMenuItemX/Y` linger, so (11, 2) keeps being reported
+        // for as long as whatever the menu opened is still up. The bag is the common case.
+        assert!(!is_start_menu(11, 2, "POTION ANTIDOTE CANCEL"),
+                "stale geometry under the bag the START menu opened");
+
+        // ⚠️ And the word alone is not enough either, or any screen quoting it would match.
+        assert!(!is_start_menu(5, 4, OPEN), "a list menu's origin is not the START menu's");
+        assert!(!is_start_menu(0, 1, OPEN), "the party list's origin is not either");
+
+        // A two-option menu writes its own origin and shows no EXIT, which is what keeps "never B on
+        // a yes/no" true for this way in.
+        assert!(!is_start_menu(15, 8, "YES NO"), "a yes/no can never match");
+    }
 
     #[test]
     fn battle_menu_base() {

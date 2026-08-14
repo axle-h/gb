@@ -13,7 +13,8 @@ use crate::pokemon::encoding::GameMode;
 use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
-use crate::pokemon::menu::{is_forget_move_prompt, BattleMenuState};
+use crate::pokemon::menu::{is_forget_move_prompt, is_start_menu, BattleMenuState, START_MENU_ORIGIN};
+use crate::pokemon::pokedex::PokedexReader;
 use crate::pokemon::policy::{Jam, Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::text::PokemonTextReader;
@@ -289,6 +290,12 @@ const BACKING_OUT_TICKS: u16 = 100;
 /// cartridge's own medium text speed, well past ordinary play's ~6 s longest silence, and well inside
 /// both the 90 s the `stalls` tier allows and the watchdog's 300 s.
 const TEXT_BOX_ESCAPE_SILENCE: Duration = Duration::from_secs(30);
+
+/// Agent ticks (20 ms each) after a text box opens in which it may still be recognised as a **menu
+/// the agent inherited** rather than a conversation. See [`PokemonAgent::menu_handover_ticks`] for
+/// the measurements that set it: the menu is not drawn for ~18 ticks and the reader's first A lands
+/// on ~26, so this has to sit between them with room either side. One second of game time.
+const MENU_HANDOVER_TICKS: u16 = 50;
 
 /// How long a driver that runs its own menus ([`drives_its_own_menus`]) may go without the agent
 /// reaching a decision point before it is abandoned and the policy asked again. See the ⚠️ at the
@@ -683,6 +690,25 @@ pub struct PokemonAgent {
     /// cleared by [`Self::poll_policy`]. See the ⚠️ in the `ReadingTextBox` arm.
     escaping_menus: bool,
 
+    /// Ticks remaining in which a newly-opened text box may still turn out to be a **menu the agent
+    /// inherited** rather than a conversation it should confirm. Counted down in the `ReadingTextBox`
+    /// arm, armed in [`Self::assert_text_box_state`], and consumed the moment
+    /// [`open_menu_on_screen`] says yes.
+    ///
+    /// ⚠️ **A window rather than the single transition tick, and the length is measured rather than
+    /// picked.** The obvious version tests once, where the box opens — and it answers no every time,
+    /// because `wFontLoaded` flips **before the menu draws itself**. Measured on the START menu
+    /// opened by `queue_manual_input`: the mode changes on tick 2, `wTopMenuItemX/Y` are still the
+    /// *previous* menu's until tick 18, and `EXIT` does not reach the tile map until tick 21 — a
+    /// third of a second in which there is nothing to recognise. The reader's first A lands on tick
+    /// 26, so the window has to outlive the draw and beat the press.
+    ///
+    /// ⚠️ **Bounded, because "always" is a different and much worse rule.** A per-tick test has to be
+    /// right about every screen of every conversation for the length of the run; this one only has to
+    /// be right about the moment a box opens with no driver behind it. That is what makes it safe to
+    /// act on immediately, where [`TEXT_BOX_ESCAPE_SILENCE`] has to wait 30 s for the same evidence.
+    menu_handover_ticks: u16,
+
     // ── W9: the stuck-run watchdog ───────────────────────────────────────────────────────────────
     /// Emulated time since the policy was last polled, in cycles. Reset by [`Self::poll_policy`] and
     /// by nothing else — which is what makes it measure *decision points* rather than ticks.
@@ -730,6 +756,7 @@ impl PokemonAgent {
             manual_input: VecDeque::new(),
             manual_input_held: 0,
             escaping_menus: false,
+            menu_handover_ticks: 0,
             hall_of_fame_teams: None,
         }
     }
@@ -1385,6 +1412,28 @@ impl PokemonAgent {
                 } else {
                     PokemonTextReader::default()
                 };
+                // ⚠️ **A menu the agent did not open is closed, not confirmed — it must never begin
+                // reading one as though it were a conversation.** This is the transition where the
+                // difference is knowable: everything that drives menus on purpose is excluded
+                // from this function by `drives_its_own_menus`, so reaching it with a menu on screen
+                // means something *left* one behind — a driver abandoned by
+                // [`DRIVER_ESCAPE_SILENCE`], a `press_buttons` batch that opened the START menu, an
+                // aborted PC. The old behaviour was to A-mash it, and every one of those menus is a
+                // closed loop under A.
+                //
+                // ⚠️ **Armed for a short window here, not tested on every tick**, which is why it
+                // can act immediately where the hatch below waits 30 s: a per-tick rule has to be
+                // right about every screen of every conversation, this one only about the moment a
+                // box opens with no driver behind it. ⚠️ It cannot be the single transition tick
+                // either — `wFontLoaded` flips a third of a second before the menu draws itself, so
+                // testing here and only here answers no every time. See
+                // [`Self::menu_handover_ticks`] for the measurements.
+                //
+                // It reuses `escaping_menus` rather than a state of its own for the reason that
+                // latch exists at all — getting out takes more menus than the one that gave it away
+                // — and it is cleared where it means something, by `poll_policy`, i.e. by the agent
+                // reaching a decision point.
+                self.menu_handover_ticks = MENU_HANDOVER_TICKS;
                 self.set_state(AgentState::ReadingTextBox { reader });
             }
         } else if let AgentState::ReadingTextBox { reader, .. } = &self.state {
@@ -1525,13 +1574,20 @@ impl PokemonAgent {
         //
         // Rather than a tick budget per driver — nineteen of them, each needing its own number and
         // each a place to forget — this is one rule over the measure that already means *nothing is
-        // happening*. Dropping to `Idle` mid-menu is safe because it composes with the escape in
-        // `ReadingTextBox`: the open menu is a text box, the silence is by definition already past
-        // [`TEXT_BOX_ESCAPE_SILENCE`], so the reader backs out of it on the very next tick.
+        // happening*.
+        //
+        // ⚠️ **Dropping to `Idle` mid-menu is safe only because `assert_text_box_state` arms the
+        // B latch on the way back in, and that is a recent repair rather than a standing property.**
+        // This comment used to claim the hand-back "composes with the escape in `ReadingTextBox`",
+        // which was true only when the abandoned driver happened to leave a *list* or a `CANCEL`
+        // behind. Every driver here opens the START menu first, and a `UsingFieldItem` abandoned
+        // standing on it left a screen the 30 s hatch could not see at all: the deployed run spent
+        // 55 minutes in ViridianMart with the text reader A-mashing the trainer card open and shut.
+        // The latch is the composition now; the leftover shape is not asked to be convenient.
         //
         // ⚠️ **It must stay well clear of the legitimately slow drivers**, which is what sets the
         // number rather than the jam: a mart shop of several items, a PC deposit, a Fly animation and
-        // an elevator ride all run without a poll. 120 s is several times the slowest of those at the
+        // an elevator ride all run without a poll. 60 s is several times the slowest of those at the
         // cartridge's own text speed, and still well inside the watchdog's 300 s.
         if drives_its_own_menus(&self.state)
             && self.cycles_since_poll.to_duration() >= DRIVER_ESCAPE_SILENCE {
@@ -1961,11 +2017,45 @@ impl PokemonAgent {
                 // offers and what no conversation ever shows — so that word on screen is the third
                 // way in. (`soak` found eleven seeds standing in Bill's house watching the Eevee
                 // evolutions cycle.)
+                //
+                // ⚠️ **The fourth shape is the START menu, and it is the one nothing could see.**
+                // `DrawStartMenu` calls `TextBoxBorder` directly and never writes `wTextBoxID`, so
+                // `menu_state()` answers `None` and neither of the first two tests can fire; its
+                // exit row reads `EXIT` rather than `CANCEL`, so the third cannot either. Left open
+                // with the cursor on the player-name row it is a closed loop under A — the trainer
+                // card opens, `WaitForTextScrollButtonPress` takes the next press, and
+                // `RedisplayStartMenu` puts the cursor back — and that is what wedged the deployed
+                // run in ViridianMart for 55 minutes. B is unconditionally right there:
+                // `home/start_menu.asm`'s `.buttonPressed` does `and PAD_B | PAD_START` /
+                // `jp nz, CloseStartMenu`. See [`is_start_menu`] for why it takes raw geometry and
+                // a word on screen rather than a [`MenuState`] method.
+                //
+                // ⚠️ **And the same recognition runs once more, immediately, for the first
+                // [`MENU_HANDOVER_TICKS`] of a box the agent did not open.** That is the hand-over
+                // rule — see [`Self::menu_handover_ticks`]. Without it a leftover menu is A-mashed
+                // for the full 30 s before anything looks, and for the START menu that is 30 s of
+                // opening and shutting the trainer card.
+                //
+                // ⚠️ **Not in a battle, for either rule.** The bag inside a fight is a `ListMenuBox`
+                // like any other, and B there is "cancel the move I am choosing" rather than
+                // "leave"; a gym leader is routinely quieter than 30 s. Battles do their own refusal
+                // handling in [`BattleState`].
                 let in_battle = api.mmu().read_pointer(&pokered_symbols::wIsInBattle) != 0;
-                if !in_battle && self.cycles_since_poll.to_duration() >= TEXT_BOX_ESCAPE_SILENCE
-                    && (api.menu_state().map_or(false, |m| m.is_list_menu() || m.is_field_move_menu())
-                        || api.on_screen_text(false).map_or(false, |t| t.contains("CANCEL"))) {
+                let handing_over = self.menu_handover_ticks > 0;
+                self.menu_handover_ticks = self.menu_handover_ticks.saturating_sub(1);
+                let timed_out = self.cycles_since_poll.to_duration() >= TEXT_BOX_ESCAPE_SILENCE;
+                // ⚠️ The hand-over rule believes only the screen; the 30 s rule may also believe the
+                // lingering ids, because by then the silence has ruled out a conversation. See
+                // [`MenuEvidence`] — getting this the same way round for both cost a nickname.
+                let evidence = if timed_out { MenuEvidence::OrTheLingeringIds } else { MenuEvidence::OnScreen };
+                if !in_battle && (handing_over || timed_out) && open_menu_on_screen(api, evidence) {
+                    if handing_over && !self.escaping_menus {
+                        new_events.push(AgentEvent::TextBox {
+                            message: "a menu was left open; closing it rather than confirming it".to_string(),
+                        });
+                    }
                     self.escaping_menus = true;
+                    self.menu_handover_ticks = 0;
                 }
                 let button = if api.in_pc_menu() || self.escaping_menus { JoypadButton::B } else { JoypadButton::A };
                 reader.update_with(api, button);
@@ -2913,8 +3003,10 @@ impl PokemonAgent {
                 // Drive each menu of the teach chain to its target index, then confirm with A.
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start // no menu yet → open START
-                } else if top_x == 11 && top_y == 2 {
-                    nav(current, 2) // START menu → ITEM (index 2, Pokédex obtained)
+                } else if (top_x, top_y) == START_MENU_ORIGIN {
+                    // ⚠️ Not a literal 2 — see `start_menu_row`. Without the Pokédex that index
+                    // is the trainer card, which is a closed loop under A.
+                    nav(current, start_menu_row(api, StartMenuRow::Item))
                 } else if tbid == Some(TextBoxId::ListMenuBox) {
                     // Bag list → the item's row (absolute index = cursor + scroll), then A to select it.
                     // If the item is no longer in the bag (a consumable like a Rare Candy that was just
@@ -3112,8 +3204,10 @@ impl PokemonAgent {
                 };
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start
-                } else if top_x == 11 && top_y == 2 {
-                    nav(current, 2) // START menu → ITEM (index 2, Pokédex obtained)
+                } else if (top_x, top_y) == START_MENU_ORIGIN {
+                    // ⚠️ Not a literal 2 — see `start_menu_row`. Without the Pokédex that index
+                    // is the trainer card, which is a closed loop under A.
+                    nav(current, start_menu_row(api, StartMenuRow::Item))
                 } else if tbid == Some(TextBoxId::ListMenuBox) {
                     // Bag list → the item's row. This is also what the quantity selector reports, but
                     // the only items worth tossing are held singly, so its cursor cannot move anyway
@@ -3361,8 +3455,10 @@ impl PokemonAgent {
                 // Drive START → ITEM → (bag) item → USE. After USE the item's field effect starts a
                 // battle (Snorlax); assert_battle_state then takes over, so here we just advance any
                 // transitional / wake-up text with A.
-                let button = if top_x == 11 && top_y == 2 {
-                    nav(current, 2) // START menu → ITEM (index 2, Pokédex obtained)
+                let button = if (top_x, top_y) == START_MENU_ORIGIN {
+                    // ⚠️ Not a literal 2 — see `start_menu_row`. Without the Pokédex that index
+                    // is the trainer card, which is a closed loop under A.
+                    nav(current, start_menu_row(api, StartMenuRow::Item))
                 } else if tbid == Some(TextBoxId::ListMenuBox) {
                     let target_idx = api.bag_item_position(item).unwrap_or(0);
                     nav(current + scroll, target_idx) // bag list → the item's row, then A
@@ -3479,6 +3575,87 @@ fn step_pos(from: Point8, btn: JoypadButton) -> Option<Point8> {
     }
 }
 
+/// How much a menu-shape test is allowed to believe. See [`open_menu_on_screen`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum MenuEvidence {
+    /// Only what is **drawn on the screen right now**.
+    ///
+    /// ⚠️ **`wTextBoxID` lingers, and on a rule that runs at every text box that is fatal.** It is
+    /// written when a box is *drawn* and never cleared, so it goes on naming a menu that closed
+    /// minutes and several maps ago. The hand-over rule armed on exactly that: the elevator's floor
+    /// list left `ListMenuBox` behind, the agent then talked to the Silph worker, and B — correct
+    /// for a list, an answer on a yes/no — said **no** to "Do you want to give a nickname to
+    /// LAPRAS?". `a_full_party_sends_the_silph_lapras_to_the_box` is the test that caught it.
+    /// The screen cannot lie the same way: closing a menu redraws it.
+    OnScreen,
+    /// The lingering RAM ids as well. Only safe once the silence is itself corroboration — see
+    /// [`TEXT_BOX_ESCAPE_SILENCE`], where 30 s of the agent reaching no decision point at all has
+    /// already ruled out an ordinary conversation.
+    OrTheLingeringIds,
+}
+
+/// True when what is on screen is a **menu** — something the agent can leave with B — rather than a
+/// conversation, which it has to confirm with A.
+///
+/// ⚠️ **`GameMode::TextBox` is not this test and must never be mistaken for it.** That is
+/// `wFontLoaded`, which is equally true of every line of dialogue in the game; the first version of
+/// the escape hatch effectively used it, pressed B on anything after 30 s of silence, and took
+/// `full_playthrough` apart — the run blacked out in Mt Moon and sat on step 52 of 516. So this is
+/// a list of *shapes*, and each one was paid for separately: a scrolling list, the party screen's
+/// field-move box, a `CANCEL` entry (Bill's PC, whose prompt is an ordinary message box), and the
+/// START menu (which advertises itself in neither `wTextBoxID` nor that word — see
+/// [`is_start_menu`]).
+///
+/// ⚠️ **A yes/no is deliberately absent.** B there is an *answer*, not an exit: it takes the second
+/// option. The reader confirms those with A and that is not this function's business to change.
+///
+/// The screen is decoded at most once. `on_screen_text` walks the tile map, and this runs on every
+/// tick the agent has been silent past [`TEXT_BOX_ESCAPE_SILENCE`].
+fn open_menu_on_screen(api: &PokemonApi<'_>, evidence: MenuEvidence) -> bool {
+    if evidence == MenuEvidence::OrTheLingeringIds
+        && api.menu_state().is_some_and(|m| m.is_list_menu() || m.is_field_move_menu()) {
+        return true;
+    }
+    let (top_x, top_y, ..) = api.menu_geometry();
+    let screen = api.on_screen_text(false).unwrap_or_default();
+    screen.contains("CANCEL") || is_start_menu(top_x, top_y, &screen)
+}
+
+/// A row of the game's own START menu, named rather than numbered. See [`start_menu_row`] for why
+/// the number is not a constant.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum StartMenuRow {
+    Pokemon,
+    Item,
+}
+
+/// The cursor index (`wCurrentMenuItem`) that selects `row` of the START menu.
+///
+/// ⚠️ **The menu is six rows before the Pokédex and seven after it, and the numbers are not the
+/// same.** `DrawStartMenu` (`engine/menus/draw_start_menu.asm`) omits the POKéDEX row until
+/// `EVENT_GOT_POKEDEX`, and `home/start_menu.asm`'s `.displayMenuItem` compensates at dispatch with
+/// an `inc a`. So index 2 is ITEM *with* the Pokédex and the **player-name row** without it — which
+/// is `StartMenu_TrainerInfo`, a screen `WaitForTextScrollButtonPress` leaves on A *or* B, straight
+/// into `jp RedisplayStartMenu` with the cursor restored from `wBattleAndStartSavedMenuItem`.
+/// Nothing in that cycle moves the cursor, so it is a closed loop under A.
+///
+/// That is not a corner: Oak's Parcel is delivered *before* the Pokédex, so **every run passes
+/// through the window where the hardcoded 2 is wrong**. It wedged the deployed run in ViridianMart
+/// for 55 minutes with the parcel still undelivered, the screen flashing white once a second as the
+/// trainer card opened and closed (`GBPalWhiteOut` at each end of `StartMenu_TrainerInfo`).
+///
+/// ⚠️ **No test tier could have caught it.** `RandomPolicy` implements only `pick_overworld_action`
+/// and `pick_battle_action`, so `soak` can never issue a field move and never enters the drivers
+/// that navigate this menu; the leg chain and `full_playthrough` reach them only long after the
+/// Pokédex. The pre-Pokédex window is reachable by an LLM policy and nothing else.
+pub(crate) fn start_menu_row(api: &PokemonApi<'_>, row: StartMenuRow) -> u8 {
+    let has_pokedex = api.mmu().read_has_pokedex();
+    match row {
+        StartMenuRow::Pokemon => u8::from(has_pokedex),
+        StartMenuRow::Item => 1 + u8::from(has_pokedex),
+    }
+}
+
 /// The party slot (0-based) of the first Pokémon that knows Surf — the mon the Surf-mount menu picks.
 /// The button that advances the **field-move menu chain** — START → POKéMON → the mon in `slot` → the
 /// field move at `move_index` — from whatever screen is currently up, plus A for the text in between.
@@ -3500,8 +3677,9 @@ pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index:
         else if current > target { JoypadButton::Up }
         else { JoypadButton::A }
     };
-    if top_x == 11 && top_y == 2 {
-        nav(1) // START menu → POKéMON (index 1, Pokédex obtained)
+    if (top_x, top_y) == START_MENU_ORIGIN {
+        // ⚠️ Not a literal 1 — see `start_menu_row`.
+        nav(start_menu_row(api, StartMenuRow::Pokemon))
     } else if top_x == 0 && (top_y == 1 || top_y == 3) {
         nav(slot) // party menu → the mon that knows the move
     } else if api.menu_state().is_some_and(|m| m.is_field_move_menu()) {
