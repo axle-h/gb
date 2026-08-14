@@ -3,7 +3,7 @@ import type { RunStatus, UsageView } from './api';
 import { Conversation } from './components/Conversation';
 import { Leaderboard } from './components/Leaderboard';
 import { PlanPanel } from './components/PlanPanel';
-import { Screen } from './components/Screen';
+import { Screen, describeRemaining } from './components/Screen';
 import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 
@@ -67,7 +67,7 @@ export function App() {
 
       <main>
         <section className="left">
-          <Screen />
+          <Screen pausedUntil={run.state === 'throttled' ? run.until_ms : null} />
           <StatusPanel status={status} />
           {/* Under the game rather than beside the conversation: it changes a few times an hour and
               is read at a glance, where the log is read as it scrolls. */}
@@ -145,6 +145,8 @@ function describeRun(run: RunStatus): string {
       return 'compacting context';
     case 'rate_limited':
       return `rate limited · retrying in ${Math.round(run.retry_in_ms / 100) / 10}s`;
+    case 'throttled':
+      return `quota spent · paused for ${describeRemaining(run.until_ms - Date.now())}`;
     case 'error':
       return run.message;
   }

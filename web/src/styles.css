@@ -144,6 +144,55 @@ main {
   border-radius: 4px;
 }
 
+/* The game is stopped on a spent quota. The frame stays visible under the plate rather than being
+   blanked: it is the screen the run will carry on from, and a black rectangle would read as a fault
+   where a dimmed picture reads as a wait. */
+.screen canvas.paused {
+  filter: brightness(45%) saturate(60%);
+}
+
+.screen-paused {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  /* Pointer events pass through: there is nothing to click here, and swallowing them would break a
+     right-click-save of the frame underneath. */
+  pointer-events: none;
+}
+
+.screen-paused .plate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  /* ⚠️ Not inherited, and its absence is not subtle: `.screen` sets `line-height: 0` to keep the
+     canvas from sitting on a text baseline, so a stack of spans inside it collapses to zero-height
+     line boxes and draws all three lines on top of one another. `.screen-overlay` restores it for
+     the same reason. */
+  line-height: 1.4;
+  padding: 10px 18px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgb(0 0 0 / 65%);
+  text-align: center;
+}
+
+.screen-paused .word {
+  /* Wide tracking so six characters read as a plate rather than as a word in a sentence. */
+  letter-spacing: 0.25em;
+  /* The indent that centres a tracked word: the trailing letter-space is part of the last glyph. */
+  text-indent: 0.25em;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.screen-paused .why,
+.screen-paused .eta {
+  font-size: 0.85em;
+  color: var(--dim);
+}
+
 .screen-overlay {
   position: absolute;
   inset: auto 8px 8px auto;

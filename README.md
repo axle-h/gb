@@ -144,6 +144,14 @@ all, so the policy is never consulted and cannot notice it is stuck. After
 six seconds) the model is asked for a nudge, and every firing is reported to the UI, the transcript
 and stdout.
 
+When the endpoint's quota runs out, the run **pauses rather than fails**. A 429 that says when it
+reopens is not something to retry — every attempt is another request against the very allowance that
+is gone — so `gb` stops asking, and stops the emulator with it: the game is frozen mid-step, the
+cartridge's own clock stops (which is the one the leaderboard ranks on), and the page dims the last
+frame under a PAUSED plate counting down to the reset. Nothing is lost and nothing is spent; when the
+window reopens the same question is put again, to a world that has not moved. A rate limit the
+endpoint does *not* date is treated as the ordinary transient one and backed off from in seconds.
+
 The other policies are `RandomPolicy`, `ConsolePolicy` (stdin, for the desktop UI) and
 `DeterministicPolicy` (scripted, used by the tests — including the full playthrough).
 

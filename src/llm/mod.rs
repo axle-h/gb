@@ -59,6 +59,19 @@ pub enum LlmError {
     /// queues **behind the very request it is replacing** and cannot be faster than waiting would
     /// have been. It can only add a second piece of work nobody is waiting for.
     Timeout(String),
+    /// A 429, with the moment the quota reopens when the endpoint said so (Unix milliseconds).
+    ///
+    /// ⚠️ **Its own variant rather than an `Http { status: 429 }`, and for the reason [`Self::Timeout`]
+    /// is not a [`Self::Transport`]**: a rate limit is the one failure where *the retry is itself the
+    /// problem*. Every attempt is another request counted against the very quota that is exhausted,
+    /// so a backoff loop against a daily cap spends four more of an allowance that has already run
+    /// out and fails four more times doing it. What the endpoint hands back instead is a *time*, and
+    /// waiting for it is the only thing that can work.
+    ///
+    /// `resets_at_ms` is `None` when the endpoint rate-limited us without saying when it would stop.
+    /// That case keeps the old behaviour — a short exponential backoff — because a limit with no
+    /// stated reset is far more often a per-minute one than a daily one.
+    RateLimited { resets_at_ms: Option<u64>, message: String },
     /// A 200 whose content was not what the protocol says. Retrying will not help.
     Protocol(String),
     /// The decision this turn was answering is no longer the question being asked (§7.3).
@@ -72,6 +85,9 @@ impl LlmError {
         match self {
             Self::Http { status, .. } => *status == 408 || *status == 429 || *status >= 500,
             Self::Transport(_) => true,
+            // Transient by definition — but see `stream_with_retries`, which will not *spend*
+            // attempts on one that carries a reset further away than the backoff could ever reach.
+            Self::RateLimited { .. } => true,
             // See the variant's own note: the far end still has this request.
             Self::Timeout(_) => false,
             Self::Protocol(_) | Self::Cancelled => false,
@@ -86,6 +102,12 @@ impl std::fmt::Display for LlmError {
             Self::Transport(detail) => write!(f, "could not reach the endpoint: {detail}"),
             Self::Timeout(detail) => {
                 write!(f, "the endpoint took the request and did not answer: {detail}")
+            }
+            Self::RateLimited { resets_at_ms: None, message } => {
+                write!(f, "the endpoint is rate limiting us: {message}")
+            }
+            Self::RateLimited { resets_at_ms: Some(at), message } => {
+                write!(f, "the endpoint is rate limiting us until {at} (unix ms): {message}")
             }
             Self::Protocol(detail) => write!(f, "the endpoint's response was malformed: {detail}"),
             Self::Cancelled => write!(f, "the turn was cancelled"),
