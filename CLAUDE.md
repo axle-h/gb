@@ -210,11 +210,11 @@ once the player is standing in front of the sprite that route is `[A]` for ever 
 ran out" branch that completes an ordinary walk is never reached. That is why a landed interaction is
 its own event (`AgentEvent::OverworldInteractionCompleted`) rather than an
 `OverworldActionCompleted`, and why it was reported as `OverworldActionAborted { reason: Textbox }`
-for so long: "✗ gave up on Mom — something was said", after a conversation that went perfectly. Not
+for so long: "✗ gave up on Mom: it was interrupted", after a conversation that went perfectly. Not
 just a word on a page — an abort reason is what `llm::prompt` calls the most useful thing the agent
 can say, so every successful conversation was reported to the model as a failed one.
 
-Two traps in the detection, one paid for in each direction:
+Three traps in the detection, each paid for separately:
 
 - ⚠️ **It is what the player is *facing*, not what it set out for.** A script can open a box
   mid-walk — the rival's, two tiles short of the aide in Oak's lab — and "my destination was a
@@ -225,6 +225,13 @@ Two traps in the detection, one paid for in each direction:
   `Obstacle` and matching on the tile answers no — silently, and for PCs only. It is a hidden event,
   indistinguishable from the wall it is drawn on, which is the whole reason `pc_locations_for` is a
   transcribed table; the coordinate is the only thing that identifies one.
+- ⚠️ **"Facing" has to mean what the game means by it, which reaches *over* a counter.** Gen 1 talks
+  through the tileset's `wTilesetTalkingOverTiles` (`MetaTile::Counter`), which is how a nurse, a
+  mart clerk and every gym receptionist are spoken to: `actions()` routes to the far side of the
+  desk, so the tile in front is the counter and never the person. Matching the literal front tile
+  reported every heal in every Pokémon Centre — the most repeated action in the deployed run — as
+  "✗ gave up on Nurse". `MetaTileMap::interaction_in_front` is the one that hops; ⚠️
+  **`tile_in_front` must not**, because `cut` and the surf mount are about the literal tile.
 
 ⚠️ **What the page shows and what the model is told are two different lists, and the split is on the
 client.** `useEventStream`'s `fold` drops `text_box` and `overworld_interaction_completed` — the
