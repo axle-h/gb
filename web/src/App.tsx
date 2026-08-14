@@ -8,7 +8,7 @@ import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 
 export function App() {
-  const { status, entries, connection, usage, run, plan } = useEventStream();
+  const { status, entries, connection, usage, run, plan, speed } = useEventStream();
   // The leaderboard's only cue that it is stale. A win is rare enough that this counter changes at
   // most once per run, and the log is already carrying the event that says so.
   const wins = useMemo(
@@ -68,7 +68,7 @@ export function App() {
       <main>
         <section className="left">
           <Screen pausedUntil={run.state === 'throttled' ? run.until_ms : null} />
-          <StatusPanel status={status} />
+          <StatusPanel status={status} speed={speed} />
           {/* Under the game rather than beside the conversation: it changes a few times an hour and
               is read at a glance, where the log is read as it scrolls. */}
           <PlanPanel plan={plan} />

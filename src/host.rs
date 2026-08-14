@@ -209,9 +209,20 @@ pub struct EmulatorHost {
     config: HostConfig,
 
     cycle_duration: Duration,
-    started: Instant,
     last_iteration: Instant,
     since_last_update: Duration,
+    /// Emulated time the catch-up clamp has thrown away on this run — the sum of every iteration's
+    /// overrun past [`MAX_CATCHUP`].
+    ///
+    /// ⚠️ **Dropping it is deliberate** (see the constant) **and until this existed it was also
+    /// invisible**, which is what made a healthy host look like a slow one. The panel used to report
+    /// speed as `emulated_ms / wall_ms` over the life of the process, so a single busy startup — a
+    /// container competing for a core while the server, the transcript thread and the LLM worker all
+    /// come up — subtracted from that ratio for ever and read as "the emulator cannot keep up". It is
+    /// the opposite: the time was dropped *once*, on purpose, and the run has been at 1× since. The
+    /// page now derives the rate from consecutive heartbeats and shows this beside it, so "fell
+    /// behind once" and "is behind now" are two different readings rather than one.
+    dropped: Duration,
     /// The last tick on which the run was found parked, and the total wall clock it has spent that
     /// way. See [`Self::paused_for`].
     ///
@@ -295,9 +306,9 @@ impl EmulatorHost {
             encoder: VideoEncoder::default(),
             config,
             cycle_duration,
-            started: now,
             last_iteration: now,
             since_last_update: Duration::ZERO,
+            dropped: Duration::ZERO,
             paused_since: None,
             paused_total: Duration::ZERO,
             ahead_by_cycles: MachineCycles::ZERO,
@@ -447,7 +458,13 @@ impl EmulatorHost {
         let usage = self.published.usage();
         RunProgress {
             emulated_ms: self.emulated.to_duration().as_millis() as u64,
-            wall_ms: self.run_started.elapsed().as_millis() as u64,
+            // ⚠️ **Minus the park, the same as the heartbeat's.** The field this reads says it is
+            // subtracted from "the `wall_ms` this run reports", and it was true on that path and not
+            // on this one — so a run parked overnight on a spent quota wrote the wait into
+            // `meta.json` and into its Hall of Fame row as time it had spent playing. Both operands
+            // are per-run-per-process (`start_new_run` resets them together) and `RunDir::checkpoint`
+            // adds the persisted baseline on top, so the rebasing is unaffected.
+            wall_ms: self.run_started.elapsed().saturating_sub(self.paused_total).as_millis() as u64,
             prompt_tokens: usage.map_or(0, |u| u.prompt_tokens),
             completion_tokens: usage.map_or(0, |u| u.completion_tokens),
             completions: usage.map_or(0, |u| u.completions),
@@ -629,8 +646,13 @@ impl EmulatorHost {
     ///    changed — the one heartbeat a viewer most needs.
     ///
     /// `emulated` restarts at zero because it measures *this game*, and it is what `meta.json`'s
-    /// `emulated_ms` reports. `started` does not: it is the process's wall clock, which is what
-    /// `/api/healthz`'s uptime means and is unaffected by a run ending.
+    /// `emulated_ms` reports. ⚠️ **Everything paired with it has to restart with it** — `run_started`,
+    /// `paused_total` and `dropped` all do, a few lines below. The host used to keep a second clock
+    /// stamped once at construction and report the heartbeat's `wall_ms` from that, which paired a
+    /// counter that resets with one that does not: a run started here read as a fraction of realtime
+    /// for as long as the process had been up before it. (The comment that justified that clock
+    /// claimed it was what `/api/healthz` reports as uptime. It is not — that is `state.started` on
+    /// the HTTP state in `web::serve_http`, which nothing here touches.)
     fn start_new_run(&mut self) -> Result<String, String> {
         let Some(current) = self.config.run.clone() else {
             return Err("this host has no run directory, so there is no new run to start".to_string());
@@ -663,6 +685,7 @@ impl EmulatorHost {
         self.last_agent_failure = None;
         self.ahead_by_cycles = MachineCycles::ZERO;
         self.since_last_update = Duration::ZERO;
+        self.dropped = Duration::ZERO;
         self.last_iteration = Instant::now();
         // ⚠️ Released here as well as by the worker on its way out of the park. Starting a run is
         // how a park is escaped when something has gone wrong with it, so this seam is the one place
@@ -724,8 +747,10 @@ impl EmulatorHost {
             self.last_iteration = now;
             self.since_last_update = Duration::ZERO;
         } else {
-            self.since_last_update +=
-                now.saturating_duration_since(self.last_iteration).min(MAX_CATCHUP);
+            let gap = now.saturating_duration_since(self.last_iteration);
+            // What the clamp throws away, kept rather than merely discarded. See the field.
+            self.dropped += gap.saturating_sub(MAX_CATCHUP);
+            self.since_last_update += gap.min(MAX_CATCHUP);
             self.last_iteration = now;
         }
 
@@ -850,13 +875,19 @@ impl EmulatorHost {
         let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
         let game = api.game_state().ok().map(|state| observe::status(&state, &api));
         let snapshot = StatusSnapshot {
+            // ⚠️ **`run_started`, not the process's own clock.** `emulated` beside it is zeroed by
+            // `start_new_run`, so pairing it with a clock that is not would report the new run's
+            // first seconds against the whole process's age — which is what made the panel read
+            // near-0× for hours after a `/reset-game` or a Hall of Fame swap.
+            //
             // Minus whatever the run has spent parked on a spent quota: that is not time it was
             // playing, and it is the figure the ledger reports beside the cartridge's own clock.
             wall_ms: now
-                .duration_since(self.started)
+                .duration_since(self.run_started)
                 .saturating_sub(self.paused_total)
                 .as_millis() as u64,
             emulated_ms: self.emulated.to_duration().as_millis() as u64,
+            dropped_ms: self.dropped.as_millis() as u64,
             target_speed: self.config.target_speed,
             // Asked of the decider itself rather than configured alongside it: two places naming the
             // same thing is two places to disagree, and this one is a wire contract the page renders.
@@ -1059,6 +1090,60 @@ mod tests {
             "the park left catch-up debt: {:?}",
             host.since_last_update,
         );
+
+        // ⚠️ **And the run does not report the wait as time it spent playing.** This is what the run
+        // writes to `meta.json` and to its Hall of Fame row, and it used to be the one path that did
+        // *not* subtract the park — the field's own doc claimed it did. A run parked overnight on a
+        // spent quota logged the whole night as play. Both paths now agree.
+        let progress = host.progress();
+        assert!(
+            progress.wall_ms + 50 < host.run_started.elapsed().as_millis() as u64,
+            "the ledger counted the park as play: {} ms of {:?}",
+            progress.wall_ms,
+            host.run_started.elapsed(),
+        );
+    }
+
+    /// ⚠️ **Both halves of the speed figure have to be the *run's*.** `emulated` restarts with the
+    /// game, and the heartbeat's `wall_ms` used to be measured from a clock stamped once at
+    /// construction and never reset — so a run started in a process that had been up for hours
+    /// opened by reporting its first seconds of play against those hours. The page divides one by
+    /// the other, so what that showed was a host at full speed reading as a fraction of realtime,
+    /// converging on the truth over the following hours without ever arriving.
+    #[test]
+    fn a_new_run_measures_itself_against_its_own_clock() {
+        use crate::run::RunDir;
+
+        let scratch = crate::run::tests::Scratch::new("host-run-clock");
+        let validate = |bytes: &[u8]| GameBoy::dmg(crate::pokemon::roms::POKERED).load_state(bytes).is_ok();
+        let (run, _, _) = RunDir::open(&scratch.0, false, "random", &validate).expect("a fresh run");
+        let published = Published::new();
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let mut host = host_with(Arc::clone(&published), |config| {
+            config.run = Some(Arc::clone(&current));
+        });
+
+        // Stand in for a process that had been up a while before this run began.
+        let aged = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < aged {
+            host.tick();
+        }
+        host.publish_status(Instant::now());
+        let before = host.last_status.clone().expect("the first heartbeat is never suppressed");
+        assert!(before.wall_ms >= 250, "the warm-up did not happen: {before:?}");
+
+        host.start_new_run().expect("a host built with a run directory can start another");
+        host.last_status = None;
+        host.publish_status(Instant::now());
+        let after = host.last_status.clone().expect("the run change is always published");
+        assert!(
+            after.wall_ms < before.wall_ms,
+            "the new run inherited the old one's wall clock: {} ms against {} ms",
+            after.wall_ms,
+            before.wall_ms,
+        );
+        assert_eq!(after.emulated_ms, 0, "the new game has not been played yet");
+        assert_eq!(after.dropped_ms, 0, "and it starts owing nothing");
     }
 
     /// **Send on change.** Every heartbeat that goes out must either say something new or be the
