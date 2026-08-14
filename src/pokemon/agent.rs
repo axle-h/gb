@@ -65,7 +65,13 @@ impl Display for OverworldActionAbortedReason {
             Self::Unknown => write!(f, "it stopped making progress"),
             Self::Script => write!(f, "the game took over"),
             Self::Battle => write!(f, "a battle started"),
-            Self::Textbox => write!(f, "something was said"),
+            // ⚠️ **Not "something was said".** This reason is only ever reached by a box the walk
+            // did *not* go looking for (a landed interaction is
+            // `OverworldInteractionCompleted`), and the case that reaches it most is a script
+            // stopping the player mid-step: the rival on the way out of Oak's lab, Oak at the edge
+            // of Route 1. Reporting that as what was said described the symptom and buried the
+            // fact the model needs, which is that the walk was cut short by something outside it.
+            Self::Textbox => write!(f, "it was interrupted"),
             Self::NamingScreen => write!(f, "the naming screen opened"),
             Self::WrongMap(map) => write!(f, "it ended up on {map}"),
             Self::NoAdjacentGrass => write!(f, "there is no grass to step into"),
@@ -99,7 +105,7 @@ pub enum AgentEvent {
     /// press, and it is re-derived every tick, so once the player is facing the sprite the route is
     /// `[A]` for ever and the "route ran out" branch that completes a walk is never reached. A text
     /// box opening *is* the arrival. It used to be reported as
-    /// `OverworldActionAborted { reason: Textbox }` — "✗ gave up on Mom — something was said" —
+    /// `OverworldActionAborted { reason: Textbox }` — "✗ gave up on Mom: it was interrupted" —
     /// which read as a failure on the page and, worse, told the model its own successful
     /// conversation had failed, in the one field the prompt calls the most useful thing the agent
     /// can say.
@@ -1327,6 +1333,13 @@ impl PokemonAgent {
     /// *facing*: the route to a sprite or a PC ends by turning to it and pressing A, so if the tile
     /// in front is the very thing that was routed to, this box is what the A press produced.
     ///
+    /// ⚠️ **"In front" has to mean what the game means by it, which reaches *over* a counter.**
+    /// A nurse, a mart clerk and every gym receptionist are talked to across a desk — the player
+    /// never stands next to one — so a plain `tile_in_front` answers `Counter`, and every
+    /// conversation in a Pokémon Centre was reported as "✗ gave up on Nurse: it was interrupted".
+    /// [`MetaTileMap::interaction_in_front`] is the same reach the route that got here was built
+    /// on.
+    ///
     /// Unreadable state answers `false`: the abort is the safe report, since it only costs the
     /// policy another decision.
     fn interaction_landed(&self, destination: MetaTile, api: &PokemonApi) -> bool {
@@ -1334,7 +1347,7 @@ impl PokemonAgent {
             return false;
         }
         let Ok(state) = self.observe_state(api) else { return false };
-        let Some((at, tile)) = state.map.tile_in_front() else { return false };
+        let Some((at, tile)) = state.map.interaction_in_front() else { return false };
         match destination {
             MetaTile::Sprite(_) => tile == destination,
             // ⚠️ **A PC is not in `meta_tiles` and the tile in front reads as `Obstacle`.** It is a
@@ -3667,7 +3680,7 @@ mod tests {
     }
 
     /// ⚠️ **Talking to someone is that action *succeeding*.** It was reported as
-    /// `OverworldActionAborted { reason: Textbox }` — "✗ gave up on Mom — something was said" — for
+    /// `OverworldActionAborted { reason: Textbox }` — "✗ gave up on Mom: it was interrupted" — for
     /// the whole of the run's history, which is not just a word: an abort reason is what the prompt
     /// calls the most useful thing the agent can tell the model, so every successful conversation
     /// was reported to it as a failed one.

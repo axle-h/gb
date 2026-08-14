@@ -47,7 +47,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
 /// the player is standing in front of the sprite that route is `[A]` for ever, and the "the route ran
 /// out" branch that completes an ordinary walk is never reached. The *only* signal that talking to
 /// someone worked is the box that opens, which the agent read as an interruption and reported as
-/// `OverworldActionAborted { reason: Textbox }`: "✗ gave up on Scientist 1: something was said",
+/// `OverworldActionAborted { reason: Textbox }`: "✗ gave up on Scientist 1: it was interrupted",
 /// after a conversation that went perfectly. It reached the model too, in the field the prompt calls
 /// the most useful thing the agent can say.
 ///
@@ -122,9 +122,45 @@ fn a_script_that_interrupts_a_walk_is_still_an_abort() {
 
     assert_eq!(
         format!("{outcome}"),
-        "✗ gave up on Scientist 1: something was said",
+        "✗ gave up on Scientist 1: it was interrupted",
         "the aide was never reached, so this is the abort it always was; got {outcome:?}",
     );
+}
+
+/// ⚠️ **The person you are talking to is very often not the tile you are facing.** Gen 1 talks
+/// *over* a counter (`wTilesetTalkingOverTiles`), so the route to a nurse, a mart clerk or a gym
+/// receptionist stops one tile short of the ones above and faces the desk instead — leaving the
+/// tile in front `Counter` and the "am I facing what I walked over for" test answering no. Every
+/// heal in every Pokémon Centre was therefore reported as "✗ gave up on Nurse: it was interrupted",
+/// which is the deployed run's most frequent action and the one it repeats most.
+///
+/// `actions()` had always routed across a counter; it was only the landing that did not know.
+#[test]
+fn talking_over_a_counter_is_a_success_not_an_abort() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/back-in-cerulean.bin"),
+        Duration::from_secs(200),
+        vec![
+            PolicyStep::goto(Map::CeruleanPokecenter),
+            PolicyStep::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+        ],
+    );
+
+    // As above: `Interact` pops when the walk is issued, so run until the outcome is emitted rather
+    // than until the queue empties.
+    let outcome = 'walk: loop {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            match &event {
+                AgentEvent::OverworldInteractionCompleted { target: MetaTile::Sprite("Nurse") }
+                | AgentEvent::OverworldActionAborted { destination: MetaTile::Sprite("Nurse"), .. } =>
+                    break 'walk event,
+                _ => {}
+            }
+        }
+    };
+
+    assert_eq!(format!("{outcome}"), "✓ talked to Nurse", "got {outcome:?}");
 }
 
 #[test]

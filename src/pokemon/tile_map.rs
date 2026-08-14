@@ -972,6 +972,29 @@ impl MetaTileMap {
         }
     }
 
+    /// What an `A` press here would actually talk to: the tile in front, or the one *behind* it
+    /// when that is a [`MetaTile::Counter`] and a person is standing there.
+    ///
+    /// ⚠️ **Gen 1 talks over a counter** — `wTilesetTalkingOverTiles`, which is what `Counter` is
+    /// read from — and that is how a Pokémon Centre nurse, a mart clerk, a gym receptionist and
+    /// every desk in the game are spoken to. The player is never adjacent to one of them, so
+    /// [`Self::tile_in_front`] answers `Counter` and anything asking "is the thing I walked over
+    /// for what I am now facing" gets `false` for every conversation held across a desk.
+    /// [`Self::actions`] already routes to the far side (its `counter_extra` positions), so the
+    /// two would otherwise disagree about the very interaction one of them set up.
+    ///
+    /// The counter itself is the answer when there is nobody behind it — a desk with no one at it
+    /// is what the player is facing, and nothing else is in play.
+    pub fn interaction_in_front(&self) -> Option<(Point8, MetaTile)> {
+        let (at, tile) = self.tile_in_front()?;
+        if tile != MetaTile::Counter { return Some((at, tile)); }
+        let over = step_one(at, self.player_direction.into(), self.width, self.height);
+        match over.map(|p| (p, self.tile_at(p))) {
+            Some((p, sprite @ MetaTile::Sprite(_))) => Some((p, sprite)),
+            _ => Some((at, tile)),
+        }
+    }
+
     /// Route the player to a walkable (`Empty`) tile adjacent to `target` and turn to face it.
     /// Returns the button sequence (movement steps + a final turn), which is empty if the player is
     /// already adjacent and facing. Returns `None` if no walkable tile adjacent to `target` is
@@ -1163,7 +1186,8 @@ mod boulder_solver_tests {
     use crate::pokemon::sprite::{Sprite, PictureId};
 
     /// Build a synthetic `MetaTileMap` from ASCII: `#`=wall, `.`=floor, `P`=player, `S`=switch(floor),
-    /// `W`=an inter-map warp tile (walkable — the player may stand on it to push), digits `1..9`=boulders.
+    /// `W`=an inter-map warp tile (walkable — the player may stand on it to push), digits `1..9`=boulders,
+    /// `=`=a counter (for the reach-over-a-desk test below; the solver never meets one).
     /// Returns the map + the switch position.
     fn from_ascii(rows: &[&str]) -> (MetaTileMap, Point8) {
         let h = rows.len();
@@ -1180,6 +1204,7 @@ mod boulder_solver_tests {
                     '#' => {}
                     '.' => meta[idx] = MetaTile::Empty,
                     'W' => meta[idx] = MetaTile::Warp { to_map: Map::Route23, to_position: Point8 { x: 0, y: 0 } },
+                    '=' => meta[idx] = MetaTile::Counter,
                     'P' => { meta[idx] = MetaTile::Empty; player = p; }
                     'S' => { meta[idx] = MetaTile::Empty; switch = p; }
                     d if d.is_ascii_digit() => {
@@ -1235,6 +1260,44 @@ mod boulder_solver_tests {
         let (map, switch) = from_ascii(&["#####", "#.S.#", "#.1.#", "#PW.#", "#####"]);
         let sol = map.solve_boulder_push(switch).expect("must solve by standing on the warp tile");
         assert_eq!(sol.last().unwrap(), &(Point8 { x: 2, y: 2 }, JoypadButton::Up));
+    }
+
+    /// ⚠️ **A nurse, a clerk and a receptionist are all talked to *over* something.** The route
+    /// `actions()` builds for one stops a tile short and faces the counter, so the plain tile in
+    /// front is `Counter` and never the person — which is what reported every conversation in a
+    /// Pokémon Centre as "✗ gave up on Nurse: it was interrupted".
+    #[test]
+    fn an_interaction_reaches_over_a_counter() {
+        // Player at (2,3), counter at (2,2), the person behind it at (2,1).
+        let (mut map, _) = from_ascii(&["#####", "#.1.#", "#.=.#", "#.P.#", "#####"]);
+        // `from_ascii` leaves a sprite's own cell walkable, because the boulder solver moves
+        // sprites about and reads them from `sprites`. A map built from the ROM overlays them
+        // (`MapMetadata::meta_tiles`), which is the grid this answers off.
+        map.meta_tiles[2 + map.width] = MetaTile::Sprite("Boulder 1");
+
+        map.player_direction = PlayerFacingDirection::Up;
+        assert_eq!(
+            map.interaction_in_front(),
+            Some((Point8 { x: 2, y: 1 }, MetaTile::Sprite("Boulder 1"))),
+            "the A press talks to the person behind the counter, so that is what was reached",
+        );
+        assert_eq!(
+            map.tile_in_front(),
+            Some((Point8 { x: 2, y: 2 }, MetaTile::Counter)),
+            "the literal tile in front is unchanged: `cut` and friends are still asked about that one",
+        );
+
+        // Nobody behind it: the counter is what is being faced and there is nothing to look past.
+        map.sprites.clear();
+        map.meta_tiles[2 + map.width] = MetaTile::Empty;
+        assert_eq!(map.interaction_in_front(), Some((Point8 { x: 2, y: 2 }, MetaTile::Counter)));
+
+        map.player_direction = PlayerFacingDirection::Down;
+        assert_eq!(
+            map.interaction_in_front(),
+            Some((Point8 { x: 2, y: 4 }, MetaTile::Obstacle)),
+            "the hop happens only across a counter",
+        );
     }
 
     #[test]
