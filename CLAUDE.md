@@ -519,6 +519,27 @@ faster, while adding a second generation nobody will read. `GB_REQUEST_TIMEOUT_S
 matching knob and wants to be *raised* for a local endpoint rather than lowered — waiting costs a
 stalled turn, giving up early costs the same turn plus the endpoint's next few minutes.
 
+⚠️ **A failure can arrive *inside* a 200, carrying the status the retry table wants, and it used to
+be thrown away twice over.** A router that cannot reach an upstream has already sent its headers, so
+it says so in an ordinary `data:` frame: `{"provider":"Nvidia","choices":[],"error":{"code":504,
+"message":"Provider timed out after 47709ms","metadata":{"error_type":"timeout"}}}`. Two faults, one
+on top of the other. ⚠️ **`code` is an integer on OpenRouter and a string on OpenAI**
+(`"insufficient_quota"`), and typing it as one made the other unparseable — so the whole chunk failed
+and the run reported *its own parser* as malformed for what was a provider timing out. And ⚠️ **the
+status was then flattened to `LlmError::Protocol`, which is not retryable**, so the textbook
+transient failure the backoff exists for was the one thing it never saw. `ErrorCode` now takes both
+spellings and `ApiError::into_failure` maps the status onto the same table a non-200 goes through
+(429 → an *undated* `RateLimited`, since a body carries no headers to park until; 5xx/408 retryable;
+other 4xx fatal). ⚠️ **A 504 here is not an `LlmError::Timeout`, despite the word** — that variant is
+*our* deadline expiring on a request the far end is still working, which is precisely why it is not
+retried; here the router has already given up and said so, so nothing is left running and another
+attempt is ordinary. ⚠️ **And the classification is scoped to OpenRouter by the frame recognising
+itself** — a chunk-level `provider` or an `error.metadata`, nothing else sends either — rather than
+by sniffing `OPENAI_BASE_URL`, which is any OpenAI-compatible endpoint and has no vendor concept in
+it. A bare `{"error": {…}}` keeps the old `Protocol` exactly, so no other provider's failures start
+being retried on the strength of a number we decided to trust, and a proxy in front of OpenRouter
+still works. `a_bare_error_frame_is_still_only_a_protocol_error` is the guard for that half.
+
 ### When the endpoint says no: the park
 
 ⚠️ **A rate limit is the one failure where the retry is itself the problem**, and the ordinary

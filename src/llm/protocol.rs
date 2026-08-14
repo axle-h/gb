@@ -558,9 +558,10 @@ impl StreamAccumulator {
             .map_err(|e| LlmError::Protocol(format!("unparseable stream chunk ({e}): {payload}")))?;
 
         // An error mid-stream arrives as a normal `data:` frame with a 200 already sent, so it cannot
-        // be handled at the status-code layer.
+        // be handled at the status-code layer — but the status is *in* it, and on OpenRouter it is
+        // routinely a transient upstream fault the retry loop already knows what to do with.
         if let Some(error) = chunk.error {
-            return Err(LlmError::Protocol(format!("the endpoint reported: {}", error.message)));
+            return Err(error.into_failure(chunk.provider.as_deref()));
         }
         // ⚠️ The usage frame is the *last* one and carries an empty `choices` array. Take it before
         // looking at choices, or an endpoint that also sets `[DONE]` on it loses the numbers.
@@ -654,6 +655,11 @@ struct StreamChunk {
     usage: Option<Usage>,
     #[serde(default)]
     error: Option<ApiError>,
+    /// Which upstream OpenRouter routed this request to. Half the tell that an error frame is its
+    /// envelope, and the only place the name appears when `error.metadata` omits it — which, in the
+    /// incident this was written for, it did. See [`ApiError::is_openrouter`].
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -702,8 +708,144 @@ struct FunctionDelta {
 pub struct ApiError {
     #[serde(default)]
     pub message: String,
+    /// ⚠️ **A string on OpenAI (`"insufficient_quota"`) and an *integer* on OpenRouter (`504`).**
+    /// Neither is wrong — the field is in nobody's schema — and typing it as one of them made the
+    /// other unparseable: an integer here failed the whole chunk, so an upstream provider timing
+    /// out was reported as our own parser being broken.
     #[serde(default)]
-    pub code: Option<String>,
+    pub code: Option<ErrorCode>,
+    /// OpenRouter's, and the tell that this *is* OpenRouter's envelope. Nothing else sends it.
+    #[serde(default)]
+    pub metadata: Option<OpenRouterErrorMetadata>,
+}
+
+/// Whatever the endpoint put in `code`. See [`ApiError::code`].
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ErrorCode {
+    Number(i64),
+    Text(String),
+}
+
+impl ErrorCode {
+    /// The HTTP status this code is, when it is one. `"504"` counts: several gateways send the
+    /// number as a string, and a code that is a *name* (`"insufficient_quota"`) answers `None`
+    /// rather than being forced into a status nobody sent.
+    pub fn status(&self) -> Option<u16> {
+        let number = match self {
+            Self::Number(number) => u16::try_from(*number).ok()?,
+            Self::Text(text) => text.trim().parse::<u16>().ok()?,
+        };
+        (100..=599).contains(&number).then_some(number)
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(number) => write!(f, "{number}"),
+            Self::Text(text) => write!(f, "{text}"),
+        }
+    }
+}
+
+/// The `metadata` object on an OpenRouter error, which is how a routed request says *which*
+/// upstream provider failed and how.
+///
+/// ⚠️ **`raw` is deliberately not read.** It is the upstream's own error body, often a whole nested
+/// JSON document, and everything in the message below is published to every open browser and
+/// written to `transcript.jsonl`. Unknown keys are ignored rather than fatal, for the reason the
+/// whole of this change exists.
+#[derive(Debug, Deserialize)]
+pub struct OpenRouterErrorMetadata {
+    #[serde(default)]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub provider_name: Option<String>,
+}
+
+impl ApiError {
+    /// Whether this is OpenRouter's upstream-error envelope rather than a bare OpenAI-style one.
+    ///
+    /// ⚠️ **The scoping decision for this whole mechanism, and it is deliberately not a config
+    /// flag.** `OPENAI_BASE_URL` is any OpenAI-compatible endpoint and [`LlmConfig`] has no vendor
+    /// concept, so what is recognised is the *frame*: a chunk-level `provider` or an
+    /// `error.metadata`, neither of which anything else sends. An endpoint that sends a bare
+    /// `{"error": {…}}` keeps the old behaviour untouched, so no other provider's failures start
+    /// being retried on the strength of a number we decided to trust. Sniffing the envelope rather
+    /// than the URL also survives a proxy in front of OpenRouter.
+    ///
+    /// [`LlmConfig`]: crate::llm::config::LlmConfig
+    fn is_openrouter(&self, chunk_provider: Option<&str>) -> bool {
+        self.metadata.is_some() || chunk_provider.is_some_and(|name| !name.is_empty())
+    }
+
+    /// The provider that actually failed, from either half of the envelope.
+    fn provider<'a>(&'a self, chunk_provider: Option<&'a str>) -> Option<&'a str> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.provider_name.as_deref())
+            .or(chunk_provider)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
+    /// The human half: `Nvidia: Provider timed out after 47709ms`.
+    ///
+    /// The code is appended only when it is *not* a status — a status is already printed by
+    /// [`LlmError::Http`]'s own `Display`, and saying `504` twice in one sentence is noise, while
+    /// `insufficient_quota` is the most useful word in the whole error.
+    pub fn describe(&self, chunk_provider: Option<&str>) -> String {
+        let error_type = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.error_type.as_deref())
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty());
+        let message = match self.message.trim() {
+            // An error that says nothing is rare and horrible to debug, so whatever the frame did
+            // carry is the message: `metadata.error_type` first, since a word beats a number.
+            "" => match (error_type, &self.code) {
+                (Some(kind), _) => format!("the endpoint reported a {kind} and said nothing else"),
+                (None, Some(code)) => format!("the endpoint reported {code} and said nothing else"),
+                (None, None) => "the endpoint reported an error and said nothing about it".to_string(),
+            },
+            message => match &self.code {
+                Some(code) if code.status().is_none() => format!("{message} [{code}]"),
+                _ => message.to_string(),
+            },
+        };
+        match self.provider(chunk_provider) {
+            Some(provider) => format!("{provider}: {message}"),
+            None => message,
+        }
+    }
+
+    /// The failure this error frame is, which is the whole point of parsing it: a status carried
+    /// inside a 200 is the same status the non-200 path already keys its retries on.
+    ///
+    /// ⚠️ **A 504 here must not become [`LlmError::Timeout`], despite the word.** `Timeout` means
+    /// *our* deadline expired while the endpoint is still working on the request, which is exactly
+    /// why it is not retryable — the retry queues behind the very generation it replaces. This is
+    /// the opposite: OpenRouter has already given up on the upstream provider and said so, so
+    /// there is nothing left running at the far end and another attempt is the ordinary transient
+    /// retry.
+    fn into_failure(self, chunk_provider: Option<&str>) -> LlmError {
+        let message = self.describe(chunk_provider);
+        let status = match self.is_openrouter(chunk_provider) {
+            true => self.code.as_ref().and_then(ErrorCode::status),
+            // Not an envelope we recognise: say what it said and change nothing else.
+            false => None,
+        };
+        match status {
+            // ⚠️ No headers exist mid-stream, so this rate limit is *undated* — which is the
+            // "keep the ordinary backoff" case rather than the "park the run" one. See
+            // `reset_at_ms` and `Worker::park_until`.
+            Some(429) => LlmError::RateLimited { resets_at_ms: None, message },
+            Some(status) => LlmError::Http { status, message },
+            None => LlmError::Protocol(format!("the endpoint reported: {message}")),
+        }
+    }
 }
 
 /// Pull the human half out of an error body, falling back to the body itself when it is not the
@@ -747,10 +889,9 @@ pub fn describe_error_body(body: &str) -> String {
         error: ApiError,
     }
     match serde_json::from_str::<Envelope>(body) {
-        Ok(Envelope { error }) if !error.message.is_empty() => match error.code {
-            Some(code) => format!("{} [{code}]", error.message),
-            None => error.message,
-        },
+        // The same describer the mid-stream frame uses, so one error cannot be worded two ways
+        // depending on which side of the 200 it arrived on.
+        Ok(Envelope { error }) if !error.message.is_empty() => error.describe(None),
         _ => body.chars().take(400).collect(),
     }
 }
@@ -939,11 +1080,127 @@ mod tests {
     /// An error inside a 200 stream: the status code already said everything was fine.
     #[test]
     fn a_mid_stream_error_frame_is_an_error() {
-        let mut accumulator = StreamAccumulator::default();
-        let failure = accumulator
-            .push_line(r#"data: {"error":{"message":"context length exceeded","code":"400"}}"#, &mut |_| {})
-            .expect_err("an error frame is not a completion");
+        let failure = error_frame(r#"{"error":{"message":"context length exceeded","code":"400"}}"#);
         assert!(format!("{failure}").contains("context length exceeded"), "{failure}");
+    }
+
+    fn error_frame(payload: &str) -> LlmError {
+        StreamAccumulator::default()
+            .push_line(&format!("data: {payload}"), &mut |_| {})
+            .expect_err("an error frame is not a completion")
+    }
+
+    /// ⚠️ **The incident this whole mechanism was written for**, verbatim off the deployed run's
+    /// transcript. Two separate faults in one line: `code` is an *integer*, which failed the whole
+    /// chunk and reported an upstream provider timing out as our own parser being malformed; and
+    /// the 504 it carries is the textbook transient failure that the retry loop already exists for
+    /// and never saw, because the status was on the wrong side of a 200.
+    ///
+    /// ⚠️ And it is an `Http`, never an [`LlmError::Timeout`], despite the word: `Timeout` is *our*
+    /// deadline expiring on a request the endpoint is still working, which is why that one is not
+    /// retried. Here the far end has already given up and said so.
+    #[test]
+    fn an_openrouter_upstream_error_is_a_retryable_status_not_a_parse_failure() {
+        let failure = error_frame(concat!(
+            r#"{"id":"gen-1786714339-L1kF3fCzShT9qsDgtgWd","object":"chat.completion.chunk","#,
+            r#""created":1786714339,"model":"nvidia/nemotron-nano-12b-v2-vl:free","#,
+            r#""provider":"Nvidia","choices":[],"#,
+            r#""error":{"code":504,"message":"Provider timed out after 47709ms","#,
+            r#""metadata":{"error_type":"timeout"}}}"#,
+        ));
+
+        assert!(matches!(failure, LlmError::Http { status: 504, .. }), "{failure}");
+        assert!(failure.is_retryable(), "a provider that timed out is worth asking again: {failure}");
+        let text = format!("{failure}");
+        assert!(text.contains("Nvidia"), "which upstream failed is the actionable half: {text}");
+        assert!(text.contains("Provider timed out after 47709ms"), "{text}");
+        assert!(!text.contains("unparseable"), "the parser is not the thing that went wrong: {text}");
+    }
+
+    /// ⚠️ **The guard for the scoping decision.** The status classification is OpenRouter's, keyed
+    /// on OpenRouter's own envelope — a chunk-level `provider` or an `error.metadata` — because
+    /// `OPENAI_BASE_URL` is any OpenAI-compatible endpoint and a bare `{"error": {…}}` from one of
+    /// them must not start being retried on the strength of a number we decided to trust. A frame
+    /// with neither keeps exactly the old behaviour.
+    #[test]
+    fn a_bare_error_frame_is_still_only_a_protocol_error() {
+        let failure = error_frame(r#"{"choices":[],"error":{"code":503,"message":"overloaded"}}"#);
+        assert!(matches!(failure, LlmError::Protocol(_)), "{failure}");
+        assert!(!failure.is_retryable(), "{failure}");
+        assert!(format!("{failure}").contains("overloaded"), "{failure}");
+
+        // Either half of the envelope is enough to recognise it, since the incident above carries
+        // the provider on the chunk and not in the metadata.
+        for enveloped in [
+            r#"{"provider":"Nvidia","error":{"code":503,"message":"overloaded"}}"#,
+            r#"{"error":{"code":503,"message":"overloaded","metadata":{"provider_name":"Nvidia"}}}"#,
+        ] {
+            let failure = error_frame(enveloped);
+            assert!(matches!(failure, LlmError::Http { status: 503, .. }), "{enveloped}: {failure}");
+            assert!(format!("{failure}").contains("Nvidia"), "{failure}");
+        }
+    }
+
+    /// The universal half of the fix: `code` is a string on OpenAI and a number on OpenRouter, and
+    /// a name rather than a status on both. Reading it is never fatal; only a *status* decides
+    /// anything.
+    #[test]
+    fn an_error_code_is_read_whether_it_is_a_number_or_a_string() {
+        assert_eq!(ErrorCode::Number(504).status(), Some(504));
+        assert_eq!(ErrorCode::Text("504".into()).status(), Some(504), "some gateways send it quoted");
+        assert_eq!(ErrorCode::Text("insufficient_quota".into()).status(), None);
+        assert_eq!(ErrorCode::Number(0).status(), None, "not every number is a status");
+        assert_eq!(ErrorCode::Number(-1).status(), None, "and it must not wrap into one");
+
+        // A named code is not thrown away just because it decides nothing — it is the most useful
+        // word in the error, so it rides along in the message.
+        let failure = error_frame(
+            r#"{"provider":"Chutes","error":{"code":"insufficient_quota","message":"out of credit"}}"#,
+        );
+        assert!(matches!(failure, LlmError::Protocol(_)), "no status, so nothing to key a retry on");
+        let text = format!("{failure}");
+        assert!(text.contains("insufficient_quota") && text.contains("out of credit"), "{text}");
+
+        // A status is not repeated: `LlmError::Http` prints it already.
+        let failure = error_frame(r#"{"provider":"Nvidia","error":{"code":502,"message":"upstream died"}}"#);
+        assert_eq!(format!("{failure}"), "the endpoint returned 502: Nvidia: upstream died");
+    }
+
+    /// ⚠️ A mid-stream 429 is a rate limit and an *undated* one: no headers exist inside a body, so
+    /// there is nothing to park until. It keeps the ordinary backoff, and must not reach
+    /// `Worker::park_until`, which would stop the emulator on a deadline nobody sent.
+    #[test]
+    fn an_openrouter_rate_limit_is_a_rate_limit_and_not_a_park() {
+        let failure = error_frame(concat!(
+            r#"{"provider":"Google AI Studio","choices":[],"error":{"code":429,"#,
+            r#""message":"Provider returned error","metadata":{"error_type":"rate_limit"}}}"#,
+        ));
+        match &failure {
+            LlmError::RateLimited { resets_at_ms, message } => {
+                assert_eq!(*resets_at_ms, None, "a body cannot carry the headers that date one");
+                assert!(message.contains("Google AI Studio"), "{message}");
+            }
+            other => panic!("a 429 is a rate limit wherever it arrives: {other}"),
+        }
+        assert!(failure.is_retryable());
+    }
+
+    /// A 4xx inside the envelope is still the request being wrong, and is still fatal.
+    #[test]
+    fn an_openrouter_client_error_is_classified_but_not_retried() {
+        let failure =
+            error_frame(r#"{"provider":"OpenAI","error":{"code":400,"message":"tool schema rejected"}}"#);
+        assert!(matches!(failure, LlmError::Http { status: 400, .. }), "{failure}");
+        assert!(!failure.is_retryable(), "{failure}");
+    }
+
+    /// An error frame that says nothing at all is rare and horrible to debug, so whatever it *did*
+    /// carry becomes the message rather than an empty sentence.
+    #[test]
+    fn an_error_with_no_message_still_says_something() {
+        let failure = error_frame(r#"{"provider":"Nvidia","error":{"metadata":{"error_type":"timeout"}}}"#);
+        let text = format!("{failure}");
+        assert!(text.contains("Nvidia") && text.contains("timeout"), "{text}");
     }
 
     /// Truncated JSON is a reported error, never a panic and never a silently empty completion.
@@ -1074,6 +1331,15 @@ mod tests {
             "you are out of credit [insufficient_quota]",
         );
         assert_eq!(describe_error_body("<html>502 Bad Gateway</html>"), "<html>502 Bad Gateway</html>");
+
+        // The same widening the mid-stream frame needed: an integer code used to fail this parse
+        // outright and fall through to the raw body, and the provider that failed is worth saying.
+        assert_eq!(
+            describe_error_body(
+                r#"{"error":{"code":504,"message":"Provider timed out","metadata":{"provider_name":"Nvidia"}}}"#
+            ),
+            "Nvidia: Provider timed out",
+        );
     }
 
     /// ⚠️ **A tool call the model wrote badly must not be able to poison the conversation.** It goes
