@@ -565,6 +565,17 @@ impl Published {
         (receiver, opening)
     }
 
+    /// The heartbeat as last published, for something that wants the whole picture at a moment
+    /// rather than a subscription to every change of it.
+    ///
+    /// The `UiEvent` rather than the `StatusSnapshot` inside it, because the only caller
+    /// ([`crate::llm::incident`]) writes it to disk verbatim, and a record that spells the run's
+    /// state differently from the transcript beside it is a second thing to keep in step for no
+    /// gain. `None` before the first heartbeat, which is a few hundred milliseconds of a run.
+    pub fn latest_status(&self) -> Option<UiEvent> {
+        self.latest_status.read().expect("status lock poisoned").clone()
+    }
+
     /// **W6 / §9** — record what the run is doing, and say so **if it changed**.
     ///
     /// The guard is not an optimisation: `Playing` is set from the emulator loop and `RunningTool`

@@ -87,9 +87,9 @@ How the interface works:
 - Not everything is walking. `use_field_move` covers cutting a tree you are facing, using Strength \
   or Flash or Dig from the party menu, flying, teaching an HM, using an item on something, pushing a \
   boulder, and pressing A at a tile to find what is hidden there.
-- `press_buttons` presses the joypad yourself. It is a **last resort**: it interrupts whatever the \
-  agent was doing, and the agent is better at menus than you are. Reach for it only where the game \
-  is somewhere the action menu does not describe.
+- `press_buttons` presses the joypad yourself, and it is an **escape hatch rather than a shortcut**: \
+  it pre-empts the agent, every use of it is recorded and read afterwards, and a turn that had an \
+  action menu almost never needed it. Reach for it only where no action describes the game at all.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
   everything not in that summary is gone. Your plan — `todo_add` and `todo_complete`, shown to you \
   every turn under 'Your plan' — is what survives that, and a restart of the program as well. It is \

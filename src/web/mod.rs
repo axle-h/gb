@@ -189,8 +189,11 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // **W6b** — the model's own plan lives in the run directory, so it survives both a
             // compaction and a restart.
             let todo = TodoList::open(Some(run.path()));
-            let (worker, handles) =
-                worker::channels(endpoint, config, Arc::clone(&published), todo);
+            // `with_run` rather than a constructor argument: it is the one thing the worker does
+            // that is not part of answering a turn, and the records go to whichever run is current
+            // when the press happens rather than to this one — see `llm::incident`.
+            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo);
+            let worker = worker.with_run(Arc::clone(&current));
             // The worker outlives this function; it ends when the policy is dropped and its channels
             // close, which happens when the emulator thread stops.
             worker.spawn()?;

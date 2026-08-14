@@ -37,12 +37,14 @@ use crate::llm::accounting::Accounting;
 use crate::llm::client::{ChatEndpoint, RetryPolicy, stream_with_retries};
 use crate::llm::compaction;
 use crate::llm::config::LlmConfig;
+use crate::llm::incident;
 use crate::llm::todo::TodoList;
 use crate::llm::prompt;
 use crate::llm::map_image;
 use crate::llm::screenshot;
 use crate::llm::protocol::{self, ChatRequest, Completion, Fragment, ImageDetail, Message, StreamOptions, ToolCall, Usage};
 use crate::pokemon::tile_map::MetaTileMap;
+use crate::run::CurrentRun;
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
 use crate::web::published::{Published, RunStatus, TodoView, UiEventBody, now_ms};
@@ -213,6 +215,13 @@ pub struct Worker {
     accounting: Accounting,
     /// **`POST /api/new-run`** — taken at the top of every turn. See [`Restart`].
     restart: Restarts,
+    /// Where the `press_buttons` records go — see [`crate::llm::incident`].
+    ///
+    /// ⚠️ **`CurrentRun` rather than a `PathBuf`, and `None` rather than a default.** The cell
+    /// follows a reset on its own, so a record written after `POST /api/new-run` lands in the run
+    /// that is playing rather than the one that was checkpointed and set aside. `None` is every
+    /// test and the in-process worker in `LlmPolicy`: no run directory, nothing recorded.
+    run: Option<Arc<CurrentRun>>,
 }
 
 /// Build the worker and its counterpart handles. The thread is started by [`Worker::spawn`]; this is
@@ -246,6 +255,7 @@ pub fn channels(
         published_plan: None,
         accounting,
         restart: Arc::clone(&restart),
+        run: None,
     };
     let handles = TurnHandles {
         turns: turn_tx,
@@ -259,6 +269,43 @@ pub fn channels(
 }
 
 impl Worker {
+    /// Point the `press_buttons` records at a run directory. Without it nothing is recorded, which
+    /// is what every test wants and what `gb serve` never does.
+    pub fn with_run(mut self, run: Arc<CurrentRun>) -> Self {
+        self.run = Some(run);
+        self
+    }
+
+    /// File a use of the escape hatch: the reason, the screen, the run's state and the last few
+    /// turns of conversation. See [`crate::llm::incident`] for what is in it and why.
+    ///
+    /// ⚠️ **Nothing here may fail a turn.** The decision is already made and the game is waiting for
+    /// it; a full disk is worth a line on stderr and no more.
+    fn record_press(
+        &self,
+        turn: u64,
+        kind: DecisionKind,
+        buttons: &[crate::joypad::JoypadButton],
+        call: &ToolCall,
+        summary: Option<&str>,
+    ) {
+        let Some(run) = &self.run else { return };
+        let why = tools::call_reason(call);
+        match incident::record(
+            run,
+            &self.published,
+            turn,
+            kind,
+            buttons,
+            why.as_deref(),
+            summary,
+            &self.messages,
+        ) {
+            Ok(path) => println!("press_buttons on turn {turn} ({}): recorded in {path:?}", kind.label()),
+            Err(why) => eprintln!("could not record the press on turn {turn}: {why}"),
+        }
+    }
+
     /// Run the loop on a new thread. It ends when the policy is dropped, which closes the channel.
     pub fn spawn(self) -> Result<std::thread::JoinHandle<()>, String> {
         std::thread::Builder::new()
@@ -617,6 +664,12 @@ impl Worker {
                     };
                     self.publish_tool_result(id, call, &classified[index], &content, None);
                     self.messages.push(Message::tool_result(&call.id, content));
+                }
+                // ⚠️ **After the tool results are appended, not before.** The record carries the last
+                // few turns of the conversation, and a slice taken above this loop would end with an
+                // assistant message whose calls nothing had answered yet.
+                if let Terminal::PressButtons { buttons } = &decision {
+                    self.record_press(id, kind, buttons, &completion.tool_calls[position], summary.as_deref());
                 }
                 return Some((decision, summary));
             }
