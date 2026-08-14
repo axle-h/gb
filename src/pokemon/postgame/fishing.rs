@@ -25,7 +25,8 @@
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
+use crate::pokemon::agent::{start_menu_row, AgentEvent, AgentState, PokemonAgent, StartMenuRow};
+use crate::pokemon::menu::START_MENU_ORIGIN;
 use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
@@ -359,8 +360,10 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
     let nav = |cur: u8, target: u8| -> JoypadButton {
         if cur < target { JoypadButton::Down } else if cur > target { JoypadButton::Up } else { JoypadButton::A }
     };
-    let button = if top_x == 11 && top_y == 2 {
-        nav(current, 2) // START menu → ITEM (index 2, the Pokédex is owned)
+    let button = if (top_x, top_y) == START_MENU_ORIGIN {
+        // The Pokédex is owned by construction here, but the index is asked for rather than
+        // assumed — see `start_menu_row`; a seventh copy of the literal is how this drifts.
+        nav(current, start_menu_row(api, StartMenuRow::Item))
     } else if tbid == Some(TextBoxId::ListMenuBox) {
         nav(current + scroll, api.bag_item_position(s.rod.item()).unwrap_or(0))
     } else if tbid == Some(TextBoxId::UseTossMenuTemplate) {

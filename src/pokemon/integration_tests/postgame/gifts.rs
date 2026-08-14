@@ -90,6 +90,13 @@ const AERODACTYL: &[u8] = include_bytes!("../../data/postgame-aerodactyl.bin");
 /// `SendNewMonToBox` ends with its own `predef AskName` (`engine/items/item_effects.asm:2731-2733`),
 /// so **both** branches name, and the nickname assertion below is what pins that: a default name
 /// would mean the screen never ran and the agent got lucky.
+///
+/// ⚠️ **It has since become the guard for a second thing, and it is the only test in the suite that
+/// can be.** The nickname prompt is a yes/no, and it arrives moments after the Silph Co lift has
+/// left `wTextBoxID` reading `ListMenuBox` — so this is the one place where a menu-shape test that
+/// believes a *lingering* id, on a rule that runs at every text box, answers B and silently declines
+/// the nickname. That is exactly what the first draft of `MENU_HANDOVER_TICKS` did. If this fails
+/// with two identical `LAPRAS` strings, look at `MenuEvidence` before anything else.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn a_full_party_sends_the_silph_lapras_to_the_box() {

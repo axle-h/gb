@@ -45,11 +45,11 @@
 
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
+use crate::pokemon::agent::{start_menu_row, AgentEvent, AgentState, PokemonAgent, StartMenuRow};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
-use crate::pokemon::menu::TextBoxId;
+use crate::pokemon::menu::{TextBoxId, START_MENU_ORIGIN};
 use crate::pokemon::policy::{FieldMove, PolicyStep};
 use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
@@ -388,8 +388,10 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
 
     let button = if game_mode == GameMode::Overworld {
         JoypadButton::Start
-    } else if top_x == 11 && top_y == 2 {
-        nav(current, 2) // START menu → ITEM (index 2 once the Pokédex is owned)
+    } else if (top_x, top_y) == START_MENU_ORIGIN {
+        // The Pokédex is owned by construction here, but the index is asked for rather than
+        // assumed — see `start_menu_row`; a seventh copy of the literal is how this drifts.
+        nav(current, start_menu_row(api, StartMenuRow::Item))
     } else if text.to_ascii_uppercase().contains("TECHNIQUE") {
         // `MoveSelectionMenu`'s relearn layout — the PP-restore move list.
         //
