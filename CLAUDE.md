@@ -124,6 +124,13 @@ answered by `Policy::service_tools`, which only runs when `gb.run` advances the 
 spanning an LLM tool call deadlocks the run. A `GB_PAUSE_WHILE_THINKING` flag was built in W4 and
 removed the same day; `HostConfig` in `src/host.rs` carries the ⚠️.
 
+⚠️ **There is exactly one exception and it is the shape of the rule, not a hole in it**: the park on
+a spent quota (`Worker::park_until`, see "When the endpoint says no" below). What deadlocks is a
+pause that spans something *waiting on the emulator*. A park happens when a request has already
+failed, before any tool was called, with nothing outstanding to service and nothing the agent could
+be asked — so no work is blocked by the stop. Any future pause has to clear that same bar; a pause
+taken with a tool batch in flight would hang the run exactly as W4's flag did.
+
 **The watchdog** (`Policy::{stuck_timeout, pick_unstick}`) raises a `DecisionKind::Stuck` turn whose
 only terminal tools are `press_buttons` and `wait`. Two ⚠️s, both learned in the design:
 
@@ -327,13 +334,30 @@ back has no record of having *tried* anything, which is the state in which it wa
 building for the fourth time. It rides on the terminal call's own arguments rather than in a message
 of its own, because that is the one place a sentence costs no extra round trip, cannot be separated
 from the decision it explains, and lands in the history by itself (`Message::assistant` carries
-`tool_calls` verbatim). ⚠️ **Required in the schema, optional in the parser** (`tools::call_summary`):
+`tool_calls` **almost** verbatim; see the poisoning ⚠️ below). ⚠️ **Required in the schema, optional in the parser** (`tools::call_summary`):
 *enforcing* it would not get it filled in, because a rejected call does not end the turn — it becomes
 another tool result and spends another of `GB_MAX_TOOL_STEPS`, pushing a forgetful model towards the
 forced `wait` rather than towards remembering. ⚠️ It is added by `add_summary_argument` post-hoc in
 `for_kind`, so it scales with the *number of terminals a kind offers* rather than with the catalogue
 — which is what moved `the_tool_array_stays_within_its_budget`'s ceilings, deliberately. It reaches
 the page as `Decision.narration`, beside `worker::describe`'s mechanical `summary`.
+
+⚠️ **A tool call the model writes badly poisons the conversation, not the turn, and a router is what
+made that a daily event.** `arguments` is a JSON string the *model* produces, and the assistant
+message carrying it is replayed on every request for the rest of the run. So one completion emitting
+`""` or a fragment cut off mid-object is rejected for ever after by any endpoint strict enough to
+parse what it is sent: `tool_calls[].function.arguments must be a JSON object` (400),
+`Expecting ',' delimiter: line 1 column 22 (char 21)` (400),
+`Failed to apply prompt template: cannot convert value into pairs` (502) — 331 of them in one
+backlog against `openrouter/free`. ⚠️ **The tell is that the parse error is character-identical every
+time**: same column, same char, because it is one stored message being re-sent rather than a run of
+unlucky completions. It never happened against a single local model, because a model that writes
+clean arguments writes them every turn; a router hands the conversation to a different one each
+request and it takes one. `protocol::history_safe` rewrites anything that is not a JSON object to
+`{}` inside `Message::assistant`, which is the one funnel every history entry goes through. ⚠️ **In
+place, never dropped** — removing the call would orphan its `tool_result` and break the invariant
+one-step rollback rests on — and ⚠️ **only the broken ones**, since `serde_json` sorts keys and
+canonicalising every call would reword the model's own history for nothing.
 
 ⚠️ **There is one notes mechanism and there used to be two.** `memory_write`/`memory_read` over a
 `memories/` directory sat beside `todo_add`/`todo_complete` doing the same job in a different shape:
@@ -439,6 +463,56 @@ runs one request at a time, the retry queues behind the very request it replaces
 faster, while adding a second generation nobody will read. `GB_REQUEST_TIMEOUT_SECS` (180) is the
 matching knob and wants to be *raised* for a local endpoint rather than lowered — waiting costs a
 stalled turn, giving up early costs the same turn plus the endpoint's next few minutes.
+
+### When the endpoint says no: the park
+
+⚠️ **A rate limit is the one failure where the retry is itself the problem**, and the ordinary
+backoff made it worse rather than better. Every attempt is another request counted against the very
+quota that is exhausted, so five attempts against a daily cap spend four more of an allowance that
+has already run out and fail four more times doing it — then the turn resolves to
+`FAILURE_WAIT_TICKS` (2 s of game time) and the next decision point asks again. On OpenRouter's free
+tier (50 requests/day below $10 of lifetime credit) that burns the whole day in under two minutes
+and then hammers the endpoint for ever. `LlmError::RateLimited` is the separate variant, on the same
+argument that made `Timeout` one.
+
+What the endpoint hands back instead is a *time*, and the only thing that works is waiting for it:
+
+- ⚠️ **The client must read the headers before the body**, because reading the body consumes the
+  response. `Retry-After` and `X-RateLimit-Reset` are the whole of what makes a 429 actionable.
+- ⚠️ **`X-RateLimit-Reset` has no agreed unit**, and `protocol::reset_at_ms` sniffs it from the
+  magnitude: OpenRouter sends Unix **milliseconds**, several OpenAI-compatible servers send Unix
+  **seconds**, others send **seconds from now**. Both misreadings are silent and bad in opposite
+  directions — a Unix-second stamp read as a delta parks the run for thirty years, a delta read as a
+  stamp resumes instantly into the same 429. ⚠️ And `None` means "the endpoint did not say", which is
+  *not* a reason to park: an undated 429 is far more often a per-minute limit, so it keeps the
+  ordinary backoff. `stream_with_retries` only declines to retry when the reset is further out than
+  `policy.max`.
+- **`Worker::park_until` waits it out**, publishing `RunStatus::Throttled { until_ms }` and stopping
+  the emulator with `Published::set_throttled_until`. ⚠️ **The release is unconditional** — a return
+  that leaves the cell set stops the game for the rest of the process. ⚠️ It is **clamped**
+  (`MAX_PARK`, 25 h) because the number came from the endpoint, and ⚠️ the turn then re-sends **the
+  same request**, which is only sound because the emulator was stopped: the situation it describes is
+  still on screen when we wake.
+- **`EmulatorHost::tick`'s pause seam** is where the game actually stops. ⚠️ **Below the reset and
+  completed-run seams**, so a parked run still answers `POST /api/new-run` — that is how a park is
+  escaped if anything goes wrong with it, and `start_new_run` releases the cell itself rather than
+  depending on the parked thread. ⚠️ **It skips the emulator and the agent only**: the heartbeat, the
+  video and the checkpoint still run, because a paused run that published nothing is *indistinguishable
+  from a dead connection* to the page (`STALE_MS`) — and since send-on-change is silent while the
+  screen is frozen, what actually feeds the page for the length of a park is the 2 s keepalive.
+  ⚠️ **No catch-up debt**: `since_last_update` is zeroed, or the game fast-forwards through
+  `MAX_CATCHUP` the moment the quota reopens. `a_parked_run_stops_the_game_but_keeps_the_page_fed`
+  holds all of it.
+- **The cartridge clock needs no help and the wall clock does.** `wPlayTime` is emulated, so stopping
+  the emulator stops it — which is the whole reason the pause beats merely holding the requests back,
+  since the leaderboard ranks on it. `wall_ms` is elapsed real time, so `paused_total` is subtracted
+  from it: a run parked overnight must not report the wait as time it spent playing.
+- **On the page** the last frame is dimmed under a PAUSED plate with a live countdown
+  (`Screen.tsx`'s `PausedOverlay`). ⚠️ **The deadline is published once and the countdown is derived
+  on the client**, so an hours-long park costs no traffic; that is also why `until_ms` is an absolute
+  Unix millisecond rather than a remaining time, since it is replayed on every heartbeat and to every
+  page that joins later. ⚠️ The plate sets its own `line-height`: `.screen` sets `line-height: 0` for
+  the canvas, which collapses a stack of spans into one overlapping line.
 
 ⚠️ **A local endpoint's real limit is its KV cache, not its advertised window, and the arithmetic is
 per *slot*.** A run against LM Studio wedged for 28 minutes at a time with no error anywhere: llama.cpp

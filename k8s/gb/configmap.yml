@@ -2,7 +2,9 @@
 # `src/llm/config.rs` explains — but they are the ones worth having somewhere you can edit and
 # `kubectl rollout restart` rather than rebuild.
 #
-# ⚠️ The API key is NOT here. It is in `secret.yml`.
+# ⚠️ The API key is NOT here. It is in `gb/secret.axh.yml`, which is gitignored — `secret.example.yml`
+# one directory up is the template, and is kept out of `gb/` so a directory apply cannot blank the
+# real values with its placeholders.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,54 +12,87 @@ metadata:
 data:
   # Any OpenAI-compatible endpoint. Leave unset for api.openai.com.
   #
-  # This is LM Studio on the LAN, not a hosted API: the k3s node is 10.0.0.10 and the box serving the
-  # model is 10.0.0.161, so the pod reaches it directly and nothing leaves the house.
-  # ⚠️ **`OPENAI_API_KEY` is still required and must still be non-empty** — `--policy llm` refuses to
-  # start without one — but LM Studio ignores whatever it is given. The Secret's real key is left
-  # alone rather than replaced with a placeholder, so switching this back to api.openai.com is one
-  # line rather than a secret edit.
-  OPENAI_BASE_URL: "http://10.0.0.161:1234/v1"
-  GB_MODEL: "google/gemma-4-12b-qat"
+  # OpenRouter.
+  #
+  # ⚠️ **The key in the Secret has to be a real one.** OpenRouter authenticates every request, so a
+  # placeholder is a 401 on every turn of the run rather than something the endpoint shrugs off.
+  # `--policy llm` refuses to start on an empty one at all.
+  #
+  # ⚠️ **`openrouter/free` is a *router*, not a model.** It picks a free model per request from
+  # whatever OpenRouter has available, so the thing playing the game changes underneath us and the
+  # capabilities below are the router's floor rather than any one model's. Tool calling is what this
+  # whole layer is built on and the router filters for it (`tools` and `tool_choice` are in its
+  # `supported_parameters`), but reasoning, window and speed all vary request to request.
+  #
+  # ⚠️ **The free tier is rate limited per *day*, and a turn is not one request.** A turn is a
+  # completion plus a request per tool step, up to `GB_MAX_TOOL_STEPS` below — so a run burns
+  # requests far faster than it looks like it should. OpenRouter's free allowance steps up once ten
+  # dollars of credit has ever been bought; below that it is small enough that the run will stop
+  # within the hour, and it stops as a 429 per turn rather than as anything that looks like a
+  # deployment problem. `--policy random` is what to switch back to while that is being sorted out.
+  #
+  # What the key is allowed, at any time:
+  #   curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://openrouter.ai/api/v1/key
+  OPENAI_BASE_URL: "https://openrouter.ai/api/v1"
+  GB_MODEL: "openrouter/free"
 
   # Tokens of history the turn loop will carry before it compacts.
   #
-  # ⚠️ **This is the model's window, not a preference, and the default of 128000 is a lie against a
-  # local one.** LM Studio reports what it actually loaded as `loaded_context_length` on
-  # `GET /api/v0/models` — 60000 here, against the 262144 the weights allow — and a limit set above
-  # it means compaction never fires and every request past the real window fails instead.
-  GB_CONTEXT_LIMIT: "60000"
+  # ⚠️ **This is the model's window, not a preference, and against a router there is no single
+  # answer.** `openrouter/free` advertises 200000 on `GET /api/v1/models`, but that is the router's
+  # ceiling and each request lands on a different free model with a window of its own. So this is a
+  # **floor every free model can hold**, and it was measured rather than guessed: of the 14
+  # tool-capable free models on 2026-08-14 the smallest window is 128000, and only 10 of the 14 reach
+  # the advertised 200000 — so trusting the headline figure fails roughly a third of routed requests.
+  # 100000 clears the floor with 28000 to spare, which is what an in-flight turn and the summarising
+  # completion need (see `GB_COMPACT_ABOVE`).
+  #
+  # ⚠️ **The free lineup changes, and this number is only as good as its smallest member.** Being
+  # under costs a compaction sooner than necessary; being over fails the request outright, and only
+  # on the turns unlucky enough to be routed to the small model. Re-measure with:
+  #
+  #   curl -s https://openrouter.ai/api/v1/models | jq '[.data[]
+  #     | select(.pricing.prompt=="0" and .pricing.completion=="0")
+  #     | select(.supported_parameters|index("tools"))
+  #     | {id, context_length}] | sort_by(.context_length)[0:5]'
+  GB_CONTEXT_LIMIT: "100000"
   # How full it gets first. The default; stated here because the headroom it leaves is absolute
   # rather than proportional, and 15% of 60000 is 9000 — enough for an in-flight turn and the
   # summarising completion, where 5% would not be.
   GB_COMPACT_ABOVE: "0.85"
   # Below the 1.0 default: every action is chosen by copying an opaque id (`PalletTown:5,6:Warp`)
-  # back exactly, and a 12B at 1.0 fumbles them.
-  GB_TEMPERATURE: "0.6"
+  # back exactly, and a small model at 1.0 fumbles them — which the router can hand us at any time.
+  # 0.8 rather than the 0.6 this used to run at: more room to try something else after a plan stalls,
+  # at the cost of a few more ids typed wrong and rejected.
+  GB_TEMPERATURE: "0.8"
   GB_MAX_TOOL_STEPS: "16"
 
-  # How long the endpoint may take to answer before the request is abandoned. Raised from the 180 s
-  # default because this endpoint is a single GPU rather than a hosted API, and ⚠️ **abandoning is
-  # not free**: llama.cpp keeps processing a request after we hang up, so an expiry here leaves a
-  # generation running that nobody will read, on a server that answers one at a time. Waiting costs
-  # a stalled turn; giving up early costs the same turn and the next few minutes of the box.
+  # How long the endpoint may take to answer before the request is abandoned. Well above the 180 s
+  # default, because ⚠️ **a timeout is not a transport failure and is deliberately not retried**
+  # (`LlmError::Timeout`) — the far end accepted the request and is working on it, so giving up buys
+  # nothing and starts the turn again from scratch. A free model is served at whatever priority
+  # OpenRouter has spare, so a slow answer here is a queue rather than a fault. Waiting costs a
+  # stalled turn; giving up early costs the same turn anyway.
   GB_REQUEST_TIMEOUT_SECS: "600"
 
-  # ⚠️ Without a ceiling a completion is bounded only by the context window. This model fell into a
-  # repetition loop twice in twenty-five minutes and generated ~26 000 tokens each time — against
-  # turns that normally cost 24–2 000 — and since the endpoint answers one request at a time, the
-  # whole run stopped for as long as it took. 8192 is far above any legitimate turn here.
+  # ⚠️ Without a ceiling a completion is bounded only by the context window, and that is not a bound:
+  # a model that falls into a repetition loop generates until it fills, measured at ~26 000 tokens
+  # against turns that normally cost 24–2 000. A router makes that likelier rather than less, since
+  # the model is a different one every request. 8192 is far above any legitimate turn.
   GB_MAX_TOKENS: "8192"
 
-  # ⚠️ **Deliberately unset — thinking is ON, and `none` was tried and reverted the same night.**
-  # It works exactly as advertised (reasoning to zero tokens, turns down to 12–28 tokens and ~4
-  # seconds, a tenth of the cost) and the model got measurably *worse* at the game: it dropped
+  # ⚠️ **Deliberately unset — thinking is ON, and turning it off was tried and reverted the same
+  # night.** `none` works exactly as advertised (reasoning to zero tokens, turns down to 12–28 tokens
+  # and ~4 seconds, a tenth of the cost) and the model got measurably *worse* at the game: it dropped
   # straight into a rigid two-cycle in Oak's lab — `wait`, interact, `wait`, interact — where with
   # thinking on it had at least explored different sprites, and had escaped that room before. Speed
-  # is not the scarce resource here; the model working out what to do next is.
+  # is not the scarce resource here; the model working out what to do next is, and a free model needs
+  # the room more rather than less. `GB_MAX_TOKENS` is what bounds a runaway.
   #
-  # `GB_MAX_TOKENS` is what bounds a runaway now, which is the job this was doing by accident.
-  # Values, if it is ever wanted again: `none` is the only one that does anything on LM Studio with
-  # gemma-4 — `low` measured 174 → 159 reasoning tokens, which is noise.
+  # OpenRouter lists `reasoning_effort` for this router, so a value set here reaches whichever model
+  # is picked; the vocabulary belongs to the endpoint and `GB_REASONING_EFFORT` is passed through
+  # unvalidated. Thinking streams back on the `reasoning` field, which `MessageDelta` knows, so the
+  # live thought shows on the page and is still never sent back into the history.
   # GB_REASONING_EFFORT: "none"
 
   # W9's watchdog: emulated seconds with the agent asking the policy nothing at all before the model

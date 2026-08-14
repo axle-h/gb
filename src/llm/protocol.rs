@@ -133,11 +133,16 @@ impl Message {
 
     /// The assistant turn that carries tool calls. `content` is kept even when empty-ish because
     /// several endpoints echo their own reasoning there and dropping it loses the thread.
+    ///
+    /// ⚠️ **The calls are sanitised on the way in, and this is the only place that can be done
+    /// once.** See [`history_safe`]: a tool call goes into the history and back out on *every*
+    /// later request, so one whose `arguments` are not a JSON object poisons the whole conversation
+    /// rather than costing one turn.
     pub fn assistant(content: String, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
             content: (!content.is_empty()).then_some(Content::Text(content)),
-            tool_calls,
+            tool_calls: history_safe(tool_calls),
             tool_call_id: None,
         }
     }
@@ -256,6 +261,49 @@ pub struct FunctionCall {
     pub name: String,
     /// A JSON *string*, not an object — that is how the API sends it, and it arrives in fragments.
     pub arguments: String,
+}
+
+/// Tool calls as they can safely be put in the history, with anything that is not a JSON object
+/// replaced by `{}`.
+///
+/// ⚠️ **A bad tool call is not a bad turn, it is a bad *conversation*, and that is what makes this
+/// worth doing rather than tolerating.** `arguments` is a JSON string the model writes, and the
+/// assistant message carrying it is replayed on every request for the rest of the run. So a single
+/// completion that emits `""`, or a fragment cut short mid-object, is rejected not once but for ever
+/// after by any endpoint strict enough to parse what it is sent:
+///
+/// - `tool_calls[].function.arguments must be a JSON object` (400),
+/// - `Expecting ',' delimiter: line 1 column 22 (char 21)` (400),
+/// - `Failed to apply prompt template: cannot convert value into pairs` (502).
+///
+/// All three were measured against `openrouter/free` on 2026-08-14, 331 of them in one backlog, and
+/// the second is the tell: character-identical every time, because it is the same stored message
+/// being re-sent rather than a run of unlucky completions. It never appeared against a single local
+/// endpoint, since one model that writes clean arguments writes them every turn; a router hands the
+/// conversation to a different model each request, and it takes one.
+///
+/// ⚠️ **In place, never dropped.** §7.3's one-step rollback is sound because every `tool_calls` entry
+/// in the history has a matching `tool_result`; removing a call here would orphan its answer and 400
+/// the request for a different reason.
+///
+/// ⚠️ **Only the broken ones are rewritten.** A valid object is left byte-for-byte alone rather than
+/// re-serialised: `serde_json`'s map sorts keys, so canonicalising every call would quietly reword
+/// the model's own history and shift the token count for nothing.
+fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
+    tool_calls
+        .into_iter()
+        .map(|mut call| {
+            let raw = call.function.arguments.trim();
+            let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw);
+            if object.is_err() {
+                // The model still learns what went wrong: an unparseable call is rejected by
+                // `ToolCall::arguments`, whose message quotes the raw text, and that rejection is the
+                // `tool_result` sitting right beside this in the history.
+                call.function.arguments = "{}".to_string();
+            }
+            call
+        })
+        .collect()
 }
 
 impl ToolCall {
@@ -660,6 +708,39 @@ pub struct ApiError {
 
 /// Pull the human half out of an error body, falling back to the body itself when it is not the
 /// shape we expected — which for a proxy or a gateway it very often is not.
+/// When a 429's quota reopens, in Unix milliseconds, from the two headers that can say so.
+///
+/// `Retry-After` wins when both are present: it is the standard one, it is a *delta* and so cannot
+/// be wrong about our clock, and an endpoint that sends both means the same thing by them.
+///
+/// ⚠️ **`X-RateLimit-Reset` has no agreed unit and the three in the wild are trivially
+/// distinguishable, so the unit is sniffed from the magnitude rather than assumed.** OpenRouter
+/// sends Unix *milliseconds*; several OpenAI-compatible servers send Unix *seconds*; others send
+/// *seconds from now*. Reading a Unix-second timestamp as a delta parks the run until the year
+/// 58000, and reading a delta as a timestamp resumes instantly and hammers the endpoint — so the
+/// failure is bad in both directions and worth the three-way test. The boundary is deliberately
+/// crude: no legitimate delta is 10^9 seconds (32 years) and no legitimate timestamp is below it.
+///
+/// ⚠️ **`None` is not "no limit", it is "the endpoint did not say"** — the caller keeps its ordinary
+/// backoff for that, rather than treating an undated 429 as a reason to park.
+pub fn reset_at_ms(retry_after: Option<&str>, reset: Option<&str>, now_ms: u64) -> Option<u64> {
+    // `Retry-After` may also be an HTTP-date. It is not worth parsing one: no OpenAI-compatible
+    // endpoint has been seen to send it, and `X-RateLimit-Reset` below is the fallback when this
+    // does not parse as a number.
+    if let Some(seconds) = retry_after.and_then(|value| value.trim().parse::<u64>().ok()) {
+        return Some(now_ms.saturating_add(seconds.saturating_mul(1000)));
+    }
+    let reset = reset?.trim().parse::<u64>().ok()?;
+    match reset {
+        // Unix milliseconds: 10^12 ms is 2001, and anything smaller cannot be a millisecond stamp.
+        _ if reset >= 1_000_000_000_000 => Some(reset),
+        // Unix seconds.
+        _ if reset >= 1_000_000_000 => Some(reset.saturating_mul(1000)),
+        // Seconds from now.
+        _ => Some(now_ms.saturating_add(reset.saturating_mul(1000))),
+    }
+}
+
 pub fn describe_error_body(body: &str) -> String {
     #[derive(Deserialize)]
     struct Envelope {
@@ -993,5 +1074,75 @@ mod tests {
             "you are out of credit [insufficient_quota]",
         );
         assert_eq!(describe_error_body("<html>502 Bad Gateway</html>"), "<html>502 Bad Gateway</html>");
+    }
+
+    /// ⚠️ **A tool call the model wrote badly must not be able to poison the conversation.** It goes
+    /// into the history and back out on every later request, so `arguments` that are not a JSON
+    /// object are rejected for ever after rather than once. See [`history_safe`].
+    #[test]
+    fn a_tool_call_that_is_not_a_json_object_cannot_reach_the_history() {
+        use super::{Message, ToolCall, FunctionCall};
+        let call = |arguments: &str| ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: FunctionCall { name: "choose_action".into(), arguments: arguments.into() },
+        };
+        let sent = |arguments: &str| {
+            Message::assistant(String::new(), vec![call(arguments)]).tool_calls[0]
+                .function
+                .arguments
+                .clone()
+        };
+
+        // The two shapes measured in the wild: nothing at all (which several endpoints send for a
+        // zero-parameter tool) and a fragment cut off mid-object.
+        assert_eq!(sent(""), "{}");
+        assert_eq!(sent(r#"{"id": "PalletTown:5"#), "{}");
+        // JSON, but not an object. `arguments` is specified as one and strict providers enforce it.
+        assert_eq!(sent("[1, 2]"), "{}");
+        assert_eq!(sent("\"walk north\""), "{}");
+
+        // ⚠️ And a good call is left **exactly** as the model wrote it: re-serialising would sort the
+        // keys, rewording the model's own history and moving the token count for no reason.
+        let good = r#"{"id":"PalletTown:5,6:Warp","summary":"heading to Route 1"}"#;
+        assert_eq!(sent(good), good);
+
+        // ⚠️ The call itself survives whatever happens to its arguments. Dropping it would orphan the
+        // `tool_result` that answers it, which is the invariant one-step rollback rests on.
+        let message = Message::assistant(String::new(), vec![call("{oops")]);
+        assert_eq!(message.tool_calls.len(), 1);
+        assert_eq!(message.tool_calls[0].id, "call_1");
+    }
+
+    /// ⚠️ The three units `X-RateLimit-Reset` is sent in, which are told apart by magnitude alone.
+    /// Getting this wrong is silent and bad in both directions: a Unix-second stamp read as a delta
+    /// parks the run for thirty years, and a delta read as a stamp resumes instantly into the same
+    /// 429. See [`reset_at_ms`].
+    #[test]
+    fn a_rate_limit_reset_is_read_in_whichever_unit_it_was_sent() {
+        // 2026-08-14T12:00:00Z, as milliseconds and as seconds.
+        const NOW: u64 = 1_786_824_000_000;
+        let at = |value: &str| super::reset_at_ms(None, Some(value), NOW);
+
+        // Unix milliseconds — what OpenRouter sends.
+        assert_eq!(at("1786824600000"), Some(1_786_824_600_000));
+        // Unix seconds.
+        assert_eq!(at("1786824600"), Some(1_786_824_600_000));
+        // Seconds from now.
+        assert_eq!(at("600"), Some(NOW + 600_000));
+
+        // `Retry-After` wins when both are present: it is a delta, so it cannot be wrong about our
+        // clock, and an endpoint sending both means the same thing by them.
+        assert_eq!(super::reset_at_ms(Some("30"), Some("1786824600000"), NOW), Some(NOW + 30_000));
+        // ...but only when it parses. An HTTP-date falls through to the header that is a number.
+        assert_eq!(
+            super::reset_at_ms(Some("Fri, 14 Aug 2026 12:10:00 GMT"), Some("600"), NOW),
+            Some(NOW + 600_000),
+        );
+
+        // ⚠️ `None` is "the endpoint did not say", which the caller must not read as "no limit":
+        // it keeps its ordinary backoff for that case rather than parking the run.
+        assert_eq!(super::reset_at_ms(None, None, NOW), None);
+        assert_eq!(super::reset_at_ms(None, Some("soon"), NOW), None);
     }
 }

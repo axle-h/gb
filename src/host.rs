@@ -25,7 +25,9 @@ use crate::pokemon::map_metadata::MapMetadataCache;
 use crate::pokemon::policy::Policy;
 use crate::pokemon::{PokemonApi, PokemonApiTrait, observe};
 use crate::run::{CurrentRun, RunProgress};
-use crate::web::published::{FrameSnapshot, Published, RunStatus, StatusSnapshot, UiEventBody};
+use crate::web::published::{
+    FrameSnapshot, Published, RunStatus, StatusSnapshot, UiEventBody, now_ms,
+};
 use crate::web::video::{Frame, VideoEncoder};
 
 /// One machine cycle at the real hardware's rate — the unit the pacing loop spends wall clock in.
@@ -180,6 +182,15 @@ pub struct EmulatorHost {
     started: Instant,
     last_iteration: Instant,
     since_last_update: Duration,
+    /// The last tick on which the run was found parked, and the total wall clock it has spent that
+    /// way. See [`Self::paused_for`].
+    ///
+    /// ⚠️ **The total is subtracted from the `wall_ms` this run reports**, so a run parked overnight
+    /// on a spent quota does not report the wait as time it spent playing. The cartridge's own clock
+    /// needs no such help: it is emulated, so stopping the emulator stops it, which is the whole
+    /// reason the pause exists rather than merely holding back the requests.
+    paused_since: Option<Instant>,
+    paused_total: Duration,
     /// Cycles `gb.run` has already delivered beyond what was asked for, spent down before any more
     /// are requested. Without it the emulator drifts steadily fast.
     ahead_by_cycles: MachineCycles,
@@ -257,6 +268,8 @@ impl EmulatorHost {
             started: now,
             last_iteration: now,
             since_last_update: Duration::ZERO,
+            paused_since: None,
+            paused_total: Duration::ZERO,
             ahead_by_cycles: MachineCycles::ZERO,
             emulated: MachineCycles::ZERO,
             next_video: now,
@@ -620,6 +633,12 @@ impl EmulatorHost {
         self.ahead_by_cycles = MachineCycles::ZERO;
         self.since_last_update = Duration::ZERO;
         self.last_iteration = Instant::now();
+        // ⚠️ Released here as well as by the worker on its way out of the park. Starting a run is
+        // how a park is escaped when something has gone wrong with it, so this seam is the one place
+        // that must not depend on the parked thread doing anything.
+        self.published.set_throttled_until(0);
+        self.paused_since = None;
+        self.paused_total = Duration::ZERO;
         self.next_checkpoint = Instant::now() + self.config.checkpoint_interval;
         self.published.set_status(RunStatus::Playing);
         self.published.publish_event(UiEventBody::Notice {
@@ -652,8 +671,32 @@ impl EmulatorHost {
         }
 
         let now = Instant::now();
-        self.since_last_update += now.saturating_duration_since(self.last_iteration).min(MAX_CATCHUP);
-        self.last_iteration = now;
+
+        // **The pause seam.** The LLM worker parks the run when the endpoint's quota is spent and it
+        // said when it reopens (`Worker::park_until`), and the game stops with it: a model that is
+        // not allowed to think should not have the world move on without it, and the cartridge's own
+        // clock is what the leaderboard ranks on.
+        //
+        // ⚠️ **Below the two seams above and above everything else.** A parked run must still answer
+        // `POST /api/new-run` — that is how a wedged park is escaped — and the reset is handled
+        // before this line for exactly that reason.
+        //
+        // ⚠️ **It skips the emulator and the agent only.** The heartbeat, the video and the
+        // checkpoint at the bottom of this function all still run, or the page would see the stream
+        // simply stop: silence and a dead connection are indistinguishable to it (`STALE_MS`), so a
+        // paused run that published nothing would show as "reconnecting" rather than as paused.
+        let paused = self.paused_for(now);
+        if paused {
+            // ⚠️ No catch-up debt. `since_last_update` is what makes the emulator make up for a
+            // slow iteration, so leaving it to accumulate across a park of hours would have the
+            // game fast-forward through `MAX_CATCHUP` the moment the quota reopened.
+            self.last_iteration = now;
+            self.since_last_update = Duration::ZERO;
+        } else {
+            self.since_last_update +=
+                now.saturating_duration_since(self.last_iteration).min(MAX_CATCHUP);
+            self.last_iteration = now;
+        }
 
         let mut min_cycles = MachineCycles::ZERO;
         while self.since_last_update >= self.cycle_duration {
@@ -733,6 +776,25 @@ impl EmulatorHost {
         ran > MachineCycles::ZERO
     }
 
+    /// Whether the run is parked on a spent quota, and the wall-clock bookkeeping that goes with it.
+    ///
+    /// ⚠️ **The deadline is re-read rather than trusted to be cleared.** The worker releases the cell
+    /// itself on its way out of the park, but a worker that died holding it would otherwise stop the
+    /// emulator for the rest of the process — so a deadline that has passed reads as running here,
+    /// whatever the cell still says.
+    fn paused_for(&mut self, now: Instant) -> bool {
+        let parked = self.published.throttled_until().is_some_and(|until| now_ms() < until);
+        match (parked, self.paused_since) {
+            (true, Some(previous)) => {
+                self.paused_total += now.saturating_duration_since(previous);
+                self.paused_since = Some(now);
+            }
+            (true, None) => self.paused_since = Some(now),
+            (false, _) => self.paused_since = None,
+        }
+        parked
+    }
+
     fn publish_video(&mut self) {
         // Copied out before encoding: the encoder borrows `self` mutably and the LCD borrows the
         // `GameBoy` inside it. The copy is not waste — the snapshot below needs one anyway, and it
@@ -757,7 +819,12 @@ impl EmulatorHost {
         let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
         let game = api.game_state().ok().map(|state| observe::status(&state, &api));
         let snapshot = StatusSnapshot {
-            wall_ms: now.duration_since(self.started).as_millis() as u64,
+            // Minus whatever the run has spent parked on a spent quota: that is not time it was
+            // playing, and it is the figure the ledger reports beside the cartridge's own clock.
+            wall_ms: now
+                .duration_since(self.started)
+                .saturating_sub(self.paused_total)
+                .as_millis() as u64,
             emulated_ms: self.emulated.to_duration().as_millis() as u64,
             target_speed: self.config.target_speed,
             // Asked of the decider itself rather than configured alongside it: two places naming the
@@ -899,6 +966,68 @@ mod tests {
         let positions: std::collections::HashSet<_> =
             statuses.iter().filter_map(|s| s.game.as_ref()).map(|g| (g.position.x, g.position.y)).collect();
         assert!(positions.len() > 1, "the player never moved: {positions:?}");
+    }
+
+    /// **The pause seam.** A run parked on a spent quota stops the emulator, and — the half that is
+    /// easy to get wrong — keeps talking to the page while it does.
+    ///
+    /// ⚠️ A paused run that published nothing would look *identical to a dead connection* from the
+    /// browser: both are silence, which is the whole reason `STALE_MS` exists. So the assertion that
+    /// heartbeats keep arriving is not padding, it is the bug this seam invites.
+    #[test]
+    fn a_parked_run_stops_the_game_but_keeps_the_page_fed() {
+        let published = Published::new();
+        let mut events = published.subscribe_events();
+        // ⚠️ **The keepalive is the only thing that speaks while a run is parked, and that is the
+        // point.** Send-on-change is silent by construction here: the screen is frozen, so every
+        // sampled heartbeat says exactly what the last one did. Shortened rather than waited out, so
+        // the test spends 200 ms rather than the 2 s the default would need.
+        let mut host = host_with(Arc::clone(&published), |config| {
+            config.status_keepalive = Duration::from_millis(20);
+        });
+
+        // Run normally for a moment, so there is emulated time to compare against.
+        let warmup = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < warmup {
+            host.tick();
+        }
+        let moving = host.emulated;
+        assert!(moving > MachineCycles::ZERO, "the emulator never started");
+
+        published.set_throttled_until(now_ms() + 30_000);
+        while let Ok(_) = events.try_recv() {}
+
+        let parked = Instant::now() + Duration::from_millis(200);
+        let mut heartbeats = 0;
+        while Instant::now() < parked {
+            host.tick();
+            while let Ok(UiEvent { body, .. }) = events.try_recv() {
+                if matches!(body, UiEventBody::Status(_)) {
+                    heartbeats += 1;
+                }
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+
+        assert_eq!(host.emulated, moving, "the emulator ran while the run was parked");
+        assert!(heartbeats > 0, "a parked run went silent, which a browser cannot tell from a dead one");
+
+        // ⚠️ And it releases on the deadline alone. The worker clears the cell on its way out, but a
+        // worker that died holding it must not stop the game for the rest of the process.
+        published.set_throttled_until(now_ms() - 1);
+        let resumed = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < resumed {
+            host.tick();
+        }
+        assert!(host.emulated > moving, "the game did not resume once the deadline had passed");
+
+        // ⚠️ And it resumes *where it was*: no catch-up debt is owed for the park, or the game would
+        // fast-forward through `MAX_CATCHUP` the moment the quota reopened.
+        assert!(
+            host.since_last_update < host.cycle_duration * 2,
+            "the park left catch-up debt: {:?}",
+            host.since_last_update,
+        );
     }
 
     /// **Send on change.** Every heartbeat that goes out must either say something new or be the

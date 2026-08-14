@@ -28,6 +28,7 @@
 //! observed `GameState` at one poll, so a partial batch cannot happen.
 
 use std::path::PathBuf;
+use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -44,7 +45,7 @@ use crate::llm::protocol::{self, ChatRequest, Completion, Fragment, ImageDetail,
 use crate::pokemon::tile_map::MetaTileMap;
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
-use crate::web::published::{Published, RunStatus, TodoView, UiEventBody};
+use crate::web::published::{Published, RunStatus, TodoView, UiEventBody, now_ms};
 
 /// One question, from the policy to the worker.
 #[derive(Debug, Clone)]
@@ -154,6 +155,26 @@ impl TurnHandles {
 /// a dead endpoint fifty times a second would turn an outage into a log flood, and the game is not
 /// going anywhere.
 const FAILURE_WAIT_TICKS: u16 = 100;
+
+/// The longest [`Worker::park_until`] will stop the run for, however far off the endpoint says its
+/// quota reopens. A daily cap is at most 24 h away; anything beyond that is a header we have
+/// misread, and the answer to that is to try again rather than to sit out the week.
+const MAX_PARK: Duration = Duration::from_secs(25 * 60 * 60);
+
+/// How finely the park is chopped. Long enough to cost nothing over hours, short enough that a
+/// `POST /api/new-run` arriving mid-park is felt as promptly as it would be mid-turn.
+const PARK_SLICE: Duration = Duration::from_millis(200);
+
+/// A duration as a viewer would say it. Used in the notice that announces a park, so it is read once
+/// per park rather than per tick, and the page renders its own live countdown from `until_ms`.
+fn describe_wait(ms: u64) -> String {
+    let seconds = ms / 1000;
+    match (seconds / 3600, (seconds % 3600) / 60, seconds % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
+}
 
 /// How much of a tool's answer the page and the transcript keep. The model is always sent all of it;
 /// this is the copy that is broadcast to every viewer and appended to `transcript.jsonl`, and a
@@ -371,6 +392,62 @@ impl Worker {
         self.published.publish_event(UiEventBody::Plan { items });
     }
 
+    /// Stop the run until `until_ms`, and stop the emulator with it. `false` if the turn was
+    /// cancelled while waiting, in which case the caller must abandon it.
+    ///
+    /// ⚠️ **This is the one place the emulator is deliberately paused, and it is safe for exactly
+    /// the reason the general rule forbids it.** `CLAUDE.md`'s ⚠️ is that a pause spanning an LLM
+    /// *tool call* deadlocks the run: a tool batch is answered by `Policy::service_tools`, which only
+    /// runs when `gb.run` advances the agent, so a paused emulator can never answer one. Here there
+    /// is nothing outstanding to answer — the request failed before any tool was called, and the
+    /// next thing this turn does is ask again — so nothing is waiting on the emulator and the pause
+    /// cannot deadlock anything. Anything that parks *while a tool batch is in flight* would.
+    ///
+    /// ⚠️ **The release is unconditional and must stay that way.** A return that leaves
+    /// `set_throttled_until` set stops the emulator for the rest of the process, and the page would
+    /// show a paused screen that no reset ever clears.
+    fn park_until(&mut self, id: u64, until_ms: u64, message: &str) -> bool {
+        let now = now_ms();
+        // ⚠️ Clamped, because the wait is driven by a number the *endpoint* chose. A header that is
+        // wrong, or a unit sniffed wrongly out of it (`protocol::reset_at_ms`), would otherwise park
+        // the run past the heat death of the sun with no way back but a restart.
+        let until_ms = until_ms.min(now.saturating_add(MAX_PARK.as_millis() as u64));
+        if until_ms <= now {
+            return true;
+        }
+
+        self.published.publish_event(UiEventBody::Notice {
+            level: "warn",
+            message: format!(
+                "the endpoint's quota is spent, so the run is paused for {}; the game is stopped and \
+                 nothing is lost. {message}",
+                describe_wait(until_ms - now),
+            ),
+        });
+        self.published.set_status(RunStatus::Throttled { until_ms, message: message.to_string() });
+        // ⚠️ Last, after the status: the emulator thread reads this one every tick, and a page that
+        // sees the screen stop before it is told why has nothing to draw its overlay from.
+        self.published.set_throttled_until(until_ms);
+
+        let mut cancelled = false;
+        while now_ms() < until_ms {
+            if self.is_stale(id) {
+                cancelled = true;
+                break;
+            }
+            std::thread::sleep(PARK_SLICE);
+        }
+
+        self.published.set_throttled_until(0);
+        if !cancelled {
+            self.published.publish_event(UiEventBody::Notice {
+                level: "info",
+                message: "the quota window reopened; the run is resuming where it stopped".to_string(),
+            });
+        }
+        !cancelled
+    }
+
     /// `None` means the turn was cancelled and abandoned.
     ///
     /// The second half of the pair is the model's own account of what it just decided and why
@@ -398,41 +475,63 @@ impl Worker {
                     stream: true,
                     stream_options: StreamOptions { include_usage: true },
                 };
-                let published = Arc::clone(&self.published);
-                let generation = Arc::clone(&self.generation);
-                let result = stream_with_retries(
-                    self.retry,
-                    self.endpoint.as_ref(),
-                    &request,
-                    &mut |delta| {
-                        published.set_status(RunStatus::Streaming);
-                        published.publish_event(match delta {
-                            Fragment::Content(text) => {
-                                UiEventBody::AssistantDelta { turn: id, text: text.to_string() }
+                // ⚠️ **A loop, so a parked turn asks the *same* question when the quota reopens.**
+                // That is only sound because the emulator is stopped for the duration (see
+                // `park_until`): the situation this request describes is still on screen when we
+                // wake, however many hours later, so re-sending it is not stale, it is the point.
+                let result = loop {
+                    let published = Arc::clone(&self.published);
+                    let generation = Arc::clone(&self.generation);
+                    let result = stream_with_retries(
+                        self.retry,
+                        self.endpoint.as_ref(),
+                        &request,
+                        &mut |delta| {
+                            published.set_status(RunStatus::Streaming);
+                            published.publish_event(match delta {
+                                Fragment::Content(text) => {
+                                    UiEventBody::AssistantDelta { turn: id, text: text.to_string() }
+                                }
+                                Fragment::Reasoning(text) => {
+                                    UiEventBody::AssistantReasoning { turn: id, text: text.to_string() }
+                                }
+                            });
+                        },
+                        &|| generation.load(Ordering::SeqCst) != id,
+                        &mut |retry| {
+                            published.set_status(RunStatus::RateLimited {
+                                retry_in_ms: retry.waiting.as_millis() as u64,
+                            });
+                            published.publish_event(UiEventBody::Notice {
+                                level: "warn",
+                                message: format!(
+                                    "attempt {}/{} failed ({}); retrying in {:?}{}",
+                                    retry.attempt,
+                                    retry.of,
+                                    retry.failure,
+                                    retry.waiting,
+                                    if retry.already_spoke { " (the reply will start again)" } else { "" },
+                                ),
+                            });
+                        },
+                    );
+                    match result {
+                        // The quota is spent and the endpoint dated its reopening: stop asking, stop
+                        // the game with it, and put the same question again when it opens.
+                        // `park_until` answers `false` only if the turn was cancelled while waiting.
+                        Err(LlmError::RateLimited { resets_at_ms: Some(until_ms), message }) => {
+                            if !self.park_until(id, until_ms, &message) {
+                                break Err(LlmError::Cancelled);
                             }
-                            Fragment::Reasoning(text) => {
-                                UiEventBody::AssistantReasoning { turn: id, text: text.to_string() }
-                            }
-                        });
-                    },
-                    &|| generation.load(Ordering::SeqCst) != id,
-                    &mut |retry| {
-                        published.set_status(RunStatus::RateLimited {
-                            retry_in_ms: retry.waiting.as_millis() as u64,
-                        });
-                        published.publish_event(UiEventBody::Notice {
-                            level: "warn",
-                            message: format!(
-                                "attempt {}/{} failed ({}); retrying in {:?}{}",
-                                retry.attempt,
-                                retry.of,
-                                retry.failure,
-                                retry.waiting,
-                                if retry.already_spoke { " (the reply will start again)" } else { "" },
-                            ),
-                        });
-                    },
-                );
+                            // ⚠️ Back to `AwaitingLlm` *before* asking again. The status is only set
+                            // at the top of this loop's parent, so without this the page keeps the
+                            // PAUSED plate up over a game that has already resumed, until the first
+                            // token of the reply happens to arrive and move it to `Streaming`.
+                            self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
+                        }
+                        settled => break settled,
+                    }
+                };
                 match result {
                     Ok(completion) => completion,
                     Err(LlmError::Cancelled) => return None,

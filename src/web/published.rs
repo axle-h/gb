@@ -88,7 +88,7 @@ pub struct UiEvent {
 
 /// Now, in Unix milliseconds. Saturating rather than `expect`: a host whose clock is set before 1970
 /// should lose its timestamps, not its run.
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as u64)
@@ -215,6 +215,18 @@ pub enum RunStatus {
     /// A retry is being waited out. Named for the case that dominates, but any retryable failure
     /// lands here — what matters to a viewer is that the run is stalled and for how long.
     RateLimited { retry_in_ms: u64 },
+    /// The endpoint's quota is exhausted and it said when it reopens, so **the whole run is
+    /// paused** — no requests, and the emulator stopped with it.
+    ///
+    /// ⚠️ **Distinct from [`Self::RateLimited`], which is a backoff of a few seconds.** This one can
+    /// be hours, and the two want opposite things from a viewer: one is "wait a moment", the other
+    /// is "come back later, and nothing is lost in the meantime".
+    ///
+    /// `until_ms` is Unix milliseconds, not a duration, for the reason `UiEvent::at` is: it is
+    /// replayed on the heartbeat and read by a page that may have joined long after it was set, so a
+    /// countdown has to be derived from an absolute moment rather than from a number that was true
+    /// once.
+    Throttled { until_ms: u64, message: String },
     /// The last turn could not be completed. Left in place until the next turn starts, because a
     /// status that flicks straight back to `Playing` is a status nobody ever sees.
     Error { message: String },
@@ -363,6 +375,11 @@ pub struct Published {
     /// can open the picture the model was just looking at, not that the run keeps every one it ever
     /// drew. Old entries fall off the back and the page shows the caption without the picture.
     tool_images: RwLock<VecDeque<(u64, Arc<Vec<u8>>)>>,
+    /// The Unix millisecond the endpoint's quota reopens, or `0` for "the run is not parked".
+    ///
+    /// The one thing in here the *emulator* thread reads on its hot path rather than writes — see
+    /// [`Self::set_throttled_until`] for why it is an atomic and not the run status itself.
+    throttled_until: AtomicU64,
 }
 
 /// How many tool pictures [`Published::tool_images`] holds. Sized for "what is on screen in the
@@ -394,6 +411,7 @@ impl Published {
             latest_status: RwLock::new(None),
             latest_plan: RwLock::new(None),
             tool_images: RwLock::new(VecDeque::new()),
+            throttled_until: AtomicU64::new(0),
             usage: RwLock::new(None),
             turns: AtomicU64::new(0),
         })
@@ -570,6 +588,24 @@ impl Published {
 
     pub fn run_status(&self) -> RunStatus {
         self.status.read().expect("status lock poisoned").clone()
+    }
+
+    /// Park the run until `until_ms` (Unix milliseconds), or `0` to release it.
+    ///
+    /// ⚠️ **An atomic rather than a read of [`Self::run_status`], because the emulator thread asks
+    /// this on every tick.** `RunStatus` carries a `String` in three of its variants, so answering
+    /// from it would clone one fifty times a second on the hot path to say "no" — and the run status
+    /// itself is set right beside this, so the two cannot disagree about *whether* we are parked.
+    pub fn set_throttled_until(&self, until_ms: u64) {
+        self.throttled_until.store(until_ms, Ordering::Relaxed);
+    }
+
+    /// The moment the run may resume, if it is parked. Read by [`crate::host::EmulatorHost::tick`].
+    pub fn throttled_until(&self) -> Option<u64> {
+        match self.throttled_until.load(Ordering::Relaxed) {
+            0 => None,
+            until => Some(until),
+        }
     }
 }
 

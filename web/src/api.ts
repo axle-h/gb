@@ -55,6 +55,16 @@ export type RunStatus =
   | { state: 'running_tool'; name: string }
   | { state: 'compacting' }
   | { state: 'rate_limited'; retry_in_ms: number }
+  /**
+   * The endpoint's quota is spent and the whole run is paused until `until_ms` — the emulator
+   * included, so nothing is missed while it waits.
+   *
+   * ⚠️ **An absolute Unix millisecond, not a countdown, and the page must keep it that way.** The
+   * status is published once when the park starts and then replayed on every heartbeat and to every
+   * page that joins, which may be hours later; a remaining-time number would be read as current by
+   * all of them. The countdown is derived here, against the viewer's own clock.
+   */
+  | { state: 'throttled'; until_ms: number; message: string }
   | { state: 'error'; message: string };
 
 /** `published::StatusSnapshot` — the 10 Hz heartbeat. */

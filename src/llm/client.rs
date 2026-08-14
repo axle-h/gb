@@ -15,7 +15,10 @@ use std::time::Duration;
 
 use crate::llm::LlmError;
 use crate::llm::config::LlmConfig;
-use crate::llm::protocol::{ChatRequest, Completion, Fragment, describe_error_body, read_stream};
+use crate::llm::protocol::{
+    ChatRequest, Completion, Fragment, describe_error_body, read_stream, reset_at_ms,
+};
+use crate::web::published::now_ms;
 
 /// One streamed chat completion. A trait so the worker can be driven by a scripted endpoint in tests
 /// without a socket, and so W6's accounting has one place to wrap.
@@ -102,11 +105,23 @@ impl ChatEndpoint for OpenAiClient {
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
+            // ⚠️ **Read before the body, because reading the body consumes the response.** The two
+            // headers are the whole of what makes a 429 actionable — without them a rate limit is
+            // just another failure to back off from, which against a daily quota is the one
+            // response that cannot work. See `LlmError::RateLimited`.
+            let header = |name: &str| {
+                response.headers().get(name).and_then(|value| value.to_str().ok()).map(str::to_owned)
+            };
+            let (retry_after, reset) = (header("retry-after"), header("x-ratelimit-reset"));
             let message = response
                 .into_body()
                 .read_to_string()
                 .map(|body| describe_error_body(&body))
                 .unwrap_or_else(|e| format!("(the error body could not be read: {e})"));
+            if status == 429 {
+                let resets_at_ms = reset_at_ms(retry_after.as_deref(), reset.as_deref(), now_ms());
+                return Err(LlmError::RateLimited { resets_at_ms, message });
+            }
             return Err(LlmError::Http { status, message });
         }
 
@@ -192,6 +207,16 @@ pub fn stream_with_retries(
         };
         if attempt == policy.attempts || !failure.is_retryable() || cancelled() {
             return Err(failure);
+        }
+        // ⚠️ **A dated rate limit is handed straight up rather than retried**, whenever the reset is
+        // further away than the backoff could ever reach. Retrying it is not merely useless, it is
+        // the failure making itself worse: every attempt is another request counted against the
+        // quota that has already run out, and on a daily cap all of them fail. The caller parks
+        // until the stated time instead — see `Worker::decide`.
+        if let LlmError::RateLimited { resets_at_ms: Some(at), .. } = &failure {
+            if *at > now_ms().saturating_add(policy.max.as_millis() as u64) {
+                return Err(failure);
+            }
         }
 
         let waiting = policy.backoff_for(attempt);
@@ -313,6 +338,51 @@ mod tests {
         assert_eq!((retries[0].0, retries[0].1), (1, 5));
         assert!(retries[0].2, "the failed attempt had already streamed prose");
         assert!(retries[0].3.contains("429"), "{}", retries[0].3);
+    }
+
+    /// ⚠️ **The distinction the whole `RateLimited` variant exists for.** A daily quota is exhausted
+    /// and the endpoint said when it reopens: every retry is another request counted against that
+    /// same spent quota, so the backoff would spend four more of an allowance that has already run
+    /// out and fail four more times doing it. One attempt, and the deadline is handed up for
+    /// `Worker::park_until` to wait out.
+    #[test]
+    fn a_rate_limit_dated_beyond_the_backoff_is_not_retried_at_all() {
+        let hour_away = now_ms() + 60 * 60 * 1000;
+        let endpoint = scripted("", vec![
+            Err(LlmError::RateLimited { resets_at_ms: Some(hour_away), message: "50/day".into() }),
+            Ok(completion("never reached")),
+        ]);
+        let mut retries = 0;
+        let failure = stream_with_retries(instant(), &endpoint, &request(), &mut |_| {}, &|| false, &mut |_| {
+            retries += 1;
+        })
+        .expect_err("a spent daily quota is not something to retry into");
+
+        assert_eq!(endpoint.attempts.get(), 1, "the quota must not be spent finding out again");
+        assert_eq!(retries, 0, "and the UI is not told to expect a retry that is not coming");
+        match failure {
+            LlmError::RateLimited { resets_at_ms, .. } => assert_eq!(resets_at_ms, Some(hour_away)),
+            other => panic!("the deadline has to survive to the caller: {other}"),
+        }
+    }
+
+    /// The other half of the same rule: a limit that clears within the backoff, or one the endpoint
+    /// did not date at all, is the ordinary transient case and is still retried. Undated is far more
+    /// often a per-minute limit than a daily one, and parking a run for hours on a guess would be a
+    /// worse mistake than waiting a second.
+    #[test]
+    fn a_rate_limit_within_reach_of_the_backoff_is_still_retried() {
+        for resets_at_ms in [None, Some(now_ms() + 2_000)] {
+            let endpoint = scripted("", vec![
+                Err(LlmError::RateLimited { resets_at_ms, message: "20/min".into() }),
+                Ok(completion("done")),
+            ]);
+            let completion =
+                stream_with_retries(instant(), &endpoint, &request(), &mut |_| {}, &|| false, &mut |_| {})
+                    .expect("the second attempt succeeds");
+            assert_eq!(completion.content, "done", "{resets_at_ms:?}");
+            assert_eq!(endpoint.attempts.get(), 2, "{resets_at_ms:?}");
+        }
     }
 
     /// A 400 is the request being wrong. Trying it four more times only spends four more seconds
