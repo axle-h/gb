@@ -559,17 +559,21 @@ impl ConnectedMapStrip {
 
         let Some(tile_indices) = self.tile_ids_at(strip_idx) else { return MetaTile::Obstacle };
 
-        let mut has_water = false;
-        let mut has_walkable = false;
-        for tile_id in tile_indices {
-            let Some(tile_id) = tile_id else { continue };
-            if self.is_water_tile(tile_id) {
-                has_water = true;
-            }
-            if self.collision_tiles.contains(&tile_id) {
-                has_walkable = true;
-            }
-        }
+        let has_water = tile_indices.iter().flatten().any(|&tile_id| self.is_water_tile(tile_id));
+
+        // ⚠️ **Bottom-left only, exactly as `build_meta_tiles_base` classifies in-map tiles** —
+        // `GetTileAndCoordsInFrontOfPlayer` collides against that one sub-tile and no other. Asking
+        // instead whether *any* of the four is passable lets a block's scenery vouch for a surface
+        // that cannot be walked on, and a ledge id is never in a tileset's passable list, so the
+        // one thing the loose test reliably let through was a one-way ledge on the far side of a
+        // border. Route 4's bottom row at x=12,13 is `39 39 36 37`: grass above, south-only ledge
+        // on the ground. Both read as crossings into Route 4, and since `actions()` offers only the
+        // *nearest* crossing per map, a player standing under one is offered nothing else and can
+        // never leave the map. A deployed run spent a day walking into it.
+        //
+        // Water keeps the loose test on purpose — see `is_water_tile_id`: shore blocks genuinely
+        // mix water and land ids, and treating them as water is the conservative answer there.
+        let has_walkable = matches!(tile_indices[2], Some(tile_id) if self.collision_tiles.contains(&tile_id));
 
         if has_water {
             MetaTile::ConnectionWater(self.map)
@@ -1024,8 +1028,17 @@ impl MMU {
                     }
                     MapConnectionDirection::North => {
                         // strip_src points to the start of the 3-block-deep strip
-                        // (connected_height − 3 rows in). The border row is the 3rd row.
-                        let addr = connection.strip_src + 2 * connection.strip_length as u16;
+                        // (connected_height − 3 rows in). The border row is the 3rd row down —
+                        // and a row is `connected_map_width` blocks long, as the E/W arms below
+                        // already stride by.
+                        //
+                        // ⚠️ **Not `strip_length`.** The two are equal for most north connections,
+                        // which is what made this survive: every case the older tests cover reads
+                        // the same row either way. They differ for seven — worst of all Route 3 →
+                        // Route 4, 13 against 45, where the strip came from the middle of Route 4
+                        // and painted almost all of Route 3's north edge as a way out. Route 6 →
+                        // Saffron City is the same bug with the opposite symptom: no crossing at all.
+                        let addr = connection.strip_src + 2 * connection.connected_map_width as u16;
                         let blocks = self.rom_data_from_pointer(
                             connected_map_bank,
                             addr,
@@ -1484,5 +1497,136 @@ mod test {
             .expect("Route2 should have a connection to ViridianCity");
 
     }
+
+    /// The block row a **north** strip is read from.
+    ///
+    /// `strip_src` points at block row `connected_height − 3`, column `_src`, of the connected map;
+    /// the row that actually borders this map is two rows further down, and a row is
+    /// `connected_map_width` blocks long — **not** `strip_length` blocks. The two are equal for most
+    /// north connections, which is why every case the older tests cover passes either way. They
+    /// differ for seven of them, Route 3 → Route 4 worst of all (13 against 45): the strip was read
+    /// from the middle of Route 4 and painted almost all of Route 3's north edge as a crossing,
+    /// including the one-way ledge that a deployed run then walked into for a day.
+    #[test]
+    fn test_north_strip_reads_the_connected_maps_border_row() {
+        let mmu = MMU::from_rom(POKERED).unwrap();
+
+        // Route3 → Route4: strip_length 13, connected width 45 — the case that diverges.
+        // pokered/maps/Route4.blk, row 8 (of 9), columns 0..12.
+        let route3 = mmu.read_map_metadata(Map::Route3).unwrap();
+        let strip = route3.connected_strips.iter()
+            .find(|s| s.map == Map::Route4)
+            .expect("Route3 should have a north strip to Route4");
+        assert_eq!(strip.direction, MapConnectionDirection::North);
+        assert_eq!(
+            strip.border_blocks,
+            vec![0x2c, 0x2c, 0x29, 0x01, 0x01, 0x01, 0x1a, 0x3e, 0x3f, 0x3f, 0x2c, 0x2c, 0x2c],
+            "Route3's north strip must be Route4's bottom block row, not a row from its middle"
+        );
+
+        // Control: PalletTown → Route1 has strip_length == connected width (10), so it reads the
+        // same row under either stride. pokered/maps/Route1.blk, row 17 (of 18).
+        let pallet = mmu.read_map_metadata(Map::PalletTown).unwrap();
+        let control = pallet.connected_strips.iter()
+            .find(|s| s.map == Map::Route1)
+            .expect("PalletTown should have a north strip to Route1");
+        assert_eq!(
+            control.border_blocks,
+            vec![0x0a, 0x6e, 0x0a, 0x0a, 0x4d, 0x0b, 0x4e, 0x0a, 0x0a, 0x6d],
+            "the equal-width case must be unchanged"
+        );
+    }
+
+    /// A one-way ledge on the far side of a border is not a way out of this map.
+    ///
+    /// Strip cells are classified from the **bottom-left** sub-tile of the 2×2, the one
+    /// `GetTileAndCoordsInFrontOfPlayer` reads — see the note in `build_meta_tiles_base`. Route 4's
+    /// bottom row at x = 12,13 is `39 39 36 37`: grass on the block's top half, a south-only ledge on
+    /// the surface actually walked on. Classifying on "any of the four sub-tiles is passable" made
+    /// those read as crossings into Route 4, and because `actions()` only ever offers the *nearest*
+    /// crossing per map, a player standing under one is offered nothing else and can never leave.
+    #[test]
+    fn test_a_ledge_across_a_border_is_not_a_connection() {
+        let mmu = MMU::from_rom(POKERED).unwrap();
+
+        // ── Route3 north → Route4 ─────────────────────────────────────────────
+        // 13 blocks = 26 meta-tiles, cell i landing on Route4 (i, 17).
+        // Passable there only at x = 6..=11; x = 12,13 are south ledges and x = 14 a west ledge.
+        let route3 = mmu.read_map_metadata(Map::Route3).unwrap();
+        let strip = route3.connected_strips.iter()
+            .find(|s| s.map == Map::Route4)
+            .expect("Route3 should have a north strip to Route4");
+        for i in 0..strip.strip_length as usize * 2 {
+            let expected_connection = (6..=11).contains(&i);
+            match strip.meta_tile_at(i) {
+                MetaTile::Connection { to_map, to_position } => {
+                    assert!(expected_connection, "strip idx {i}: a ledge or wall offered as a crossing");
+                    assert_eq!(to_map, Map::Route4);
+                    assert_eq!(to_position, Point8 { x: i as u8, y: 17 });
+                }
+                other => assert!(!expected_connection, "strip idx {i}: real crossing lost, got {other:?}"),
+            }
+        }
+
+        // ── Route18 north → Route17 ───────────────────────────────────────────
+        // Cycling Road's south wall: seven of the twenty cells are south-only ledges, and only
+        // x = 10 is a genuine way up. The rest is sea, which stays `ConnectionWater` — the water
+        // test deliberately still scans all four sub-tiles (see `is_water_tile_id`).
+        let route18 = mmu.read_map_metadata(Map::Route18).unwrap();
+        let cycling = route18.connected_strips.iter()
+            .find(|s| s.map == Map::Route17)
+            .expect("Route18 should have a north strip to Route17");
+        for i in 0..cycling.strip_length as usize * 2 {
+            let tile = cycling.meta_tile_at(i);
+            if [6, 7, 8, 9, 11, 12, 13].contains(&i) {
+                assert_eq!(tile, MetaTile::Obstacle, "strip idx {i}: Route17's ledge is not a crossing");
+            } else if i == 10 {
+                assert!(matches!(tile, MetaTile::Connection { to_map: Map::Route17, .. }),
+                    "strip idx 10 is the only real way up onto Cycling Road, got {tile:?}");
+            }
+        }
+    }
+
+    /// The deployed wedge, reproduced without the emulator.
+    ///
+    /// A run stood at raw (63, 0) — the top row of Route 3's eastern corridor, reached by hopping
+    /// down Route 4's one-way ledge — and was offered exactly one way into Route 4: the ledge
+    /// directly overhead, one button press away. It held Up into it for 60 s, gave up, was offered
+    /// the same thing again, and did that for a day. The real crossings are three to seven steps
+    /// west, at expanded x = 58..=62.
+    #[test]
+    fn test_route3_east_corridor_routes_west_to_reach_route4() {
+        let mmu = MMU::from_rom(POKERED).unwrap();
+        let metadata = mmu.read_map_metadata(Map::Route3).unwrap();
+        let current_map = CurrentMap {
+            player_position: Point8 { x: 63, y: 0 },
+            player_direction: PlayerFacingDirection::Up,
+            sprites: vec![],
+            metadata: Arc::new(metadata),
+            closed_doors: vec![],
+            grass_encounter_rate: 0,
+            card_key_locked: false,
+        };
+        let tile_map = MetaTileMap::new(&current_map);
+        println!("{tile_map}");
+
+        let action = tile_map.actions().into_iter()
+            .find(|a| matches!(a.tile, MetaTile::Connection { to_map, .. } if to_map == Map::Route4))
+            .expect("Route3's east corridor should still have a way into Route4");
+
+        assert_eq!(action.destination.y, 0, "the crossing is on the north border row");
+        assert!(
+            (58..=62).contains(&action.destination.x),
+            "expected a real crossing at expanded x 58..=62, got {:?} — x 63/64 are Route4's ledge",
+            action.destination
+        );
+        assert!(
+            action.route.len() > 1,
+            "reaching it means walking west first, not one press of Up: {:?}", action.route
+        );
+    }
+
+
 }
+
 

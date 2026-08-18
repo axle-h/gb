@@ -134,6 +134,12 @@ const STATES: &[SoakState] = &[
         covers: "the rarest grass in the game (8/256) — where the pacing budget was found",
     },
     SoakState {
+        name: "route3-ledge-pocket",
+        state: include_bytes!("../data/route3-ledge-pocket.bin"),
+        covers: "a map border sealed by one-way ledges: the only way on is five tiles west of the \
+                 only way the player can see",
+    },
+    SoakState {
         name: "at-vermilion",
         state: include_bytes!("../data/at-vermilion.bin"),
         covers: "a port city: gym, mart, Pokémon Centre PC, the S.S. Anne gangway",
@@ -347,6 +353,26 @@ fn random_play_from_a_fresh_save_never_goes_quiet() {
 #[test]
 fn random_play_in_viridian_forest_never_goes_quiet() {
     soak(state("viridian-forest"));
+}
+
+/// Route 3's north-east pocket — **the deployed run's own save**, lifted off the pod, and the only
+/// fixture here that did not come out of the leg chain.
+///
+/// The player is stood where a one-way ledge dropped them out of Route 4, against a map border whose
+/// strip was misread twice over: the row came from the middle of Route 4, and cells were called
+/// walkable if *any* of their four sub-tiles was. The crossing directly overhead was a ledge, it was
+/// also the nearest one, and `actions()` only ever offers the nearest per map — so the only way into
+/// Route 4 on the menu was one that could never be walked. The run picked it for a day.
+///
+/// ⚠️ **This is coverage, not the regression test.** A jam that aborts is not silence: the phantom
+/// cost 60 s of `MAX_MOVEMENT_SILENCE` and then handed control back, which never approaches the
+/// watchdog this tier watches, so a soak here would have passed throughout. What pins the bug is
+/// `map_metadata`'s `test_a_ledge_across_a_border_is_not_a_connection` and its two neighbours. What
+/// this buys is the region — connection strips, one-way ledges and a pocket that has to be routed
+/// out of westwards — under a fuzzer, from a save that a real run really reached.
+#[test]
+fn random_play_in_route_3s_ledge_pocket_never_goes_quiet() {
+    soak(state("route3-ledge-pocket"));
 }
 
 /// Vermilion: a gym behind a puzzle, a mart, a Pokémon Centre PC and the dock.
