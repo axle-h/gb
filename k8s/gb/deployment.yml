@@ -97,7 +97,12 @@ spec:
               # ⚠️ Deliberately no CPU limit. A limit throttles the emulator thread against the CFS
               # quota, which shows up as the game running slower than real time rather than as
               # anything that looks like a resource problem.
-              memory: 1Gi
+              #
+              # Memory was 1Gi and the pod was OOMKilled twelve times over four days — an exit 137
+              # every few hours, each one resuming from the last checkpoint and each one costing
+              # whatever had happened since. The node has ~7.5Gi allocatable and this is the only
+              # thing on it that wants any of it.
+              memory: 2Gi
           # Resuming reads a save state and rebuilds the world graph from ROM headers; it is fast,
           # but the startup probe is what stops liveness counting against that.
           startupProbe:

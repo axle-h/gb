@@ -7,8 +7,16 @@
 # on. That is exactly what is wanted here — the run is single-writer and there is one replica — but
 # it does mean the pod cannot move nodes without the data staying behind.
 #
-# The transcript is the only thing that grows without bound (a few MB per playthrough); 1Gi is
-# generous for a run and cheap to raise.
+# The transcript is the only thing that grows without bound, and "a few MB per playthrough" was an
+# underestimate: a four-day LLM run reached 162 MB live with a 268 MB rotated file beside it, 437 MB
+# for the directory. 10Gi leaves that room.
+#
+# ⚠️ **This number is nominal, and raising it here does not resize a claim that already exists.**
+# `local-path` sets no `allowVolumeExpansion`, so the API server refuses an edit to a bound PVC —
+# the only way to change a live one is to delete and recreate it, and the PV's reclaim policy is
+# `Delete`, so that takes the run's directory with it. What actually limits a run is the node's
+# disk (930G here), which nothing in this file constrains; the request is a scheduling hint and a
+# statement of intent for the next cluster this is applied to.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -21,4 +29,4 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi
+      storage: 10Gi
