@@ -12,7 +12,14 @@ const PIN_SLACK = 24;
  * log with it would be the one performance mistake this page can make. `entries` only changes when
  * something is actually said.
  */
-export const Conversation = memo(function Conversation({ entries }: { entries: Entry[] }) {
+export const Conversation = memo(function Conversation({
+  entries,
+  visible = true,
+}: {
+  entries: Entry[];
+  /** False while a phone is showing another tab — see the pin effect below for why it matters. */
+  visible?: boolean;
+}) {
   const list = useRef<HTMLDivElement>(null);
   // ⚠️ **The live thought scrolls inside its own box, and that box has to be followed separately.**
   // A thought is capped at a few lines so it cannot bury the log, which means the tokens arriving
@@ -32,10 +39,15 @@ export const Conversation = memo(function Conversation({ entries }: { entries: E
   // are different questions about the same row — "what did it think" and "what came down the wire".
   const [thoughts, setThoughts] = useState<Set<number>>(() => new Set());
 
+  // ⚠️ `visible` is a dependency and not a condition. While a phone shows another tab this pane is
+  // `display: none`, where `scrollHeight` is 0 and every pin applied is a no-op — so switching back
+  // has to re-apply it, or the log reopens at the top. It must not gate the assignment itself: the
+  // tab state is inert on a desk (the stylesheet ignores it from 640px up), so `visible` can be
+  // stale-false there while the pane is plainly on screen and still needs following.
   useLayoutEffect(() => {
     const element = list.current;
     if (pinned && element) element.scrollTop = element.scrollHeight;
-  }, [entries, pinned, showAllRaw, expanded, thoughts]);
+  }, [entries, pinned, showAllRaw, expanded, thoughts, visible]);
 
   // The live thought follows its own tail, on the same terms as the list above it: pinned until the
   // viewer scrolls back through it, and re-pinned when the next thought starts (a new row means a

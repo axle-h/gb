@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { RunStatus, UsageView } from './api';
 import { Conversation } from './components/Conversation';
 import { Leaderboard } from './components/Leaderboard';
@@ -7,8 +7,19 @@ import { Screen, describeRemaining } from './components/Screen';
 import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 
+/** The phone's three tabs: the log, the trainer card and party, the model's plan. */
+type PaneTab = 'log' | 'status' | 'plan';
+
 export function App() {
   const { status, entries, connection, usage, run, plan, speed } = useEventStream();
+  // Which pane a phone is showing. From 640px up the stylesheet hides the tab bar and ignores the
+  // tab classes, so this state is inert on a desk. The log is the default because it is the thing
+  // the page is for.
+  const [tab, setTab] = useState<PaneTab>('log');
+  // The Plan tab is only offered while there is a plan (PlanPanel renders nothing without one, and
+  // `--policy random` never has one), so a selection that outlives its pane falls back to the log
+  // rather than to an empty column.
+  const pane: PaneTab = tab === 'plan' && plan.length === 0 ? 'log' : tab;
   // The leaderboard's only cue that it is stale. A win is rare enough that this counter changes at
   // most once per run, and the log is already carrying the event that says so.
   const wins = useMemo(
@@ -65,16 +76,33 @@ export function App() {
         </span>
       </header>
 
-      <main>
+      <main className={`tab-${pane}`}>
         <section className="left">
           <Screen pausedUntil={run.state === 'throttled' ? run.until_ms : null} />
+          {/* Phone-only (hidden from 640px up): the three panes that share what height the screen
+              leaves become tabs, one scrollable pane at a time. The screen itself stays above them,
+              because it is the one thing every tab wants. The buttons key off `pane` rather than
+              `tab` so the Plan fallback above also moves the highlight. */}
+          <nav className="pane-tabs">
+            <button className={pane === 'log' ? 'on' : ''} onClick={() => setTab('log')}>
+              Log
+            </button>
+            <button className={pane === 'status' ? 'on' : ''} onClick={() => setTab('status')}>
+              Trainer
+            </button>
+            {plan.length > 0 && (
+              <button className={pane === 'plan' ? 'on' : ''} onClick={() => setTab('plan')}>
+                Plan
+              </button>
+            )}
+          </nav>
           <StatusPanel status={status} speed={speed} />
           {/* Under the game rather than beside the conversation: it changes a few times an hour and
               is read at a glance, where the log is read as it scrolls. */}
           <PlanPanel plan={plan} />
         </section>
         <section className="right">
-          <Conversation entries={entries} />
+          <Conversation entries={entries} visible={pane === 'log'} />
         </section>
       </main>
     </div>

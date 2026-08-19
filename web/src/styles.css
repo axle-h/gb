@@ -534,6 +534,13 @@ main {
   cursor: pointer;
 }
 
+/* The phone's pane tabs. A desk has room for all three panes at once, so the bar only exists below
+   the 640px breakpoint — the phone block at the bottom of this file is where it is switched on and
+   where the tab-* classes on <main> mean anything. */
+.pane-tabs {
+  display: none;
+}
+
 /* ── Narrow screens ─────────────────────────────────────────────────────────────────────────────
    Two breakpoints, and they answer different questions. At 900px the two columns stop fitting side
    by side and become two rows. At 640px — a phone — the question is no longer layout but *budget*:
@@ -1004,14 +1011,74 @@ header .trophy:hover {
     grid-template-rows: minmax(0, auto) minmax(38vh, 1fr);
   }
 
-  /* ⚠️ **The top row needs a ceiling as well as a floor, and the party is why.** The screen is a
-     fixed fraction of the viewport but the panel under it is not: an empty party is ~140px and six
-     Pokémon is ~260, so a layout tuned on a fresh save quietly halves the log four badges in. Above
-     this the left column scrolls within itself — the same thing it does on a laptop, and the reason
-     it has always had `overflow-y: auto`. */
+  /* The 52vh ceiling the stacked layout needed (a six-Pokémon party under the screen quietly
+     halved the log) went with the stacking: under the tabs below, the column is the screen and the
+     tab bar on the log tab, and the whole viewport on the others. `none` because the 900px block
+     above also matches a phone and would otherwise reimpose its 58vh. */
   .left {
-    max-height: 52vh;
+    max-height: none;
     gap: 8px;
+  }
+
+  /* ── The pane tabs ──
+     Three panes used to share what height the screen left, each scrolling in a box of its own: the
+     party inside .left, the plan capped at 22vh, the log squeezed under both — three nested
+     scrollbars in ~700px. Tabs instead: the screen and the bar stay put, and exactly one of
+     log / trainer / plan gets the rest of the height and is the only thing that scrolls. The panes
+     are hidden, never unmounted, so the log keeps its scroll position and open rows while another
+     tab is showing. */
+  .pane-tabs {
+    display: flex;
+    gap: 6px;
+  }
+
+  .pane-tabs button {
+    flex: 1;
+    padding: 3px 0;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: none;
+    color: var(--dim);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .pane-tabs button.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  }
+
+  main.tab-log .status,
+  main.tab-log .plan,
+  main.tab-status .plan,
+  main.tab-plan .status {
+    display: none;
+  }
+
+  main.tab-status .right,
+  main.tab-plan .right {
+    display: none;
+  }
+
+  /* With the log hidden the grid's second row would be an empty 38vh floor, so these tabs collapse
+     the grid to one row and let the left column take the whole height. `overflow: hidden` on the
+     column plus `flex: 1` on the pane is what keeps the screen and the tab bar fixed while the
+     pane's own `overflow-y` does all the scrolling. */
+  main.tab-status,
+  main.tab-plan {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  main.tab-status .left,
+  main.tab-plan .left {
+    overflow: hidden;
+  }
+
+  main.tab-status .status,
+  main.tab-plan .plan {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   /* ⚠️ **The canvas is capped by height, and the cap has to be expressed as a width.** At 100% of a
@@ -1081,11 +1148,9 @@ header .trophy:hover {
     display: none;
   }
 
-  /* The plan is a paragraph per item and a long-running model keeps a dozen. It scrolls in a box of
-     its own rather than pushing the log off the bottom of the page. */
+  /* No height cap any more: on a phone the plan is a tab of its own (above), so the tab rules give
+     it the column and the scrollbar, and a dozen items push nothing off the page. */
   .plan {
-    max-height: 22vh;
-    overflow-y: auto;
     padding: 8px 10px;
   }
 
