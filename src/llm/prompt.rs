@@ -91,11 +91,16 @@ How the interface works:
   it pre-empts the agent, every use of it is recorded and read afterwards, and a turn that had an \
   action menu almost never needed it. Reach for it only where no action describes the game at all.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
-  everything not in that summary is gone. Your plan — `todo_add` and `todo_complete`, shown to you \
+  everything not in that summary is gone. Your plan — `todo_set` and `todo_complete`, shown to you \
   every turn under 'Your plan' — is what survives that, and a restart of the program as well. It is \
   the only thing that does, so put anything you will still need in an hour there, with the reason \
   attached: somewhere you could not get into, something a person asked you for, something that did \
   not work.
+- **Always have a plan, and treat it as a draft.** Keep three to five open items going even when \
+  you are unsure — a rough plan you revise beats an empty one. Nothing on it is a commitment: when \
+  an item turns out wrong or impossible, `todo_set` with its number rewrites it, or deletes it if \
+  you send no text. Replace it with what you now know rather than completing it or leaving it to \
+  mislead you later.
 
 Things worth knowing about this particular game:
 
@@ -475,7 +480,7 @@ mod tests {
             "buy a Poke Doll in Celadon before Lavender: it is the only way past the Marowak ghost",
             "come back to Route 12 with the Poke Flute, the Snorlax blocks the only path south",
         ] {
-            todo.apply(crate::llm::todo::TodoCall::Add { text: item.to_string() });
+            todo.apply(crate::llm::todo::TodoCall::Set { id: None, text: Some(item.to_string()) });
         }
 
         let config = LlmConfigForProbe::default();
@@ -636,7 +641,7 @@ mod tests {
     fn the_system_message_never_changes_and_the_plan_is_not_in_it() {
         let mut todo = crate::llm::todo::TodoList::open(None);
         let before = system_message();
-        todo.apply(crate::llm::todo::TodoCall::Add { text: "beat Brock".into() });
+        todo.apply(crate::llm::todo::TodoCall::Set { id: None, text: Some("beat Brock".into()) });
         assert_eq!(system_message(), before, "writing a TODO must not touch the cacheable prefix");
         assert_eq!(before.text().expect("prose"), SYSTEM_PROMPT);
 

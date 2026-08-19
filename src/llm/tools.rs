@@ -442,28 +442,34 @@ fn reads_for(kind: DecisionKind) -> impl Iterator<Item = &'static ReadTool> {
 // ── W6b: the plan (§10) ──────────────────────────────────────────────────────────────────────────
 
 /// The two TODO tools, by name. Non-terminal like the reads, and named in the turn contract for the
-/// same reason: a model that thinks `todo_add` ended its turn stops playing.
+/// same reason: a model that thinks `todo_set` ended its turn stops playing.
 ///
 /// ⚠️ **There were four.** `memory_write` and `memory_read` sat beside these, doing the same job in
-/// a different shape — see [`crate::llm::todo`]'s module docs for why one mechanism beat two.
-pub const TODO_TOOL_NAMES: &[&str] = &["todo_add", "todo_complete"];
+/// a different shape — see [`crate::llm::todo`]'s module docs for why one mechanism beat two. And
+/// `todo_set` used to be `todo_add`, which could only append: revising a plan was a delete the
+/// catalogue did not offer plus an add, so wrong items were completed — or kept — instead.
+pub const TODO_TOOL_NAMES: &[&str] = &["todo_set", "todo_complete"];
 
 /// Their specs. A function rather than a const because a JSON Schema is not a `const` expression.
 pub fn todo_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec::new(
-            "todo_add",
+            "todo_set",
             format!(
-                "Add something to your plan. The list is shown to you every turn and it is the only \
-                 thing you write that survives this conversation being summarised away, or the \
-                 program restarting — so say the reason as well as the intent: `come back to Route \
-                 12 with the Poké Flute, the Snorlax blocks the path south`. At most \
-                 {MAX_TODO_TEXT} characters."
+                "Add, rewrite or delete one item on your plan: no `id` adds a new item, an `id` \
+                 from the list replaces that item, an `id` with no `text` deletes it. The plan is \
+                 shown to you every turn and it is the only thing you write that survives this \
+                 conversation being summarised away, or the program restarting — so say the reason \
+                 as well as the intent: `come back to Route 12 with the Poké Flute, the Snorlax \
+                 blocks the path south`. At most {MAX_TODO_TEXT} characters."
             ),
             json!({
                 "type": "object",
-                "properties": { "text": { "type": "string", "description": "What to do, and why." } },
-                "required": ["text"],
+                "properties": {
+                    "id": { "type": "integer", "minimum": 1,
+                            "description": "An existing item's number, to replace or delete it. Omit to add." },
+                    "text": { "type": "string", "description": "What to do, and why. Omit to delete `id`." },
+                },
                 "additionalProperties": false,
             }),
         ),
@@ -482,9 +488,12 @@ pub fn todo_tools() -> Vec<ToolSpec> {
 
 fn classify_todo(name: &str, arguments: &Value) -> Option<CallKind> {
     let call = match name {
-        "todo_add" => match string_argument(arguments, "text") {
-            Ok(text) => TodoCall::Add { text },
-            Err(complaint) => return Some(CallKind::Rejected(complaint)),
+        // `todo_add` is the old name, accepted so a resumed run imitating the calls in its own
+        // history is serviced rather than lectured. It is not advertised, and both arguments are
+        // optional here because the empty shapes get a better answer from the list itself.
+        "todo_set" | "todo_add" => TodoCall::Set {
+            id: arguments.get("id").and_then(Value::as_u64).map(|id| id.min(u64::from(u32::MAX)) as u32),
+            text: arguments.get("text").and_then(Value::as_str).map(str::to_string),
         },
         "todo_complete" => match arguments.get("id").and_then(Value::as_u64) {
             Some(id) => TodoCall::Complete { id: id.min(u64::from(u32::MAX)) as u32 },
@@ -832,7 +841,7 @@ fn press_buttons_spec() -> ToolSpec {
 
 /// Every tool that does **not** end a turn, *for this kind*: the reads this kind is offered, the
 /// screenshot and W6b's TODO tools. The contract at the bottom of each turn names them all, because
-/// a model that believes `todo_add` was its terminal call simply stops playing.
+/// a model that believes `todo_set` was its terminal call simply stops playing.
 ///
 /// ⚠️ **Per kind, since the reads are.** A contract that named a read the request did not carry
 /// would be inviting exactly the call `classify` has to reject.
@@ -1414,8 +1423,15 @@ mod tests {
         // Overworld is the big one: it carries `use_field_move`, which is a dozen field actions
         // behind one `move` discriminant precisely so it is one entry rather than twelve.
         for (kind, ceiling) in [
-            // Measured 2026-08-14, after `press_buttons` was asked to say `why`: 8826, 5153, 3305,
-            // 3727, 3623, 4066. Each ceiling has ~10% of headroom for rewording.
+            // Measured 2026-08-19, after `todo_add` became `todo_set`: 9064, 5391, 3543, 3965,
+            // 3861, 4304. Each ceiling has ~8-10% of headroom for rewording.
+            //
+            // ⚠️ **`todo_set` cost 238 bytes on every kind, and that is the price of one tool, not
+            // of the catalogue.** An optional `id` property plus the sentence saying which of the
+            // three edits each argument shape means — add, rewrite, delete. What it buys is a plan
+            // that can be *revised* in one call: under `todo_add` a wrong item could only be
+            // completed or kept, and the deployed model did exactly that. (The 2026-08-14 figures,
+            // after `press_buttons` was asked to say `why`: 8826, 5153, 3305, 3727, 3623, 4066.)
             //
             // ⚠️ **`why` cost 239 bytes and no ceiling had to move, and that was worked for.** The
             // first draft of the reword spent 403 — the tool description had grown a clause listing
@@ -1430,12 +1446,12 @@ mod tests {
             // so it is the one addition here that scales with the *number* of terminals rather than
             // with the catalogue. What it buys is the only sentence the model keeps about its own
             // turn; see that function.
-            (DecisionKind::Overworld, 9_400),
-            (DecisionKind::Battle, 5_300),
-            (DecisionKind::Nickname, 3_500),
-            (DecisionKind::MartPurchase, 4_000),
-            (DecisionKind::ForgetMove, 3_900),
-            (DecisionKind::Stuck, 4_300),
+            (DecisionKind::Overworld, 9_700),
+            (DecisionKind::Battle, 5_900),
+            (DecisionKind::Nickname, 3_900),
+            (DecisionKind::MartPurchase, 4_350),
+            (DecisionKind::ForgetMove, 4_250),
+            (DecisionKind::Stuck, 4_700),
         ] {
             let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
             assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
@@ -1707,7 +1723,7 @@ mod tests {
         // A single-question turn carries almost nothing. Stated as a number so that adding a read
         // back to every kind has to be a deliberate edit to this line: naming a Pokémon used to
         // arrive with all eight reads and four note tools — fourteen entries to answer with a word.
-        assert_eq!(names(DecisionKind::Nickname), ["read_party", SCREENSHOT, "todo_add", "todo_complete",
+        assert_eq!(names(DecisionKind::Nickname), ["read_party", SCREENSHOT, "todo_set", "todo_complete",
                                                    "set_nickname", "wait"]);
 
         // ⚠️ A read that exists but is not offered *here* is told which turn it belongs to. Falling

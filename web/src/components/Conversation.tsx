@@ -280,9 +280,12 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
     }
     case 'screenshot':
       return 'Looked at the screen';
-    case 'todo_add': {
+    // `todo_add` is the tool's old name; transcripts written before `todo_set` still replay it.
+    case 'todo_add':
+    case 'todo_set': {
       const item = text('text');
-      return item ? `Planned: ${item}` : 'Added to the plan';
+      if (item) return args.id === undefined ? `Planned: ${item}` : `Revised plan item ${args.id}: ${item}`;
+      return args.id === undefined ? 'Added to the plan' : `Dropped plan item ${args.id}`;
     }
     case 'todo_complete':
       return args.id === undefined ? 'Ticked something off' : `Ticked off plan item ${args.id}`;

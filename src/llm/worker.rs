@@ -638,7 +638,7 @@ impl Worker {
             // still get a result message, because every `tool_call` needs one.
             //
             // ⚠️ **W6b's TODO calls are the exception, and it is not a detail.** A read is a
-            // question whose answer is worthless once the turn is over; `todo_add` is a *side
+            // question whose answer is worthless once the turn is over; `todo_set` is a *side
             // effect the model asked for*. "Remember this, and go north" is a completely
             // natural thing to say in one message — dropping the first half of it silently loses
             // exactly the long-horizon intent §10 exists to keep. Found by watching a mock do it on

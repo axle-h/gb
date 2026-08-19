@@ -1107,7 +1107,7 @@ mod tests {
             // Turn 2 adds to it *and* decides in one message — the "remember this, and go north"
             // shape the worker has to service rather than discard.
             calls(&[
-                ("todo_add", r#"{"text":"come back to Route 12 with the Poke Flute"}"#),
+                ("todo_set", r#"{"text":"come back to Route 12 with the Poke Flute"}"#),
                 ("choose_action", &choose),
             ]),
             // Turns 3 and 4 change nothing, so neither may move the plan.

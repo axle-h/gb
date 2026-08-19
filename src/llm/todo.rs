@@ -59,7 +59,11 @@ impl From<&TodoItem> for crate::web::published::TodoView {
 /// the emulator, so unlike a read it costs no round trip through `service_tools`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TodoCall {
-    Add { text: String },
+    /// `todo_set`, one call for the three edits: no `id` appends a new item, an `id` with text
+    /// rewrites that item (and reopens it, because new text is a new intent), an `id` with no text
+    /// deletes it. One shape instead of add-then-delete pairs, so revising the plan is never more
+    /// expensive than writing it was.
+    Set { id: Option<u32>, text: Option<String> },
     Complete { id: u32 },
 }
 
@@ -92,7 +96,7 @@ impl TodoList {
     /// Service one call, returning the sentence the model is shown as the tool result.
     pub fn apply(&mut self, call: TodoCall) -> String {
         match call {
-            TodoCall::Add { text } => self.add(&text),
+            TodoCall::Set { id, text } => self.set(id, text.as_deref()),
             TodoCall::Complete { id } => self.complete(id),
         }
     }
@@ -100,6 +104,36 @@ impl TodoList {
     /// Every item, for the UI. The model's copy is [`Self::render`], which is shorter.
     pub fn items(&self) -> &[TodoItem] {
         &self.items
+    }
+
+    fn set(&mut self, id: Option<u32>, text: Option<&str>) -> String {
+        let text = text.map(|text| truncated(text.trim(), MAX_TEXT)).filter(|text| !text.is_empty());
+        match (id, text) {
+            (None, Some(text)) => self.add(&text),
+            (None, None) => {
+                "An empty TODO is not a TODO. Give `todo_set` some `text`, or an `id` to delete."
+                    .to_string()
+            }
+            (Some(id), Some(text)) => match self.items.iter_mut().find(|item| item.id == id) {
+                Some(item) => {
+                    item.text = text.clone();
+                    item.done = false;
+                    self.persist();
+                    format!("TODO {id} is now: {text}")
+                }
+                // Forgiving on purpose: the id is stale — deleted earlier, or misremembered across
+                // a compaction — but the text is still a plan. Keep it, and say what happened.
+                None => format!("There was no TODO {id}, so this went on the end. {}", self.add(&text)),
+            },
+            (Some(id), None) => match self.items.iter().position(|item| item.id == id) {
+                Some(position) => {
+                    let item = self.items.remove(position);
+                    self.persist();
+                    format!("Removed TODO {id}: {}", item.text)
+                }
+                None => format!("There is no TODO {id}. The list is in the turn you were just sent."),
+            },
+        }
     }
 
     fn add(&mut self, text: &str) -> String {
@@ -115,7 +149,8 @@ impl TodoList {
             } else {
                 return format!(
                     "Your TODO list is full ({MAX_ITEMS} items) and none of them are done. Finish \
-                     something with `todo_complete` first."
+                     something with `todo_complete`, or delete an item with `todo_set` (its `id`, \
+                     no `text`) first."
                 );
             }
         }
@@ -147,14 +182,19 @@ impl TodoList {
         out.push_str(PLAN_HEADING);
         out.push_str(
             "\n\nThis is the only thing you write that survives a context compaction and a restart \
-             of the program. Keep it current: add what you mean to do next and why, and complete \
-             items as you finish them.\n\n",
+             of the program. Keep a short plan going at all times, even when you are unsure: the \
+             next three to five things you mean to do, each with its reason. Nothing here is a \
+             commitment — when an item turns out wrong or impossible, rewrite or delete it with \
+             `todo_set` rather than leaving it, and complete items as you actually finish them.\n\n",
         );
 
         let (done, open): (Vec<&TodoItem>, Vec<&TodoItem>) =
             self.items.iter().partition(|item| item.done);
         if open.is_empty() && done.is_empty() {
-            out.push_str("(empty — `todo_add` is how a plan outlives this conversation.)\n");
+            out.push_str(
+                "(empty — `todo_set` is how a plan outlives this conversation. Start one now, even \
+                 a rough one.)\n",
+            );
             return out;
         }
         if open.is_empty() {
@@ -208,6 +248,11 @@ mod tests {
     use super::*;
     use crate::run::tests::Scratch;
 
+    /// The shape every plain append takes on the wire: `todo_set` with no `id`.
+    fn add(text: impl Into<String>) -> TodoCall {
+        TodoCall::Set { id: None, text: Some(text.into()) }
+    }
+
     /// The whole of W6b's point: what the model writes is in the *next* turn, and still there after
     /// the process has gone away and come back.
     #[test]
@@ -215,8 +260,8 @@ mod tests {
         let scratch = Scratch::new("todo");
         {
             let mut todo = TodoList::open(Some(&scratch.0));
-            todo.apply(TodoCall::Add { text: "beat Brock".into() });
-            todo.apply(TodoCall::Add { text: "buy potions".into() });
+            todo.apply(add("beat Brock"));
+            todo.apply(add("buy potions"));
             assert!(todo.apply(TodoCall::Complete { id: 1 }).contains("beat Brock"));
         }
 
@@ -227,7 +272,7 @@ mod tests {
         assert!(rendered.contains("- [ ] 2 — buy potions"), "{rendered}");
 
         // A new id after a restart, rather than one that collides with what is already there.
-        assert!(todo.apply(TodoCall::Add { text: "reach Cerulean".into() }).contains("TODO 3"));
+        assert!(todo.apply(add("reach Cerulean")).contains("TODO 3"));
     }
 
     /// The caps are what stop the plan becoming the context problem it exists to solve — and the
@@ -236,24 +281,55 @@ mod tests {
     fn the_caps_hold_and_say_why() {
         let mut todo = TodoList::open(None);
         for n in 0..MAX_ITEMS {
-            todo.apply(TodoCall::Add { text: format!("thing {n}") });
+            todo.apply(add(format!("thing {n}")));
         }
-        let full = todo.apply(TodoCall::Add { text: "one more".into() });
+        let full = todo.apply(add("one more"));
         assert!(full.contains("full"), "{full}");
 
         // Completing one makes room, and it is the completed one that is dropped.
         todo.apply(TodoCall::Complete { id: 1 });
-        assert!(todo.apply(TodoCall::Add { text: "one more".into() }).starts_with("Added"));
+        assert!(todo.apply(add("one more")).starts_with("Added"));
         assert!(!todo.render().contains("thing 0"), "the finished item made way");
 
-        assert!(todo.apply(TodoCall::Add { text: "  ".into() }).contains("not a TODO"));
+        assert!(todo.apply(add("  ")).contains("not a TODO"));
         assert!(todo.apply(TodoCall::Complete { id: 9999 }).contains("no TODO 9999"));
 
         // Two bytes a character, so the cap bites at half the characters — and lands *on* a
         // boundary rather than splitting one, which is the thing worth asserting.
         let mut todo = TodoList::open(None);
-        todo.apply(TodoCall::Add { text: "é".repeat(MAX_TEXT) });
+        todo.apply(add("é".repeat(MAX_TEXT)));
         assert_eq!(todo.items()[0].text.chars().count(), MAX_TEXT / 2);
+    }
+
+    /// `todo_set` is one tool doing three jobs: append without an `id`, rewrite with one, delete
+    /// with an `id` and no text. The plan is meant to be *rewritten* — an item that turned out
+    /// wrong is replaced, not completed — so none of the three may cost more than one call.
+    #[test]
+    fn set_rewrites_and_deletes_as_well_as_adding() {
+        let mut todo = TodoList::open(None);
+        todo.apply(add("beat Brock"));
+        todo.apply(add("go to Mt Moon via Route 4"));
+
+        // A rewrite keeps the number and reopens a finished item: new text is a new intent.
+        todo.apply(TodoCall::Complete { id: 1 });
+        let answer = todo.apply(TodoCall::Set { id: Some(1), text: Some("rematch Brock with Mankey".into()) });
+        assert!(answer.contains("TODO 1 is now"), "{answer}");
+        assert!(todo.render().contains("- [ ] 1 — rematch Brock with Mankey"), "{}", todo.render());
+
+        // An `id` with no text deletes.
+        let answer = todo.apply(TodoCall::Set { id: Some(2), text: None });
+        assert!(answer.contains("Removed TODO 2"), "{answer}");
+        assert!(!todo.render().contains("Route 4"));
+
+        // A stale `id` with text keeps the text rather than wasting the round trip — appended, and
+        // the answer says both halves.
+        let answer = todo.apply(TodoCall::Set { id: Some(2), text: Some("buy potions".into()) });
+        assert!(answer.contains("no TODO 2") && answer.contains("Added TODO 3"), "{answer}");
+
+        // Deleting nothing and writing nothing both answer rather than fail.
+        assert!(todo.apply(TodoCall::Set { id: Some(99), text: None }).contains("no TODO 99"));
+        assert!(todo.apply(TodoCall::Set { id: None, text: Some("  ".into()) }).contains("not a TODO"));
+        assert!(todo.apply(TodoCall::Set { id: None, text: None }).contains("not a TODO"));
     }
 
     /// ⚠️ The model's copy is not the UI's. A run that finishes fifty things must not carry fifty
@@ -262,10 +338,10 @@ mod tests {
     fn finished_work_leaves_the_prompt_but_not_the_list() {
         let mut todo = TodoList::open(None);
         for n in 0..10 {
-            todo.apply(TodoCall::Add { text: format!("thing {n}") });
+            todo.apply(add(format!("thing {n}")));
             todo.apply(TodoCall::Complete { id: n + 1 });
         }
-        todo.apply(TodoCall::Add { text: "the one thing left".into() });
+        todo.apply(add("the one thing left"));
 
         let rendered = todo.render();
         assert_eq!(rendered.matches("- [x]").count(), SHOW_DONE, "{rendered}");
@@ -283,7 +359,7 @@ mod tests {
     fn a_list_without_a_directory_still_answers() {
         let mut todo = TodoList::open(None);
         assert!(todo.render().contains("(empty"));
-        assert!(todo.apply(TodoCall::Add { text: "go north".into() }).starts_with("Added"));
+        assert!(todo.apply(add("go north")).starts_with("Added"));
         assert!(todo.render().contains("- [ ] 1 — go north"));
     }
 }
