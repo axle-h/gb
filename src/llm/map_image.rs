@@ -416,8 +416,18 @@ fn collect_labels(map: &MetaTileMap) -> Vec<Label> {
             None => groups.push((to_map, is_edge, x, y, x, y)),
         }
     }
+    // A warp's label carries its coordinate, because the menu row it has to be matched to is keyed
+    // on nothing else: three ladders on one floor are three plates saying `MtMoonB1F`, and a model
+    // that cannot read them off the ruler (the deployed one could not) cannot tell which row is
+    // which. A map edge is named by where it leads; every cell of it is one row.
     groups.into_iter()
-        .map(|(to_map, _, x0, y0, x1, y1)| Label { cells: (x0, y0, x1, y1), text: wrap(&format!("{to_map}")) })
+        .map(|(to_map, is_edge, x0, y0, x1, y1)| {
+            let mut text = wrap(&format!("{to_map}"));
+            if !is_edge {
+                text.push(format!("({x0},{y0})"));
+            }
+            Label { cells: (x0, y0, x1, y1), text }
+        })
         .collect()
 }
 
@@ -617,9 +627,9 @@ pub fn caption(map: &MetaTileMap, is_dark: bool) -> String {
         "A map of {} ({}x{} squares), drawn from the game's own graphics. You are the square ringed \
          in red, with a pip on the side you are facing. Each square is 16x16 pixels: the square at \
          (x, y) is drawn at pixel ({} + 16x, {} + 16y), and the numbers along the top and left edges \
-         are those coordinates. Green is tall grass, blue is water, magenta is a warp, orange is a \
-         ledge with an arrow for the only way it can be jumped, and anything you cannot walk to from \
-         where you are standing is dimmed.{dark}",
+         are those coordinates. Green is tall grass, blue is water, magenta is a warp labelled with \
+         where it leads and its own (x,y), orange is a ledge with an arrow for the only way it can \
+         be jumped, and anything you cannot walk to from where you are standing is dimmed.{dark}",
         map.map, map.width, map.height, RULER_LEFT, RULER_TOP,
     )
 }
@@ -746,6 +756,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A warp's plate names its own coordinate, so it can be matched to a menu row keyed on nothing
+    /// else; a map edge's does not, because every cell of an edge is one row.
+    #[test]
+    fn a_warp_label_carries_its_coordinate_and_an_edge_does_not() {
+        let mut fixture = TestFixture::new(&include_bytes!("../pokemon/data/mt-moon.bin")[..], Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
+        let labels = collect_labels(&state.map);
+        let ladders: Vec<&Label> = labels.iter().filter(|l| l.text.iter().any(|t| t.contains("Mt Moon"))).collect();
+        assert_eq!(ladders.len(), 3, "Mt Moon 1F has three ladders down: {labels:?}");
+        for label in &ladders {
+            let (x0, y0, ..) = label.cells;
+            assert_eq!(label.text.last().map(String::as_str), Some(format!("({x0},{y0})").as_str()), "{label:?}");
+        }
+
+        let mut fixture = TestFixture::new(&include_bytes!("../pokemon/data/pallet-town-state.bin")[..], Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
+        let edge = collect_labels(&state.map).into_iter().find(|l| l.text.iter().any(|t| t.contains("Route1"))).expect("the way north");
+        assert!(!edge.text.iter().any(|t| t.starts_with('(')), "{edge:?}");
     }
 
     /// **The ground truth.** Everything else here checks that the picture is *well formed*; this

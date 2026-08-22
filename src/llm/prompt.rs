@@ -143,6 +143,10 @@ pub struct ApiSnapshot {
     /// from `wCurMart`, so it is empty everywhere except inside a shop; a `MartPurchase` turn's whole
     /// menu comes from here, and nothing else can supply it — the stock is not in `GameState`.
     pub mart_stock: Vec<(crate::pokemon::item::ItemId, Option<u32>)>,
+    /// Where the player entered the current map, and from where — [`WorldGraph::arrival`], which
+    /// only the agent knows. `None` until the first map change this process sees. Not read from the
+    /// API, so [`ApiSnapshot::read`] leaves it empty and the policy fills it in from the graph.
+    pub arrival: Option<crate::pokemon::world_graph::Arrival>,
 }
 
 impl ApiSnapshot {
@@ -152,6 +156,7 @@ impl ApiSnapshot {
             screen_text: crate::pokemon::observe::screen_text(api),
             playtime: crate::pokemon::observe::playtime(api),
             mart_stock: api.mart_item_list().into_iter().map(|item| (item, api.item_price(item))).collect(),
+            arrival: None,
         }
     }
 }
@@ -241,6 +246,15 @@ pub fn situation(
         "Location: {} at ({}, {}), facing {:?}\n",
         state.map.map, state.map.player_position.x, state.map.player_position.y, state.map.player_direction,
     ));
+    // Which door the player came in by. On a map with several warps to the same place this is the
+    // only thing that tells the one just used from the ones not yet tried — the row for that warp
+    // says so too (`tools::overworld_menu`), so the two cannot be read apart.
+    if let Some(arrival) = snapshot.arrival.filter(|a| a.map == state.map.map) {
+        out.push_str(&match arrival.from {
+            Some(from) => format!("Entered this map at ({}, {}) from {from}\n", arrival.at.x, arrival.at.y),
+            None => format!("Entered this map at ({}, {})\n", arrival.at.x, arrival.at.y),
+        });
+    }
     // What the player is facing is the precondition for half of `use_field_move` — `cut` works on
     // the tile in front and nothing else — and it is one line against a whole `read_map`.
     if let Some((at, tile)) = state.map.tile_in_front() {
@@ -528,7 +542,7 @@ mod tests {
                 _ => TurnContext::None,
             };
             let menu = match kind {
-                DecisionKind::Overworld => tools::overworld_menu(&state),
+                DecisionKind::Overworld => tools::overworld_menu(&state, snapshot.arrival),
                 DecisionKind::Battle => tools::battle_menu(&state),
                 DecisionKind::MartPurchase => tools::mart_menu(&snapshot),
                 DecisionKind::ForgetMove => tools::forget_menu(&party_moves),

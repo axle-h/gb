@@ -284,6 +284,9 @@ impl From<Point8> for Point {
 
 pub fn map_view(state: &GameState) -> MapView {
     let map = &state.map;
+    let reachable: std::collections::HashSet<_> = map.actions().into_iter()
+        .filter_map(|action| match action.tile { MetaTile::Sprite(name) => Some(name), _ => None })
+        .collect();
     MapView {
         map: format!("{}", map.map),
         position: map.player_position.into(),
@@ -291,8 +294,12 @@ pub fn map_view(state: &GameState) -> MapView {
         width: map.width,
         height: map.height,
         // Hidden people are absent from the map the player sees; reporting them would invite the
-        // model to try to talk to someone who is not there.
-        people: map.sprites.iter().filter(|s| !s.hidden).map(|s| PersonView {
+        // model to try to talk to someone who is not there. ⚠️ So would someone the agent cannot
+        // route to: the menu lists only people it can reach, so a person here and not there reads
+        // as an action the menu forgot, and the deployed run spent `press_buttons` trying to walk
+        // to Rockets on the far side of a Mt Moon wall. The predicate is `actions()` itself, so
+        // this list and the menu agree by construction.
+        people: map.sprites.iter().filter(|s| !s.hidden && reachable.contains(&s.name)).map(|s| PersonView {
             index: s.index,
             // Through `MetaTile::id_kind` so this is the same spelling as the action id, by
             // construction rather than by two functions agreeing.
@@ -344,8 +351,12 @@ pub fn screen_text(api: &PokemonApi<'_>) -> Option<String> {
 // ── World graph ──────────────────────────────────────────────────────────────────────────────────
 
 view! {
-    /// One map on the way to somewhere. `via` is how it is entered — `"Warp"` or `"Connection"` —
-    /// and is absent on the first hop, which is the map already stood on.
+    /// One map on the way to somewhere. `via` is how it is entered and **which tile of the previous
+    /// map to leave by** — `"Warp at (25, 9)"`, `"Connection at (9, 0)"` — and is absent on the
+    /// first hop, which is the map already stood on. ⚠️ The coordinate is on the hop *before* this
+    /// one, in that map's action-id space, because the choice is made there: a bare `"Warp"` on a
+    /// floor with four warps to the same map answered nothing, and the deployed run read it as the
+    /// nearest one.
     pub struct RouteHopView {
         pub map: String,
         pub via: Option<String>,
@@ -370,7 +381,7 @@ pub fn route(graph: &WorldGraph, from: Map, to: Map) -> Option<Vec<RouteHopView>
             .into_iter()
             .map(|step| RouteHopView {
                 map: format!("{}", step.map),
-                via: step.via.map(|kind| format!("{kind:?}")),
+                via: step.via.zip(step.via_at).map(|(kind, at)| format!("{kind:?} at ({}, {})", at.x, at.y)),
             })
             .collect(),
     )
