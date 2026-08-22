@@ -804,6 +804,40 @@ header .trophy:hover {
   border-color: var(--accent);
 }
 
+/* The repo and its author: two round marks at the same height as the trophy, quiet until hovered. */
+.links {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.links a {
+  display: inline-flex;
+  color: var(--dim);
+  line-height: 0;
+}
+
+.links a:hover {
+  color: var(--text);
+}
+
+.links .face {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  object-fit: cover;
+}
+
+.links a:hover .face {
+  border-color: var(--accent);
+}
+
+/* Phone-only; see the 640px block. */
+.about {
+  display: none;
+}
+
 .overlay {
   position: fixed;
   inset: 0;
@@ -976,13 +1010,25 @@ header .trophy:hover {
   }
 
   /* The header's job on a phone is: who is playing, what are they doing, is this thing live. The
-     bar and the running bill are a desk's questions and they are most of what makes this row feel
-     like noise — the percentage stays, because it is the one figure that says the run has a
-     lifetime, and the rest is still on the tooltip. The trophy stays too: one glyph, and the only
-     way to the Hall of Fame. */
-  header .gauge,
-  header .context .spent {
+     context gauge and the links are a desk's questions and they are most of what makes this row feel
+     like noise, so they move to the foot of the Trainer tab (`.about`). The trophy stays: one glyph,
+     and the only way to the Hall of Fame. */
+  header .context,
+  header .links {
     display: none;
+  }
+
+  /* …and where they went: a footer to the Trainer tab, shown with it. */
+  .about {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .about .spacer {
+    flex: 1;
   }
 
   /* Without this the pill is pushed onto a line of its own by a flex spacer with nothing to space:
@@ -1049,9 +1095,11 @@ header .trophy:hover {
   }
 
   main.tab-log .status,
+  main.tab-log .about,
   main.tab-log .plan,
   main.tab-status .plan,
-  main.tab-plan .status {
+  main.tab-plan .status,
+  main.tab-plan .about {
     display: none;
   }
 
