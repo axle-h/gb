@@ -22,12 +22,24 @@ const RETRY_MS = 1000;
  * whether or not anything changed. ⚠️ **Not the SSE keep-alive**, which is a comment line
  * (`Sse::keep_alive` in `src/web/mod.rs`) and is deliberately invisible to every `EventSource`
  * handler — a watchdog fed from that would starve and reconnect every 8 s for ever.
+ *
+ * ⚠️ **A reconnect is also a reload, and `onOpen` is how.** A fresh `/api/events` connection opens
+ * with the latest heartbeat and the latest plan and nothing else (`Published::join_events`), so a
+ * page that only reopened the stream kept exactly what the *previous* connection had delivered and
+ * silently lost everything published in between — a tab left dormant for an hour came back showing
+ * the hour-old log, for ever. `onOpen` fires on **every** open, the browser's own transparent
+ * retries included (their `onopen` fires again, and they are a gap too), and the caller answers it by
+ * throwing its folded state away and fetching `/api/history` afresh — the same model as the video
+ * path, where every connection opens with a keyframe. `resync` forces one from outside, for the
+ * case the watchdog cannot see: a tab hidden long enough that its queue overflowed on a socket that
+ * never died.
  */
 export function subscribe(
   url: string,
   onMessage: (data: string) => void,
   onConnection: (connection: Connection) => void,
-): () => void {
+  onOpen: () => void,
+): { close: () => void; resync: () => void } {
   let source: EventSource | null = null;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
@@ -51,7 +63,12 @@ export function subscribe(
   const open = () => {
     if (stopped) return;
     source = new EventSource(url);
-    source.onopen = alive;
+    source.onopen = () => {
+      // Before `alive`, and before any message of this connection can arrive: the reset has to land
+      // ahead of the opening heartbeat and plan, or they are thrown away with the old state.
+      onOpen();
+      alive();
+    };
     source.onmessage = (message) => {
       alive();
       onMessage(message.data);
@@ -65,11 +82,16 @@ export function subscribe(
   };
   open();
 
-  return () => {
-    stopped = true;
-    clearTimeout(retry);
-    clearTimeout(watchdog);
-    source?.close();
+  return {
+    close: () => {
+      stopped = true;
+      clearTimeout(retry);
+      clearTimeout(watchdog);
+      source?.close();
+    },
+    resync: () => {
+      if (!stopped) rebuild(0);
+    },
   };
 }
 
@@ -334,14 +356,26 @@ export function useEventStream(): EventStream {
     // **W7 / §11.** ⚠️ **Subscribe first, backfill second** — the same ordering the video path uses
     // (§5.2), and for the same reason: the other way round loses everything published between the
     // fetch returning and the stream attaching, and loses it invisibly.
-    let abandoned = false;
-    const backfill = () => {
+    //
+    // ⚠️ **And on every connection, not once.** The backfill runs from `onOpen`, so a reconnect —
+    // the watchdog's, the browser's own, or one forced by the tab coming back — reloads the
+    // transcript rather than resuming a log with a hole in it that nothing would ever fill. See
+    // `subscribe`. `generation` is what makes that safe: a fetch started by the old connection can
+    // resolve after the new one has reset the page, and its rows are the stale ones.
+    let generation = 0;
+    const backfill = (started: number) => {
       fetch('/api/history')
         .then((response) => (response.ok ? response.json() : []))
         .then((backlog: UiEvent[]) => {
-          if (abandoned || backlog.length === 0) return;
-          for (const event of backlog) {
-            if (event.type === 'decision' && event.usage) setUsage((current) => current ?? event.usage!);
+          if (started !== generation || backlog.length === 0) return;
+          // The **last** decision's usage: it is a running total, so the newest one is the figure.
+          // The stream wins if it has already delivered a newer one.
+          for (let index = backlog.length - 1; index >= 0; index -= 1) {
+            const event = backlog[index];
+            if (event.type !== 'decision' || !event.usage) continue;
+            const usage = event.usage;
+            setUsage((current) => current ?? usage);
+            break;
           }
           // ⚠️ The **last** plan in the backlog, and only if the stream has not already delivered a
           // newer one — the same "live wins" rule the entries below use. Each event carries the
@@ -371,7 +405,27 @@ export function useEventStream(): EventStream {
       setEntries((previous) => arrived.reduce(fold, previous).slice(-MAX_ENTRIES));
     };
 
-    const unsubscribe = subscribe(
+    /**
+     * A connection has (re)opened: forget everything the last one delivered and load the transcript
+     * again. On the first open this is a reset of nothing, which is why mount needs no special case.
+     * The opening heartbeat and plan of the new connection arrive right behind this, so the panels
+     * refill within a tick; the log refills when `/api/history` answers.
+     */
+    const reload = () => {
+      generation += 1;
+      pending.current = [];
+      if (frame.current !== undefined) cancelAnimationFrame(frame.current);
+      frame.current = undefined;
+      setEntries([]);
+      setPlan([]);
+      setUsage(null);
+      // A speed window must not span the gap: the first heartbeat after a reconnect is a new anchor.
+      anchor.current = null;
+      setSpeed(null);
+      backfill(generation);
+    };
+
+    const stream = subscribe(
       '/api/events',
       (data) => {
         const event = JSON.parse(data) as UiEvent;
@@ -400,12 +454,35 @@ export function useEventStream(): EventStream {
         frame.current ??= requestAnimationFrame(flush);
       },
       setConnection,
+      reload,
     );
-    backfill();
+
+    // A tab that comes back from the background is resynced whether or not its socket died. A
+    // hidden tab gets no animation frames, so `pending` overflows on a connection that is perfectly
+    // healthy, and the watchdog's timer is throttled along with everything else — so waiting for
+    // it is waiting for nothing. Short absences keep the connection: a tab flip is not a gap.
+    let hiddenAt: number | null = null;
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        hiddenAt = Date.now();
+        return;
+      }
+      const away = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+      hiddenAt = null;
+      if (away > STALE_MS) stream.resync();
+    };
+    // A bfcache restore hands back a page whose `EventSource` and timers were frozen mid-flight.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) stream.resync();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', onPageShow);
 
     return () => {
-      abandoned = true;
-      unsubscribe();
+      generation += 1;
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', onPageShow);
+      stream.close();
     };
   }, []);
 
