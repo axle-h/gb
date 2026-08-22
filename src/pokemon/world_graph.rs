@@ -57,6 +57,9 @@ pub struct MapStep {
     pub map: Map,
     /// How the player arrived at this map. `None` for the starting map.
     pub via: Option<EdgeKind>,
+    /// The tile on the **previous** map that `via` leaves from, in that map's action-id
+    /// coordinates — which warp to choose there. `None` with `via`.
+    pub via_at: Option<Point8>,
 }
 
 /// Connected graph of reachable Pokémon Red maps built by BFS over the tile layer.
@@ -74,6 +77,25 @@ pub struct MapStep {
 #[derive(Debug, Clone, Default)]
 pub struct WorldGraph {
     adjacency: HashMap<(Map, Point8), Vec<Edge>>,
+    /// The most recent map arrival — see [`Arrival`].
+    arrival: Option<Arrival>,
+}
+
+/// Where the player came into the map they are on, and from where.
+///
+/// Recorded by [`WorldGraph::observe`], which runs exactly once per map arrival. It exists for the
+/// model: on a multi-floor map every ladder is `to MtMoonB1F` and nothing else in the turn says
+/// which one the player has just climbed, so the deployed run took the same ladder up and down
+/// fifty times each way with the summary "continue eastward" on every one. The turn now says where
+/// the player entered, and the menu row for that warp says it is the way back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arrival {
+    pub map: Map,
+    /// In the tile map's own coordinates — the ones the action ids and the ruler use — not the raw
+    /// `wXCoord`/`wYCoord` the graph keys its sections on.
+    pub at: Point8,
+    /// The map the player was on before this one. `None` for the first map seen by this process.
+    pub from: Option<Map>,
 }
 
 impl WorldGraph {
@@ -86,7 +108,7 @@ impl WorldGraph {
     /// NPC-blocked cave paths). The trade-off is that deterministic navigation cannot rely on
     /// routing to a not-yet-visited map — forward map transitions must be specified explicitly.
     pub fn new() -> Self {
-        Self { adjacency: HashMap::new() }
+        Self { adjacency: HashMap::new(), arrival: None }
     }
 
     /// Derive the warp/connection edges reachable by BFS from the player position in `tile_map`.
@@ -131,6 +153,14 @@ impl WorldGraph {
     pub fn observe(&mut self, map: Map, entry: Point8, tile_map: &MetaTileMap) {
         let edges = Self::edges_from_reachable(tile_map, map);
         self.adjacency.insert((map, entry), edges);
+        let from = self.arrival.map(|a| a.map).filter(|&previous| previous != map);
+        self.arrival = Some(Arrival { map, at: tile_map.player_position, from });
+    }
+
+    /// How the player got onto the map they are on now, or `None` before the first arrival this
+    /// process has seen — a resumed run does not know until it next changes map.
+    pub fn arrival(&self) -> Option<Arrival> {
+        self.arrival
     }
 
     /// All outgoing edges from `map`, across all entry-point sections.
@@ -163,16 +193,18 @@ impl WorldGraph {
     /// occurrences are never the same section because no map has a self-edge.
     fn bfs_to_map(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<MapStep>> {
         self.bfs_nodes(starts, to)
-            .map(|nodes| nodes.into_iter().map(|((m, _), via)| MapStep { map: m, via }).collect())
+            .map(|nodes| nodes.into_iter().map(|((m, _), via)| MapStep {
+                map: m, via: via.map(|(kind, _)| kind), via_at: via.map(|(_, at)| at),
+            }).collect())
     }
 
     /// Like [`bfs_to_map`] but keeps the full `(map, raw_entry)` node per step (with the
     /// `EdgeKind` used to enter it). The entry positions are exactly the raw `to_position`s
     /// needed to encode explicit [`PolicyStep::EnterMap`] transitions.
-    fn bfs_nodes(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<((Map, Point8), Option<EdgeKind>)>> {
+    fn bfs_nodes(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<((Map, Point8), Option<(EdgeKind, Point8)>)>> {
         type Node = (Map, Point8);
         let mut dist: HashMap<Node, u32> = HashMap::new();
-        let mut came_from: HashMap<Node, (Node, EdgeKind)> = HashMap::new();
+        let mut came_from: HashMap<Node, (Node, (EdgeKind, Point8))> = HashMap::new();
         let mut queue: VecDeque<Node> = VecDeque::new();
 
         // Resolve a (map, position) reference to an actually-observed node. A map *connection*
@@ -220,7 +252,7 @@ impl WorldGraph {
                 let next = (edge.to.map, resolve(edge.to.map, edge.to.location));
                 if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(next) {
                     e.insert(cost + 1);
-                    came_from.insert(next, ((m, p), edge.kind));
+                    came_from.insert(next, ((m, p), (edge.kind, edge.from.location)));
                     queue.push_back(next);
                 }
             }
@@ -235,7 +267,7 @@ impl WorldGraph {
             .copied()?;
 
         // Reconstruct the path from goal back to whichever start node was used.
-        let mut path_rev: Vec<(Node, Option<EdgeKind>)> = vec![(goal, None)];
+        let mut path_rev: Vec<(Node, Option<(EdgeKind, Point8)>)> = vec![(goal, None)];
         let mut current = goal;
         while !start_set.contains(&current) {
             let &(prev, kind) = came_from.get(&current)?;
@@ -277,7 +309,7 @@ impl WorldGraph {
     /// step records how the player enters that map.
     pub fn shortest_path(&self, from: Map, to: Map) -> Option<Vec<MapStep>> {
         if from == to {
-            return Some(vec![MapStep { map: from, via: None }]);
+            return Some(vec![MapStep { map: from, via: None, via_at: None }]);
         }
         let starts: Vec<(Map, Point8)> = self.adjacency.keys()
             .filter(|(m, _)| *m == from)
@@ -350,6 +382,22 @@ mod tests {
 
     fn p(x: u8, y: u8) -> Point8 { Point8 { x, y } }
 
+    /// `observe` runs once per arrival, so it is where the arrival is remembered: where the player
+    /// landed, and which map they were on before. A resumed process knows neither until it moves.
+    #[test]
+    fn an_arrival_remembers_where_it_came_from() {
+        use crate::pokemon::integration_tests::fixture::TestFixture;
+        let mut fixture = TestFixture::new(
+            include_bytes!("../pokemon/data/pallet-town-state.bin"), std::time::Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
+        let mut g = WorldGraph::new();
+        assert_eq!(g.arrival(), None);
+        g.observe(Map::Route1, p(9, 8), &state.map);
+        assert_eq!(g.arrival(), Some(Arrival { map: Map::Route1, at: state.map.player_position, from: None }));
+        g.observe(Map::PalletTown, p(9, 0), &state.map);
+        assert_eq!(g.arrival().map(|a| (a.map, a.from)), Some((Map::PalletTown, Some(Map::Route1))));
+    }
+
     /// A small synthetic world observed incrementally, mirroring how the agent would build it
     /// as it walks:  PalletTown ⇄ Route1 ⇄ ViridianCity, PalletTown ⇄ OaksLab (warp),
     /// RedsHouse1F ⇄ RedsHouse2F (warp-only), and PalletTown → Route21 (dead-end).
@@ -402,7 +450,7 @@ mod tests {
     fn trivial_path_same_map() {
         let g = small_world();
         let path = g.shortest_path(Map::PalletTown, Map::PalletTown).unwrap();
-        assert_eq!(path, vec![MapStep { map: Map::PalletTown, via: None }]);
+        assert_eq!(path, vec![MapStep { map: Map::PalletTown, via: None, via_at: None }]);
     }
 
     #[test]

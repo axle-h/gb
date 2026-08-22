@@ -208,6 +208,19 @@ pub struct MapConnection {
     pub view_pointer: u16,
 }
 
+/// How far a map's tile-map coordinates sit from its raw warp-table ones: one column if the map
+/// has a western connection strip, one row if it has a northern one (`MapDimensions::{west,north}_extra`).
+/// Read straight out of the ROM, so it can be asked about a map the player is *not* on — which is
+/// what a menu row needs to say where a warp comes out in the coordinates the picture of that map
+/// uses. Caves and buildings have no strips and answer `(0, 0)`.
+pub fn strip_offset(map: Map) -> (u8, u8) {
+    let Some(pointer) = map.header_pointer() else { return (0, 0) };
+    // Byte 9 of the header is the connection flags; see `MACRO map_header`.
+    let flags = crate::pokemon::rom_gfx::rom_slice(pointer)[9];
+    let flags = MapConnectionDirectionFlags::from_bits_truncate(flags);
+    (flags.contains(MapConnectionDirectionFlags::West) as u8, flags.contains(MapConnectionDirectionFlags::North) as u8)
+}
+
 pub trait MapHeaderReader {
     fn read_map_header(&self, map: Map) -> Result<MapHeader, String>;
 }

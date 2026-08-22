@@ -187,7 +187,7 @@ impl LlmPolicy {
             // immediately before every poll site, so this is only ever true before the first tick.
             self.state.as_deref().map(|state| {
                 let menu = match kind {
-                    DecisionKind::Overworld => tools::overworld_menu(state),
+                    DecisionKind::Overworld => tools::overworld_menu(state, self.snapshot.arrival),
                     DecisionKind::Battle => tools::battle_menu(state),
                     DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot),
                     DecisionKind::ForgetMove => match context {
@@ -264,6 +264,7 @@ impl Policy for LlmPolicy {
         // livestream's policy), so that is fifty of each per wall-clock second and the emulator under
         // it is doing nothing else with the other 95% of the time.
         self.snapshot = ApiSnapshot::read(api);
+        self.snapshot.arrival = graph.arrival();
         self.state = Some(Box::new(state.clone()));
 
         while let Ok(batch) = self.handles.tool_calls.try_recv() {
@@ -868,7 +869,7 @@ mod tests {
         /// The first menu id the model would be offered.
         fn first_action_id(&mut self) -> String {
             let state = self.state();
-            tools::overworld_menu(&state).first().expect("Oak's lab has reachable actions").id.clone()
+            tools::overworld_menu(&state, None).first().expect("Oak's lab has reachable actions").id.clone()
         }
     }
 

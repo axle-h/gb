@@ -497,18 +497,22 @@ per-kind too, or the contract at the bottom of a turn would name a tool the requ
 ⚠️ A read that exists but is not offered *here* is rejected by name with the reason — falling through
 to "there is no tool called `read_map`" is a lie the model cannot act on.
 
-⚠️ **A menu row must not repeat its own id, but the id itself may not be trimmed.** The row is
-`` `{map}:{x},{y}:{kind}` — {what the id cannot say} ``, and it used to be
-`` `OaksLab:5,11:Warp` — Warp → PalletTown (12, 11) — 10 steps ``: the verb is the `kind` said twice,
-and `(12, 11)` is a coordinate on a map the model has not seen and cannot choose — it picks *which*
-warp, never where it lands. A city menu is a couple of dozen rows in every overworld turn, so that
-is 17% of the longest block in the request. `OverworldAction`'s `Display` still says it the long way
-for the SDL console, where there is no id beside it — hence `overworld_description`, and
-`a_menu_row_does_not_repeat_its_own_id`. (A person's row is now the distance alone, since `id_kind`
-puts the name in the id — see the agent section.) ⚠️ **The `{map}` prefix looks like the same redundancy and
-is the opposite of it**: `resolve_overworld` re-mints ids against the map the player is on *now*, and
-an answer can land after a warp — so without it, `5,6:Warp` chosen in Oak's lab could match a warp
-that happens to sit at (5, 6) in Pallet Town and be carried out silently.
+⚠️ **A menu row says what choosing it does, in words, and carries nothing else.** The row is
+`` `{map}:{x},{y}:{kind}` — {verb phrase} ``: `take the warp to PalletTown`, `walk into Route1`,
+`talk to Mom`, `pick up the Potion`, `read the Pokedex 1`. It has been two other things. First
+`` `OaksLab:5,11:Warp` — Warp → PalletTown (12, 11) — 10 steps ``, where the verb is the `kind` said
+twice and `(12, 11)` is a coordinate on a map the model cannot see; then, over-corrected, a person's
+row was the bare distance (`` `MtMoonB2F:15,23:Rocket2` — 5 steps ``) and the deployed model took
+Rocket2 for a warp forty-five times. The id is a key and the row must not make the model parse the
+action out of it, so a person's name is now said once more, on purpose, after the verb. ⚠️ **The
+verb comes from the sprite's `PictureId`, never its name**: everything the player can face is a
+sprite to the game — items, boulders, fossils, the lab's Pokédex, Snorlax — and only the picture
+tells `Potion1` from `Hiker`. The step count is gone for good; nothing ever used it.
+`a_menu_row_explains_the_action_in_words` and `a_sprite_row_is_verbed_by_its_picture` hold it.
+⚠️ **The `{map}` prefix of the id is not redundancy**: `resolve_overworld` re-mints ids against the
+map the player is on *now*, and an answer can land after a warp — so without it, `5,6:Warp` chosen
+in Oak's lab could match a warp that happens to sit at (5, 6) in Pallet Town and be carried out
+silently.
 
 ⚠️ **`PokemonStatus`' `Display` is `strum`'s derive, so a healthy Pokémon prints `None`** — and every
 party line in every turn read `20/20 HP, None`, which is a missing value rather than good news.

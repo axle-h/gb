@@ -1178,6 +1178,33 @@ fn map_view_is_well_formed_stable_and_fully_documented() {
     }
 }
 
+/// The JSON's `people` and the action menu are two views of who can be talked to, and they have to
+/// agree: a person in one and not the other reads as an action the menu forgot. Mt Moon is the map
+/// that found it — Rockets behind walls the player cannot reach from the entrance, and a run that
+/// spent its escape hatch walking at them.
+#[test]
+fn map_view_lists_only_the_people_the_menu_offers() {
+    use crate::pokemon::observe;
+    use crate::pokemon::tile::MetaTile;
+    let mut someone_out_of_reach = false;
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data")).expect("the fixture directory") {
+        let path = entry.expect("a directory entry").path();
+        if path.extension().is_none_or(|e| e != "bin") { continue; }
+        let snapshot = std::fs::read(&path).expect("a readable fixture");
+        let mut fixture = TestFixture::new(&snapshot, Duration::from_secs(10), vec![]);
+        let Ok(state) = fixture.try_game_state() else { continue };
+        let view = observe::map_view(&state);
+        let offered: std::collections::BTreeSet<String> = state.map.actions().iter()
+            .filter_map(|a| match a.tile { MetaTile::Sprite(name) => Some(MetaTile::Sprite(name).id_kind().into_owned()), _ => None })
+            .collect();
+        let listed: std::collections::BTreeSet<String> = view.people.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(listed, offered, "{}", path.display());
+        let present = state.map.sprites.iter().filter(|s| !s.hidden).count();
+        if listed.len() < present { eprintln!("{}: {} of {present} people reachable", path.display(), listed.len()); someone_out_of_reach = true; }
+    }
+    assert!(someone_out_of_reach, "no fixture has anyone out of reach, so the filter is untested");
+}
+
 /// The badge strip the web UI draws, against a snapshot that has actually earned some.
 ///
 /// `observation_views_describe_the_snapshot` checks the shape on a fixture with **no** badges, which
@@ -1261,7 +1288,8 @@ fn a_route_is_only_ever_over_ground_already_walked() {
     assert_eq!(route.last().map(|hop| hop.map.as_str()), Some(format!("{}", Map::Route1).as_str()),
                "…and ends on the one asked for: {route:?}");
     assert!(route[0].via.is_none(), "the first hop is stood on, not entered");
-    assert!(route[1..].iter().all(|hop| hop.via.is_some()), "every later hop says how: {route:?}");
+    assert!(route[1..].iter().all(|hop| hop.via.as_deref().is_some_and(|v| v.starts_with("Connection at ("))),
+            "every later hop says how, and which tile of the map before it to leave by: {route:?}");
 
     // ⚠️ The negative guarantee, which is the whole reason this is not a "where is X" tool: an
     // unvisited map is `None`, and `None` means "you have not been there", never "it does not

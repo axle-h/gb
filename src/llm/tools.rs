@@ -374,7 +374,8 @@ pub const READ_TOOLS: &[ReadTool] = &[
     ReadTool {
         name: READ_ROUTE,
         description: "How to get somewhere you have already been. With `to`, the sequence of maps \
-                      from here to that one; without it, every map you have set foot on. It knows \
+                      from here to that one, each saying which warp or edge of the map before it \
+                      to leave by; without it, every map you have set foot on. It knows \
                       only what has been walked, so a map missing from it means 'not visited yet', \
                       never 'does not exist'.",
         kinds: &[DecisionKind::Overworld],
@@ -1235,38 +1236,73 @@ pub fn overworld_id(state: &GameState, action: &OverworldAction) -> String {
     format!("{}:{},{}:{}", state.map.map, destination.x, destination.y, action.tile.id_kind())
 }
 
-/// What one menu row says *beyond* its id.
+/// What one menu row says *beyond* its id: the action, in words.
 ///
-/// ⚠️ **Not `OverworldAction`'s `Display`, and the difference is what this exists for.** That prose
-/// is written for a person reading the SDL console — it leads with a verb and names the tile — so
-/// beside an id that already ends in `:Warp` it repeats the row's own key: "`…:Warp` — Warp →
-/// PalletTown (12, 11)". Here the kind is in the id, so the row carries only what the id cannot:
-/// *which* map a door leads to.
+/// ⚠️ **Not `OverworldAction`'s `Display`.** That prose is written for a person reading the SDL
+/// console, names the tile and its coordinates, and beside an id that already ends in `:Warp` it
+/// repeats the row's own key. This says what choosing the row *does* — `take the warp to
+/// PalletTown`, `talk to Mom`, `pick up the Potion` — because a row that relied on the id for that
+/// was misread: the deployed run took `` `MtMoonB2F:15,23:Rocket2` — 5 steps `` for a warp, forty-five
+/// times. A person's name is therefore said once more here on purpose; it is the verb that matters.
 ///
-/// ⚠️ **A person's row is now the bare distance**, because `MetaTile::id_kind` puts the name in the
-/// id itself: `` `OaksLab:2,2:Pokedex1` — 9 steps ``. Naming them again here would be the same
-/// repetition this function exists to avoid, one variant later.
+/// ⚠️ **Whether a sprite is a person is decided by its `PictureId`, never by its name.** Every map
+/// object the player can face is a sprite to the game — items on the ground, boulders, the fossils
+/// in Mt Moon, the Pokédex in Oak's lab, Snorlax — and the name alone cannot tell `Potion1` from
+/// `Hiker`. The picture can, for all of them, ahead of time.
 ///
-/// ⚠️ **A warp's `to_position` is dropped outright.** It is a coordinate on a map the model has not
-/// seen and cannot act on — it does not choose where to land, only which warp to take — so it was
-/// nine characters of noise on every door in the game.
-fn overworld_description(action: &OverworldAction) -> String {
-    let steps = action.route.len();
-    let target = match action.tile {
-        crate::pokemon::tile::MetaTile::Warp { to_map, .. }
-        | crate::pokemon::tile::MetaTile::Connection { to_map, .. } => format!("to {to_map}, "),
-        crate::pokemon::tile::MetaTile::ConnectionWater(to_map) => format!("surf to {to_map}, "),
-        // Grass, a PC, a tree to cut, a person: the id's last field is the whole of what it is, and
-        // "Walk in grass" beside `…:Grass` says it a second time.
-        _ => String::new(),
-    };
-    format!("{target}{steps} steps")
+/// ⚠️ **No distance, but the landing coordinate is back.** The step count was nine characters per
+/// row for a number the model never used. The warp's `to_position` was dropped once as "a
+/// coordinate on a map the model cannot see"; now that every map picture labels its warps with
+/// their coordinates, it is the one thing that joins two floors — the ladder at `(17,11)` on 1F
+/// comes out on the `(17,11)` plate of the B1F picture. ⚠️ It is shifted by the destination's
+/// connection strips (`map_header::strip_offset`), so it is in that map's *picture* coordinates,
+/// not the raw warp table's.
+fn overworld_description(state: &GameState, action: &OverworldAction) -> String {
+    use crate::pokemon::sprite::PictureId;
+    use crate::pokemon::tile::MetaTile;
+    match action.tile {
+        MetaTile::Warp { to_map, to_position } => {
+            let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
+            format!("take the warp to {to_map}, arriving at ({}, {})", to_position.x + dx, to_position.y + dy)
+        }
+        MetaTile::Connection { to_map, .. } => format!("walk into {to_map}"),
+        MetaTile::ConnectionWater(to_map) => format!("surf into {to_map}"),
+        MetaTile::Grass => "walk into tall grass to find wild Pokémon".to_string(),
+        MetaTile::Pc => "use the PC".to_string(),
+        MetaTile::CutTree => "walk up to a tree that Cut can clear".to_string(),
+        MetaTile::Sprite(name) => {
+            let picture = state.map.sprites.iter().find(|s| s.name == name).map(|s| s.picture_id);
+            match picture {
+                Some(PictureId::PokeBall) => format!("pick up the {}", name.trim_end_matches(|c: char| c.is_ascii_digit()).trim()),
+                Some(PictureId::Boulder) => "walk up to a boulder that Strength can push".to_string(),
+                Some(PictureId::Fossil | PictureId::OldAmber | PictureId::UnusedOldAmber) => format!("examine the {name}"),
+                Some(PictureId::Paper | PictureId::Pokedex | PictureId::Clipboard) => format!("read the {name}"),
+                Some(PictureId::Snorlax) => "walk up to the sleeping Snorlax blocking the way".to_string(),
+                _ => format!("talk to {name}"),
+            }
+        }
+        other => format!("walk to {other}"),
+    }
 }
 
 /// Everything reachable from where the player is standing. Sorted, so two reads of an unchanged map
 /// produce the same menu — `actions()` walks a `HashSet` and would otherwise reshuffle, which reads
 /// to a model as the world having moved.
-pub fn overworld_menu(state: &GameState) -> Vec<MenuItem> {
+///
+/// `arrival` marks the way back: the warp the player came in by says so on its row, and so does a
+/// map edge leading to the map they came from. On a floor with three ladders all `to MtMoonB1F`
+/// it is the only thing that tells the one just climbed from the two not yet tried.
+pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_graph::Arrival>) -> Vec<MenuItem> {
+    use crate::pokemon::tile::MetaTile;
+    let arrival = arrival.filter(|a| a.map == state.map.map);
+    let way_back = |action: &OverworldAction| -> bool {
+        let Some(arrival) = arrival else { return false };
+        match action.tile {
+            MetaTile::Warp { .. } => action.destination == arrival.at,
+            MetaTile::Connection { to_map, .. } | MetaTile::ConnectionWater(to_map) => Some(to_map) == arrival.from,
+            _ => false,
+        }
+    };
     let mut actions = state.map.actions();
     // `id_kind`, not `kind`: two people can share the tile an action approaches them from, and
     // "Sprite" == "Sprite" leaves that pair to `sort_by_key`'s stability over a `HashSet` walk.
@@ -1275,7 +1311,10 @@ pub fn overworld_menu(state: &GameState) -> Vec<MenuItem> {
         .iter()
         .map(|action| MenuItem {
             id: overworld_id(state, action),
-            description: overworld_description(action),
+            description: match way_back(action) {
+                true => format!("{}; the way you came in", overworld_description(state, action)),
+                false => overworld_description(state, action),
+            },
         })
         .collect()
 }
@@ -1377,35 +1416,77 @@ mod tests {
 
     /// **A menu row carries what its id cannot, and nothing else.**
     ///
-    /// The action menu is in every overworld turn and is the longest thing in one — a city map runs
-    /// to a couple of dozen rows — so what each row repeats, it repeats a couple of dozen times a
-    /// turn, for the length of the run.
+    /// Three ladders on one floor are three rows `to MtMoonB1F`, and the one the player just came
+    /// up is indistinguishable from the two not yet tried — which is the loop the deployed run sat
+    /// in for days. The arrival marks it, and only it.
     #[test]
-    fn a_menu_row_does_not_repeat_its_own_id() {
+    fn the_warp_the_player_came_in_by_says_so() {
+        use crate::pokemon::world_graph::Arrival;
         let state = fixture_state();
-        let menu = overworld_menu(&state);
+        let door = crate::geometry::Point8 { x: 5, y: 11 };
+        let marked = overworld_menu(&state, Some(Arrival { map: state.map.map, at: door, from: Some(Map::PalletTown) }));
+        let row = |menu: &[MenuItem], id: &str| menu.iter().find(|m| m.id == id).expect(id).description.clone();
+        assert_eq!(row(&marked, "OaksLab:5,11:Warp"), "take the warp to PalletTown, arriving at (12, 12); the way you came in");
+        assert_eq!(marked.iter().filter(|m| m.description.contains("came in")).count(), 1, "{marked:#?}");
+
+        // An arrival on some other map says nothing about this one.
+        let elsewhere = overworld_menu(&state, Some(Arrival { map: Map::PalletTown, at: door, from: None }));
+        assert_eq!(row(&elsewhere, "OaksLab:5,11:Warp"), "take the warp to PalletTown, arriving at (12, 12)");
+    }
+
+    /// A row says what choosing it *does*, as a verb phrase — the id is a key, not a description,
+    /// and a model that had to parse the action out of the key took a Rocket for a warp. What it
+    /// must not carry is noise: a step count, a landing coordinate, or the word "sprite".
+    #[test]
+    fn a_menu_row_explains_the_action_in_words() {
+        let state = fixture_state();
+        let menu = overworld_menu(&state, None);
         let rows: Vec<String> =
             menu.iter().map(|item| format!("- `{}` — {}", item.id, item.description)).collect();
 
-        assert!(rows.contains(&"- `OaksLab:5,11:Warp` — to PalletTown, 10 steps".to_string()), "{rows:#?}");
-        // ⚠️ A person is *named by the id* and the row is the bare distance. The old pair was
-        // "`OaksLab:2,2:Sprite` — Pokedex 1, 9 steps", which spends a word of the emulator's own
-        // vocabulary on the key and then has to say who is there anyway.
-        assert!(rows.contains(&"- `OaksLab:2,2:Pokedex1` — 9 steps".to_string()), "{rows:#?}");
+        assert!(rows.contains(&"- `OaksLab:5,11:Warp` — take the warp to PalletTown, arriving at (12, 12)".to_string()), "{rows:#?}");
+        // ⚠️ A person is named by the id *and* by the row: the name is what the verb needs. But the
+        // verb is the game's own kind of thing — this one is a bookcase, by its picture — and never
+        // "Sprite", the emulator's word for anything that moves.
+        assert!(rows.contains(&"- `OaksLab:2,2:Pokedex1` — read the Pokedex 1".to_string()), "{rows:#?}");
         assert!(!rows.iter().any(|row| row.contains("Sprite")),
                 "no row may call a person a sprite: {rows:#?}");
 
         for item in &menu {
-            // ⚠️ The verb is the id's own `kind` said twice: `…:Warp` — "Warp → …", `…:Sprite` —
-            // "Talk to …". `OverworldAction`'s `Display` still says it that way for the SDL console,
-            // where there is no id beside it.
-            let kind = item.id.rsplit(':').next().expect("an id ends in its kind");
-            assert!(!item.description.contains(kind),
-                    "`{}` — {} repeats the kind already in its id", item.id, item.description);
-            // …and a warp's landing coordinates are not in it either: the model picks which warp to
-            // take, never where it comes out, so they were nine characters of noise per door.
-            assert!(!item.description.contains('('), "{item:?} still carries a coordinate");
+            assert!(item.description.starts_with(|c: char| c.is_ascii_lowercase()), "{item:?}: not a verb phrase");
+            assert!(!item.description.contains("steps"), "{item:?} still carries a distance");
         }
+    }
+
+    /// A warp's landing coordinate is in the destination's *picture* coordinates — the ones its
+    /// own warps are labelled and listed in — which differ from the warp table's by the connection
+    /// strips that map draws. Pallet Town has strips north and south, so the lab door the player
+    /// comes out on is `(12, 12)` on its picture and `(12, 11)` in the ROM.
+    #[test]
+    fn a_landing_coordinate_is_where_the_destination_picture_puts_it() {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/pallet-town-state.bin")).expect("the committed fixture loads");
+        let pallet = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }.expect("readable");
+        let lab_door = crate::pokemon::observe::map_view(&pallet).warps.into_iter()
+            .find(|w| w.to_map == format!("{}", Map::OaksLab)).expect("Pallet Town has a door into the lab");
+        let menu = overworld_menu(&fixture_state(), None);
+        let out = menu.iter().find(|m| m.id == "OaksLab:5,11:Warp").expect("the lab's door").description.clone();
+        assert_eq!(out, format!("take the warp to PalletTown, arriving at ({}, {})", lab_door.at.x, lab_door.at.y));
+        assert_eq!(crate::pokemon::map_header::strip_offset(Map::MtMoon1F), (0, 0));
+    }
+
+    /// The verb comes from the sprite's picture, so an item on the ground is picked up and a person
+    /// is spoken to, whatever either is called.
+    #[test]
+    fn a_sprite_row_is_verbed_by_its_picture() {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/mt-moon.bin")).expect("the committed fixture loads");
+        let state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }.expect("readable");
+        let menu = overworld_menu(&state, None);
+        let find = |needle: &str| menu.iter().find(|m| m.id.ends_with(needle)).unwrap_or_else(|| panic!("{needle}: {menu:#?}")).description.clone();
+        assert_eq!(find(":Potion1"), "pick up the Potion");
+        assert_eq!(find(":TMWaterGun"), "pick up the TM Water Gun");
+        assert_eq!(find(":Hiker"), "talk to Hiker");
     }
 
     /// **What the `tools` array costs, per kind, with a ceiling on each.**
