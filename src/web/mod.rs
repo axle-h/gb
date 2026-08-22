@@ -555,8 +555,9 @@ struct Since {
 ///
 /// ⚠️ **The client subscribes to `/api/events` first and calls this second**, exactly as the video
 /// path does (§5.2). The other order loses everything published in the gap, and loses it invisibly.
-/// Reading the file happens on a blocking thread: it is up to a couple of megabytes and the runtime
-/// threads are also serving two SSE streams.
+/// Reading the file happens on a blocking thread, and [`transcript::read_since`] reads it from the
+/// end: a long run's transcript is hundreds of megabytes, and reading it whole is what OOM-killed
+/// the deployed pod on every page load.
 async fn history(State(state): State<AppState>, Query(query): Query<Since>) -> Json<serde_json::Value> {
     let path = state.run.get().transcript_path();
     let events = tokio::task::spawn_blocking(move || transcript::read_since(&path, query.since))
