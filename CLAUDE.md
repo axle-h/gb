@@ -356,6 +356,27 @@ unmounted, so a watchdog that used it would kill the retry along with the connec
 `kill -STOP` on the process — a blackhole, where `docker stop` or Ctrl-C is a clean close and
 exercises the path that already worked.
 
+⚠️ **A reconnect of `/api/events` is also a reload of the transcript, because the stream alone
+cannot catch a page up.** A fresh connection opens with the latest heartbeat and the latest plan
+(`join_events`) and nothing else, and `/api/history` used to be fetched once, at mount — so every
+reconnect, the watchdog's included, resumed a log with a hole in it that nothing would ever fill. A
+tab left dormant came back showing the hour-old log, for ever, with the live pill green. Now
+`subscribe` reports every `onopen` (the browser's own transparent retries included, since their
+`onopen` fires again and they are a gap too) and the hook answers it by resetting everything the old
+connection folded — entries, the pending queue, plan, usage, the speed anchor — and fetching
+`/api/history` afresh: the video path's "every connection opens with a keyframe", applied to the log.
+Three traps. ⚠️ **The reset has to be inside `onopen`, before `alive`**, so it lands ahead of the
+opening heartbeat and plan rather than throwing them away. ⚠️ **The backfill is generation-guarded**:
+a fetch started by the old connection can resolve after the new one has reset the page, and its rows
+are the stale ones. ⚠️ **A hidden tab is resynced on return whether or not its socket died**
+(`visibilitychange` after more than `STALE_MS` away, `pageshow` with `persisted`): a backgrounded tab
+gets no animation frames, so `pending` overflows on a perfectly healthy connection, and the
+watchdog's own timer is throttled along with everything else, so waiting for it is waiting for
+nothing. A short tab flip keeps the connection — it is not a gap. This is deliberately a full reload
+and not a `since=` merge: `transcript::read_since` reads from the tail so a bare backlog is cheap,
+and a merge of a *folded* log across a gap (a half-grown streaming row, a tool result straddling the
+boundary) is where the bugs would live.
+
 ⚠️ **Every `UiEvent` carries `at`, a Unix-millisecond wall-clock stamp, and it is the only clock the
 page can date a line by.** `wall_ms` and `emulated_ms` are both elapsed times *since this process
 started*, so a run resumed nightly reports them from zero; the browser cannot supply one either,

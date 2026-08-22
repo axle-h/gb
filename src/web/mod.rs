@@ -578,9 +578,10 @@ async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<
     let (receiver, opening) = state.published.join_events();
     let opening = tokio_stream::iter(opening.into_iter().map(sse_event));
     let live = BroadcastStream::new(receiver).filter_map(|item| {
-        // A lagged client has missed events it cannot recover here; W7's `/api/history?since=` is
-        // where it catches up. Dropping the notification is the right call — the alternative is
-        // tearing down a connection that is otherwise working.
+        // A lagged client has missed events it cannot recover here. Dropping the notification is
+        // the right call — the alternative is tearing down a connection that is otherwise working,
+        // and the client treats every (re)connection as a reload of `/api/history` anyway
+        // (`useEventStream`'s `onOpen`), so a viewer that does drop and come back gets the lot.
         Some(sse_event(item.ok()?))
     });
     Sse::new(opening.chain(live)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
