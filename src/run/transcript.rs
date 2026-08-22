@@ -128,17 +128,33 @@ fn rotate(path: &Path) -> Result<std::fs::File, String> {
 /// Parsed back to `serde_json::Value` rather than re-serialised from a typed struct, because the file
 /// is the wire format already — round-tripping it through `UiEventBody` would mean the transcript
 /// could only ever hold events *this* build knows the shape of.
+///
+/// ⚠️ **Read from the end, and never the whole file.** The first version was `read_to_string` and a
+/// parse of every line with the cap applied last — fine at the "couple of megabytes" it was written
+/// for, and what OOM-killed the deployed pod at its 2 GiB limit once a reasoning model publishing
+/// one event per streamed token had grown a four-day run's transcript to 254 MB and 2.9 million
+/// lines. A page load is `/api/history`, so the run died *on connect*, eight times. This walks
+/// backwards in [`CHUNK`]-sized reads and stops at the cap or at the first event below `since`
+/// (sequence numbers are monotonic within a file; that is what [`last_seq`] is for), so the
+/// allocation is bounded by what is returned rather than by the age of the run.
 pub fn read_since(path: &Path, since: u64) -> Vec<serde_json::Value> {
-    let Ok(contents) = std::fs::read_to_string(path) else { return Vec::new() };
-    let mut events: Vec<serde_json::Value> = contents
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| event["seq"].as_u64().is_some_and(|seq| seq >= since))
-        .collect();
-    if events.len() > MAX_BACKLOG {
-        events.drain(..events.len() - MAX_BACKLOG);
+    let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
+    let mut events = Vec::new();
+    for line in RevLines::new(file) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        match event["seq"].as_u64() {
+            Some(seq) if seq >= since => events.push(event),
+            Some(_) => break,
+            None => continue,
+        }
+        if events.len() >= MAX_BACKLOG {
+            break;
+        }
     }
+    events.reverse();
     events
 }
 
@@ -149,13 +165,92 @@ pub fn read_since(path: &Path, since: u64) -> Vec<serde_json::Value> {
 /// otherwise write `seq: 0` again, ten thousand lines into a transcript that already has one. Two
 /// things break at once: `?since=` selects across both ranges, and the browser, which keys entries
 /// by sequence number, gets duplicates. Found by reading the file after a restart.
+///
+/// Reads from the end for the same reason as [`read_since`]: this runs at every start, and a
+/// `read_to_string` here was a quarter of a gigabyte of baseline on the deployed run.
 pub fn last_seq(path: &Path) -> Option<u64> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    contents
-        .lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    let file = std::fs::File::open(path).ok()?;
+    RevLines::new(file)
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
         .find_map(|event| event["seq"].as_u64())
+}
+
+/// How much of the file a backwards read pulls in at a time. A transcript line is a few hundred
+/// bytes, a `plan` a few kilobytes, so a chunk holds many of them and a line straddling two is the
+/// rare case rather than the rule.
+const CHUNK: u64 = 64 * 1024;
+
+/// The lines of a file, last first, read in [`CHUNK`]s from the end so that a file of any size
+/// costs only what is consumed. Invalid UTF-8 is replaced rather than failing the whole read, since
+/// one torn line must not hide the rest of the file.
+struct RevLines {
+    file: std::fs::File,
+    /// Everything below this offset is still unread.
+    pos: u64,
+    /// Bytes read but not yet yielded: the (possibly partial) first line of the chunks seen so far,
+    /// without its newline, which completes once the chunk before it arrives.
+    pending: Vec<u8>,
+    /// Whole lines ready to yield, in file order, so `pop` is the next line backwards.
+    ready: Vec<String>,
+}
+
+impl RevLines {
+    fn new(file: std::fs::File) -> Self {
+        let pos = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Self { file, pos, pending: Vec::new(), ready: Vec::new() }
+    }
+
+    /// Pull the next chunk off the end and split it into lines. Returns `false` at the start of
+    /// the file, once whatever was pending has been flushed as the first line.
+    fn fill(&mut self) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        if self.pos == 0 {
+            if self.pending.is_empty() {
+                return false;
+            }
+            let first = std::mem::take(&mut self.pending);
+            self.ready.push(String::from_utf8_lossy(&first).into_owned());
+            return true;
+        }
+        let len = self.pos.min(CHUNK);
+        self.pos -= len;
+        let mut buf = vec![0u8; len as usize];
+        if self.file.seek(SeekFrom::Start(self.pos)).is_err() || self.file.read_exact(&mut buf).is_err() {
+            self.pos = 0;
+            self.pending.clear();
+            return false;
+        }
+        buf.append(&mut self.pending);
+        // Everything after the first newline is whole lines that end in this chunk; everything
+        // before it belongs to a line that starts in an earlier chunk and stays pending.
+        let Some(first_nl) = buf.iter().position(|&b| b == b'\n') else {
+            self.pending = buf;
+            return true;
+        };
+        let rest = buf.split_off(first_nl + 1);
+        buf.pop(); // the newline that ended the pending line; it must not be split on again
+        self.pending = buf;
+        // `ready` is popped from the back, so pushing in file order yields the lines last-first.
+        for line in rest.split(|&b| b == b'\n') {
+            self.ready.push(String::from_utf8_lossy(line).into_owned());
+        }
+        true
+    }
+}
+
+impl Iterator for RevLines {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        loop {
+            if let Some(line) = self.ready.pop() {
+                return Some(line);
+            }
+            if !self.fill() {
+                return None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +370,89 @@ mod tests {
         assert_eq!(events.len(), MAX_BACKLOG);
         assert_eq!(events[0]["seq"], 500, "the cap keeps the *recent* end");
         assert_eq!(events.last().unwrap()["seq"], (MAX_BACKLOG + 499) as u64);
+    }
+
+    /// `RevLines` against lines that straddle chunk boundaries, a file with no trailing newline,
+    /// and one smaller than a chunk — every line comes back, last first, byte for byte.
+    #[test]
+    fn lines_are_read_back_from_the_end_across_chunk_boundaries() {
+        let scratch = Scratch::new("transcript-rev");
+        let path = scratch.0.join("rev.txt");
+        // Lines of awkward, varying lengths so that many of them straddle a 64 KiB boundary.
+        let lines: Vec<String> = (0..5000).map(|i| format!("{i}:{}", "x".repeat(i % 97 + 1))).collect();
+        for trailing_newline in [true, false] {
+            let mut text = lines.join("\n");
+            if trailing_newline {
+                text.push('\n');
+            }
+            std::fs::write(&path, &text).expect("write");
+            let got: Vec<String> = RevLines::new(std::fs::File::open(&path).unwrap()).collect();
+            let mut want: Vec<String> = lines.clone();
+            if trailing_newline {
+                want.push(String::new());
+            }
+            want.reverse();
+            assert_eq!(got, want, "trailing newline: {trailing_newline}");
+        }
+        std::fs::write(&path, "only\n").expect("write");
+        let got: Vec<String> = RevLines::new(std::fs::File::open(&path).unwrap()).collect();
+        assert_eq!(got, vec!["".to_string(), "only".to_string()]);
+    }
+
+    /// The deployed failure: a transcript far larger than anything the backlog returns is served
+    /// without being read whole. The file is ~40 MB; the read is bounded by the cap, so it finishes
+    /// in a small fraction of what parsing every line would take, and `since` near the end reads
+    /// almost nothing at all.
+    #[test]
+    fn a_huge_transcript_is_not_read_whole() {
+        let scratch = Scratch::new("transcript-huge");
+        let path = scratch.0.join("transcript.jsonl");
+        let total: u64 = 200_000;
+        let padding = "p".repeat(150);
+        {
+            let mut w = BufWriter::new(std::fs::File::create(&path).unwrap());
+            for seq in 0..total {
+                writeln!(w, "{{\"seq\":{seq},\"type\":\"notice\",\"level\":\"info\",\"message\":\"{padding}\"}}")
+                    .unwrap();
+            }
+        }
+        let started = Instant::now();
+        let events = read_since(&path, 0);
+        let full = started.elapsed();
+        assert_eq!(events.len(), MAX_BACKLOG);
+        assert_eq!(events[0]["seq"], total - MAX_BACKLOG as u64);
+        assert_eq!(events.last().unwrap()["seq"], total - 1);
+
+        let started = Instant::now();
+        let tail = read_since(&path, total - 10);
+        let near_end = started.elapsed();
+        assert_eq!(tail.len(), 10);
+        assert_eq!(tail[0]["seq"], total - 10);
+        assert_eq!(last_seq(&path), Some(total - 1));
+
+        // A read that parsed every one of the 200 000 lines would cost well over this; a read that
+        // stops after the cap stays comfortably under it even on a slow machine.
+        assert!(full < Duration::from_secs(2), "capped read took {full:?}");
+        assert!(near_end <= full, "a read near the end costs more than one across the cap: {near_end:?} vs {full:?}");
+    }
+
+    /// Against a real transcript: `GB_TRANSCRIPT=/path/to/transcript.jsonl`. Prints how long the
+    /// backlog and the last sequence number take to read, and the peak resident size afterwards.
+    #[test]
+    #[ignore]
+    #[cfg(feature = "diagnostics")]
+    fn probe_real_transcript() {
+        let Ok(path) = std::env::var("GB_TRANSCRIPT") else { return };
+        let path = Path::new(&path);
+        let started = Instant::now();
+        let events = read_since(path, 0);
+        println!("read_since(0): {} events in {:?}", events.len(), started.elapsed());
+        let started = Instant::now();
+        println!("last_seq: {:?} in {:?}", last_seq(path), started.elapsed());
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines().filter(|l| l.starts_with("VmHWM") || l.starts_with("VmRSS")) {
+                println!("{line}");
+            }
+        }
     }
 }
