@@ -422,6 +422,11 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             && !forced_onto_bike
             && !in_safari_zone;
         map.can_surf = can_use_surf;
+        // The badge and the move, exactly as `.cut` in `engine/menus/start_sub_menus.asm` checks them
+        // — and the map needs it for the same reason it needs `can_surf`: `actions()` must not offer a
+        // walk whose only follow-up is a field move the game will refuse. See `MetaTileMap::can_cut`.
+        let can_use_cut = badges.contains(Badge::CascadeBadge) && has_move(&pokemon, PokemonMoveName::Cut);
+        map.can_cut = can_use_cut;
         // Vermilion Gym trash-can puzzle: EVENT_1ST_LOCK_OPENED = 0x161 → wEventFlags[44] bit 1,
         // EVENT_2ND_LOCK_OPENED = 0x160 → wEventFlags[44] bit 0.
         let trash_cans = (map.map == Map::VermilionGym).then(|| {
@@ -438,7 +443,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             player_id: mmu.read_pointer_u16_be(&pokered_symbols::wPlayerID),
             name: mmu.read_pointer_pokemon_string(&pokered_symbols::wPlayerName),
             rival_name: mmu.read_pointer_pokemon_string(&pokered_symbols::wRivalName),
-            can_use_cut: badges.contains(Badge::CascadeBadge) && has_move(&pokemon, PokemonMoveName::Cut),
+            can_use_cut,
             can_use_surf,
             badges,
             money: encoding::reverse_bcd(mmu.read_pointer_u24_be(&pokered_symbols::wPlayerMoney)),

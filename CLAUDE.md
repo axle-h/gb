@@ -439,17 +439,22 @@ anything dynamic in the system message throws away the cached prefill of the **e
 the next time it changes — the cache discount on a hosted endpoint, and seconds of re-prefill on a
 local one. The model's plan used to live there, re-rendered on every request, which meant every
 `todo_add` paid that. It is now `prompt::plan_message`, a `user` message of its own, and
-`Worker::sync_plan` emits it **only when it differs from the copy already in the history**:
+`Worker::sync_plan` emits it **only when it differs from the newest copy already in the history**:
 
-- unchanged → nothing happens, the history grows purely by append and the cache is intact;
-- changed → the stale copy is removed and a fresh one appended, so the break is at the last turn the
-  plan changed rather than at the top. A model that edits often pays little, one that edits rarely
-  pays rarely;
+- unchanged → nothing happens, and the cache is intact;
+- changed → a fresh copy is **appended**, and the stale one is left exactly where it was. ⚠️ **That
+  is not laziness, it is the cache**: removing it would rewrite the middle of the conversation and
+  re-prefill everything after, which is thousands of uncached tokens every time the model touches its
+  own list, against a few hundred cached ones for leaving it — see the ⚠️ under the plan section
+  below for the arithmetic;
 - absent (a compaction took it) → appended, which is what makes the whole thing self-healing.
+
+⚠️ **So the invariant is that after the system prompt this history is append-only, with no
+exceptions**, and "the plan" means the last `is_plan` message rather than the only one.
 
 ⚠️ It is deliberately **not** a turn boundary (`compaction::is_turn_start` excludes it), or a cut
 taken between the plan and the situation it belongs to would drop the one thing meant to survive.
-`the_plan_is_carried_once_and_never_disturbs_the_cacheable_prefix` holds both halves.
+`the_plan_is_appended_and_never_disturbs_the_cacheable_prefix` holds both halves.
 
 ⚠️ **Every terminal tool takes a required `summary`, enforced, and it is the only thing the model
 says about a turn that outlives the turn.** Reasoning arrives on a channel that is deliberately
@@ -634,6 +639,130 @@ Three traps in the check:
   map prefix against the map the player is on and say which of the two mistakes it was. The check
   reads the current map out of the menu's own first id rather than being handed it separately, so
   the two cannot disagree about where the player is.
+
+⚠️ **An action the game will refuse is not an action, and offering one wedges the run rather than
+wasting a turn.** Every HM field move is used from the party menu, and pokered answers a missing
+badge with `.newBadgeRequired` → `jp .loop` — the same menu, cursor untouched
+(`engine/menus/start_sub_menus.asm`). The agent's driver is mashing A by then and its only exit is
+"we came back to the overworld", which never comes, so the whole thing ends sixty seconds later at
+`DRIVER_ESCAPE_SILENCE` having achieved nothing. The deployed run of 2026-08-25 did it **eleven
+times** on Route 2 **with no badges at all**, and the model's own words for it were
+`cut got no answer from the game for 60s` and *"since Cut pathing/tiles are buggy, we'll reset from a
+different map position"*. Two gates now, and they are different mechanisms on purpose:
+
+- **`MetaTileMap::can_cut`**, set by `game_state()` beside `can_surf`, keeps `:CutTree` rows out of
+  `actions()` entirely. ⚠️ **On the map rather than in `overworld_menu`**, so the scripted policy is
+  held to it too — `PolicyStep::CutTree`'s own fallback could otherwise push a step that can never
+  complete. The same line stops `actions()` offering a `ConnectionWater` crossing to a party that
+  cannot Surf: the BFS records the shore tile as a reachable *terminal*, so that row was a walk to
+  the water's edge and a bump into the sea.
+- **`tools::hm_available`**, in `resolve_field_move`, refuses the call itself against `HM_BADGES` —
+  the five moves and the badge each needs, transcribed from `.outOfBattleMovePointers`. ⚠️ **The two
+  halves are separate complaints** ("nobody knows it" vs "you have not won the badge") because they
+  need different things done about them. Caught here it is an ordinary `CallKind::Rejected` and the
+  model still acts in the same turn — the argument `not_on_the_menu` is built on. ⚠️ `PushBoulder`
+  additionally requires `strength_active`: Strength is *armed* once per map and cleared on every map
+  change, and a push before that moves nothing and reports nothing.
+- **`agent.rs`'s own check on the way into `CuttingTree`**, which is the one every request passes
+  through whatever asked for it — the two above are two places to forget. It refuses with a
+  `TextBox` and drops to `Idle` rather than opening the menu.
+  `mechanics::a_cut_with_no_cut_never_opens_the_party_menu` is the guard, and ⚠️ **what it asserts is
+  that decisions keep coming**, not that the state was skipped: a guard that dropped to `Idle` and
+  left the agent with nothing to do would pass "never entered `CuttingTree`" and still be the wedged
+  run it replaces.
+
+⚠️ **`fly_bike::blocked_by` was already doing this and still had the hole**: it checks the
+destination, the tileset and that somebody knows Fly, and never checks the Thunder Badge.
+
+⚠️ **Withholding a row silently is the same bug facing the other way**, which is why `prompt` gained
+a `Blocked here:` line. It fires only while the map holds a `CutTree` or `Water` the party cannot get
+past, and it names what would clear it. Without it a model finds no way north out of Route 2, no
+reason why, and goes round the same four maps for forty turns — which is the *other* half of what the
+deployed run actually did.
+
+⚠️ **The naming screen used to talk the model out of the only thing it is for.** `set_nickname` said
+the default "is the ordinary answer", and across both deployed runs **all four** naming screens took
+it — *"Keep the default name ZUBAT for the newly caught Pokémon"*. A decision kind with one possible
+answer is a round trip nobody needed to buy. Both the tool and `TurnContext::Nickname` now ask for a
+name that says what the model makes of *this* Pokémon. ⚠️ **And the name is written straight into the
+naming screen's buffer, so nothing else checks it**: `PokemonString::from_string` maps a character it
+does not know to `0x00`, which is not the terminator (`0x50`) but a control byte — so `Poké` does not
+fail, it names the mon something unreadable for the rest of the run. `tools::unencodable` rejects it
+by round-tripping through the charmap rather than by asking whether it is alphanumeric, for the same
+reason `every_name_a_policy_can_choose_is_one_the_game_will_take` does: `/` is a perfectly writable
+`$F3`.
+
+⚠️ **Emit-on-change keeps the prefix cache and buries the plan, and both deployed runs proved it.**
+`sync_plan` leaves an unchanged plan where it is because moving it costs a re-prefill — but a model
+that sets one item on turn 1 and never touches it again (258 turns, one `todo_set`; and 2430 turns,
+sixteen `todo_set`s and a single `todo_complete`) then has the list it is meant to be revising as the
+*least* recent thing in every request. Three parts to the answer, and they are three different
+mechanisms on purpose:
+
+- **`PLAN_REFRESH_TURNS` (10)** bounds the drift: an unchanged plan gets a fresh copy appended every
+  tenth overworld turn. ⚠️ **The number is set by history growth, not by cache cost** — that is what
+  changed when the removal went. A refresh is one ~150-token message prefilled once and cached from
+  then on, against a turn of one to two thousand, so every tenth turn is on the order of 1% more
+  context to carry and to compact and every turn would be ~10%.
+  `a_plan_nobody_edits_is_brought_back_to_the_tail_of_the_history` asserts both halves, because a
+  refresh that fired every turn would pass a test that only checked it comes back.
+- ⚠️ **It is an append: nothing is ever removed, and after the system prompt the history only ever
+  grows at the end.** This used to remove the stale copy so there would only ever be one, which is a
+  rewrite of the middle of the conversation and therefore a re-prefill of everything after it.
+  ⚠️ **Measured, the two are within about 20% and leaving is the cheaper side** — worth writing down,
+  because "one copy" sounds obviously right and is not. The plan is 1283 bytes (~320 tokens,
+  `probe_turn_requests`) and sits immediately before the *previous* turn's situation, so a removal
+  re-prefills exactly one turn; the deployed run compacted 38 times across 2427 decisions, so a cycle
+  is ~64 turns to grow ~5 k → 85 k and a turn is ~1250 tokens. Leaving the copy costs its 320 tokens
+  on every request until compaction takes it — half a cycle on average, ~32 requests — and they are
+  *cached*, a tenth the price. ~1250 against ~1020, plus the ~4% of the context a cycle's worth of
+  stale copies occupies and therefore compacts sooner. ⚠️ **The tie is broken on structure, not on
+  the 20%**: appending has no exceptions to get wrong, and the removal's advantage depends on the
+  endpoint's cached-token discount, which is not ours to control — at 2× rather than 10× the removal
+  wins outright. ⚠️ **So "the plan" is the *last* copy** — `rposition`, and `TodoList::render` says
+  in the message itself that it replaces any earlier one, because a model reading four
+  `## Your plan` blocks has to be told which wins.
+- ⚠️ **The refresh is gated to `DecisionKind::Overworld` and the edit is not.** A refresh buys a
+  fresh look at a list, and there is nothing to be done about a list in the middle of a battle, on a
+  naming screen or at a mart. An *edit* has to land on any kind, because `non_terminal_names` chains
+  the todo tools onto all of them unconditionally, so a plan changed during a battle that stayed
+  uncorrected would have the next overworld turn read a stale one.
+  `a_battle_turn_never_pays_to_reposition_a_plan_it_cannot_act_on` holds the pair apart.
+- **`prompt::PLAN_UNCHANGED`** is appended to the situation on every turn that does *not* carry the
+  plan. ⚠️ **A message the model can still see is not a message the model is still reading** — the
+  copy may be fifty turns back in a conversation that is mostly menus. It costs nothing at the cache,
+  because the situation is fresh tokens every turn either way, and it says "unchanged" rather than
+  restating the items: a second copy is the thing the one-message design exists to avoid.
+
+⚠️ **A compaction can take the plan, and nothing else needs to.** `is_turn_start` refuses to cut
+between a plan and its turn, so it is only ever dropped *with* that turn; `sync_plan`'s "there is no
+copy" arm then appends a fresh one at the top of the next turn, re-rendered from `todo.json`, which
+is the authority and cannot come back stale. ⚠️ **Which is why the summary deliberately does not
+quote the plan**: a summary is written once and never rewritten, so a plan inside one is frozen at
+the moment of the compaction and sits at message 1 contradicting the live copy for the rest of the
+run. `a_compaction_that_drops_the_plan_does_not_break_the_chain` is the guard, and it asserts the
+precondition — that the history was long enough for the plan to be inside the dropped middle — or it
+would prove nothing. (The system prompt is never compacted at all: `apply_summary` lifts
+`messages.first()` out when it is a `Role::System` and rebuilds around it.)
+
+⚠️ **Four things the system prompt has to keep saying, each bought with a measured failure.** They
+are prose, so nothing but `the_system_prompt_says_the_things_the_deployed_runs_needed_it_to_say`
+notices them going — and all four *have* been reworded away at some point:
+
+- **The game is not broken and you are not debugging it.** 29 of one 258-turn run's own decision
+  summaries called it buggy, glitched, broken or in need of a reset. Restarting, backing out to
+  another map "to clear the state" and waiting for something to settle are not moves this game has.
+- **Retrying is not a plan.** Eleven cuts at the same tree; 91 consecutive `press_buttons` on Route 3
+  in the run before it. A model reads its own last turns back on every request, so the second attempt
+  is what makes the tenth likely.
+- **Prior knowledge of Pokémon Red is not evidence.** That run named Brock **88 times** without
+  having met him or held a badge, and chose its starter on turn **7** for the "type advantage over
+  Gary's likely Charmander" — a fact about a different playthrough. The one before it said "Pewter"
+  573 times and "HM01" 100.
+- **What people say is the instruction.** It read `GARY: Yo AI! Gramps isn't around!` six times in
+  Oak's lab and spent thirty turns re-talking to the same three people and re-picking the same three
+  Poké Balls, instead of going to look for Oak. Every text box is quoted into the turn under
+  `### Since your last decision` already; what was missing was being told they are directions.
 
 ⚠️ **`PokemonStatus`' `Display` is `strum`'s derive, so a healthy Pokémon prints `None`** — and every
 party line in every turn read `20/20 HP, None`, which is a missing value rather than good news.
@@ -1137,7 +1266,7 @@ before.**
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + web/host/llm.
-# ~20s, 1310 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each. The
+# ~20s, 1320 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each. The
 # one deliberate exception to the tiering is `the_hall_of_fame_is_announced_once_when_the_ceremony_
 # starts` (1.7 s of real ROM), which buys the only proof that the end of the game is detected at all.
 cargo test --release

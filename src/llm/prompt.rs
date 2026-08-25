@@ -43,6 +43,26 @@ pub fn plan_message(todo: &crate::llm::todo::TodoList) -> crate::llm::protocol::
     crate::llm::protocol::Message::user(todo.render())
 }
 
+/// What a turn says when the plan is not being re-sent with it — appended to the situation by
+/// [`Worker::run_one`](crate::llm::worker::Worker).
+///
+/// ⚠️ **A message the model can still see is not a message the model is still reading.** The plan
+/// rides in a `user` message of its own and is only re-emitted when it changes or when
+/// [`PLAN_REFRESH_TURNS`](crate::llm::worker::PLAN_REFRESH_TURNS) falls due, so on most turns it is
+/// tens of turns back in a conversation that is mostly menus. Both deployed runs behaved as though
+/// it were not there at all — 258 turns with one `todo_set` on turn 1 and no edit after it. This
+/// line is the cheap half of the fix (the refresh is the other): it is part of the situation, which
+/// is fresh tokens every turn regardless, so it costs nothing at the prefix cache.
+///
+/// ⚠️ **It says "unchanged", not "here it is".** Restating the items would be a second copy of the
+/// thing the whole one-message design exists to avoid, and a copy that ages into the history behind
+/// every turn.
+pub const PLAN_UNCHANGED: &str =
+    "Your plan is unchanged since the last `## Your plan` message in this conversation — the one \
+     nearest the end — and that copy is still the current one. Read it back before you decide; if it \
+     no longer describes what you are doing, fix it with `todo_set` or `todo_complete` in this same \
+     turn.";
+
 /// Whether this is a message [`plan_message`] produced.
 ///
 /// ⚠️ **A plan is not a turn boundary** — see [`compaction::is_turn_start`]. It sits immediately
@@ -92,18 +112,64 @@ How the interface works:
   one: what you were trying to do, what you expected, what happened instead. A developer reads \
   these, and the screen and a save state are filed with it. ⚠️ It does **not** end your turn and \
   nothing changes now — so having filed it, carry on and try a different way. Reporting a problem \
-  and playing on are not alternatives.
+  and playing on are not alternatives. What can be wrong is the agent's *description* of the game — \
+  a menu row, a route, a name. The game itself is not wrong; see below.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
   everything not in that summary is gone. Your plan — `todo_set` and `todo_complete`, shown to you \
   every turn under 'Your plan' — is what survives that, and a restart of the program as well. It is \
   the only thing that does, so put anything you will still need in an hour there, with the reason \
   attached: somewhere you could not get into, something a person asked you for, something that did \
   not work.
+
+The game is not broken, and you are not debugging it:
+
+- This is the real 1996 cartridge, unmodified, running on an accurate emulator. It has been \
+  finished many times. Nothing in it is glitched, stuck, or waiting to be reset, and there is no \
+  developer to fix anything for you. You are a player, not a tester.
+- So when something does not work, the explanation is almost always that **you have not done the \
+  thing the game is waiting for** — a person you have not spoken to, an item you do not have yet, a \
+  badge you have not won, a place you have not been. It is never that the game needs another go.
+- **Doing the same thing again is not a plan.** If an action has failed twice, stop and change what \
+  you are doing: go somewhere else, talk to someone you have not talked to, read what you were last \
+  told. Doing it a third, fifth and tenth time is the single most expensive mistake available to \
+  you, and it never once works.
+- Restarting, resetting, backing out to another map to 'clear the state', and waiting for something \
+  to settle are not moves this game has. Nothing about the world changes because you left and came \
+  back.
+
+Play the game in front of you, not the one you remember:
+
+- You may recognise this game. **Do not act on that.** Anything you think you know about where to \
+  go, who is where, what someone is called, what is in a building, or what an item does is a \
+  memory of a different playthrough, and acting on it sends you to places you have no reason to be \
+  and makes you stop looking for the reason you are stuck. This run's names, its rival, and the \
+  order things happen in are whatever *this* game says they are.
+- Act only on what you have been told this run: what a person said, what a sign said, what the \
+  screen said, what you can see in the menu. If you cannot point to where you learnt something, \
+  you did not learn it here.
+- **Read what people say to you.** Almost everything the game wants you to do next is said out \
+  loud by someone, once, in a text box — where to go, what to fetch, what is blocking you, what \
+  they will give you. Those text boxes are quoted back to you under 'Since your last decision'. \
+  They are the instructions. Reading 'GRAMPS ISN'T AROUND' and then talking to the same person \
+  again is how a run ends up going nowhere.
+- When someone tells you something you will need later — a place, an errand, a name, a condition — \
+  put it on the plan straight away, with who said it. That sentence will not be shown to you twice.
+
+Your plan, and keeping it:
+
 - **Always have a plan, and treat it as a draft.** Keep three to five open items going even when \
   you are unsure — a rough plan you revise beats an empty one. Nothing on it is a commitment: when \
   an item turns out wrong or impossible, `todo_set` with its number rewrites it, or deletes it if \
   you send no text. Replace it with what you now know rather than completing it or leaving it to \
   mislead you later.
+- **Expect to touch it most turns you learn anything.** Finished the thing at the top? \
+  `todo_complete` it. Someone gave you an errand? Add it. Found out the way you meant to go is \
+  shut? Rewrite that item to say so and say what you will do instead. A plan you have not changed \
+  in a long stretch of turns is not a plan you are following; it is one you have forgotten about, \
+  and it is the first thing to check when you cannot say what you are doing or why.
+- Write items you could act on cold, after everything else you know has been thrown away — 'ask \
+  the man in the Viridian mart what he wants, he would not let me past the north exit' rather than \
+  'go north'.
 
 Things worth knowing about this particular game:
 
@@ -114,6 +180,9 @@ Things worth knowing about this particular game:
 - Money is finite early on. Potions and Poké Balls are worth buying; almost nothing else is.
 - The action list is what the agent can currently *reach*. If somewhere you want to go is not in it, \
   the way there is blocked, or it is on another map you have to walk to first.
+- Some things stay shut until you have a particular move and the badge that lets you use it outside \
+  battle. While that is true they are not offered to you at all, and the turn says so plainly under \
+  'Blocked here'. That is a different errand, not a thing to keep trying.
 ";
 
 /// The line that ends every turn request, and the reason the loop can rely on exactly one terminal
@@ -213,7 +282,7 @@ pub fn situation(
     out.push_str(match kind {
         DecisionKind::Overworld => "## Decision: what to do next in the overworld\n\n",
         DecisionKind::Battle => "## Decision: what to do this battle turn\n\n",
-        DecisionKind::Nickname => "## Decision: name this Pokémon, or keep the default\n\n",
+        DecisionKind::Nickname => "## Decision: name this Pokémon\n\n",
         DecisionKind::MartPurchase => "## Decision: what to buy here, if anything\n\n",
         DecisionKind::ForgetMove => "## Decision: which move to forget, if any\n\n",
         DecisionKind::Stuck => "## Decision: the game is stuck — get it moving\n\n",
@@ -224,8 +293,19 @@ pub fn situation(
         TurnContext::Nickname(species) => out.push_str(&format!(
             // No article: a species name is one, and "a Eevee" / "a Omanyte" is what picking one
             // blind gets you in a sentence printed on every naming screen of the run.
+            //
+            // ⚠️ **Asking for a name is the whole point of this turn, and the wording used to talk
+            // the model out of it.** It said the default "is the ordinary answer", and across two
+            // deployed runs every single naming screen — four of them — was declined: *"Keep the
+            // default name ZUBAT for the newly caught Pokémon"*. A turn that only ever has one
+            // answer is a turn nobody needed to pay for, so it asks for the other one.
             "The naming screen is open for {species}. It has just been caught, hatched or given \
-             to you.\n\n",
+             to you.\n\n\
+             Name it. Not the species again — a name that says what you make of *this* one: how you \
+             came by it, what you plan to do with it, what the fight it came out of was like, what \
+             it reminds you of. It is the name you will read in every message about it from here on, \
+             so pick one you will recognise. Keep the default only if you truly have nothing to \
+             say.\n\n",
         )),
         TurnContext::ForgetMove { new, .. } => out.push_str(&format!(
             "A Pokémon is trying to learn **{new}** but already knows four moves. Pick one to \
@@ -262,6 +342,36 @@ pub fn situation(
     // the tile in front and nothing else — and it is one line against a whole `read_map`.
     if let Some((at, tile)) = state.map.tile_in_front() {
         out.push_str(&format!("Facing: {tile} at ({}, {})\n", at.x, at.y));
+    }
+    // ⚠️ **What the menu no longer offers still has to be explainable.** A cuttable tree and a
+    // stretch of water are the two things on a map that are impassable *for now* rather than for
+    // ever, and both are withheld from the action menu until the party can actually deal with them
+    // (`MetaTileMap::can_cut` / `can_surf`) — because an action whose only follow-up the game
+    // refuses is a menu loop, not a choice. Withholding it silently would leave a model staring at a
+    // map with no way out and no idea why, which is the other half of the same bug: it would go
+    // looking for a route that does not exist, or conclude the agent is broken. So the obstacle is
+    // named once, in a sentence, with what it takes to pass it.
+    //
+    // ⚠️ **Only on the turn that has an action menu.** It is a fact about that menu, and the other
+    // five kinds do not have one — on a naming screen it is overworld trivia in the middle of a
+    // question about a word.
+    if kind == DecisionKind::Overworld {
+        use crate::pokemon::tile::MetaTile;
+        let obstacles: [(bool, fn(&MetaTile) -> bool, &str, &str); 2] = [
+            (!state.can_use_cut, |tile| matches!(tile, MetaTile::CutTree), "Cuttable trees",
+             "Cut, which is an HM to be found and taught, and needs the CascadeBadge"),
+            // `ConnectionWater` too: the sea at a map edge is the same wall as the pond inside it.
+            (!state.can_use_surf, |tile| matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_)),
+             "Water", "Surf, which is an HM to be found and taught, and needs the SoulBadge"),
+        ];
+        for (blocked, is_obstacle, noun, what) in obstacles {
+            if blocked && state.map.meta_tiles.iter().any(is_obstacle) {
+                out.push_str(&format!(
+                    "Blocked here: {noun} on this map cannot be passed yet — that needs {what}. \
+                     Nothing in the menu below leads past that, and retrying will not change it.\n",
+                ));
+            }
+        }
     }
     let badges: Vec<String> = state.badges.iter_names().map(|(name, _)| name.to_string()).collect();
     out.push_str(&format!(
@@ -346,7 +456,10 @@ pub fn situation(
                 "(no menu — the agent is not offering actions, which is why you are being asked. \
                  `press_buttons`, or `wait`.)\n"
             }
-            DecisionKind::Nickname => "(there is no menu — call `set_nickname`, with or without a name.)\n",
+            DecisionKind::Nickname => {
+                "(there is no menu — call `set_nickname` with the name you have chosen. Omitting \
+                 `name` keeps the species name, and is the answer only if nothing comes to mind.)\n"
+            }
             DecisionKind::MartPurchase => {
                 "(the shop's stock could not be read. Call `buy_item` with no `item` to leave.)\n"
             }
@@ -665,11 +778,79 @@ mod tests {
 
         let plan = plan_message(&todo);
         assert!(plan.text().expect("prose").contains("beat Brock"), "{plan:?}");
-        assert!(is_plan(&plan), "the worker finds the stale copy with this");
+        // ⚠️ **The history can hold several of these**, because `sync_plan` appends rather than
+        // moving — so the message has to say which one wins, and chronology is the only answer a
+        // conversation implies on its own.
+        assert!(plan.text().expect("prose").contains("replaces any earlier"), "{plan:?}");
+        assert!(is_plan(&plan), "the worker finds the newest copy with this");
         assert!(!crate::llm::compaction::is_turn_start(&plan),
                 "a cut between the plan and its turn would drop the one thing meant to survive");
         assert!(!is_plan(&crate::llm::protocol::Message::user("Location: PalletTown")),
                 "an ordinary turn is not a plan");
+    }
+
+    /// **What the map will not let you do is said once, in the turn.**
+    ///
+    /// An action whose only follow-up the game refuses is withheld from the menu
+    /// (`MetaTileMap::can_cut` / `can_surf`), which is what stops a cut with no Cut becoming sixty
+    /// seconds of A-mashing in a party menu. But withholding it *silently* is the same bug facing
+    /// the other way: the deployed run, having found no way north out of Route 2, went round the
+    /// same four maps for forty turns and filed three issue reports saying the game was broken. So
+    /// the obstacle is named, with what it takes to pass it, and only while it is actually blocking.
+    #[test]
+    fn an_obstacle_the_party_cannot_pass_is_named_rather_than_silently_dropped() {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/at-vermilion.bin")).expect("the fixture loads");
+        let mut state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("the fixture has a readable state");
+        assert!(!state.can_use_cut, "the fixture reaches Vermilion before the HM");
+
+        let rendered = |kind, state: &GameState| situation(
+            kind, state, &ApiSnapshot::default(), &[], &[], TurnContext::None,
+        );
+        let blocked = rendered(DecisionKind::Overworld, &state);
+        assert!(blocked.contains("Blocked here: Cuttable trees"), "{blocked}");
+        assert!(blocked.contains("CascadeBadge"), "it has to say what would clear them: {blocked}");
+
+        // ⚠️ **And only on the turn that has an action menu.** It is a fact about that menu; on a
+        // battle turn or a naming screen it is overworld trivia in the middle of another question.
+        for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::Stuck] {
+            let other = rendered(elsewhere, &state);
+            assert!(!other.contains("Blocked here"), "{elsewhere:?} has no action menu: {other}");
+        }
+
+        // ⚠️ **And it stops the moment it stops being true**, or it is a line on every turn of the
+        // rest of the game telling the model about a thing it can already do.
+        state.can_use_cut = true;
+        let cleared = rendered(DecisionKind::Overworld, &state);
+        assert!(!cleared.contains("Blocked here: Cuttable trees"), "{cleared}");
+    }
+
+    /// **The four things the system prompt has to keep saying**, each bought with a measured
+    /// failure of a deployed run rather than a guess:
+    ///
+    /// - the game is not broken and is not being debugged — 29 of one 258-turn run's own decision
+    ///   summaries called it buggy, glitched or in need of a reset;
+    /// - retrying is not a plan — that run cut the same Route 2 tree eleven times;
+    /// - prior knowledge of Pokémon Red is not evidence — it named Brock 88 times without having
+    ///   met him, and picked a starter on turn 7 for its "type advantage over Gary's likely
+    ///   Charmander";
+    /// - what people say is the instruction — it read "GRAMPS ISN'T AROUND" six times in Oak's lab
+    ///   and talked to the same three people for thirty turns instead of going to find him.
+    ///
+    /// ⚠️ **A prose test, deliberately.** None of this can be asserted on behaviour without an
+    /// endpoint, and all four were *removed* by rewording at some point in this file's history.
+    #[test]
+    fn the_system_prompt_says_the_things_the_deployed_runs_needed_it_to_say() {
+        for phrase in [
+            "The game is not broken",
+            "Doing the same thing again is not a plan",
+            "not the one you remember",
+            "Read what people say to you",
+            "put it on the plan straight away",
+        ] {
+            assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
+        }
     }
 
     /// A scrolling conversation emits the same line repeatedly. Twenty identical sentences is not

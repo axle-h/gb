@@ -1142,7 +1142,7 @@ mod tests {
     /// across every request of the run, and the plan must appear once rather than accumulating a
     /// stale copy per turn.
     #[test]
-    fn the_plan_is_carried_once_and_never_disturbs_the_cacheable_prefix() {
+    fn the_plan_is_appended_and_never_disturbs_the_cacheable_prefix() {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let id = rig.first_action_id();
         let choose = format!(r#"{{"id":"{id}"}}"#);
@@ -1177,22 +1177,26 @@ mod tests {
                        "request {n}'s system message differs — the whole prefix cache is gone");
         }
 
-        // Exactly one copy, every time, and it says the current thing.
-        for (n, request) in requests.iter().enumerate() {
-            assert_eq!(plans(request).len(), 1, "request {n} carries {:?}", plans(request));
-        }
-        assert!(!plans(&requests[0])[0].contains("Poke Flute"), "nothing was planned yet");
-        assert!(plans(&requests[2])[0].contains("Poke Flute"),
-                "the item added mid-turn is in the next turn: {}", plans(&requests[2])[0]);
+        // ⚠️ **The newest copy is the plan; the older ones are left where they are.** Removing the
+        // stale one would mean rewriting the middle of the history, and a prompt cache is keyed on
+        // the prefix — so that is a couple of thousand uncached tokens every time the model touches
+        // its own list, against a few hundred *cached* ones for leaving it. `render()` says in the
+        // message itself that the last one wins, and compaction is what bounds how many there are.
+        assert!(!plans(&requests[0]).last().expect("a plan").contains("Poke Flute"),
+                "nothing was planned yet");
+        assert!(plans(&requests[2]).last().expect("a plan").contains("Poke Flute"),
+                "the item added mid-turn is in the next turn: {:?}", plans(&requests[2]));
+        assert_eq!(plans(&requests[2]).len(), 2, "the empty opening plan is still there, untouched");
 
-        // ⚠️ **The property that makes it cheap: an unchanged plan is not re-emitted.** Turn 3 is
-        // where the new item lands — the copy in front of it was stale, so it moved, and that is the
-        // one turn that pays. Turn 4 changes nothing, so everything turn 3 sent must still be a
-        // *prefix* of what turn 4 sends: the history grew purely by append and the endpoint's cache
-        // is intact all the way back to the system message.
-        let sent = &requests[2].messages;
-        assert_eq!(&requests[3].messages[..sent.len()], &sent[..],
-                   "turn 4 rewrote history turn 3 had already sent — the prefix cache is gone");
+        // ⚠️ **And therefore the history is append-only, with no exceptions.** Every request must
+        // carry the whole of the one before it as a literal prefix — including turn 3, which is the
+        // turn the plan changed and the one that used to pay for it.
+        for n in 1..requests.len() {
+            let sent = &requests[n - 1].messages;
+            assert_eq!(&requests[n].messages[..sent.len()], &sent[..],
+                       "request {n} rewrote history request {} had already sent — the cache is gone",
+                       n - 1);
+        }
 
         // The page is told too — a viewer reads the plan as what the run is trying to do.
         let published: Vec<Vec<String>> = rig
@@ -1209,6 +1213,170 @@ mod tests {
         // happened to touch its own list, which can be an hour.
         assert_eq!(published, [vec![], vec!["come back to Route 12 with the Poke Flute".to_string()]],
                    "published on change, not on a timer");
+    }
+
+    /// **An unchanged plan still comes back to the tail eventually.**
+    ///
+    /// Emit-on-change is what keeps the prefix cache intact, and it has one failure mode: a model
+    /// that sets a plan once and never touches it leaves that message wherever it first landed, so
+    /// the list it is meant to be revising ends up the *least* recent thing in the request. Both
+    /// deployed runs did exactly that — 258 turns with one `todo_set`, and 2430 turns with sixteen —
+    /// and neither ever revised an item. `PLAN_REFRESH_TURNS` bounds how far back it can drift.
+    ///
+    /// ⚠️ **Both halves are asserted.** A refresh that happened every turn would pass a test that
+    /// only checked the plan comes back, and would cost a turn's re-prefill on every request — which
+    /// is the thing emit-on-change exists to avoid. So the turns in between must still append.
+    #[test]
+    fn a_plan_nobody_edits_is_brought_back_to_the_tail_of_the_history() {
+        const REFRESH: usize = crate::llm::worker::PLAN_REFRESH_TURNS as usize;
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        // One edit on turn 1, then nothing at all for well past the refresh window.
+        let mut replies = vec![calls(&[
+            ("todo_set", r#"{"text":"deliver the parcel to Oak"}"#),
+            ("choose_action", &choose),
+        ])];
+        replies.extend((0..REFRESH + 3).map(|_| calls(&[("choose_action", &choose)])));
+        let turns = replies.len();
+        rig.push(replies);
+        for turn in 1..=turns {
+            assert!(rig.pump_overworld(&mut policy).is_some(), "turn {turn} decides");
+        }
+
+        let requests = rig.requests();
+        let plan_at = |request: &ChatRequest| -> usize {
+            request.messages.iter().rposition(|m| crate::llm::prompt::is_plan(m)).expect("a plan is carried")
+        };
+        // Request 1 is the first to carry the edit, so it is where the drift is measured from, and
+        // the window runs from there.
+        let planted = plan_at(&requests[1]);
+        let due = REFRESH + 2;
+        assert_eq!(plan_at(&requests[due - 1]), planted,
+                   "the plan moved before it was due — every turn in between pays a re-prefill");
+        for request in 2..due {
+            let sent = &requests[request - 1].messages;
+            assert_eq!(&requests[request].messages[..sent.len()], &sent[..],
+                       "request {request} rewrote history the one before had already sent");
+        }
+        // …and then it comes back, once, to sit immediately before the situation it belongs to —
+        // ⚠️ **as a second copy, with the buried one left exactly where it was.** Lifting it would
+        // mean rewriting the middle of the history, which is the one thing the prefix cache cannot
+        // survive; a stale copy a few hundred cached tokens back is the cheaper half of that trade by
+        // about ten to one, and compaction is what stops them piling up.
+        let refreshed = plan_at(&requests[due]);
+        assert!(refreshed > planted, "the plan is still buried at {refreshed} after {REFRESH} quiet turns");
+        assert_eq!(requests[due].messages[planted], requests[due - 1].messages[planted],
+                   "the older copy was disturbed — everything after it is a re-prefill");
+        assert_eq!(requests[due].messages[planted], requests[due].messages[refreshed],
+                   "and the refresh says the same thing, since nothing edited it");
+        assert_eq!(refreshed, requests[due].messages.len() - 2,
+                   "a refreshed plan belongs directly in front of the turn that reads it");
+        assert_eq!(plan_at(&requests[due + 1]), refreshed,
+                   "and the window starts again rather than moving it every turn from here on");
+
+        // ⚠️ **Every turn that does not carry the plan says so.** The copy is still in the history,
+        // but tens of turns back in a conversation that is mostly menus — which is a message the
+        // model can see and is not reading. The line costs nothing at the cache: the situation is
+        // fresh tokens every turn either way.
+        for (n, request) in requests.iter().enumerate() {
+            let asked = last_user_message(request);
+            let carried = plan_at(request) == request.messages.len() - 2;
+            assert_eq!(!carried, asked.contains(crate::llm::prompt::PLAN_UNCHANGED),
+                       "request {n} carried={carried} but the note says otherwise: {asked}");
+        }
+    }
+
+    /// **The periodic refresh is an overworld thing, and an edit is not.**
+    ///
+    /// A refresh buys the model a fresh look at a list it has not touched, and there is nothing to
+    /// be done about that list in the middle of a battle — one question, one answer, and the
+    /// re-prefill it costs is bought for nothing. An *edit* has to land on any kind, because the todo
+    /// tools are offered on all of them (`non_terminal_names` chains them unconditionally), so a plan
+    /// changed during a battle that stayed uncorrected would have the next overworld turn read a
+    /// stale one.
+    #[test]
+    fn a_battle_turn_never_pays_to_reposition_a_plan_it_cannot_act_on() {
+        const REFRESH: usize = crate::llm::worker::PLAN_REFRESH_TURNS as usize;
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        let mut replies = vec![calls(&[
+            ("todo_set", r#"{"text":"deliver the parcel to Oak"}"#),
+            ("choose_action", &choose),
+        ])];
+        // Well past the window, all of it in battle.
+        replies.extend((0..REFRESH + 4).map(|_| calls(&[("choose_battle_action", r#"{"id":"run"}"#)])));
+        rig.push(replies);
+        assert!(rig.pump_overworld(&mut policy).is_some(), "the plan is planted by an overworld turn");
+        rig.enter_battle();
+        for turn in 0..REFRESH + 4 {
+            assert!(rig.pump_battle(&mut policy, Duration::from_secs(2)).is_some(), "battle turn {turn} decides");
+        }
+
+        let requests = rig.requests();
+        let plan_at = |request: &ChatRequest| -> usize {
+            request.messages.iter().rposition(|m| crate::llm::prompt::is_plan(m)).expect("a plan is carried")
+        };
+        // Request 1 is the first battle turn and *does* move the plan — the overworld turn before it
+        // called `todo_set`, and an edit lands on any kind. That is the case this is distinguishing
+        // itself from, so it is asserted rather than skipped past.
+        let planted = plan_at(&requests[1]);
+        assert_eq!(planted, requests[1].messages.len() - 2, "the edit is carried on the next turn");
+        assert!(!last_user_message(&requests[1]).contains(crate::llm::prompt::PLAN_UNCHANGED));
+
+        // Everything after it is a battle turn with nothing to say about the plan, so none of them
+        // may move it however long the window has been up.
+        for (n, request) in requests.iter().enumerate().skip(2) {
+            assert_eq!(plan_at(request), planted,
+                       "request {n} is a battle turn and repositioned the plan anyway");
+            assert!(last_user_message(request).contains(crate::llm::prompt::PLAN_UNCHANGED),
+                    "but it must still be told the plan is back there: request {n}");
+        }
+        assert!(requests.len() > REFRESH + 2, "the window has to have fallen due for this to mean anything");
+    }
+
+    /// **A compaction can take the plan, and the next turn puts it back.**
+    ///
+    /// `is_turn_start` refuses to cut *between* a plan and its turn, so the plan is only ever dropped
+    /// along with the turn it belongs to — but it can be dropped, and after a summarising compaction
+    /// the history is the system prompt, the summary and a short tail. What stops that clobbering
+    /// the chain is that `sync_plan` runs at the top of the next turn, finds no copy, and appends
+    /// one; the plan itself is re-rendered from `todo.json`, which is the authority and cannot go
+    /// stale.
+    ///
+    /// ⚠️ **Which is also why the summary does not carry a copy of the plan.** A summary is written
+    /// once and never rewritten, so a plan quoted inside one is frozen at the moment of the
+    /// compaction and sits at message 1 contradicting the live copy for the rest of the run.
+    #[test]
+    fn a_compaction_that_drops_the_plan_does_not_break_the_chain() {
+        use crate::llm::compaction;
+        let mut todo = crate::llm::todo::TodoList::open(None);
+        todo.apply(crate::llm::todo::TodoCall::Set { id: None, text: Some("deliver the parcel".into()) });
+        let plan = crate::llm::prompt::plan_message(&todo);
+
+        // A history shaped the way the worker leaves one: system, then turns, with the plan sitting
+        // immediately in front of the situation of the turn it was last emitted for.
+        let mut messages = vec![Message::system(crate::llm::prompt::SYSTEM_PROMPT)];
+        for turn in 0..6 {
+            if turn == 1 { messages.push(plan.clone()); }
+            messages.push(Message::user(format!("## Decision: turn {turn}")));
+            messages.push(Message::assistant(format!("did turn {turn}"), vec![]));
+        }
+        assert!(messages.iter().any(crate::llm::prompt::is_plan), "the plan starts in the history");
+
+        compaction::apply_summary(&mut messages, "I am in Pallet Town.", compaction::KEEP_MESSAGES);
+        assert_eq!(messages[0].role, Role::System, "and the system prompt is never compacted");
+        assert!(!messages.iter().any(crate::llm::prompt::is_plan),
+                "this history is long enough that the plan is inside the dropped middle — otherwise                  the test proves nothing");
+
+        // The repair is `sync_plan`'s "there is no copy" arm, which is what the next turn runs.
+        assert!(messages.iter().position(|m| crate::llm::prompt::is_plan(m)).is_none());
+        messages.push(crate::llm::prompt::plan_message(&todo));
+        let restored = messages.last().expect("a plan was appended");
+        assert!(crate::llm::prompt::is_plan(restored));
+        assert!(restored.text().expect("prose").contains("deliver the parcel"),
+                "and it is re-rendered from the list on disk, so it cannot come back stale");
     }
 
     /// §2.1 and §7.3 together: several reads in one assistant message are answered **all at once,

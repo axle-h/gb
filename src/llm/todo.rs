@@ -185,7 +185,15 @@ impl TodoList {
              of the program. Keep a short plan going at all times, even when you are unsure: the \
              next three to five things you mean to do, each with its reason. Nothing here is a \
              commitment — when an item turns out wrong or impossible, rewrite or delete it with \
-             `todo_set` rather than leaving it, and complete items as you actually finish them.\n\n",
+             `todo_set` rather than leaving it, and complete items as you actually finish them.\n\n\
+             Look at it now and ask whether it still describes what you are doing. If something on \
+             it is done, `todo_complete` it. If you have been told something you will need later — \
+             an errand, a place, a name, what is blocking you — add it, with who told you. If the \
+             list has not changed while you have been going round in circles, it is the list that \
+             is wrong.\n\n\
+             ⚠️ This replaces any earlier `## Your plan` message in this conversation. Older copies \
+             are left where they were so nothing above them has to be rewritten; the one nearest the \
+             end is always the current one.\n\n",
         );
 
         let (done, open): (Vec<&TodoItem>, Vec<&TodoItem>) =
