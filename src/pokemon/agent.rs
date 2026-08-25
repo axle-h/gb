@@ -1775,6 +1775,23 @@ impl PokemonAgent {
                         }
                         Some(crate::pokemon::policy::FieldMove::CutTree) => {
                             api.release_all_buttons();
+                            // ⚠️ **The last line of defence, and it is here because the driver has
+                            // no way back.** `CuttingTree` opens the party menu and mashes A until
+                            // the overworld comes back; without the Cascade Badge pokered answers
+                            // `.newBadgeRequired` → `jp .loop` and the overworld never comes back, so
+                            // the whole attempt is sixty seconds ended by `DRIVER_ESCAPE_SILENCE`.
+                            // Both policies are already stopped from asking — `MetaTileMap::can_cut`
+                            // withholds the action, `tools::hm_available` refuses the tool call — but
+                            // those are two places to forget and this is the one every request passes
+                            // through.
+                            if !game_state.can_use_cut {
+                                self.event(AgentEvent::TextBox {
+                                    message: "Cut needs a party member that knows it, and the \
+CascadeBadge; not cutting".to_string(),
+                                });
+                                self.set_state(AgentState::Idle);
+                                return Ok(());
+                            }
                             let tree_pos = game_state.map.tile_in_front().map(|(p, _)| p)
                                 .unwrap_or(game_state.map.player_position);
                             self.set_state(AgentState::CuttingTree { press: true, entered_menu: false, tree_pos });
@@ -3147,7 +3164,16 @@ impl PokemonAgent {
                 // overworld. So once we've entered a menu, the first return to the overworld means the
                 // cut is done: record the tile (the ROM map still shows the tree) and finish. A failed
                 // cut ("nothing to cut") stays in the menu, so it won't false-trigger this — and the
-                // preconditions were verified before entering (facing a 0x3d tree, Cascade Badge).
+                // preconditions were verified before entering (facing a 0x3d tree, and a party that
+                // can Cut at all).
+                //
+                // ⚠️ **That second precondition is two separate gates and both are outside this
+                // file.** `MetaTileMap::can_cut` keeps `:CutTree` out of `actions()` and
+                // `tools::hm_available` refuses a `use_field_move` that names it — because the party
+                // menu a badgeless Cut opens has no CUT row in it, and this driver's only exit is
+                // "we came back to the overworld", which never happens. What that costs when it is
+                // not gated is sixty seconds of A-mashing per attempt, ended by
+                // `DRIVER_ESCAPE_SILENCE` rather than by anything here.
                 if entered_menu && game_mode == GameMode::Overworld {
                     self.cut_tiles.insert((api.game_state()?.map.map, tree_pos));
                     self.event(AgentEvent::TextBox { message: format!("Cut down the tree at {tree_pos}") });

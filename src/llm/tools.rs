@@ -208,6 +208,51 @@ pub enum FieldMoveRequest {
     Interact { target: Point8, facing: Option<PlayerFacingDirection> },
 }
 
+/// The five HM field moves and the badge each one needs before the game will let it be used outside
+/// battle, transcribed from `.outOfBattleMovePointers` in `engine/menus/start_sub_menus.asm`: every
+/// arm opens `bit BIT_<something>BADGE, a` / `jp z, .newBadgeRequired`. Dig, Teleport and Softboiled
+/// are on that same table and take no badge, which is why they are not here.
+const HM_BADGES: &[(PokemonMoveName, crate::pokemon::badge::Badge)] = &[
+    (PokemonMoveName::Flash, crate::pokemon::badge::Badge::BoulderBadge),
+    (PokemonMoveName::Cut, crate::pokemon::badge::Badge::CascadeBadge),
+    (PokemonMoveName::Fly, crate::pokemon::badge::Badge::ThunderBadge),
+    (PokemonMoveName::Strength, crate::pokemon::badge::Badge::RainbowBadge),
+    (PokemonMoveName::Surf, crate::pokemon::badge::Badge::SoulBadge),
+];
+
+/// Refuse a field move the game itself would refuse, and say which half is missing.
+///
+/// ⚠️ **A refused field move is not a wasted turn, it is a wedged run.** Every one of these is
+/// reached through the party menu, and pokered answers a missing badge with `.newBadgeRequired` →
+/// `jp .loop` — back to the same menu, cursor untouched. The agent's driver is mashing A at that
+/// point and has no exit condition but "we came back to the overworld", which never happens; the
+/// only thing that ends it is `DRIVER_ESCAPE_SILENCE` sixty seconds later. The deployed run spent
+/// eleven turns and two `report_issue` filings on exactly this, with no badges at all, and came away
+/// believing the emulator was broken: *"since Cut pathing/tiles are buggy, we'll reset from a
+/// different map position"*.
+///
+/// So it is checked here, in the turn, where a rejection is an ordinary tool result the model can
+/// still act on — the same argument [`not_on_the_menu`] is built on.
+fn hm_available(state: &GameState, name: PokemonMoveName) -> Result<(), String> {
+    let Some(&(_, badge)) = HM_BADGES.iter().find(|(hm, _)| *hm == name) else { return Ok(()) };
+    let known = (0..state.pokemon.len() as u8).any(|slot| knows(state, slot, name));
+    match (known, state.badges.contains(badge)) {
+        (true, true) => Ok(()),
+        (false, true) => Err(format!(
+            "No Pokémon in the party knows {name}, so it cannot be used. {name} is taught by an HM \
+             you have to find first."
+        )),
+        (true, false) => Err(format!(
+            "{name} needs the {badge} before the game will let it be used outside battle, and you \
+             do not have it yet. Win the gym badge first."
+        )),
+        (false, false) => Err(format!(
+            "{name} cannot be used yet: no Pokémon in the party knows it, and it also needs the \
+             {badge}, which you do not have. Both have to come first."
+        )),
+    }
+}
+
 /// Turn a request into the [`FieldMove`] the agent executes, or into the sentence the model is told
 /// instead. Everything that can be checked from the state is checked here rather than left to fail
 /// silently three seconds later inside a menu driver.
@@ -231,6 +276,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
 
     Ok(match request {
         FieldMoveRequest::Cut => {
+            hm_available(state, PokemonMoveName::Cut)?;
             // The driver cuts whatever is in front of the player, so a player facing anything else
             // walks into a menu it cannot use and comes back out having achieved nothing.
             match state.map.tile_in_front() {
@@ -246,6 +292,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             }
         }
         FieldMoveRequest::PartyMove { name, slot } => {
+            hm_available(state, *name)?;
             let slot = match slot {
                 Some(slot) => {
                     let slot = party_slot(*slot)?;
@@ -263,7 +310,10 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             // index depends on what else that mon knows. It is computed, never assumed.
             FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, *name) }
         }
-        FieldMoveRequest::Fly { to } => FieldMove::Fly { to: *to },
+        FieldMoveRequest::Fly { to } => {
+            hm_available(state, PokemonMoveName::Fly)?;
+            FieldMove::Fly { to: *to }
+        }
         FieldMoveRequest::Teach { item, slot } => {
             FieldMove::TeachMove { item: held(*item)?, target_slot: party_slot(*slot)? }
         }
@@ -283,12 +333,37 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
         }
         FieldMoveRequest::TossItem { item } => FieldMove::TossItem { item: held(*item)? },
         FieldMoveRequest::PushBoulder { boulder, direction } => {
+            // Strength is not *used* on a boulder, it is armed once per map from the party menu and
+            // then every push works — `BIT_STRENGTH_ACTIVE`, cleared on every map change. A push
+            // before it is armed moves nothing and reports nothing, so the model retries the same
+            // shove until something else stops it. Say which half is missing.
+            hm_available(state, PokemonMoveName::Strength)?;
+            if !state.strength_active {
+                return Err(
+                    "Strength is not armed on this map, so a boulder will not move. Use \
+                     `use_field_move` with `strength` first — it has to be done again after every \
+                     map change — then push."
+                        .to_string(),
+                );
+            }
             FieldMove::PushBoulder { boulder: *boulder, dir: *direction }
         }
         FieldMoveRequest::ReorderParty { slot } => FieldMove::ReorderParty { slot: party_slot(*slot)? },
         FieldMoveRequest::Interact { target, facing } => {
             FieldMove::CheckTrashCan { target: *target, facing: *facing }
         }
+    })
+}
+
+/// The first character of `name` the cartridge's charmap has no byte for, if there is one.
+///
+/// Asked by round-tripping through [`PokemonString`] rather than by listing the allowed characters a
+/// second time — the same argument
+/// `policy::every_name_a_policy_can_choose_is_one_the_game_will_take` is built on, and for the same
+/// reason: `/` is a perfectly writable `$F3`, so "is it alphanumeric" is the wrong question.
+fn unencodable(name: &str) -> Option<char> {
+    name.chars().find(|c| {
+        crate::pokemon::strings::PokemonString::from_string(&c.to_string()).0.first() == Some(&0x00)
     })
 }
 
@@ -550,9 +625,11 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
         DecisionKind::Nickname => tools.push(ToolSpec::new(
             "set_nickname",
             format!(
-                "ENDS THE TURN. Name the Pokémon on the naming screen. Omit `name` to keep the \
-                 default, which is the species name in capitals — that is the ordinary answer. At \
-                 most {MAX_NICKNAME} characters; anything longer is truncated."
+                "ENDS THE TURN. **Give this Pokémon a nickname**: one that says what you make of \
+                 it — how you came by it, what you mean to use it for, what it reminds you of. It \
+                 is what every message about it will call it from now on. Omit `name` only if \
+                 nothing comes to mind. At most {MAX_NICKNAME} characters; letters, digits, spaces \
+                 and `.,:;'-?!()[]/` only."
             ),
             json!({
                 "type": "object",
@@ -560,7 +637,7 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                     "name": {
                         "type": "string",
                         "maxLength": MAX_NICKNAME,
-                        "description": "The nickname. Omit to keep the species name.",
+                        "description": "The nickname you have chosen. Omit to keep the species name.",
                     }
                 },
                 "additionalProperties": false,
@@ -762,7 +839,10 @@ fn use_field_move_spec() -> ToolSpec {
              - `interact` — stand next to `target`, face it and press A. This is how every hidden \
              thing in the game is found: hidden items, the Vermilion Gym bins, the Pokémon Mansion \
              switches.\n\
-             Surf is not here — the agent mounts it by itself as soon as a route crosses water.",
+             Surf is not here — the agent mounts it by itself as soon as a route crosses water.\n\
+             `cut`, `fly`, `strength` and `flash` each need a Pokémon taught that HM *and* a \
+             particular badge; until you have both the game refuses them, and retrying will not \
+             change it.",
             party_moves.join("\n- "),
         ),
         json!({
@@ -1128,7 +1208,20 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
                 .map(|name| name.chars().take(MAX_NICKNAME).collect::<String>());
-            CallKind::Terminal(Terminal::SetNickname { name })
+            // ⚠️ **The name is written straight into the naming screen's buffer, so nothing else
+            // checks it.** `PokemonString::from_string` maps anything it does not know to `0x00` —
+            // not the terminator (`0x50`), a control byte — so an accented letter or an emoji does
+            // not fail, it writes a Pokémon whose name is garbage for the rest of the run. The
+            // encodable set is exactly what the game's own naming screen offers, and a rejection
+            // here costs one tool step and gets a real name.
+            match name.as_deref().and_then(unencodable) {
+                Some(bad) => CallKind::Rejected(format!(
+                    "`{bad}` is not a character this game can write. A nickname may use letters, \
+                     digits, spaces and `.,:;'-?!()[]/`, and nothing else — pick a name out of those \
+                     and call `set_nickname` again."
+                )),
+                None => CallKind::Terminal(Terminal::SetNickname { name }),
+            }
         }
         "buy_item" if kind == DecisionKind::MartPurchase => {
             match arguments.get("item").and_then(Value::as_str).filter(|name| !name.is_empty()) {
@@ -1761,6 +1854,16 @@ mod tests {
             // so it is the one addition here that scales with the *number* of terminals rather than
             // with the catalogue. What it buys is the only sentence the model keeps about its own
             // turn; see that function.
+            //
+            // ⚠️ **The HM gate and the nickname reword cost 176 and 141 bytes and no ceiling moved,
+            // which is what the slack is for.** Measured the same day, after: 8822, 4908, 3684,
+            // 3965, 3861, 5144. `use_field_move` gained the sentence saying an HM needs its badge as
+            // well as the move — the thing the deployed run spent eleven turns and two issue reports
+            // failing to work out — and `set_nickname` stopped telling the model that keeping the
+            // default "is the ordinary answer", which is what every naming screen of both deployed
+            // runs did. Both drafts were about twice the length first; the tool description says the
+            // rule once and the turn's own situation carries the argument, which is the split that
+            // kept them affordable.
             (DecisionKind::Overworld, 9_500),
             (DecisionKind::Battle, 5_400),
             (DecisionKind::Nickname, 3_900),
@@ -2448,22 +2551,27 @@ mod tests {
             Err(complaint) => complaint,
             Ok(resolved) => panic!("{request:?} should not have resolved to {resolved:?}"),
         };
-        assert!(complaint(FieldMoveRequest::Cut).contains("facing"), "cut must check the tile in front");
-        assert!(
-            complaint(FieldMoveRequest::PartyMove { name: PokemonMoveName::Strength, slot: None })
-                .contains("No Pokémon in the party knows"),
-        );
-        assert!(
-            complaint(FieldMoveRequest::PartyMove { name: PokemonMoveName::Strength, slot: Some(0) })
-                .contains("does not know"),
-            "a named slot that does not know it is a different complaint from nobody knowing it",
-        );
         assert!(complaint(FieldMoveRequest::ReorderParty { slot: 3 }).contains("no party member in slot 3"));
         assert!(complaint(FieldMoveRequest::TossItem { item: ItemId::Hm01Cut }).contains("no Hm01Cut in the bag"));
 
-        // …and the ones that need nothing from the state resolve as themselves.
+        // The tile check is the one `cut` exists for, and it only becomes reachable once the HM gate
+        // above it is satisfied — so it is asserted on a state that *can* cut.
+        let mut able = fixture_state();
+        able.badges |= crate::pokemon::badge::Badge::CascadeBadge;
+        able.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
+            Some(PokemonMove::with_max_pp(PokemonMoveName::Cut));
+        match resolve_field_move(&able, &FieldMoveRequest::Cut) {
+            Err(complaint) => assert!(complaint.contains("facing"), "cut must check the tile in front: {complaint}"),
+            Ok(resolved) => panic!("nothing in Oak's lab is a tree, but cut resolved to {resolved:?}"),
+        }
+
+        // …and the one that needs nothing but its own HM resolves as itself.
+        let mut flier = fixture_state();
+        flier.badges |= crate::pokemon::badge::Badge::ThunderBadge;
+        flier.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
+            Some(PokemonMove::with_max_pp(PokemonMoveName::Fly));
         assert_eq!(
-            resolve_field_move(&state, &FieldMoveRequest::Fly { to: Map::PalletTown }),
+            resolve_field_move(&flier, &FieldMoveRequest::Fly { to: Map::PalletTown }),
             Ok(FieldMove::Fly { to: Map::PalletTown }),
         );
         assert_eq!(
@@ -2472,12 +2580,152 @@ mod tests {
         );
     }
 
+    /// **The HM gate, and why it is worth a test of its own.**
+    ///
+    /// Every HM field move is used from the party menu, and pokered answers a missing badge with
+    /// `jp .loop` — the same menu, cursor untouched. The agent's driver has no exit condition for
+    /// that, so a `cut` with no Cut is sixty seconds of A-mashing ended only by
+    /// `DRIVER_ESCAPE_SILENCE`. The deployed run did it eleven times on Route 2 with no badges at
+    /// all and filed two `report_issue`s calling the game broken.
+    ///
+    /// ⚠️ **Both halves are checked and they are different complaints**, because they need different
+    /// things done about them: find the HM, or go and win a gym.
+    #[test]
+    fn an_hm_the_game_would_refuse_is_refused_here_instead() {
+        let none = fixture_state();
+        let complaint = |state: &GameState, request| match resolve_field_move(state, &request) {
+            Err(complaint) => complaint,
+            Ok(resolved) => panic!("{request:?} should not have resolved to {resolved:?}"),
+        };
+
+        // Neither the move nor the badge — the deployed run's exact position on Route 2.
+        let both = complaint(&none, FieldMoveRequest::Cut);
+        assert!(both.contains("no Pokémon in the party knows it"), "{both}");
+        assert!(both.contains("CascadeBadge"), "{both}");
+
+        // The move but not the badge: the gym is the thing to go and do.
+        let mut taught = fixture_state();
+        taught.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
+            Some(PokemonMove::with_max_pp(PokemonMoveName::Cut));
+        let unbadged = complaint(&taught, FieldMoveRequest::Cut);
+        assert!(unbadged.contains("CascadeBadge"), "{unbadged}");
+        assert!(!unbadged.contains("knows"), "the move is known; only the badge is missing: {unbadged}");
+
+        // The badge but not the move: the HM is the thing to go and find.
+        let mut badged = fixture_state();
+        badged.badges |= crate::pokemon::badge::Badge::CascadeBadge;
+        let untaught = complaint(&badged, FieldMoveRequest::Cut);
+        assert!(untaught.contains("HM"), "{untaught}");
+        assert!(!untaught.contains("CascadeBadge"), "the badge is held: {untaught}");
+
+        // Every HM the game gates, not just the one that broke.
+        for (name, badge) in HM_BADGES {
+            let request = match name {
+                PokemonMoveName::Cut => FieldMoveRequest::Cut,
+                PokemonMoveName::Fly => FieldMoveRequest::Fly { to: Map::PalletTown },
+                other => FieldMoveRequest::PartyMove { name: *other, slot: None },
+            };
+            assert!(
+                complaint(&none, request).contains(&badge.to_string()),
+                "{name} must name the {badge} it needs",
+            );
+        }
+
+        // A boulder needs Strength *armed*, which is a third thing again: the move, the badge, and
+        // then a trip through the party menu on this map. A push before that moves nothing at all.
+        let mut strong = fixture_state();
+        strong.badges |= crate::pokemon::badge::Badge::RainbowBadge;
+        strong.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
+            Some(PokemonMove::with_max_pp(PokemonMoveName::Strength));
+        assert!(!strong.strength_active, "the fixture has not armed Strength");
+        let unarmed = complaint(&strong, FieldMoveRequest::PushBoulder {
+            boulder: Point8 { x: 1, y: 1 },
+            direction: JoypadButton::Up,
+        });
+        assert!(unarmed.contains("not armed"), "{unarmed}");
+    }
+
+    /// **The naming screen asks for a name, and takes only names the cartridge can write.**
+    ///
+    /// Two separate faults, and the second was made likelier by fixing the first. The tool used to
+    /// say that keeping the default "is the ordinary answer", and across the two deployed runs all
+    /// four naming screens took it — *"Keep the default name ZUBAT for the newly caught Pokémon"* —
+    /// which makes the whole decision kind a round trip nobody needed to buy.
+    ///
+    /// ⚠️ **And the name is written straight into the naming screen's buffer**, so nothing between
+    /// here and RAM checks it: `PokemonString::from_string` maps a character it does not know to
+    /// `0x00`, which is not the terminator (`0x50`) but a control byte, so an accented letter or an
+    /// emoji does not fail — it names the Pokémon something unreadable for the rest of the run.
+    #[test]
+    fn a_nickname_is_asked_for_and_has_to_be_one_the_game_can_write() {
+        let spec = for_kind(DecisionKind::Nickname);
+        let described = spec.iter().find(|tool| tool.function.name == "set_nickname")
+            .map(|tool| tool.function.description.clone())
+            .expect("the naming turn offers set_nickname");
+        assert!(described.contains("nickname"), "{described}");
+        assert!(!described.contains("ordinary answer"),
+                "the tool must not talk the model out of the one thing this turn is for: {described}");
+
+        let parse = |arguments: &str| classify(DecisionKind::Nickname, &call("set_nickname", arguments), &[]);
+        let named = |name: &str| parse(&json!({"name": name}).to_string());
+        assert!(matches!(named("Rocky"), CallKind::Terminal(Terminal::SetNickname { name: Some(_) })));
+        // `/` is `$F3` and a space is `$7F` — "is it alphanumeric" is the wrong question, which is
+        // why the check round-trips through the charmap instead of listing characters twice.
+        assert!(matches!(named("MT/MOON"), CallKind::Terminal(Terminal::SetNickname { name: Some(_) })));
+        assert!(
+            matches!(named("Poké"), CallKind::Rejected(_)),
+            "an accented letter has no byte in this charmap and must not reach the buffer",
+        );
+        assert!(matches!(named("🔥"), CallKind::Rejected(_)));
+        // An omitted or blank name is still the decline, because the naming screen reads an empty
+        // buffer as one — the two must not be able to disagree.
+        assert!(matches!(
+            parse("{}"),
+            CallKind::Terminal(Terminal::SetNickname { name: None }),
+        ));
+        assert!(matches!(named("   "), CallKind::Terminal(Terminal::SetNickname { name: None })));
+    }
+
+    /// **A tree nobody can cut is not an action.**
+    ///
+    /// A `:CutTree` row is a walk that ends *facing* a tree and nothing else — the cut itself is a
+    /// separate `use_field_move` — so offered without Cut it is a menu entry whose only follow-up
+    /// the game refuses. The deployed run took it eleven times on Route 2 with no badges at all.
+    ///
+    /// ⚠️ **The gate is on the map rather than in the menu builder** (`MetaTileMap::can_cut`, set by
+    /// `game_state()` alongside `can_surf`), so the scripted policy is held to it too: its own
+    /// `PolicyStep::CutTree` fallback used to be able to push a step that could never complete.
+    #[test]
+    fn a_cut_tree_is_not_offered_to_a_party_that_cannot_cut() {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/at-vermilion.bin"))
+            .expect("the committed fixture loads");
+        let mut state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("the fixture has a readable state");
+        assert!(
+            state.map.meta_tiles.contains(&crate::pokemon::tile::MetaTile::CutTree),
+            "this fixture's map has to have a tree on it for the test to mean anything",
+        );
+
+        let cut_rows = |state: &GameState| -> usize {
+            overworld_menu(state, None).iter().filter(|item| item.id.ends_with(":CutTree")).count()
+        };
+        assert!(!state.can_use_cut, "the fixture reaches Vermilion before the HM");
+        assert_eq!(cut_rows(&state), 0, "a tree is not an action without Cut");
+
+        state.map.can_cut = true;
+        assert!(cut_rows(&state) > 0, "and it is one with Cut — or this test would pass by accident");
+    }
+
     /// ⚠️ The party menu lists a mon's field moves in **its own move-slot order**, so the index of
     /// the one being asked for depends on what else that mon knows. Assuming zero works for an HM
     /// slave and silently uses the wrong move for anything else.
     #[test]
     fn a_party_field_moves_index_is_computed_from_the_moves_it_knows() {
         let mut state = fixture_state();
+        // The HM gate sits above the index arithmetic, so this mon has to be able to use Strength
+        // at all before the index is the thing under test.
+        state.badges |= crate::pokemon::badge::Badge::RainbowBadge;
         state.pokemon.get_mut(0).expect("the fixture has a starter").moves = [
             Some(PokemonMove::with_max_pp(PokemonMoveName::Tackle)),
             Some(PokemonMove::with_max_pp(PokemonMoveName::Cut)),

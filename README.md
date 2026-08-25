@@ -122,7 +122,18 @@ passes `GB_COMPACT_ABOVE` of the window: images are evicted first, then older tu
 ⚠️ The plan rides in a message of its own near the end of the history rather than in the system
 prompt, and is re-sent only when it has actually changed. A prompt cache is keyed on the prefix, so
 the obvious placement — re-rendering the list into message 0 every request — throws the whole
-conversation's cached prefill away every time the model ticks something off.
+conversation's cached prefill away every time the model ticks something off. Re-sending it appends a
+new copy and leaves the old one alone, for the same reason: removing the stale one is a rewrite of
+the middle of the conversation, and the message itself says the last copy is the one that counts.
+After the system prompt this history only ever grows at the end.
+
+The catch is that a model which never edits its plan never sees it move either, and both deployed
+runs were exactly that — one `todo_set` in 258 turns, sixteen and a single `todo_complete` in 2430 —
+so the list it was meant to be revising ended up the least recent thing in every request. A fresh
+copy is now appended every tenth overworld turn even when nothing changed, and every turn that does
+not carry one is told in a line that the plan is back there and still current. A compaction may drop
+the plan along with the turn it belongs to; the next turn re-renders it from the file, so nothing is
+lost.
 
 A model that streams its thinking separately — `reasoning_content`, which most local servers send and
 OpenAI does not — has it shown live in the log and collapsed to a line once the thought ends. It is
@@ -161,6 +172,26 @@ problem and playing on stopped being alternatives.
 decision point at all, there is no menu to prefer, and a raw button really is the only way out. There
 its `why` is enforced rather than merely requested. Prose the model is asked to believe cannot be
 checked afterwards; a directory of presses can.
+
+An action the game would refuse is not offered at all. Every HM field move — Cut, Fly, Surf,
+Strength, Flash — needs both a Pokémon that has been taught it and a particular gym badge, and the
+cartridge answers a missing badge by dropping straight back to the same party menu with the cursor
+where it was. The agent has no exit condition for that, so it mashes A for sixty seconds and gives
+up. A deployed run walked into it eleven times on one tree in Route 2 with no badges at all, filed
+two issue reports saying the game was broken, and spent the rest of its life going round four maps
+looking for a way past. So cuttable trees are kept out of the action menu until Cut can actually be
+used, water crossings until Surf can, and `use_field_move` refuses the call itself and says which
+half is missing. What the turn does say — once, while it is true — is that the trees are there and
+what it would take to clear them, because a model that is simply shown no way forward starts
+inventing reasons why.
+
+Every Pokémon it catches gets a name it chose. That is a decision the game puts to a player and the
+prompt used to talk the model out of it — the tool said keeping the species name "is the ordinary
+answer", and across two deployed runs all four naming screens did exactly that. It is now asked for
+a name that says what it makes of that particular Pokémon, and the name is checked against the
+cartridge's own character set first: it goes straight into the naming screen's buffer, and a
+character Gen 1 has no byte for does not fail, it just writes something unreadable for the rest of
+the run.
 
 `read_map` answers with a **picture**, not a description: the whole map the player is standing on,
 drawn from the cartridge's own tile graphics, with every NPC where they are standing and facing where

@@ -1576,3 +1576,63 @@ fn a_battle_turn_is_decided_once_rather_than_twice() {
                  enemy HP at each decision point was {:?}", log.enemy_hp);
     }
 }
+
+/// **A Cut nobody can use never reaches the party menu.**
+///
+/// `CuttingTree` opens the START menu and mashes A until the overworld comes back, and without the
+/// Cascade Badge pokered answers `.newBadgeRequired` with `jp .loop` — the same menu, cursor
+/// untouched — so the overworld never comes back and the whole attempt is sixty seconds ended by
+/// `DRIVER_ESCAPE_SILENCE`. The deployed run of 2026-08-25 walked into it eleven times on one tree in
+/// Route 2 and filed two issue reports saying the game was broken.
+///
+/// Two gates keep a *policy* from asking (`MetaTileMap::can_cut` withholds the action,
+/// `tools::hm_available` refuses the tool call) and this is the third, in the agent, where every
+/// request passes through whatever asked for it — so the policy here asks for the thing neither of
+/// the others would let through.
+///
+/// ⚠️ **The assertion is that decisions keep coming, not that the state was skipped.** A guard that
+/// dropped to `Idle` and left the agent with nothing to do would satisfy "never entered `CuttingTree`"
+/// perfectly well and still be a wedged run — which is exactly what the sixty-second escape it
+/// replaces looks like.
+#[test]
+fn a_cut_with_no_cut_never_opens_the_party_menu() {
+    /// Answers every field-move poll with `CutTree`, which is what the deployed model did.
+    struct AlwaysCuts;
+    impl crate::pokemon::policy::Policy for AlwaysCuts {
+        fn name(&self) -> &'static str { "always-cuts" }
+        fn pick_overworld_action(&mut self, _state: &GameState, _graph: &crate::pokemon::world_graph::WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction> { None }
+        fn pick_battle_action(&mut self, _state: &GameState) -> Option<crate::pokemon::battle::BattleAction> {
+            Some(crate::pokemon::battle::BattleAction::Run)
+        }
+        fn pick_field_move(&mut self, _state: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
+            Some(crate::pokemon::policy::FieldMove::CutTree)
+        }
+    }
+
+    const RUN_FOR: Duration = Duration::from_secs(30);
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/at-vermilion.bin"), RUN_FOR * 2, Box::new(AlwaysCuts),
+    );
+    assert!(!fixture.game_state().can_use_cut,
+            "this fixture reaches Vermilion before the HM, or the test proves nothing");
+
+    let mut refusals = 0;
+    let mut worst_silence = Duration::ZERO;
+    let budget = MachineCycles::from_duration(RUN_FOR);
+    let mut emulated = MachineCycles::ZERO;
+    while emulated < budget {
+        fixture.step();
+        emulated += AGENT_RESOLUTION;
+        let state = fixture.agent.state_debug();
+        assert!(!state.starts_with("cut"), "the agent entered the Cut driver with no Cut: {state}");
+        worst_silence = worst_silence.max(fixture.agent.since_last_policy_poll());
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::TextBox { message } = &event
+                && message.contains("Cut needs a party member") { refusals += 1 }
+        }
+    }
+    assert!(refusals > 0, "the refusal has to be said out loud, or nothing explains the no-op");
+    assert!(worst_silence < Duration::from_secs(10),
+            "the agent went {worst_silence:?} without asking anything — a guard that wedges is not a fix");
+}

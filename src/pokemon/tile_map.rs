@@ -53,6 +53,18 @@ pub struct MetaTileMap {
     /// `IsSurfingAllowed`'s *other* refusal — Seafoam's "current is much too fast" shore tiles — is
     /// modelled separately as [`Self::no_surf_mount`], because it is per-tile rather than per-map.
     pub can_surf: bool,
+    /// True when the player can Cut **here**: the Cascade Badge and a party mon that knows Cut
+    /// (`GameState::can_use_cut`). Set by `game_state()` after construction, for the same reason
+    /// [`Self::can_surf`] is — the map builder has no party access.
+    ///
+    /// ⚠️ **It gates the cut-tree entries `actions()` emits, and that is not cosmetic.** A `CutTree`
+    /// action is a walk that ends *facing* a tree, and the only thing to do from there is the Cut
+    /// field move — which, without the move or the badge, opens the party menu onto a mon that has
+    /// no CUT entry and never comes back out. The deployed run found it: eleven turns on Route 2 with
+    /// no badges at all, `cut got no answer from the game for 60s` each time, and the model
+    /// reasonably concluded the game was broken. An action nobody can carry out is worse than a
+    /// missing one, so it is not offered.
+    pub can_cut: bool,
     /// Strength boulder-switch tiles on this map (invisible pressure plates, from the ROM map scripts):
     /// push a boulder onto one to open its barrier. Exposed so a policy (deterministic or LLM) can
     /// discover *where* to push without hardcoding coordinates. Empty for maps with no Strength puzzle.
@@ -219,6 +231,7 @@ impl MetaTileMap {
             }).collect(),
             meta_tiles,
             can_surf: false,
+            can_cut: false,
             strength_switches: strength_switch_table(map.metadata.map).iter()
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
                 .collect(),
@@ -786,10 +799,15 @@ impl MetaTileMap {
         //    A *specific* landing (e.g. to avoid a dead-end pocket) is requested via
         //    `connection_action(to_map, to_position)`, kept out of this hot path so the common
         //    nearest-crossing behaviour — and the whole-game run's timing — is unchanged.
+        //
+        //    ⚠️ **A water crossing is only offered when the player can Surf.** `ConnectionWater` is
+        //    reachable from the shore whether or not anything in the party can mount it — the BFS
+        //    records it as a terminal neighbour — so without Surf the row is a walk to the water's
+        //    edge and a bump into the sea. Same rule as the cut trees below, for the same reason.
         for to_map in &self.connection_targets {
             let Some((tile, dest)) = nearest(&|t| match t {
                 MetaTile::Connection { to_map: m, .. } => m == to_map,
-                MetaTile::ConnectionWater(m) => m == to_map,
+                MetaTile::ConnectionWater(m) => self.can_surf && m == to_map,
                 _ => false,
             }) else { continue };
             let (_, came_from) = best_dist_from(&dest).unwrap();
@@ -855,10 +873,17 @@ impl MetaTileMap {
 
         // 6. Cut trees: route to a walkable tile adjacent to a CutTree and face it (no A — the cut is
         //    triggered via the field-move menu once facing). One action per reachable-adjacent tree.
-        let cut_trees: Vec<Point8> = self.meta_tiles.iter().enumerate()
-            .filter(|(_, t)| **t == MetaTile::CutTree)
-            .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
-            .collect();
+        //
+        //    ⚠️ **Only when Cut can actually be used** — see [`Self::can_cut`]. The action ends facing
+        //    a tree and nothing else, so without the move and the badge it is an invitation into a
+        //    party menu with no CUT in it.
+        let cut_trees: Vec<Point8> = match self.can_cut {
+            false => Vec::new(),
+            true => self.meta_tiles.iter().enumerate()
+                .filter(|(_, t)| **t == MetaTile::CutTree)
+                .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
+                .collect(),
+        };
         for tree in cut_trees {
             let adj: [(PlayerFacingDirection, Point8); 4] = [
                 (PlayerFacingDirection::Down,  Point8 { x: tree.x,                   y: tree.y.saturating_sub(1) }),
@@ -1225,7 +1250,7 @@ mod boulder_solver_tests {
             tile_pair_collisions: vec![],
             tile_pair_collisions_water: vec![], sprites,
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
-            spinners: HashMap::new(), can_surf: false,
+            spinners: HashMap::new(), can_surf: false, can_cut: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
             hidden_items: vec![], has_grass_encounters: false,
             // A hand-built grid for the boulder solver; there is no ROM map behind it to draw.

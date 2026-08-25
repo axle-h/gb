@@ -197,6 +197,24 @@ const MAX_TOOL_RESULT: usize = 2_000;
 /// run that 400s on every request from here on.
 const TRIM_TO: f64 = 0.50;
 
+/// How many overworld turns an unchanged plan may sit at before a fresh copy is appended.
+///
+/// ⚠️ **The plan is emitted on change, so a model that never edits it never sees it near the tail** —
+/// and that is exactly the model this is for. Both deployed runs were it: 258 turns with a single
+/// `todo_set` on turn 1 and no edit after it, and 2430 turns before that with sixteen `todo_set`s
+/// and one `todo_complete`. The plan ends up buried under the whole conversation, so the list the
+/// model is meant to be revising is the least recent thing in the request.
+///
+/// ⚠️ **The number is set by history growth, not by cache cost, and that is a change.** It used to
+/// be 15 on the argument that re-emitting *moved* the plan — removing the old copy and paying a
+/// re-prefill of everything after it, a couple of thousand uncached tokens a time. [`Worker::sync_plan`]
+/// no longer moves anything (see its ⚠️), so what a refresh actually costs is one ~150-token message
+/// prefilled once and cached from then on. What it buys against is history growth: a turn is one to
+/// two thousand tokens, so a copy every tenth overworld turn is on the order of 1% more context to
+/// carry and to compact. Every turn would be ~10%, which is a compaction bought sooner for a message
+/// the per-turn [`prompt::PLAN_UNCHANGED`] note already covers.
+pub const PLAN_REFRESH_TURNS: u32 = 10;
+
 pub struct Worker {
     endpoint: Box<dyn ChatEndpoint>,
     config: LlmConfig,
@@ -218,6 +236,9 @@ pub struct Worker {
     /// What the page was last told the plan is, so [`Self::publish_todo`] can be called from every
     /// moment it might have changed without publishing the same list twice.
     published_plan: Option<Vec<TodoView>>,
+    /// Turns since the plan message was last (re)placed at the tail of the history — see
+    /// [`Self::sync_plan`] and [`PLAN_REFRESH_TURNS`].
+    turns_since_plan: u32,
     /// **W6** — tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
     accounting: Accounting,
     /// **`POST /api/new-run`** — taken at the top of every turn. See [`Restart`].
@@ -260,6 +281,7 @@ pub fn channels(
         messages: vec![prompt::system_message()],
         todo,
         published_plan: None,
+        turns_since_plan: 0,
         accounting,
         restart: Arc::clone(&restart),
         run: None,
@@ -359,6 +381,10 @@ impl Worker {
         self.publish_todo();
         // Index 0 is the system prompt and is never removed, so the history *is* this vec.
         self.messages = vec![prompt::system_message()];
+        // The history the counter was measured against is gone, and `sync_plan` finds no plan in the
+        // fresh one, so it appends immediately — leaving a stale count would make the *next* refresh
+        // fall due at the wrong time.
+        self.turns_since_plan = 0;
         self.accounting = Accounting::new(self.config.context_limit);
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
@@ -379,9 +405,18 @@ impl Worker {
         let TurnRequest { id, kind, situation, headline, menu } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 
-        self.sync_plan();
+        let carried = self.sync_plan(kind);
         self.publish_todo();
-        self.messages.push(Message::user(situation));
+        // ⚠️ **The turn that does not carry the plan has to say so.** The copy in the history is
+        // still there, but it is behind however many turns have passed since it last changed, and a
+        // model reading a fifty-turn conversation does not treat a message that far back as a live
+        // instruction. One line at the bottom of the situation costs nothing at the cache — the
+        // situation is new tokens every turn either way — and it is the only reminder on a turn that
+        // is not an overworld one, since those never refresh.
+        self.messages.push(Message::user(match carried {
+            true => situation,
+            false => format!("{situation}\n{}\n", prompt::PLAN_UNCHANGED),
+        }));
         let outcome = self.decide(id, kind, &menu);
         match outcome {
             Some((decision, narration)) => {
@@ -418,28 +453,65 @@ impl Worker {
     /// message when the request goes out: recent enough to be read as current, and never the last
     /// thing, which the contract has to be.
     ///
-    /// ⚠️ **The whole design is "only when it changed", and that is what makes it cheap.** Three
-    /// cases, and the common one costs nothing:
+    /// ⚠️ **Nothing here ever removes or rewrites a message: the history is append-only, and that is
+    /// the property the whole prompt cache rests on.** A hosted endpoint caches on the *prefix*, so
+    /// the cost of any edit is a re-prefill of everything after the edited position — and a message
+    /// removed from the middle of a fifty-thousand-token conversation is not a cheap edit, it is a
+    /// couple of thousand uncached tokens, every time the model touches its own list.
     ///
-    /// - the copy in the history already says this → **do nothing**, so the history grows purely by
-    ///   append and the endpoint's prefix cache is intact all the way back to the system prompt;
-    /// - the copy says something else → remove it and append a fresh one, which invalidates the
-    ///   cache from wherever that copy sat. It sat at the last turn the plan changed, so a model
-    ///   that edits often pays little and a model that edits rarely pays rarely;
+    /// This used to remove the stale copy so there would only ever be one. ⚠️ **Measured, the two are
+    /// within about 20% of each other and leaving is the cheaper side** — the arithmetic is worth
+    /// writing down because "one copy" sounds obviously right and is not. The plan is 1283 bytes
+    /// (~320 tokens, `probe_turn_requests`) and sits immediately before the *previous* turn's
+    /// situation, so removing it re-prefills one turn: the deployed run compacted 38 times across
+    /// 2427 decisions, i.e. ~64 turns to grow a history from ~5 k to `GB_CONTEXT_LIMIT` × 0.85, so a
+    /// turn is ~1250 tokens. Leaving the copy instead costs those 320 tokens on every request until
+    /// compaction takes it, which averages half a cycle — ~32 requests — and they are *cached*, worth
+    /// a tenth of an uncached one on this endpoint. So ~1250 against ~1020, plus the ~4% of the
+    /// context that a cycle's worth of stale copies occupies and therefore compacts sooner.
+    ///
+    /// ⚠️ **The tie is broken on structure rather than on the 20%.** Appending has no exceptions to
+    /// get wrong: after the system prompt this conversation only ever grows at the end, so there is
+    /// no position in it whose cache anything has to reason about. The removal's advantage also
+    /// depends entirely on the endpoint's cached-token discount, which is a number we do not
+    /// control — at a 2× discount rather than 10× the removal wins outright.
+    ///
+    /// ⚠️ **Which makes "the plan" the *last* copy, not the only one.** `rposition`, and
+    /// [`TodoList::render`](crate::llm::todo::TodoList::render) says in the message itself that it
+    /// replaces any earlier one — a model reading four `## Your plan` blocks needs to be told which
+    /// wins, and chronology is the answer a conversation already implies.
+    ///
+    /// Three cases, and the common one costs nothing at all:
+    ///
+    /// - the newest copy already says this, and no refresh is due → **do nothing**;
+    /// - it says something else, or [`PLAN_REFRESH_TURNS`] has come round → append a fresh copy;
     /// - there is no copy — a compaction took it, or this is the first turn → append one.
     ///
-    /// The alternative it replaced was re-rendering the plan into message 0, which invalidated the
-    /// entire conversation every time the model touched its own list. See [`prompt::system_message`].
-    fn sync_plan(&mut self) {
+    /// The alternative both of these replaced was re-rendering the plan into message 0, which
+    /// invalidated the entire conversation every time the model touched its own list. See
+    /// [`prompt::system_message`].
+    ///
+    /// Returns whether the plan is at the tail of the history for *this* request — false means the
+    /// newest copy the model can see is further back and unchanged, which is what
+    /// [`prompt::PLAN_UNCHANGED`] is appended to the situation to say.
+    fn sync_plan(&mut self, kind: DecisionKind) -> bool {
         let plan = prompt::plan_message(&self.todo);
-        match self.messages.iter().position(|message| prompt::is_plan(message)) {
-            Some(at) if self.messages[at] == plan => return,
-            Some(at) => {
-                self.messages.remove(at);
-            }
-            None => {}
+        // ⚠️ **The periodic refresh is an overworld thing; the edit-driven one is not.** A refresh
+        // buys the model a fresh look at a list it has not touched, and there is nothing to do about
+        // that list in the middle of a battle, on a naming screen or at a mart — those turns are one
+        // question with one answer, and a re-prefill bought there is a re-prefill wasted. An *edit*
+        // is different: the todo tools are offered on every kind (`non_terminal_names` chains them
+        // unconditionally), so a plan changed during a battle has to be corrected in the history at
+        // once or the next overworld turn reads a stale one.
+        let due = self.turns_since_plan >= PLAN_REFRESH_TURNS && kind == DecisionKind::Overworld;
+        let newest = self.messages.iter().rposition(|message| prompt::is_plan(message));
+        if newest.is_some_and(|at| self.messages[at] == plan) && !due {
+            self.turns_since_plan += 1;
+            return false;
         }
+        self.turns_since_plan = 0;
         self.messages.push(plan);
+        true
     }
 
     /// One TODO call, applied and published. The UI gets the whole list — a viewer reads it as what
