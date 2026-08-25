@@ -81,14 +81,18 @@ cargo run --release
 place, plan and all. `--new-run` starts the game over in a directory of its own — or, on something
 already running, opening `/reset-game` does the same thing without a restart (see below).
 
-A new game names its trainer after whoever is about to play it: `GB_MODEL` shortened to the seven
-characters Gen 1 allows (`google/gemma-3-12b` → `GEMMA3`), `HUMAN` at the desktop, something drawn
-from a list under `--policy random`. A resume keeps the name it already has, because by then the game
-has printed it in a dozen places. The vendor is dropped because it is routing rather than identity,
-except on the handful of ids where that is backwards and the tail names a tier rather than a model:
-`openrouter/free` is `OR/FREE`, not `FREE`. The name and the trainer ID are both on the status panel,
-which is the one place the run says who it is by the save rather than by `GB_MODEL` — a process
-restarted under a different model shows one of each.
+A new game names its trainer after whoever is about to play it, in the seven characters Gen 1 allows:
+`AI` for any model, `HUMAN` at the desktop, something drawn from a list under `--policy random`. A
+resume keeps the name it already has, because by then the game has printed it in a dozen places.
+
+The LLM name used to be `GB_MODEL` shortened to fit, and it was wrong more often than it was right.
+Seven characters cannot hold a model id, so every name was a guess at which half of one mattered, and
+the guess kept producing models that do not exist — `openai/gpt-5.4-nano` came out `GPT54`. It was
+also a lossy second copy of something already recorded exactly: `meta.json` and the hall-of-fame
+ledger both carry the full id, and the trainer card could disagree with them, because the name is
+written once into the save and `GB_MODEL` can change under a restart. So the save says `AI` and the
+model id stays where it is unambiguous. The name and the trainer ID are both on the status panel,
+beside the model the process is currently configured with.
 
 ## How the model plays
 

@@ -18,82 +18,121 @@ data:
   # placeholder is a 401 on every turn of the run rather than something the endpoint shrugs off.
   # `--policy llm` refuses to start on an empty one at all.
   #
-  # ⚠️ **`openrouter/free` is a *router*, not a model.** It picks a free model per request from
-  # whatever OpenRouter has available, so the thing playing the game changes underneath us and the
-  # capabilities below are the router's floor rather than any one model's. Tool calling is what this
-  # whole layer is built on and the router filters for it (`tools` and `tool_choice` are in its
-  # `supported_parameters`), but reasoning, window and speed all vary request to request.
+  # ⚠️ **This is a *paid* model and no longer a free router.** `openrouter/free` picked a different
+  # free model per request, which made the thing playing the game change underneath us and every
+  # capability below the router's floor rather than any one model's; it also stopped for a day at a
+  # time on a per-day quota. What replaced it is pinned: `openai/gpt-5.4-nano-20260317`, 400000
+  # tokens of context, tools and vision, and `reasoning_effort` (see below).
   #
-  # ⚠️ **The free tier is rate limited per *day*, and a turn is not one request.** A turn is a
-  # completion plus a request per tool step, up to `GB_MAX_TOOL_STEPS` below — so a run burns
-  # requests far faster than it looks like it should. OpenRouter's free allowance steps up once ten
-  # dollars of credit has ever been bought; below that it is small enough that the run will stop
-  # within the hour, and it stops as a 429 per turn rather than as anything that looks like a
-  # deployment problem. `--policy random` is what to switch back to while that is being sorted out.
+  # ⚠️ **`:floor` is a routing shortcut, not a model variant, and it is the *only* spelling that
+  # works.** The catalogue's real suffixes are `:free`, `:batch` and `:thinking`; the two routing
+  # shortcuts are `:nitro` (sort by throughput) and `:floor` (sort by price). **There is no `:low`** —
+  # thinking is turned down by `GB_REASONING_EFFORT` further down this file, which is a different
+  # thing entirely. `player_name_for` splits the suffix off before shortening, so the trainer is
+  # named `GPT54` either way.
+  #
+  # What `:floor` actually buys is the **flex service tier**, which is half price:
+  #
+  #   OpenAI | gpt-5.4-nano-20260317  tag=openai       in=0.200/M  out=1.250/M  cache_read=0.0200/M
+  #   OpenAI | gpt-5.4-nano-20260317  tag=openai/flex  in=0.100/M  out=0.625/M  cache_read=0.0100/M
+  #   Azure  | gpt-5.4-nano-20260317  tag=azure        in=0.200/M  out=1.250/M  cache_read=0.0200/M
+  #   Azure  | gpt-5.4-nano-20260317  tag=azure/us     in=0.220/M  out=1.375/M  cache_read=0.0220/M
+  #
+  # ⚠️ **Flex is a service tier, not a model tier** — the snapshot string is identical on both OpenAI
+  # rows, so it is the same weights on cheaper, lower-priority capacity, billed at Batch API rates.
+  # What is traded for it is latency and `429 Resource Unavailable` (uncharged when it happens), and
+  # ⚠️ **`408` gets likelier**, which is why `GB_REQUEST_TIMEOUT_SECS` below is 600 rather than 180.
+  #
+  # ⚠️ **`:floor` sorts, it does not pin, and the fallback can land on Azure and miss the cache.**
+  # `allow_fallbacks` defaults true, so a flex 429 falls through to a 0.200 tie between OpenAI
+  # standard and Azure, and Azure is a different deployment with a cold prompt cache. The proper fix
+  # is `provider: {"only": ["openai"]}` in the request body, and **`ChatRequest` has no `provider`
+  # field**, so it cannot be set from here. Costed rather than feared: one cold Azure request is
+  # $0.0091 against $0.0013 warm on flex, and the request after it is back on a still-warm flex
+  # cache — so even at a 10% flex-429 rate with half of those landing on Azure it is +$1.22 across a
+  # 2500-turn run. Leakage, not a cache reset. Pin it in the OpenRouter dashboard's provider
+  # preferences (ignore Azure) if that ever stops being true.
+  #
+  # Estimated at ~$5.81 per 2500 decisions on flex, against ~$11.63 on the standard tier: ~144M
+  # prompt tokens and ~2.8M completion tokens, of which the prompt side is ~97% of the bill. That
+  # assumes an 80% prompt-cache hit rate, which the model gets automatically — OpenAI caches without
+  # being asked, so there is no `cache_control` for this one to be missing.
   #
   # What the key is allowed, at any time:
   #   curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://openrouter.ai/api/v1/key
+  # What this model's endpoints and prices are, at any time:
+  #   curl -s https://openrouter.ai/api/v1/models/openai/gpt-5.4-nano/endpoints \
+  #     | jq '.data.endpoints[] | {name, tag, pricing: .pricing.prompt}'
   OPENAI_BASE_URL: "https://openrouter.ai/api/v1"
-  GB_MODEL: "openrouter/free"
+  GB_MODEL: "openai/gpt-5.4-nano:floor"
 
   # Tokens of history the turn loop will carry before it compacts.
   #
-  # ⚠️ **This is the model's window, not a preference, and against a router there is no single
-  # answer.** `openrouter/free` advertises 200000 on `GET /api/v1/models`, but that is the router's
-  # ceiling and each request lands on a different free model with a window of its own. So this is a
-  # **floor every free model can hold**, and it was measured rather than guessed: of the 14
-  # tool-capable free models on 2026-08-14 the smallest window is 128000, and only 10 of the 14 reach
-  # the advertised 200000 — so trusting the headline figure fails roughly a third of routed requests.
-  # 100000 clears the floor with 28000 to spare, which is what an in-flight turn and the summarising
-  # completion need (see `GB_COMPACT_ABOVE`).
+  # ⚠️ **This is a *cost* decision now, not the router floor it used to be.** Against
+  # `openrouter/free` this number was the smallest window any free model could hold, measured, because
+  # being over failed the request outright on whichever turns were unlucky. gpt-5.4-nano holds 400000,
+  # so nothing here is forced and what is left is the bill: the history sawtooths from a ~6000-token
+  # floor up to `GB_CONTEXT_LIMIT × GB_COMPACT_ABOVE` and collapses back, so the average prompt is
+  # about half the ceiling and **every token of the window is paid for on every request under it**.
   #
-  # ⚠️ **The free lineup changes, and this number is only as good as its smallest member.** Being
-  # under costs a compaction sooner than necessary; being over fails the request outright, and only
-  # on the turns unlucky enough to be routed to the small model. Re-measure with:
-  #
-  #   curl -s https://openrouter.ai/api/v1/models | jq '[.data[]
-  #     | select(.pricing.prompt=="0" and .pricing.completion=="0")
-  #     | select(.supported_parameters|index("tools"))
-  #     | {id, context_length}] | sort_by(.context_length)[0:5]'
+  # At 100000 the ceiling is 85000, the average prompt is ~45500, and compaction fires every ~93
+  # turns. Raising it to the model's full 400000 would roughly quadruple the average prompt and the
+  # bill with it; dropping it to 40000 saves around a pound per 2500 turns and triples how often the
+  # run pays for a summarising completion and loses detail to it. 100000 is the knee.
   GB_CONTEXT_LIMIT: "100000"
   # How full it gets first. The default; stated here because the headroom it leaves is absolute
   # rather than proportional, and 15% of 60000 is 9000 — enough for an in-flight turn and the
   # summarising completion, where 5% would not be.
   GB_COMPACT_ABOVE: "0.85"
-  # Below the 1.0 default: every action is chosen by copying an opaque id (`PalletTown:5,6:Warp`)
-  # back exactly, and a small model at 1.0 fumbles them — which the router can hand us at any time.
-  # 0.8 rather than the 0.6 this used to run at: more room to try something else after a plan stalls,
-  # at the cost of a few more ids typed wrong and rejected.
-  GB_TEMPERATURE: "0.8"
+  # ⚠️ **1.0 because it is the only value this model has, not because it was tuned.** `temperature`
+  # is not in gpt-5.4-nano's `supported_parameters` at all — the GPT-5 family fixes it — so OpenRouter
+  # drops the key and OpenAI would reject anything but 1.0 anyway. `ChatRequest.temperature` is a bare
+  # `f32` rather than an `Option`, so *something* is always on the wire; 1.0 is the value that is
+  # ignored harmlessly at both ends. The 0.8 this used to hold was already a no-op against any GPT-5
+  # routing and was tuned for the free router's small models, which fumbled an id (`PalletTown:5,6:Warp`)
+  # copied back at 1.0. Restore a real value here only for a model that actually reads it.
+  GB_TEMPERATURE: "1.0"
   GB_MAX_TOOL_STEPS: "16"
 
   # How long the endpoint may take to answer before the request is abandoned. Well above the 180 s
   # default, because ⚠️ **a timeout is not a transport failure and is deliberately not retried**
   # (`LlmError::Timeout`) — the far end accepted the request and is working on it, so giving up buys
-  # nothing and starts the turn again from scratch. A free model is served at whatever priority
-  # OpenRouter has spare, so a slow answer here is a queue rather than a fault. Waiting costs a
-  # stalled turn; giving up early costs the same turn anyway.
+  # nothing and starts the turn again from scratch. ⚠️ **The flex tier makes that the common case
+  # rather than the rare one**: `GB_MODEL`'s `:floor` buys half price by accepting lower-priority
+  # capacity, OpenAI's own default deadline for it is ten minutes, and its documentation says
+  # outright that request timeouts get likelier. So a slow answer here is a queue, not a fault.
+  # Waiting costs a stalled turn; giving up early costs the same turn anyway, plus the completion the
+  # far end is still generating and nobody will read.
   GB_REQUEST_TIMEOUT_SECS: "600"
 
   # ⚠️ Without a ceiling a completion is bounded only by the context window, and that is not a bound:
   # a model that falls into a repetition loop generates until it fills, measured at ~26 000 tokens
-  # against turns that normally cost 24–2 000. A router makes that likelier rather than less, since
-  # the model is a different one every request. 8192 is far above any legitimate turn.
+  # against turns that normally cost 24–2 000. A reasoning model makes that likelier rather than
+  # less, since the loop it falls into is usually in the thinking. 8192 is far above any legitimate
+  # turn, and a truncated reply is nudged differently from a silent one (`prompt::truncated_nudge`).
   GB_MAX_TOKENS: "8192"
 
-  # ⚠️ **Deliberately unset — thinking is ON, and turning it off was tried and reverted the same
-  # night.** `none` works exactly as advertised (reasoning to zero tokens, turns down to 12–28 tokens
-  # and ~4 seconds, a tenth of the cost) and the model got measurably *worse* at the game: it dropped
-  # straight into a rigid two-cycle in Oak's lab — `wait`, interact, `wait`, interact — where with
-  # thinking on it had at least explored different sprites, and had escaped that room before. Speed
-  # is not the scarce resource here; the model working out what to do next is, and a free model needs
-  # the room more rather than less. `GB_MAX_TOKENS` is what bounds a runaway.
+  # ⚠️ **`low`, which is thinking turned down rather than off — and off was tried and reverted the
+  # same night.** `none` works exactly as advertised (reasoning to zero tokens, turns down to 12–28
+  # tokens and ~4 seconds, a tenth of the cost) and the model got measurably *worse* at the game: it
+  # dropped straight into a rigid two-cycle in Oak's lab — `wait`, interact, `wait`, interact — where
+  # with thinking on it had at least explored different sprites, and had escaped that room before.
+  # Speed is not the scarce resource here; the model working out what to do next is.
   #
-  # OpenRouter lists `reasoning_effort` for this router, so a value set here reaches whichever model
-  # is picked; the vocabulary belongs to the endpoint and `GB_REASONING_EFFORT` is passed through
-  # unvalidated. Thinking streams back on the `reasoning` field, which `MessageDelta` knows, so the
-  # live thought shows on the page and is still never sent back into the history.
-  # GB_REASONING_EFFORT: "none"
+  # What changed since then is that the thinking is now *billed*. Reasoning arrives as completion
+  # tokens, at 0.625/M on flex, and it is the one part of a turn with no ceiling of its own short of
+  # `GB_MAX_TOKENS`. `low` keeps the deliberation that beat `none` without paying for a high-effort
+  # model's several thousand tokens of it per turn, and it keeps the answer inside
+  # `GB_REQUEST_TIMEOUT_SECS` — high effort plus a flex queue is how a request crosses ten minutes.
+  #
+  # ⚠️ The vocabulary belongs to the endpoint and `GB_REASONING_EFFORT` is passed through
+  # unvalidated, because refusing a value the far end would have taken is worse than forwarding one
+  # it rejects in a 400 whose body we keep. `reasoning_effort` is in this model's
+  # `supported_parameters`, so it reaches OpenAI rather than being dropped. Thinking streams back on
+  # the `reasoning` field, which `MessageDelta` knows, so the live thought shows on the page and is
+  # still never sent back into the history — it is billed once, and a copy in the history would pay
+  # for it again on every turn after that.
+  GB_REASONING_EFFORT: "low"
 
   # W9's watchdog: emulated seconds with the agent asking the policy nothing at all before the model
   # is asked for a nudge. `0` turns it off. Every firing is a bug report, not routine.
