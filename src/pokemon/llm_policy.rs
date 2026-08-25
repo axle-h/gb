@@ -182,7 +182,7 @@ impl LlmPolicy {
     fn start_turn(&mut self, kind: DecisionKind, context: TurnContext<'_>) {
         // Everything that reads `self` immutably happens inside this block, so the mutations below
         // it are free of the borrow. `situation` and `headline` come out owned.
-        let Some((mut situation, headline)) = ({
+        let Some((mut situation, headline, menu)) = ({
             // No state has been observed yet, so there is nothing to describe. `service_tools` runs
             // immediately before every poll site, so this is only ever true before the first tick.
             self.state.as_deref().map(|state| {
@@ -207,7 +207,11 @@ impl LlmPolicy {
                     state.map.player_position.x,
                     state.map.player_position.y,
                 );
-                (situation, headline)
+                // ⚠️ The ids the situation was rendered from, not a second list built beside it:
+                // `tools::classify` refuses anything not in here, so the two disagreeing would
+                // reject an action the model was told it could take.
+                let ids: Vec<String> = menu.iter().map(|item| item.id.clone()).collect();
+                (situation, headline, ids)
             })
         }) else {
             return;
@@ -219,7 +223,7 @@ impl LlmPolicy {
         }
         self.events.clear();
 
-        if self.handles.turns.send(TurnRequest { id, kind, situation, headline }).is_ok() {
+        if self.handles.turns.send(TurnRequest { id, kind, situation, headline, menu }).is_ok() {
             self.pending = Some((kind, id));
         }
         // If the send failed the worker has gone. `pending` stays `None`, so the next poll tries
@@ -293,11 +297,24 @@ impl Policy for LlmPolicy {
                 // running for however long the turn took.
                 match tools::resolve_overworld(state, &id) {
                     Some(action) => Some(action),
+                    // ⚠️ **Two different mistakes, and telling the model the wrong one is worse than
+                    // saying nothing.** An id whose map is not the map the player is on was never on
+                    // this turn's menu — the model quoted one it read several turns ago — and
+                    // "the game moved on" invites it to try the same thing again. An id for *this*
+                    // map that no longer resolves really is the world having changed.
                     None => {
-                        self.reject(format!(
-                            "`{id}` is no longer available — the game moved on while you were \
-                             deciding. Here is the current situation; pick again."
-                        ));
+                        self.reject(match id.split(':').next() {
+                            Some(named) if named != state.map.map.to_string() => format!(
+                                "`{id}` is an id for `{named}` and you are in `{}`. Ids are minted \
+                                 for the map you are standing on, so one from an earlier turn never \
+                                 resolves. Nothing happened; pick from the list in this turn.",
+                                state.map.map,
+                            ),
+                            _ => format!(
+                                "`{id}` is no longer available — the game moved on while you were \
+                                 deciding. Here is the current situation; pick again."
+                            ),
+                        });
                         None
                     }
                 }
@@ -1534,22 +1551,48 @@ mod tests {
         assert_eq!(rig.requests().len(), 2);
     }
 
-    /// §7.4's ⚠️: an id that no longer resolves is a message back to the model, never a panic and
-    /// never a silent no-op.
+    /// §7.4's ⚠️: an id that does not resolve is a message back to the model, never a panic and
+    /// never a silent no-op. What changed is *where* the message is made.
+    ///
+    /// ⚠️ **An id the turn never offered is refused inside the turn, so it costs one completion
+    /// rather than the whole turn.** It used to be accepted here, published as a `Decision`, sent to
+    /// the policy and refused by `resolve_overworld` — after which the complaint could only be
+    /// carried on the *next* turn's situation, which is a second full prefill. The deployed run paid
+    /// that 59 times in 934 `choose_action` decisions, every one of them an id whose map was a map
+    /// the player had already left. `tools::not_on_the_menu` is the check and
+    /// `an_id_the_turn_never_offered_is_refused_before_it_costs_the_turn` pins its wording.
+    ///
+    /// The rejection is a `tool` message, so the model answers it in the same conversation: this
+    /// asserts the turn goes on to make a real decision rather than ending on the complaint.
     #[test]
-    fn an_unresolvable_id_is_explained_on_the_next_turn() {
+    fn an_id_the_turn_never_offered_is_refused_without_ending_the_turn() {
         let (mut rig, mut policy) = Rig::new(vec![
-            calls(&[("choose_action", r#"{"id":"PalletTown:99,99:Warp"}"#)]),
-            calls(&[("wait", r#"{"ticks":1}"#)]),
+            calls(&[("choose_action", r#"{"id":"PalletTown:99,99:Warp","summary":"out of the lab"}"#)]),
+            calls(&[("wait", r#"{"ticks":1,"summary":"waiting"}"#)]),
         ]);
 
         rig.pump_overworld_for(&mut policy, Duration::from_secs(2));
 
         let requests = rig.requests();
-        assert!(requests.len() >= 2, "a fresh turn is asked after an unresolvable id");
-        let reopened = last_user_message(&requests[1]);
-        assert!(reopened.contains("no longer available"), "{reopened}");
-        assert!(reopened.contains("PalletTown:99,99:Warp"), "the model is told which id failed");
+        assert!(requests.len() >= 2, "the turn carries on after the id is refused");
+        // ⚠️ The complaint is a `tool` result inside the same turn, not the next turn's situation.
+        // That distinction is the whole saving, so it is what is asserted.
+        let answer = requests[1]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Tool)
+            .and_then(Message::text)
+            .expect("the refused call is answered like any other tool call");
+        assert!(answer.contains("PalletTown:99,99:Warp"), "the model is told which id failed: {answer}");
+        assert!(answer.contains("not one of this turn's actions"), "{answer}");
+        // The fixture is Oak's lab, so the id names a map the player is not on — the mistake the
+        // deployed run made 59 times, and the one the complaint has to name rather than blaming the
+        // world for having moved.
+        assert!(answer.contains("OaksLab"), "it must say where the player actually is: {answer}");
+        for request in &requests {
+            history_is_well_formed(request);
+        }
     }
 
     // ── W5 ───────────────────────────────────────────────────────────────────────────────────────

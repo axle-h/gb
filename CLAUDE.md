@@ -448,9 +448,14 @@ any turn that has a menu it is a way to finish a turn without choosing from it. 
 proved that is what a weak model uses it for: **749 presses, 738 of them overworld turns with a
 perfectly good menu, 0 at the watchdog's turn**, ending in a run of **91 consecutive** presses
 oscillating in a 13-tile box on Route 3 while `Route3:0,10:Connection — walk into PewterCity` sat in
-the menu every time. ⚠️ **Nothing had failed**: the last `choose_action` before that run succeeded,
-and `choose_action` was never once rejected for an unresolvable id in the whole run. The tell that it
-is self-reinforcing rather than caused is the ratchet — 26% → 2% → 12% → 74% → 38% → 72% → 100%,
+the menu every time. ⚠️ **Nothing had failed *there***: the last `choose_action` before that run
+succeeded, and no id was rejected anywhere near it. ⚠️ **The stronger claim this used to make — that
+`choose_action` was never once rejected in the whole run — is false, and was measured wrong.** Across
+the run **59 of 934 `choose_action` decisions named a map the player was not standing on**, every one
+of which `resolve_overworld` had to refuse; see the ⚠️ on ids the turn never offered, below. It does
+not change the conclusion about the presses, since none of those refusals sat anywhere near the Route
+3 run, but it was quoted as evidence and it is not evidence. The tell that the pressing is
+self-reinforcing rather than caused is the ratchet — 26% → 2% → 12% → 74% → 38% → 72% → 100%,
 recovering to 2% for 600 turns in the middle, because the model reads its own last three turns back
 on every request.
 
@@ -570,6 +575,34 @@ tells `Potion1` from `Hiker`. The step count is gone for good; nothing ever used
 map the player is on *now*, and an answer can land after a warp — so without it, `5,6:Warp` chosen
 in Oak's lab could match a warp that happens to sit at (5, 6) in Pallet Town and be carried out
 silently.
+
+⚠️ **An id that is not in the turn's own menu is refused by `tools::classify`, inside the turn,
+before it can ever be a decision.** `TurnRequest` carries the menu's ids for exactly this
+(`tools::not_on_the_menu`), and the check is worth the plumbing because of where the alternative
+lands: an id the model invented used to be classified as a `Terminal`, published as a `Decision`,
+sent to the policy and only then refused by `resolve_overworld` — at which point the turn is over and
+the complaint can only ride on the *next* turn's situation, which is a second full prefill of a
+~55 k-token history. Caught in `classify` it is an ordinary `CallKind::Rejected`, so it costs one
+more completion and the model still acts in the same turn.
+
+⚠️ **It is measured, not hypothetical: 59 of the deployed run's 934 `choose_action` decisions named a
+map the player was not on** — `ViridianCity:33,8:Warp` while standing in `ViridianPokecenter`,
+`MtMoon1F:25,15:Warp` while on B1F — because the model was quoting a menu from several turns earlier.
+Since `overworld_id` prefixes with `state.map.map`, not one of them could ever have resolved.
+
+Three traps in the check:
+
+- ⚠️ **An empty menu checks nothing.** `Nickname`, `ForgetMove` and `Stuck` carry no menu at all, and
+  reading "no menu" as "nothing is allowed" would reject every answer they give.
+- ⚠️ **`resolve_overworld` is still the authority and must stay.** The menu is minted when the turn is
+  built and re-minted when the answer lands; this catches what the model was never *offered*, and
+  that one still catches what stopped being true in between. Belt and braces, not a replacement.
+- ⚠️ **The complaint has to name the right mistake.** The policy's note used to say "the game moved on
+  while you were deciding" for every failure, which for a stale id is a misdiagnosis that invites the
+  model to try it again — the world had not moved, the model had. Both messages now compare the id's
+  map prefix against the map the player is on and say which of the two mistakes it was. The check
+  reads the current map out of the menu's own first id rather than being handed it separately, so
+  the two cannot disagree about where the player is.
 
 ⚠️ **`PokemonStatus`' `Display` is `strum`'s derive, so a healthy Pokémon prints `None`** — and every
 party line in every turn read `20/20 HP, None`, which is a missing value rather than good news.
@@ -1053,7 +1086,7 @@ before.**
 
 ```bash
 # Default tier: all unit tests + agent mechanics + two navigation smoke tests + web/host/llm.
-# ~22s, 1220 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each. The
+# ~20s, 1310 tests. The `stalls` tier is most of the growth: eleven cases, three seeds each. The
 # one deliberate exception to the tiering is `the_hall_of_fame_is_announced_once_when_the_ceremony_
 # starts` (1.7 s of real ROM), which buys the only proof that the end of the game is detected at all.
 cargo test --release
@@ -1137,6 +1170,48 @@ fixed. Keep it that way.
 
 Failure artifacts — a save state and a screenshot at the point of a stall or timeout — land in
 `target/test-artifacts/`, not the repo root.
+
+### Turns the game takes back: `integration_tests::interruption`
+
+A turn abandoned mid-flight is paid for and thrown away, so before committing a run to a paid model
+the rate matters. `LlmPolicy` keys a turn by the decision kind it answers and cancels it when the
+agent asks something else — the shape everyone expects is an overworld turn interrupted by a battle.
+
+⚠️ **Measured, it does not happen.** The deployed run's 2428 turns contain **one** `turn_cancelled`
+for "the game moved on", and it is turn 1, the `POST /api/new-run` reset bumping the generation. The
+structural reason is that **the agent presses nothing while a turn is in flight**:
+`AwaitingOverworldAction` and `BattleState::AwaitingPolicy` tick a delay and poll, so the game sits
+at a static menu or a stationary tile and cannot move on its own. Across the same run's 2430
+`turn_started → decision` windows exactly **one** agent event fired inside a window. A wild encounter
+or a trainer's line of sight fires *during a walk*, and no policy poll happens during a walk — so the
+battle is the next turn rather than an interruption of the one in flight.
+
+⚠️ **The 68 other `turn_cancelled` events in that run are a different thing wearing the same name**:
+`Worker::give_up` publishes one when the model replies twice with no tool call, and those turns still
+return a forced `wait`. Counting `turn_cancelled` without splitting on `reason` reports the rate as
+2.8% when it is 0.04%.
+
+What is kept is the guard, not the search. `SlowPolicy` wraps any ordinary policy and holds each
+answer back for a number of agent ticks, which is the one property of an LLM turn that matters here.
+⚠️ **It has to key turns exactly the way `LlmPolicy` does**, `pick_field_move`'s exemption included,
+or it reports a cancellation every time the agent asks anything at all.
+
+- `leaving_oaks_lab_does_not_strand_a_turn_in_the_rivals_script` (default tier, ~2 s) is the case
+  worth guarding: the rival's challenge is the longest scripted freeze the early game has. The trace
+  shows the walk to the door aborting into `RunningScript` and the agent asking **nothing** for the
+  ~900 ticks (18 s of game time) between the abort and the battle menu. Three latencies — instant,
+  5 s, 60 s — because the script fires on a *tile* and the answer lands on a *clock*, so each puts
+  the walk in a different place relative to it. ⚠️ **The precondition is half the test**: a run that
+  stops before the battle question is ever put proves nothing, which is how the first version passed
+  at every latency below 600 ticks.
+- `the_detector_notices_a_question_being_replaced` exists because both results are negative ones.
+  Nothing in the game replaces a question mid-flight, so it is done by hand.
+
+⚠️ **A broad sweep was written and deliberately not kept**: random play from six fixtures, 10 minutes
+of game time each with a jittered latency, 346 turns and 0 abandoned. It cost 100 s of the
+`soak-tests` tier to re-derive a number the structure already explains, over the same fixtures under
+the same `RandomPolicy` that `soak` already walks. If the rate is ever in doubt again, it is twenty
+lines around `SlowPolicy` rather than something to keep running.
 
 ### Finding jams: `soak`, and `stalls` beside it
 

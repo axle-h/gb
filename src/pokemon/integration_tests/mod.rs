@@ -53,6 +53,8 @@ pub use fixture::TestFixture;
 
 mod mechanics;
 mod early_game;
+/// Turns abandoned mid-flight because the game asked a different question. See the module header.
+mod interruption;
 /// **W4** — the LLM path end to end against a mock OpenAI server. Default tier: it is the test that
 /// keeps the tool schema, the resolution logic and the agent's expectations in step, and it emulates
 /// a few seconds of game time.

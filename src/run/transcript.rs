@@ -416,24 +416,35 @@ mod tests {
                     .unwrap();
             }
         }
-        let started = Instant::now();
+        // The cap is honoured, and the values prove the loop *stopped* rather than read on and threw
+        // the rest away: `read_since` pushes every line it parses and has no discard path, so a
+        // result holding exactly the last `MAX_BACKLOG` seqs is a result that broke at the cap.
         let events = read_since(&path, 0);
-        let full = started.elapsed();
         assert_eq!(events.len(), MAX_BACKLOG);
         assert_eq!(events[0]["seq"], total - MAX_BACKLOG as u64);
         assert_eq!(events.last().unwrap()["seq"], total - 1);
 
-        let started = Instant::now();
+        // The same for the other exit: the first `seq` below `since` ends the walk.
         let tail = read_since(&path, total - 10);
-        let near_end = started.elapsed();
         assert_eq!(tail.len(), 10);
         assert_eq!(tail[0]["seq"], total - 10);
         assert_eq!(last_seq(&path), Some(total - 1));
 
-        // A read that parsed every one of the 200 000 lines would cost well over this; a read that
-        // stops after the cap stays comfortably under it even on a slow machine.
-        assert!(full < Duration::from_secs(2), "capped read took {full:?}");
-        assert!(near_end <= full, "a read near the end costs more than one across the cap: {near_end:?} vs {full:?}");
+        // ⚠️ **The other half of the name — *not read whole* — is about the reader underneath, and
+        // it is measured rather than timed.** This asserted "the capped read took under two seconds"
+        // and "a read near the end is faster than one across the cap"; both are races against
+        // whatever else the machine is doing, and the pair went red once under a loaded full-suite
+        // run while passing alone every time. `RevLines::pos` is the offset below which nothing has
+        // been read, so laziness is a number the test can simply look at.
+        let length = std::fs::metadata(&path).unwrap().len();
+        let mut lines = RevLines::new(std::fs::File::open(&path).unwrap());
+        for _ in 0..MAX_BACKLOG {
+            lines.next().expect("the file holds far more lines than the cap");
+        }
+        let read = length - lines.pos;
+        assert!(read < length / 10,
+                "a backlog's worth of lines is {read} bytes of a {length}-byte file; a reader that \
+                 slurped it whole would have read all of it");
     }
 
     /// Against a real transcript: `GB_TRANSCRIPT=/path/to/transcript.jsonl`. Prints how long the
