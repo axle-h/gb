@@ -156,7 +156,10 @@ export type UiEvent = At &
   /**
    * `id` pairs this with the `tool_result` that answers it — a turn can call several tools in one
    * message and they are answered as a batch, so neither position nor arrival order will do it.
-   * `kind` is what the call turned out to be: `read`, `todo`, `terminal`, `rejected`.
+   * `kind` is what the call turned out to be: `read`, `todo`, `issue`, `terminal`, `rejected`.
+   *
+   * `issue` is `report_issue` — the model saying the *agent* is wrong. It does not end the turn, so
+   * a turn can carry one of these and a decision both.
    */
   | {
       seq: number;

@@ -141,6 +141,10 @@ pub enum CallKind {
     /// **W6b** — a TODO operation. Answered by the worker too: none of it needs the emulator, so
     /// making it a batch for `service_tools` would cost a round trip for a file write.
     Todo(TodoCall),
+    /// `report_issue`: the model believes the agent is wrong. Answered by the worker as well — it is
+    /// a file write and a screenshot from the frame the host already published — and, like a todo
+    /// call, it does **not** end the turn. See [`report_issue_spec`] for why that matters.
+    Issue(String),
     /// The turn is over.
     Terminal(Terminal),
     /// Nothing this turn can use — an unknown name, a terminal tool belonging to the other decision
@@ -157,6 +161,7 @@ impl CallKind {
         match self {
             Self::Read | Self::Screenshot => "read",
             Self::Todo(_) => "todo",
+            Self::Issue(_) => "issue",
             Self::Terminal(_) => "terminal",
             Self::Rejected(_) => "rejected",
         }
@@ -528,7 +533,6 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                 }),
             ));
             tools.push(use_field_move_spec());
-            tools.push(press_buttons_spec());
         }
         DecisionKind::Battle => {
             tools.push(ToolSpec::new(
@@ -542,7 +546,6 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                     "additionalProperties": false,
                 }),
             ));
-            tools.push(press_buttons_spec());
         }
         DecisionKind::Nickname => tools.push(ToolSpec::new(
             "set_nickname",
@@ -579,8 +582,9 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                 "additionalProperties": false,
             }),
         )),
-        // **W9.** `press_buttons` is pushed by the arms above for the two kinds that also have a
-        // menu; here it is the only thing on offer besides `wait`.
+        // **W9.** The one turn that offers `press_buttons` at all: there is no menu here, so
+        // raw input and doing nothing are the whole of it. It used to be pushed by the `Overworld`
+        // and `Battle` arms above as well; see [`press_buttons_spec`] for what that cost.
         DecisionKind::Stuck => tools.push(press_buttons_spec()),
         DecisionKind::ForgetMove => tools.push(ToolSpec::new(
             "forget_move",
@@ -595,6 +599,10 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                 "additionalProperties": false,
             }),
         )),
+    }
+
+    if offers_issue_report(kind) {
+        tools.push(report_issue_spec());
     }
 
     tools.push(ToolSpec::new(
@@ -653,10 +661,16 @@ pub const MAX_REASON: usize = 200;
 /// decision it explains, and lands in the history by itself — `Message::assistant` already carries
 /// `tool_calls` verbatim, arguments included.
 ///
-/// ⚠️ **Required in the schema, optional in the parser.** Saying it is required is what gets it
-/// filled in; *enforcing* it would not, because a rejected call does not end the turn — it becomes
-/// another tool result and spends another of `GB_MAX_TOOL_STEPS`, so a model that forgets it would
-/// be pushed towards the forced `wait` rather than towards remembering. See `call_summary`.
+/// ⚠️ **Required in the schema *and* enforced by [`classify`], and the second half is new.** The
+/// argument for tolerating its absence was that a rejected call does not end the turn — it becomes
+/// another tool result and spends another of `GB_MAX_TOOL_STEPS`, so a model that forgot it would be
+/// pushed towards the forced `wait` rather than towards remembering. What settled it was measuring
+/// the cost rather than reasoning about it: across the deployed run's **2427 decisions only 98
+/// carried no summary and every one was a `wait`** — the *synthesised* fallback wait, which never
+/// reaches `classify`. The model already fills it in on every real action, so the rule costs that
+/// model nothing; `press_buttons`' `why` is the counter-example that made it worth closing, having
+/// been left null on 543 of 749 calls. See `call_summary` and
+/// `tests::a_terminal_call_must_say_what_it_is_doing`.
 fn add_summary_argument(tool: &mut ToolSpec) {
     let Some(properties) = tool.function.parameters.get_mut("properties").and_then(Value::as_object_mut)
     else {
@@ -690,12 +704,14 @@ pub fn call_summary(call: &ToolCall) -> Option<String> {
     call_string(call, "summary", MAX_SUMMARY)
 }
 
-/// `press_buttons`' `why`: which action the model looked for and could not find.
+/// `press_buttons`' `why`: what the model thinks is on the screen and what it is pressing at.
 ///
-/// ⚠️ **Required in the schema, optional here**, and it is the same trade `call_summary` makes for
-/// the same reason — rejecting a press that forgot to explain itself does not end the turn, it
-/// spends another of `GB_MAX_TOOL_STEPS` and pushes the model towards the forced `wait`. A press
-/// with no reason is still recorded; the missing reason is itself worth reading.
+/// ⚠️ **Required in the schema and enforced by [`classify`]**, unlike the trade this used to make
+/// with `call_summary`. Tolerating its absence was justified on the grounds that a rejection spends
+/// another `GB_MAX_TOOL_STEPS` and pushes the model towards the forced `wait` — and it was measured
+/// on the deployed run: **543 of 749 presses left it null**, so the record it exists to make
+/// readable was three quarters blank. It is now asked on the single turn that offers the tool at
+/// all, so the friction falls where a press is already the right answer.
 pub fn call_reason(call: &ToolCall) -> Option<String> {
     call_string(call, "why", MAX_REASON)
 }
@@ -798,24 +814,92 @@ fn field_move_names() -> Vec<&'static str> {
 ///
 /// ⚠️ **`why` is friction, and that is the whole of its job.** Saying "a last resort" in prose was
 /// not enough on the deployed run: the model pressed buttons on ordinary turns that had a perfectly
-/// good menu. A required field it has to fill in makes the model state, before it presses, which
-/// action it looked for and could not find — and it is the headline of the record
-/// [`crate::llm::incident`] writes for every press, which is what makes the claim checkable
-/// afterwards. It is one property on one tool rather than anything the catalogue pays for.
+/// good menu. A required `why` was the next attempt, and it did not work either — **72% of 749
+/// presses left it null**, because a field the schema calls required and the parser treats as
+/// optional is a field a weak model simply omits.
 ///
-/// ⚠️ The wording is conditioned on **a menu being on offer**, because `DecisionKind::Stuck` is the
-/// one turn where a press is the right answer and there is no menu at all. Telling the model off for
-/// pressing there would be telling it off for doing as it was asked.
+/// ⚠️ **So the hatch is no longer offered on a turn that has a menu at all.** It survives only at
+/// [`DecisionKind::Stuck`], which is the failure it was built for: the agent has reached no decision
+/// point for `GB_STUCK_TIMEOUT_SECS`, there is no menu, and a raw press is the only thing that can
+/// move the game. What replaced it on the two kinds that *do* have a menu is [`report_issue_spec`] —
+/// which files the complaint and then makes the model choose an action anyway.
+///
+/// The deployed run is what settled it: 91 consecutive turns of `press_buttons` walking into ledges
+/// on Route 3, while `Route3:0,10:Connection — walk into PewterCity` sat in the menu on every one of
+/// them. The last `choose_action` before that run succeeded, so nothing had failed; the model had
+/// simply learned to reach past the menu, and every turn of history it read back taught it again.
+///
+/// ⚠️ **`why` stays required and is now enforced** ([`call_reason`]): here it is asked on the one
+/// turn where a press is the right answer, so a model that cannot say what it is pressing at is a
+/// model whose press is worth refusing.
+/// The name of the tool that replaced the escape hatch on every turn that has a menu.
+pub const REPORT_ISSUE: &str = "report_issue";
+
+/// How long an issue report may be. Longer than [`MAX_REASON`] and longer than [`MAX_SUMMARY`],
+/// because unlike either of those it is not carried in the history or re-read every turn: it is
+/// written to disk once and read by a person, so the only thing length costs is the completion that
+/// wrote it.
+pub const MAX_ISSUE: usize = 1_000;
+
+/// `report_issue`: what the model says when it believes the *agent* is wrong.
+///
+/// ⚠️ **It does not end the turn, and that is the whole design.** `press_buttons` was reached for on
+/// ordinary turns because it was the one way to finish a turn without choosing from the menu — so
+/// the replacement is deliberately not a way to finish a turn at all. The model files the complaint
+/// and then still has to call `choose_action`, `wait`, or whatever its kind offers. A terminal
+/// issue report would be `press_buttons` with a different name and the same gravity.
+///
+/// What it buys over the old `why`: the reason used to ride on a call that had already decided to
+/// bypass the agent, so filing one and doing something sensible were mutually exclusive. Now the
+/// model can say "the menu will not let me do X" *and* try Y, which is the behaviour worth having.
+///
+/// ⚠️ **The message is enforced** — see [`classify`]. An issue with no message is not an issue, and
+/// this is one of the two places where a rejection is worth the tool step it spends, because the
+/// tool does nothing else: rejecting it costs the turn a round trip and costs the model nothing it
+/// was going to do anyway.
+fn report_issue_spec() -> ToolSpec {
+    ToolSpec::new(
+        REPORT_ISSUE,
+        format!(
+            "Report a problem with the agent itself: something it will not let you do, an action \
+             menu that does not describe what is on the screen, a choice that keeps failing for a \
+             reason you cannot see. **A developer reads these.** Write it as a bug report: what you \
+             were trying to do, what you expected, and what happened instead. The game's state, the \
+             screen and a save state are filed alongside it automatically, so describe rather than \
+             transcribe. This does NOT end your turn and does NOT fix anything now: after filing \
+             it, carry on and try a different way. At most {MAX_ISSUE} characters."
+        ),
+        json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "maxLength": MAX_ISSUE,
+                    "description": "The report: what you tried, what you expected, what happened.",
+                },
+            },
+            "required": ["message"],
+            "additionalProperties": false,
+        }),
+    )
+}
+
+/// A `report_issue` call's message, trimmed and capped. Unlike [`call_summary`] and [`call_reason`]
+/// this has no "absent" case to be tolerant of: [`classify`] rejects a call without one, so by the
+/// time anything reads it there is a message.
+pub fn issue_message(call: &ToolCall) -> Option<String> {
+    call_string(call, "message", MAX_ISSUE)
+}
+
 fn press_buttons_spec() -> ToolSpec {
     ToolSpec::new(
         "press_buttons",
         format!(
-            "ENDS THE TURN. Press these buttons in order, one at a time, then hand control back to \
-             the agent. **An escape hatch, not a shortcut: every use is recorded and read \
-             afterwards.** The agent is better at menus than you are, and a raw press pre-empts \
-             whatever it was doing. If this turn shows you an action menu, the answer is in it. Use \
-             this only where the game is somewhere no action describes: an unmodelled menu, or a \
-             screen that has stopped responding. Up to {MANUAL_INPUT_CAPACITY} presses; anything \
+            "ENDS THE TURN. Press these buttons in order, one at a time, then hand control back \
+             to the agent. You are being offered this because the agent has stopped reaching \
+             decision points on its own: there is no menu to choose from and a raw press is the way \
+             out. Work out from the screen what is in front of you. B backs out of most menus and \
+             closes most boxes; A advances text. Up to {MANUAL_INPUT_CAPACITY} presses; anything \
              past that is dropped."
         ),
         json!({
@@ -830,8 +914,9 @@ fn press_buttons_spec() -> ToolSpec {
                 "why": {
                     "type": "string",
                     "maxLength": MAX_REASON,
-                    "description": "Which action you looked for and could not find. If one could \
-                                    have done this, use that instead.",
+                    "description": "What you think is on the screen, and what these presses are \
+                                    meant to do about it. Required: every press is recorded and \
+                                    read afterwards by a person.",
                 },
             },
             "required": ["buttons", "why"],
@@ -847,13 +932,27 @@ fn press_buttons_spec() -> ToolSpec {
 /// ⚠️ **Per kind, since the reads are.** A contract that named a read the request did not carry
 /// would be inviting exactly the call `classify` has to reject.
 pub fn non_terminal_names(kind: DecisionKind) -> Vec<&'static str> {
-    reads_for(kind).map(|tool| tool.name).chain(TODO_TOOL_NAMES.iter().copied()).collect()
+    reads_for(kind)
+        .map(|tool| tool.name)
+        .chain(TODO_TOOL_NAMES.iter().copied())
+        .chain(offers_issue_report(kind).then_some(REPORT_ISSUE))
+        .collect()
+}
+
+/// Which kinds can report that the agent itself is wrong.
+///
+/// The three that can be wedged by something the agent models badly: the two with an action menu,
+/// where the complaint is "the menu does not describe this", and the watchdog's own turn, where the
+/// complaint is the turn. The transient prompts — a naming screen, a mart, a forget-move — are a
+/// single question with a single answer and nothing for the agent to get wrong.
+pub fn offers_issue_report(kind: DecisionKind) -> bool {
+    matches!(kind, DecisionKind::Overworld | DecisionKind::Battle | DecisionKind::Stuck)
 }
 
 pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
     match kind {
-        DecisionKind::Overworld => &["choose_action", "use_field_move", "press_buttons", "wait"],
-        DecisionKind::Battle => &["choose_battle_action", "press_buttons", "wait"],
+        DecisionKind::Overworld => &["choose_action", "use_field_move", "wait"],
+        DecisionKind::Battle => &["choose_battle_action", "wait"],
         DecisionKind::Nickname => &["set_nickname", "wait"],
         DecisionKind::MartPurchase => &["buy_item", "wait"],
         DecisionKind::ForgetMove => &["forget_move", "wait"],
@@ -871,6 +970,25 @@ pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
 /// than an error that ends the turn: a model that reaches for `choose_action` in a battle should be
 /// told the battle menu is over there, not have its turn silently discarded.
 pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
+    match classify_call(kind, call) {
+        // ⚠️ **`summary` is now enforced, and the old doc argued it should not be.** That argument
+        // was that a rejection does not end the turn — it spends another `GB_MAX_TOOL_STEPS` and
+        // pushes a forgetful model towards the forced `wait`. What settled it is that the cost was
+        // measured and is nearly zero: across 2427 turns of the deployed run only 98 decisions
+        // carried no summary and **every one of them was a `wait`**, which is the *synthesised*
+        // fallback wait and never goes through here at all. The model already fills it in on every
+        // real action; enforcing it closes the hole for the model that would not.
+        CallKind::Terminal(_) if call_summary(call).is_none() => CallKind::Rejected(format!(
+            "`{}` needs a `summary`: one or two sentences saying what you are doing and why. Your \
+             thinking is not kept, so it is the only note you will have of this turn. Call it again \
+             with one.",
+            call.function.name,
+        )),
+        classified => classified,
+    }
+}
+
+fn classify_call(kind: DecisionKind, call: &ToolCall) -> CallKind {
     let name = call.function.name.as_str();
     // ⚠️ A read that exists but is not offered in *this* kind is answered like a terminal tool from
     // the wrong kind: named, with the reason. Falling through to "there is no tool called
@@ -902,6 +1020,27 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
         return todo;
     }
 
+    if name == REPORT_ISSUE {
+        if !offers_issue_report(kind) {
+            return CallKind::Rejected(format!(
+                "`{REPORT_ISSUE}` is not available in a {} turn. The tools that do not end the turn \
+                 are {}.",
+                kind.label(),
+                non_terminal_names(kind).join(", "),
+            ));
+        }
+        // ⚠️ Enforced, unlike `summary` used to be. A report is *only* its message: rejecting an
+        // empty one costs a tool step and loses nothing, where accepting it would write a directory
+        // to disk saying a person should read nothing.
+        return match issue_message(call) {
+            Some(message) => CallKind::Issue(message),
+            None => CallKind::Rejected(format!(
+                "`{REPORT_ISSUE}` needs a `message` saying what you tried, what you expected and \
+                 what happened. It does not end your turn: file it, then take an action."
+            )),
+        };
+    }
+
     match name {
         "choose_action" if kind == DecisionKind::Overworld => match string_argument(&arguments, "id") {
             Ok(id) => CallKind::Terminal(Terminal::ChooseAction { id }),
@@ -915,14 +1054,22 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
             Ok(request) => CallKind::Terminal(Terminal::UseFieldMove(request)),
             Err(complaint) => CallKind::Rejected(complaint),
         },
-        "press_buttons"
-            if matches!(kind, DecisionKind::Overworld | DecisionKind::Battle | DecisionKind::Stuck) =>
-        {
-            match button_arguments(&arguments) {
-                Ok(buttons) => CallKind::Terminal(Terminal::PressButtons { buttons }),
-                Err(complaint) => CallKind::Rejected(complaint),
-            }
-        }
+        // ⚠️ **`Stuck` only.** On a turn with a menu the answer is in the menu; the tool is not
+        // in that request's catalogue and the fall-through arm below names what to call instead.
+        "press_buttons" if kind == DecisionKind::Stuck => match button_arguments(&arguments) {
+            Ok(buttons) => match call_reason(call) {
+                Some(_) => CallKind::Terminal(Terminal::PressButtons { buttons }),
+                // Enforced here and nowhere else in the catalogue's history: this is the one turn
+                // that offers the hatch, so this is the one place the record can still be made
+                // worth reading. See `press_buttons_spec`.
+                None => CallKind::Rejected(
+                    "`press_buttons` needs a `why`: what you think is on the screen, and what \
+                     these presses are meant to do about it. Every press is filed and read."
+                        .to_string(),
+                ),
+            },
+            Err(complaint) => CallKind::Rejected(complaint),
+        },
         "set_nickname" if kind == DecisionKind::Nickname => {
             // An absent `name` is the answer "keep the default", and so is an empty string — the
             // naming screen treats an empty buffer as a decline, so agreeing with it here means the
@@ -969,9 +1116,18 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
             }),
             None => CallKind::Rejected("`wait` needs a whole number of `ticks`.".to_string()),
         },
+        // ⚠️ Not the generic sentence below. A model pressing buttons on a turn with a menu is
+        // not confused about which kind of turn it is on; it is going round the agent. What it
+        // needs is both halves: the action is in the menu, and if it really is not, say so.
+        "press_buttons" => CallKind::Rejected(format!(
+            "`press_buttons` is not available on a turn that has a menu; the agent presses the \
+             buttons. Take one of: {}. If what you want genuinely is not in the menu, call \
+             `{REPORT_ISSUE}` to say so and then take the closest action there is.",
+            terminal_names(kind).join(", "),
+        )),
         // A terminal tool from another decision kind. It exists, so saying "unknown tool" would be
         // actively misleading; what the model needs is the name of the one that does apply.
-        "choose_action" | "choose_battle_action" | "use_field_move" | "press_buttons"
+        "choose_action" | "choose_battle_action" | "use_field_move"
         | "set_nickname" | "buy_item" | "forget_move" => CallKind::Rejected(format!(
             "`{name}` is not available in a {} turn. End this turn with one of: {}.",
             kind.label(),
@@ -1389,7 +1545,23 @@ mod tests {
     use super::*;
     use crate::llm::protocol::FunctionCall;
 
+    /// A call with a `summary` filled in, since [`classify`] now refuses a terminal call without
+    /// one and almost every fixture here is about some *other* argument. Anything that is not a JSON
+    /// object is passed through untouched — several tests hand this deliberate rubbish. Use
+    /// [`bare`] to write a call that genuinely says nothing.
     fn call(name: &str, arguments: &str) -> ToolCall {
+        let arguments = match serde_json::from_str::<Value>(arguments) {
+            Ok(Value::Object(mut object)) => {
+                object.entry("summary").or_insert_with(|| json!("doing the thing"));
+                Value::Object(object).to_string()
+            }
+            _ => arguments.to_string(),
+        };
+        bare(name, &arguments)
+    }
+
+    /// A call exactly as written, `summary` and all.
+    fn bare(name: &str, arguments: &str) -> ToolCall {
         ToolCall {
             id: "c".into(),
             kind: "function".into(),
@@ -1521,18 +1693,32 @@ mod tests {
             // so unlike `summary` below it scales with nothing at all; that is the whole reason it
             // was affordable as a lock-down when more prose was not.
             //
+            // ⚠️ **Two ceilings came *down* on 2026-08-25 and that is the point of them.** Measured
+            // after `press_buttons` left the two kinds that have a menu and `report_issue` replaced
+            // it: 8646, 4908, 3543, 3965, 3861, 5144. Overworld and Battle each shed ~450 bytes,
+            // because the hatch carried a `why`, a `summary` and a paragraph talking the model out
+            // of using it, and the tool that replaced it is not terminal so it pays for no summary.
+            // `Stuck` is the only kind that grew: it keeps the hatch *and* gains `report_issue`,
+            // which is right — it is the turn where the agent is most likely to be genuinely wrong,
+            // and the one place a press is still the correct answer. The unchanged three are the
+            // single-question prompts, which carry neither tool.
+            //
+            // ⚠️ **The ceilings were lowered to match rather than left where they were.** A ceiling
+            // with 20% of slack stops being a ratchet; leaving Overworld at 9700 would have let the
+            // 418 bytes just recovered be spent again without anybody deciding to.
+            //
             // ⚠️ **The jump from the 2026-08-12 figures (6875, 3773, 2530, 2952, 2848, 2877) is
             // `add_summary_argument`, and it is bought rather than leaked.** It is one property
             // repeated across every terminal tool a kind offers — `Stuck` has two and pays twice —
             // so it is the one addition here that scales with the *number* of terminals rather than
             // with the catalogue. What it buys is the only sentence the model keeps about its own
             // turn; see that function.
-            (DecisionKind::Overworld, 9_700),
-            (DecisionKind::Battle, 5_900),
+            (DecisionKind::Overworld, 9_500),
+            (DecisionKind::Battle, 5_400),
             (DecisionKind::Nickname, 3_900),
             (DecisionKind::MartPurchase, 4_350),
             (DecisionKind::ForgetMove, 4_250),
-            (DecisionKind::Stuck, 4_700),
+            (DecisionKind::Stuck, 5_650),
         ] {
             let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
             assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
@@ -1682,15 +1868,10 @@ mod tests {
         assert_eq!(capped.chars().count(), MAX_SUMMARY);
     }
 
-    /// `press_buttons`' `why`: the friction that is supposed to make a model check the action menu
-    /// before it reaches past it, and the headline of the record `llm::incident` writes.
-    ///
-    /// ⚠️ **Required in the schema, optional in the parser**, the same trade `summary` makes — a
-    /// rejection here would not get it filled in, it would spend another `GB_MAX_TOOL_STEPS` and
-    /// push the model towards the forced `wait`. So a press with no reason still presses, and the
-    /// record says it did not say.
+    /// `press_buttons`' `why`: the headline of the record `llm::incident` writes, on the one turn
+    /// that still offers the tool.
     #[test]
-    fn a_press_is_asked_why_and_is_carried_out_either_way() {
+    fn a_press_without_a_why_is_refused() {
         let schema = &press_buttons_spec().function.parameters;
         assert_eq!(schema["required"], json!(["buttons", "why"]), "the model is asked for it");
 
@@ -1699,23 +1880,103 @@ mod tests {
             call_reason(&press(r#"{"buttons":["a"], "why": "  no action opens the PC  "}"#)),
             Some("no action opens the PC".to_string()),
         );
-        assert_eq!(call_reason(&press(r#"{"buttons":["a"]}"#)), None, "absent is not an error");
-        assert_eq!(call_reason(&press(r#"{"buttons":["a"], "why": " "}"#)), None, "blank is absent");
 
-        // And the press itself still lands, whatever the model did or did not say about it.
-        for arguments in [r#"{"buttons":["a"]}"#, r#"{"buttons":["a"], "why": "because"}"#] {
-            assert!(
-                matches!(
-                    classify(DecisionKind::Overworld, &press(arguments)),
-                    CallKind::Terminal(Terminal::PressButtons { .. }),
-                ),
-                "{arguments}",
-            );
+        assert!(matches!(
+            classify(DecisionKind::Stuck, &press(r#"{"buttons":["a"], "why": "a stuck text box"}"#)),
+            CallKind::Terminal(Terminal::PressButtons { .. }),
+        ));
+        // ⚠️ **Refused now, where it used to be carried out anyway.** The old trade — ask in the
+        // schema, tolerate the absence in the parser, on the grounds that a rejection spends a
+        // `GB_MAX_TOOL_STEPS` — was measured on the deployed run and lost: **543 of 749 presses
+        // left `why` null**. A field that is optional in practice is a field a weak model omits,
+        // and the record it was meant to make readable was three quarters blank.
+        for arguments in [r#"{"buttons":["a"]}"#, r#"{"buttons":["a"], "why": " "}"#] {
+            let CallKind::Rejected(complaint) = classify(DecisionKind::Stuck, &press(arguments)) else {
+                panic!("a press with nothing to say is refused: {arguments}");
+            };
+            assert!(complaint.contains("why"), "{complaint}");
         }
 
         let long = "x".repeat(MAX_REASON * 2);
         let capped = call_reason(&press(&format!(r#"{{"why": "{long}"}}"#))).expect("present");
         assert_eq!(capped.chars().count(), MAX_REASON, "a schema's maxLength is a request");
+    }
+
+    /// **Every terminal call has to say what it is doing**, on every kind — the one note the model
+    /// keeps about its own turn.
+    ///
+    /// ⚠️ **The doc on `add_summary_argument` used to argue against enforcing this**, on the grounds
+    /// that a rejection does not end the turn and so pushes a forgetful model towards the forced
+    /// `wait`. What settled it was measuring the cost on the deployed run: of 2427 decisions only 98
+    /// carried no summary and **all 98 were `wait`** — the *synthesised* fallback wait, which never
+    /// goes through `classify` at all. The model already fills it in on every real action, so the
+    /// rule costs that model nothing and closes the hole for the one that would not.
+    #[test]
+    fn a_terminal_call_must_say_what_it_is_doing() {
+        for (kind, name, arguments) in [
+            (DecisionKind::Overworld, "choose_action", r#"{"id":"PalletTown:5,6:Warp"}"#),
+            (DecisionKind::Battle, "choose_battle_action", r#"{"id":"fight:Tackle"}"#),
+            (DecisionKind::Nickname, "set_nickname", r#"{"name":"Bubbles"}"#),
+            (DecisionKind::MartPurchase, "buy_item", "{}"),
+            (DecisionKind::ForgetMove, "forget_move", r#"{"slot":1}"#),
+            (DecisionKind::Overworld, "wait", r#"{"ticks":5}"#),
+        ] {
+            let CallKind::Rejected(complaint) = classify(kind, &bare(name, arguments)) else {
+                panic!("{name} on a {kind:?} turn must be made to say what it is doing");
+            };
+            assert!(complaint.contains("summary") && complaint.contains(name), "{complaint}");
+            // …and the same call *with* one goes through, so the rule is the only thing being tested.
+            assert!(
+                matches!(classify(kind, &call(name, arguments)), CallKind::Terminal(_)),
+                "{name} with a summary is fine",
+            );
+        }
+    }
+
+    /// The tool that replaced the escape hatch on every turn that has a menu.
+    ///
+    /// ⚠️ **It must not end the turn**, and that is the whole design rather than an implementation
+    /// detail: `press_buttons` was reached for on ordinary turns because it was the one way to
+    /// finish a turn without choosing from the menu, so a terminal replacement would be the same
+    /// tool under a new name. The model files the complaint and still has to decide.
+    #[test]
+    fn an_issue_report_does_not_end_the_turn_and_must_carry_a_message() {
+        for kind in [DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::Stuck] {
+            assert!(offers_issue_report(kind));
+            assert!(names(kind).contains(&REPORT_ISSUE), "{kind:?} offers it");
+            assert!(
+                !terminal_names(kind).contains(&REPORT_ISSUE),
+                "{kind:?} must not let a turn end on it",
+            );
+            assert!(non_terminal_names(kind).contains(&REPORT_ISSUE), "the contract names it");
+
+            let good = bare(REPORT_ISSUE, r#"{"message":"  the ladder is not in the menu  "}"#);
+            let CallKind::Issue(message) = classify(kind, &good) else {
+                panic!("{kind:?} should file it");
+            };
+            assert_eq!(message, "the ladder is not in the menu", "trimmed, like every other string");
+
+            // ⚠️ Enforced, unlike `summary` used to be: a report is *only* its message.
+            for arguments in ["{}", r#"{"message":"   "}"#] {
+                let CallKind::Rejected(complaint) = classify(kind, &bare(REPORT_ISSUE, arguments))
+                else {
+                    panic!("an empty report is not a report: {arguments}");
+                };
+                assert!(complaint.contains("message"), "{complaint}");
+            }
+        }
+
+        // The single-question prompts have nothing for the agent to get wrong, so they do not carry
+        // it — and a call there is named and explained rather than falling through to "no such tool".
+        for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove] {
+            assert!(!offers_issue_report(kind));
+            assert!(!names(kind).contains(&REPORT_ISSUE), "{kind:?} does not offer it");
+            let call = bare(REPORT_ISSUE, r#"{"message":"x"}"#);
+            let CallKind::Rejected(complaint) = classify(kind, &call) else {
+                panic!("{kind:?} does not offer it and must say so");
+            };
+            assert!(complaint.contains(REPORT_ISSUE), "{complaint}");
+        }
     }
 
     /// §7.5's first line of defence: the model cannot end a turn the wrong way because the wrong way
@@ -1735,17 +1996,23 @@ mod tests {
         // cannot carry out.
         for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove] {
             let offered = names(kind);
-            for elsewhere in ["choose_action", "choose_battle_action", "use_field_move", "press_buttons"] {
+            for elsewhere in
+                ["choose_action", "choose_battle_action", "use_field_move", "press_buttons", REPORT_ISSUE]
+            {
                 assert!(!offered.contains(&elsewhere), "{kind:?} must not offer {elsewhere}");
             }
         }
         assert!(names(DecisionKind::Nickname).contains(&"set_nickname"));
         assert!(names(DecisionKind::MartPurchase).contains(&"buy_item"));
         assert!(names(DecisionKind::ForgetMove).contains(&"forget_move"));
-        // `press_buttons` is the escape hatch for a game the action menu does not describe, which is
-        // the overworld and a battle — not a menu whose one question is already on offer.
-        assert!(names(DecisionKind::Overworld).contains(&"press_buttons"));
-        assert!(names(DecisionKind::Battle).contains(&"press_buttons"));
+        // ⚠️ **`press_buttons` is not offered on a turn that has a menu at all**, which is the
+        // change the deployed run bought: 738 of its 749 presses were overworld turns with a
+        // perfectly good menu, and 91 of them were consecutive. What is offered instead is
+        // `report_issue`, which says the menu is wrong *and leaves the model having to choose*.
+        for kind in [DecisionKind::Overworld, DecisionKind::Battle] {
+            assert!(!names(kind).contains(&"press_buttons"), "{kind:?} must not offer the hatch");
+            assert!(names(kind).contains(&REPORT_ISSUE), "{kind:?} offers the replacement");
+        }
 
         // **W9.** The watchdog's turn is the one where `press_buttons` is not a last resort but the
         // only resort: there is no menu, because the agent is not offering one. Anything else on
@@ -1775,8 +2042,12 @@ mod tests {
             }
             assert_eq!(
                 offered.len(),
-                reads_for(kind).count() + TODO_TOOL_NAMES.len() + terminal_names(kind).len(),
-                "a turn is offered its own reads, W6b's TODO tools, and its own terminal tools",
+                reads_for(kind).count()
+                    + TODO_TOOL_NAMES.len()
+                    + usize::from(offers_issue_report(kind))
+                    + terminal_names(kind).len(),
+                "a turn is offered its own reads, the TODO tools, `report_issue` where it applies, \
+                 and its own terminal tools",
             );
         }
     }
@@ -1916,28 +2187,33 @@ mod tests {
 
     /// The escape hatch has to reject what it cannot press rather than silently drop it — a queue
     /// that is one button short walks the player somewhere nobody asked for.
+    ///
+    /// ⚠️ **`Stuck` throughout, because that is the only kind that offers the tool now.** Written
+    /// against `Overworld`, every case below would pass for the wrong reason: rejected because the
+    /// turn has a menu, never reaching the argument parsing this is about.
     #[test]
     fn press_buttons_parses_a_sequence_and_refuses_what_is_not_one() {
+        let press = |arguments: &str| call("press_buttons", arguments);
         let CallKind::Terminal(Terminal::PressButtons { buttons }) = classify(
-            DecisionKind::Overworld,
-            &call("press_buttons", r#"{"buttons":["b","b","start"]}"#),
+            DecisionKind::Stuck,
+            &press(r#"{"buttons":["b","b","start"],"why":"a menu nothing closes"}"#),
         ) else {
             panic!("a list of real buttons is a decision");
         };
         assert_eq!(buttons, [JoypadButton::B, JoypadButton::B, JoypadButton::Start]);
 
-        for bad in [r#"{"buttons":["b","x"]}"#, r#"{"buttons":[]}"#, "{}"] {
+        for bad in [r#"{"buttons":["b","x"],"why":"w"}"#, r#"{"buttons":[],"why":"w"}"#, r#"{"why":"w"}"#] {
             assert!(
-                matches!(classify(DecisionKind::Overworld, &call("press_buttons", bad)), CallKind::Rejected(_)),
+                matches!(classify(DecisionKind::Stuck, &press(bad)), CallKind::Rejected(_)),
                 "{bad} should have been rejected",
             );
         }
         // …and the agent's own cap is the cap here, so a runaway list is trimmed rather than
         // half-delivered by a queue that silently stops accepting.
-        let many = format!(r#"{{"buttons":{}}}"#,
+        let many = format!(r#"{{"buttons":{},"why":"a menu nothing closes"}}"#,
             serde_json::to_string(&vec!["a"; MANUAL_INPUT_CAPACITY * 2]).unwrap());
         let CallKind::Terminal(Terminal::PressButtons { buttons }) =
-            classify(DecisionKind::Overworld, &call("press_buttons", &many))
+            classify(DecisionKind::Stuck, &press(&many))
         else {
             panic!("an over-long list is still a decision");
         };

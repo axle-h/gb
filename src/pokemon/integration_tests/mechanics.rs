@@ -20,7 +20,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
         fixture.step();
         for event in fixture.agent.drain_events() {
             match &event {
-                AgentEvent::OverworldActionAborted { destination, reason }
+                AgentEvent::OverworldActionAborted { destination, reason, .. }
                     if *destination == MetaTile::Grass
                     && *reason == OverworldActionAbortedReason::Script =>
                 {
@@ -81,6 +81,7 @@ fn talking_to_a_sprite_is_a_success_not_an_abort() {
                 AgentEvent::OverworldActionAborted {
                     destination: MetaTile::Sprite(_) | MetaTile::Pc,
                     reason: OverworldActionAbortedReason::Textbox,
+                    ..
                 } => interrupted.push(event),
                 _ => {}
             }
@@ -120,9 +121,12 @@ fn a_script_that_interrupts_a_walk_is_still_an_abort() {
         }
     };
 
+    // ⚠️ **The square is part of the sentence now**, and it is the rival's script cutting the walk
+    // short two tiles from the aide — so this is also the case that shows the coordinate is where
+    // the walk *stopped* rather than where it was headed.
     assert_eq!(
         format!("{outcome}"),
-        "✗ gave up on Scientist 1: it was interrupted",
+        "✗ gave up on Scientist 1 at (5, 6): it was interrupted",
         "the aide was never reached, so this is the abort it always was; got {outcome:?}",
     );
 }

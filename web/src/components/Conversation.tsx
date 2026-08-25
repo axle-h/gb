@@ -314,6 +314,13 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
       const buttons = Array.isArray(args.buttons) ? args.buttons.join(', ') : undefined;
       return buttons ? `Pressed ${buttons}` : 'Pressed buttons';
     }
+    // The model reporting that the *agent* is wrong. The message is the row rather than a label
+    // above it: unlike every other tool here this one is written to be read by a person, and it is
+    // filed to disk whether or not anyone opens the row.
+    case 'report_issue': {
+      const message = text('message');
+      return message ? `Reported: ${message}` : 'Reported a problem with the agent';
+    }
     case 'set_nickname': {
       const name = text('name');
       // Omitting the argument is the ordinary answer here, not a missing one.

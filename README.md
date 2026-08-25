@@ -133,16 +133,30 @@ is a column of bare JSON saying what it did and never once why, which is a good 
 same building four times. It rides on the terminal call's arguments, so it costs no extra round trip
 and lands in the history by itself. It is also the line the page leads the decision with.
 
-One tool is deliberately hard to reach for. `press_buttons` presses the joypad directly, going round
-the agent's whole state machine, and it exists only because the action menu is a *model* of the game
-rather than the game — somewhere that model is incomplete, a raw button is the only way through. A
-model that reaches for it instead of choosing an action walks the player into a wall, and saying "a
-last resort" in the description turned out not to be enough. So it takes a required `why` naming the
-action that was looked for and could not be found, and every use of it writes a directory:
-`press-buttons/turn-<id>/`, holding that reason, the screen at the moment of the press, and the last
-three turns of conversation with the pictures taken out. Prose the model is asked to believe cannot
-be checked afterwards; a directory of presses can. The watchdog's turn is the exception and is
-recorded as one: there is no menu there, so a press is the right answer and the record says so.
+The action menu is a *model* of the game rather than the game, so sometimes it is wrong — and the
+model needs somewhere to put that. For a long time the answer was `press_buttons`, which presses the
+joypad directly, going round the agent's whole state machine. It did not work. A deployed run made
+749 presses of which 738 were ordinary overworld turns that had a perfectly good menu, ending in 91
+turns in a row spent walking into a ledge on Route 3 while the connection into Pewter City sat in the
+menu the whole time. Neither "a last resort" in the description nor a required `why` moved that
+number: three quarters of the presses left the `why` empty, because a field the schema calls required
+and the parser lets through is a field a weak model omits. Nothing had actually failed, either — the
+last menu action before that run worked, and no action id was ever rejected in the entire run. A
+model reads its own recent turns back on every request, so once it presses twice it keeps pressing.
+
+So on any turn that has a menu the tool is simply not offered, and `report_issue` is there instead.
+It takes a message — what you tried, what you expected, what happened — and **it does not end the
+turn**: the model files the complaint and then still has to choose an action. That is the whole
+design, because the reason the escape hatch was over-used is that it was the one way to finish a turn
+without choosing, and a terminal replacement would be the same tool under a new name. Every report
+writes `issues/turn-<id>/`: the message, the screen, a save state taken at the moment the turn was
+put to the model, and the last three turns of conversation with the pictures taken out. Reporting a
+problem and playing on stopped being alternatives.
+
+`press_buttons` survives on exactly one turn — the watchdog's, where the agent has reached no
+decision point at all, there is no menu to prefer, and a raw button really is the only way out. There
+its `why` is enforced rather than merely requested. Prose the model is asked to believe cannot be
+checked afterwards; a directory of presses can.
 
 `read_map` answers with a **picture**, not a description: the whole map the player is standing on,
 drawn from the cartridge's own tile graphics, with every NPC where they are standing and facing where
@@ -181,7 +195,8 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
 | `todo.json` | the model's own plan — the one thing it writes that outlives its conversation |
-| `press-buttons/` | one directory per use of the escape hatch: why, the screen, and the conversation |
+| `issues/` | one directory per `report_issue`: the message, the screen, a save state, the conversation |
+| `press-buttons/` | the same, for the watchdog turn's escape hatch: why, and what was pressed |
 
 Copy that directory and the run moves with it. `gb` checkpoints periodically and on the way out —
 Ctrl-C and SIGTERM both — so a restart, a rollout or a reboot resumes rather than starts over.

@@ -87,9 +87,12 @@ How the interface works:
 - Not everything is walking. `use_field_move` covers cutting a tree you are facing, using Strength \
   or Flash or Dig from the party menu, flying, teaching an HM, using an item on something, pushing a \
   boulder, and pressing A at a tile to find what is hidden there.
-- `press_buttons` presses the joypad yourself, and it is an **escape hatch rather than a shortcut**: \
-  it pre-empts the agent, every use of it is recorded and read afterwards, and a turn that had an \
-  action menu almost never needed it. Reach for it only where no action describes the game at all.
+- **The agent can be wrong, and `report_issue` is how you say so.** If the action menu does not \
+  describe what is in front of you, or an action keeps failing for a reason you cannot see, file \
+  one: what you were trying to do, what you expected, what happened instead. A developer reads \
+  these, and the screen and a save state are filed with it. ⚠️ It does **not** end your turn and \
+  nothing changes now — so having filed it, carry on and try a different way. Reporting a problem \
+  and playing on are not alternatives.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
   everything not in that summary is gone. Your plan — `todo_set` and `todo_complete`, shown to you \
   every turn under 'Your plan' — is what survives that, and a restart of the program as well. It is \
@@ -479,6 +482,7 @@ mod tests {
             AgentEvent::OverworldActionAborted {
                 destination: MetaTile::Warp { to_map: crate::pokemon::map::Map::CeladonGym, to_position: crate::geometry::Point8 { x: 4, y: 17 } },
                 reason: OverworldActionAbortedReason::Textbox,
+                at: Some(crate::geometry::Point8 { x: 8, y: 19 }),
             },
         ]
         .iter()
@@ -699,6 +703,7 @@ mod tests {
         let events = [describe_event(&AgentEvent::OverworldActionAborted {
             destination: MetaTile::Grass,
             reason: OverworldActionAbortedReason::NoRoute(MetaTile::Grass),
+            at: None,
         })];
         assert!(summarise_events(&events)[0].contains("no route"), "{:?}", summarise_events(&events));
     }
