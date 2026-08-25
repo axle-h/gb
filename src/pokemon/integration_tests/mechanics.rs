@@ -1466,3 +1466,113 @@ fn a_menu_left_open_is_closed_rather_than_confirmed() {
     assert!(closed, "the agent should have left the START menu rather than pressing A into it");
 }
 
+
+/// **A battle turn is put to the policy once, at the main battle menu — not again while the move
+/// list it opened is still on screen.**
+///
+/// ⚠️ **The screen the agent reads lags the game's own tilemap, and the two thirds of it can
+/// disagree.** `AutoBgMapTransfer` (`home/vcopy.asm`) copies `wTileMap` into VRAM one third per
+/// V-blank, so for a frame or two after `MoveSelectionMenu` has drawn the move list — and written
+/// `wTopMenuItemX/Y` = (5, 12) to say so — the bottom third still holds `FIGHT`/`PKMN`/`ITEM`/`RUN`.
+/// `WaitingForMenu`'s text test read that stale third, concluded the main menu was back and handed
+/// the turn to the policy, **abandoning the move chosen one tick earlier**.
+///
+/// It cost a paid LLM turn per battle turn on the deployed run: `choose_battle_action fight:Tackle`,
+/// then 1.1 s later — the `Navigating` and `AwaitingPolicy` delays back to back — a second battle
+/// turn with the move menu open, which the model quite reasonably answered `wait`.
+///
+/// ⚠️ **Two latencies, because it is a race the policy's own speed moves.** An instant policy
+/// answers on the tick it is asked and lands in a different place relative to the transfer than one
+/// that takes a second and a half; the first version of this reproduced at one and not the other.
+/// ⚠️ **And the enemy's HP is half the test**: counting polls alone passes if the agent stops
+/// fighting altogether, so what is asserted is one poll *per landed move*.
+#[test]
+fn a_battle_turn_is_decided_once_rather_than_twice() {
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::policy::Policy;
+    use crate::pokemon::world_graph::WorldGraph;
+    use std::sync::{Arc, Mutex};
+
+    /// Where the game was every time the policy was asked for a battle action.
+    #[derive(Default)]
+    struct Log {
+        /// The `battle_menu_state()` at each decision point, as prose.
+        asked_at: Vec<String>,
+        enemy_hp: Vec<u16>,
+        menu: String,
+    }
+
+    /// Always the first move, with an LLM's latency bolted on. `service_tools` runs on the same tick
+    /// immediately before `pick_battle_action` (see `PokemonAgent::poll_policy`), which is the only
+    /// way to read the screen from a policy.
+    struct Probe { latency: u32, remaining: Option<u32>, log: Arc<Mutex<Log>> }
+
+    impl Policy for Probe {
+        fn name(&self) -> &'static str { "scripted" }
+
+        fn service_tools(&mut self, _: &GameState, api: &mut PokemonApi<'_>, _: &WorldGraph) {
+            self.log.lock().expect("the log is never poisoned").menu =
+                format!("{:?}", api.menu_state().and_then(|m| m.battle_menu_state()));
+        }
+
+        fn pick_overworld_action(&mut self, _: &GameState, _: &WorldGraph) -> Option<OverworldAction> { None }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            match self.remaining {
+                // The poll that opens a turn: record what the agent thinks is on screen.
+                None => {
+                    self.remaining = Some(self.latency);
+                    let mut log = self.log.lock().expect("the log is never poisoned");
+                    let menu = log.menu.clone();
+                    log.asked_at.push(menu);
+                    log.enemy_hp.push(state.battle.as_ref().map_or(0, |b| b.enemy.current_hp));
+                    None
+                }
+                Some(0) => {
+                    self.remaining = None;
+                    state.battle.as_ref().and_then(|b| b.player.moves[0])
+                        .map(|battle_move| BattleAction::Fight { slot: 0, battle_move })
+                }
+                Some(n) => { self.remaining = Some(n - 1); None }
+            }
+        }
+    }
+
+    // 20 ms a tick: an instant answer and a second and a half, which is what the deployed run took.
+    for latency in [1u32, 75] {
+        let log = Arc::new(Mutex::new(Log::default()));
+        let policy = Probe { latency, remaining: None, log: Arc::clone(&log) };
+        let mut fixture = TestFixture::with_policy(
+            BATTLE_STATE, Duration::from_secs(120), Box::new(policy));
+
+        let mut ticks = 0;
+        while fixture.total_cycles < fixture.max_cycles {
+            ticks += 1;
+            fixture.step();
+            // The fixture opens mid-battle; stop once it is over rather than wandering the overworld.
+            if ticks > 50 && fixture.try_game_state().map_or(true, |s| s.battle.is_none()) {
+                break;
+            }
+        }
+
+        let log = log.lock().expect("the log is never poisoned");
+        let off_menu: Vec<_> = log.asked_at.iter()
+            .filter(|menu| menu.as_str() != "Some(Fight)").collect();
+        assert!(off_menu.is_empty(),
+                "at {latency} ticks of latency the policy was asked for a battle action somewhere \
+                 other than the main battle menu: {off_menu:?} (all decision points: {:?})",
+                log.asked_at);
+
+        // The enemy loses HP on every landed move, so a decision point that changed nothing is a
+        // turn the agent asked for and threw away.
+        let landed = log.enemy_hp.windows(2).filter(|w| w[1] < w[0]).count();
+        assert!(log.asked_at.len() <= landed + 1,
+                "at {latency} ticks of latency the policy was asked {} times to land {landed} \
+                 moves; enemy HP at each decision point was {:?}",
+                log.asked_at.len(), log.enemy_hp);
+        assert!(landed >= 2,
+                "at {latency} ticks of latency nothing landed, so this run asserts nothing: \
+                 enemy HP at each decision point was {:?}", log.enemy_hp);
+    }
+}

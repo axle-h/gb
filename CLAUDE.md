@@ -175,6 +175,37 @@ and never enters those drivers, while the leg chain and `full_playthrough` reach
 Pokédex. Pre-Pokédex, they are reachable by an LLM policy and nothing else — which is the general
 lesson, not a fact about this menu.
 
+⚠️ **The screen the agent reads lags the game's own tilemap, and its three horizontal bands can
+disagree with each other.** `AutoBgMapTransfer` (`pokered/home/vcopy.asm`) copies `wTileMap` into VRAM
+**one third of the screen per V-blank**, rotating top, middle, bottom, so a menu the game has already
+drawn takes up to three frames (~50 ms, two and a half agent ticks) to appear and the band it
+replaces is still showing the old one meanwhile. RAM is therefore *ahead* of the screen at every
+menu transition, and `wTopMenuItemX/Y` — written by whoever is about to call `HandleMenuInput` — is
+the authority on which menu is live.
+
+⚠️ **That cost a paid LLM turn per battle turn for months.** `WaitingForMenu` resolves the main
+battle menu from the text (`FIGHT` … `RUN`) as well as from geometry, because after an item turn the
+geometry is genuinely ambiguous. But the move list is drawn at `hlcoord 4, 12` over the battle menu's
+own box, so for a frame or two after `MoveSelectionMenu` writes `(5, 12)` the bottom band still reads
+`FIGHT PKMN ITEM RUN` — and the test fired, concluded the turn was the policy's again, and **threw
+away the move `Navigating` had just highlighted**. The deployed run shows it as
+`choose_battle_action fight:Tackle` followed **1.099 s** later (the `Navigating` and `AwaitingPolicy`
+delays back to back, 500 ms each) by a second battle turn with the move menu open, which the model
+sensibly answered `wait`; then the same move again. `BattleState::confirming` is the fix — a bounded
+window after `Navigating` hands over in which the geometry is believed and the text test is skipped —
+and `mechanics::a_battle_turn_is_decided_once_rather_than_twice` is the guard, at two policy
+latencies because it is a race the policy's own speed moves. ⚠️ **Counting decision points is not
+enough**: that passes if the agent stops fighting, so the test asserts one poll *per landed move*,
+which it reads off the enemy's HP.
+
+⚠️ **It re-timed the battles, exactly as `with_original_battle_timing` warns, and `can_reach_lavender`
+was the casualty** — a leg whose own ⚠️ already said it is pinned to one RNG line. It ran Razor Leaf
+dry crossing Rock Tunnel and its scripted policy cannot recover from that; it failed at *every*
+window length, so it is the shift and not the number. `back-in-cerulean.bin` was regenerated
+(`can_return_to_cerulean` under `--features regen-fixtures`) and the whole chain is green from it —
+one fixture, not the cascade, because `at-lavender.bin` was left alone and every downstream leg still
+passes from it.
+
 ⚠️ **`impl Display for AgentEvent` is a UI contract, not debugging output.** `host.rs` does
 `format!("{event}")` straight into `UiEventBody::Agent { text }` and the page prints it verbatim, so
 a `{:?}` in there puts `Fight { slot: 1, battle_move: PokemonMove { name: Growl, pp: 40 } }` on
