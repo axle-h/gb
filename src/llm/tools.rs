@@ -964,13 +964,55 @@ pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
 
 // ── Classification ───────────────────────────────────────────────────────────────────────────────
 
+/// The complaint to make when the model chose an id this turn never offered, or `None` when it did.
+///
+/// ⚠️ **This is a *rejection*, not a terminal call, and that is the whole saving.** An id the menu
+/// does not carry cannot resolve, so the alternative is a decision that is accepted here, published
+/// as a `Decision`, sent to the policy, and refused by `resolve_overworld` — a turn paid for in full
+/// that moves nothing. Caught here it costs one more completion inside the same turn, and the model
+/// still gets to act. The deployed run spent **59 of 934 `choose_action` decisions** this way, every
+/// one of them an id whose map was a map the player had already left.
+///
+/// ⚠️ **`resolve_overworld` stays the authority and this does not replace it.** The menu is minted
+/// when the turn is built and re-minted when the answer lands; this catches what the model was never
+/// *offered*, and that one still catches what stopped being true in between.
+///
+/// ⚠️ **An empty menu checks nothing.** `Nickname`, `ForgetMove` and `Stuck` have no menu at all, and
+/// a check that treated "no menu" as "nothing is allowed" would reject every answer they give.
+fn not_on_the_menu(id: &str, menu: &[String]) -> Option<String> {
+    if menu.is_empty() || menu.iter().any(|offered| offered == id) {
+        return None;
+    }
+    // ⚠️ Every overworld id is `{map}:{x},{y}:{kind}`, so the menu already names the map the player
+    // is on and nothing has to carry it here separately — which is also what stops the complaint and
+    // the situation disagreeing about where the player is. A battle menu's ids have no prefix, and
+    // then this says nothing about maps at all: a battle id going stale is a different mistake.
+    let here = menu[0].contains(':').then(|| menu[0].split(':').next()).flatten();
+    let elsewhere = match (here, id.split_once(':')) {
+        (Some(here), Some((named, _))) if named != here => format!(
+            " That id is for `{named}` and you are in `{here}`; ids are minted for the map you are \
+             standing on, so one you read on an earlier turn never resolves."
+        ),
+        _ => String::new(),
+    };
+    Some(format!(
+        "`{id}` is not one of this turn's actions.{elsewhere} The ids that work are the ones in the \
+         list you were given: {}. Pick one of those.",
+        menu.iter().map(|offered| format!("`{offered}`")).collect::<Vec<_>>().join(", "),
+    ))
+}
+
 /// Decide what a call is, without touching the game.
 ///
 /// Everything recoverable becomes [`CallKind::Rejected`] carrying a sentence for the model, rather
 /// than an error that ends the turn: a model that reaches for `choose_action` in a battle should be
 /// told the battle menu is over there, not have its turn silently discarded.
-pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
-    match classify_call(kind, call) {
+///
+/// `menu` is the list of ids the turn's situation offered, in the order it offered them — see
+/// [`not_on_the_menu`]. Empty means "this kind has no menu", which is the three single-question
+/// prompts and W9's `Stuck`, and then nothing is checked against it.
+pub fn classify(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKind {
+    match classify_call(kind, call, menu) {
         // ⚠️ **`summary` is now enforced, and the old doc argued it should not be.** That argument
         // was that a rejection does not end the turn — it spends another `GB_MAX_TOOL_STEPS` and
         // pushes a forgetful model towards the forced `wait`. What settled it is that the cost was
@@ -988,7 +1030,7 @@ pub fn classify(kind: DecisionKind, call: &ToolCall) -> CallKind {
     }
 }
 
-fn classify_call(kind: DecisionKind, call: &ToolCall) -> CallKind {
+fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKind {
     let name = call.function.name.as_str();
     // ⚠️ A read that exists but is not offered in *this* kind is answered like a terminal tool from
     // the wrong kind: named, with the reason. Falling through to "there is no tool called
@@ -1043,11 +1085,17 @@ fn classify_call(kind: DecisionKind, call: &ToolCall) -> CallKind {
 
     match name {
         "choose_action" if kind == DecisionKind::Overworld => match string_argument(&arguments, "id") {
-            Ok(id) => CallKind::Terminal(Terminal::ChooseAction { id }),
+            Ok(id) => match not_on_the_menu(&id, menu) {
+                None => CallKind::Terminal(Terminal::ChooseAction { id }),
+                Some(complaint) => CallKind::Rejected(complaint),
+            },
             Err(complaint) => CallKind::Rejected(complaint),
         },
         "choose_battle_action" if kind == DecisionKind::Battle => match string_argument(&arguments, "id") {
-            Ok(id) => CallKind::Terminal(Terminal::ChooseBattleAction { id }),
+            Ok(id) => match not_on_the_menu(&id, menu) {
+                None => CallKind::Terminal(Terminal::ChooseBattleAction { id }),
+                Some(complaint) => CallKind::Rejected(complaint),
+            },
             Err(complaint) => CallKind::Rejected(complaint),
         },
         "use_field_move" if kind == DecisionKind::Overworld => match field_move_arguments(&arguments) {
@@ -1882,7 +1930,7 @@ mod tests {
         );
 
         assert!(matches!(
-            classify(DecisionKind::Stuck, &press(r#"{"buttons":["a"], "why": "a stuck text box"}"#)),
+            classify(DecisionKind::Stuck, &press(r#"{"buttons":["a"], "why": "a stuck text box"}"#), &[]),
             CallKind::Terminal(Terminal::PressButtons { .. }),
         ));
         // ⚠️ **Refused now, where it used to be carried out anyway.** The old trade — ask in the
@@ -1891,7 +1939,7 @@ mod tests {
         // left `why` null**. A field that is optional in practice is a field a weak model omits,
         // and the record it was meant to make readable was three quarters blank.
         for arguments in [r#"{"buttons":["a"]}"#, r#"{"buttons":["a"], "why": " "}"#] {
-            let CallKind::Rejected(complaint) = classify(DecisionKind::Stuck, &press(arguments)) else {
+            let CallKind::Rejected(complaint) = classify(DecisionKind::Stuck, &press(arguments), &[]) else {
                 panic!("a press with nothing to say is refused: {arguments}");
             };
             assert!(complaint.contains("why"), "{complaint}");
@@ -1921,13 +1969,13 @@ mod tests {
             (DecisionKind::ForgetMove, "forget_move", r#"{"slot":1}"#),
             (DecisionKind::Overworld, "wait", r#"{"ticks":5}"#),
         ] {
-            let CallKind::Rejected(complaint) = classify(kind, &bare(name, arguments)) else {
+            let CallKind::Rejected(complaint) = classify(kind, &bare(name, arguments), &[]) else {
                 panic!("{name} on a {kind:?} turn must be made to say what it is doing");
             };
             assert!(complaint.contains("summary") && complaint.contains(name), "{complaint}");
             // …and the same call *with* one goes through, so the rule is the only thing being tested.
             assert!(
-                matches!(classify(kind, &call(name, arguments)), CallKind::Terminal(_)),
+                matches!(classify(kind, &call(name, arguments), &[]), CallKind::Terminal(_)),
                 "{name} with a summary is fine",
             );
         }
@@ -1951,14 +1999,14 @@ mod tests {
             assert!(non_terminal_names(kind).contains(&REPORT_ISSUE), "the contract names it");
 
             let good = bare(REPORT_ISSUE, r#"{"message":"  the ladder is not in the menu  "}"#);
-            let CallKind::Issue(message) = classify(kind, &good) else {
+            let CallKind::Issue(message) = classify(kind, &good, &[]) else {
                 panic!("{kind:?} should file it");
             };
             assert_eq!(message, "the ladder is not in the menu", "trimmed, like every other string");
 
             // ⚠️ Enforced, unlike `summary` used to be: a report is *only* its message.
             for arguments in ["{}", r#"{"message":"   "}"#] {
-                let CallKind::Rejected(complaint) = classify(kind, &bare(REPORT_ISSUE, arguments))
+                let CallKind::Rejected(complaint) = classify(kind, &bare(REPORT_ISSUE, arguments), &[])
                 else {
                     panic!("an empty report is not a report: {arguments}");
                 };
@@ -1972,7 +2020,7 @@ mod tests {
             assert!(!offers_issue_report(kind));
             assert!(!names(kind).contains(&REPORT_ISSUE), "{kind:?} does not offer it");
             let call = bare(REPORT_ISSUE, r#"{"message":"x"}"#);
-            let CallKind::Rejected(complaint) = classify(kind, &call) else {
+            let CallKind::Rejected(complaint) = classify(kind, &call, &[]) else {
                 panic!("{kind:?} does not offer it and must say so");
             };
             assert!(complaint.contains(REPORT_ISSUE), "{complaint}");
@@ -2080,11 +2128,11 @@ mod tests {
 
         // ⚠️ A read that exists but is not offered *here* is told which turn it belongs to. Falling
         // through to "there is no tool called `read_map`" would be a lie the model cannot act on.
-        let rejected = classify(DecisionKind::Battle, &call("read_map", "{}"));
+        let rejected = classify(DecisionKind::Battle, &call("read_map", "{}"), &[]);
         let CallKind::Rejected(complaint) = rejected else { panic!("read_map is not a battle read") };
         assert!(complaint.contains("not available in a battle turn"), "{complaint}");
         assert!(complaint.contains("read_battle"), "it has to name what *is* here: {complaint}");
-        assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", "{}")), CallKind::Read));
+        assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", "{}"), &[]), CallKind::Read));
     }
 
     /// Every schema must be a JSON Schema object with the properties it claims — a malformed one is
@@ -2111,13 +2159,13 @@ mod tests {
     #[test]
     fn a_terminal_tool_from_the_wrong_kind_is_rejected_with_the_right_one() {
         let CallKind::Rejected(complaint) =
-            classify(DecisionKind::Battle, &call("choose_action", r#"{"id":"x"}"#))
+            classify(DecisionKind::Battle, &call("choose_action", r#"{"id":"x"}"#), &[])
         else {
             panic!("choose_action must not end a battle turn");
         };
         assert!(complaint.contains("choose_battle_action"), "{complaint}");
 
-        let CallKind::Rejected(complaint) = classify(DecisionKind::Overworld, &call("teleport", "{}")) else {
+        let CallKind::Rejected(complaint) = classify(DecisionKind::Overworld, &call("teleport", "{}"), &[]) else {
             panic!("an invented tool is rejected");
         };
         assert!(complaint.contains("teleport") && complaint.contains("read_map"), "{complaint}");
@@ -2126,29 +2174,29 @@ mod tests {
     #[test]
     fn arguments_are_parsed_or_complained_about() {
         assert!(matches!(
-            classify(DecisionKind::Overworld, &call("choose_action", r#"{"id":"PalletTown:5,6:Warp"}"#)),
+            classify(DecisionKind::Overworld, &call("choose_action", r#"{"id":"PalletTown:5,6:Warp"}"#), &[]),
             CallKind::Terminal(Terminal::ChooseAction { ref id }) if id == "PalletTown:5,6:Warp",
         ));
         assert!(matches!(
-            classify(DecisionKind::Battle, &call("wait", r#"{"ticks":25}"#)),
+            classify(DecisionKind::Battle, &call("wait", r#"{"ticks":25}"#), &[]),
             CallKind::Terminal(Terminal::Wait { ticks: 25 }),
         ));
         // A model asking to sit out ten minutes of game time is stalling its own run.
         assert!(matches!(
-            classify(DecisionKind::Battle, &call("wait", r#"{"ticks":99999}"#)),
+            classify(DecisionKind::Battle, &call("wait", r#"{"ticks":99999}"#), &[]),
             CallKind::Terminal(Terminal::Wait { ticks: MAX_WAIT_TICKS }),
         ));
-        assert!(matches!(classify(DecisionKind::Overworld, &call("wait", "{}")), CallKind::Rejected(_)));
+        assert!(matches!(classify(DecisionKind::Overworld, &call("wait", "{}"), &[]), CallKind::Rejected(_)));
         assert!(matches!(
-            classify(DecisionKind::Overworld, &call("choose_action", r#"{"id":""}"#)),
+            classify(DecisionKind::Overworld, &call("choose_action", r#"{"id":""}"#), &[]),
             CallKind::Rejected(_),
         ));
         assert!(matches!(
-            classify(DecisionKind::Overworld, &call("choose_action", "not json at all")),
+            classify(DecisionKind::Overworld, &call("choose_action", "not json at all"), &[]),
             CallKind::Rejected(_),
         ));
         // A zero-parameter read tool is routinely called with empty arguments rather than `{}`.
-        assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", "")), CallKind::Read));
+        assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", ""), &[]), CallKind::Read));
     }
 
     /// A battle id must survive the thing that changes most often about a battle action: its PP,
@@ -2191,12 +2239,56 @@ mod tests {
     /// ⚠️ **`Stuck` throughout, because that is the only kind that offers the tool now.** Written
     /// against `Overworld`, every case below would pass for the wrong reason: rejected because the
     /// turn has a menu, never reaching the argument parsing this is about.
+    /// **The 59.** The deployed run chose `ViridianCity:33,8:Warp` while standing in
+    /// `ViridianPokecenter` — an id it had read several turns earlier — 59 times in 934
+    /// `choose_action` decisions. Every one was accepted here, published as a decision, and refused
+    /// by `resolve_overworld` a thread later, which is a whole turn paid for and nothing moved.
+    #[test]
+    fn an_id_the_turn_never_offered_is_refused_before_it_costs_the_turn() {
+        let menu = [
+            "ViridianPokecenter:3,7:Warp".to_string(),
+            "ViridianPokecenter:5,3:Nurse".to_string(),
+        ];
+        let chose = |id: &str| call("choose_action", &format!(r#"{{"id":"{id}","summary":"s"}}"#));
+
+        assert!(
+            matches!(
+                classify(DecisionKind::Overworld, &chose("ViridianPokecenter:3,7:Warp"), &menu),
+                CallKind::Terminal(Terminal::ChooseAction { .. }),
+            ),
+            "an id from this turn's own menu is the decision it always was",
+        );
+
+        let CallKind::Rejected(complaint) =
+            classify(DecisionKind::Overworld, &chose("ViridianCity:33,8:Warp"), &menu)
+        else {
+            panic!("an id for a map the player is not on can never resolve");
+        };
+        // ⚠️ The complaint has to name the *right* mistake. "The game moved on" — which is what the
+        // policy used to say — sends the model back to try the same id again.
+        assert!(complaint.contains("ViridianCity") && complaint.contains("ViridianPokecenter"),
+                "it must say which map the id is for and which map the player is on; got {complaint}");
+        assert!(complaint.contains("ViridianPokecenter:3,7:Warp"),
+                "and it must repeat what can be chosen instead; got {complaint}");
+
+        // ⚠️ An empty menu checks nothing: `Nickname`, `ForgetMove` and `Stuck` have no menu, and a
+        // check that read that as "nothing is allowed" would reject every answer they give.
+        assert!(
+            matches!(
+                classify(DecisionKind::Overworld, &chose("anything at all"), &[]),
+                CallKind::Terminal(_),
+            ),
+            "with no menu to check against, the id is the policy's to resolve as it always was",
+        );
+    }
+
     #[test]
     fn press_buttons_parses_a_sequence_and_refuses_what_is_not_one() {
         let press = |arguments: &str| call("press_buttons", arguments);
         let CallKind::Terminal(Terminal::PressButtons { buttons }) = classify(
             DecisionKind::Stuck,
             &press(r#"{"buttons":["b","b","start"],"why":"a menu nothing closes"}"#),
+            &[],
         ) else {
             panic!("a list of real buttons is a decision");
         };
@@ -2204,7 +2296,7 @@ mod tests {
 
         for bad in [r#"{"buttons":["b","x"],"why":"w"}"#, r#"{"buttons":[],"why":"w"}"#, r#"{"why":"w"}"#] {
             assert!(
-                matches!(classify(DecisionKind::Stuck, &press(bad)), CallKind::Rejected(_)),
+                matches!(classify(DecisionKind::Stuck, &press(bad), &[]), CallKind::Rejected(_)),
                 "{bad} should have been rejected",
             );
         }
@@ -2213,7 +2305,7 @@ mod tests {
         let many = format!(r#"{{"buttons":{},"why":"a menu nothing closes"}}"#,
             serde_json::to_string(&vec!["a"; MANUAL_INPUT_CAPACITY * 2]).unwrap());
         let CallKind::Terminal(Terminal::PressButtons { buttons }) =
-            classify(DecisionKind::Stuck, &press(&many))
+            classify(DecisionKind::Stuck, &press(&many), &[])
         else {
             panic!("an over-long list is still a decision");
         };
@@ -2225,15 +2317,15 @@ mod tests {
     /// policy, which has no idea what to do with it and would answer "not a read tool".
     #[test]
     fn a_screenshot_is_classified_apart_from_the_other_reads() {
-        assert!(matches!(classify(DecisionKind::Battle, &call(SCREENSHOT, "{}")), CallKind::Screenshot));
-        assert!(matches!(classify(DecisionKind::Battle, &call("read_party", "{}")), CallKind::Read));
+        assert!(matches!(classify(DecisionKind::Battle, &call(SCREENSHOT, "{}"), &[]), CallKind::Screenshot));
+        assert!(matches!(classify(DecisionKind::Battle, &call("read_party", "{}"), &[]), CallKind::Read));
         assert!(READ_TOOLS.iter().any(|tool| tool.name == SCREENSHOT), "it is still offered as a read");
     }
 
     /// Every argument shape `use_field_move` accepts, and the complaint each malformed one earns.
     #[test]
     fn a_field_move_call_parses_into_the_move_it_names() {
-        let parse = |arguments: &str| classify(DecisionKind::Overworld, &call("use_field_move", arguments));
+        let parse = |arguments: &str| classify(DecisionKind::Overworld, &call("use_field_move", arguments), &[]);
         let request = |arguments: &str| match parse(arguments) {
             CallKind::Terminal(Terminal::UseFieldMove(request)) => request,
             CallKind::Rejected(complaint) => panic!("{arguments} was rejected: {complaint}"),
@@ -2295,7 +2387,7 @@ mod tests {
     /// rather than a malformed call: no nickname, no purchase, no move forgotten.
     #[test]
     fn omitting_the_argument_is_an_answer_for_the_three_menu_prompts() {
-        let parse = |kind, name, arguments: &str| classify(kind, &call(name, arguments));
+        let parse = |kind, name, arguments: &str| classify(kind, &call(name, arguments), &[]);
 
         assert!(matches!(
             parse(DecisionKind::Nickname, "set_nickname", "{}"),

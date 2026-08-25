@@ -61,6 +61,13 @@ pub struct TurnRequest {
     /// A one-line description for the UI, so a viewer sees what is being decided without the
     /// thousand tokens that were sent to decide it.
     pub headline: String,
+    /// The ids this turn's situation offered, in the order it offered them.
+    ///
+    /// ⚠️ **Carried so `tools::classify` can refuse an id the model invented while the turn is still
+    /// running.** Without it a bad id is accepted here, published as a decision and refused by
+    /// `resolve_overworld` one thread later, which costs the whole turn rather than one completion.
+    /// Empty for the kinds that have no menu.
+    pub menu: Vec<String>,
 }
 
 /// The answer. Always a [`Terminal`]: a turn that could not produce one is turned into a `wait`
@@ -369,13 +376,13 @@ impl Worker {
         if let Some(restart) = self.restart.lock().ok().and_then(|mut cell| cell.take()) {
             self.apply_restart(restart);
         }
-        let TurnRequest { id, kind, situation, headline } = request;
+        let TurnRequest { id, kind, situation, headline, menu } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 
         self.sync_plan();
         self.publish_todo();
         self.messages.push(Message::user(situation));
-        let outcome = self.decide(id, kind);
+        let outcome = self.decide(id, kind, &menu);
         match outcome {
             Some((decision, narration)) => {
                 self.published.publish_event(UiEventBody::Decision {
@@ -521,7 +528,7 @@ impl Worker {
     /// The second half of the pair is the model's own account of what it just decided and why
     /// ([`tools::call_summary`]) — absent when the model left the argument out, and absent by
     /// construction on the forced wait, which is the loop's decision rather than the model's.
-    fn decide(&mut self, id: u64, kind: DecisionKind) -> Option<(Terminal, Option<String>)> {
+    fn decide(&mut self, id: u64, kind: DecisionKind, menu: &[String]) -> Option<(Terminal, Option<String>)> {
         let specs = tools::for_kind(kind);
         let mut nudged = false;
 
@@ -640,7 +647,7 @@ impl Worker {
             }
 
             let classified: Vec<CallKind> =
-                completion.tool_calls.iter().map(|call| tools::classify(kind, call)).collect();
+                completion.tool_calls.iter().map(|call| tools::classify(kind, call, menu)).collect();
 
             // Published *after* classification, not before, so each call arrives at the page already
             // labelled — a rejected call reads as rejected rather than as one that never answered.

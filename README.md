@@ -141,8 +141,8 @@ turns in a row spent walking into a ledge on Route 3 while the connection into P
 menu the whole time. Neither "a last resort" in the description nor a required `why` moved that
 number: three quarters of the presses left the `why` empty, because a field the schema calls required
 and the parser lets through is a field a weak model omits. Nothing had actually failed, either — the
-last menu action before that run worked, and no action id was ever rejected in the entire run. A
-model reads its own recent turns back on every request, so once it presses twice it keeps pressing.
+last menu action before that run worked, and nothing was rejected anywhere near it. A model reads its
+own recent turns back on every request, so once it presses twice it keeps pressing.
 
 So on any turn that has a menu the tool is simply not offered, and `report_issue` is there instead.
 It takes a message — what you tried, what you expected, what happened — and **it does not end the
