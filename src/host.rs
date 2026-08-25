@@ -260,6 +260,9 @@ pub struct EmulatorHost {
     /// The completion event and the sequence number it was published with, parked for the top of the
     /// next tick — see [`Self::file_completed_run`] for why it is not acted on where it is found.
     completed: Option<(AgentEvent, u64)>,
+    /// Whether the run was already waiting on the model at the previous tick, so the transition
+    /// *into* waiting can be spotted. See the save-state capture in [`Self::tick`].
+    awaiting_llm: bool,
     /// The last `agent.update` failure that was published.
     ///
     /// ⚠️ **Publishing every failure is a flood, and the game reaches a state that produces one on
@@ -319,6 +322,7 @@ impl EmulatorHost {
             // is the state that was just checkpointed, and rewriting it at startup would mean a
             // process that crash-loops rewrites its own save every few seconds.
             next_checkpoint: first_checkpoint,
+            awaiting_llm: false,
             last_status: None,
             last_status_at: now,
             booted: false,
@@ -683,6 +687,11 @@ impl EmulatorHost {
         self.watchdog_firings = 0;
         self.completed = None;
         self.last_agent_failure = None;
+        // ⚠️ **Cleared, or the new run's first turn is filed with the old run's save state.** The
+        // capture in `tick` fires on the *edge* into `AwaitingLlm`; a swap that happens while a turn
+        // is already out leaves this true, the worker sets `AwaitingLlm` again for the new run's
+        // first turn, and no edge is seen.
+        self.awaiting_llm = false;
         self.ahead_by_cycles = MachineCycles::ZERO;
         self.since_last_update = Duration::ZERO;
         self.dropped = Duration::ZERO;
@@ -797,6 +806,36 @@ impl EmulatorHost {
                     }
                 }
             }
+            // **A save state for whatever the model is about to complain about.** `report_issue`
+            // files the machine alongside the message, and the worker cannot produce one: `self.gb`
+            // exists on this thread and nowhere else. So the state is taken here, once, on the edge
+            // into waiting — the moment the turn was put to the model, which is the state its
+            // complaint will be about.
+            //
+            // ⚠️ **The edge, not the level.** `AwaitingLlm` is the status for as long as the request
+            // is out, so capturing on the level would be a save state every tick for the length of
+            // every turn: 50 a second against one a turn.
+            //
+            // It is affordable at all because a state is 24 µs and 6.4 KB (measured on Pokémon Red,
+            // 2026-08-25) against turns that are tens of seconds apart. ⚠️ That is also why it is
+            // not simply done every tick "to be safe": cheap is not free, and `MAX_CATCHUP` turns
+            // anything on this path into dropped emulated time rather than into a slow frame.
+            //
+            // ⚠️ **A retry re-arms it deliberately.** `Worker::stream_with_retries` returns to
+            // `AwaitingLlm` before each attempt, so a retried turn re-captures — which is right,
+            // because the emulator never stops while the model thinks and the newer state is the
+            // closer one to what the model is being shown.
+            let awaiting = matches!(self.published.run_status(), RunStatus::AwaitingLlm { .. });
+            if awaiting && !self.awaiting_llm {
+                match self.gb.save_state() {
+                    Ok(state) => self.published.publish_save_state(state),
+                    // Nothing here may cost a tick. A report filed without a save state still
+                    // carries the screen, the status and the conversation.
+                    Err(failure) => eprintln!("could not capture a turn's save state: {failure}"),
+                }
+            }
+            self.awaiting_llm = awaiting;
+
             let events = self.agent.drain_events();
             for event in events {
                 let seq = self.published.publish_event(UiEventBody::Agent {
@@ -1128,6 +1167,14 @@ mod tests {
         while Instant::now() < aged {
             host.tick();
         }
+        // ⚠️ **Cleared first, for the same reason the second publish below clears it**, and this
+        // line is why that one is not paranoia. `tick` publishes its own heartbeats, and
+        // `says_the_same_as` deliberately excludes the clocks — so once the warm-up has gone quiet
+        // the explicit publish here is *suppressed*, `last_status` keeps whatever the last changing
+        // heartbeat carried, and `wall_ms` is read from a snapshot taken near the start of the loop
+        // rather than at the end of it. Intermittent by construction: it depends on whether anything
+        // in the status changed in the last few hundred milliseconds of the warm-up.
+        host.last_status = None;
         host.publish_status(Instant::now());
         let before = host.last_status.clone().expect("the first heartbeat is never suppressed");
         assert!(before.wall_ms >= 250, "the warm-up did not happen: {before:?}");

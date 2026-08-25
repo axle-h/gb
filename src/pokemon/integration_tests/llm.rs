@@ -146,9 +146,19 @@ async fn completions(State(mock): State<Mock>, body: String) -> impl IntoRespons
         vec![("wait", serde_json::json!({ "ticks": 1 }))]
     };
 
+    // ⚠️ **Every terminal call needs a `summary` and `tools::classify` refuses one without it**, so
+    // it is added here rather than repeated in each arm above. A real model fills it in: across the
+    // deployed run's 2427 decisions the only ones without were the synthesised fallback waits, which
+    // never go through `classify`. A mock that omitted it would have every turn rejected and spend
+    // its whole tool budget finding that out.
     let calls: Vec<(&str, String)> = calls
         .into_iter()
-        .map(|(name, arguments)| (name, serde_json::to_string(&arguments).expect("valid JSON")))
+        .map(|(name, mut arguments)| {
+            if let Some(object) = arguments.as_object_mut() {
+                object.entry("summary").or_insert_with(|| serde_json::json!("what the mock is doing"));
+            }
+            (name, serde_json::to_string(&arguments).expect("valid JSON"))
+        })
         .collect();
     ([(header::CONTENT_TYPE, "text/event-stream")], sse(&calls))
 }

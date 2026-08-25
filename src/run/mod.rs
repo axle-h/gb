@@ -52,6 +52,10 @@ pub mod files {
     /// A debugging artefact rather than part of the run: nothing reads it back, and a run directory
     /// without one is complete.
     pub const PRESS_BUTTONS: &str = "press-buttons";
+
+    /// One directory per `report_issue` call: the model's own account of something the agent gets
+    /// wrong, with the screen and a save state beside it. See [`crate::llm::incident`].
+    pub const ISSUES: &str = "issues";
     /// Where finished runs are filed, one level below the root — see [`super::hall_of_fame`], whose
     /// module docs explain why that level of nesting is load-bearing rather than tidiness.
     pub const HALL_OF_FAME: &str = "hall-of-fame";

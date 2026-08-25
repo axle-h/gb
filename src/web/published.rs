@@ -372,6 +372,17 @@ pub struct Published {
     /// generation: it counts turns that were abandoned as well, and it restarts at 1 in every
     /// process, so it is not a count of anything a run's record wants.
     turns: AtomicU64,
+    /// The emulator's state as it was when the current turn was put to the model, and when that was
+    /// (Unix milliseconds), for [`crate::llm::incident`] to file beside a report.
+    ///
+    /// ⚠️ **This is the *only* thing that travels from the emulator to the worker other than a
+    /// frame and a tool answer, and it is here rather than on a channel for the same reason the
+    /// frame is**: the worker asks for it at an arbitrary moment, long after the tick that produced
+    /// it. Refreshed once per turn — 24 µs and 6.4 KB measured on Pokémon Red, so a turn that lasts
+    /// tens of seconds pays nothing for it — by [`crate::host::EmulatorHost::tick`].
+    ///
+    /// `None` until the first turn is asked, and for ever under a policy that never asks one.
+    save_state: RwLock<Option<(Arc<Vec<u8>>, u64)>>,
     /// The most recent heartbeat, for a client that has just connected.
     ///
     /// ⚠️ **This is what makes send-on-change safe, and it is one cell rather than one per client.**
@@ -433,6 +444,7 @@ impl Published {
             events: broadcast::channel(EVENT_CAPACITY).0,
             next_event_seq: AtomicU64::new(next_seq),
             status: RwLock::new(RunStatus::Booting),
+            save_state: RwLock::new(None),
             latest_status: RwLock::new(None),
             latest_plan: RwLock::new(None),
             tool_images: RwLock::new(VecDeque::new()),
@@ -480,6 +492,21 @@ impl Published {
     /// length of one clone rather than the length of the encode.
     pub fn latest_frame(&self) -> Arc<FrameSnapshot> {
         Arc::clone(&self.frame.read().expect("frame lock poisoned"))
+    }
+
+    /// Keep the machine as it is now, for a report filed during the turn that is starting.
+    ///
+    /// ⚠️ **Called from the emulator thread only.** It is the one place a `GameBoy` exists, which is
+    /// the whole reason this cell has to be here rather than the worker taking a state when it wants
+    /// one.
+    pub fn publish_save_state(&self, state: Vec<u8>) {
+        *self.save_state.write().expect("save state lock poisoned") =
+            Some((Arc::new(state), now_ms()));
+    }
+
+    /// That state and when it was taken. `Arc`, for the reason [`Self::latest_frame`] is.
+    pub fn latest_save_state(&self) -> Option<(Arc<Vec<u8>>, u64)> {
+        self.save_state.read().expect("save state lock poisoned").clone()
     }
 
     /// Stamp a sequence number on an event body and broadcast it. Returns the sequence number, which

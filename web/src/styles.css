@@ -710,6 +710,15 @@ header .run.error {
   color: var(--warn);
 }
 
+/* `report_issue`: the model saying the agent itself is wrong. Not a failure — the turn carries on
+   and it still has to decide — but the one row in the log a person is actually being asked to read,
+   so it is the only tool row that is not the calm blue above. */
+.entry.tool.issue .chip,
+.entry.tool.issue .body {
+  color: var(--warn);
+  font-weight: 600;
+}
+
 /* The ▸/▾ beside a tool line: there is something under this row, and there is not under the others. */
 .entry .disclose {
   margin-left: 6px;

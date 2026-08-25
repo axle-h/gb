@@ -276,34 +276,55 @@ impl Worker {
         self
     }
 
-    /// File a use of the escape hatch: the reason, the screen, the run's state and the last few
-    /// turns of conversation. See [`crate::llm::incident`] for what is in it and why.
+    /// File a report: the screen, the run's state, a save state and the last few turns of
+    /// conversation. See [`crate::llm::incident`] for what is in it and why.
     ///
-    /// ⚠️ **Nothing here may fail a turn.** The decision is already made and the game is waiting for
-    /// it; a full disk is worth a line on stderr and no more.
-    fn record_press(
+    /// ⚠️ **Nothing here may fail a turn.** For a press the decision is already made and the game is
+    /// waiting for it; for an issue the turn is still running and owes the model a tool result. A
+    /// full disk is worth a line on stderr and no more, in both cases.
+    fn record_report(
         &self,
         turn: u64,
         kind: DecisionKind,
-        buttons: &[crate::joypad::JoypadButton],
-        call: &ToolCall,
+        report: incident::Report<'_>,
         summary: Option<&str>,
     ) {
         let Some(run) = &self.run else { return };
-        let why = tools::call_reason(call);
-        match incident::record(
-            run,
-            &self.published,
-            turn,
-            kind,
-            buttons,
-            why.as_deref(),
-            summary,
-            &self.messages,
-        ) {
-            Ok(path) => println!("press_buttons on turn {turn} ({}): recorded in {path:?}", kind.label()),
-            Err(why) => eprintln!("could not record the press on turn {turn}: {why}"),
+        let what = match report {
+            incident::Report::Issue { .. } => "report_issue",
+            incident::Report::Press { .. } => "press_buttons",
+        };
+        match incident::record(run, &self.published, turn, kind, report, summary, &self.messages) {
+            Ok(path) => println!("{what} on turn {turn} ({}): recorded in {path:?}", kind.label()),
+            Err(why) => eprintln!("could not record the {what} on turn {turn}: {why}"),
         }
+    }
+
+    /// Write a `report_issue` call to disk and answer it.
+    ///
+    /// ⚠️ **The answer must not read like a fix.** The model has just said the agent is wrong; if
+    /// the reply sounds like something changed it will wait for the change, and the next turn will
+    /// look identical. So it says what actually happened — filed, nobody is coming, keep playing —
+    /// which is also what [`tools::report_issue_spec`] promised.
+    ///
+    /// ⚠️ **The conversation slice this records ends one message earlier than a press's does**, and
+    /// it cannot do otherwise: the string returned here *is* the tool result, so it has to be built
+    /// before the result it becomes can be appended. The assistant message carrying the report is in
+    /// the slice — it is pushed before classification — so what is missing is only this constant
+    /// sentence, which a person reading the record already knows. A press has no such constraint,
+    /// which is why it is deliberately recorded after its results land.
+    fn file_issue(
+        &self,
+        turn: u64,
+        kind: DecisionKind,
+        message: &str,
+        summary: Option<&str>,
+    ) -> String {
+        self.record_report(turn, kind, incident::Report::Issue { message }, summary);
+        "Filed, with the screen and a save state. A developer will read it; nothing changes now, \
+         and this did not end your turn. Carry on and try a different way of getting what you \
+         wanted."
+            .to_string()
     }
 
     /// Run the loop on a new thread. It ends when the policy is dropped, which closes the channel.
@@ -659,6 +680,14 @@ impl Worker {
                                 .to_string()
                         }
                         CallKind::Todo(call) => self.apply_todo(call.clone()),
+                        // ⚠️ **Filed, not dropped — the same exception TODO calls get, for the same
+                        // reason.** "The menu will not let me do X, so I am doing Y instead" is the
+                        // single most natural way to use this tool, and it arrives as one message
+                        // with the report and the terminal call in it. Dropping the report because
+                        // the turn ended would delete exactly the complaints worth reading.
+                        CallKind::Issue(message) => {
+                            self.file_issue(id, kind, message, summary.as_deref())
+                        }
                         CallKind::Rejected(complaint) => complaint.clone(),
                         _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
                     };
@@ -669,7 +698,11 @@ impl Worker {
                 // few turns of the conversation, and a slice taken above this loop would end with an
                 // assistant message whose calls nothing had answered yet.
                 if let Terminal::PressButtons { buttons } = &decision {
-                    self.record_press(id, kind, buttons, &completion.tool_calls[position], summary.as_deref());
+                    // `why` is enforced by `tools::classify` for the one kind that offers the tool,
+                    // so the `unwrap_or_default` is unreachable rather than a tolerated absence.
+                    let why = tools::call_reason(&completion.tool_calls[position]).unwrap_or_default();
+                    let report = incident::Report::Press { buttons, why: &why };
+                    self.record_report(id, kind, report, summary.as_deref());
                 }
                 return Some((decision, summary));
             }
@@ -771,6 +804,7 @@ impl Worker {
                         format!("{caption} It is attached to the message after this one.")
                     }
                     CallKind::Todo(call) => self.apply_todo(call.clone()),
+                    CallKind::Issue(message) => self.file_issue(id, kind, message, None),
                     CallKind::Rejected(complaint) => complaint.clone(),
                     CallKind::Terminal(_) => unreachable!("handled above"),
                 };

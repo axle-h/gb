@@ -585,6 +585,15 @@ mod tests {
         Reply { completion: Completion { content: text.into(), ..Completion::default() }, release: None }
     }
 
+    /// ⚠️ **A `summary` is added to every well-formed call that does not have one**, because
+    /// `tools::classify` rejects a terminal call without one and every fixture below predates that
+    /// rule. Writing it into each of the sixty-odd argument strings by hand would be the same edit
+    /// sixty times, and would leave each of them testing the rule rather than what it is about.
+    /// Arguments that do not parse are left exactly as written — several tests hand this deliberate
+    /// rubbish and expect a complaint about it.
+    ///
+    /// The enforcement itself is tested where it lives:
+    /// `llm::tools::tests::a_terminal_call_must_say_what_it_is_doing`.
     fn calls(pairs: &[(&str, &str)]) -> Reply {
         let tool_calls = pairs
             .iter()
@@ -592,10 +601,21 @@ mod tests {
             .map(|(i, (name, arguments))| ToolCall {
                 id: format!("call_{i}"),
                 kind: "function".into(),
-                function: FunctionCall { name: (*name).into(), arguments: (*arguments).into() },
+                function: FunctionCall { name: (*name).into(), arguments: with_summary(arguments) },
             })
             .collect();
         Reply { completion: Completion { tool_calls, ..Completion::default() }, release: None }
+    }
+
+    /// See [`calls`]. A no-op on anything that is not a JSON object, or that already says something.
+    fn with_summary(arguments: &str) -> String {
+        let Ok(serde_json::Value::Object(mut object)) = serde_json::from_str(arguments) else {
+            return arguments.to_string();
+        };
+        if !object.contains_key("summary") {
+            object.insert("summary".into(), serde_json::json!("a test's decision"));
+        }
+        serde_json::Value::Object(object).to_string()
     }
 
     /// A reply that says something *and* calls a tool. The prose is what makes it possible to write a
@@ -1214,7 +1234,7 @@ mod tests {
     fn a_stuck_turn_may_read_first_and_its_press_reaches_the_agent() {
         let (mut rig, mut policy) = Rig::new(vec![
             calls(&[("read_map", "{}")]),
-            calls(&[("press_buttons", r#"{"buttons":["a"]}"#)]),
+            calls(&[("press_buttons", r#"{"buttons":["a"],"why":"a text box that will not close"}"#)]),
         ]);
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1225,6 +1245,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(pressed, vec![JoypadButton::A], "the nudge never came back out of the policy");
+        assert!(policy.take_manual_input().is_empty(), "a collected press is not queued again");
 
         let requests = rig.requests();
         assert_eq!(requests.len(), 2, "a read, then the decision");
@@ -1571,21 +1592,47 @@ mod tests {
         assert!(last_user_message(&requests[1]).contains("facing"), "{}", last_user_message(&requests[1]));
     }
 
-    /// The escape hatch's policy half: a `press_buttons` decision leaves the presses where the agent
-    /// collects them, and taking them empties the queue so they cannot be delivered twice.
+    /// **The escape hatch is closed on a turn that has a menu**, end to end: the presses never reach
+    /// the agent, the model is told where the answer actually is, and the turn carries on to a real
+    /// decision rather than being thrown away.
+    ///
+    /// ⚠️ **This is the whole point of the change and it is worth stating plainly.** The deployed run
+    /// spent 91 consecutive turns pressing buttons at a ledge on Route 3 while the connection into
+    /// Pewter City sat in its action menu on every one of them; 738 of its 749 presses were on
+    /// overworld turns with a perfectly good menu. Neither prose in the tool description nor a
+    /// required `why` moved that number — 72% of the presses left `why` null — so the tool is no
+    /// longer in the catalogue here at all.
+    ///
+    /// The press half of the contract still holds where it belongs; see
+    /// [`a_stuck_turn_may_read_first_and_its_press_reaches_the_agent`].
     #[test]
-    fn press_buttons_leaves_the_presses_for_the_agent_to_collect() {
-        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
-            "press_buttons",
-            r#"{"buttons":["b","start","a"]}"#,
-        )])]);
+    fn a_press_on_a_turn_with_a_menu_is_refused_and_the_turn_carries_on() {
+        let (mut rig, mut policy) = Rig::new(vec![
+            calls(&[("press_buttons", r#"{"buttons":["b","start","a"]}"#)]),
+            calls(&[("wait", r#"{"ticks":1}"#)]),
+        ]);
 
-        assert!(rig.pump_overworld_for(&mut policy, Duration::from_secs(2)).is_none());
-        assert_eq!(
-            policy.take_manual_input(),
-            [JoypadButton::B, JoypadButton::Start, JoypadButton::A],
-        );
-        assert!(policy.take_manual_input().is_empty(), "a collected press is not queued again");
+        rig.pump_overworld_for(&mut policy, Duration::from_secs(2));
+        assert!(policy.take_manual_input().is_empty(), "no press may reach the agent from here");
+
+        let requests = rig.requests();
+        assert!(requests.len() >= 2, "the refusal is a tool result, so the turn recovers");
+        let offered: Vec<&str> = requests[0].tools.iter().map(|tool| tool.function.name).collect();
+        assert!(!offered.contains(&"press_buttons"), "not even offered: {offered:?}");
+        assert!(offered.contains(&"report_issue"), "what replaced it: {offered:?}");
+
+        // ⚠️ The refusal has to name both halves — the menu, *and* the way to say the menu is wrong.
+        // Told only "use the menu", a model that genuinely cannot find its action has nowhere to go.
+        let refusal = requests[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(Message::text)
+            .next_back()
+            .expect("the refusal is answered as a tool result")
+            .to_string();
+        assert!(refusal.contains("choose_action"), "{refusal}");
+        assert!(refusal.contains("report_issue"), "{refusal}");
     }
 
     /// The three menu prompts, each asked as its own turn with its own scoped tools, and each

@@ -230,6 +230,20 @@ for so long: "✗ gave up on Mom: it was interrupted", after a conversation that
 just a word on a page — an abort reason is what `llm::prompt` calls the most useful thing the agent
 can say, so every successful conversation was reported to the model as a failed one.
 
+⚠️ **An abort also says *where* the walk stopped, and the reason alone was not enough to act on.**
+`OverworldActionAborted` carries `at` — the square the player was actually standing on — so the line
+is "✗ gave up on the way into Route2 at (19, 11): it was interrupted". The deployed run produced that
+abort **143 times**: the Viridian old man blocks the north exit until Oak's Parcel is delivered, so
+the walk was impossible every time and the log said only that something stopped it. The model
+concluded, in its own `why` strings, that "the choose_action pathfinding keeps failing" and started
+walking by hand. ⚠️ **Nothing counts those aborts, refuses a target that keeps failing, or drops one
+from the menu** — noticing that the same square twenty times means a blocked route is deliberately
+the model's job, and a menu that silently withheld a reachable-looking action would be a worse lie
+than a repeated failure. ⚠️ **`at` is in the *expanded* coordinate space** the ids, the map picture
+and every turn's `Location:` line use, never `raw_player_coords`, which is the same square before the
+connection-strip offsets; `MetaTileMap::player_position` is where it comes from, and the one abort
+that reports `None` on purpose is `WrongMap`, where a coordinate would be read against the wrong map.
+
 Three traps in the detection, each paid for separately:
 
 - ⚠️ **It is what the player is *facing*, not what it set out for.** A script can open a box
@@ -406,45 +420,57 @@ local one. The model's plan used to live there, re-rendered on every request, wh
 taken between the plan and the situation it belongs to would drop the one thing meant to survive.
 `the_plan_is_carried_once_and_never_disturbs_the_cacheable_prefix` holds both halves.
 
-⚠️ **Every terminal tool takes a required `summary`, and it is the only thing the model says about a
-turn that outlives the turn.** Reasoning arrives on a channel that is deliberately never sent back,
-and most models emit no `content` at all beside a tool call — so the assistant side of the history
-was a column of bare JSON: every turn saying what it did, not one saying why. A model reading that
-back has no record of having *tried* anything, which is the state in which it walks into the same
-building for the fourth time. It rides on the terminal call's own arguments rather than in a message
-of its own, because that is the one place a sentence costs no extra round trip, cannot be separated
-from the decision it explains, and lands in the history by itself (`Message::assistant` carries
-`tool_calls` **almost** verbatim; see the poisoning ⚠️ below). ⚠️ **Required in the schema, optional in the parser** (`tools::call_summary`):
-*enforcing* it would not get it filled in, because a rejected call does not end the turn — it becomes
-another tool result and spends another of `GB_MAX_TOOL_STEPS`, pushing a forgetful model towards the
-forced `wait` rather than towards remembering. ⚠️ It is added by `add_summary_argument` post-hoc in
-`for_kind`, so it scales with the *number of terminals a kind offers* rather than with the catalogue
-— which is what moved `the_tool_array_stays_within_its_budget`'s ceilings, deliberately. It reaches
-the page as `Decision.narration`, beside `worker::describe`'s mechanical `summary`.
+⚠️ **Every terminal tool takes a required `summary`, enforced, and it is the only thing the model
+says about a turn that outlives the turn.** Reasoning arrives on a channel that is deliberately
+never sent back, and most models emit no `content` at all beside a tool call — so the assistant side
+of the history was a column of bare JSON: every turn saying what it did, not one saying why. A model
+reading that back has no record of having *tried* anything, which is the state in which it walks
+into the same building for the fourth time. It rides on the terminal call's own arguments rather
+than in a message of its own, because that is the one place a sentence costs no extra round trip,
+cannot be separated from the decision it explains, and lands in the history by itself
+(`Message::assistant` carries `tool_calls` **almost** verbatim; see the poisoning ⚠️ below). ⚠️ **It
+used to be required in the schema and optional in the parser**, on the argument that enforcing it
+would not get it filled in — a rejected call does not end the turn, it becomes another tool result
+and spends another of `GB_MAX_TOOL_STEPS`, pushing a forgetful model towards the forced `wait`
+rather than towards remembering. That was settled by measuring what enforcement would cost: across
+the deployed run's **2427 decisions only 98 carried no summary and every one of them was a `wait`**
+— the *synthesised* fallback wait, which never goes through `classify` at all. The model already
+fills it in on every real action, so the rule costs that model nothing and closes the hole for the
+one that would not. `classify` now rejects a terminal call without one, in one wrapper rather than a
+check per arm. ⚠️ It is added by `add_summary_argument` post-hoc in `for_kind`, so it scales with
+the *number of terminals a kind offers* rather than with the catalogue — which is what moved
+`the_tool_array_stays_within_its_budget`'s ceilings, deliberately. It reaches the page as
+`Decision.narration`, beside `worker::describe`'s mechanical `summary`.
 
-⚠️ **`press_buttons` is an escape hatch and the *only* thing that keeps it one is that every use is
-recorded.** The deployed run reached for it on ordinary turns that had a perfectly good menu, and no
-amount of "a last resort" in the description changed that, because prose cannot be checked
-afterwards. Two things do. The tool takes a required **`why`** — which action was looked for and not
-found — read post-hoc by `tools::call_reason`; and `Worker::record_press` files
-`$GB_RUN_DIR/<run-id>/press-buttons/turn-<id>/{incident.json,screen.png}` through `llm::incident`.
-Five ⚠️s in it, each paid for once:
+⚠️ **`press_buttons` is offered on exactly one decision kind — `Stuck` — and everything below is the
+history of finding that out.** It is an escape hatch for an agent that has stopped working, and on
+any turn that has a menu it is a way to finish a turn without choosing from it. The deployed run
+proved that is what a weak model uses it for: **749 presses, 738 of them overworld turns with a
+perfectly good menu, 0 at the watchdog's turn**, ending in a run of **91 consecutive** presses
+oscillating in a 13-tile box on Route 3 while `Route3:0,10:Connection — walk into PewterCity` sat in
+the menu every time. ⚠️ **Nothing had failed**: the last `choose_action` before that run succeeded,
+and `choose_action` was never once rejected for an unresolvable id in the whole run. The tell that it
+is self-reinforcing rather than caused is the ratchet — 26% → 2% → 12% → 74% → 38% → 72% → 100%,
+recovering to 2% for 600 turns in the middle, because the model reads its own last three turns back
+on every request.
 
-- **`why` is required in the schema and optional in the parser**, the same trade `summary` makes and
-  for the same reason: a rejection does not end the turn, it spends another `GB_MAX_TOOL_STEPS` and
-  pushes the model towards the forced `wait`. A press with no reason still presses; the record says
-  it did not say.
-- **It costs 239 bytes and that number was worked for.** One property on **one** tool, so unlike
-  `summary` it scales with nothing — which is the whole reason it was affordable as a lock-down when
-  more prompt prose was not. The first draft spent 403 by listing what the action menu covers (the
-  menu said twice) and by explaining what "why" means. No ceiling in
-  `the_tool_array_stays_within_its_budget` had to move; if one ever does, say what bought it.
-- **A `Stuck` record is not a fault.** The watchdog's turn offers `press_buttons` and `wait` and no
-  menu at all, so a press there is the model doing as it was asked. Everything is recorded and the
-  `kind` field tells them apart — filtering at the record would mean the one number worth knowing
-  (how often the hatch is used against how often it was *needed*) could not be counted. The wording
-  in both the tool and the system prompt is conditioned on **a menu being on offer** for the same
-  reason.
+Two rounds of friction were tried on the tool and both failed, which is the general lesson:
+
+- "A last resort" in the description. Prose cannot be checked afterwards.
+- A required **`why`**. ⚠️ **It was required in the schema and optional in the parser** — the same
+  trade `summary` made, on the same argument that a rejection spends a `GB_MAX_TOOL_STEPS` and pushes
+  a forgetful model towards the forced `wait`. **543 of 749 presses left it null.** A field that is
+  optional in practice is a field a weak model omits, so the record it existed to make readable was
+  three quarters blank. It cost 239 bytes and bought nothing.
+
+⚠️ **So on `Overworld` and `Battle` the tool is not in the catalogue at all**, and what replaced it is
+`report_issue` — see below. `why` survives at `Stuck` and **is now enforced** (`tools::classify`),
+because that is the one turn where a press is the right answer and so the one place the record is
+still worth making readable. Both changes together took Overworld and Battle *down* ~450 bytes each.
+
+⚠️ **A press at `Stuck` is not a fault**: there is no menu, so it is the model doing as it was asked.
+`incident.json`'s `kind` still records which turn asked, and its `report` field says `press` or
+`issue`, so the two can be counted apart without inferring it from which fields are null.
 - **The conversation slice is image-evicted, and that is not an optimisation.** Three turns, cut on
   `compaction::is_turn_start`, through `compaction::evict_images(.., 0)`. A history holding a map
   render is hundreds of kilobytes of base64 *per message*, and a model that has decided to press
@@ -453,6 +479,37 @@ Five ⚠️s in it, each paid for once:
   ring. The page already shows the press as `Pressed a, b` off the `Decision` event. And the path is
   re-read from `run::CurrentRun` per record, never captured, or a press after `POST /api/new-run`
   lands in the run that was already set aside.
+
+⚠️ **`report_issue` is what a turn with a menu gets instead, and the thing that makes it work is that
+it does not end the turn.** The hatch was reached for because it was the one way to finish a turn
+without choosing from the menu, so a *terminal* replacement would be the same tool renamed. The model
+files the complaint and still has to call `choose_action` or `wait`; "the menu will not let me do X,
+so I am doing Y" is one message, and both halves happen. Three ⚠️s:
+
+- **Its `message` is enforced**, unlike everything before it. A report is *only* its message, so
+  rejecting an empty one costs a tool step and loses nothing — which is the test the two enforced
+  fields pass and `summary`'s old argument did not.
+- **The answer must not read like a fix.** `Worker::file_issue` says filed, nobody is coming, this
+  did not end your turn, try a different way. A reply that sounded like something had changed would
+  have the model wait for the change and produce an identical turn.
+- **It is offered on `Overworld`, `Battle` *and* `Stuck`** (`tools::offers_issue_report`). The
+  watchdog's turn is where the agent is most likely to be genuinely wrong, so it is the last place to
+  withhold it; the three single-question prompts have nothing for the agent to get wrong and carry
+  neither tool.
+
+Records land in `$GB_RUN_DIR/<run-id>/issues/turn-<id>/` beside `press-buttons/`, same shape:
+`{incident.json, screen.png, state.gbst}`.
+
+⚠️ **The save state is taken at the *start of the turn*, by the emulator thread, and left in
+`Published`** — `EmulatorHost::tick` on the edge into `RunStatus::AwaitingLlm`, never on the level, or
+it is 50 states a second for the length of every turn instead of one. It has to be there because
+`GameBoy` exists on that thread and the worker has no way to ask for one. ⚠️ **The obvious cheap
+version — copy the run's `state.gbst` — was written first and is wrong**: that is the last periodic
+checkpoint, up to a minute behind, which is a minute of walking, several battles, or the very
+transition being complained about. A state is **24 µs and 6.4 KB** (measured on Pokémon Red,
+2026-08-25), so one per turn is cheaper than the copy it replaced. ⚠️ It is still not free enough to
+do every tick: `MAX_CATCHUP` turns anything on that path into dropped emulated time rather than a
+slow frame.
 
 ⚠️ **A tool call the model writes badly poisons the conversation, not the turn, and a router is what
 made that a daily event.** `arguments` is a JSON string the *model* produces, and the assistant

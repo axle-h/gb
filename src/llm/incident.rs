@@ -1,25 +1,35 @@
-//! What the model did when it reached past the action menu and pressed buttons itself.
+//! What the model says, and does, when it believes the agent is wrong.
 //!
-//! `press_buttons` is the escape hatch — raw joypad presses delivered ahead of the whole state
-//! machine, for the case where the action menu, which is the *agent's model of the game* rather than
-//! the game, is incomplete. It resets the agent to idle afterwards, so a model that reaches for it
-//! instead of choosing an action walks the player into a wall. On the deployed run it was being
-//! reached for on ordinary turns that had a perfectly good menu.
-//!
-//! Prose alone could not fix that, because prose cannot be checked afterwards. This writes one
-//! directory per press:
+//! Two things are filed here and they are the same shape on disk:
 //!
 //! ```text
-//! $GB_RUN_DIR/<run-id>/press-buttons/turn-<id>/
-//!   ├── incident.json   the reason, the decision, the run's whole state, and the conversation
-//!   └── screen.png      what was actually on the screen at the moment of the press
+//! $GB_RUN_DIR/<run-id>/issues/turn-<id>/          a `report_issue` call
+//! $GB_RUN_DIR/<run-id>/press-buttons/turn-<id>/   a press at the watchdog's turn
+//!   ├── incident.json   the report, the decision, the run's whole state, and the conversation
+//!   ├── screen.png      what was actually on the screen
+//!   └── state.gbst      the machine as the turn found it, to replay from — see the ⚠️ below
 //! ```
 //!
-//! ⚠️ **A `Stuck` record is not a fault.** The watchdog's turn offers `press_buttons` and `wait` and
-//! nothing else — there is no menu to prefer — so a press there is the model doing exactly as it was
-//! asked. Everything is recorded and the `kind` field is what tells the two apart; filtering here
-//! would mean the one number worth knowing (how often the hatch is used, and how often it was
-//! needed) could not be counted.
+//! **`report_issue`** is the interesting one. It does not end the turn: the model files the
+//! complaint and then still has to choose an action, so filing one and playing on are no longer
+//! mutually exclusive. That is the whole reason it replaced the escape hatch on every turn that has
+//! a menu — see [`crate::llm::tools::report_issue_spec`].
+//!
+//! **A press** now only ever happens at [`DecisionKind::Stuck`], where the agent has reached no
+//! decision point at all and there is no menu to prefer, so it is the model doing exactly as it was
+//! asked rather than a fault. The `kind` field still records which turn asked, because the two were
+//! worth telling apart when the hatch was offered everywhere and a record is worth reading either
+//! way.
+//!
+//! ⚠️ **`state.gbst` is the machine as it was when *this turn* was put to the model**, not the last
+//! periodic checkpoint. It is captured by `EmulatorHost::tick` on the edge into `AwaitingLlm` and
+//! left in `Published`, because `GameBoy` exists on the emulator thread and this one has no way to
+//! ask for a state when it wants one. The first draft copied `state.gbst` out of the run directory
+//! instead and was up to a checkpoint interval — a minute — behind, which is a minute of walking,
+//! several battles, or the very transition being complained about. A state costs 24 µs and 6.4 KB
+//! (measured on Pokémon Red, 2026-08-25), so taking one per turn is cheaper than the copy it
+//! replaced. `state_captured_at` carries the moment it was taken, and the gap between that and `at`
+//! is how long the model spent on the turn.
 //!
 //! Three things this deliberately does **not** do.
 //!
@@ -60,7 +70,38 @@ use crate::web::published::{Published, UiEvent, now_ms};
 /// of JSON, written again on every press.
 const TURNS_KEPT: usize = 3;
 
-/// `incident.json`. Everything a person needs to answer "should this have been an action?" without
+/// What is being filed. The directory differs and so do two fields of the JSON; everything else — the
+/// screen, the save state, the status heartbeat, the conversation slice — is identical, because the
+/// question a person opens either one to answer is the same question.
+#[derive(Debug, Clone, Copy)]
+pub enum Report<'a> {
+    /// A `report_issue` call: the model's own account of what the agent will not let it do.
+    Issue { message: &'a str },
+    /// A press at the watchdog's turn. `why` is required and enforced by
+    /// [`crate::llm::tools::classify`], so unlike the old escape hatch's it is never absent.
+    Press { buttons: &'a [JoypadButton], why: &'a str },
+}
+
+impl Report<'_> {
+    /// Which directory under the run it lands in.
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Issue { .. } => files::ISSUES,
+            Self::Press { .. } => files::PRESS_BUTTONS,
+        }
+    }
+
+    /// The one-word discriminant in the JSON, so a directory of both can be counted apart without
+    /// inferring it from which fields are null.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Issue { .. } => "issue",
+            Self::Press { .. } => "press",
+        }
+    }
+}
+
+/// `incident.json`. Everything a person needs to answer "is the agent actually wrong here?" without
 /// opening anything else.
 #[derive(Debug, Serialize)]
 struct Incident<'a> {
@@ -70,12 +111,24 @@ struct Incident<'a> {
     at: u64,
     run_id: String,
     turn: u64,
-    /// ⚠️ `"stuck"` here means the watchdog asked, which is the one turn where a press is correct.
+    /// `"issue"` or `"press"` — which of the two this is, said outright rather than inferred from
+    /// which of the fields below are null.
+    report: &'static str,
+    /// The decision kind that asked. ⚠️ `"stuck"` means the watchdog did, which is now the only turn
+    /// a press can happen on at all.
     kind: &'static str,
-    buttons: Vec<String>,
-    /// The model's answer to "which action could not do this". `None` means it did not say, which
-    /// the schema asks for and the parser does not enforce — see `tools::call_reason`.
+    /// A `report_issue` call's message: what the model tried, expected and got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'a str>,
+    /// What was pressed, and why. Both present only for a press.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buttons: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     why: Option<&'a str>,
+    /// When the `state.gbst` beside this was taken, as Unix milliseconds: the start of this turn.
+    /// `None` means there was none to write — a policy that never asks the model anything, or a
+    /// test with no host behind it.
+    state_captured_at: Option<u64>,
     /// The model's `summary`: what it thought it was doing, in its own words.
     summary: Option<&'a str>,
     /// The last status heartbeat, whole. Carries the agent's own state string alongside the map,
@@ -89,34 +142,54 @@ struct Incident<'a> {
 ///
 /// ⚠️ **Every failure is the caller's to shrug at.** This runs on the turn loop's thread on the way
 /// to handing a decision back to the game; a full disk must cost a log line, never a turn.
-#[allow(clippy::too_many_arguments)]
 pub fn record(
     run: &CurrentRun,
     published: &Published,
     turn: u64,
     kind: DecisionKind,
-    buttons: &[JoypadButton],
-    why: Option<&str>,
+    report: Report<'_>,
     summary: Option<&str>,
     messages: &[Message],
 ) -> Result<PathBuf, String> {
     let run = run.get();
-    let parent = run.path().join(files::PRESS_BUTTONS);
+    let parent = run.path().join(report.directory());
     std::fs::create_dir_all(&parent).map_err(|e| format!("could not create {parent:?}: {e}"))?;
     // ⚠️ A turn id is the worker's cancellation generation and restarts with the process, so a run
     // resumed twice in a day would otherwise overwrite the first record with the second.
     let dir = parent.join(run::unique_dir(&parent, &format!("turn-{turn}")));
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
 
+    // Written first so its own timestamp can go in the JSON beside it. ⚠️ A failure here is a
+    // `None` and never an error: a report that could not carry its save state still carries the
+    // screen, the status and the conversation, and the caller is on its way back to the game.
+    let state_captured_at = match published.latest_save_state() {
+        Some((state, at)) => run::write_atomically(&dir.join(files::STATE), &state).ok().map(|()| at),
+        None => None,
+    };
+
     let incident = Incident {
         at: now_ms(),
         run_id: run.run_id(),
         turn,
+        report: report.label(),
         kind: kind.label(),
+        message: match report {
+            Report::Issue { message } => Some(message),
+            Report::Press { .. } => None,
+        },
         // Lower-cased so the record spells a button the way the model's own call did — the schema's
         // enum is `"start"`, and a record grepped for what was sent should find it.
-        buttons: buttons.iter().map(|button| button.to_string().to_lowercase()).collect(),
-        why,
+        buttons: match report {
+            Report::Press { buttons, .. } => {
+                Some(buttons.iter().map(|button| button.to_string().to_lowercase()).collect())
+            }
+            Report::Issue { .. } => None,
+        },
+        why: match report {
+            Report::Press { why, .. } => Some(why),
+            Report::Issue { .. } => None,
+        },
+        state_captured_at,
         summary,
         status: published.latest_status(),
         conversation: recent_turns(messages),
@@ -132,6 +205,7 @@ pub fn record(
     run::write_atomically(&dir.join("screen.png"), &screenshot::encode(&frame.pixels))?;
     Ok(dir)
 }
+
 
 /// The tail of the history, cut at a turn boundary and stripped of pictures.
 ///
@@ -178,7 +252,7 @@ mod tests {
         messages
     }
 
-    /// The whole of it: both files land, the conversation is cut to the last three turns, and no
+    /// The whole of it: every file lands, the conversation is cut to the last three turns, and no
     /// picture survives into the JSON.
     ///
     /// ⚠️ The `data:` assertion is the load-bearing one. Without the eviction a record is a base64
@@ -194,9 +268,11 @@ mod tests {
             &run,
             &published,
             7,
-            DecisionKind::Overworld,
-            &[JoypadButton::Start, JoypadButton::A],
-            Some("no action opens the START menu"),
+            DecisionKind::Stuck,
+            Report::Press {
+                buttons: &[JoypadButton::Start, JoypadButton::A],
+                why: "the screen has a menu on it and nothing has moved for a minute",
+            },
             Some("checking the bag"),
             &history(),
         )
@@ -206,16 +282,52 @@ mod tests {
         assert!(dir.join("screen.png").exists(), "the screen is half of what a record is for");
         assert!(!json.contains("data:image"), "a picture must never reach the record");
         assert!(json.contains("[image removed to save context]"), "the caption stays");
-        assert!(json.contains("no action opens the START menu"), "the reason is the headline");
-        assert!(json.contains("\"kind\": \"overworld\""), "a Stuck press has to be tellable apart");
+        assert!(json.contains("nothing has moved for a minute"), "the reason is the headline");
+        assert!(json.contains("\"report\": \"press\""), "which of the two shapes this is");
+        assert!(json.contains("\"kind\": \"stuck\""), "which turn asked");
         // Spelled the model's way, not `strum`'s `Display`.
         assert!(json.contains("\"start\"") && json.contains("\"a\""), "the buttons that were pressed");
+        assert!(!json.contains("\"message\""), "an issue's field has no business on a press");
 
         let incident: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         let conversation = incident["conversation"].as_array().expect("a conversation");
         // Three turn starts, their assistant replies, and the trailing picture message.
         assert_eq!(conversation.len(), 7, "{conversation:#?}");
         assert_eq!(conversation[0]["content"], "### Turn 1", "cut at a turn boundary");
+    }
+
+    /// An issue lands in a directory of its own, carries its message and none of a press's fields,
+    /// and gets the same screen and conversation treatment.
+    ///
+    /// ⚠️ **The separate directory is the point.** A press is now only ever the watchdog doing as it
+    /// was asked; an issue is the model saying the agent is wrong. Counting the second is the whole
+    /// reason the tool exists, and a shared directory would mean counting them apart by a field.
+    #[test]
+    fn an_issue_is_filed_apart_from_a_press() {
+        let scratch = Scratch::new("incident-issue");
+        let run = current(&scratch);
+        let published = Published::new();
+
+        let dir = record(
+            &run,
+            &published,
+            9,
+            DecisionKind::Overworld,
+            Report::Issue { message: "the menu will not offer the ladder I am standing on" },
+            Some("trying the other ladder instead"),
+            &history(),
+        )
+        .expect("the record writes");
+
+        assert!(dir.ends_with("turn-9"));
+        assert_eq!(dir.parent().and_then(|p| p.file_name()), Some(files::ISSUES.as_ref()));
+        let json = std::fs::read_to_string(dir.join("incident.json")).expect("incident.json");
+        assert!(json.contains("\"report\": \"issue\""));
+        assert!(json.contains("will not offer the ladder"), "the message is the record");
+        assert!(json.contains("trying the other ladder instead"), "and what it did anyway");
+        assert!(!json.contains("\"buttons\""), "nothing was pressed");
+        assert!(!json.contains("\"why\""), "a press's field has no business on an issue");
+        assert!(dir.join("screen.png").exists());
     }
 
     /// A second press on the same turn id — a run resumed twice in a day is the real case — must not
@@ -226,7 +338,8 @@ mod tests {
         let run = current(&scratch);
         let published = Published::new();
         let write = || {
-            record(&run, &published, 1, DecisionKind::Stuck, &[JoypadButton::A], None, None, &[])
+            let report = Report::Press { buttons: &[JoypadButton::A], why: "nothing has moved" };
+            record(&run, &published, 1, DecisionKind::Stuck, report, None, &[])
                 .expect("the record writes")
         };
 

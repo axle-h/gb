@@ -96,7 +96,23 @@ impl OverworldActionAbortedReason {
 #[derive(Debug)]
 pub enum AgentEvent {
     StartedOverworldAction { destination: MetaTile },
-    OverworldActionAborted { destination: MetaTile, reason: OverworldActionAbortedReason },
+    /// ⚠️ **`at` is where the walk actually stopped, in the *expanded* coordinates everything else
+    /// the model reads uses** — the ids in the action menu, the ruler on the map picture, the
+    /// `Location:` line of every turn. Never `raw_player_coords`, which is the same square in a
+    /// different space and would have the model reasoning about two maps at once.
+    ///
+    /// It is here because "it was interrupted" on its own was not enough to act on. The deployed run
+    /// aborted on `the way into Route2` **143 times** — the Viridian old man, who blocks the north
+    /// exit until Oak's Parcel is delivered, so the walk was impossible every time and said only
+    /// that something stopped it. Repeating the same square is the fact that makes a blocked route
+    /// tell itself apart from bad luck, and ⚠️ **working that out is deliberately left to the
+    /// model**: nothing here counts aborts, refuses a target that keeps failing, or hides one from
+    /// the menu. `None` where the position could not be read; the sentence simply omits it.
+    OverworldActionAborted {
+        destination: MetaTile,
+        reason: OverworldActionAbortedReason,
+        at: Option<Point8>,
+    },
     OverworldActionCompleted { destination: MetaTile },
     /// The agent walked to something interactable — a person, a PC — pressed A, and the game
     /// answered.
@@ -184,8 +200,10 @@ impl Display for AgentEvent {
         match self {
             AgentEvent::StartedOverworldAction { destination } =>
                 write!(f, "→ heading for {destination}"),
-            AgentEvent::OverworldActionAborted { destination, reason } =>
-                write!(f, "✗ gave up on {destination}: {reason}"),
+            AgentEvent::OverworldActionAborted { destination, reason, at } => match at {
+                Some(at) => write!(f, "✗ gave up on {destination} at ({}, {}): {reason}", at.x, at.y),
+                None => write!(f, "✗ gave up on {destination}: {reason}"),
+            },
             AgentEvent::OverworldActionCompleted { destination } =>
                 write!(f, "✓ reached {destination}"),
             // Not rendered by the page — `useEventStream`'s `fold` drops the kind, because the
@@ -1193,8 +1211,24 @@ impl PokemonAgent {
         Ok(())
     }
 
-    fn abort_overworld(&mut self, destination: MetaTile, reason: OverworldActionAbortedReason) {
-        self.event(AgentEvent::OverworldActionAborted { destination, reason });
+    /// Where the player is, in the **expanded** coordinates the model reads everywhere else.
+    ///
+    /// ⚠️ **Not `raw_player_coords`.** That is the same square before the connection-strip offsets
+    /// `MetaTileMap` adds, so on any map with a connection the two differ — and a walk reported as
+    /// stopping at a square the action ids and the map picture put somewhere else is worse than one
+    /// that says nothing. Observing a whole `GameState` for two numbers is affordable because this
+    /// runs once per abort, not once per tick.
+    fn player_at(&self, api: &PokemonApi) -> Option<Point8> {
+        self.observe_state(api).ok().map(|state| state.map.player_position)
+    }
+
+    fn abort_overworld(
+        &mut self,
+        destination: MetaTile,
+        reason: OverworldActionAbortedReason,
+        at: Option<Point8>,
+    ) {
+        self.event(AgentEvent::OverworldActionAborted { destination, reason, at });
         self.set_state(AgentState::Idle);
     }
 
@@ -1214,7 +1248,10 @@ impl PokemonAgent {
                 AgentState::OverworldMovement { destination, .. } => {
                     // entering battle from the overworld
                     let d = destination;
-                    self.abort_overworld(d, OverworldActionAbortedReason::Battle);
+                    // ⚠️ No position, and this arm takes no `PokemonApi` to read one from. It is
+                    // also the one abort that needs none: "a battle started" is a complete account
+                    // of why the walk stopped and says nothing about the route being wrong.
+                    self.abort_overworld(d, OverworldActionAbortedReason::Battle, None);
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
@@ -1404,7 +1441,8 @@ impl PokemonAgent {
                     if self.interaction_landed(destination, api) {
                         self.event(AgentEvent::OverworldInteractionCompleted { target: destination });
                     } else {
-                        self.abort_overworld(destination, OverworldActionAbortedReason::Textbox);
+                        let at = self.player_at(api);
+                        self.abort_overworld(destination, OverworldActionAbortedReason::Textbox, at);
                     }
                 }
                 let reader = if matches!(self.state, AgentState::Battle(_)) {
@@ -1639,9 +1677,12 @@ impl PokemonAgent {
                     if crossed {
                         // script has just breached rollback deadline, commit to RunningScript so we can start mashing next cycle
                         if let Some(AgentState::OverworldMovement { destination, .. }) = self.backup_state.as_ref() {
+                            let destination = *destination;
+                            let at = self.player_at(api);
                             self.event(AgentEvent::OverworldActionAborted {
-                                destination: *destination,
+                                destination,
                                 reason: OverworldActionAbortedReason::Script,
+                                at,
                             });
                         }
                     }
@@ -1820,20 +1861,32 @@ impl PokemonAgent {
                 const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
                 if self.cycles_since_poll.to_duration() >= MAX_MOVEMENT_SILENCE {
                     api.release_all_buttons();
-                    self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination));
+                    let at = self.player_at(api);
+                    self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination), at);
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
                 let game_state = self.observe_state(api)?;
                 if game_state.mode != GameMode::Overworld {
-                    self.abort_overworld(destination, OverworldActionAbortedReason::from_game_mode(game_state.mode));
+                    let at = Some(game_state.map.player_position);
+                    self.abort_overworld(
+                        destination,
+                        OverworldActionAbortedReason::from_game_mode(game_state.mode),
+                        at,
+                    );
                 } else if game_state.map.map != expected_map {
                     // Map changed — success for warps and connections (both take you off the map).
                     if matches!(destination, MetaTile::Warp { .. } | MetaTile::Connection { .. } | MetaTile::ConnectionWater(_)) {
                         new_events.push(AgentEvent::OverworldActionCompleted { destination });
                         self.set_state(AgentState::Idle);
                     } else {
-                        self.abort_overworld(destination, OverworldActionAbortedReason::WrongMap(game_state.map.map));
+                        // ⚠️ No position: the player is on a *different map*, so a coordinate here
+                        // would be read against the map named in the destination and mean nothing.
+                        self.abort_overworld(
+                            destination,
+                            OverworldActionAbortedReason::WrongMap(game_state.map.map),
+                            None,
+                        );
                     }
                 } else if matches!(destination, MetaTile::Warp { .. })
                     && game_state.map.player_tile() == destination
@@ -1874,7 +1927,12 @@ impl PokemonAgent {
                         Some((tile_a, tile_b)) => self.set_state(AgentState::PacingForEncounters {
                             map: game_state.map.map, tile_a, tile_b, heading_to_b: false, stalled: 0, paced: 0 }),
                         None => {
-                            self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination));
+                            let at = Some(game_state.map.player_position);
+                            self.abort_overworld(
+                                destination,
+                                OverworldActionAbortedReason::NoRoute(destination),
+                                at,
+                            );
                             self.set_state(AgentState::Idle);
                         }
                     }
@@ -1892,7 +1950,8 @@ impl PokemonAgent {
                         } else {
                             // TODO this should not happen, we shouldn't generate an action if this is true
                             //      the adjacent grass tile should be in the action
-                            self.abort_overworld(destination, OverworldActionAbortedReason::NoAdjacentGrass);
+                            let at = Some(game_state.map.player_position);
+                            self.abort_overworld(destination, OverworldActionAbortedReason::NoAdjacentGrass, at);
                             self.set_state(AgentState::Idle);
                         }
                     } else {
@@ -1916,7 +1975,11 @@ impl PokemonAgent {
                             _ => None,
                         });
                     match action {
-                        None => self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination)),
+                        None => self.abort_overworld(
+                            destination,
+                            OverworldActionAbortedReason::NoRoute(destination),
+                            Some(game_state.map.player_position),
+                        ),
                         Some(a) => match a.route.first() {
                             // Pulse A via toggle so hJoyPressed fires every other tick —
                             // press_button (after release_all) would only fire once since A
@@ -3823,8 +3886,20 @@ mod tests {
         let event = AgentEvent::OverworldActionAborted {
             destination: MetaTile::Pc,
             reason: OverworldActionAbortedReason::Battle,
+            at: None,
         };
         assert_eq!(format!("{event}"), "✗ gave up on the PC: a battle started");
+        // ⚠️ **The square is the fact the model needs and the reason on its own was not.** The
+        // deployed run gave up on `the way into Route2` 143 times with "it was interrupted" and
+        // nothing else, every one of them at the same tile — the Viridian old man, who blocks that
+        // exit until Oak's Parcel is delivered. Working out that a repeated square means a blocked
+        // route is deliberately the model's job; saying *which* square is ours.
+        let blocked = AgentEvent::OverworldActionAborted {
+            destination: MetaTile::Pc,
+            reason: OverworldActionAbortedReason::Textbox,
+            at: Some(Point8 { x: 19, y: 11 }),
+        };
+        assert_eq!(format!("{blocked}"), "✗ gave up on the PC at (19, 11): it was interrupted");
         assert_eq!(
             format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass }),
             "→ heading for tall grass",
@@ -3930,7 +4005,7 @@ mod tests {
     fn no_event_formats_to_nothing() {
         let events = [
             AgentEvent::StartedOverworldAction { destination: MetaTile::Pc },
-            AgentEvent::OverworldActionAborted { destination: MetaTile::Pc, reason: OverworldActionAbortedReason::Unknown },
+            AgentEvent::OverworldActionAborted { destination: MetaTile::Pc, reason: OverworldActionAbortedReason::Unknown, at: None },
             AgentEvent::OverworldActionCompleted { destination: MetaTile::Pc },
             AgentEvent::OverworldInteractionCompleted { target: MetaTile::Pc },
             AgentEvent::BattleStarted,
