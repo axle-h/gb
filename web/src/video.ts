@@ -115,6 +115,27 @@ export class VideoDecoder {
 }
 
 /**
+ * The connection *ended* rather than failed, and there is nothing wrong: what the inflater raised is
+ * only the truncated deflate stream that closing a healthy one leaves behind.
+ *
+ * ⚠️ **An ordinary disconnect can only be told apart structurally, never from the exception.**
+ * `VideoStream::frame` flushes the connection's encoder after every message and deliberately never
+ * *finishes* it, since finishing the stream is the one thing that would end it — so a body that
+ * stops carries no final block and no adler trailer, and `DecompressionStream` reports the missing
+ * end as bad input rather than as EOF. It raises a bare `TypeError` (Firefox words it "Error in
+ * input stream", node gives it no message at all) which is indistinguishable by inspection from a
+ * genuinely corrupt stream, and ⚠️ **matching on that wording would be a guess about three
+ * engines' private prose**. So the tell is not the failure, it is whether the *source* closed before
+ * the inflater complained.
+ */
+class Disconnected extends Error {
+  constructor() {
+    super('/api/video closed mid-stream');
+    this.name = 'Disconnected';
+  }
+}
+
+/**
  * `/api/video` is a length-prefixed binary stream, deflated across the whole connection — see the
  * route's docs in `src/web/mod.rs` for the measurements that made it one. This turns the response
  * body into the messages `VideoDecoder.apply` wants.
@@ -134,12 +155,26 @@ async function* readVideoStream(
   signal: AbortSignal,
   alive: () => void,
 ): AsyncGenerator<ArrayBuffer> {
-  // Piped rather than `pipeThrough`ed so the abort signal reaches the *source*: aborting the reader
-  // alone leaves the response body draining in the background until the server notices.
+  // Both pipes carry the signal so an abort reaches the *source*: aborting the reader alone leaves
+  // the response body draining in the background until the server notices.
   // The cast is the DOM types being stricter than the spec: `DecompressionStream` accepts any
   // `BufferSource`, which `Uint8Array` is, but the two `WritableStream`s are not assignable.
   const inflating = new DecompressionStream('deflate');
-  body.pipeTo(inflating.writable as WritableStream<Uint8Array>, { signal }).catch(() => {});
+  // The identity tap is the whole of how an ordinary disconnect is recognised: `flush` runs when the
+  // *body* closes and never runs when the pipe is aborted or the transport fails, which separates
+  // "the connection ended" from "the stream was corrupt" without inspecting a single exception. It
+  // is ordered ahead of the failure it explains rather than racing it — closing this transform is
+  // what closes the inflater's writable, which is what makes zlib notice it never reached an end.
+  let ended = false;
+  const tap = new TransformStream<Uint8Array, Uint8Array>({
+    flush() {
+      ended = true;
+    },
+  });
+  body
+    .pipeThrough(tap, { signal })
+    .pipeTo(inflating.writable as WritableStream<Uint8Array>, { signal })
+    .catch(() => {});
   const reader = (inflating.readable as ReadableStream<Uint8Array>).getReader();
   // The tail of the last chunk that was not yet a whole message. A message spans chunk boundaries
   // routinely — deflate's output has nothing to do with our framing.
@@ -168,6 +203,9 @@ async function* readVideoStream(
       }
       pending = pending.subarray(at);
     }
+  } catch (failure) {
+    if (ended) throw new Disconnected();
+    throw failure;
   } finally {
     reader.cancel().catch(() => {});
   }
@@ -223,7 +261,13 @@ export function subscribeVideo(
         }
       } catch (failure) {
         if (controller.signal.aborted) return;
-        console.error('video stream dropped, reconnecting', failure);
+        // ⚠️ **A disconnect is normal behaviour and must not be logged as a fault.** The pill
+        // already says `reconnecting…`, the next connection opens with a keyframe, and nothing is
+        // lost — so it goes to a level the console hides by default, and everything else stays loud.
+        // A watchdog abort arrives here too, as an `AbortError`, and is one of the loud ones: 8 s of
+        // silence on a stream with a 2 s keep-alive is a fault whoever is watching should see.
+        if (failure instanceof Disconnected) console.debug('video stream ended, reconnecting');
+        else console.error('video stream dropped, reconnecting', failure);
       } finally {
         clearTimeout(watchdog);
         controller.signal.removeEventListener('abort', abandon);
