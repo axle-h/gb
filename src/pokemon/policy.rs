@@ -4163,6 +4163,38 @@ mod move_learn_tests {
 mod policy_helper_tests {
     use super::*;
 
+    /// ⚠️ **Every name any policy can hand the game has to be one the game will actually take**:
+    /// never empty (the cartridge's own name screen refuses one), never longer than
+    /// [`MAX_PLAYER_NAME`], and made only of characters the charmap has a glyph for.
+    ///
+    /// ⚠️ **That last check is the point, and it is not "is it alphanumeric".** What matters is that
+    /// nothing falls through [`PokemonString::from_string`] to a `0x00`, which the game draws as a
+    /// blank — so the assertion is made by encoding the name rather than by inspecting it. This
+    /// replaces a narrower test that only ever saw the names derived from `GB_MODEL`; those are gone
+    /// (`LlmPolicy` is always `AI` now), and the three lists that remain had no guard at all.
+    ///
+    /// ⚠️ It must also not collide with `DebugNewGamePlayerName` (`NINTEN`), which
+    /// `PokemonApiTrait::game_mode` compares `wPlayerName` against to decide the intro is still up:
+    /// a policy that named the trainer that would leave the agent permanently "not in game".
+    #[test]
+    fn every_name_a_policy_can_choose_is_one_the_game_will_take() {
+        let mut names: Vec<String> = RANDOM_NAMES.iter().map(|n| n.to_string()).collect();
+        names.push("HUMAN".to_string());
+        #[cfg(feature = "llm")]
+        names.push(crate::pokemon::llm_policy::PLAYER_NAME.to_string());
+
+        for name in names {
+            assert!(!name.is_empty(), "a policy offered an empty name");
+            assert!(
+                name.len() <= crate::pokemon::MAX_PLAYER_NAME,
+                "{name:?} is longer than the game's field"
+            );
+            assert_ne!(name, "NINTEN", "{name:?} is the new-game sentinel");
+            let encoded = crate::pokemon::strings::PokemonString::from_string(&name).0;
+            assert!(!encoded.contains(&0x00), "{name:?} has a character with no glyph");
+        }
+    }
+
     /// The Power Plant numbers its disguised Poké Balls, and an exact name match finds none of them —
     /// which presents as `CatchPokemon` pacing a map that has no wild encounters at all.
     #[test]

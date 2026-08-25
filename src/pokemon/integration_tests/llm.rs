@@ -284,7 +284,7 @@ fn the_llm_plays_from_a_fixture() {
     let mut fixture = TestFixture::with_policy(
         FIXTURE,
         Duration::from_secs(120),
-        Box::new(LlmPolicy::new(handles, None, None)),
+        Box::new(LlmPolicy::new(handles, None)),
     );
     let arrived = fixture.try_run_until(|state| state.map.map != Map::PalletTown);
 
@@ -386,7 +386,7 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
     let mut fixture = TestFixture::with_policy(
         FIXTURE,
         Duration::from_secs(120),
-        Box::new(LlmPolicy::new(handles, Some(Duration::from_secs(1)), None)),
+        Box::new(LlmPolicy::new(handles, Some(Duration::from_secs(1)))),
     );
 
     let mut reported = false;

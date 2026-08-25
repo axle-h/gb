@@ -57,16 +57,17 @@ spec:
           # placeholder key and crash-looped it. `secret.axh.yml` closes the other half of that trap.
           #
           # **`--policy llm`**, against OpenRouter — see `configmap.yml` for the endpoint, the model
-          # and the context limit, and the ⚠️ there about `openrouter/free` being a router that picks
-          # a different free model per request.
+          # and the context limit, and the ⚠️ there about `:floor` buying the flex service tier at
+          # half price in exchange for a queue.
           #
           # ⚠️ `OPENAI_API_KEY` must be present and non-empty in the Secret for `--policy llm` to
           # start at all, and against this endpoint it must also be **valid** — every request is
           # authenticated, so a placeholder gets a 401 per turn rather than being ignored.
           # `--policy random` needs no endpoint and no key and still exercises the whole stack — the
           # agent, the video pipeline, the page and the volume — so it is what to switch back to when
-          # the free allowance runs out or the endpoint is refusing, rather than leaving the pod
-          # erroring at every turn.
+          # the credit runs out or the endpoint is refusing, rather than leaving the pod erroring at
+          # every turn. ⚠️ **The model is paid now, so a wedged run costs money rather than a
+          # quota**: `--policy random` is also the right answer while an agent bug is being fixed.
           #
           # `gb serve` RESUMES the newest run under $GB_RUN_DIR, which is what makes a pod restart
           # continue the playthrough instead of starting a new one. **To start the game over, do not

@@ -184,8 +184,6 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // **W9** — read off before `config` is moved into the worker. The watchdog belongs to
             // the policy (it is what the agent asks how long to wait), not to the turn loop.
             let stuck_timeout = config.stuck_timeout;
-            // Ditto: the trainer is named after whoever is playing, and only a *new* run uses it.
-            let player_name = crate::llm::config::player_name_for(&config.model);
             // **W6b** — the model's own plan lives in the run directory, so it survives both a
             // compaction and a restart.
             let todo = TodoList::open(Some(run.path()));
@@ -197,7 +195,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // The worker outlives this function; it ends when the policy is dropped and its channels
             // close, which happens when the emulator thread stops.
             worker.spawn()?;
-            Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout, Some(player_name))))
+            Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout)))
         }
         #[cfg(not(feature = "llm"))]
         ServePolicy::Llm => unreachable!("rejected above"),

@@ -973,12 +973,32 @@ name is part of the save and the game has already printed it in a dozen places, 
 restarted under a different `GB_MODEL` would silently rename a trainer mid-run. Random draws from a
 list off its *seed* (not its stream, so a seeded soak run is unchanged), console is `HUMAN`, scripted
 declines — a fixture chain that renamed the trainer would differ from every state it was captured
-against — and LLM is `GB_MODEL` shortened by `config::player_name_for`. ⚠️ That shortening keeps
-**whole segments** and stops at the first that will not fit: truncating the joined string invents
-version numbers (`gemma-3-12b` → `GEMMA31`), and *skipping* a segment to fit a later one assembles a
-different model (`gpt-4o-2024-08-06` → `GPT4O08`, the month). It is deliberately not asked of the
-model: the name is written before the emulator's first instruction, so a completion there would put a
-round trip, a timeout and a retry policy in front of every new run.
+against — and **LLM is the constant `AI`**, whatever the model
+(`llm_policy::PLAYER_NAME`).
+
+⚠️ **That was `GB_MODEL` shortened to fit (`config::player_name_for`) and the whole mechanism is
+gone.** The shortening kept whole segments and stopped at the first that would not fit, because
+truncating the joined string invents version numbers (`gemma-3-12b` → `GEMMA31`) and *skipping* a
+segment to fit a later one assembles a different model (`gpt-4o-2024-08-06` → `GPT4O08`, the month) —
+but getting those two right only ever narrowed the failure. Seven characters cannot hold a model id,
+so the output was a guess at which half mattered and the guess still produced models that do not
+exist: `openai/gpt-5.4-nano` → `GPT54`. It was also a *lossy second copy* of something recorded
+exactly in `meta.json` and `hall-of-fame/ledger.jsonl`, and the two could disagree, since the name is
+written once into the save and `GB_MODEL` can change under a restart. `PREFIXED_TAILS` (the
+`openrouter/free` → `OR/FREE` special case) went with it.
+
+⚠️ **The one property that outlived it is the check, now in
+`policy::every_name_a_policy_can_choose_is_one_the_game_will_take`**: every name any policy can hand
+the game is asserted non-empty, within `MAX_PLAYER_NAME`, not `NINTEN` (which is
+`DebugNewGamePlayerName`, what `game_mode` compares `wPlayerName` against to decide the intro is
+still up), and encodable without a `0x00` — ⚠️ **tested by running it through
+`PokemonString::from_string`, not by asking whether it is alphanumeric**, since `/` is a perfectly
+writable `$F3`. The old test only ever saw the derived names; `RANDOM_NAMES` and `HUMAN` had no guard
+at all.
+
+⚠️ **A name is deliberately not asked of the model**: it is written before the emulator's first
+instruction, so a completion there would put a round trip, a timeout and a retry policy in front of
+every new run.
 
 ⚠️ **A run directory has exactly one writer, and five things had a copy of which one it was** — the
 checkpointer, the transcript thread's open file, `/api/history`'s path, `/api/healthz`'s run id, and

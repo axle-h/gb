@@ -80,10 +80,6 @@ pub struct LlmPolicy {
     /// Raw presses waiting for the agent to collect them at the top of its next tick
     /// ([`Policy::take_manual_input`]).
     manual: Vec<JoypadButton>,
-    /// What to call the player when a **new** game starts — `GB_MODEL`, shortened to what the game
-    /// allows. Resolved at construction because `LlmConfig` is moved into the worker thread a line
-    /// later and this is the only side of the pair that is ever asked for it.
-    player_name: Option<String>,
     /// Prepended to the next turn: what went wrong with the last decision, in the model's own terms.
     note: Option<String>,
     /// **W9** — `GB_STUCK_TIMEOUT_SECS`, handed to the agent once at construction
@@ -91,16 +87,15 @@ pub struct LlmPolicy {
     stuck_timeout: Option<std::time::Duration>,
 }
 
+/// What every LLM-played run calls its trainer. See [`Policy::player_name`] below for why this is a
+/// constant rather than something derived from `GB_MODEL`.
+pub(crate) const PLAYER_NAME: &str = "AI";
+
 impl LlmPolicy {
-    pub fn new(
-        handles: TurnHandles,
-        stuck_timeout: Option<std::time::Duration>,
-        player_name: Option<String>,
-    ) -> Self {
+    pub fn new(handles: TurnHandles, stuck_timeout: Option<std::time::Duration>) -> Self {
         Self {
             handles,
             stuck_timeout,
-            player_name,
             pending: None,
             waiting: None,
             events: Vec::new(),
@@ -241,12 +236,24 @@ impl LlmPolicy {
 impl Policy for LlmPolicy {
     fn name(&self) -> &'static str { "llm" }
 
-    /// The run is played by a model, so the trainer is named after it — `GB_MODEL` shortened to the
-    /// seven characters the game allows by [`crate::llm::config::player_name_for`].
+    /// Every LLM run is played by `AI`, whatever the model.
     ///
-    /// `None` only in the tests, which build this policy without a configuration.
+    /// ⚠️ **This used to be `GB_MODEL` shortened to fit, and the shortening was wrong more often
+    /// than it was right.** Seven characters ([`MAX_PLAYER_NAME`](crate::pokemon::MAX_PLAYER_NAME))
+    /// cannot hold a model id, so every name was a guess at which half of one mattered, and the
+    /// guess routinely produced a model that does not exist: `openai/gpt-5.4-nano` came out `GPT54`,
+    /// which is the same failure the whole-segments rule was written one level up to avoid
+    /// (`gemma-3-12b` → `GEMMA31`). It is also a *lossy second copy* of something already recorded
+    /// exactly — `meta.json` and `hall-of-fame/ledger.jsonl` both carry the full id — and the two
+    /// could disagree, because the name is written once into the save and `GB_MODEL` can change
+    /// under a restart.
+    ///
+    /// So the trainer card says who is playing in the only sense it can hold, and the model id stays
+    /// where it is unambiguous. `RandomPolicy` still draws a name from its own list and
+    /// `ConsolePolicy` is still `HUMAN`: those are not abbreviations of anything, so they lose
+    /// nothing by being spelled out.
     fn player_name(&self) -> Option<String> {
-        self.player_name.clone()
+        Some(PLAYER_NAME.to_string())
     }
 
     /// ⚠️ Runs at every poll of every decision point — fifty times a second — so the common path
@@ -747,7 +754,7 @@ mod tests {
                 events,
                 worker: Some(handle),
             };
-            (rig, LlmPolicy::new(handles, config_stuck_timeout, None))
+            (rig, LlmPolicy::new(handles, config_stuck_timeout))
         }
 
         /// A trainer just spotted the player. Swapping the loaded state is exactly what that looks
