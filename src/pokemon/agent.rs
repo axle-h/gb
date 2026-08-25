@@ -288,6 +288,14 @@ fn thrown_at_the_enemy(item: crate::pokemon::item::ItemId) -> bool {
     matches!(item, ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall | ItemId::SafariBall)
 }
 
+/// Ticks a freshly opened battle sub-menu is believed from RAM rather than from the screen. See
+/// [`BattleState::confirming`] for why the two disagree at all.
+///
+/// 15 ticks is 300 ms of game time, against the ≤3 frames (~50 ms) `AutoBgMapTransfer` takes to get
+/// the whole tilemap into VRAM — comfortable margin, and still far inside the seconds a battle turn
+/// takes to resolve, so a main menu that has genuinely come back is never held up for long.
+const CONFIRMING_TICKS: u16 = 15;
+
 /// Ticks of B-mashing [`BattleState::WaitingForMenu`] does after the game refuses a move. See the
 /// ⚠️ at the top of that arm for why it is a countdown rather than a flag.
 const BACKING_OUT_TICKS: u16 = 100;
@@ -327,7 +335,7 @@ const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
-    WaitingForMenu { reader: PokemonTextReader, delay: DelayContext, backing_out: u16 },
+    WaitingForMenu { reader: PokemonTextReader, delay: DelayContext, backing_out: u16, confirming: u16 },
 
     /// Battle menu is up but policy hasn't returned an action yet.
     AwaitingPolicy { delay: DelayContext },
@@ -362,6 +370,7 @@ impl Default for BattleState {
             reader: PokemonTextReader::message_box_only(),
             delay: DelayContext::default(),
             backing_out: 0,
+            confirming: 0,
         }
     }
 }
@@ -380,6 +389,36 @@ impl BattleState {
             reader: PokemonTextReader::message_box_only(),
             delay: DelayContext::default(),
             backing_out: BACKING_OUT_TICKS,
+            confirming: 0,
+        }
+    }
+
+    /// [`Self::default`], but told that a sub-menu was *just* opened on purpose and is waiting to be
+    /// confirmed.
+    ///
+    /// ⚠️ **This exists because the screen the agent reads lags the game's own tilemap by up to three
+    /// frames, and the two can disagree about which menu is up.** `AutoBgMapTransfer`
+    /// (`home/vcopy.asm`) copies `wTileMap` into VRAM **one third of the screen per V-blank**, so for
+    /// a frame or two after `MoveSelectionMenu` draws the move list the bottom third of VRAM still
+    /// holds `FIGHT`/`PKMN`/`ITEM`/`RUN` — while `wTopMenuItemX/Y` already say (5, 12), the move
+    /// list. The text test in [`Self::WaitingForMenu`] reads that stale third, concludes the main
+    /// battle menu is back and hands the turn to the policy — **abandoning the move the policy chose
+    /// one tick earlier and asking it the same question again**. On the deployed run that was a
+    /// second paid LLM turn per battle turn, 1.1 s after the first, with the move menu open on
+    /// screen; the model quite reasonably answered `wait`.
+    ///
+    /// So for a short window after `Navigating` hands over, RAM wins: the geometry is what the game
+    /// wrote for the menu it is about to take input on, and the screen is a stale copy of the one
+    /// before it. ⚠️ **Bounded rather than latched to the confirm**, because the arms below can
+    /// legitimately fail to press anything (a refusal, a message box) — after the window the
+    /// ordinary text test resumes and a genuinely returned main menu is handed to the policy as
+    /// before, one window late.
+    fn confirming() -> Self {
+        Self::WaitingForMenu {
+            reader: PokemonTextReader::message_box_only(),
+            delay: DelayContext::default(),
+            backing_out: 0,
+            confirming: CONFIRMING_TICKS,
         }
     }
 }
@@ -2138,7 +2177,7 @@ impl PokemonAgent {
                     return Ok(());
                 }
                 match battle_state {
-                    BattleState::WaitingForMenu { reader, delay, backing_out } => {
+                    BattleState::WaitingForMenu { reader, delay, backing_out, confirming } => {
                         // ⚠️ **Hoisted above everything, because the A presses that defeat it do not
                         // come from the branch that detects the problem.** A move the game refuses —
                         // out of PP, or disabled — drops back to the move list, and getting out takes
@@ -2228,7 +2267,13 @@ impl PokemonAgent {
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
                             }
-                            if screen.contains("FIGHT") && screen.contains("RUN") {
+                            // ⚠️ **Only once the screen is trustworthy again.** `confirming` is set
+                            // when `Navigating` opens a sub-menu, and for as long as it is running the
+                            // bottom third of VRAM may still be showing the main menu this test looks
+                            // for — see [`BattleState::confirming`].
+                            if *confirming > 0 {
+                                *confirming -= 1;
+                            } else if screen.contains("FIGHT") && screen.contains("RUN") {
                                 new_events.push(AgentEvent::text_box_from_reader(reader));
                                 api.release_all_buttons();
                                 self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
@@ -2562,7 +2607,12 @@ impl PokemonAgent {
                                         api.toggle_button(JoypadButton::A);
                                     } else {
                                         api.release_all_buttons();
-                                        self.set_battle_state(BattleState::default());
+                                        // ⚠️ **Not a plain `default()`.** The sub-menu is open per RAM
+                                        // and may not be on screen yet, and `WaitingForMenu`'s text
+                                        // test would read the stale third and hand the turn back to
+                                        // the policy with the move unconfirmed. See
+                                        // [`BattleState::confirming`].
+                                        self.set_battle_state(BattleState::confirming());
                                     }
                                 } else {
                                     let resolved_target = if let Some(target_parent) = menu_target.parent() {
