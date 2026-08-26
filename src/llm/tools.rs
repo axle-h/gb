@@ -462,6 +462,18 @@ pub const READ_TOOLS: &[ReadTool] = &[
         parameters: Some(read_route_arguments),
     },
     ReadTool {
+        name: READ_GUIDE,
+        description: "The walkthrough for the stretch of the game you are in now: where to go, in \
+                      order, what is blocking the way and what the next Gym Leader has. It is chosen \
+                      from your badges and it does not change until you win the next one, so there \
+                      is no reason to ask twice. Place names in it are spelled exactly as the \
+                      action menu and `read_route` spell them.",
+        // Overworld and Stuck only: it answers "where am I supposed to be going", which is not a
+        // question a battle, a nickname, a mart or a move to forget can raise.
+        kinds: &[DecisionKind::Overworld, DecisionKind::Stuck],
+        parameters: None,
+    },
+    ReadTool {
         name: SCREENSHOT,
         description: "A picture of the Game Boy screen as it is right now. Everything the agent can \
                       read for you — the map, the party, the text on screen — is cheaper and more \
@@ -486,6 +498,15 @@ pub const SCREENSHOT: &str = "screenshot";
 /// the routing runs here, where the graph already is, and what crosses into the context is the
 /// answer.
 pub const READ_ROUTE: &str = "read_route";
+
+/// **The walkthrough, cut to where the player actually is.** Everything a run needs to know about
+/// the order of this game is in [`crate::llm::guide`], and the chapter is picked from the badges the
+/// turn is already reading — so the tool takes no arguments and cannot be asked the wrong question.
+///
+/// ⚠️ **It answers with markdown rather than JSON**, which is the one read that does. A chapter is
+/// prose meant to be read, and `\n` escaping it into a JSON string makes it unreadable to a human
+/// reviewing the turn for no gain to the model.
+pub const READ_GUIDE: &str = "read_guide";
 
 fn read_route_arguments() -> Value {
     json!({
@@ -1447,6 +1468,10 @@ pub fn service_read(
         "read_map" => Some(Box::new(state.map.clone())),
         _ => None,
     };
+    // ⚠️ Answered before the JSON arms below and returned as raw text: see [`READ_GUIDE`].
+    if call.function.name == READ_GUIDE {
+        return ToolAnswer::text(crate::llm::guide::chapter(state.badges));
+    }
     let value = match call.function.name.as_str() {
         "read_map" => serde_json::to_value(observe::map_view(state)),
         "read_party" => serde_json::to_value(observe::party(state)),
