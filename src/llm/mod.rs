@@ -34,6 +34,7 @@ pub mod compaction;
 pub mod config;
 pub mod incident;
 pub mod guide;
+pub mod history;
 pub mod prompt;
 pub mod map_image;
 pub mod protocol;

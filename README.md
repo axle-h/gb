@@ -114,10 +114,54 @@ built to make reading unnecessary: the location, the party, the money, the badge
 and the menu of what can be done are all in the request already, so most turns should need no read
 at all.
 
+One turn does not have to be one action. `choose_action` takes a `then`: up to three more ids from
+the same menu, carried out in order without the model being asked again. Healing at a Pokémon Centre
+is the case it was written for — talk to the Nurse, then take the door out — and it is two requests
+otherwise, on something a player does a dozen times a run. A chain is a sequence of independent
+decisions rather than a route the agent commits to: each id is resolved against the live game when
+its turn comes round, exactly as the first one is, so anything that stops one stops the rest. Being
+stopped is how this game says almost everything — a guard, a locked door, an errand — and carrying on
+past that is the loop the whole agent exists to avoid, so a chain that ends early says where it got
+to and hands the decision back.
+
+The other half of the same saving is `resume_after_battle`. A wild Pokémon or a trainer interrupting
+a walk says nothing about the walk: the battle ends by itself, the world is where it was, and the
+walk was going to be re-issued word for word. So an action asked for with that flag is taken up again
+once the battle is over rather than coming back to be chosen a second time. It is opt-in and only
+ever a battle — a text box is the game talking, and resuming through one is exactly the wedge above —
+and it gives up after five, because the model is answering battle turns throughout but is locked out
+of the overworld, which is where "half the party has fainted, go and heal instead" lives.
+
 The model keeps a **plan** it edits itself, shown to it every turn and drawn on the page beside the
-game. It is the only thing it writes that survives both a context compaction and a restart of the
-program, so an item is meant to carry its reason as well as its intent. History is compacted once it
-passes `GB_COMPACT_ABOVE` of the window: images are evicted first, then older turns are summarised.
+game. It is the only thing it writes that survives a context compaction, so an item is meant to carry
+its reason as well as its intent. History is compacted once it passes `GB_COMPACT_ABOVE` of the
+window: images are evicted first, then older turns are summarised.
+
+The conversation itself survives a **restart**, which it did not used to. It is written to the run
+directory at the end of every turn, so a rollout, a crash or a reboot resumes a run that still
+remembers what it was doing rather than one that wakes up holding only its plan. Two files, because
+the two jobs pull in opposite directions: `history.json` is rewritten each turn and is the smallest
+correct copy of the live conversation, and `conversation.jsonl` is appended to and never rewritten,
+so it keeps every message the model was ever sent — including the ones a compaction replaced with a
+summary, which were previously gone the moment it ran. Neither carries the map pictures: those are
+hundreds of kilobytes of base64 apiece, and a restored one would be priced at a twentieth of its real
+weight in the token accounting, which is the sort of thing that quietly stops compaction ever firing
+again. The caption stays and says the picture went.
+
+⚠️ **A changed system prompt takes effect on the next restart, and says so.** Message 0 is never
+stored — it is re-minted from the build that is running — so a deployment that edits the prompt gets
+the edit in front of the model rather than pinned to whatever the last process happened to be running.
+The conversation underneath it is kept, and the change is logged at `warn` level and marked in
+`conversation.jsonl`. Reading that file back as one conversation therefore shows the system prompt
+changing partway through, which looks odd and is the honest picture: it is what the model was
+actually sent. It should be a rare event, and when it is not that is worth seeing.
+
+A resumed conversation is a little ahead of the game it describes: the save state is the last
+checkpoint and the conversation is the last completed turn, so up to a minute of play can be replayed
+under it. The model is told so in one line, once, because a situation that contradicts the
+conversation is exactly what makes a model decide the game is broken. `GB_RESTORE_HISTORY=0` turns
+the restore off, which is the one way to hand a run a fresh conversation without also resetting the
+cartridge.
 
 ⚠️ The plan rides in a message of its own near the end of the history rather than in the system
 prompt, and is re-sent only when it has actually changed. A prompt cache is keyed on the prefix, so
@@ -253,7 +297,9 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `state.gbst` | the save state — the emulator, exactly as it was |
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
-| `todo.json` | the model's own plan — the one thing it writes that outlives its conversation |
+| `todo.json` | the model's own plan — what outlives a compaction |
+| `history.json` | the live conversation, rewritten each turn — what a restart resumes on |
+| `conversation.jsonl` | every message ever sent, appended; the record of what a compaction replaced |
 | `issues/` | one directory per `report_issue`: the message, the screen, a save state, the conversation |
 | `press-buttons/` | the same, for the watchdog turn's escape hatch: why, and what was pressed |
 
@@ -411,6 +457,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
 | `GB_AUDIO_BITRATE` | the Opus stream's target, bits/s (`24000`); `0` turns sound off entirely |
 | `GB_HARDWARE` | which Game Boy the cartridge runs on: `dmg` (default) or `cgb` |
+| `GB_RESTORE_HISTORY` | resume a run's conversation as well as its save (`1`); `0` starts the conversation over |
 | `GB_ADMIN_TOKEN` | enables `/reset-game` and `POST /api/new-run`; unset means both 404 |
 
 ## Deployment
@@ -473,7 +520,8 @@ src/
 │   ├── screenshot.rs    — one published frame as a PNG data URL, encoded on the worker thread
 │   ├── map_image.rs     — the whole current map as a labelled picture, ditto
 │   ├── accounting.rs    — tokens reported vs tokens estimated, and the calibration between them
-│   ├── todo.rs          — the model's plan: the only thing it writes that survives a restart
+│   ├── todo.rs          — the model's plan: the only thing it writes that survives a compaction
+│   ├── history.rs       — the conversation on disk: restored on a restart, logged past a compaction
 │   ├── compaction.rs    — image eviction + summarising compaction, as pure functions over the history
 │   └── worker.rs        — the turn loop: stream → tool batch → terminal call, with cancellation
 ├── game_boy.rs          — top-level GameBoy struct (run loop, save/restore)

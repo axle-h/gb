@@ -20,6 +20,7 @@
 //! | `GB_STUCK_TIMEOUT_SECS` | `300` | **W9** — emulated seconds with the agent asking nothing before the watchdog does; `0` is off |
 //! | `GB_PORT` | `8080` | Read in `cli.rs`, since it applies to `--policy random` too |
 //! | `GB_RUN_DIR` | `runs` | Read in `web/mod.rs`, for the same reason (**W7**) |
+//! | `GB_RESTORE_HISTORY` | `1` | Resume the conversation as well as the save; `0` starts it over. See [`restore_history`] |
 //!
 //! `GB_RUN_DIR` is **W7's and is read in `src/web/mod.rs`**, not here: it applies to
 //! `--policy random` too, and the run directory is resolved before this block is — a missing API key
@@ -215,6 +216,35 @@ where
     }
 }
 
+/// Whether a resumed run picks its conversation back up — `GB_RESTORE_HISTORY`, on unless it is set
+/// to `0`, `false`, `no` or `off`.
+///
+/// ⚠️ **Read here rather than parsed into [`LlmConfig`], for `GB_RUN_DIR`'s reason**: the history is
+/// opened in `web/mod.rs` beside the `TodoList`, before the config block is validated, and it is a
+/// property of the run directory rather than of the endpoint.
+///
+/// What switching it off buys is the one thing a restart used to give for free. A model reads its
+/// own last turns back on every request, so a run that has talked itself into a loop — the 91
+/// consecutive `press_buttons` on Route 3, the eleven cuts at the same tree — reinforces it, and
+/// before this module the loop died with the process. Now it does not. `GB_RESTORE_HISTORY=0` is
+/// therefore an escape hatch rather than a tuning knob: it starts the conversation over while
+/// keeping the game, the plan and the run directory, which is the one combination
+/// `POST /api/new-run` cannot offer because that resets the cartridge too.
+pub fn restore_history() -> bool {
+    restores_history(std::env::var("GB_RESTORE_HISTORY").ok())
+}
+
+/// The reading, split out so it can be tested without touching the process environment — the same
+/// reason [`LlmConfig::from_lookup`] exists.
+fn restores_history(value: Option<String>) -> bool {
+    match value {
+        // ⚠️ **Blank counts as unset**, which is the shape a placeholder Secret takes — the same
+        // reading `GB_ADMIN_TOKEN` already has, and the opposite of treating an empty string as
+        // "off" and silently dropping every resumed conversation on the deployment.
+        Some(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        None => true,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -371,6 +401,22 @@ mod tests {
             let env = lookup(&pairs);
             let failure = LlmConfig::from_lookup(&env).expect_err("the value is nonsense");
             assert!(failure.contains(name) && failure.contains(bad), "{failure}");
+        }
+    }
+
+    /// ⚠️ **The default has to be *on*, and blank has to read as unset.** This decides whether a
+    /// resumed run keeps the conversation it was having, so a placeholder Secret rendering as an
+    /// empty string must not quietly turn the feature off across a whole deployment.
+    #[test]
+    fn a_conversation_is_restored_unless_something_actually_says_not_to() {
+        assert!(restores_history(None), "unset resumes the conversation");
+        assert!(restores_history(Some(String::new())), "and so does a blank placeholder Secret");
+        assert!(restores_history(Some("   ".into())));
+        assert!(restores_history(Some("1".into())));
+        assert!(restores_history(Some("yes".into())));
+
+        for off in ["0", "false", "no", "off", "OFF", " False "] {
+            assert!(!restores_history(Some(off.into())), "`{off}` should switch the restore off");
         }
     }
 }

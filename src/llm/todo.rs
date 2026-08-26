@@ -215,9 +215,9 @@ impl TodoList {
         out.push_str(PLAN_HEADING);
         out.push_str(
             &format!(
-                "\n\nThis is the only thing you write that survives a context compaction and a \
-                 restart of the program. Keep a short plan going at all times, even when you are \
-                 unsure: the next few things you mean to do, each with its reason. Nothing here is \
+                "\n\nThis is the only thing you write that survives a context compaction. Keep a \
+                 short plan going at all times, even when you are unsure: the next few things you \
+                 mean to do, each with its reason. Nothing here is \
                  a commitment — when an item turns out wrong or impossible, rewrite or delete it \
                  with `todo_set` rather than leaving it, and complete items as you actually finish \
                  them.\n\n\

@@ -49,6 +49,65 @@ place, never dropped** — removing the call would orphan its `tool_result` and 
 rests on — and ⚠️ **only the broken ones**, since `serde_json` sorts keys and canonicalising every call would reword the
 model's own history for nothing.
 
+### The conversation on disk
+
+⚠️ **Two files, two audiences, and merging them is the mistake to avoid.** `history.json` is rewritten whole each turn
+and is the smallest *correct current* state, which a restart resumes on; `conversation.jsonl` is appended to and never
+rewritten, so it holds every message ever sent including the ones a compaction replaced. They want opposite things:
+`write_atomically` gives the first all-or-nothing for free, and the append-only file's one failure mode is a torn final
+line — fatal for a restore, one skipped line for a log. ⚠️ **One append-only file replayed on load was the other design
+and is worse**: the reducer would have to model `pop`, `evict_images`, `apply_summary` and `trim_history` and stay
+bit-exact with `compaction.rs` for ever, a divergence corrupts a resumed history *silently*, and reading the whole log
+at every start is the unbounded read that OOM-killed the pod before `read_since` worked from the tail.
+
+⚠️ **Both copies are image-evicted, and the reason is the token price rather than the bytes.** `ImageUrl::tokens` is
+`#[serde(skip)]` defaulting to `IMAGE_TOKENS` (85) while a real map costs 765 to 3825, so a round-tripped picture is
+priced at a twentieth of its weight, `Accounting::occupancy` reads a full context as nearly empty, and compaction never
+fires again. Storing none means there is nothing to mis-default. It goes through `compaction::evict_images(.., 0)`, the
+call `incident::recent_turns` already makes, because `is_evicted_image` sniffs the `EVICTED` wording.
+
+⚠️ **The checkpoint sits between `decide` returning and `outcomes.send`, never at the end of the turn.** The moment the
+emulator thread has a `TurnOutcome` it may act on it, and an action that wins the game has `hall_of_fame::archive` copy
+the directory on the next tick — so publishing the `Decision` and `compact_if_needed` (a whole summarising completion)
+are both below the race. Writing first makes durability precede visibility. It is the argument that made the archiver
+*follow* the transcript rather than `fs::copy` it. A second, conditional checkpoint runs after a compaction.
+
+⚠️ **The run directory is captured, not re-read from `CurrentRun` per write — the inversion of `transcript.rs`'s rule is
+deliberate.** The transcript re-reads because an unrelated event stream drives it and it would never learn about the
+swap; the worker *does* learn, through the `Restart` cell at the top of `run_one`. Re-reading here would file a turn
+that belongs to the **old** game in the new run's directory, and the new run would then resume into it. Hence
+`History::fresh` beside `History::open`: `apply_restart` clears and must never reload.
+
+⚠️ **`Accounting::resumed` carries the calibration and must not carry the totals.** `EmulatorHost::progress` folds those
+into a `RunProgress` that `RunDir::checkpoint` rebases onto `meta.json`, so a restored `prompt_total` is counted twice —
+the "a run's figures used to be a process's" bug again. The calibration is not cosmetic: at a 3× endpoint ratio a
+restored 85%-full history reads as 28% full at the default 1.0 and the first request goes out over the window.
+
+⚠️ **The system prompt is stored to be *compared*, never to be restored, and the two are one line
+apart.** Index 0 is always re-minted from `prompt::system_message()`, which is what makes a
+deployment's edit reach a resumed run instead of being pinned by an old file; `Saved::system_prompt`
+exists only so a change can be *noticed*. When it differs the conversation is still kept, a `warn`
+Notice is published, a `system_prompt_changed` line goes into the log, and the save taken at
+construction records the new one so it fires **once per change rather than once per restart after
+one**. An *empty* stored prompt is "not recorded", not "changed" — the field is `#[serde(default)]` so
+an older file still reads. Full text rather than a hash on purpose: the comparison is exact, and
+`DefaultHasher` is not stable across Rust releases, so a toolchain bump would report a change that
+never happened. `the_stored_system_prompt_is_compared_and_never_restored` is the guard.
+
+⚠️ **The log carries the system prompt, one copy per *process*.** The watermark cannot do it — on a
+restore the messages behind it were written by the previous process and index 0 was not — so
+`History::start` logs it explicitly. That is what makes each process's stretch of the log
+self-describing, and it means reading the file back as one conversation shows the prompt changing
+partway through. That is the honest picture rather than a glitch. ⚠️ The restored middle is **not**
+re-logged, or a run restarted nightly would multiply its own log.
+
+⚠️ **A restored conversation is *ahead* of the game and the model has to be told.** `state.gbst` is the last periodic
+checkpoint and `history.json` is the last completed turn, so up to a minute of play is replayed under a conversation
+that already describes it. That is a new failure mode this change created, and a situation contradicting the
+conversation is exactly the input behind "29 of one 258-turn run's summaries called it buggy, glitched or broken".
+`prompt::RESUMED_NOTE` says which side is the truth, once, at the tail. `GB_RESTORE_HISTORY=0` is the escape hatch for a
+run that has talked itself into a loop, which a restart used to provide by accident.
+
 ### The tool catalogue
 
 ⚠️ **Every terminal tool takes a required `summary`, enforced, and it is the only thing the model says about a turn
@@ -103,8 +162,11 @@ the copy it replaced; ⚠️ still not free enough to do every tick, where `MAX_
 ⚠️ **There is one notes mechanism and there used to be two.** `memory_write`/`memory_read` over a `memories/` directory
 sat beside `todo_add`/`todo_complete` doing the same job in a different shape: four tools' worth of schema in every
 request and a choice for the model to get wrong. The plan won — it renders on the page, for both audiences — and the
-freeform role it gave up is filled better by the compaction summary. What only the plan does is survive a *process*
-restart, since the history is never persisted; that is why `MAX_TEXT` is long enough for an item to carry its own reason.
+freeform role it gave up is filled better by the compaction summary. What only the plan does is survive a **compaction**,
+which is why `MAX_TEXT` is long enough for an item to carry its own reason. ⚠️ **It used to survive a process restart
+too, and that is no longer the distinction** — `llm::history` persists the conversation, so the plan's claim narrowed;
+`SYSTEM_PROMPT` and `TodoList::render` were both reworded and `the_system_prompt_says_the_things_the_deployed_runs_needed_it_to_say`
+now pins the narrower one, because "and a restart of the program as well" reads perfectly well and is false.
 `run::files::MEMORIES` survives only so an archive of an older run is still complete.
 
 ⚠️ **A read the situation already answered is worse than no read at all** — a round trip bought for nothing, and it
@@ -178,6 +240,42 @@ different mechanisms on purpose:
   `a_cut_with_no_cut_never_opens_the_party_menu` asserts that **decisions keep coming**, not that the state was skipped:
   a guard that left the agent with nothing to do would pass "never entered `CuttingTree`" and still be the wedged run it
   replaces.
+
+### Chaining actions
+
+⚠️ **`choose_action` carries up to `MAX_CHAINED_ACTIONS` (4) ids and the chain buys turns, not tokens.**
+`then` is checked against the same menu as `id`, by the same `not_on_the_menu` — taking the tail on trust and letting
+the policy find out is that bug one step on: the first two hops have already happened, and the complaint rides on the
+*next* turn's situation instead of a tool result this turn can still act on. Over-length is a rejection rather than a
+truncation, or half of what the model asked for is carried out and said nowhere.
+
+⚠️ **`LlmPolicy::advance_queue` runs *before* `advance` and touches neither `pending`, `waiting` nor the generation.**
+Same shape as `pick_field_move`: a decision already taken is being handed over, not asked for. Starting a turn here
+would cancel nothing and buy a completion for an answer in hand — which is the whole feature, backwards.
+
+⚠️ **Only a landed action advances a chain, and the only interruption that may be resumed through is a battle.** The
+conservative half is the load-bearing one: a text box, a locked door and a guard turning the player back are the game
+*saying* something, and a chain that walked past those is the loop the agent exists to avoid — 143 aborts on the same
+square in one deployed run. A battle means nothing about the action: it ends by itself, the world is where it was, and
+the walk was going to be re-issued verbatim. `resume_after_battle` is opt-in and capped at `MAX_BATTLE_RESUMES` (5),
+because the model keeps answering *battle* turns throughout but is locked out of the overworld, which is where "half
+the party has fainted, heal instead" lives.
+
+⚠️ **An ending nothing named is read as failure, not success.** `LlmPolicy::outcome` is written by `on_event` from
+three events and nothing else, and several endings emit none of them on purpose: grass and cave pacing
+(`PacingForEncounters`) and the Surf mount both leave `OverworldMovement` for a driver of their own and hand the
+decision back. Reading that silence as an arrival carries a chain past a step that never happened.
+`a_chain_does_not_advance_on_an_ending_the_agent_never_reported`.
+
+⚠️ **`take_current` re-resolves every hop against a freshly recomputed `actions()`, never the menu the chain was written
+from.** That is what makes chaining safe to offer at all: an id that stopped being true — because the hop before it took
+the player through a door — fails to match rather than matching whatever now sits at those coordinates. The map prefix
+is what does the work; see the `overworld_id` ⚠️ above.
+
+⚠️ **A single action that was stopped gets no note, and that is deliberate.** `drop_queue` returns early for it: the
+agent has already reported the abort, in the very turn a note would be prepended to, and a second account in the
+policy's words is a second thing to reconcile and a way for the two to disagree. What is worth saying is only what the
+agent cannot know — that something was queued behind it, or that a resume budget ran out.
 
 ⚠️ **`fly_bike::blocked_by` was already doing this and still had the hole**: it checks the destination, the tileset and
 that somebody knows Fly, and never checks the Thunder Badge.

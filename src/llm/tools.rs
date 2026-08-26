@@ -109,7 +109,24 @@ impl DecisionKind {
 /// have moved since.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminal {
-    ChooseAction { id: String },
+    /// One overworld action, and — since the whole point of the agent is that a decision is bigger
+    /// than a button — optionally the next few after it.
+    ///
+    /// ⚠️ **`then` is not a route and must not be read as one.** Each id is resolved against the
+    /// live game at the moment its turn comes round ([`resolve_overworld`]), exactly as `id` is, so
+    /// a chain is a sequence of independent decisions taken without asking again rather than a plan
+    /// the agent commits to. Anything that stops one stops the rest — see
+    /// [`LlmPolicy::advance_queue`](crate::pokemon::llm_policy::LlmPolicy).
+    ChooseAction {
+        id: String,
+        /// Further ids from the **same** turn's menu, in the order they are to be taken. At most
+        /// [`MAX_CHAINED_ACTIONS`] counting `id` itself.
+        then: Vec<String>,
+        /// A battle interrupting this action does not end it: once the battle is over the same
+        /// action is taken again rather than the decision being handed back. Off by default, and
+        /// only ever a battle — see the policy for why no other interruption may resume.
+        resume_after_battle: bool,
+    },
     ChooseBattleAction { id: String },
     /// Something the agent does *without* walking: cut a tree, teach an HM, push a boulder. Stashed
     /// by the policy and handed to the agent at the next `pick_field_move`, which is the tick after.
@@ -123,6 +140,16 @@ pub enum Terminal {
     /// the game is mid-animation, and the forced answer when a model will not call anything else.
     Wait { ticks: u16 },
 }
+
+/// How many overworld actions one `choose_action` may carry, `id` included.
+///
+/// ⚠️ **The bound is how far ahead the menu stays true, not how much a model might want to queue.**
+/// Every action changes the map the next id was minted against — a warp changes it entirely — so a
+/// chain is only worth anything where each step is still on the menu after the one before it: heal
+/// and then leave the Centre, pick the item up and then take the door. Four is about as far as that
+/// holds, and a chain that over-reaches is not wrong so much as wasted: it stops at the first id
+/// that no longer resolves and the model is told where it got to.
+pub const MAX_CHAINED_ACTIONS: usize = 4;
 
 /// A cap, because `wait { ticks: 100000 }` is a model stalling its own run and there is no legitimate
 /// reason to sit out more than a few seconds of game time in one decision.
@@ -619,11 +646,31 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
         DecisionKind::Overworld => {
             tools.push(ToolSpec::new(
                 "choose_action",
-                "ENDS THE TURN. Walk to and take one of the actions listed in the turn's action menu. \
-                 `id` is the id from that menu, copied exactly — never a position in the list.",
+                format!(
+                    "ENDS THE TURN. Walk to and take one of the actions listed in the turn's action \
+                     menu. `id` is the id from that menu, copied exactly — never a position in the \
+                     list. `then` chains up to {} more ids from this same menu, taken in order \
+                     without asking you again; that is worth doing where each is still true after \
+                     the one before, as in heal then leave. It stops at the first that will not \
+                     resolve or is stopped, and says where it got to. `resume_after_battle` takes \
+                     the action up again once a battle that interrupted it ends.",
+                    MAX_CHAINED_ACTIONS - 1,
+                ),
                 json!({
                     "type": "object",
-                    "properties": { "id": { "type": "string", "description": "An id from the action menu." } },
+                    "properties": {
+                        "id": { "type": "string", "description": "An id from the action menu." },
+                        "then": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "maxItems": MAX_CHAINED_ACTIONS - 1,
+                            "description": "More ids from this menu, in order.",
+                        },
+                        "resume_after_battle": {
+                            "type": "boolean",
+                            "description": "Carry on after a battle interrupts.",
+                        },
+                    },
                     "required": ["id"],
                     "additionalProperties": false,
                 }),
@@ -1185,11 +1232,8 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
     }
 
     match name {
-        "choose_action" if kind == DecisionKind::Overworld => match string_argument(&arguments, "id") {
-            Ok(id) => match not_on_the_menu(&id, menu) {
-                None => CallKind::Terminal(Terminal::ChooseAction { id }),
-                Some(complaint) => CallKind::Rejected(complaint),
-            },
+        "choose_action" if kind == DecisionKind::Overworld => match chosen_actions(&arguments, menu) {
+            Ok(terminal) => CallKind::Terminal(terminal),
             Err(complaint) => CallKind::Rejected(complaint),
         },
         "choose_battle_action" if kind == DecisionKind::Battle => match string_argument(&arguments, "id") {
@@ -1312,6 +1356,60 @@ fn string_argument(arguments: &Value, key: &str) -> Result<String, String> {
 }
 
 // ── Parsing the awkward arguments ────────────────────────────────────────────────────────────────
+
+/// A `choose_action` call: the id, whatever is chained behind it, and whether a battle ends it.
+///
+/// ⚠️ **Every id in the chain is checked against this turn's menu, on the same rule as `id`.** The
+/// alternative — take them on trust and let the policy find out — spends the whole chain before the
+/// mistake is visible and reports it a turn later, which is the exact shape
+/// [`not_on_the_menu`] was written to close. Rejecting here costs one tool step and the model still
+/// acts in this turn.
+///
+/// ⚠️ **Over-length is a rejection rather than a truncation.** Silently keeping the first three of
+/// six would carry out half of something the model asked for whole and say so nowhere.
+fn chosen_actions(arguments: &Value, menu: &[String]) -> Result<Terminal, String> {
+    let id = string_argument(arguments, "id")?;
+    if let Some(complaint) = not_on_the_menu(&id, menu) {
+        return Err(complaint);
+    }
+
+    let malformed = || {
+        "`then` is a list of further ids from this turn's action menu, as strings; omit it to take \
+         one action."
+            .to_string()
+    };
+    let then: Vec<String> = match arguments.get("then") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| match item.as_str().map(str::trim).filter(|next| !next.is_empty()) {
+                Some(next) => match not_on_the_menu(next, menu) {
+                    None => Ok(next.to_string()),
+                    Some(complaint) => Err(complaint),
+                },
+                None => Err(malformed()),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(malformed()),
+    };
+    if then.len() + 1 > MAX_CHAINED_ACTIONS {
+        return Err(format!(
+            "That chains {} actions and one call may carry at most {MAX_CHAINED_ACTIONS}. Keep the \
+             first {MAX_CHAINED_ACTIONS} and ask again once they are done; you will be shown a \
+             fresh menu then anyway.",
+            then.len() + 1,
+        ));
+    }
+
+    Ok(Terminal::ChooseAction {
+        id,
+        then,
+        resume_after_battle: arguments
+            .get("resume_after_battle")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
 
 fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
     let which = string_argument(arguments, "move")?;
@@ -1889,12 +1987,31 @@ mod tests {
             // runs did. Both drafts were about twice the length first; the tool description says the
             // rule once and the turn's own situation carries the argument, which is the split that
             // kept them affordable.
-            (DecisionKind::Overworld, 9_500),
-            (DecisionKind::Battle, 5_400),
-            (DecisionKind::Nickname, 3_900),
-            (DecisionKind::MartPurchase, 4_350),
-            (DecisionKind::ForgetMove, 4_250),
-            (DecisionKind::Stuck, 5_650),
+            //
+            // ⚠️ **Overworld's ceiling moved for the first time on 2026-08-26, and 489 bytes of
+            // what forced it had already been spent without anybody recording it.** Re-measured
+            // across all six: 9828, 4869, 3645, 3926, 3822, 5595. Two additions are in that
+            // Overworld figure. `read_guide` is one whole tool — 489 bytes, on Overworld alone —
+            // added after the figures above were taken, which is what quietly ate the headroom;
+            // it is written down here now because a ceiling nobody re-measures stops being a
+            // ratchet and becomes a surprise. `choose_action`'s chain is the other, at **558**: an
+            // optional `then` array and a `resume_after_battle` flag (207) and the sentences saying
+            // where a chain is worth taking and what ends one (351). What it buys is turns rather
+            // than tokens — heal and then leave the Centre is one request instead of two — so it is
+            // the one addition here that pays for itself in the thing the whole catalogue is
+            // rationing. Drafted twice as long first: the tool description says the rule and the
+            // policy's note says what became of a chain that stopped, which is the same split that
+            // kept the HM gate affordable.
+            //
+            // ⚠️ **The other five came down to match, as they did last time.** All five had
+            // drifted ~40 bytes *smaller* and none was near its ceiling; leaving them where they
+            // were would bank slack nobody decided to spend.
+            (DecisionKind::Overworld, 10_600),
+            (DecisionKind::Battle, 5_250),
+            (DecisionKind::Nickname, 3_950),
+            (DecisionKind::MartPurchase, 4_250),
+            (DecisionKind::ForgetMove, 4_150),
+            (DecisionKind::Stuck, 6_050),
         ] {
             let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
             assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
@@ -2282,6 +2399,61 @@ mod tests {
         }
     }
 
+    /// Chaining: every id in a `then` is held to the same menu as the first, and an over-long chain
+    /// is refused rather than quietly cut down to size.
+    ///
+    /// ⚠️ **The cheap alternative — take `then` on trust and let the policy find out — is the bug
+    /// `not_on_the_menu` was written to close, one step further on.** A chain accepted here and
+    /// rejected at the third hop has already carried out the first two, and reports the mistake in
+    /// the *next* turn's situation rather than as a tool result this turn can still act on.
+    #[test]
+    fn every_id_in_a_chain_is_held_to_the_menu_the_turn_offered() {
+        let menu = ["PalletTown:5,6:Warp".to_string(), "PalletTown:3,3:Mom".to_string()];
+        let chain = |arguments: &str| classify(DecisionKind::Overworld, &call("choose_action", arguments), &menu);
+
+        // The shape the whole feature is for, and both flags defaulted.
+        let CallKind::Terminal(Terminal::ChooseAction { id, then, resume_after_battle }) = chain(
+            r#"{"id":"PalletTown:5,6:Warp","then":["PalletTown:3,3:Mom"],"summary":"in, then talk"}"#,
+        ) else {
+            panic!("a chain of two ids from the menu is an ordinary call");
+        };
+        assert_eq!(id, "PalletTown:5,6:Warp");
+        assert_eq!(then, ["PalletTown:3,3:Mom"]);
+        assert!(!resume_after_battle, "a battle ends the action unless the model says otherwise");
+
+        // ⚠️ The id is checked, not merely the count: a chained id from an earlier turn is exactly
+        // the mistake `not_on_the_menu` exists for, and it must not be let through by being second.
+        let CallKind::Rejected(complaint) = chain(
+            r#"{"id":"PalletTown:5,6:Warp","then":["OaksLab:5,11:Warp"],"summary":"a stale id"}"#,
+        ) else {
+            panic!("a chained id that was never offered is refused");
+        };
+        assert!(complaint.contains("OaksLab:5,11:Warp"), "it names the one that failed: {complaint}");
+
+        let CallKind::Rejected(complaint) = chain(&format!(
+            r#"{{"id":"PalletTown:5,6:Warp","then":[{}],"summary":"far too many"}}"#,
+            ["\"PalletTown:3,3:Mom\""; MAX_CHAINED_ACTIONS].join(","),
+        )) else {
+            panic!("a chain longer than the cap is refused");
+        };
+        assert!(complaint.contains(&MAX_CHAINED_ACTIONS.to_string()), "it says what the cap is: {complaint}");
+
+        // Not a list of strings at all. One sentence, because there is one thing to fix.
+        let CallKind::Rejected(complaint) =
+            chain(r#"{"id":"PalletTown:5,6:Warp","then":"PalletTown:3,3:Mom","summary":"a bare string"}"#)
+        else {
+            panic!("`then` must be a list");
+        };
+        assert!(complaint.contains("list of further ids"), "{complaint}");
+
+        let CallKind::Terminal(Terminal::ChooseAction { resume_after_battle, .. }) = chain(
+            r#"{"id":"PalletTown:5,6:Warp","resume_after_battle":true,"summary":"carry on"}"#,
+        ) else {
+            panic!("the flag is legal on its own");
+        };
+        assert!(resume_after_battle);
+    }
+
     /// A terminal call from the other kind is answerable, not fatal — and the answer names the tool
     /// that would have worked.
     #[test]
@@ -2303,7 +2475,7 @@ mod tests {
     fn arguments_are_parsed_or_complained_about() {
         assert!(matches!(
             classify(DecisionKind::Overworld, &call("choose_action", r#"{"id":"PalletTown:5,6:Warp"}"#), &[]),
-            CallKind::Terminal(Terminal::ChooseAction { ref id }) if id == "PalletTown:5,6:Warp",
+            CallKind::Terminal(Terminal::ChooseAction { ref id, .. }) if id == "PalletTown:5,6:Warp",
         ));
         assert!(matches!(
             classify(DecisionKind::Battle, &call("wait", r#"{"ticks":25}"#), &[]),

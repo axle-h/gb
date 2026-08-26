@@ -1603,9 +1603,25 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | **W8** ✅ | Four-stage Dockerfile — the cartridge is a stage of its own · no-SDL build · compose file | ✅ Image builds, the ROM matches upstream's sha1, an LLM run plays inside it and survives `docker stop`/`start` |
 | **W9** ✅ | Stuck-run watchdog — lenient, last resort, loud (§14): a sixth `DecisionKind`, one poll seam, `GB_STUCK_TIMEOUT_SECS` | ✅ Fires on a jammed agent, through a real socket, and the model's press reaches the joypad; silent through ordinary play with 50× margin |
 | ✅ | Audio streaming (§12) | Opus over the video path's own framing; see `CLAUDE.md` |
+| ✅ | The conversation on disk (`src/llm/history.rs`) | `history.json` restores the history across a restart, `conversation.jsonl` keeps every message a compaction replaced; both archived with a finished run |
 
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.
+
+**What W6b and W7 left on the table, and why it came back.** Between them they made a run keep its
+own notes and survive a restart, and the note mechanism was deliberately sized around the fact that
+the *conversation* did not: `MAX_TEXT` is long enough for a plan item to carry its own reason
+precisely because the plan was the only thing a second process would have. Two deployed runs then
+showed the other half of that trade. A rollout, an OOM or a node loss left the game, the plan and the
+transcript intact and the model's actual memory empty, so the run resumed knowing where it was and
+nothing about what it had been doing; and a compaction destroyed the middle of the conversation with
+no copy anywhere, since `transcript.jsonl` holds `UiEvent`s rather than messages, carries no rendered
+situation, plan message or summary, and truncates every tool result at `MAX_TOOL_RESULT`.
+`src/llm/history.rs` is the answer to both, in two files with opposite jobs — see the `llm-turn-loop`
+skill for the invariants, of which the two easiest to get backwards are that the checkpoint happens
+*before* the outcome is sent (anything after it races `hall_of_fame::archive`) and that the run
+directory is captured rather than re-read from `CurrentRun` (a turn in flight when a new run starts
+belongs to the old game).
 
 **What W8 inherited, and what it turned out to be.** W6, W6b and W7 had already made a run bound its
 own context, keep its own notes and survive a restart, so the container's own job looked like two

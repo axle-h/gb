@@ -176,7 +176,7 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
         .map_err(|e| format!("could not write the archived sram: {e}"))?;
 
     // The whole story, and the whole reason this is not `fs::copy` — see `TRANSCRIPT_FOLLOW`.
-    follow_transcript(
+    follow_lines(
         &job.run_dir.join(files::TRANSCRIPT),
         &into.join(format!("{}.gz", files::TRANSCRIPT)),
         job.until_seq,
@@ -184,7 +184,7 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
     // The rotated half, if this run went on long enough to have one. Already complete, so no follow.
     let rotated = job.run_dir.join(files::TRANSCRIPT).with_extension("jsonl.1");
     if rotated.exists() {
-        follow_transcript(&rotated, &into.join("transcript.jsonl.1.gz"), u64::MAX)?;
+        follow_lines(&rotated, &into.join("transcript.jsonl.1.gz"), u64::MAX)?;
     }
 
     // `memories/` is legacy — nothing has written one since W6b's two note mechanisms became one —
@@ -195,6 +195,26 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
     if todo.exists() {
         std::fs::copy(&todo, into.join(files::TODO))
             .map_err(|e| format!("could not copy {}: {e}", todo.display()))?;
+    }
+
+    // The conversation, both halves. `history.json` is written by rename, so a plain copy of it is
+    // whole or absent and never torn.
+    let history = job.run_dir.join(files::HISTORY);
+    if history.exists() {
+        std::fs::copy(&history, into.join(files::HISTORY))
+            .map_err(|e| format!("could not copy {}: {e}", history.display()))?;
+    }
+    // ⚠️ **Whole lines, not `fs::copy`, for the transcript's reason**: the LLM worker is appending
+    // to this on its own thread while we read, so a byte copy can catch it between the `writeln!`
+    // and the flush. There is no seq to follow to — nothing keys on one — so it is read to EOF.
+    follow_lines(
+        &job.run_dir.join(files::CONVERSATION),
+        &into.join(format!("{}.gz", files::CONVERSATION)),
+        u64::MAX,
+    )?;
+    let rotated_log = job.run_dir.join(format!("{}.1", files::CONVERSATION));
+    if rotated_log.exists() {
+        follow_lines(&rotated_log, &into.join(format!("{}.1.gz", files::CONVERSATION)), u64::MAX)?;
     }
 
     let mut completion = job.completion.clone();
@@ -254,7 +274,7 @@ fn append(path: &Path, completion: &Completion) -> Result<(), String> {
 /// Whole lines only: a byte copy can catch the writer between its `writeln!` and its `flush` and
 /// archive half an event. `u64::MAX` means "whatever is there now", for a file nothing is appending
 /// to any more.
-fn follow_transcript(from: &Path, to: &Path, until_seq: u64) -> Result<(), String> {
+fn follow_lines(from: &Path, to: &Path, until_seq: u64) -> Result<(), String> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
@@ -377,7 +397,7 @@ mod tests {
     /// landed beside the runs it would be the newest resumable thing on the volume and the next
     /// `gb serve` would continue a game that has already been won and filed.
     #[test]
-    fn an_archive_is_written_and_is_not_resumable() {
+    fn an_archive_carries_the_whole_run_including_the_conversation_and_is_not_resumable() {
         let scratch = Scratch::new("hof-archive");
         let (run, _, _) = RunDir::open(&scratch.0, false, "gpt-test", &|_| true).expect("a run");
         run.checkpoint(b"GBSTlive", b"sram", RunProgress::default()).expect("checkpoint");
@@ -391,6 +411,13 @@ mod tests {
         std::fs::create_dir_all(run.path().join(files::MEMORIES)).expect("memories");
         std::fs::write(run.path().join(files::MEMORIES).join("plan.md"), "beat brock").expect("a memory");
         std::fs::write(run.path().join(files::TODO), "[]").expect("a todo list");
+        std::fs::write(run.path().join(files::HISTORY), r#"{"version":1,"messages":[]}"#)
+            .expect("a saved conversation");
+        std::fs::write(
+            run.path().join(files::CONVERSATION),
+            "{\"kind\":\"run\"}\n{\"kind\":\"message\",\"turn\":1}\n",
+        )
+        .expect("a conversation log");
 
         let job = ArchiveJob {
             root: scratch.0.clone(),
@@ -410,6 +437,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(into.join(files::MEMORIES).join("plan.md")).unwrap(), "beat brock");
         assert!(into.join(files::TODO).is_file(), "the model's plan travels with the run");
         assert!(into.join(files::META).is_file(), "the archive is self-describing without the ledger");
+        assert!(into.join(files::HISTORY).is_file(), "the conversation travels with the run");
 
         // The transcript is gzipped and stops at the event that announced the win.
         let gz = std::fs::read(into.join("transcript.jsonl.gz")).expect("a gzipped transcript");
@@ -418,6 +446,17 @@ mod tests {
             .expect("it inflates");
         assert_eq!(inflated.lines().count(), 2, "both lines, and nothing invented: {inflated}");
         assert!(inflated.contains("hall_of_fame"), "the victory itself is in the archive");
+
+        // ⚠️ **The conversation log is gzipped whole rather than followed to a seq.** Nothing keys on
+        // one, so it is read to EOF — but it is still read as *lines*, because the LLM worker is
+        // appending to it on another thread while this runs and a byte copy can catch it between the
+        // `writeln!` and the flush.
+        let gz = std::fs::read(into.join("conversation.jsonl.gz")).expect("a gzipped conversation");
+        let mut log = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&gz[..]), &mut log)
+            .expect("it inflates");
+        assert_eq!(log.lines().count(), 2, "both lines and nothing invented: {log}");
+        assert!(log.contains("\"kind\":\"message\""), "what the model was actually sent is in the archive");
 
         let rows = top(&scratch.0, 10);
         assert_eq!(rows.len(), 1);

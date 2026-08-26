@@ -289,7 +289,13 @@ pub struct FunctionCall {
 /// ⚠️ **Only the broken ones are rewritten.** A valid object is left byte-for-byte alone rather than
 /// re-serialised: `serde_json`'s map sorts keys, so canonicalising every call would quietly reword
 /// the model's own history and shift the token count for nothing.
-fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
+///
+/// ⚠️ **[`Message::assistant`] is no longer the only way in.** A history now comes back off disk
+/// too ([`crate::llm::history`]), and `serde` builds a `Message` field by field, so deserialisation
+/// walks straight past that funnel. `History::open` runs this same pass over every restored
+/// assistant message for exactly that reason — a file written by an older build, or edited by hand,
+/// would otherwise resurrect the disease above and 400 every request for the rest of the run.
+pub(crate) fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
     tool_calls
         .into_iter()
         .map(|mut call| {

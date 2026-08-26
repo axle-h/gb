@@ -278,6 +278,7 @@ fn the_llm_plays_from_a_fixture() {
             config,
             Arc::clone(&published),
             crate::llm::todo::TodoList::open(None),
+            crate::llm::history::History::open(None),
         );
     let _worker = worker.spawn().expect("the worker thread starts");
 
@@ -374,6 +375,7 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
         config,
         Arc::clone(&published),
         crate::llm::todo::TodoList::open(None),
+        crate::llm::history::History::open(None),
     );
     // A real run directory, so the press is recorded the way a deployed one would be.
     let scratch = crate::run::tests::Scratch::new("watchdog");
