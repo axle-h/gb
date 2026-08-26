@@ -1398,6 +1398,60 @@ mod tests {
 
     // ── Audio ────────────────────────────────────────────────────────────────────────────────────
 
+    /// A parked run goes **quiet**, not dead: no packets while the emulator is stopped, and the
+    /// sound picks up again from live when the quota reopens.
+    ///
+    /// ⚠️ **Silence is the correct output here and it is not the same as a stopped stream.** The
+    /// route's 2 s keep-alive is what carries the connection through a park of hours — see
+    /// `a_parked_run_stops_the_game_but_keeps_the_page_fed` for the same argument about the
+    /// heartbeat — and the client re-anchors on the first packet after the gap rather than trying to
+    /// play out audio that was never generated.
+    #[test]
+    fn a_parked_run_stops_the_sound_and_picks_it_up_again_from_live() {
+        let published = Published::new();
+        let mut listener = published.join_audio();
+        let mut host = host(Arc::clone(&published));
+
+        // Playing: packets arrive.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut before = 0;
+        while before < 5 && Instant::now() < deadline {
+            host.tick();
+            while listener.try_recv().is_ok() {
+                before += 1;
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(before >= 5, "the run was not producing audio to begin with");
+
+        // Parked: the emulator is stopped, so there is nothing to encode and nothing is sent.
+        published.set_throttled_until(now_ms() + 30_000);
+        while listener.try_recv().is_ok() {}
+        let parked_until = Instant::now() + Duration::from_millis(300);
+        let mut during = 0;
+        while Instant::now() < parked_until {
+            host.tick();
+            while listener.try_recv().is_ok() {
+                during += 1;
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert_eq!(during, 0, "{during} packets were published while the game was stopped");
+
+        // Released: it resumes, and the listener is still attached to hear it.
+        published.set_throttled_until(now_ms() - 1);
+        let resumed_by = Instant::now() + Duration::from_secs(20);
+        let mut after = 0;
+        while after < 5 && Instant::now() < resumed_by {
+            host.tick();
+            while listener.try_recv().is_ok() {
+                after += 1;
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(after >= 5, "the sound never came back after the park; only {after} packets");
+    }
+
     /// The twin of [`the_host_publishes_decodable_video`]: what reaches a listener is real Opus
     /// that a real decoder turns back into real sound.
     ///
