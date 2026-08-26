@@ -605,6 +605,22 @@ reworded away at some point:
 - **What people say is the instruction.** It read `GARY: Yo AI! Gramps isn't around!` six times in Oak's lab and spent
   thirty turns re-talking to the same three people instead of going to look for Oak.
 
+⚠️ **Those four say what not to do, and a run can obey all four and still play badly.** The 2026-08-26 run reached Mt
+Moon on **92 minutes of cartridge time with one Lv19 starter as its whole party**: of 204 battle decisions **31 were
+`run` and none was a Poké Ball**, and it bought nothing in a mart across 429 decisions. (It did heal, six times, and it
+read the guide three times, so neither of those is the gap.) None of it is a malfunction, so nothing but prose can fix
+it — hence the second section, "Playing it well, and the clock you are playing against", and
+`the_system_prompt_says_how_to_play_the_game_well` beside the first test. ⚠️ **The blackout bullet is a cartridge fact
+rather than advice, and the distinction is the whole of it**: `SetLastBlackoutMap` is called from
+`DisplayPokemonCenterDialogue_` **only after the player answers yes to the heal**, so walking into a Centre does not
+move where a blackout sends you, and `ResetStatusAndHalveMoneyOnBlackout` is where half the money goes. ⚠️ **The clock
+the prompt says it is timed on is the cartridge's** — `wPlayTime`, in every turn's header and what the hall-of-fame
+ledger ranks on — which is why asking for a thorough run *and* a fast one is not a contradiction, and why a park costs
+it nothing. ⚠️ **The guide bullet states a cadence rather than encouraging the tool**: `guide::chapter` is keyed on
+the badges alone, so every read before the next badge returns a word-for-word copy, and the only other moment worth
+spending one on is *after a compaction*, which is when the chapter the model read is gone and the plan is all that is
+left of it. "Read it whenever you are unsure" is therefore the wrong shape, and was the first draft.
+
 ⚠️ **`PokemonStatus`' `Display` is `strum`'s derive, so a healthy Pokémon prints `None`** — every party line in every turn
 read `20/20 HP, None`, which is a missing value rather than good news. `prompt::ailment` says nothing when there is
 nothing to say. Same class of bug as `MetaTile`'s old `strum` `Display`: a derive is a debugging default, and every one of

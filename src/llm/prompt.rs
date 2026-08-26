@@ -193,8 +193,7 @@ Things worth knowing about this particular game:
 - Talking to people is how almost everything progresses. If you are stuck, there is usually someone \
   you have not spoken to.
 - Wild encounters happen in tall grass and in caves. A fainted lead Pokémon is not the end of a \
-  battle — switch, or use an item.
-- Money is finite early on. Potions and Poké Balls are worth buying; almost nothing else is.
+  battle: switch to another one, or use an item.
 - The action list is what the agent can currently *reach*. If somewhere you want to go is not in it, \
   the way there is blocked, or it is on another map you have to walk to first.
 - Some things stay shut until you have a particular move and the badge that lets you use it outside \
@@ -202,9 +201,43 @@ Things worth knowing about this particular game:
   'Blocked here'. That is a different errand, not a thing to keep trying.
 - There is a walkthrough for this game, and `read_guide` hands you the stretch of it you are in \
   now: the order to do things in, what is blocking the way and what the next Gym Leader has. It is \
-  worth reading if you are unsure where to go next, or you notice you have been round the same few \
-  maps. It is chosen from your badges alone, so it answers with the same text every time until you \
-  win the next badge — read it once and put what you need on your plan rather than asking again.
+  chosen from your badges alone, so it says exactly the same thing every turn until you win the \
+  next badge. Read it once at the start of each badge, before you spend turns wandering to work \
+  out where you are meant to be, and put what you need out of it on your plan. Asking again before \
+  the badge changes buys you a word-for-word copy of what you already have. The one exception is \
+  after this conversation has been summarised: the chapter you read is not in the summary, so if \
+  your plan no longer tells you what to do next, read it again.
+
+Playing it well, and the clock you are playing against:
+
+- **You are being timed.** The 'Play time' on every turn is the cartridge's own clock, and a \
+  finished run is ranked on it. What is being asked of you is the whole game, eight badges and then \
+  the Elite Four, played properly and finished as soon as you can manage it. Exploring is not the \
+  opposite of being quick: the hours go on circling the same three maps not knowing where you are \
+  supposed to be next, and what fixes that is `read_guide` and your plan, not hurrying.
+- **Keep the party healthy.** Every turn lists each Pokémon's HP. A Pokémon Centre heals the whole \
+  party, for nothing, in about two decisions: take the warp in, talk to the Nurse, accept. Do that \
+  before a gym, a cave or a long route rather than after something has fainted.
+- **If your whole party faints you black out**, lose half your money, and wake up at the last \
+  Pokémon Centre where you accepted a heal, which is not the same as the last one you walked into. \
+  So healing at the Centre nearest to wherever you are working is worth the two decisions even when \
+  nobody is badly hurt: it is also where you would be sent back to, and the alternative is walking \
+  the last three maps a second time.
+- **Keep stocked up.** Poké Balls and Potions are what money is for; buy them whenever you are in a \
+  mart and can afford to, and top up before setting out somewhere long. A few Antidotes and Paralyz \
+  Heals earn their place too. Almost nothing else does, and money is tight early on.
+- **Catch Pokémon.** The turn tells you how many species you own and how many you have seen. One you \
+  always run from is one you never had: weaken it first, or put it to sleep or paralyse it, then \
+  throw a Poké Ball from the battle's item rows. A party that covers several types is what gets \
+  through a gym; a single strong Pokémon loses to the first thing it has no answer to, and takes \
+  the run down with it.
+- **Bring the party up together.** A Pokémon that never battles never levels. Sending a weaker one \
+  in first in an easy fight is how it catches up, and a trained party is what makes a bad matchup \
+  survivable instead of fatal.
+- **Look round a town before you leave it.** Go into the buildings, read the signs, talk to everyone \
+  once. Errands, free items, HMs and the directions you need next all come from people standing in \
+  rooms you had no particular reason to enter, and each of them says it once. Items lying on the \
+  ground appear in the action menu; pick them up as you pass.
 ";
 
 /// The line that ends every turn request, and the reason the loop can rely on exactly one terminal
@@ -875,6 +908,38 @@ mod tests {
             "not the one you remember",
             "Read what people say to you",
             "put it on the plan straight away",
+        ] {
+            assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
+        }
+    }
+
+    /// **What a run that is following every rule above still leaves out.**
+    ///
+    /// The four bullets that test guards all say what *not* to do. The deployed run of 2026-08-26
+    /// obeyed them and was still playing badly: 92 minutes of cartridge time, one badge, and a
+    /// single Lv19 starter as the whole party. Of its 204 battle decisions 31 were `run` and **none
+    /// was a Poké Ball**, it bought nothing in a mart in 429 decisions, and it read the guide three
+    /// times. Nothing in that is a malfunction, which is why nothing but prose can fix it.
+    ///
+    /// ⚠️ **The blackout bullet is a fact about the cartridge, not advice**, and the distinction it
+    /// draws is the part that is easy to get wrong: `SetLastBlackoutMap` is called from
+    /// `DisplayPokemonCenterDialogue_` only after the player answers *yes* to the heal, so walking
+    /// into a Centre does not move where a blackout sends you. `ResetStatusAndHalveMoneyOnBlackout`
+    /// is where the money goes.
+    #[test]
+    fn the_system_prompt_says_how_to_play_the_game_well() {
+        for phrase in [
+            // Ranked on `wPlayTime`, which is on every turn: finishing is the goal, not wandering.
+            "You are being timed",
+            "Keep the party healthy",
+            // Both halves: the penalty, and *which* Centre you wake up in.
+            "faints you black out",
+            "accepted a heal",
+            "Keep stocked up",
+            "Catch Pokémon",
+            "Look round a town before you leave it",
+            // The walkthrough is only worth carrying if the prompt says when to reach for it.
+            "There is a walkthrough for this game",
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
         }
