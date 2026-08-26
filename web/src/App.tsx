@@ -4,6 +4,7 @@ import { Conversation } from './components/Conversation';
 import { Leaderboard } from './components/Leaderboard';
 import { PlanPanel } from './components/PlanPanel';
 import { Screen, describeRemaining } from './components/Screen';
+import { SoundButton } from './components/SoundButton';
 import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 
@@ -71,6 +72,13 @@ export function App() {
           </span>
         )}
         <Leaderboard wins={wins} />
+        {/* Beside the trophy rather than on the screen, where it first went: over four shades of
+            Game Boy it was a small grey glyph on whatever the game happened to be drawing, and it
+            had to be dimmed further still not to sit on top of the picture. Here it is one control
+            among several, at a size the rest of the row already established. Like the trophy it
+            survives the phone layout — the media query drops the context gauge and the links
+            because they are a desk's questions, and sound is not. */}
+        <SoundButton />
         {/* Off the header on a phone and at the foot of the Trainer tab instead, with the context
             figure: neither is about the run, and the row has three lines' worth of things that are. */}
         <Links />

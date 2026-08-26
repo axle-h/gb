@@ -5,11 +5,15 @@ import type { Connection } from '../api';
 const STORAGE_KEY = 'gb.sound';
 
 /**
- * The speaker, bottom-left of the screen.
+ * The speaker, in the header beside the trophy.
  *
- * ⚠️ **On the screen rather than in the header**, which is where every video player puts it and
- * where the thing making the noise is. The header is already three lines on a phone — `App`'s
- * `.about` block exists because it ran out of room — and this is not a fact about the run.
+ * It was on the screen first, in the corner, where every video player puts it. That was wrong here
+ * and the reason is the screen: four shades of Game Boy behind a small grey glyph, dimmed further
+ * still so as not to sit on top of the picture, which is the opposite of what a control someone is
+ * looking for should do. The header already had a row of controls at a legible size, so it joins
+ * them. ⚠️ **It survives the phone layout**, where the media query drops the context gauge and the
+ * links: those are a desk's questions and sound is not, which is the same argument that keeps the
+ * trophy.
  *
  * ⚠️ **Off by default, and the stream is not opened until it is on.** Two reasons that happen to
  * agree: an `AudioContext` starts suspended under every autoplay policy, so a connection opened

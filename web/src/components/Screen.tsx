@@ -1,7 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import type { Connection } from '../api';
 import { HEIGHT, VideoDecoder, WIDTH, subscribeVideo } from '../video';
-import { SoundButton } from './SoundButton';
 
 /**
  * The game screen: a 160×144 canvas, CSS-scaled, fed by `/api/video`.
@@ -47,9 +46,6 @@ export function Screen({ pausedUntil }: { pausedUntil: number | null }) {
     <div className="screen">
       <canvas className={pausedUntil ? 'paused' : undefined} ref={canvas} width={WIDTH} height={HEIGHT} />
       {pausedUntil !== null && <PausedOverlay until={pausedUntil} />}
-      {/* Its own connection, its own retry loop: audio can be reconnecting while the picture is
-          live and the other way round, and one pill for two streams would have to lie about one. */}
-      <SoundButton />
       {connection !== 'live' && <div className="screen-overlay">{connection}…</div>}
     </div>
   );

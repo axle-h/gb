@@ -1250,35 +1250,29 @@ header .trophy:hover {
   }
 }
 
-/* The speaker, bottom-*left* of the screen — `.screen-overlay` has the right-hand corner, and the
-   two are routinely visible at once (a reconnecting picture over a playing stream). Dim until it is
-   wanted: it sits on top of the game and is read once a session, not watched. */
-.screen .sound {
-  position: absolute;
-  inset: auto auto 8px 8px;
-  padding: 2px 6px;
+/* The speaker, beside the trophy. It began as an overlay in the corner of the screen and was
+   moved: at that size, over four shades of Game Boy, it was a grey glyph on whatever the game was
+   drawing — and it had to be dimmed further still to avoid sitting on top of the picture, which is
+   the opposite of what a control the viewer is looking for should do. Here it borrows the trophy's
+   box exactly, so the row reads as one set of controls rather than as a button someone added. */
+header .sound {
+  padding: 2px 8px;
   border: 1px solid var(--line);
   border-radius: 4px;
-  background: rgb(0 0 0 / 55%);
-  /* ⚠️ `.screen` sets `line-height: 0` for the canvas; without this the glyph draws on a zero-height
-     line box and sits outside its own background. Same trap as `.screen-paused .plate`. */
-  line-height: 1.4;
-  font-size: 0.9em;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.2;
   cursor: pointer;
-  opacity: 0.45;
-  transition: opacity 120ms ease;
 }
 
-.screen .sound:hover,
-.screen .sound:focus-visible,
-.screen .sound.on {
-  opacity: 1;
+header .sound:hover,
+header .sound:focus-visible {
+  border-color: var(--accent);
 }
 
-/* A touch device gets no hover, and a control that only appears on hover is a control it does not
-   have. */
-@media (hover: none) {
-  .screen .sound {
-    opacity: 0.8;
-  }
+/* On, and saying so the way `.pill.live` does — the accent is what the rest of the page uses for
+   "this is happening", and the glyph alone is a poor signal at a glance. */
+header .sound.on {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }
