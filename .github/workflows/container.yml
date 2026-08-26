@@ -175,13 +175,44 @@ jobs:
           # And the emulator is actually running: video_seq is null until the first keyframe is
           # published, so a non-null value means frames are being produced, not merely that axum
           # answered.
+          emulating=""
           for i in $(seq 1 30); do
             seq=$(curl -fsS http://localhost:8080/api/healthz | python3 -c 'import json,sys; print(json.load(sys.stdin)["video_seq"])')
-            [ "$seq" != "None" ] && { echo "emulating — video_seq=$seq"; exit 0; }
+            [ "$seq" != "None" ] && { echo "emulating — video_seq=$seq"; emulating=1; break; }
             sleep 2
           done
-          echo "::error::no video keyframe was ever published — the emulator thread is not running"
-          exit 1
+          [ -n "$emulating" ] \
+            || { echo "::error::no video keyframe was ever published — the emulator thread is not running"; exit 1; }
+
+          # And the sound: a real Opus packet, out of a real emulator, through the real route. This
+          # is the one end-to-end proof there is — a unit test can encode a synthetic tone, but only
+          # this says the container's APU, encoder and route are wired to each other.
+          #
+          # ⚠️ `--max-time` on a stream that never ends leaves curl exit code 28, so the failure is
+          # judged on the *bytes* rather than on the status.
+          curl -sS --max-time 5 -o audio.bin http://localhost:8080/api/audio || true
+          python3 - <<'PY' || exit 1
+          import struct, sys
+          data = open("audio.bin", "rb").read()
+          at, messages = 0, []
+          while at + 4 <= len(data):
+              n = struct.unpack_from("<I", data, at)[0]
+              at += 4
+              if at + n > len(data):
+                  break
+              messages.append(data[at:at + n])
+              at += n
+          if not messages or messages[0][:4] != b"GBA1":
+              sys.exit("::error::/api/audio did not open with a GBA1 header")
+          packets = [m for m in messages[1:] if m]
+          if not packets:
+              sys.exit("::error::/api/audio sent a header and no Opus packets")
+          # RFC 6716 §3.1: the TOC's low two bits are the frame count code, and we send one per packet.
+          if any(p[0] & 3 for p in packets):
+              sys.exit("::error::/api/audio packets are not single-frame Opus")
+          print(f"audio — {len(packets)} Opus packets, {sum(map(len, packets))} bytes")
+          PY
+          exit 0
 
       # ── publish ────────────────────────────────────────────────────────────────────────────────
       #

@@ -37,7 +37,7 @@ We want:
 4. **Persistence** — a run survives a process restart, and a viewer joining mid-run gets the whole
    backlog before the live stream.
 
-Explicitly **out of scope for now**: audio streaming (specced in §12, deferred), TLS (the platform
+Explicitly **out of scope for now**: TLS (the platform
 terminates it), authentication, horizontal scale. One container, one process, one emulator.
 
 ### 1.1 Decisions already taken
@@ -47,7 +47,7 @@ terminates it), authentication, horizontal scale. One container, one process, on
 | Server stack | `axum` + `tokio` for the **HTTP server only** | Emulator and LLM worker stay synchronous threads |
 | LLM client | `ureq` (blocking, streams via `Read`) | No second runtime; the worker is a plain `std::thread` |
 | Video transport | Hand-rolled 8×8 block-diff, base64 in SSE | No image codec, no ffmpeg, ~30–200 kbit/s |
-| Audio | **Deferred** | §12 keeps the design; no work in phases W0–W8 |
+| Audio | ✅ **done** | §12 — and not the design that section proposed; the reasons are kept there |
 | LLM protocol | OpenAI native tool calling | Screenshots return as image content in tool results |
 | SPA delivery | Embedded at compile time (`rust-embed`) | Node is a build-stage dependency; dev mode serves from disk |
 | SDL UI | Kept, behind a **cargo feature** | Server-only builds drop `libsdl2` entirely |
@@ -1264,27 +1264,43 @@ run-…` and came up at 4:47 of in-game play time with its notes intact.
    error before a directory exists for a run that cannot start.
 
 ⚠️ **`Audio::set_output_sample_rate` is not serialised** and must be re-applied after every
-`load_state` (`render.rs:154-159`). Irrelevant while audio is deferred, but the resume path is where
-it will bite when §12 lands — `EmulatorHost::new` now carries the comment.
+`load_state` (`render.rs:154-159`). That is `host::tune_audio` now, called from both of the emulator
+thread's load sites — §12 landed and the comment that predicted this became a test.
 
 ---
 
-## 12. Deferred — audio
+## 12. Audio ✅ **done** — and not the way this section proposed
 
-Kept for later, not built. The intended design, so the seam is not designed against:
+What was written here, deferred, was: 24 kHz output, drain i16 stereo on the emulator thread, raw PCM
+over a WebSocket into an `AudioWorklet`, **768 kbit/s**, no encoder, with IMA-ADPCM at 192 as the
+fallback if that proved too fat. The measurements are in `src/web/audio/bench.rs` and the ⚠️s in
+`CLAUDE.md`'s "The audio stream"; what shipped differs on every count, so the reasons are worth
+keeping rather than the design.
 
-`Audio::read_samples_f32` (`src/audio/mod.rs:107`) is the only consumer entry point and the SDL loop
-is its only caller — detaching it is ~15 lines. `BlipStereo::read_interleaved_i16`
-(`blip/mod.rs:229`) already exists and is unused. Plan: set the output rate to 24 kHz, drain i16
-stereo on the emulator thread, ship raw PCM over a WebSocket into an `AudioWorklet` with a ~200 ms
-jitter buffer — 768 kbit/s, no encoder. If that proves too fat, IMA-ADPCM is ~60 lines of Rust and
-~40 of JS for 192 kbit/s.
+**It proved too fat before it was built.** 768 kbit/s is 36× `/api/video`, which spent a whole bench
+file getting from 565 to 21 — so the sound got a real codec: `/api/audio` is **Opus, 48 kHz mono at
+24 kbit/s**, one 20 ms packet at a time. ADPCM is in the bench table (194 kbit/s) as the alternative
+it beat rather than the fallback it was meant to be.
+
+- **Not a WebSocket**, for `§5.2`'s reason and not a new one: nothing here is bidirectional, so the
+  chunked binary response and the length-prefixed framing `/api/video` already had were reused
+  wholesale. `web/src/stream.ts` is that transport, extracted rather than copied.
+- **Not an `AudioWorklet`.** WebCodecs' `AudioDecoder` feeding scheduled `AudioBufferSourceNode`s
+  needs no worklet file, no `SharedArrayBuffer` and therefore no COOP/COEP on the server.
+- **Not 24 kHz**, which is the one genuinely surprising part: `opus-rs` is measurably *wrong* at that
+  rate and correct at 48. See the ⚠️ in `CLAUDE.md`.
+- **Not deflated**, which is the one place the audio path had to ignore what the video path taught:
+  +16.6% on a codec that is already range-coded.
 
 ⚠️ Under fast-forward, `set_emulation_speed` must track `cycle_duration` or the queue backs up
-(`render.rs:224-229`). This section used to warn that `GB_PAUSE_WHILE_THINKING` would produce
-audible gaps and was mutually exclusive with audio; that flag no longer exists (§2.1), and the
-emulator now never stops while a run is in progress — which is exactly the property a continuous
-audio stream needs.
+(`render.rs:224-229`). That is now `host::tune_audio`, called from both of the emulator thread's
+`load_state` sites, with `the_sample_rate_and_the_speed_survive_every_state_that_is_loaded` on it.
+
+This section used to warn that `GB_PAUSE_WHILE_THINKING` would produce audible gaps and was mutually
+exclusive with audio. That flag no longer exists (§2.1) — but ⚠️ **the park does stop the emulator**,
+for hours, which is exactly the case the sentence was worried about. It is handled rather than
+avoided: the stream carries nothing but its 2 s keep-alive, and the client's underrun path re-anchors
+when packets resume, which is the same path a `MAX_CATCHUP` gap takes.
 
 ---
 
@@ -1586,7 +1602,7 @@ the agent's expectations drifting apart, and it costs no API key and no network.
 | **W7** ✅ | Run directory · checkpoint/resume · SIGTERM · transcript · `/api/history` · `--new-run` | ✅ Survives a restart mid-run: SIGTERM, checkpoint, second process resumes at 4:47 of play with its notes |
 | **W8** ✅ | Four-stage Dockerfile — the cartridge is a stage of its own · no-SDL build · compose file | ✅ Image builds, the ROM matches upstream's sha1, an LLM run plays inside it and survives `docker stop`/`start` |
 | **W9** ✅ | Stuck-run watchdog — lenient, last resort, loud (§14): a sixth `DecisionKind`, one poll seam, `GB_STUCK_TIMEOUT_SECS` | ✅ Fires on a jammed agent, through a real socket, and the model's press reaches the joypad; silent through ordinary play with 50× margin |
-| *(deferred)* | Audio streaming (§12) | — |
+| ✅ | Audio streaming (§12) | Opus over the video path's own framing; see `CLAUDE.md` |
 
 W0–W3 are independent of any LLM and are worth shipping on their own: they give a browser-watchable
 emulator with the existing policies. W4 is where the actual subject of this plan begins.

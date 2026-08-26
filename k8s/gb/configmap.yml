@@ -142,6 +142,20 @@ data:
   # viewer; it was 50 at 10 Hz unconditional).
   GB_STATUS_HZ: "2"
 
+  # The Opus stream `/api/audio` carries, in bits per second. **`0` turns audio off entirely.**
+  #
+  # What a listening viewer actually costs is more than this: `web::audio::bench` measures 24.0 kbit/s
+  # of payload arriving as **~49.6 kbit/s on the wire**, because a 20 ms packet is only 60 bytes and
+  # the length prefix, the HTTP chunk header and the TCP segment around it come to about as much
+  # again. 20 ms is not a tunable there — it is the longest frame Opus's CELT-only mode has, and at
+  # this bitrate CELT-only is what the encoder picks.
+  #
+  # ⚠️ It costs nothing at all until someone asks: the page's speaker is off by default, and
+  # `EmulatorHost::drain_audio` does not even encode while `audio_listeners()` is zero. So this is
+  # the price of a viewer who turns sound on, roughly doubling their 21 kbit/s of video, rather than
+  # a standing charge on the volume.
+  GB_AUDIO_BITRATE: "24000"
+
   # Which Game Boy the cartridge runs on. Pokémon Red is DMG-only, so `cgb` is *compatibility mode*:
   # the boot ROM picks a palette from the title checksum and the same picture comes out red-tinted,
   # exactly as it does on real hardware. The game is unaffected — `full_playthrough` on a CGB ends on

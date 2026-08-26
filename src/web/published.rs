@@ -27,6 +27,14 @@ use crate::lcd_palette::LcdColor;
 const VIDEO_CAPACITY: usize = 64;
 /// Events are small and a viewer catching up on a burst of dialogue is normal, so this is generous.
 const EVENT_CAPACITY: usize = 1024;
+/// ~1.3 s of audio at 50 packets a second.
+///
+/// ⚠️ **Deliberately not generous, for the opposite reason to `VIDEO_CAPACITY`'s.** `broadcast`
+/// drops the *oldest* for a subscriber that falls behind, so this ring is the bound on how far
+/// behind live a stalled client resumes. A bigger one does not save the audio — it hands over a
+/// longer burst of stale audio that the client's scheduler then has to throw away to get back to
+/// live, which is an audible cut either way and a longer one for the larger ring.
+const AUDIO_CAPACITY: usize = 64;
 
 // ── Video ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -347,6 +355,15 @@ impl StatusSnapshot {
 
 pub struct Published {
     video: broadcast::Sender<VideoMessage>,
+    /// One Opus packet, encoded **once** on the emulator thread for every listener.
+    ///
+    /// ⚠️ **The exact opposite of the video path's per-connection deflate, and for the same
+    /// reason.** Deflate had to be per connection because the compression came from a window
+    /// spanning the whole stream, so there was nothing to share. Opus has no such window: a packet
+    /// is a packet, so encoding it once and handing every subscriber the same `Arc` is both cheaper
+    /// and simpler. `Arc<[u8]>` rather than a struct because there is nothing else to carry — see
+    /// [`Self::join_audio`].
+    audio: broadcast::Sender<Arc<[u8]>>,
     /// The keyframe a late joiner starts from. **Stored before the matching delta is broadcast** —
     /// see [`Published::publish_video`], where the ordering argument lives.
     keyframe: RwLock<Option<VideoMessage>>,
@@ -436,6 +453,7 @@ impl Published {
     pub fn resuming(next_seq: u64) -> Arc<Self> {
         Arc::new(Self {
             video: broadcast::channel(VIDEO_CAPACITY).0,
+            audio: broadcast::channel(AUDIO_CAPACITY).0,
             keyframe: RwLock::new(None),
             frame: RwLock::new(Arc::new(FrameSnapshot {
                 seq: 0,
@@ -480,6 +498,31 @@ impl Published {
 
     /// The keyframe on its own, for a subscriber that has already lagged out of the ring buffer and
     /// needs to re-sync without dropping its connection.
+    /// Hand one Opus packet to every listener.
+    pub fn publish_audio(&self, packet: Arc<[u8]>) {
+        let _ = self.audio.send(packet);
+    }
+
+    /// Subscribe, and that is the whole of it.
+    ///
+    /// ⚠️ **No second half, and the asymmetry with [`Self::join_video`] is the point rather than an
+    /// omission.** Video's subscribe-then-read-the-keyframe ordering exists because a delta is
+    /// meaningless without the frame it builds on, so a joiner that missed one has a permanently
+    /// stale corner of the screen. Every Opus packet decodes on its own, so there is nothing for a
+    /// joiner to be caught up with, nothing to order against, and nothing a `Lagged` can corrupt —
+    /// which is why `/api/audio` answers a lagged subscriber by skipping rather than by re-syncing.
+    pub fn join_audio(&self) -> broadcast::Receiver<Arc<[u8]>> {
+        self.audio.subscribe()
+    }
+
+    /// Whether anyone is listening.
+    ///
+    /// ⚠️ **Read on the emulator's hot path**, once per tick, and it is what makes audio free for
+    /// the viewers who never turn it on — see `EmulatorHost::drain_audio`.
+    pub fn audio_listeners(&self) -> usize {
+        self.audio.receiver_count()
+    }
+
     pub fn latest_keyframe(&self) -> Option<VideoMessage> {
         self.keyframe.read().expect("video keyframe lock poisoned").clone()
     }
