@@ -72,7 +72,18 @@ impl Display for OverworldActionAbortedReason {
             // stopping the player mid-step: the rival on the way out of Oak's lab, Oak at the edge
             // of Route 1. Reporting that as what was said described the symptom and buried the
             // fact the model needs, which is that the walk was cut short by something outside it.
-            Self::Textbox => write!(f, "it was interrupted"),
+            //
+            // ⚠️ **And not "it was interrupted" either, which is what this said for months.** The
+            // fact was right and the word was not: an interruption reads as a malfunction, and
+            // being stopped by a guard, a locked door or a scripted scene is the game working
+            // exactly as designed. The deployed run walked at the Viridian Gym door without the
+            // badges to open it, got "✗ gave up on the warp to ViridianGym: it was interrupted"
+            // with "The GYM's doors are locked..." on the line below, and filed a `report_issue`
+            // asking a developer to "verify action targeting for gym entrance vs warp". Nothing had
+            // gone wrong; the sentence just told it something had. So it now names the *cause* —
+            // the game chose to speak — and points at the message that follows, which is the thing
+            // to act on. `prompt::SYSTEM_PROMPT` says the same in full, once.
+            Self::Textbox => write!(f, "the game stopped you to say something"),
             Self::NamingScreen => write!(f, "the naming screen opened"),
             Self::WrongMap(map) => write!(f, "it ended up on {map}"),
             Self::NoAdjacentGrass => write!(f, "there is no grass to step into"),
@@ -101,7 +112,7 @@ pub enum AgentEvent {
     /// `Location:` line of every turn. Never `raw_player_coords`, which is the same square in a
     /// different space and would have the model reasoning about two maps at once.
     ///
-    /// It is here because "it was interrupted" on its own was not enough to act on. The deployed run
+    /// It is here because the reason on its own was not enough to act on. The deployed run
     /// aborted on `the way into Route2` **143 times** — the Viridian old man, who blocks the north
     /// exit until Oak's Parcel is delivered, so the walk was impossible every time and said only
     /// that something stopped it. Repeating the same square is the fact that makes a blocked route
@@ -1049,7 +1060,44 @@ impl PokemonAgent {
         }
     }
 
+    /// Report whatever the text reader has collected, and forget it.
+    ///
+    /// ⚠️ **Reading a text box and reporting it are two moments, and treating them as one lost the
+    /// most important text boxes in the game.** The buffer used to be emitted in exactly one place —
+    /// [`Self::assert_text_box_state`]'s "the box closed" arm, which fires on the
+    /// `TextBox → anything else` edge *while the agent is still* `ReadingTextBox`. But
+    /// `assert_script_state` runs **before** it in `update` and swaps the state out for
+    /// `RunningScript`, so any box the game follows with a script never reached that arm at all: the
+    /// reader was dropped mid-sentence and the model was told only that its walk had stopped.
+    ///
+    /// ⚠️ **That is not an edge case, it is the shape of every blocker in Pokémon Red.** A guard,
+    /// a locked door or a "you can't go through here" prints its message and then calls
+    /// `StartSimulatingJoypadStates` to shove the player back a tile — `Route22GateGuardText`,
+    /// `ViridianCityCheckGymOpenScript`, the Viridian old man. Measured on the deployed run of
+    /// 2026-08-26: a landed conversation was followed by a `TextBox` event **31 times out of 38**,
+    /// and an aborted walk **2 times out of 28** — and both of those two were multi-box story
+    /// scripts (Oak at the edge of Route 1, the rival in the lab) rather than a blocker. So the run
+    /// walked into the Route 22 gate, was told "✗ gave up on the warp to Route23 at (4, 2)" with no
+    /// text whatsoever, talked to the guard **five times** trying to find out why, got nothing back
+    /// each time, and filed a `report_issue`. The words it could not see were "Only truly skilled
+    /// trainers are allowed through. You don't have the BOULDERBADGE yet!"
+    ///
+    /// Called from the two places that assign `self.state`, so "leaving the reader reports what it
+    /// read" is structural rather than a list of call sites to keep up to date.
+    fn flush_text_reader(&mut self) {
+        let AgentState::ReadingTextBox { reader } = &mut self.state else { return };
+        let message = reader.take();
+        // Empty ones are dropped by `event` — a box is detected before its characters are drawn, so
+        // most of these have nothing in them.
+        self.event(AgentEvent::TextBox { message });
+    }
+
     fn backup_current_state(&mut self, new_state: AgentState) {
+        // ⚠️ **Before the clone, not after.** The backup is what `restore_state_from_backup` puts
+        // back when a script turns out to have been a ledge jump, and a reader restored with its
+        // buffer still in it would report the same sentence a second time when the box finally
+        // closed.
+        self.flush_text_reader();
         self.backup_state = Some(self.state.clone());
         self.state = new_state;
     }
@@ -1208,6 +1256,11 @@ impl PokemonAgent {
 
     pub(crate) fn set_state(&mut self, state: AgentState) {
         if self.state != state {
+            // Whatever the reader had collected, said now — see [`Self::flush_text_reader`]. It is
+            // a no-op from every other state, and `ReadingTextBox` is never replaced by another
+            // `ReadingTextBox` while it holds anything: the two places that build one both check
+            // first that the agent is not already reading.
+            self.flush_text_reader();
             self.state = state;
 
             if self.state != AgentState::Idle {
@@ -1513,9 +1566,9 @@ impl PokemonAgent {
                 self.menu_handover_ticks = MENU_HANDOVER_TICKS;
                 self.set_state(AgentState::ReadingTextBox { reader });
             }
-        } else if let AgentState::ReadingTextBox { reader, .. } = &self.state {
-            // text box closed
-            self.event(AgentEvent::text_box_from_reader(&reader));
+        } else if matches!(self.state, AgentState::ReadingTextBox { .. }) {
+            // Text box closed. `set_state` flushes the reader on the way out, which is the same
+            // funnel a script or a battle stealing the state now goes through.
             self.set_state(AgentState::Idle);
         }
     }
@@ -3966,7 +4019,7 @@ mod tests {
         };
         assert_eq!(format!("{event}"), "✗ gave up on the PC: a battle started");
         // ⚠️ **The square is the fact the model needs and the reason on its own was not.** The
-        // deployed run gave up on `the way into Route2` 143 times with "it was interrupted" and
+        // deployed run gave up on `the way into Route2` 143 times with the bare reason and
         // nothing else, every one of them at the same tile — the Viridian old man, who blocks that
         // exit until Oak's Parcel is delivered. Working out that a repeated square means a blocked
         // route is deliberately the model's job; saying *which* square is ours.
@@ -3975,7 +4028,7 @@ mod tests {
             reason: OverworldActionAbortedReason::Textbox,
             at: Some(Point8 { x: 19, y: 11 }),
         };
-        assert_eq!(format!("{blocked}"), "✗ gave up on the PC at (19, 11): it was interrupted");
+        assert_eq!(format!("{blocked}"), "✗ gave up on the PC at (19, 11): the game stopped you to say something");
         assert_eq!(
             format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass }),
             "→ heading for tall grass",

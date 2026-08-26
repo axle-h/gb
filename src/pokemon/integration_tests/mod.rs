@@ -78,3 +78,8 @@ mod postgame;
 pub const PALLET_TOWN_STATE: &[u8] = include_bytes!("../data/pallet-town-state.bin");
 pub const ROUTE1_STATE: &[u8] = include_bytes!("../data/route1-state.bin");
 pub const BATTLE_STATE: &[u8] = include_bytes!("../data/battle-state.bin");
+/// Standing inside the Route 22 gate with no badges, which is where the deployed run of 2026-08-26
+/// spent its last twelve turns. The guard turns the player back with a message and a scripted step
+/// backwards, which is the shape every blocker in the game has — see
+/// `mechanics::a_guard_who_turns_you_back_is_quoted_rather_than_swallowed`.
+pub const ROUTE22_GATE: &[u8] = include_bytes!("../data/route22-gate.bin");

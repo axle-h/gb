@@ -126,7 +126,7 @@ fn a_script_that_interrupts_a_walk_is_still_an_abort() {
     // the walk *stopped* rather than where it was headed.
     assert_eq!(
         format!("{outcome}"),
-        "✗ gave up on Scientist 1 at (5, 6): it was interrupted",
+        "✗ gave up on Scientist 1 at (5, 6): the game stopped you to say something",
         "the aide was never reached, so this is the abort it always was; got {outcome:?}",
     );
 }
@@ -1635,4 +1635,93 @@ fn a_cut_with_no_cut_never_opens_the_party_menu() {
     assert!(refusals > 0, "the refusal has to be said out loud, or nothing explains the no-op");
     assert!(worst_silence < Duration::from_secs(10),
             "the agent went {worst_silence:?} without asking anything — a guard that wedges is not a fix");
+}
+
+/// ⚠️ **A text box the game follows with a script used to be read and then thrown away, and that is
+/// every blocker in the game.**
+///
+/// The reader's buffer was emitted in exactly one place — `assert_text_box_state`'s "the box closed"
+/// arm, which fires on the `TextBox → anything else` edge *while the agent is still*
+/// `ReadingTextBox`. But `assert_script_state` runs before it in `update` and swaps the state out
+/// for `RunningScript`, so a box followed by a script never reached that arm: the words went on the
+/// floor and the model was told only that its walk had stopped.
+///
+/// Pokémon Red blocks the player by printing a message and then calling
+/// `StartSimulatingJoypadStates` to shove them back a tile — `Route22GateGuardText`,
+/// `ViridianCityCheckGymOpenScript`, the Viridian old man — so the one class of text box that most
+/// needs to reach the model was precisely the class that never did. Measured on the deployed run of
+/// 2026-08-26: a landed conversation was followed by a `TextBox` event 31 times out of 38, an
+/// aborted walk **2 times out of 28**, and both of those two were long story scripts rather than a
+/// blocker. The run walked into this gate, was told "✗ gave up on the warp to Route23 at (4, 2)"
+/// with nothing after it, talked to the guard **five times** trying to find out why, got nothing
+/// back each time, and filed a `report_issue`.
+///
+/// ⚠️ **What is asserted is that the words arrive, not that an event fires.** An empty `TextBox` is
+/// dropped by `PokemonAgent::event` (a box is detected before its characters are drawn), so a test
+/// that only counted events would pass on the stream of empty ones this bug already produced.
+#[test]
+fn a_guard_who_turns_you_back_is_quoted_rather_than_swallowed() {
+    let mut fixture = TestFixture::new(
+        ROUTE22_GATE,
+        Duration::from_secs(120),
+        vec![PolicyStep::goto(Map::Route23)],
+    );
+
+    let mut aborted = false;
+    let mut heard: Vec<String> = Vec::new();
+    for _ in 0..6000 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            match event {
+                AgentEvent::OverworldActionAborted { reason: OverworldActionAbortedReason::Textbox, .. } =>
+                    aborted = true,
+                AgentEvent::TextBox { message } => heard.push(message),
+                _ => {}
+            }
+        }
+        if aborted && !heard.is_empty() { break; }
+    }
+
+    // The precondition: without the abort this proves nothing, because the guard would simply have
+    // been walked past.
+    assert!(aborted, "the walk to Route 23 should have been stopped by the guard; heard {heard:?}");
+    assert!(
+        heard.iter().any(|line| line.contains("BOULDERBADGE")),
+        "the guard says why he will not let you past, and the model has to be told; heard {heard:?}",
+    );
+}
+
+/// The same fixture, from the other side: the model asking the guard directly.
+///
+/// ⚠️ **Talking to him is an `OverworldInteractionCompleted`, and that event carries no words.** It
+/// says "✓ talked to Guard" and nothing else, so the quote has to arrive as its own `TextBox` — the
+/// deployed run spent five consecutive turns on exactly this, each one summarised as wanting "his
+/// exact message", and heard nothing every time.
+#[test]
+fn talking_to_that_guard_reports_what_he_said() {
+    let mut fixture = TestFixture::new(
+        ROUTE22_GATE,
+        Duration::from_secs(120),
+        vec![PolicyStep::Interact(MapSprite::ROUTE22GATE_GUARD)],
+    );
+
+    let mut talked = false;
+    let mut heard: Vec<String> = Vec::new();
+    for _ in 0..6000 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            match event {
+                AgentEvent::OverworldInteractionCompleted { .. } => talked = true,
+                AgentEvent::TextBox { message } => heard.push(message),
+                _ => {}
+            }
+        }
+        if talked && !heard.is_empty() { break; }
+    }
+
+    assert!(talked, "the guard should have been reached and spoken to; heard {heard:?}");
+    assert!(
+        heard.iter().any(|line| line.contains("BOULDERBADGE")),
+        "asking him what the problem is has to answer with what he said; heard {heard:?}",
+    );
 }
