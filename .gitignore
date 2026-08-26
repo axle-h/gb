@@ -2,7 +2,11 @@
 .idea/
 # Test failure artifacts now go to target/test-artifacts/ (save_failure_artifacts), already ignored.
 
-.claude/
+# Claude Code's own per-project state (settings.local.json, session scratch) is local, but
+# `.claude/skills/` is not: those eight skills hold the invariants and the test workflows that
+# CLAUDE.md used to carry in full, so they are versioned with the code they describe.
+.claude/*
+!.claude/skills/
 # Compiled golden-vector generator (tools/blip-golden/build.sh builds into target/)
 /tools/blip-golden/gen_golden
 
