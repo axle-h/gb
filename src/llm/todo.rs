@@ -30,16 +30,20 @@ use std::path::{Path, PathBuf};
 
 use crate::run::files;
 
-/// How many items the list holds. Small on purpose: it is in every request, and a plan nobody can
-/// read at a glance is not a plan.
-pub const MAX_ITEMS: usize = 32;
+/// How many items the list holds, **finished ones included**.
+///
+/// ⚠️ **Five, and it was 32.** At 32 the cap never bound in practice and nothing else pushed back:
+/// the deployed run of 2026-08-26 reached **13 items of which 11 were done** without ever deleting
+/// one, so most of the plan in every request was work finished an hour earlier and the two live
+/// items were at the bottom. Counting done items against the cap is the whole point — a cap on open
+/// items only moves the growth into the tail, which is exactly where it went before.
+///
+/// Small enough to read at a glance, which is what a plan is for, and small enough that
+/// [`TodoList::render`] can show every item rather than hiding a tail of them from the model.
+pub const MAX_ITEMS: usize = 5;
 /// Long enough for the intent *and* the reason it exists, because there is no longer a note beside
 /// it to hold the second half. See the module's second ⚠️.
 pub const MAX_TEXT: usize = 200;
-/// How many finished items are still shown to the model. The UI shows every one — a viewer reads
-/// them as progress — but in a context window a done item is answered noise, and the compaction
-/// summary is what carries the achievements forward.
-const SHOW_DONE: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TodoItem {
@@ -90,7 +94,15 @@ impl TodoList {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let next_id = items.iter().map(|item| item.id).max().unwrap_or(0) + 1;
-        Self { path: Some(path), items, next_id }
+        let mut list = Self { path: Some(path), items, next_id };
+        // ⚠️ **Trimmed on the way in, not only on the way up.** `MAX_ITEMS` was 32 and is 5, so a
+        // run resumed across that change carries a list the cap would never otherwise touch: `add`
+        // only makes room when it needs some, and a model that stops adding keeps the long list for
+        // ever. Trimming here makes the cap a property of the list rather than of one code path.
+        if list.trim_to_cap() {
+            list.persist();
+        }
+        list
     }
 
     /// Service one call, returning the sentence the model is shown as the tool result.
@@ -136,21 +148,37 @@ impl TodoList {
         }
     }
 
+    /// Bring the list down to [`MAX_ITEMS`], returning whether anything was dropped.
+    ///
+    /// **Finished items go first, oldest first**: they are the ones the run has already had the
+    /// value of, and dropping live work to keep a tick would be the wrong way round. Open items are
+    /// only reached by a list that arrived over the cap from disk — [`Self::add`] refuses rather
+    /// than deleting a plan the model still means to carry out.
+    fn trim_to_cap(&mut self) -> bool {
+        let mut dropped = false;
+        while self.items.len() > MAX_ITEMS {
+            let position = self.items.iter().position(|item| item.done).unwrap_or(0);
+            self.items.remove(position);
+            dropped = true;
+        }
+        dropped
+    }
+
     fn add(&mut self, text: &str) -> String {
         let text = truncated(text.trim(), MAX_TEXT);
         if text.is_empty() {
             return "An empty TODO is not a TODO.".to_string();
         }
-        // Dropping *done* items first is what stops a long run hitting the cap because of things it
-        // finished an hour ago.
+        // Dropping the oldest *done* item is what makes room, since the cap counts them: a plan
+        // whose finished half is squeezing out the live half is the failure this exists to prevent.
         if self.items.len() >= MAX_ITEMS {
             if let Some(position) = self.items.iter().position(|item| item.done) {
                 self.items.remove(position);
             } else {
                 return format!(
-                    "Your TODO list is full ({MAX_ITEMS} items) and none of them are done. Finish \
-                     something with `todo_complete`, or delete an item with `todo_set` (its `id`, \
-                     no `text`) first."
+                    "Your plan is full: {MAX_ITEMS} items, and none of them are done. It is meant \
+                     to be short. Finish one with `todo_complete`, or drop the one you no longer \
+                     mean to do with `todo_set` (its `id`, no `text`), then add this."
                 );
             }
         }
@@ -174,50 +202,57 @@ impl TodoList {
         format!("Done: {text}")
     }
 
-    /// The block that goes into a turn as a message of its own (§10). Open items in full — that is
-    /// the whole point of it — and only the last [`SHOW_DONE`] finished ones, so a long run's
-    /// completed work does not become the context problem the list exists to solve.
+    /// The block that goes into a turn as a message of its own (§10).
+    ///
+    /// ⚠️ **In the list's own order, finished items included and in place.** It used to partition —
+    /// open items first, then the last few done ones — which meant the order the model wrote was not
+    /// the order it read back, and an item ticked off in the middle of a plan jumped to the bottom.
+    /// A plan is a sequence; re-sorting it silently is a way to make the model's own numbering stop
+    /// meaning anything. [`MAX_ITEMS`] is what keeps the whole thing short now, so nothing has to be
+    /// hidden to make it fit.
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push_str(PLAN_HEADING);
         out.push_str(
-            "\n\nThis is the only thing you write that survives a context compaction and a restart \
-             of the program. Keep a short plan going at all times, even when you are unsure: the \
-             next three to five things you mean to do, each with its reason. Nothing here is a \
-             commitment — when an item turns out wrong or impossible, rewrite or delete it with \
-             `todo_set` rather than leaving it, and complete items as you actually finish them.\n\n\
-             Look at it now and ask whether it still describes what you are doing. If something on \
-             it is done, `todo_complete` it. If you have been told something you will need later — \
-             an errand, a place, a name, what is blocking you — add it, with who told you. If the \
-             list has not changed while you have been going round in circles, it is the list that \
-             is wrong.\n\n\
-             ⚠️ This replaces any earlier `## Your plan` message in this conversation. Older copies \
-             are left where they were so nothing above them has to be rewritten; the one nearest the \
-             end is always the current one.\n\n",
+            &format!(
+                "\n\nThis is the only thing you write that survives a context compaction and a \
+                 restart of the program. Keep a short plan going at all times, even when you are \
+                 unsure: the next few things you mean to do, each with its reason. Nothing here is \
+                 a commitment — when an item turns out wrong or impossible, rewrite or delete it \
+                 with `todo_set` rather than leaving it, and complete items as you actually finish \
+                 them.\n\n\
+                 **It holds {MAX_ITEMS} items and finished ones count towards that.** So this is \
+                 not a diary of the run: when it is full, tick off or delete something before you \
+                 add. A finished item is worth keeping only while it still explains what you are \
+                 doing next; once it does not, drop it. What you have achieved is carried forward \
+                 by the summary of this conversation, not by this list.\n\n\
+                 **The order is yours and it is kept.** Items are shown in the order you put them \
+                 in, done or not, and a new one goes on the end — so put them in the order you mean \
+                 to do them, and if that order changes, rewrite them.\n\n\
+                 Look at it now and ask whether it still describes what you are doing. If something \
+                 on it is done, `todo_complete` it. If you have been told something you will need \
+                 later — an errand, a place, a name, what is blocking you — add it, with who told \
+                 you. If the list has not changed while you have been going round in circles, it is \
+                 the list that is wrong.\n\n\
+                 ⚠️ This replaces any earlier `## Your plan` message in this conversation. Older \
+                 copies are left where they were so nothing above them has to be rewritten; the one \
+                 nearest the end is always the current one.\n\n"
+            ),
         );
 
-        let (done, open): (Vec<&TodoItem>, Vec<&TodoItem>) =
-            self.items.iter().partition(|item| item.done);
-        if open.is_empty() && done.is_empty() {
+        if self.items.is_empty() {
             out.push_str(
                 "(empty — `todo_set` is how a plan outlives this conversation. Start one now, even \
                  a rough one.)\n",
             );
             return out;
         }
-        if open.is_empty() {
-            out.push_str("(nothing outstanding.)\n");
+        for item in &self.items {
+            let tick = if item.done { 'x' } else { ' ' };
+            out.push_str(&format!("- [{tick}] {} — {}\n", item.id, item.text));
         }
-        for item in &open {
-            out.push_str(&format!("- [ ] {} — {}\n", item.id, item.text));
-        }
-        // Oldest-first among the ones shown, so the tail still reads in the order it happened.
-        let hidden = done.len().saturating_sub(SHOW_DONE);
-        if hidden > 0 {
-            out.push_str(&format!("\n({hidden} earlier items done and not listed)\n"));
-        }
-        for item in done.iter().skip(hidden) {
-            out.push_str(&format!("- [x] {} — {}\n", item.id, item.text));
+        if self.items.iter().all(|item| item.done) {
+            out.push_str("\n(nothing outstanding — decide what comes next.)\n");
         }
         out
     }
@@ -341,9 +376,11 @@ mod tests {
     }
 
     /// ⚠️ The model's copy is not the UI's. A run that finishes fifty things must not carry fifty
-    /// answered lines in every request for the rest of its life.
+    /// answered lines in every request for the rest of its life. The cap is what does that now:
+    /// finished items count against it, so a run that keeps working keeps evicting its own history
+    /// rather than accumulating it.
     #[test]
-    fn finished_work_leaves_the_prompt_but_not_the_list() {
+    fn finished_work_is_squeezed_out_by_the_cap_rather_than_hidden() {
         let mut todo = TodoList::open(None);
         for n in 0..10 {
             todo.apply(add(format!("thing {n}")));
@@ -351,14 +388,75 @@ mod tests {
         }
         todo.apply(add("the one thing left"));
 
+        assert_eq!(todo.items().len(), MAX_ITEMS, "the cap counts finished items too");
         let rendered = todo.render();
-        assert_eq!(rendered.matches("- [x]").count(), SHOW_DONE, "{rendered}");
-        assert!(rendered.contains("(7 earlier items done and not listed)"), "{rendered}");
+        // Nothing is hidden from the model any more: what it holds is what it is shown.
+        assert_eq!(
+            rendered.matches("- [").count(),
+            MAX_ITEMS,
+            "every item the list holds should be rendered: {rendered}"
+        );
+        assert!(!rendered.contains("not listed"), "nothing is hidden now: {rendered}");
         assert!(rendered.contains("- [ ] 11 — the one thing left"), "{rendered}");
-        assert!(rendered.contains("thing 9"), "the most recent finished work is still shown");
-        assert!(!rendered.contains("thing 0"), "the oldest is not: {rendered}");
+        assert!(rendered.contains("thing 9"), "the most recent finished work is still there");
+        assert!(!rendered.contains("thing 0"), "the oldest was evicted: {rendered}");
+    }
 
-        assert_eq!(todo.items().len(), 11, "the UI still gets every one of them");
+    /// ⚠️ **The order the model writes is the order it reads back**, done items in place. This used
+    /// to partition, so ticking off an item in the middle of a plan moved it to the bottom and the
+    /// numbering stopped matching what the model had written.
+    #[test]
+    fn the_list_is_rendered_in_the_order_the_model_maintains() {
+        let mut todo = TodoList::open(None);
+        for text in ["first", "second", "third", "fourth"] {
+            todo.apply(add(text));
+        }
+        // Tick off the one in the middle: it must not move.
+        todo.apply(TodoCall::Complete { id: 2 });
+
+        let rendered = todo.render();
+        let lines: Vec<&str> = rendered.lines().filter(|line| line.starts_with("- [")).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "- [ ] 1 — first",
+                "- [x] 2 — second",
+                "- [ ] 3 — third",
+                "- [ ] 4 — fourth",
+            ],
+            "{rendered}"
+        );
+
+        // And a rewrite stays where it was rather than going to the end.
+        todo.apply(TodoCall::Set { id: Some(1), text: Some("first, revised".to_string()) });
+        let first = todo.render();
+        let lines: Vec<&str> = first.lines().filter(|line| line.starts_with("- [")).collect();
+        assert_eq!(lines[0], "- [ ] 1 — first, revised", "{first}");
+    }
+
+    /// A list written when the cap was 32 has to come under it on the way in, not merely stop
+    /// growing — a model that never adds again would otherwise keep the long list for ever.
+    #[test]
+    fn a_list_from_before_the_cap_is_trimmed_when_it_is_opened() {
+        let scratch = crate::run::tests::Scratch::new("todo-legacy-cap");
+        let long: Vec<TodoItem> = (1..=13)
+            .map(|id| TodoItem { id, text: format!("thing {id}"), done: id <= 11 })
+            .collect();
+        std::fs::write(
+            scratch.0.join(crate::run::files::TODO),
+            serde_json::to_vec(&long).expect("serialises"),
+        )
+        .expect("write");
+
+        let todo = TodoList::open(Some(&scratch.0));
+        assert_eq!(todo.items().len(), MAX_ITEMS, "the long list was not trimmed");
+        // The two live items survived; the finished ones were what went.
+        let open: Vec<&str> = todo.items().iter().filter(|i| !i.done).map(|i| i.text.as_str()).collect();
+        assert_eq!(open, vec!["thing 12", "thing 13"], "live work was dropped to keep ticks");
+
+        // And it was written back, so the next process does not have to trim it again.
+        let reopened = TodoList::open(Some(&scratch.0));
+        assert_eq!(reopened.items().len(), MAX_ITEMS);
     }
 
     /// With no run directory the tools still work — they simply keep nothing. That is what the
