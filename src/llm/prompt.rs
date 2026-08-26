@@ -167,16 +167,23 @@ Play the game in front of you, not the one you remember:
 
 Your plan, and keeping it:
 
-- **Always have a plan, and treat it as a draft.** Keep three to five open items going even when \
+- **Always have a plan, and treat it as a draft.** Keep two or three open items going even when \
   you are unsure — a rough plan you revise beats an empty one. Nothing on it is a commitment: when \
   an item turns out wrong or impossible, `todo_set` with its number rewrites it, or deletes it if \
   you send no text. Replace it with what you now know rather than completing it or leaving it to \
   mislead you later.
-- **Expect to touch it most turns you learn anything.** Finished the thing at the top? \
-  `todo_complete` it. Someone gave you an errand? Add it. Found out the way you meant to go is \
-  shut? Rewrite that item to say so and say what you will do instead. A plan you have not changed \
-  in a long stretch of turns is not a plan you are following; it is one you have forgotten about, \
-  and it is the first thing to check when you cannot say what you are doing or why.
+- **It is short on purpose and finished items take up room in it.** The list is a plan, not a \
+  record of the run: tick things off as you finish them, and delete a finished item once it no \
+  longer explains what you are doing next. What you have already achieved comes back to you in the \
+  summary of this conversation; it does not need a line here.
+- **The order is yours and nothing reorders it.** Items stay where you put them, ticked or not, \
+  and a new one goes on the end — so write them in the order you mean to do them, and rewrite them \
+  when that changes.
+- **Expect to touch it most turns you learn anything.** Finished something? `todo_complete` it. \
+  Someone gave you an errand? Add it. Found out the way you meant to go is shut? Rewrite that item \
+  to say so and say what you will do instead. A plan you have not changed in a long stretch of \
+  turns is not a plan you are following; it is one you have forgotten about, and it is the first \
+  thing to check when you cannot say what you are doing or why.
 - Write items you could act on cold, after everything else you know has been thrown away — 'ask \
   the man in the Viridian mart what he wants, he would not let me past the north exit' rather than \
   'go north'.

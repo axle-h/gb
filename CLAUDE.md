@@ -746,6 +746,33 @@ by round-tripping through the charmap rather than by asking whether it is alphan
 reason `every_name_a_policy_can_choose_is_one_the_game_will_take` does: `/` is a perfectly writable
 `$F3`.
 
+⚠️ **The plan holds five items and finished ones count towards that; it used to hold 32 and they
+did not have to.** At 32 the cap never bound, nothing else pushed back, and the model never deleted
+anything: the deployed run of 2026-08-26 reached **13 items of which 11 were done** — most of the
+plan in every request was work finished an hour earlier, with the two live items at the bottom.
+⚠️ **Counting done items against the cap is the whole of the fix**: a cap on open items only moves
+the growth into the tail, which is exactly where it went. `add` evicts the oldest *done* item to
+make room and refuses outright when none are done, which is the message that teaches the rule.
+⚠️ **`TodoList::open` trims as well**, or a run resumed across the change keeps its long list for
+ever — `add` only makes room when it needs some, so a model that stops adding never triggers it.
+
+⚠️ **The list is rendered in the model's own order, ticked items in place, and it used to be
+partitioned.** `render` put open items first and the last three done ones after, so an item
+completed in the middle of a plan jumped to the bottom and the numbering the model had written
+stopped matching what it read back. A plan is a sequence and silently re-sorting it is a way to make
+it say something its author did not. `PlanPanel.tsx` had the same bug independently
+(`[...open, ...done]`) and now maps the list as it stands. `the_list_is_rendered_in_the_order_the_model_maintains`
+is the guard. ⚠️ **`SHOW_DONE` is gone with it** — hiding a tail of finished items from the model
+was a workaround for a cap that did not bind, and at five items there is nothing to hide.
+
+⚠️ **The rule is stated in three places and that is deliberate, not duplication.** The tool
+description is the only one present on *every* request (`sync_plan` emits the plan message on change
+and every tenth overworld turn, so most turns carry only `PLAN_UNCHANGED`), so it says the rule
+tersely; the plan message argues it; the system prompt frames it. That split is what kept it
+affordable — the first draft put the argument in the tool description and
+`the_tool_array_stays_within_its_budget` went red on **Overworld at 9522 against 9500** and then on
+Stuck, which is exactly what that test is for. No ceiling moved.
+
 ⚠️ **Emit-on-change keeps the prefix cache and buries the plan, and both deployed runs proved it.**
 `sync_plan` leaves an unchanged plan where it is because moving it costs a re-prefill — but a model
 that sets one item on turn 1 and never touches it again (258 turns, one `todo_set`; and 2430 turns,

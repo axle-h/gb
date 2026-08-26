@@ -9,9 +9,12 @@ import type { TodoView } from '../api';
  * following. It is the same list the model is sent every turn, which is what makes it honest —
  * nothing here is a rendering of something else.
  *
- * ⚠️ **Finished items stay, and they stay at the bottom.** The model's own copy shows only the last
- * few (a done item is answered noise in a context window); a viewer reads them as progress, so the
- * page keeps all of them and greys them out.
+ * ⚠️ **In the model's own order, finished items in place.** This used to render open items first
+ * and finished ones after, which reordered the list the moment anything was ticked off: an item
+ * completed in the middle jumped to the bottom and the numbering stopped matching what the model
+ * had written. A plan is a sequence, and re-sorting someone else's sequence for them is a way to
+ * make it say something they did not. Done items are greyed rather than moved, and the list is
+ * capped at `todo::MAX_ITEMS` including them, so there is no tail to push out of the way.
  */
 export function PlanPanel({ plan }: { plan: TodoView[] }) {
   // Nothing published yet: a fresh run, or `--policy random`, which has no plan and never will.
@@ -19,19 +22,19 @@ export function PlanPanel({ plan }: { plan: TodoView[] }) {
   // deployments.
   if (plan.length === 0) return null;
 
-  const open = plan.filter((item) => !item.done);
-  const done = plan.filter((item) => item.done);
+  const open = plan.filter((item) => !item.done).length;
+  const done = plan.length - open;
 
   return (
     <div className="plan">
       <div className="plan-head">
         <span className="plan-title">Plan</span>
         <span className="dim">
-          {open.length} to do{done.length > 0 ? ` · ${done.length} done` : ''}
+          {open} to do{done > 0 ? ` · ${done} done` : ''}
         </span>
       </div>
       <ol className="plan-items">
-        {[...open, ...done].map((item) => (
+        {plan.map((item) => (
           <li key={item.id} className={item.done ? 'done' : undefined}>
             <span className="tick" aria-hidden="true">
               {item.done ? '✓' : '·'}

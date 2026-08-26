@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
-use crate::llm::todo::{MAX_TEXT as MAX_TODO_TEXT, TodoCall};
+use crate::llm::todo::{MAX_ITEMS as MAX_TODO_ITEMS, MAX_TEXT as MAX_TODO_TEXT, TodoCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
 use crate::llm::worker::ToolAnswer;
 use crate::pokemon::GameState;
@@ -558,12 +558,12 @@ pub fn todo_tools() -> Vec<ToolSpec> {
         ToolSpec::new(
             "todo_set",
             format!(
-                "Add, rewrite or delete one item on your plan: no `id` adds a new item, an `id` \
-                 from the list replaces that item, an `id` with no `text` deletes it. The plan is \
-                 shown to you every turn and it is the only thing you write that survives this \
-                 conversation being summarised away, or the program restarting — so say the reason \
-                 as well as the intent: `come back to Route 12 with the Poké Flute, the Snorlax \
-                 blocks the path south`. At most {MAX_TODO_TEXT} characters."
+                "Add, rewrite or delete one item on your plan: no `id` adds one on the end, an \
+                 `id` rewrites that item where it is, an `id` with no `text` deletes it. The order \
+                 is kept. Room for {MAX_TODO_ITEMS}, finished ones included. This is the only thing \
+                 you write that outlives the conversation, so give the reason with the intent: \
+                 `come back to Route 12 with the Poké Flute, the Snorlax blocks the path south`. At \
+                 most {MAX_TODO_TEXT} characters."
             ),
             json!({
                 "type": "object",
