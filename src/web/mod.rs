@@ -43,6 +43,7 @@ pub mod version;
 pub mod video;
 
 use std::convert::Infallible;
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,6 +71,10 @@ use published::Published;
 /// `/api/video` an empty message — neither is anything a client has to parse, and an idle screen
 /// under `--policy llm` is a long silence, not a rare one.
 const KEEP_ALIVE: Duration = Duration::from_secs(2);
+
+/// How long the runtime is given to stop once the accept loop has been dropped. There is nothing
+/// to drain — see the ⚠️ in [`serve_http`] — so this only bounds the case where a task is wedged.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The header `POST /api/new-run` reads its token from.
 const ADMIN_TOKEN_HEADER: &str = "x-gb-token";
@@ -293,7 +298,7 @@ fn serve_http(
         .build()
         .map_err(|e| format!("could not start the HTTP runtime: {e}"))?;
 
-    runtime.block_on(async move {
+    let result = runtime.block_on(async move {
         let state = AppState { published, started: Instant::now(), run, new_runs, admin_token };
         let app = routes().with_state(state);
 
@@ -304,17 +309,38 @@ fn serve_http(
             .map_err(|e| format!("could not bind port {port}: {e}"))?;
         println!("gb serve — http://localhost:{port}");
 
-        axum::serve(listener, app)
-            // ⚠️ **SIGTERM as well as Ctrl-C.** `docker stop` sends the former, and a container that
-            // only handled the latter would lose every checkpoint-worth of play since the last
-            // periodic write — up to a minute — on every deploy.
-            .with_graceful_shutdown(async {
-                shutdown_signal().await;
-                println!("shutting down — checkpointing");
-            })
-            .await
-            .map_err(|e| format!("server failed: {e}"))
-    })
+        // ⚠️ **SIGTERM as well as Ctrl-C.** `docker stop` sends the former, and a container that
+        // only handled the latter would lose every checkpoint-worth of play since the last
+        // periodic write — up to a minute — on every deploy.
+        //
+        // ⚠️ **And the signal drops the connections rather than draining them, which is what
+        // `with_graceful_shutdown` did and is the wrong end of this trade.** `/api/events` and
+        // `/api/video` never finish by construction — an SSE stream and a chunked binary one, each
+        // held open by its own keepalive precisely so that a quiet run is not mistaken for a dead
+        // one — so "wait for the requests in flight" means "wait for every viewer to close their
+        // tab". A rollout with a single browser on the page stopped accepting new connections, kept
+        // serving the old ones, and sat there until the kubelet's grace period ran out and SIGKILL
+        // took the checkpoint with it: exactly the loss the paragraph above exists to prevent, on
+        // exactly the deploy that causes it. Every endpoint here is read-only, so a dropped
+        // connection costs a viewer a reconnect and nothing else — and the page already reconnects,
+        // because a network that goes away looks the same from inside it.
+        tokio::select! {
+            result = axum::serve(listener, app).into_future() => {
+                result.map_err(|e| format!("server failed: {e}"))
+            }
+            _ = shutdown_signal() => {
+                println!("shutting down — dropping every connection, then checkpointing");
+                Ok(())
+            }
+        }
+    });
+
+    // ⚠️ **Dropping the `serve` future above ends the *accept* loop and nothing else.** Every
+    // connection axum has taken is a task of its own and outlives it, so this is what actually
+    // stops the streams. The timeout bounds a shutdown that has nothing left to wait for; it is
+    // not a drain.
+    runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
+    result
 }
 
 /// Every route, in one place — the module doc's table above says the same thing in prose.
