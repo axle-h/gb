@@ -25,6 +25,22 @@ impl PokemonTextReader {
     }
 
 
+    /// Everything read so far, leaving the reader empty and still configured the way it was.
+    ///
+    /// ⚠️ **Reading a box and *reporting* it are two different moments, and they used to be the
+    /// same one.** The agent emitted the buffer only on the `TextBox → not a text box` edge, from
+    /// inside [`AgentState::ReadingTextBox`] — so anything that took the state away first threw the
+    /// words on the floor. This is what [`PokemonAgent::flush_text_reader`] hands out, and it clears
+    /// rather than replaces so the battle reader's `message_box_only` survives being drained.
+    ///
+    /// [`AgentState::ReadingTextBox`]: crate::pokemon::agent::AgentState
+    /// [`PokemonAgent::flush_text_reader`]: crate::pokemon::agent::PokemonAgent
+    pub fn take(&mut self) -> String {
+        self.had_text = false;
+        self.page_cleared = false;
+        std::mem::take(&mut self.buffer)
+    }
+
     pub fn update<A: PokemonApiTrait>(&mut self, api: &mut A) {
         // mash the A button to advance the text
         self.update_with(api, JoypadButton::A);

@@ -109,8 +109,10 @@ How the interface works:
   boulder, and pressing A at a tile to find what is hidden there.
 - **The agent can be wrong, and `report_issue` is how you say so.** If the action menu does not \
   describe what is in front of you, or an action keeps failing for a reason you cannot see, file \
-  one: what you were trying to do, what you expected, what happened instead. A developer reads \
-  these, and the screen and a save state are filed with it. ⚠️ It does **not** end your turn and \
+  one: what you were trying to do, what you expected, what happened instead. An action the game \
+  stopped with a message you were shown is **not** one of these — there the reason is the message, \
+  and it is a thing to act on rather than to report. A developer reads these, and the screen and a \
+  save state are filed with it. ⚠️ It does **not** end your turn and \
   nothing changes now — so having filed it, carry on and try a different way. Reporting a problem \
   and playing on are not alternatives. What can be wrong is the agent's *description* of the game — \
   a menu row, a route, a name. The game itself is not wrong; see below.
@@ -129,6 +131,14 @@ The game is not broken, and you are not debugging it:
 - So when something does not work, the explanation is almost always that **you have not done the \
   thing the game is waiting for** — a person you have not spoken to, an item you do not have yet, a \
   badge you have not won, a place you have not been. It is never that the game needs another go.
+- **Being stopped is not a malfunction; it is how the game tells you something.** Guards, locked \
+  doors, people with an errand and scripted scenes all halt you where you stand and put a message \
+  on screen. The action you asked for is then reported back as given up on — 'the game stopped you \
+  to say something' — and what it said is quoted in the very next lines under 'Since your last \
+  decision'. That message is the answer, every time: a door that will not open yet, someone who \
+  wants something first, somewhere you are not allowed past. Read it and act on it. A gym or a \
+  building you cannot get into yet is ordinary — note on the plan what it is waiting for and go and \
+  get that.
 - **Doing the same thing again is not a plan.** If an action has failed twice, stop and change what \
   you are doing: go somewhere else, talk to someone you have not talked to, read what you were last \
   told. Doing it a third, fifth and tenth time is the single most expensive mistake available to \
@@ -844,6 +854,11 @@ mod tests {
     fn the_system_prompt_says_the_things_the_deployed_runs_needed_it_to_say() {
         for phrase in [
             "The game is not broken",
+            // The Viridian Gym door: a locked door the run had no badges for, reported as an
+            // abandoned walk, answered with a `report_issue` asking a developer to check the
+            // agent's warp targeting. Nothing was wrong. This bullet and
+            // `OverworldActionAbortedReason::Textbox`'s wording are the two halves of saying so.
+            "Being stopped is not a malfunction",
             "Doing the same thing again is not a plan",
             "not the one you remember",
             "Read what people say to you",

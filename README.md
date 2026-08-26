@@ -185,6 +185,30 @@ half is missing. What the turn does say — once, while it is true — is that t
 what it would take to clear them, because a model that is simply shown no way forward starts
 inventing reasons why.
 
+What the game *does* refuse it refuses out loud, and that had the opposite problem: a word. Guards,
+locked doors and scripted scenes stop the player where they stand and put a message on screen, so the
+walk carrying out the model's action is abandoned — correctly — and the agent said so as "✗ gave up
+on the warp to ViridianGym at (32, 9): it was interrupted". The next line quoted the game itself
+saying "The GYM's doors are locked...", which is the whole answer: that gym opens on the eighth
+badge. A deployed run read the two together, concluded the agent's warp targeting was broken, and
+filed a bug asking a developer to look at it. Nothing was wrong except the sentence. Being stopped is
+how this game tells you things, so the reason now reads "the game stopped you to say something" —
+pointing at the message rather than describing the walk's failure — and the system prompt says once
+that a building you cannot get into yet is ordinary, and that what stopped you is quoted in the lines
+immediately below.
+
+That last clause was a lie for most of the game's blockers, which is the more serious half of the
+same story. Every text box is read character by character and reported once it closes — except that
+Pokémon Red turns the player back by printing a message and *then* running a script to step them
+backwards, and a script took the agent's state away before the words were reported. So they were
+read in full and thrown on the floor. Across the same run a conversation the model walked into was
+quoted back 31 times out of 38; a walk stopped by something was quoted 2 times out of 28. It reached
+the Route 22 gate, was told its walk had stopped and nothing else, asked the guard directly five
+times running, heard nothing each time, and filed a bug. What he actually says is "Only truly skilled
+trainers are allowed through. You don't have the BOULDERBADGE yet!" — the whole answer, out loud, for
+twelve turns. The reader is now drained wherever it stops being the thing in charge rather than only
+when the box closes tidily.
+
 Every Pokémon it catches gets a name it chose. That is a decision the game puts to a player and the
 prompt used to talk the model out of it — the tool said keeping the species name "is the ordinary
 answer", and across two deployed runs all four naming screens did exactly that. It is now asked for

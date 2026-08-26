@@ -251,6 +251,40 @@ ones — on the deployed run they were most of the log. `PokemonAgent::event` dr
 funnel *every* event goes through (including the ones collected into `update`'s local `new_events`),
 so the transcript is clean as well as the page.
 
+⚠️ **Reading a text box and *reporting* it are two moments, and treating them as one lost the most
+important text boxes in the game.** The reader's buffer used to be emitted in exactly one place —
+`assert_text_box_state`'s "the box closed" arm, which fires on the `TextBox → anything else` edge
+*while the agent is still* `ReadingTextBox`. But `assert_script_state` runs **before** it in
+`update` and swaps the state out for `RunningScript`, so a box the game follows with a script never
+reached that arm at all: the reader was dropped mid-sentence and the model was told only that its
+walk had stopped. ⚠️ **That is not an edge case, it is the shape of every blocker in Pokémon Red** —
+print a message, then `StartSimulatingJoypadStates` to shove the player back a tile
+(`Route22GateGuardText`, `ViridianCityCheckGymOpenScript`, the Viridian old man). Measured on the
+deployed run of 2026-08-26: a landed conversation was followed by a `TextBox` event **31 times out of
+38**, an aborted walk **2 of 28**, and both of those two were long story scripts (Oak at the edge of
+Route 1, the rival in the lab) rather than a blocker. The run walked into the Route 22 gate, was told
+`✗ gave up on the warp to Route23 at (4, 2)` with nothing after it, **talked to the guard five times**
+trying to find out why, heard nothing each time, and filed a `report_issue`. The words it could not
+see were "Only truly skilled trainers are allowed through. You don't have the BOULDERBADGE yet!"
+`PokemonAgent::flush_text_reader` is the fix and `PokemonTextReader::take` is what it drains with;
+⚠️ **it hangs off the two places that assign `self.state`** — `set_state` and `backup_current_state`
+— so "leaving the reader reports what it read" is structural rather than a list of call sites, and a
+battle or a mart stealing the state is covered by the same line as a script. ⚠️ **`take` clears
+rather than replaces**, because `backup_current_state` keeps the state it flushed and a ledge jump
+restores it: a reader put back with its buffer still in it would say the same sentence twice.
+`mechanics::a_guard_who_turns_you_back_is_quoted_rather_than_swallowed` and
+`talking_to_that_guard_reports_what_he_said` are the pair, on `route22-gate.bin`, and ⚠️ **what they
+assert is that the *words* arrive** — an empty `TextBox` is dropped by `event`, so counting events
+would pass on the stream of empty ones the bug already produced.
+
+⚠️ **`### On screen` is not a second chance at this, and it looks like one.** `observe::screen_text`
+reads the tile map as it stands, so through a conversation it returns a rolling fragment — measured
+across this same box: `"Onl"`, `"Only truly skilled trainers are"`, `"trainers are allowed thr"`,
+`""`, `"You don't have the BOULDERB"` — and by the time the abort has resolved into an overworld
+decision the box is gone and it is `None`. Only the reader accumulates across pages, so the
+`TextBox` event is the only complete record of anything the game said, and
+`### Since your last decision` is the only place a model ever reads it.
+
 ⚠️ **Talking to someone is that action succeeding, and the text box is the only signal it ever
 gets.** The route to a sprite ends by facing it and pressing A, and it is re-derived every tick — so
 once the player is standing in front of the sprite that route is `[A]` for ever and the "the route
@@ -263,7 +297,8 @@ can say, so every successful conversation was reported to the model as a failed 
 
 ⚠️ **An abort also says *where* the walk stopped, and the reason alone was not enough to act on.**
 `OverworldActionAborted` carries `at` — the square the player was actually standing on — so the line
-is "✗ gave up on the way into Route2 at (19, 11): it was interrupted". The deployed run produced that
+is "✗ gave up on the way into Route2 at (19, 11): the game stopped you to say something". The
+deployed run produced that
 abort **143 times**: the Viridian old man blocks the north exit until Oak's Parcel is delivered, so
 the walk was impossible every time and the log said only that something stopped it. The model
 concluded, in its own `why` strings, that "the choose_action pathfinding keeps failing" and started
@@ -293,6 +328,25 @@ Three traps in the detection, each paid for separately:
   reported every heal in every Pokémon Centre — the most repeated action in the deployed run — as
   "✗ gave up on Nurse". `MetaTileMap::interaction_in_front` is the one that hops; ⚠️
   **`tile_in_front` must not**, because `cut` and the surf mount are about the literal tile.
+
+⚠️ **And the *word* was the other half: "it was interrupted" reads as a malfunction, and being
+stopped is the game working.** Guards, locked doors, people with an errand and scripted scenes all
+halt the player where they stand and put a message on screen, and the walk that was carrying out the
+model's action is abandoned — correctly. The deployed run walked at the Viridian Gym door with no
+badges, was told "✗ gave up on the warp to ViridianGym at (32, 9): it was interrupted" with "The
+GYM's doors are locked..." quoted on the line below it, and filed a `report_issue` asking a developer
+to "verify action targeting for gym entrance vs warp". Nothing had gone wrong. Two changes, and they
+are two audiences: `OverworldActionAbortedReason::Textbox` now reads **"the game stopped you to say
+something"**, which names the cause and points at the text box that follows rather than describing
+the walk's failure; and `SYSTEM_PROMPT` says once, under "The game is not broken", that being stopped
+is how the game tells you something, that what it said is in the next lines under
+`### Since your last decision`, and that a building you cannot get into yet is ordinary rather than a
+thing to report. ⚠️ **Not "something was said"** — that was tried and buries the fact the model needs
+(see the ⚠️ on the variant); the reason names the *cause* and the `TextBox` event beneath it carries
+the words. ⚠️ **And no `Blocked here:` line was added for it**, unlike the Cut/Surf case above: the
+cartridge already says the doors are locked, in a box that is quoted into the very next turn, so a
+second copy assembled from `EVENT_VIRIDIAN_GYM_OPEN` would be the agent repeating what the game had
+just said.
 
 ⚠️ **What the page shows and what the model is told are two different lists, and the split is on the
 client.** `useEventStream`'s `fold` drops `text_box` and `overworld_interaction_completed` — the
