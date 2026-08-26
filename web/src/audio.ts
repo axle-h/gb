@@ -27,6 +27,8 @@ const TRIM_FULL_SCALE_S = 0.15;
 const FADE_S = 0.008;
 /** Backpressure: a decoder this far behind is not going to catch up, and queueing builds latency. */
 const MAX_DECODE_QUEUE = 20;
+/** How long to give `AudioContext.resume()` before deciding the browser wants a gesture first. */
+const RESUME_GRACE_MS = 1000;
 
 const MAGIC = 0x31414247; // "GBA1", little-endian
 export const HEADER_LEN = 12;
@@ -137,6 +139,8 @@ export class AudioPlayer {
   private master: GainNode | null = null;
   private decoder: AudioDecoder | null = null;
   private format: AudioFormat | null = null;
+  /** What `this.decoder` was actually configured with, which survives `format` being forgotten. */
+  private format0: { sampleRate: number; numberOfChannels: number } | null = null;
   private unsubscribe: (() => void) | null = null;
   private live = new Set<AudioBufferSourceNode>();
   private nextAt: number | null = null;
@@ -161,11 +165,16 @@ export class AudioPlayer {
     } catch {
       context = new AudioContext();
     }
-    try {
-      await context.resume();
-    } catch {
-      /* handled by the state check below */
-    }
+    // ⚠️ **`resume()` must be raced, because without user activation it never settles at all.**
+    // Not "rejects" — the promise simply stays pending for the life of the page, which is a shape
+    // `await` has no answer to. It matters because the stored-preference path calls this at mount,
+    // where there has been no gesture yet: awaiting it there hangs `start` for ever, leaves the
+    // caller holding a half-built player, and the viewer's *real* click then short-circuits on it
+    // and connects nothing. A second of grace is far more than a permitted resume needs.
+    await Promise.race([
+      context.resume().catch(() => {}),
+      new Promise((settle) => setTimeout(settle, RESUME_GRACE_MS)),
+    ]);
     if (context.state !== 'running') {
       await context.close().catch(() => {});
       return false;
@@ -179,7 +188,7 @@ export class AudioPlayer {
     // does the same elsewhere. Re-anchoring is what stops it resuming into deadlines set hours ago.
     context.addEventListener('statechange', this.onStateChange);
 
-    this.unsubscribe = subscribeFramed(this.url, this.onMessage, this.onConnection, {
+    this.unsubscribe = subscribeFramed(this.url, this.onMessage, this.connectionChanged, {
       inflate: false,
       label: '/api/audio',
       onFatal: this.onFatal,
@@ -202,6 +211,7 @@ export class AudioPlayer {
     this.live.clear();
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = null;
+    this.format0 = null;
     this.context?.removeEventListener('statechange', this.onStateChange);
     this.context?.close().catch(() => {});
     this.context = null;
@@ -210,6 +220,27 @@ export class AudioPlayer {
     this.nextAt = null;
     this.timestamp = 0;
   }
+
+  /**
+   * ⚠️ **Every connection re-sends the header, so the format has to be forgotten on each one.**
+   * The first message of a stream is twelve bytes of `GBA1` and the rest are bare Opus packets, told
+   * apart by position and nothing else — so a reconnect that kept the format it already had would
+   * fall straight through to the decoder and feed it the header as if it were audio. It is not
+   * rejected either: `G` is `0x47`, which reads as a TOC byte claiming a stereo stream and a
+   * frame-count code of 3.
+   *
+   * `'live'` is the moment for it — `subscribeFramed` reports it after the fetch has succeeded and
+   * before the first message, so this lands in the gap rather than racing the header.
+   *
+   * ⚠️ **`nextAt` is deliberately *not* reset here.** A reconnect is not automatically a
+   * discontinuity: a blip that is repaired inside the jitter buffer should stay inaudible, and a gap
+   * long enough to matter drains `nextAt` past `UNDERRUN_S` on its own and anchors. Forcing an
+   * anchor would instead schedule the new audio on top of sources that are still playing out.
+   */
+  private connectionChanged = (connection: Connection) => {
+    if (connection === 'live') this.format = null;
+    this.onConnection(connection);
+  };
 
   private onStateChange = () => {
     if (!this.context) return;
@@ -221,13 +252,22 @@ export class AudioPlayer {
 
   private onMessage = (message: ArrayBuffer) => {
     if (!this.format) {
+      let format: AudioFormat;
       try {
-        this.format = parseHeader(message);
+        format = parseHeader(message);
       } catch (failure) {
         console.error('audio stream opened with something else', failure);
         return;
       }
-      this.buildDecoder();
+      const changed =
+        this.format0?.sampleRate !== format.sampleRate ||
+        this.format0?.numberOfChannels !== format.channels;
+      this.format = format;
+      // ⚠️ **A reconnect keeps the decoder it already had**, and with it the timestamp counter that
+      // has to stay monotonic across the gap. Rebuilding on every reconnect would either restart
+      // that counter — which WebCodecs rejects — or leak a decoder per attempt. Only a format that
+      // has genuinely moved under a deploy is worth a new one.
+      if (!this.decoder || this.decoder.state !== 'configured' || changed) this.buildDecoder();
       return;
     }
     const decoder = this.decoder;
@@ -253,6 +293,11 @@ export class AudioPlayer {
   private buildDecoder() {
     const format = this.format;
     if (!format) return;
+    // ⚠️ Closed rather than dropped: an `AudioDecoder` left configured holds its own resources, and
+    // this is reached again on a decode error as well as on a format change.
+    if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
+    this.timestamp = 0;
+    this.format0 = { sampleRate: format.sampleRate, numberOfChannels: format.channels };
     this.decoder = new AudioDecoder({
       output: this.onFrame,
       // ⚠️ **Rebuild and keep the connection, which is the opposite of what `Screen` does.** A video

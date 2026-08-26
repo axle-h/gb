@@ -1159,6 +1159,33 @@ last set, which is the click the fades exist to avoid. ⚠️ **Do not "handle" 
 `AudioContext`**: `suspend()` freezes `currentTime`, which makes every deadline already stored wrong
 on resume, and the underrun path handles it unchanged.
 
+⚠️ **Every connection re-sends the header, so the client has to forget the format on each one.** A
+stream is twelve bytes of `GBA1` followed by bare Opus packets, told apart by **position and nothing
+else** — so a reconnect that kept the format it already had fell straight through and fed the header
+to the decoder as audio. It is not rejected either: `G` is `0x47`, which reads as a TOC byte claiming
+a stereo stream and a frame-count code of 3. Reproduced in Chrome across a server bounce:
+`EncodingError: Decoding error.` and **11 of 22 frames lost**, because the decoder dies at the header
+and takes the rest of that connection's packets with it. `AudioPlayer.connectionChanged` clears
+`format` on `'live'`, which `subscribeFramed` reports after the fetch succeeds and before the first
+message. ⚠️ **`nextAt` is deliberately *not* cleared with it** — a reconnect is not automatically a
+discontinuity, a blip repaired inside the jitter buffer should stay inaudible, and a gap long enough
+to matter drains `nextAt` past `UNDERRUN_S` and anchors on its own. ⚠️ **Nor is the decoder rebuilt**,
+because its timestamp counter has to stay monotonic across the gap; only a format that has genuinely
+moved under a deploy earns a new one.
+
+⚠️ **`AudioContext.resume()` does not reject without user activation — it never settles at all**, and
+`await`ing it is therefore a hang rather than a failure. That is reachable in ordinary use: the
+stored-preference path calls `AudioPlayer.start` at mount, where there has been no gesture yet. Left
+unraced it hung for the life of the page, and — because `player.current` had already been assigned —
+the viewer's *real* click then short-circuited on a player that was never going to connect, leaving
+the speaker on `sound connecting…` for ever with nothing behind it. `RESUME_GRACE_MS` (1 s, far more
+than a permitted resume needs) races it, and `SoundButton` assigns `player.current` only once the
+context is genuinely running, with a `starting` latch so a second click cannot stack a second
+context. Verified by reloading with `gb.sound=on` and no activation: it degrades to `tap for sound`.
+⚠️ **A synthetic `.click()` does not confer activation either**, so this path is what a test harness
+driving the page from JavaScript will always hit — that is how it was found, and it is not a reason
+to think it is only a harness problem.
+
 ⚠️ **Never assume the decoder's output rate matches what was configured.** Chrome decodes Opus at
 48 kHz whatever `sampleRate` says, so `AudioData.sampleRate` is the authority for both the buffer and
 the frame's duration. And ⚠️ **every packet is a `'key'` chunk** — Opus has no delta frames and

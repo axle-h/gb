@@ -25,14 +25,23 @@ export function SoundButton() {
   const [needsGesture, setNeedsGesture] = useState(false);
   const [connection, setConnection] = useState<Connection>('connecting');
   const player = useRef<AudioPlayer | null>(null);
+  /** ⚠️ A start in flight is not a player: see `startPlaying`. */
+  const starting = useRef(false);
 
   const stop = useCallback(() => {
     player.current?.stop();
     player.current = null;
   }, []);
 
+  // ⚠️ **`player.current` is set only once the context is genuinely running.** It used to be
+  // assigned before the `await`, which meant a start that had not finished — the mount-time one,
+  // which has no user activation behind it — read as a working player, and the click that came
+  // afterwards returned early and connected nothing. The `starting` latch is what stops a second
+  // click stacking a second context on top of the first while that is resolved.
   const startPlaying = useCallback(async () => {
     if (player.current) return true;
+    if (starting.current) return false;
+    starting.current = true;
     const created = new AudioPlayer('/api/audio', setConnection, (why) => {
       // The server will never answer: audio is off on this deployment, or this build predates it.
       // Either way the control has nothing left to offer, so it goes rather than sitting there
@@ -42,15 +51,18 @@ export function SoundButton() {
       stop();
       setOn(false);
     });
-    player.current = created;
-    const started = await created.start();
-    if (!started) {
-      player.current = null;
-      setNeedsGesture(true);
-      return false;
+    try {
+      const started = await created.start();
+      if (!started) {
+        setNeedsGesture(true);
+        return false;
+      }
+      player.current = created;
+      setNeedsGesture(false);
+      return true;
+    } finally {
+      starting.current = false;
     }
-    setNeedsGesture(false);
-    return true;
   }, [stop]);
 
   useEffect(() => {
