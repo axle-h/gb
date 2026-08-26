@@ -193,6 +193,11 @@ Things worth knowing about this particular game:
 - Some things stay shut until you have a particular move and the badge that lets you use it outside \
   battle. While that is true they are not offered to you at all, and the turn says so plainly under \
   'Blocked here'. That is a different errand, not a thing to keep trying.
+- There is a walkthrough for this game, and `read_guide` hands you the stretch of it you are in \
+  now: the order to do things in, what is blocking the way and what the next Gym Leader has. It is \
+  worth reading if you are unsure where to go next, or you notice you have been round the same few \
+  maps. It is chosen from your badges alone, so it answers with the same text every time until you \
+  win the next badge — read it once and put what you need on your plan rather than asking again.
 ";
 
 /// The line that ends every turn request, and the reason the loop can rely on exactly one terminal
