@@ -24,6 +24,7 @@
 //! `use_field_move` is therefore an *outcome* of an overworld turn: the decision is stashed and this
 //! method hands it over on the next tick without touching `pending`, `waiting` or `site`.
 
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
 use crate::joypad::JoypadButton;
@@ -31,7 +32,7 @@ use crate::llm::prompt::{self, ApiSnapshot, TurnContext};
 use crate::llm::tools::{self, DecisionKind, Terminal};
 use crate::llm::worker::{ToolBatchResult, TurnHandles, TurnRequest};
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::agent::AgentEvent;
+use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason};
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::BattleAction;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
@@ -71,6 +72,17 @@ pub struct LlmPolicy {
     /// `GameState`, so this is the only thing that can tell `service_tools` which question a batch
     /// belongs to — see [`Self::observed_kind`].
     site: Option<DecisionKind>,
+    /// The `choose_action` call being carried out, if one is — see [`ActionQueue`]. `None` between
+    /// decisions, which is the state in which a new turn may be asked for.
+    queue: Option<ActionQueue>,
+    /// What became of the overworld action handed over last, as the agent reported it. Written by
+    /// [`Policy::on_event`] and read once, by [`Self::advance_queue`].
+    ///
+    /// ⚠️ **`None` is a real answer and not just "nothing yet".** Several endings leave
+    /// `OverworldMovement` for a driver of their own without reporting anything — grass and cave
+    /// pacing, and mounting Surf — and each of those hands the decision back on purpose. Reading a
+    /// missing outcome as success would carry a chain on past a step that never happened.
+    outcome: Option<ActionOutcome>,
     /// A decided [`FieldMove`], waiting for the `pick_field_move` that will collect it.
     ///
     /// ⚠️ It has to be stashed rather than returned, because `pick_overworld_action` — the site that
@@ -91,6 +103,86 @@ pub struct LlmPolicy {
 /// constant rather than something derived from `GB_MODEL`.
 pub(crate) const PLAYER_NAME: &str = "AI";
 
+/// How many battles one action may be resumed through before the decision is handed back anyway.
+///
+/// ⚠️ **A cap is needed even though a battle is itself a stream of decisions.** The model keeps
+/// answering battle turns throughout, so it is never locked out of the run — but it is locked out of
+/// the *overworld*, and the overworld is where the answer to "half the party has fainted, go and
+/// heal instead" lives. Five is a long route's worth of trainers and wild encounters; past that, an
+/// action the model chose several minutes ago is no longer obviously the action it would choose now.
+const MAX_BATTLE_RESUMES: u8 = 5;
+
+/// What became of the overworld action the policy last handed to the agent.
+///
+/// ⚠️ **Read off the agent's own events rather than by re-observing the world.** Whether the walk
+/// arrived is not a thing a `GameState` says: the player standing on the destination tile is true
+/// both of a warp that fired and of one that was refused, and an interaction's only success signal
+/// is a text box the agent has already consumed. The agent knows, and says so once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionOutcome {
+    /// `OverworldActionCompleted`, or `OverworldInteractionCompleted` for a person or a PC — the two
+    /// are one thing here, and are two events only because a conversation has no arrival tile.
+    Landed,
+    /// `OverworldActionAborted`. The reason is carried because exactly one of them may be resumed
+    /// from, and telling them apart is the whole of that feature.
+    Stopped(OverworldActionAbortedReason),
+}
+
+/// One `choose_action` call, while the agent is working through it.
+///
+/// ⚠️ **This exists for every call, not only a chained one.** A single action needs the same
+/// bookkeeping the moment `resume_after_battle` is on, and giving the two shapes one representation
+/// is what stops "was this chained?" being asked at each of the four places that end a chain.
+struct ActionQueue {
+    /// The id the agent is carrying out now.
+    current: String,
+    /// The ids the model chained behind it, in the order it wrote them.
+    rest: VecDeque<String>,
+    /// What has already landed. Only ever read to say where a dropped chain got to.
+    done: Vec<String>,
+    /// From the tool call: a battle does not end `current`.
+    resume_after_battle: bool,
+    /// Battles `current` has already been resumed through. Reset by moving on to the next id, since
+    /// the budget is per action rather than per call.
+    resumes: u8,
+}
+
+/// Why what was left of a chain was thrown away. Each one reads differently to the model because
+/// each one wants something different done about it.
+enum Dropped {
+    /// The id no longer matches anything on the live map. The sentence differs for a stale map
+    /// prefix and for a world that moved under a decision, so it is composed by
+    /// [`unresolved_note`] where the state is in hand.
+    Unresolved(String),
+    /// The agent aborted the action and said why.
+    Stopped(OverworldActionAbortedReason),
+    /// The action ended without the agent naming an outcome — see [`LlmPolicy::outcome`].
+    Unreported,
+    /// [`MAX_BATTLE_RESUMES`], spent.
+    Resumes,
+}
+
+/// The two different mistakes an id that will not resolve can be, in the words that say which.
+///
+/// ⚠️ **Telling the model the wrong one is worse than saying nothing.** An id whose map prefix is
+/// not the map the player is on was never on this turn's menu at all — the model quoted one from an
+/// earlier turn — and "the game moved on" invites it to try the same thing again. An id for *this*
+/// map that no longer resolves really is the world having changed while it decided.
+fn unresolved_note(id: &str, state: &GameState) -> String {
+    match id.split(':').next() {
+        Some(named) if named != state.map.map.to_string() => format!(
+            "`{id}` is an id for `{named}` and you are in `{}`. Ids are minted for the map you are \
+             standing on, so one from an earlier turn never resolves. Nothing happened; pick from \
+             the list in this turn.",
+            state.map.map,
+        ),
+        _ => format!(
+            "`{id}` is no longer available — the game moved on while you were deciding. Here is the \
+             current situation; pick again."
+        ),
+    }
+}
+
 impl LlmPolicy {
     pub fn new(handles: TurnHandles, stuck_timeout: Option<std::time::Duration>) -> Self {
         Self {
@@ -103,6 +195,8 @@ impl LlmPolicy {
             state: None,
             site: None,
             field_move: None,
+            queue: None,
+            outcome: None,
             manual: Vec::new(),
             note: None,
         }
@@ -231,6 +325,147 @@ impl LlmPolicy {
     fn reject(&mut self, note: String) {
         self.note = Some(note);
     }
+
+    /// The turn the model does not pay for: the next action of a `choose_action` that carried more
+    /// than one, or the same action again after a battle interrupted it.
+    ///
+    /// ⚠️ **It runs before [`Self::advance`] and never touches `pending`, `waiting` or the
+    /// generation.** This is the same shape `pick_field_move` has and for the same reason — a
+    /// decision the model has already taken is being handed over, not asked for. Starting a turn
+    /// here would cancel nothing and cost a completion for an answer that is already in hand.
+    ///
+    /// ⚠️ **Only a landed action advances the chain, and only a *battle* may be resumed through.**
+    /// Every other ending stops it, which is the conservative half of the design and the load
+    /// bearing one: a text box, a locked door and a guard turning the player back are the game
+    /// saying something, and carrying on past that is exactly the loop the whole agent is built to
+    /// avoid — the deployed run aborted on the same square 143 times without ever being asked to.
+    /// A battle is the one interruption that means nothing about the action: it ends by itself, the
+    /// world is where it was, and the walk was going to be re-issued verbatim.
+    ///
+    /// Returns the action to carry out, or `None` — which is either "no chain is running" or "the
+    /// chain has just ended", the second having left a note for the turn [`Self::advance`] is about
+    /// to start.
+    fn advance_queue(&mut self, state: &GameState) -> Option<OverworldAction> {
+        enum Step {
+            /// `current` landed: move on to whatever was chained behind it.
+            Next,
+            /// A battle took `current` and the model asked for it back.
+            Resume,
+            Drop(Dropped),
+        }
+
+        let step = {
+            let queue = self.queue.as_ref()?;
+            match self.outcome {
+                Some(ActionOutcome::Landed) => Step::Next,
+                Some(ActionOutcome::Stopped(OverworldActionAbortedReason::Battle))
+                    if queue.resume_after_battle =>
+                {
+                    match queue.resumes < MAX_BATTLE_RESUMES {
+                        true => Step::Resume,
+                        false => Step::Drop(Dropped::Resumes),
+                    }
+                }
+                Some(ActionOutcome::Stopped(reason)) => Step::Drop(Dropped::Stopped(reason)),
+                None => Step::Drop(Dropped::Unreported),
+            }
+        };
+        // Spent either way: what happens next has been decided from it, and leaving it behind would
+        // have the next action in the chain judged by the outcome of the one before it.
+        self.outcome = None;
+
+        match step {
+            Step::Drop(dropped) => {
+                self.drop_queue(dropped);
+                return None;
+            }
+            Step::Resume => self.queue.as_mut()?.resumes += 1,
+            Step::Next => {
+                let queue = self.queue.as_mut()?;
+                let finished = std::mem::take(&mut queue.current);
+                queue.done.push(finished);
+                // Per action, not per call: a chain of three each get the full budget.
+                queue.resumes = 0;
+                match queue.rest.pop_front() {
+                    Some(next) => queue.current = next,
+                    // The whole chain landed. Deliberately no note: every one of those actions is a
+                    // `✓` line in this very turn's `### Since your last decision`, and saying it a
+                    // second time in different words is a second thing to reconcile.
+                    None => {
+                        self.queue = None;
+                        return None;
+                    }
+                }
+            }
+        }
+        self.take_current(state)
+    }
+
+    /// Resolve the id at the head of the queue against the live game and hand it over.
+    ///
+    /// ⚠️ **Against a freshly recomputed action list, never the menu the chain was written from.**
+    /// That is what makes a chain safe to offer at all: `actions()` is re-derived here, so an id
+    /// that stopped being true — because the action before it took the player through a door — fails
+    /// to match and the chain ends with a sentence, rather than matching something else that happens
+    /// to sit at those coordinates on the new map.
+    fn take_current(&mut self, state: &GameState) -> Option<OverworldAction> {
+        let id = self.queue.as_ref()?.current.clone();
+        match tools::resolve_overworld(state, &id) {
+            Some(action) => Some(action),
+            None => {
+                self.drop_queue(Dropped::Unresolved(unresolved_note(&id, state)));
+                None
+            }
+        }
+    }
+
+    /// Throw away what is left of the chain and leave the model a note saying where it got to.
+    ///
+    /// ⚠️ **A single action that was stopped gets no note at all, and that is the point of the two
+    /// early returns.** The agent has already reported the abort, in the very turn this note would
+    /// be prepended to; a second account of it in the policy's words is a second thing to reconcile
+    /// and a way for the two to disagree. What is worth saying is only ever the part the agent
+    /// cannot know: that there was more queued behind it, or that a resume budget ran out.
+    fn drop_queue(&mut self, dropped: Dropped) {
+        let Some(queue) = self.queue.take() else { return };
+        let waiting = queue.rest.len();
+
+        if waiting == 0 && matches!(dropped, Dropped::Stopped(_) | Dropped::Unreported) {
+            return;
+        }
+
+        let why = match dropped {
+            Dropped::Unresolved(sentence) => sentence,
+            Dropped::Stopped(reason) => format!("`{}` was stopped: {reason}.", queue.current),
+            Dropped::Unreported => format!(
+                "The agent handed the decision back before `{}` finished.",
+                queue.current,
+            ),
+            Dropped::Resumes => format!(
+                "`{}` has been interrupted by a battle {MAX_BATTLE_RESUMES} times now, so it was \
+                 not taken up again. Decide for yourself whether it is still the right thing to do.",
+                queue.current,
+            ),
+        };
+
+        let mut note = String::new();
+        if !queue.done.is_empty() {
+            note.push_str(&format!(
+                "{} carried out. ",
+                queue.done.iter().map(|id| format!("`{id}`")).collect::<Vec<_>>().join(", "),
+            ));
+        }
+        note.push_str(&why);
+        if waiting > 0 {
+            note.push_str(match waiting {
+                1 => " The one action you had chained behind it was not tried.".to_string(),
+                more => format!(" The {more} actions you had chained behind it were not tried."),
+            }
+            .as_str());
+            note.push_str(" The menu below is the current one; pick again from it.");
+        }
+        self.note = Some(note);
+    }
 }
 
 impl Policy for LlmPolicy {
@@ -297,34 +532,27 @@ impl Policy for LlmPolicy {
     }
 
     fn pick_overworld_action(&mut self, state: &GameState, _graph: &WorldGraph) -> Option<OverworldAction> {
+        // ⚠️ **Before `advance`, so a chain still running never starts a turn.** Saving the model a
+        // request is the whole of what a chain buys; asking it anyway and throwing the answer away
+        // would buy the opposite.
+        if let Some(action) = self.advance_queue(state) {
+            return Some(action);
+        }
         match self.advance(DecisionKind::Overworld, TurnContext::None)? {
-            Terminal::ChooseAction { id } => {
-                // ⚠️ Resolved against a **freshly recomputed** action list, never against the one the
-                // menu was rendered from: `actions()` is sorted by `MetaTile` and the world has been
-                // running for however long the turn took.
-                match tools::resolve_overworld(state, &id) {
-                    Some(action) => Some(action),
-                    // ⚠️ **Two different mistakes, and telling the model the wrong one is worse than
-                    // saying nothing.** An id whose map is not the map the player is on was never on
-                    // this turn's menu — the model quoted one it read several turns ago — and
-                    // "the game moved on" invites it to try the same thing again. An id for *this*
-                    // map that no longer resolves really is the world having changed.
-                    None => {
-                        self.reject(match id.split(':').next() {
-                            Some(named) if named != state.map.map.to_string() => format!(
-                                "`{id}` is an id for `{named}` and you are in `{}`. Ids are minted \
-                                 for the map you are standing on, so one from an earlier turn never \
-                                 resolves. Nothing happened; pick from the list in this turn.",
-                                state.map.map,
-                            ),
-                            _ => format!(
-                                "`{id}` is no longer available — the game moved on while you were \
-                                 deciding. Here is the current situation; pick again."
-                            ),
-                        });
-                        None
-                    }
-                }
+            Terminal::ChooseAction { id, then, resume_after_battle } => {
+                // The queue is built even for a lone action with nothing chained and no resume: it
+                // is the record of what is being carried out, and `take_current` is then the one
+                // place an id is resolved — see [`Self::take_current`] for why that has to be
+                // against a freshly recomputed list.
+                self.queue = Some(ActionQueue {
+                    current: id,
+                    rest: then.into(),
+                    done: Vec::new(),
+                    resume_after_battle,
+                    resumes: 0,
+                });
+                self.outcome = None;
+                self.take_current(state)
             }
             // Stashed, not returned: this method's return type is a walk, and a field move is not
             // one. `pick_field_move` collects it on the next tick — 20 ms later — and hands it
@@ -507,6 +735,8 @@ impl Policy for LlmPolicy {
         self.state = None;
         self.site = None;
         self.field_move = None;
+        self.queue = None;
+        self.outcome = None;
         self.manual.clear();
         self.note = None;
     }
@@ -519,6 +749,22 @@ impl Policy for LlmPolicy {
     /// The narrative between decisions: dialogue, a battle starting, and above all the abort reasons
     /// that tell a model to stop re-picking a route that cannot be walked.
     fn on_event(&mut self, event: &AgentEvent) {
+        // ⚠️ **This is the only place the policy learns how an action ended**, and the three events
+        // below are the whole of it. `event()` is the funnel every agent event goes through — the
+        // ones collected into `update`'s local buffer included — so a class of ending cannot be
+        // missed here, only mis-classified; and an ending nothing names is read as
+        // [`ActionOutcome`]'s `None` rather than as success, which is the safe way round.
+        match event {
+            AgentEvent::OverworldActionCompleted { .. }
+            | AgentEvent::OverworldInteractionCompleted { .. } => {
+                self.outcome = Some(ActionOutcome::Landed);
+            }
+            AgentEvent::OverworldActionAborted { reason, .. } => {
+                self.outcome = Some(ActionOutcome::Stopped(*reason));
+            }
+            _ => {}
+        }
+
         // A conversation can run for hundreds of boxes while no decision is asked for. The renderer
         // keeps the most recent twenty; this keeps the buffer from growing without bound in between.
         const MAX_BUFFERED: usize = 64;
@@ -700,6 +946,16 @@ mod tests {
         /// `context_limit`, because a compaction test that had to fill a real 128 k window would
         /// have to send a hundred thousand tokens of fixture through a scripted endpoint.
         fn with_config(script: Vec<Reply>, tweak: impl FnOnce(&mut LlmConfig)) -> (Self, LlmPolicy) {
+            Self::with_config_in(script, None, tweak)
+        }
+
+        /// The same rig, pointed at a run directory, so a test can drop it and build a second one on
+        /// the same files — which is the only way to exercise a restart from outside the process.
+        fn with_config_in(
+            script: Vec<Reply>,
+            run_dir: Option<&std::path::Path>,
+            tweak: impl FnOnce(&mut LlmConfig),
+        ) -> (Self, LlmPolicy) {
             let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
             gb.load_state(FIXTURE).expect("the committed fixture loads");
 
@@ -741,8 +997,10 @@ mod tests {
                 Box::new(Forwarding(Arc::clone(&endpoint))),
                 config,
                 Arc::clone(&published),
-                // No run directory: the note tools work, they simply keep nothing (W6b).
-                crate::llm::todo::TodoList::open(None),
+                // Without a run directory the note tools work, they simply keep nothing (W6b), and
+                // the conversation is forgotten at the end of the test exactly as it used to be.
+                crate::llm::todo::TodoList::open(run_dir),
+                crate::llm::history::History::open(run_dir),
             );
             let handle = worker.spawn().expect("the worker thread starts");
 
@@ -912,8 +1170,16 @@ mod tests {
 
         /// The first menu id the model would be offered.
         fn first_action_id(&mut self) -> String {
+            self.action_ids(1).remove(0)
+        }
+
+        /// The first `count` ids the overworld menu offers, in the order the turn offers them —
+        /// which is the order a chain has to be written in for `not_on_the_menu` to accept it.
+        fn action_ids(&mut self, count: usize) -> Vec<String> {
             let state = self.state();
-            tools::overworld_menu(&state, None).first().expect("Oak's lab has reachable actions").id.clone()
+            let menu = tools::overworld_menu(&state, None);
+            assert!(menu.len() >= count, "Oak's lab offers {} actions, not {count}", menu.len());
+            menu.into_iter().take(count).map(|item| item.id).collect()
         }
     }
 
@@ -1770,6 +2036,136 @@ mod tests {
         }
     }
 
+    // ── Chained actions ──────────────────────────────────────────────────────────────────────────
+
+    /// The whole point of `then`: the second action costs no request at all.
+    ///
+    /// ⚠️ **What is asserted is the request count, because that is the only thing the feature buys.**
+    /// A chain that were re-decided by the model between its steps would pass every assertion about
+    /// *which* actions came out and still be worth nothing.
+    #[test]
+    fn a_chained_action_is_taken_without_asking_the_model_again() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let ids = rig.action_ids(2);
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
+            "choose_action",
+            &format!(r#"{{"id":"{}","then":["{}"],"summary":"heal, then leave"}}"#, ids[0], ids[1]),
+        )]));
+
+        let first = rig.pump_overworld(&mut policy).expect("the first action lands");
+        assert_eq!(tools::overworld_id(&rig.state(), &first), ids[0]);
+        assert_eq!(rig.requests().len(), 1);
+
+        // The agent reports that it arrived, which is the only signal a chain advances on.
+        policy.on_event(&AgentEvent::OverworldActionCompleted { destination: first.tile });
+        let second = rig.tick_overworld(&mut policy).expect("the chained action follows immediately");
+        assert_eq!(tools::overworld_id(&rig.state(), &second), ids[1]);
+        assert_eq!(rig.requests().len(), 1, "the chained action must cost no second request");
+
+        // …and once the chain is spent the model is asked again, as it would be for any decision.
+        policy.on_event(&AgentEvent::OverworldActionCompleted { destination: second.tile });
+        assert!(rig.pump_overworld_for(&mut policy, Duration::from_millis(300)).is_none());
+        rig.wait_for_requests(2, Duration::from_secs(2));
+        assert_eq!(rig.requests().len(), 2, "the end of a chain is an ordinary decision point");
+    }
+
+    /// A chain is a sequence of independent decisions, not a route the agent commits to: anything
+    /// that stops one stops the rest, and the model is told where it got to.
+    ///
+    /// ⚠️ **The conservative rule is the load-bearing one.** Carrying on past a text box would walk
+    /// a chain straight through the guards, locked doors and errands that are how this game says
+    /// anything — the same loop that had one deployed run abort on the same square 143 times.
+    #[test]
+    fn a_chain_stops_where_the_agent_was_stopped_and_says_where_it_got_to() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let ids = rig.action_ids(3);
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
+            "choose_action",
+            &format!(
+                r#"{{"id":"{}","then":["{}","{}"],"summary":"three in a row"}}"#,
+                ids[0], ids[1], ids[2],
+            ),
+        )]));
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+
+        let first = rig.pump_overworld(&mut policy).expect("the first action lands");
+        policy.on_event(&AgentEvent::OverworldActionAborted {
+            destination: first.tile,
+            reason: OverworldActionAbortedReason::Textbox,
+            at: None,
+        });
+
+        // ⚠️ One tick, not a pump: the drop and the fresh turn both happen inside it, and polling on
+        // would let the `wait` this turn answers with expire and buy a *third* turn.
+        assert!(rig.tick_overworld(&mut policy).is_none(), "the chain is dropped rather than advanced");
+        rig.wait_for_requests(2, Duration::from_secs(2));
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2, "a stopped chain hands the decision back");
+        let situation = last_user_message(&requests[1]);
+        assert!(situation.contains("were not tried"), "the model is told the rest was dropped: {situation}");
+        assert!(situation.contains(&ids[0]), "and which action was stopped: {situation}");
+    }
+
+    /// **The other half of the same call.** A wild Pokémon interrupting a walk says nothing about
+    /// the walk, so `resume_after_battle` takes it up again — and without the flag the decision comes
+    /// back to the model, which is what every run before this did.
+    #[test]
+    fn a_battle_takes_the_action_up_again_only_when_it_was_asked_to() {
+        for (resume, expected_requests) in [(true, 1), (false, 2)] {
+            let (mut rig, mut policy) = Rig::new(vec![]);
+            let id = rig.first_action_id();
+            rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
+                "choose_action",
+                &format!(r#"{{"id":"{id}","resume_after_battle":{resume},"summary":"to the centre"}}"#),
+            )]));
+            rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+
+            let action = rig.pump_overworld(&mut policy).expect("the action lands");
+            policy.on_event(&AgentEvent::OverworldActionAborted {
+                destination: action.tile,
+                reason: OverworldActionAbortedReason::Battle,
+                at: None,
+            });
+
+            match resume {
+                true => {
+                    let again = rig.tick_overworld(&mut policy).expect("the same action is taken up again");
+                    assert_eq!(tools::overworld_id(&rig.state(), &again), id);
+                }
+                false => {
+                    assert!(rig.tick_overworld(&mut policy).is_none(), "the decision comes back");
+                    rig.wait_for_requests(2, Duration::from_secs(2));
+                }
+            }
+            assert_eq!(
+                rig.requests().len(),
+                expected_requests,
+                "resume_after_battle={resume} should cost {expected_requests} request(s)",
+            );
+        }
+    }
+
+    /// ⚠️ **An ending nothing named is not an ending that went well.** Grass and cave pacing and the
+    /// Surf mount all leave `OverworldMovement` for a driver of their own and report no outcome at
+    /// all, on purpose — each is handing the decision back. Reading that silence as success would
+    /// carry a chain on past a step that never happened.
+    #[test]
+    fn a_chain_does_not_advance_on_an_ending_the_agent_never_reported() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let ids = rig.action_ids(2);
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
+            "choose_action",
+            &format!(r#"{{"id":"{}","then":["{}"],"summary":"grass, then out"}}"#, ids[0], ids[1]),
+        )]));
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+
+        assert!(rig.pump_overworld(&mut policy).is_some(), "the first action lands");
+        // No event of any kind, which is exactly what a pace or a surf mount produces.
+        assert!(rig.tick_overworld(&mut policy).is_none(), "the chain is dropped rather than advanced");
+        rig.wait_for_requests(2, Duration::from_secs(2));
+        assert_eq!(rig.requests().len(), 2, "the chain must not advance on silence");
+    }
+
     // ── W5 ───────────────────────────────────────────────────────────────────────────────────────
 
     /// ⚠️ **A field move is decided by an overworld turn and collected by a different method.**
@@ -1997,7 +2393,15 @@ mod tests {
     /// one turn at a time.
     #[test]
     fn a_full_context_is_summarised_and_the_next_turn_carries_the_summary() {
-        let (mut rig, mut policy) = Rig::with_config(vec![], |config| config.context_limit = 6_000);
+        // ⚠️ **8 000 rather than the 6 000 this was written at, and the change is a fixture rather
+        // than a finding.** What a turn costs before it says anything is the system prompt and the
+        // tools array, neither of which a compaction touches, and both have grown — `read_guide`, a
+        // second prose section, `choose_action`'s chain. Three ordinary turns had crept over 0.85 of
+        // 6 000 on their own, so the compaction fired a turn early and **ate the prose reply meant
+        // for turn 4 as its summary**: `after` (8 830) came back larger than `before` (5 198), which
+        // is what this test's own assertion caught. The sizing rule is unchanged — three plain turns
+        // under the threshold, the prose turn over it — and the number that expresses it moved.
+        let (mut rig, mut policy) = Rig::with_config(vec![], |config| config.context_limit = 8_000);
         let id = rig.first_action_id();
         let choose = format!(r#"{{"id":"{id}"}}"#);
         rig.push(vec![
@@ -2005,8 +2409,9 @@ mod tests {
             calls(&[("choose_action", &choose)]),
             calls(&[("choose_action", &choose)]),
             // ~4 900 tokens of prose in one turn, which is what puts it over `compact_above` (0.85)
-            // of 6 000. ⚠️ Sized against the *threshold*, so it moves when the default does — a turn
-            // that lands just under it makes this test pass by never compacting at all.
+            // of the window above. ⚠️ Sized against the *threshold*, so it moves when the default
+            // does — a turn that lands just under it makes this test pass by never compacting at
+            // all, and one that lands over it a turn early makes it compact the wrong thing.
             saying_calls(&"I am thinking very hard about this. ".repeat(500), &[("choose_action", &choose)]),
             says("I am in Oak's lab with a Squirtle, about to leave for Route 1."),
             calls(&[("choose_action", &choose)]),
@@ -2059,5 +2464,155 @@ mod tests {
             "the turn after a compaction must be cheaper than the turn before it",
         );
         history_is_well_formed(last);
+    }
+
+    /// Half (A)'s headline, through the real worker: a second process opens its first request on the
+    /// conversation the first one left behind, rather than on a bare system prompt.
+    #[test]
+    fn a_process_that_restarts_mid_run_opens_its_next_request_on_the_conversation_it_had() {
+        let scratch = crate::run::tests::Scratch::new("llm-restart");
+        let said = "I am heading north out of Pallet Town to look for Oak.";
+
+        let first_turns = {
+            let (mut rig, mut policy) = Rig::with_config_in(vec![], Some(&scratch.0), |_| {});
+            let id = rig.first_action_id();
+            let choose = format!(r#"{{"id":"{id}"}}"#);
+            rig.push(vec![
+                saying_calls(said, &[("choose_action", &choose)]),
+                calls(&[("choose_action", &choose)]),
+            ]);
+            rig.pump_overworld(&mut policy).expect("turn 1 lands");
+            rig.pump_overworld(&mut policy).expect("turn 2 lands");
+            let turns = rig.requests().last().expect("requests were sent").messages.len();
+            drop(policy);
+            drop(rig);
+            turns
+        };
+
+        // The precondition: the first process really did build a conversation worth restoring, and
+        // really did write it down. Without this the assertions below pass on an empty file.
+        assert!(first_turns > 3, "the first process only sent {first_turns} messages");
+        let saved = std::fs::read_to_string(scratch.0.join(crate::run::files::HISTORY)).expect("a history");
+        assert!(saved.contains(said), "the first process wrote its conversation down");
+
+        let (mut rig, mut policy) = Rig::with_config_in(vec![], Some(&scratch.0), |_| {});
+        let id = rig.first_action_id();
+        rig.push(vec![calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))])]);
+        rig.pump_overworld(&mut policy).expect("the resumed process plays on");
+
+        let requests = rig.requests();
+        let last = requests.last().expect("a request");
+        assert_eq!(last.messages[0].role, Role::System, "index 0 is still the system prompt");
+        assert_eq!(
+            last.messages.iter().filter(|m| m.role == Role::System).count(),
+            1,
+            "and there is exactly one of it, not the stored copy behind a fresh one",
+        );
+        assert!(
+            last.messages.iter().any(|m| m.text().is_some_and(|t| t.contains(said))),
+            "the first process's own words came back",
+        );
+        assert!(
+            last.messages.iter().any(|m| m.text() == Some(crate::llm::prompt::RESUMED_NOTE)),
+            "and the model is told why the game may be behind them",
+        );
+        // ⚠️ The invariant the endpoint enforces with a 400. A restored history that fails this is
+        // the failure mode that lasts for the rest of the run rather than for one request.
+        history_is_well_formed(last);
+
+        drop(policy);
+        drop(rig);
+    }
+
+    /// Half (B) through the real worker: after a compaction the conversation it replaced is gone from
+    /// the request and still on disk.
+    #[test]
+    fn a_run_that_compacts_still_has_the_conversation_the_compaction_replaced_on_disk() {
+        let scratch = crate::run::tests::Scratch::new("llm-compactlog");
+        let (mut rig, mut policy) =
+            Rig::with_config_in(vec![], Some(&scratch.0), |config| config.context_limit = 8_000);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        // ⚠️ **The marker has to be in an *early* turn, not the one that fills the window.** What a
+        // summary keeps is the tail, so the turn whose prose triggered the compaction is precisely
+        // the one still in the request afterwards — asserting on that would fail for a reason that
+        // has nothing to do with the log.
+        let doomed = "I remember standing outside the lab on the very first turn.";
+        let filler = "I am thinking very hard about this. ".repeat(500);
+        rig.push(vec![
+            saying_calls(doomed, &[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            saying_calls(&filler, &[("choose_action", &choose)]),
+            says("I am in Oak's lab with a Squirtle, about to leave for Route 1."),
+            calls(&[("choose_action", &choose)]),
+        ]);
+        for turn in 1..=4 {
+            rig.pump_overworld(&mut policy).unwrap_or_else(|| panic!("turn {turn} did not land"));
+        }
+        rig.events_until(Duration::from_secs(5), |event| matches!(event, UiEventBody::Compacted { .. }));
+        rig.pump_overworld(&mut policy).expect("the run continues after a compaction");
+
+        let requests = rig.requests();
+        let last = requests.last().expect("a request");
+        // ⚠️ **The precondition is half the test.** A run that never compacted would pass the "it is
+        // still in the log" assertion trivially, because it would still be in the live history too.
+        assert!(
+            !last.messages.iter().any(|m| m.text().is_some_and(|t| t.contains(doomed))),
+            "the compaction really did take it out of the conversation",
+        );
+
+        drop(policy);
+        drop(rig);
+
+        assert!(
+            !std::fs::read_to_string(scratch.0.join(crate::run::files::HISTORY)).unwrap().contains(doomed),
+            "and out of what the next process would resume on",
+        );
+        let logged = std::fs::read_to_string(scratch.0.join(crate::run::files::CONVERSATION)).expect("a log");
+        assert!(logged.contains(doomed), "but the log kept what the summary replaced");
+        assert!(
+            logged.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .any(|l| l["kind"] == "compaction"),
+            "and says where it went",
+        );
+    }
+
+    /// ⚠️ **A turn in flight when `POST /api/new-run` lands belongs to the *old* game.** Its
+    /// conversation has to stay with the run that had it: filed in the new run's directory instead,
+    /// the new run would resume into a conversation about a game that no longer exists.
+    #[test]
+    fn the_conversation_a_new_run_leaves_behind_stays_with_the_run_that_had_it() {
+        let old = crate::run::tests::Scratch::new("llm-oldrun");
+        let new = crate::run::tests::Scratch::new("llm-newrun");
+        let said = "I am about to be replaced by a brand new game.";
+
+        let (mut rig, mut policy) = Rig::with_config_in(vec![], Some(&old.0), |_| {});
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        rig.push(vec![
+            saying_calls(said, &[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+        ]);
+        rig.pump_overworld(&mut policy).expect("the old game's turn lands");
+
+        // The precondition: the old run really does have a conversation to misfile.
+        assert!(
+            std::fs::read_to_string(old.0.join(crate::run::files::HISTORY)).unwrap().contains(said),
+            "the old run wrote its conversation down before the restart",
+        );
+
+        policy.restart(Some(new.0.as_path()));
+        rig.pump_overworld(&mut policy).expect("the new game's first turn lands");
+        drop(policy);
+        drop(rig);
+
+        assert!(
+            std::fs::read_to_string(old.0.join(crate::run::files::HISTORY)).unwrap().contains(said),
+            "the old run keeps its own conversation",
+        );
+        let started = std::fs::read_to_string(new.0.join(crate::run::files::HISTORY))
+            .expect("the new run has a history of its own from the moment it starts");
+        assert!(!started.contains(said), "and the new run inherits none of it: {started}");
     }
 }

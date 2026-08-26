@@ -43,6 +43,11 @@ at all.
 ⚠️ **A name is deliberately not asked of the model**: it is written before the emulator's first instruction, so
 a completion there would put a round trip, a timeout and a retry policy in front of every new run.
 
+⚠️ **`llm::history` is the one writer that deliberately does *not* follow `CurrentRun`.** Everything
+below re-reads the current run per write; the conversation captures its directory instead, because a
+turn in flight when the swap lands belongs to the old game and its messages must be filed with it.
+See the `llm-turn-loop` skill.
+
 ⚠️ **A run directory has exactly one writer, and five things had a copy of which one it was** — the
 checkpointer, the transcript thread's open file, `/api/history`'s path, `/api/healthz`'s run id, and the LLM
 worker's notes. They all read `run::CurrentRun` now. ⚠️ The transcript thread in particular **re-reads the path
@@ -95,7 +100,7 @@ the increment replays those seconds and detects it again.
 level of nesting is load-bearing.** `run::resumable` lists the *direct* children of `$GB_RUN_DIR` holding a
 `state.gbst` and continues the newest; an archive is a complete run directory written *after* the run it copied,
 so beside the runs it would be the newest resumable thing on the volume and the next `gb serve` would resume a
-game that had already been won and filed. `hall_of_fame::tests::an_archive_is_written_and_is_not_resumable`.
+game that had already been won and filed. `hall_of_fame::tests::an_archive_carries_the_whole_run_including_the_conversation_and_is_not_resumable`.
 
 ⚠️ **The transcript is followed, not copied.** The completion event is *published* in the tick the archive is
 triggered from and written by a different thread, so `fs::copy` produces an archive of a victory with no victory

@@ -8,6 +8,8 @@
 //!     transcript.jsonl    one JSON object per UiEvent, append-only (see `transcript.rs`)
 //!     memories/<slug>.md  W6b
 //!     todo.json           W6b
+//!     history.json        the live conversation, rewritten each turn: what a restart resumes on
+//!     conversation.jsonl  every message ever sent to the model, append-only (see `llm::history`)
 //! ```
 //!
 //! `GB_RUN_DIR` defaults to `runs` beside the working directory, which is what makes the container
@@ -46,8 +48,21 @@ pub mod files {
     /// this any more. It stays named here because runs made before that change still have one on
     /// disk, and an archive that silently dropped it would be an incomplete copy of the run.
     pub const MEMORIES: &str = "memories";
-    /// The model's plan: the one thing it writes that outlives its own conversation.
+    /// The model's plan: what outlives a compaction, which is the one thing that still empties the
+    /// conversation now that [`HISTORY`] carries it across a restart.
     pub const TODO: &str = "todo.json";
+    /// The live conversation, rewritten whole once a turn: what a restarted process resumes on.
+    /// See [`crate::llm::history`].
+    ///
+    /// ⚠️ **Nothing else in a run directory may share this stem.** [`super::write_atomically`]
+    /// stages at `with_extension("tmp")`, which *replaces* the extension rather than appending to
+    /// it, so a `history.jsonl` beside this would stage to the same `history.tmp` and the two
+    /// writes would race. The log below is append-only and is never staged.
+    pub const HISTORY: &str = "history.json";
+    /// Every message ever appended to the conversation, one JSON object per line, plus a marker
+    /// line for each compaction. Append-only, and read by nothing in this program: it is the record
+    /// of what a compaction destroyed, for whoever reads the run afterwards.
+    pub const CONVERSATION: &str = "conversation.jsonl";
     /// One subdirectory per use of the `press_buttons` escape hatch — see [`crate::llm::incident`].
     /// A debugging artefact rather than part of the run: nothing reads it back, and a run directory
     /// without one is complete.
@@ -449,7 +464,7 @@ fn read_meta(path: &Path) -> Option<RunMeta> {
     serde_json::from_slice(&std::fs::read(path.join(files::META)).ok()?).ok()
 }
 
-fn directory_name(path: &Path) -> String {
+pub(crate) fn directory_name(path: &Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "run".into())
 }
 

@@ -1,15 +1,19 @@
 # A run's entire state is one directory: `$GB_RUN_DIR/<run-id>/` holding meta.json, state.gbst,
-# sram.bin, transcript.jsonl and the model's own memories/ and todo.json (`src/run/mod.rs`). Lose it
-# and the playthrough starts over from the title screen; keep it and `gb serve` resumes the newest
-# run in it on every start, notes and all.
+# sram.bin, transcript.jsonl, the model's own todo.json, and the conversation it is having with the
+# endpoint (history.json and conversation.jsonl, `src/llm/history.rs`). Lose it and the playthrough
+# starts over from the title screen; keep it and `gb serve` resumes the newest run in it on every
+# start, notes and conversation alike.
 #
 # `local-path` is k3s's built-in provisioner and pins the volume to the node it was first scheduled
 # on. That is exactly what is wanted here — the run is single-writer and there is one replica — but
 # it does mean the pod cannot move nodes without the data staying behind.
 #
-# The transcript is the only thing that grows without bound, and "a few MB per playthrough" was an
-# underestimate: a four-day LLM run reached 162 MB live with a 268 MB rotated file beside it, 437 MB
-# for the directory. 10Gi leaves that room.
+# Two files grow without bound, and "a few MB per playthrough" was an underestimate: a four-day LLM
+# run reached 162 MB of transcript live with a 268 MB rotated file beside it, 437 MB for the
+# directory. conversation.jsonl grows beside it and is roughly an order of magnitude smaller — the
+# transcript's bulk is one event per streamed token, while that file has one line per *message* — so
+# it is tens of MB over a playthrough rather than hundreds. Both rotate at the same 256 MB. 10Gi
+# leaves room for all of it.
 #
 # ⚠️ **This number is nominal, and raising it here does not resize a claim that already exists.**
 # `local-path` sets no `allowVolumeExpansion`, so the API server refuses an edit to a bound PVC —

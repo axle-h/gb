@@ -21,7 +21,7 @@ use crate::web::published::{Published, UiEvent, UiEventBody};
 
 /// §11's rotation point. Reached only by a run that has been going for weeks: with heartbeats
 /// excluded a busy hour is a few hundred kilobytes.
-const MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The most events `/api/history` will return, however far back `since` reaches. The SPA keeps 500
 /// entries, so this is already more than it can show; the cap exists so a month-old run cannot make
@@ -103,7 +103,7 @@ fn keep(event: &UiEvent) -> bool {
     !matches!(event.body, UiEventBody::Status(_))
 }
 
-fn open_append(path: &Path) -> Result<std::fs::File, String> {
+pub(crate) fn open_append(path: &Path) -> Result<std::fs::File, String> {
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -111,7 +111,7 @@ fn open_append(path: &Path) -> Result<std::fs::File, String> {
         .map_err(|e| format!("could not open {}: {e}", path.display()))
 }
 
-fn rotate(path: &Path) -> Result<std::fs::File, String> {
+pub(crate) fn rotate(path: &Path) -> Result<std::fs::File, String> {
     let previous = path.with_extension("jsonl.1");
     std::fs::rename(path, &previous)
         .map_err(|e| format!("could not rotate {} to {}: {e}", path.display(), previous.display()))?;

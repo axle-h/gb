@@ -63,6 +63,34 @@ pub const PLAN_UNCHANGED: &str =
      no longer describes what you are doing, fix it with `todo_set` or `todo_complete` in this same \
      turn.";
 
+/// Appended once, by [`History::open`](crate::llm::history::History::open), to a conversation that
+/// has just come back off disk.
+///
+/// ⚠️ **This exists because half of the restore is a lie the model would otherwise have to explain
+/// to itself.** `state.gbst` is the last periodic checkpoint — up to a minute old, and older still
+/// on a SIGKILL — while `history.json` is the last completed turn, so a resumed run can open with
+/// its own recent messages describing a Pokémon Centre it is no longer standing in. That is not a
+/// small confusion: a situation contradicting the conversation is precisely the input that had one
+/// deployed run call the game buggy, glitched, broken or in need of a reset in 29 of its 258
+/// decision summaries. Naming the skew costs about sixty tokens once per process and removes the
+/// only reading under which something is wrong.
+///
+/// ⚠️ **It says which side is the truth.** "Something may have changed" would leave the model to
+/// pick, and it has no way to. The save point is authoritative by construction — it is what the
+/// emulator actually loaded — so the sentence says so rather than describing a discrepancy.
+///
+/// ⚠️ **A legal [`compaction::is_turn_start`]**, so a compaction can eventually drop it like any
+/// other turn. It is deliberately at the tail, where a message that differs on every process start
+/// costs nothing at the prefix cache.
+pub const RESUMED_NOTE: &str =
+    "The program was restarted and this conversation was restored from disk. The game itself \
+     resumed from its last save point, which may be up to a minute behind the last thing said \
+     above. So the action you took in your most recent turn may not have happened, and a few \
+     seconds of play may have been replayed. If what you are shown now does not match what you \
+     thought you had just done, the save point is right and this conversation is ahead of it. \
+     Nothing is broken and there is nothing to undo. Read the situation below and carry on from \
+     where the game actually is.";
+
 /// Whether this is a message [`plan_message`] produced.
 ///
 /// ⚠️ **A plan is not a turn boundary** — see [`compaction::is_turn_start`]. It sits immediately
@@ -97,6 +125,11 @@ How the interface works:
   reorder between turns.
 - The game keeps running while you think. A menu action can therefore disappear before your answer \
   lands — you will be told when that happens, and shown the current menu, so simply pick again.
+- **One decision can be several actions.** Where you already know the next step, chain it onto \
+  `choose_action` with `then`: talk to the Nurse and then take the door out. Chain only what is on \
+  the menu now and stays true once the step before it is done; the chain stops the moment one does \
+  not, and you are told where it got to. `resume_after_battle` is the same saving for a walk a \
+  battle interrupts: it is taken up again rather than handed back to you to choose twice.
 - Read tools (`read_map`, `read_party`, …) do not end the turn. Request every read you need in a \
   single message; they are all answered from one consistent snapshot of the game. Most turns should \
   need none of them: the situation you are shown already carries the party, the money, the badges, \
@@ -118,10 +151,9 @@ How the interface works:
   a menu row, a route, a name. The game itself is not wrong; see below.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
   everything not in that summary is gone. Your plan — `todo_set` and `todo_complete`, shown to you \
-  every turn under 'Your plan' — is what survives that, and a restart of the program as well. It is \
-  the only thing that does, so put anything you will still need in an hour there, with the reason \
-  attached: somewhere you could not get into, something a person asked you for, something that did \
-  not work.
+  every turn under 'Your plan' — is what survives that. It is the only thing that does, so put \
+  anything you will still need in an hour there, with the reason attached: somewhere you could not \
+  get into, something a person asked you for, something that did not work.
 
 The game is not broken, and you are not debugging it:
 
@@ -908,9 +940,31 @@ mod tests {
             "not the one you remember",
             "Read what people say to you",
             "put it on the plan straight away",
+            // ⚠️ **A tool nothing tells the model to reach for is a tool nothing reaches for**, and
+            // this one is worth nothing unread: `then` and `resume_after_battle` are pure saving,
+            // so a run that never uses them is exactly as expensive as one without them. Both
+            // deployed runs are the precedent — the plan tools were offered every turn and edited
+            // once in 258 turns and sixteen times in 2430 — which is why the habit is prose here
+            // and not only a sentence in the tool's own description.
+            "One decision can be several actions",
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
         }
+
+        // ⚠️ **The plan bullet's claim narrowed when the conversation started surviving a restart**
+        // (`llm::history`), and the narrower claim is the true one: a compaction still empties the
+        // history, so the plan is still what survives *that*. Pinned here because the sentence it
+        // replaced — "and a restart of the program as well" — reads perfectly well and would be an
+        // easy thing to put back, at which point the prompt is telling the model something false
+        // about its own memory.
+        assert!(
+            SYSTEM_PROMPT.contains("is what survives that. It is the only thing that does"),
+            "the plan bullet no longer says what the plan is for",
+        );
+        assert!(
+            !SYSTEM_PROMPT.contains("restart of the program"),
+            "the conversation survives a restart now, so the prompt must not claim only the plan does",
+        );
     }
 
     /// **What a run that is following every rule above still leaves out.**

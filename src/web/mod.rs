@@ -200,10 +200,34 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // **W6b** — the model's own plan lives in the run directory, so it survives both a
             // compaction and a restart.
             let todo = TodoList::open(Some(run.path()));
+            // The conversation itself, beside the plan and for the same reason. ⚠️ **A constructor
+            // argument rather than `with_run`, unlike the incident records below**: this one is
+            // read at construction, so it has to be in hand before `Accounting` is built — the
+            // calibration comes back with it — and it belongs to *this* run for its whole life.
+            let history = crate::llm::history::History::open(Some(run.path()));
+            if let Some(restored) = history.restored() {
+                published.publish_event(published::UiEventBody::Notice {
+                    level: "info",
+                    message: format!("resumed the conversation: {} messages", restored.messages),
+                });
+                // ⚠️ **A changed system prompt is a `warn`, not an `info`, and it is deliberately
+                // loud.** Index 0 is always re-minted, so the new prompt takes effect on this
+                // restart while the conversation carries on underneath it — which is what was asked
+                // for and is also the one thing about a resumed run that a reader of the log would
+                // otherwise have to infer. It should be rare; when it is not, that is worth seeing.
+                if restored.system_prompt_changed {
+                    published.publish_event(published::UiEventBody::Notice {
+                        level: "warn",
+                        message: "the system prompt changed since this conversation was saved; \
+                                  the new one is now in force"
+                            .to_string(),
+                    });
+                }
+            }
             // `with_run` rather than a constructor argument: it is the one thing the worker does
             // that is not part of answering a turn, and the records go to whichever run is current
             // when the press happens rather than to this one — see `llm::incident`.
-            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo);
+            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo, history);
             let worker = worker.with_run(Arc::clone(&current));
             // The worker outlives this function; it ends when the policy is dropped and its channels
             // close, which happens when the emulator thread stops.

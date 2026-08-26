@@ -55,6 +55,36 @@ impl Accounting {
         }
     }
 
+    /// The accounting for a run whose conversation has just been read back off disk
+    /// ([`crate::llm::history`]).
+    ///
+    /// ⚠️ **The calibration is carried and the totals deliberately are not.** They look like the
+    /// obvious thing to restore and restoring them is the "a run's figures used to be a process's"
+    /// bug: `EmulatorHost::progress` folds these totals into a [`crate::run::RunProgress`], which
+    /// `RunDir::checkpoint` *rebases* onto the baseline already in `meta.json`, so a restored
+    /// `prompt_total` would add the whole run's tokens a second time at the next checkpoint. Every
+    /// one of them is display-only and re-derives from the next response; the calibration does not,
+    /// and it is not cosmetic either. It is the ratio [`Self::occupancy`] measures on, so an
+    /// endpoint that counts 3× what we do leaves a restored 85 %-full history reading as 28 % full
+    /// at the default 1.0 — and the first request of the new process goes out over the window.
+    pub fn resumed(limit: u64, calibration: f64) -> Self {
+        Self {
+            // A number that came off disk, so it is checked rather than trusted: `clamp` propagates
+            // a NaN instead of rejecting it, which would poison every occupancy reading silently.
+            calibration: match calibration.is_finite() {
+                true => calibration.clamp(MIN_CALIBRATION, MAX_CALIBRATION),
+                false => 1.0,
+            },
+            ..Self::new(limit)
+        }
+    }
+
+    /// What the endpoint counts, divided by what we estimate. Persisted across a restart by
+    /// [`crate::llm::history`]; see [`Self::resumed`].
+    pub fn calibration(&self) -> f64 {
+        self.calibration
+    }
+
     /// Fold in one response. `sent` is the history as it went out — not as it stands now — because
     /// that is what the reported `prompt_tokens` counted.
     pub fn record(&mut self, usage: Usage, sent: &[Message]) {
@@ -175,5 +205,54 @@ mod tests {
         let mut accounting = Accounting::new(1_000);
         accounting.record(reported(1, 0), &sent);
         assert_eq!(accounting.tokens_in(&sent), 250, "…and at a quarter");
+    }
+
+    /// ⚠️ **The calibration is the reason a restored history is measured at all.** Now that a
+    /// conversation comes back off disk, a process that starts at the default 1.0 against an
+    /// endpoint counting three times what we do reads a nearly full context as a third full, and the
+    /// first request of the new process goes out over the window with no compaction in front of it.
+    #[test]
+    fn a_resumed_run_measures_its_restored_history_on_the_endpoints_scale_not_ours() {
+        // Sized so the two land either side of the default threshold rather than merely differing.
+        let limit = 10_000;
+        let sent: Vec<Message> = (0..12)
+            .map(|_| Message::user("x".repeat(1_000)))
+            .collect();
+
+        let cold = Accounting::new(limit);
+        let warm = Accounting::resumed(limit, 3.0);
+        let threshold = crate::llm::config::DEFAULT_COMPACT_ABOVE;
+
+        // ⚠️ **The precondition is that they disagree about compacting**, not merely about the
+        // number. A test where both sat on the same side would pass with `resumed` ignoring its
+        // argument entirely.
+        assert!(
+            cold.occupancy(&sent) < threshold,
+            "at 1.0 this history looks like it fits: {}",
+            cold.occupancy(&sent)
+        );
+        assert!(
+            warm.occupancy(&sent) >= threshold,
+            "and on the endpoint's own scale it does not: {}",
+            warm.occupancy(&sent)
+        );
+    }
+
+    /// The number came off a file, so it is checked rather than trusted. ⚠️ `clamp` *propagates* a
+    /// NaN rather than rejecting it, and a NaN calibration makes every occupancy reading false
+    /// silently — so the non-finite case is handled separately from the range.
+    #[test]
+    fn a_calibration_read_off_disk_is_checked_rather_than_trusted() {
+        assert_eq!(Accounting::resumed(1_000, 3.0).calibration(), 3.0, "an ordinary value is kept");
+        assert_eq!(Accounting::resumed(1_000, 1e9).calibration(), MAX_CALIBRATION);
+        assert_eq!(Accounting::resumed(1_000, 0.0001).calibration(), MIN_CALIBRATION);
+        assert_eq!(Accounting::resumed(1_000, f64::NAN).calibration(), 1.0);
+        assert_eq!(Accounting::resumed(1_000, f64::INFINITY).calibration(), 1.0);
+
+        // ⚠️ The totals deliberately do not come back: `RunProgress` rebases them onto `meta.json`,
+        // so a restored total would be counted twice at the next checkpoint.
+        let resumed = Accounting::resumed(1_000, 3.0);
+        assert!(!resumed.has_figures(), "a resumed run has spent nothing yet");
+        assert_eq!(resumed.view().prompt_tokens, 0);
     }
 }

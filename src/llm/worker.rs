@@ -37,6 +37,7 @@ use crate::llm::accounting::Accounting;
 use crate::llm::client::{ChatEndpoint, RetryPolicy, stream_with_retries};
 use crate::llm::compaction;
 use crate::llm::config::LlmConfig;
+use crate::llm::history::{CompactionNote, History};
 use crate::llm::incident;
 use crate::llm::todo::TodoList;
 use crate::llm::prompt;
@@ -227,9 +228,14 @@ pub struct Worker {
     tool_calls: Sender<ToolBatch>,
     tool_results: Receiver<ToolBatchResult>,
 
-    /// The conversation. Index 0 is the system prompt; it is never removed and, since **W6b**'s
-    /// plan moved out of it, never rewritten either — see [`prompt::system_message`].
-    messages: Vec<Message>,
+    /// The conversation, and the two files it is kept in — see [`crate::llm::history`]. Index 0 is
+    /// the system prompt; it is never removed and, since **W6b**'s plan moved out of it, never
+    /// rewritten either — see [`prompt::system_message`].
+    ///
+    /// It reads as the `Vec<Message>` it used to be, through `Deref`. That is sound because
+    /// persistence here is checkpoint-based rather than write-through: nothing intercepts a
+    /// mutation, [`Self::run_one`] simply writes the vector down once a turn.
+    history: History,
     /// **W6b / §10** — the model's plan. Answered here rather than at the policy poll: none of it
     /// needs the emulator.
     todo: TodoList,
@@ -259,6 +265,7 @@ pub fn channels(
     config: LlmConfig,
     published: Arc<Published>,
     todo: TodoList,
+    history: History,
 ) -> (Worker, TurnHandles) {
     let (turn_tx, turn_rx) = mpsc::channel();
     let (outcome_tx, outcome_rx) = mpsc::channel();
@@ -267,7 +274,16 @@ pub fn channels(
     let generation = Arc::new(AtomicU64::new(0));
     let restart: Restarts = Arc::new(Mutex::new(None));
 
-    let accounting = Accounting::new(config.context_limit);
+    // ⚠️ **The calibration comes back with the conversation, and nothing else does.** A restored
+    // history is measured on the endpoint's scale or not at all: see `Accounting::resumed`, which
+    // also says why the token totals must *not* be restored with it.
+    let (accounting, turns_since_plan) = match history.restored() {
+        Some(restored) => (
+            Accounting::resumed(config.context_limit, restored.calibration),
+            restored.turns_since_plan,
+        ),
+        None => (Accounting::new(config.context_limit), 0),
+    };
     let worker = Worker {
         endpoint,
         config,
@@ -278,10 +294,10 @@ pub fn channels(
         outcomes: outcome_tx,
         tool_calls: call_tx,
         tool_results: result_rx,
-        messages: vec![prompt::system_message()],
+        history,
         todo,
         published_plan: None,
-        turns_since_plan: 0,
+        turns_since_plan,
         accounting,
         restart: Arc::clone(&restart),
         run: None,
@@ -323,7 +339,7 @@ impl Worker {
             incident::Report::Issue { .. } => "report_issue",
             incident::Report::Press { .. } => "press_buttons",
         };
-        match incident::record(run, &self.published, turn, kind, report, summary, &self.messages) {
+        match incident::record(run, &self.published, turn, kind, report, summary, &self.history) {
             Ok(path) => println!("{what} on turn {turn} ({}): recorded in {path:?}", kind.label()),
             Err(why) => eprintln!("could not record the {what} on turn {turn}: {why}"),
         }
@@ -379,8 +395,11 @@ impl Worker {
     fn apply_restart(&mut self, restart: Restart) {
         self.todo = TodoList::open(restart.run_dir.as_deref());
         self.publish_todo();
-        // Index 0 is the system prompt and is never removed, so the history *is* this vec.
-        self.messages = vec![prompt::system_message()];
+        // ⚠️ **`fresh`, never `open`.** The two differ in exactly one way and it is the whole point
+        // of having both: `open` would read the new run directory back, and this is the one call
+        // site where reading is wrong. Today `RunDir::open`'s fresh path always mints an empty
+        // directory, so both would behave the same by luck rather than by construction.
+        self.history = History::fresh(restart.run_dir.as_deref());
         // The history the counter was measured against is gone, and `sync_plan` finds no plan in the
         // fresh one, so it appends immediately — leaving a stale count would make the *next* refresh
         // fall due at the wrong time.
@@ -413,11 +432,19 @@ impl Worker {
         // instruction. One line at the bottom of the situation costs nothing at the cache — the
         // situation is new tokens every turn either way — and it is the only reminder on a turn that
         // is not an overworld one, since those never refresh.
-        self.messages.push(Message::user(match carried {
+        self.history.push(Message::user(match carried {
             true => situation,
             false => format!("{situation}\n{}\n", prompt::PLAN_UNCHANGED),
         }));
         let outcome = self.decide(id, kind, &menu);
+        // ⚠️ **Before the outcome is sent, not at the end of the turn.** The moment the emulator
+        // thread has a `TurnOutcome` it may act on it, and an action that wins the game has
+        // `hall_of_fame::archive` copy this whole directory on the very next tick — so everything
+        // below the send races that copy and usually loses. Publishing the `Decision` is below it,
+        // and so is `compact_if_needed`, which can be an entire summarising completion. Writing
+        // first makes durability precede visibility and closes the race by construction: it is the
+        // same argument that made the archiver *follow* the transcript rather than `fs::copy` it.
+        self.history.checkpoint(id, self.accounting.calibration(), self.turns_since_plan);
         match outcome {
             Some((decision, narration)) => {
                 self.published.publish_event(UiEventBody::Decision {
@@ -443,7 +470,15 @@ impl Worker {
         if !matches!(self.published.run_status(), RunStatus::Error { .. }) {
             self.published.set_status(RunStatus::Playing);
         }
-        self.compact_if_needed();
+        // ⚠️ **The log is flushed above, before this runs, and that ordering is what makes the
+        // watermark sound**: everything a compaction is about to destroy has already been written
+        // down. `note_compaction` puts the watermark back, and the second checkpoint stores the
+        // shortened history so a restart resumes on the compacted one rather than replaying the
+        // turns it just paid a completion to summarise away.
+        if let Some(note) = self.compact_if_needed() {
+            self.history.note_compaction(id, &note);
+            self.history.checkpoint(id, self.accounting.calibration(), self.turns_since_plan);
+        }
     }
 
     /// **W6b / §10** — put the model's plan in front of it, in exactly one place, at the cheapest
@@ -504,13 +539,13 @@ impl Worker {
         // unconditionally), so a plan changed during a battle has to be corrected in the history at
         // once or the next overworld turn reads a stale one.
         let due = self.turns_since_plan >= PLAN_REFRESH_TURNS && kind == DecisionKind::Overworld;
-        let newest = self.messages.iter().rposition(|message| prompt::is_plan(message));
-        if newest.is_some_and(|at| self.messages[at] == plan) && !due {
+        let newest = self.history.iter().rposition(|message| prompt::is_plan(message));
+        if newest.is_some_and(|at| self.history[at] == plan) && !due {
             self.turns_since_plan += 1;
             return false;
         }
         self.turns_since_plan = 0;
-        self.messages.push(plan);
+        self.history.push(plan);
         true
     }
 
@@ -613,7 +648,7 @@ impl Worker {
             let completion = {
                 let request = ChatRequest {
                     model: self.config.model.clone(),
-                    messages: self.messages.clone(),
+                    messages: self.history.to_vec(),
                     tools: specs.clone(),
                     parallel_tool_calls: Some(true),
                     max_tokens: self.config.max_tokens,
@@ -690,14 +725,14 @@ impl Worker {
                         });
                         // The request is still the last thing in the history and was never answered.
                         // Drop it so the next turn does not open on a dangling question.
-                        self.messages.pop_if_user();
+                        self.history.pop_if_user();
                         return Some((Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None));
                     }
                 }
             };
 
             self.account_for(&completion);
-            self.messages.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
+            self.history.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
 
             if completion.tool_calls.is_empty() {
                 // §7.5's fallback. One nudge quoting the rule, then the rule is enforced for it.
@@ -711,7 +746,7 @@ impl Worker {
                     }), None));
                 }
                 nudged = true;
-                self.messages.push(Message::user(match truncated {
+                self.history.push(Message::user(match truncated {
                     true => prompt::truncated_nudge(kind),
                     false => prompt::nudge(kind),
                 }));
@@ -771,7 +806,7 @@ impl Worker {
                         _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
                     };
                     self.publish_tool_result(id, call, &classified[index], &content, None);
-                    self.messages.push(Message::tool_result(&call.id, content));
+                    self.history.push(Message::tool_result(&call.id, content));
                 }
                 // ⚠️ **After the tool results are appended, not before.** The record carries the last
                 // few turns of the conversation, and a slice taken above this loop would end with an
@@ -812,7 +847,7 @@ impl Worker {
                     None => {
                         // ⚠️ §7.3's one-step rollback: drop the assistant message whose calls were
                         // never serviced. Everything left has its results.
-                        self.messages.pop();
+                        self.history.pop();
                         return None;
                     }
                 },
@@ -888,11 +923,11 @@ impl Worker {
                     CallKind::Terminal(_) => unreachable!("handled above"),
                 };
                 self.publish_tool_result(id, call, classification, &content, png);
-                self.messages.push(Message::tool_result(&call.id, content));
+                self.history.push(Message::tool_result(&call.id, content));
             }
-            self.messages.extend(pictures);
+            self.history.extend(pictures);
             if out_of_reads {
-                self.messages.push(Message::user(prompt::OUT_OF_STEPS));
+                self.history.push(Message::user(prompt::OUT_OF_STEPS));
             }
         }
 
@@ -975,11 +1010,11 @@ impl Worker {
     }
 
     /// Fold one response into [`Accounting`]. Called **before** the assistant message is appended,
-    /// so `self.messages` is still exactly what the endpoint counted — which is what makes the
+    /// so `self.history` is still exactly what the endpoint counted — which is what makes the
     /// reported figure usable as a calibration.
     fn account_for(&mut self, completion: &Completion) {
-        let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&self.messages, completion));
-        self.accounting.record(usage, &self.messages);
+        let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&self.history, completion));
+        self.accounting.record(usage, &self.history);
     }
 
     /// **W6 / §9** — the two-stage compaction, run after every turn.
@@ -987,21 +1022,25 @@ impl Worker {
     /// Stage 1 is free and often enough: a run that looks at the screen regularly is carrying most of
     /// its context in pictures it has already acted on. Stage 2 costs a completion, so it runs only
     /// when stage 1 left the history still over the line.
-    fn compact_if_needed(&mut self) {
-        if self.accounting.occupancy(&self.messages) < self.config.compact_above {
-            return;
+    /// Returns what it did, so the caller can write it down. ⚠️ **The `Compacted` event is published
+    /// from the same note the log line is built from**, so the page and the file cannot end up
+    /// disagreeing about a compaction that neither can be asked to re-run.
+    fn compact_if_needed(&mut self) -> Option<CompactionNote> {
+        if self.accounting.occupancy(&self.history) < self.config.compact_above {
+            return None;
         }
         let resume = self.published.run_status();
         self.published.set_status(RunStatus::Compacting);
-        let before = self.accounting.tokens_in(&self.messages);
+        let before = self.accounting.tokens_in(&self.history);
+        let was = self.history.len();
 
-        let images_evicted = compaction::evict_images(&mut self.messages, compaction::KEEP_IMAGES);
-        let mut summarised = false;
-        let still_over = self.accounting.occupancy(&self.messages) >= self.config.compact_above;
-        if still_over && compaction::worth_summarising(&self.messages, compaction::KEEP_MESSAGES) {
-            if let Some(summary) = self.summarise() {
-                compaction::apply_summary(&mut self.messages, &summary, compaction::KEEP_MESSAGES);
-                summarised = true;
+        let images_evicted = compaction::evict_images(&mut self.history, compaction::KEEP_IMAGES);
+        let mut summary = None;
+        let still_over = self.accounting.occupancy(&self.history) >= self.config.compact_above;
+        if still_over && compaction::worth_summarising(&self.history, compaction::KEEP_MESSAGES) {
+            if let Some(prose) = self.summarise() {
+                compaction::apply_summary(&mut self.history, &prose, compaction::KEEP_MESSAGES);
+                summary = Some(prose);
             }
             // A summary could not be had — the endpoint is down, or the model returned nothing. The
             // trim below is then the whole of the compaction, which is worse than a summary and far
@@ -1009,13 +1048,23 @@ impl Worker {
         }
         // Still over: the summary was refused, or what it kept is itself too big. Dropping the oldest
         // turns is the last resort, and it leaves the summary alone (`compaction::is_summary`).
-        if self.accounting.occupancy(&self.messages) >= self.config.compact_above {
+        if self.accounting.occupancy(&self.history) >= self.config.compact_above {
             self.trim_history();
         }
 
-        let after = self.accounting.tokens_in(&self.messages);
+        let after = self.accounting.tokens_in(&self.history);
+        let summarised = summary.is_some();
         self.published.publish_event(UiEventBody::Compacted { before, after, images_evicted, summarised });
         self.published.set_status(resume);
+        Some(CompactionNote {
+            before,
+            after,
+            images_evicted,
+            // What the history *lost*, which is not `was - len()`: `apply_summary` adds the summary
+            // back, so the two added messages would understate the drop by exactly that much.
+            dropped: was.saturating_sub(self.history.len()),
+            summary,
+        })
     }
 
     /// One extra completion, asking the model to write the story so far. `None` if it could not be
@@ -1027,7 +1076,7 @@ impl Worker {
     /// completion's worth of latency on a game that is not waiting for anything — the emulator keeps
     /// running throughout, as it does while any turn is in flight.
     fn summarise(&mut self) -> Option<String> {
-        let request = compaction::summary_request(&self.config, &self.messages);
+        let request = compaction::summary_request(&self.config, &self.history);
         let published = Arc::clone(&self.published);
         let result = stream_with_retries(
             self.retry,
@@ -1080,16 +1129,16 @@ impl Worker {
         let target = (self.accounting.limit() as f64 * TRIM_TO) as u64;
         // Index 0 is the system prompt; index 1 is the summary, if a stage 2 has ever run. Neither is
         // a turn, and dropping the summary would throw away every turn it stands for.
-        let first = 1 + usize::from(self.messages.get(1).is_some_and(compaction::is_summary));
+        let first = 1 + usize::from(self.history.get(1).is_some_and(compaction::is_summary));
         let mut dropped = 0;
-        while self.accounting.tokens_in(&self.messages) > target {
+        while self.accounting.tokens_in(&self.history) > target {
             let Some(boundary) =
-                self.messages.iter().skip(first).position(compaction::is_turn_start).map(|i| i + first)
+                self.history.iter().skip(first).position(compaction::is_turn_start).map(|i| i + first)
             else {
                 break;
             };
             let Some(next) = self
-                .messages
+                .history
                 .iter()
                 .skip(boundary + 1)
                 .position(compaction::is_turn_start)
@@ -1097,7 +1146,7 @@ impl Worker {
             else {
                 break; // only one turn left; dropping it would leave nothing to answer
             };
-            self.messages.drain(boundary..next);
+            self.history.drain(boundary..next);
             dropped += 1;
         }
         if dropped > 0 {
@@ -1121,7 +1170,18 @@ fn names(calls: &[ToolCall]) -> String {
 
 fn describe(decision: &Terminal) -> String {
     match decision {
-        Terminal::ChooseAction { id } => format!("choose_action {id}"),
+        // The chain is on the line the page shows, because a decision that carries three actions
+        // and reads as one is a decision nobody watching can account for afterwards.
+        Terminal::ChooseAction { id, then, resume_after_battle } => {
+            let mut line = format!("choose_action {id}");
+            if !then.is_empty() {
+                line.push_str(&format!(", then {}", then.join(", ")));
+            }
+            if *resume_after_battle {
+                line.push_str(" (resuming after a battle)");
+            }
+            line
+        }
         Terminal::ChooseBattleAction { id } => format!("choose_battle_action {id}"),
         Terminal::UseFieldMove(request) => format!("use_field_move {request:?}"),
         Terminal::PressButtons { buttons } => format!(
