@@ -1249,3 +1249,36 @@ header .trophy:hover {
     margin-top: 8px;
   }
 }
+
+/* The speaker, bottom-*left* of the screen — `.screen-overlay` has the right-hand corner, and the
+   two are routinely visible at once (a reconnecting picture over a playing stream). Dim until it is
+   wanted: it sits on top of the game and is read once a session, not watched. */
+.screen .sound {
+  position: absolute;
+  inset: auto auto 8px 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgb(0 0 0 / 55%);
+  /* ⚠️ `.screen` sets `line-height: 0` for the canvas; without this the glyph draws on a zero-height
+     line box and sits outside its own background. Same trap as `.screen-paused .plate`. */
+  line-height: 1.4;
+  font-size: 0.9em;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 120ms ease;
+}
+
+.screen .sound:hover,
+.screen .sound:focus-visible,
+.screen .sound.on {
+  opacity: 1;
+}
+
+/* A touch device gets no hover, and a control that only appears on hover is a control it does not
+   have. */
+@media (hover: none) {
+  .screen .sound {
+    opacity: 0.8;
+  }
+}

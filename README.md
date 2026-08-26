@@ -266,12 +266,13 @@ an append-only `ledger.jsonl` of one line each. See below.
 ## The web UI
 
 `web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed` and served by
-the same process that runs the emulator. Ten read-only endpoints and two that are not:
+the same process that runs the emulator. Eleven read-only endpoints and two that are not:
 
 | | |
 |---|---|
 | `/api/events` | SSE: status heartbeat, published on change, plus agent events as they happen |
 | `/api/video` | binary: a keyframe, then 8×8 block deltas, deflated per connection — about 21 kbit/s |
+| `/api/audio` | binary: a header, then raw Opus packets — 24 kbit/s, and nothing at all until a viewer asks |
 | `/api/history?since=` | the transcript backlog, so a page that just loaded is not empty |
 | `/api/leaderboard?limit=` | the runs that have finished the game, fastest first |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's own trainer-card graphics |
@@ -309,6 +310,40 @@ is repeated 8×8 tiles and a shared window sees every repeat), and dropping base
 before compression but 69–113% *after* it.
 For comparison, the same footage through x264 is 45 kbit/s losslessly and 25 at a quality that
 visibly mangles pixel art, so a real video codec was measured and rejected rather than assumed away.
+
+### The sound
+
+There is a speaker in the corner of the screen, and it is **off until you press it**. The stream is
+Opus — 48 kHz mono at 24 kbit/s, one 20 ms packet at a time, length-prefixed down the same kind of
+chunked binary response the picture uses and decoded in the browser by WebCodecs. It is deliberately
+**not** compressed on top: Opus is already range-coded, and deflating it measures **+16.6%** — the
+one place this stream had to ignore what the video stream spent a whole bench file learning.
+
+The plan this replaces was raw 24 kHz stereo PCM at **768 kbit/s** and no encoder, which is 36× the
+picture and hard to square with how hard 565 → 21 was fought for. The honest figure for a listener is
+nearer **50 kbit/s** than 24, though: a 20 ms packet is only 60 bytes, and the length prefix, the
+HTTP chunk header and the TCP segment around it come to about as much again. That is a floor rather
+than something to tune away — 20 ms is the longest frame Opus's CELT-only mode has, and CELT-only is
+what the encoder picks at this bitrate. Nobody who leaves the speaker alone pays any of it: the
+emulator does not encode a single packet while nothing is listening.
+
+The encoder is `opus-rs`, a pure-Rust port of libopus, chosen over the mature C bindings so the
+container's only non-Rust dependency stays `ring`'s — the same trade `src/audio/blip/` already made
+by being a hand-written port of Blip_Buffer rather than a binding to it. It is also three weeks old,
+and it turns out to be **wrong at 24 kHz**: encode a chiptune at that rate and it comes back at
+roughly the right loudness with the spectrum destroyed, tones 36 dB down, and no better at a higher
+bitrate. At 48 kHz the same signal round-trips through real libopus to within 0.3 dB on every tone.
+So the stream is 48 kHz; a test pins that with a spectral check rather than a waveform one — a
+waveform comparison reports total failure on a *healthy* transform codec, which is the worst possible
+answer to get from the test guarding a young dependency; and the encode call is wrapped in
+`catch_unwind`, because a panic in a codec on the emulator thread would take the run's checkpoint
+with it. If that ever fires the sound stops and the game plays on.
+
+Audio sits about 0.2 s behind the picture and nothing synchronises the two. Within the stream, the
+scheduler trims playback rate by at most ±0.5% to absorb drift: the emulator's clock and the
+browser's separate by a couple of seconds an hour even when everything is healthy, and without the
+trim that alone would force an audible cut every ten minutes. Real discontinuities — a run parked on
+a spent quota for hours, a frozen tab, a dropped network — get one 8 ms fade instead.
 
 ### When a run finishes the game
 
@@ -374,6 +409,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog; `0` turns it off |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
+| `GB_AUDIO_BITRATE` | the Opus stream's target, bits/s (`24000`); `0` turns sound off entirely |
 | `GB_HARDWARE` | which Game Boy the cartridge runs on: `dmg` (default) or `cgb` |
 | `GB_ADMIN_TOKEN` | enables `/reset-game` and `POST /api/new-run`; unset means both 404 |
 
@@ -413,13 +449,14 @@ terminated outside by traefik and cert-manager. See [`k8s/README.md`](k8s/README
 src/
 ├── main.rs              — entry point: `gb` (SDL UI) or `gb serve` (web), dispatched from cli.rs
 ├── cli.rs               — hand-rolled arg parsing; `parse` is unit-testable without a process
-├── host.rs              — headless emulator host: GameBoy + PokemonAgent + video encoder on one thread
+├── host.rs              — headless emulator host: GameBoy + PokemonAgent + both encoders on one thread
 ├── run/                 — the run directory (`web` feature): checkpoint, resume, transcript
 │   ├── mod.rs           — $GB_RUN_DIR/<run-id>/: meta.json, state.gbst, sram.bin; atomic writes
 │   ├── transcript.rs    — transcript.jsonl writer thread + the /api/history backlog reader
 │   └── hall_of_fame.rs  — a finished run: the archive, the ledger, and the leaderboard read back
 ├── web/                 — the axum server (`web` feature); read-only but for the reset
 │   ├── published.rs     — the only interface between the emulator thread and HTTP
+│   ├── audio.rs         — the Opus encoder and /api/audio's wire format
 │   ├── video.rs         — 8×8 block-diff video codec + the reference decoder
 │   │   └── bench.rs     — what the stream costs, and every alternative it was chosen over
 │   ├── assets.rs        — the SPA: `web/dist` embedded, or read from disk under GB_WEB_DEV=1
@@ -496,6 +533,7 @@ a mock-server playthrough are all default-tier tests, and behind an opt-in featu
 | Symbol codegen | `build.rs` + `pokered/pokered.sym` | Every RAM/ROM symbol becomes a typed `DmgPointer` constant, so an address that moves upstream is a compile error |
 | pokered | a git submodule | The source of truth for the ROM, the symbol map and the game's data tables |
 | LLM transport | `ureq` + hand-rolled SSE | The wire types and the stream accumulator are pure and testable without HTTP |
+| Audio transport | raw Opus over the same chunked binary framing | No container and no muxer: the WebCodecs Opus registration takes bare packets, and supplying an `OpusHead` would put the decoder into Ogg mode instead. Not deflated either — measured at **+16.6%** on top of a codec that is already range-coded. Encoded once on the emulator thread for every listener, which is the opposite of the video path's per-connection deflate and for the same reason: there is no shared window here worth duplicating |
 | Video transport | chunked binary + `flate2` | Not a WebSocket: nothing is bidirectional, and a plain response needs no upgrade, no ping/pong and no second reconnection story. The compression is the protocol rather than a `Content-Encoding`, so no proxy can decide to buffer and re-encode it |
 
 ## Tests
@@ -515,6 +553,10 @@ clock. `CLAUDE.md` has the full map of the tiers, the fixture chain and the benc
 There is no top-level `LICENSE` here yet. If one is added, the constraint to check first is
 `src/audio/blip/`: it is a translation of blargg's Blip_Buffer 0.4.0, which is LGPL 2.1+. The
 original C++ and its licence are vendored under `tools/blip-golden/`.
+
+The other codec in the audio path constrains nothing: `opus-rs` is BSD-3-Clause, a Rust port of
+libopus, which is BSD-3 itself — so it asks for attribution and nothing more. It is named here
+because this paragraph is the list, and a dependency absent from it is one nobody checked.
 
 The ROM is not distributed and cannot be — `pokered/` is a submodule of the disassembly project, and
 the cartridge is assembled locally from it.

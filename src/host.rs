@@ -28,6 +28,7 @@ use crate::run::{CurrentRun, RunProgress};
 use crate::web::published::{
     FrameSnapshot, Published, RunStatus, StatusSnapshot, UiEventBody, now_ms,
 };
+use crate::web::audio::{self, AudioEncoder};
 use crate::web::video::{Frame, VideoEncoder};
 
 /// One machine cycle at the real hardware's rate — the unit the pacing loop spends wall clock in.
@@ -78,6 +79,11 @@ pub struct HostConfig {
     /// Emulation speed as a multiple of real time. 1.0 for a livestream; the tests use a large
     /// number so a bounded run covers real game time in a fraction of the wall clock.
     pub target_speed: f64,
+    /// The Opus stream's target, in bits per second, or `None` for no audio at all.
+    ///
+    /// `None` is byte-for-byte the behaviour this host had before `/api/audio` existed: no encoder
+    /// is built, nothing is drained, and the route answers 503.
+    pub audio_bitrate: Option<i32>,
     /// Wall-clock spacing of video messages, independent of the emulated frame rate so that running
     /// fast does not multiply bandwidth.
     pub video_interval: Duration,
@@ -180,6 +186,7 @@ impl Default for HostConfig {
     fn default() -> Self {
         Self {
             target_speed: 1.0,
+            audio_bitrate: Some(crate::web::audio::DEFAULT_BITRATE),
             video_interval: Duration::from_nanos(1_000_000_000 / 30),
             // 2 Hz. It was 10, which measured at **49.7 kbit/s per viewer** — six times the idle
             // video feed and 90% of `/api/events` — for a payload that was byte-identical to the one
@@ -200,12 +207,41 @@ impl Default for HostConfig {
     }
 }
 
+/// Re-apply everything about the APU that a save state does not carry.
+///
+/// ⚠️ **`set_output_sample_rate` and `set_emulation_speed` are derived state**: excluded from the
+/// `apu` section and from `Audio`'s `PartialEq`, so *every* `load_state` silently drops both. There
+/// are exactly two on this thread — [`EmulatorHost::new`] and [`EmulatorHost::start_new_run`] — and
+/// `render.rs`'s `F9` handler is the third, in the other UI. A missed one is not a failure that
+/// announces itself: the resampler falls back to its 44.1 kHz default, the stream keeps saying
+/// 48 kHz in its header, and the game plays back at the wrong pitch for the rest of the run.
+///
+/// The speed is mirrored for the reason `render.rs:224-229` mirrors it: a host at `target_speed`
+/// 40 synthesises forty seconds of audio per second, and without this the buffer spends its life
+/// throwing the backlog away.
+/// `the_sample_rate_and_the_speed_survive_every_state_that_is_loaded` is the guard.
+fn tune_audio(gb: &mut GameBoy, target_speed: f64) {
+    let audio = gb.core_mut().mmu_mut().audio_mut();
+    audio.set_output_sample_rate(audio::SAMPLE_RATE);
+    audio.set_emulation_speed(target_speed.max(f64::MIN_POSITIVE));
+}
+
 pub struct EmulatorHost {
     gb: GameBoy,
     agent: PokemonAgent,
     map_cache: MapMetadataCache,
     published: Arc<Published>,
     encoder: VideoEncoder,
+    /// `None` when `HostConfig::audio_bitrate` is, which is the whole of "audio is off".
+    audio: Option<AudioEncoder>,
+    /// One read's worth of PCM, sized past the 100 ms the blip buffer holds so a single read always
+    /// empties it. Allocated once, the way `render.rs:61` does it.
+    audio_scratch: Vec<f32>,
+    /// Reused so a packet costs one `Arc` and not a `Vec` as well.
+    audio_packets: Vec<Arc<[u8]>>,
+    /// Whether anyone was listening on the previous tick. ⚠️ **The edge is what matters**, not the
+    /// level — see [`Self::drain_audio`].
+    audio_listeners: bool,
     config: HostConfig,
 
     cycle_duration: Duration,
@@ -289,10 +325,7 @@ impl EmulatorHost {
     ) -> Result<Self, String> {
         let mut gb = GameBoy::new(crate::pokemon::roms::POKERED, config.model);
         gb.load_state(save_state).map_err(|e| format!("could not load the starting state: {e}"))?;
-        // ⚠️ **§12's note, left here because this is where it will bite.** `Audio::set_output_sample_rate`
-        // is not serialised, so anything that loads a state has to re-apply it — see the `F9` handler
-        // in `render.rs`. Nothing here consumes audio while §12 is deferred; the moment a stream is
-        // added, this line is where the rate goes back on.
+        tune_audio(&mut gb, config.target_speed);
 
         let now = Instant::now();
         let cycle_duration = REALTIME_CYCLE_DURATION.div_f64(config.target_speed.max(f64::MIN_POSITIVE));
@@ -307,6 +340,12 @@ impl EmulatorHost {
             map_cache: MapMetadataCache::default(),
             published,
             encoder: VideoEncoder::default(),
+            audio: config.audio_bitrate.map(AudioEncoder::new),
+            // 125 ms of stereo, the sizing `render.rs:61` arrived at: comfortably more than the
+            // 100 ms `BUFFER_MS` the blip buffer holds, so one read always empties it.
+            audio_scratch: vec![0.0; audio::SAMPLE_RATE as usize / 8 * 2],
+            audio_packets: Vec::new(),
+            audio_listeners: false,
             config,
             cycle_duration,
             last_iteration: now,
@@ -677,6 +716,13 @@ impl EmulatorHost {
         self.name_the_player();
 
         self.encoder.restart();
+        // ⚠️ The reload above dropped both APU settings, exactly as it dropped the video encoder's
+        // palette. `tune_audio`'s ⚠️ has the consequence of forgetting this one.
+        tune_audio(&mut self.gb, self.config.target_speed);
+        if let Some(audio) = self.audio.as_mut() {
+            audio.restart();
+        }
+        self.audio_packets.clear();
         self.last_status = None;
         self.emulated = MachineCycles::ZERO;
         // Everything that measures *this game* rather than this process starts again with it. The
@@ -855,6 +901,8 @@ impl EmulatorHost {
             }
         }
 
+        self.drain_audio();
+
         if now >= self.next_video {
             self.next_video = schedule_next(self.next_video, now, self.config.video_interval);
             self.publish_video();
@@ -888,6 +936,71 @@ impl EmulatorHost {
             (false, _) => self.paused_since = None,
         }
         parked
+    }
+
+    /// Take whatever the APU has synthesised since the last tick and put it on the wire.
+    ///
+    /// ⚠️ **Not on the video timer, and not inside the emulation block above.** `publish_video`
+    /// returns without sending when nothing moved on screen; audio may never do the equivalent,
+    /// because a client's jitter buffer cannot tell a stream that has nothing to say from one that
+    /// has died — silence is a thing that has to be sent. And it costs nothing on a tick that
+    /// emulated nothing: the buffer is empty and the first read returns 0.
+    ///
+    /// ⚠️ **Nothing is encoded while nobody is listening**, which on this deployment is nearly all
+    /// the time. The blip buffer drops its own backlog when it fills (`BlipBuffer::end_frame`), so
+    /// skipping the whole thing is exactly the behaviour a headless run has always had and costs
+    /// the emulator thread nothing at all.
+    ///
+    /// ⚠️ **The 0→1 edge throws away what accumulated while nobody was there** — up to 100 ms of
+    /// blip backlog *and* the part-built frame — or the first thing a new listener hears is a
+    /// fragment of a moment that may be hours old. That is why this reads an edge and not a level.
+    ///
+    /// ⚠️ **A gap in emulated time is a gap in the audio, and it is left as one.** `MAX_CATCHUP`
+    /// drops overrun wall clock rather than fast-forwarding, and a park stops the emulator for
+    /// hours; nothing here inserts silence to paper over either. The client's underrun path is the
+    /// whole of the handling, and it is the same path for both.
+    fn drain_audio(&mut self) {
+        // Off, or given up. ⚠️ **A silenced encoder has to short-circuit *here*, not just inside
+        // `push`**: without this the loop below would still drain the blip buffer every tick for the
+        // rest of the process, for an encoder that is never going to encode any of it again.
+        if self.audio.as_ref().is_none_or(AudioEncoder::silenced) {
+            return;
+        }
+        if self.published.audio_listeners() == 0 {
+            self.audio_listeners = false;
+            return;
+        }
+        if !self.audio_listeners {
+            self.audio_listeners = true;
+            if let Some(audio) = self.audio.as_mut() {
+                audio.restart();
+            }
+            while self.gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut self.audio_scratch) > 0 {}
+            return;
+        }
+
+        loop {
+            let frames = self.gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut self.audio_scratch);
+            if frames == 0 {
+                break;
+            }
+            // Split across two statements rather than one chained call: the encoder and the scratch
+            // are both fields, and the borrow checker will not have them at once through `self`.
+            let (audio, scratch) = (self.audio.as_mut(), &self.audio_scratch[..frames * 2]);
+            let Some(audio) = audio else { break };
+            let silenced_before = audio.silenced();
+            audio.push(scratch, &mut self.audio_packets);
+            if !silenced_before && audio.silenced() {
+                self.published.publish_event(UiEventBody::Notice {
+                    level: "error",
+                    message: "the Opus encoder failed; audio is off for the rest of this process"
+                        .to_string(),
+                });
+            }
+        }
+        for packet in self.audio_packets.drain(..) {
+            self.published.publish_audio(packet);
+        }
     }
 
     fn publish_video(&mut self) {
@@ -1281,6 +1394,116 @@ mod tests {
         let snapshot = published.latest_frame();
         assert_eq!(snapshot.seq, keyframe.seq, "the frame and the keyframe describe the same moment");
         assert_eq!(decoder.pixels(), snapshot.pixels.as_ref());
+    }
+
+    // ── Audio ────────────────────────────────────────────────────────────────────────────────────
+
+    /// The twin of [`the_host_publishes_decodable_video`]: what reaches a listener is real Opus
+    /// that a real decoder turns back into real sound.
+    ///
+    /// ⚠️ **Subscribe first.** Nothing is encoded while nobody is listening, so a version of this
+    /// that ticked before subscribing would wait out its whole deadline and report the feature
+    /// broken.
+    ///
+    /// ⚠️ **The energy assertion is safe because of *where* `START_OF_GAME` is**: Red's bedroom,
+    /// with the Pallet Town theme playing. Without a note like this, "audio is broken" and "the
+    /// game happens to be silent here" are the same failure.
+    #[test]
+    fn the_host_publishes_decodable_audio() {
+        let published = Published::new();
+        let mut listener = published.join_audio();
+        let mut host = host(Arc::clone(&published));
+
+        let mut packets = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while packets.len() < 25 && Instant::now() < deadline {
+            host.tick();
+            while let Ok(packet) = listener.try_recv() {
+                packets.push(packet);
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(packets.len() >= 25, "only {} packets in 20 s", packets.len());
+
+        let mut decoder =
+            opus_rs::OpusDecoder::new(audio::SAMPLE_RATE as i32, audio::CHANNELS as usize)
+                .expect("decoder");
+        let mut frame = vec![0.0f32; audio::FRAME_SAMPLES];
+        let mut loudest = 0.0f32;
+        for packet in &packets {
+            let samples = decoder.decode(packet, audio::FRAME_SAMPLES, &mut frame).expect("decode");
+            assert_eq!(samples, audio::FRAME_SAMPLES, "a packet decoded to the wrong length");
+            loudest = loudest.max(frame.iter().fold(0.0f32, |a, s| a.max(s.abs())));
+        }
+        assert!(loudest > 0.01, "half a second of the Pallet Town theme came back silent");
+    }
+
+    /// The guard on the comment that used to sit at the top of [`EmulatorHost::new`] predicting
+    /// this bug. **Every `load_state` drops both settings**, and there are two on this thread.
+    ///
+    /// Asserted directly rather than inferred from how much audio came out: a wrong rate is
+    /// perfectly good audio at the wrong pitch, which is exactly the failure that survives a
+    /// "did any packets arrive" test.
+    #[test]
+    fn the_sample_rate_and_the_speed_survive_every_state_that_is_loaded() {
+        use crate::run::{Origin, RunDir};
+
+        let scratch = crate::run::tests::Scratch::new("host-audio-tuning");
+        let validate = |bytes: &[u8]| GameBoy::dmg(crate::pokemon::roms::POKERED).load_state(bytes).is_ok();
+        let (run, origin, _) = RunDir::open(&scratch.0, false, "random", &validate).expect("a fresh run");
+        assert_eq!(origin, Origin::Fresh);
+
+        let published = Published::new();
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let mut host = host_with(Arc::clone(&published), |config| {
+            config.run = Some(Arc::clone(&current));
+        });
+        let speed = host.config.target_speed;
+
+        let tuned = |host: &EmulatorHost| {
+            let audio = host.gb.core().mmu().audio();
+            (audio.output_sample_rate(), audio.emulation_speed())
+        };
+        assert_eq!(tuned(&host), (audio::SAMPLE_RATE, speed), "EmulatorHost::new left the APU untuned");
+
+        host.start_new_run().expect("a new run");
+        assert_eq!(tuned(&host), (audio::SAMPLE_RATE, speed), "start_new_run left the APU untuned");
+    }
+
+    /// The deployment's normal state: nobody is listening, so nothing is encoded at all.
+    #[test]
+    fn nothing_is_encoded_while_nobody_is_listening() {
+        let published = Published::new();
+        let mut host = host(Arc::clone(&published));
+
+        for _ in 0..200 {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert_eq!(host.audio.as_ref().expect("audio on").packets(), 0, "encoded with no listener");
+
+        let _listener = published.join_audio();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while host.audio.as_ref().expect("audio on").packets() == 0 && Instant::now() < deadline {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(host.audio.as_ref().expect("audio on").packets() > 0, "a listener got nothing");
+    }
+
+    /// `GB_AUDIO_BITRATE=0` is byte-for-byte the behaviour this host had before `/api/audio`.
+    #[test]
+    fn audio_off_builds_no_encoder_and_drains_nothing() {
+        let published = Published::new();
+        let mut host = host_with(Arc::clone(&published), |config| config.audio_bitrate = None);
+        let mut listener = published.join_audio();
+
+        for _ in 0..200 {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(host.audio.is_none());
+        assert!(listener.try_recv().is_err(), "audio was published with the encoder off");
     }
 
     /// **W7's acceptance, without a process restart.** A host plays for a while and checkpoints; a

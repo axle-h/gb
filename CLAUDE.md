@@ -1034,6 +1034,143 @@ neither built: 12–19% of changed blocks duplicate a block already on screen, a
 vector beats a straight diff on half to four fifths of moving frames. Deflate already collects most
 of the first.
 
+## The audio stream
+
+`/api/audio` is Opus: **48 kHz mono at 24 kbit/s**, one 20 ms packet at a time, `u32`-LE
+length-prefixed down a chunked binary response, zero length being the keep-alive — the same framing
+as `/api/video` and deliberately none of its compression. Measured by `src/web/audio/bench.rs` over
+the same four fixtures the video bench uses:
+
+| | kbit/s |
+|---|---|
+| raw f32 stereo, as the APU makes it | 3074 |
+| raw i16 stereo | 1538 |
+| raw i16 mono — *the same 768 the deferred §12 plan came to at 24 kHz stereo* | 770 |
+| IMA ADPCM mono — §12's own fallback | 194 |
+| Opus mono @16k | 17.6 |
+| **Opus mono @24k — what ships** | **25.6** |
+| Opus mono @32k | 33.6 |
+| *for comparison:* `/api/video` | 21 |
+
+⚠️ **48 kHz, not 24, and the difference is a bug in the dependency rather than a preference.**
+`opus-rs` 0.1.32 is **wrong at 24 kHz**: a synthetic chiptune encoded there decodes — through the
+crate's own decoder *and* through real libopus 1.6 — at roughly the right loudness with the spectrum
+destroyed (tones at +29.7/+39.2/+36.5 dB came back at −3.1/+3.2/+2.5), and it does not improve with
+bitrate. At 48 kHz the same signal round-trips through real libopus to within **0.3 dB on every
+tone**, zero packets rejected. 16 kHz is fine too; 24 kHz is the one rate that fails. The control
+that proves the *measurement* rather than the crate: libopus→libopus reproduced the same input to
+within 0.2 dB. Nothing is lost by 48 kHz — Opus's bitrate is independent of its input rate.
+⚠️ **Anyone "tidying" `SAMPLE_RATE` to match the 24 kbit/s figure breaks the sound in the worst
+available way**: it stays the right loudness and stops being the right sound.
+
+⚠️ **The guard is spectral, never a sample-wise SNR, and the first version of it got this wrong.**
+Opus is a transform codec with ~6.5 ms of lookahead and CELT does not preserve phase, so a waveform
+comparison reports total failure on a perfectly healthy codec — it read −3 dB SNR on output that was
+in fact correct. That is indistinguishable from the real bug above, which is the worst possible
+answer from the test guarding a three-week-old dependency.
+`audio::tests::the_packets_are_ones_a_browser_can_decode` uses Goertzel energies and was watched
+going red at 24 kHz before being trusted at 48. ⚠️ Beside it,
+`a_packet_says_mono_twenty_milliseconds_on_its_face` reads the TOC byte by hand (RFC 6716 §3.1) —
+the only check in the file that is evidence about the *bitstream* rather than about the library,
+since a self-consistently wrong codec passes every round-trip.
+
+⚠️ **No deflate, and the section above it in `src/web/mod.rs` argues the opposite at length.** That
+is the trap: `/api/video` spends a page establishing that deflating the connection is worth 5×, so
+the next person to read both is primed to apply it here, where it is wrong twice over. Opus output is
+range-coded, so LZ77 finds nothing; and `frame` must flush per message, which puts a block boundary
+around every ~60-byte packet. Measured at **+16.6%** across the connection and **+18.3%** per
+message. `bench_audio_deflate_is_not_worth_a_byte` asserts the sign, so a "consistency" fix fails.
+
+⚠️ **The wire's own overhead is larger than the payload and cannot be tuned away.** A 20 ms packet is
+60 bytes; the `u32` prefix, the HTTP chunk header and a TCP segment add ~64 more, so 24.0 kbit/s of
+audio is ~49.6 on the wire. **40 ms frames are not the fix** — at this bitrate the encoder picks
+CELT-only, whose frame sizes are 2.5/5/10/20 ms; 40 and 60 exist only in SILK and hybrid, which are
+the speech models. `bench_audio_what_a_packet_costs_the_wire` encodes at each length and prints the
+refusal rather than extrapolating.
+
+⚠️ **`set_output_sample_rate` and `set_emulation_speed` are derived state that every `load_state`
+drops**, and there are exactly two load sites on the emulator thread — `EmulatorHost::new` and
+`start_new_run` — plus `render.rs`'s `F9` in the other UI. `host::tune_audio` is the one function
+both call. A missed one does not announce itself: the resampler falls back to 44.1 kHz while the
+stream's header keeps saying 48, so the game plays at the wrong pitch for the rest of the run, and
+a missed *speed* makes a `target_speed` 40 host synthesise forty seconds of audio per second.
+`the_sample_rate_and_the_speed_survive_every_state_that_is_loaded` asserts both directly rather than
+inferring them from how much audio arrived, and was watched failing at `(44100, 1.0)`.
+
+⚠️ **Nothing is encoded while nobody is listening**, which on this deployment is nearly all the time:
+the page's speaker is off by default and `drain_audio` returns on `audio_listeners() == 0` without
+even draining. The blip buffer drops its own backlog (`BlipBuffer::end_frame`), so that is exactly
+the behaviour a headless run always had. ⚠️ **It reads an edge, not a level**: the 0→1 transition
+throws away both the backlog (up to 100 ms) and the part-built frame, or the first thing a new
+listener hears is a fragment of a moment that may be hours old.
+
+⚠️ **Encoding is on the emulator thread and that was measured, not assumed** — **0.032 ms per 20 ms
+frame, 0.16% of one core**, against a `MAX_CATCHUP` of 250 ms. There is no argument for a thread and
+a channel at four orders of magnitude under the budget, and encoding once for everyone is only
+possible *because* it is there. ⚠️ But the call is wrapped in `catch_unwind`, and that is the whole
+reason a three-week-old codec with ~183 `unsafe` sites was acceptable: a panic there would unwind the
+emulator thread and take the run's checkpoint with it. On the first panic the encoder is dropped
+outright — which is what makes the unwind safe, since no half-updated codec state is re-entered — a
+`Notice` is published once, and audio is off for the rest of the process while the game plays on.
+⚠️ **A silenced encoder is never rebuilt**, or `restart` would re-enter the same panic fifty times a
+second.
+
+⚠️ **A `Lagged` subscriber is skipped and that is the whole handling.** A lagged *video* subscriber
+keeps a stale screen for ever unless handed a keyframe; a lagged audio subscriber has missed sound
+that is already gone. `AUDIO_CAPACITY` is 64 (~1.3 s) and deliberately not generous for the same
+reason: a bigger ring does not save the audio, it hands over a longer burst of stale audio the client
+must throw away to reach live, which is an audible cut either way.
+
+⚠️ **A park is silence for hours and the connection must survive it.** The 2 s keep-alive is doing
+more work here than on the video side — an idle screen is still a screen, but a parked run produces
+no packets at all, so the keep-alive is the entire connection and the only thing between a listening
+page and `STALE_MS`. Equally, ⚠️ **a `MAX_CATCHUP` gap is a real gap in the audio and is left as
+one**: nothing inserts silence to paper over dropped emulated time, and the client's underrun path is
+the whole of the handling for both.
+
+⚠️ **The header is ours and must never become an `OpusHead`.** The W3C WebCodecs Opus registration
+makes `AudioDecoderConfig.description` optional and says that *supplying* one means the bitstream is
+Ogg-encapsulated — so the obvious "we have a header, let us use the standard one" would configure the
+page's decoder into the wrong mode for the bare packets it is about to receive. The twelve bytes
+carry `sampleRate` and `numberOfChannels` for `configure()` and are never handed to the decoder.
+
+**On the client**, `web/src/stream.ts` now holds the transport both streams share — the framing, the
+per-attempt `AbortController` chain and the `STALE_MS` watchdog — extracted from `video.ts` rather
+than copied, because those ~90 lines are almost entirely the subtle parts. ⚠️ **The identity-tap
+`ended` trick is deflate-specific**: it exists because the server never *finishes* the deflate
+stream, so with `inflate: false` a clean close is simply `done` and `Disconnected` is raised
+directly. ⚠️ **A 503 or a 404 stops the retry loop**, and they are different answers — 503 is
+`GB_AUDIO_BITRATE=0` on a build that has audio, 404 is a build that does not — so the page hides the
+speaker rather than hammering the server once a second for the length of the run.
+
+⚠️ **The drift trim is not a refinement.** `web/src/audio.ts`'s `schedule` is a pure function on
+purpose so the whole algorithm can be read without an `AudioContext`. The steady-state case trims
+`playbackRate` by at most ±0.5%, and it has to: the wall/emulated ratio's 1.0007× ceiling (see the
+speed section above) separates the emulator's clock from the browser's by ~2.5 s an hour in a
+perfectly healthy run, and a sound card is independently off by up to 0.1% again — so without the
+trim that drift *alone* crosses the resync threshold and forces an audible cut every ten minutes for
+no reason. ±0.5% closes a 100 ms error in 20 s and is inaudible on chiptune. The hard resync is kept
+for things that really are discontinuities, and ⚠️ **the fade-out is armed in advance** on every
+scheduled frame: by the time an underrun is detected the DAC has already run dry and the click cannot
+be undone retroactively, so the timer that fades the gain as the last frame ends is what turns a
+park, a network gap and a dropped catch-up into a fade rather than a click. ⚠️ **Never
+`cancelScheduledValues` without pinning the current value first** — it drops the gain to whatever was
+last set, which is the click the fades exist to avoid. ⚠️ **Do not "handle" a park by suspending the
+`AudioContext`**: `suspend()` freezes `currentTime`, which makes every deadline already stored wrong
+on resume, and the underrun path handles it unchanged.
+
+⚠️ **Never assume the decoder's output rate matches what was configured.** Chrome decodes Opus at
+48 kHz whatever `sampleRate` says, so `AudioData.sampleRate` is the authority for both the buffer and
+the frame's duration. And ⚠️ **every packet is a `'key'` chunk** — Opus has no delta frames and
+WebCodecs rejects a stream whose first chunk is not one; the timestamp is a local counter and is
+deliberately *not* used for scheduling, since there is no shared clock with the server and the
+emulated one legitimately gaps.
+
+⚠️ **A decode error rebuilds the decoder and keeps the connection, which is the opposite of what
+`Screen` does.** A video decode error means the palette and the pixels are both suspect and only a
+fresh keyframe repairs them; the next Opus packet repairs itself, so reconnecting would throw away
+the jitter buffer to fix nothing.
+
 ## Graphics out of the cartridge
 
 No image is committed to this repo. The badges, the party sprites, the favicon and every tile,
@@ -1381,6 +1518,11 @@ cargo test --release --features bench --bin gb -- \
 
 # What /api/video costs, and every alternative it was chosen over. ~25 s.
 cargo test --release --features bench --bin gb -- video::bench --nocapture
+
+# The same for /api/audio: the bitrate table, what deflate costs on top of Opus, what a packet costs
+# the wire at each frame length, and what the encoder costs the emulator thread. ⚠️ The kbit/s in
+# the README and in CLAUDE.md comes from here and nowhere else.
+cargo test --release --features bench --bin gb -- web::audio::bench --nocapture
 ```
 
 **A test that is `#[ignore]`d should be blocked, not merely slow or not-a-test.** Everything else

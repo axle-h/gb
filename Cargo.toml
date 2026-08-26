@@ -26,7 +26,7 @@ sdl = ["dep:sdl2", "dep:fontdue"]
 # them. The cost is 57 extra crates on a build that already pulls 119. A server-only build still
 # drops SDL entirely:
 #   cargo build --release --no-default-features --features web
-web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed", "dep:flate2"]
+web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed", "dep:flate2", "dep:opus-rs"]
 # **W4** — the LLM: the OpenAI-compatible client (`src/llm/`) and the policy that drives the game
 # from it (`src/pokemon/llm_policy.rs`). Implies `web`, because the turn loop publishes into the same
 # `Published` buffers the browser reads and there is no configuration in which one is wanted without
@@ -126,6 +126,16 @@ ureq = { version = "3.3", optional = true }
 # is measured against in `src/web/video/bench.rs`. Pure Rust — `miniz_oxide`, no C — so it adds
 # nothing to what the container has to link.
 flate2 = { version = "1", optional = true }
+# `/api/audio`'s Opus encoder (`src/web/audio.rs`). **Pure Rust** — a port of libopus 1.6 with no
+# build script and no non-Rust dependency of its own — which is the whole reason it was chosen over
+# the mature `opus` bindings: the container's only C dependency stays `ring`'s.
+#
+# ⚠️ **Young, and it has a rate-specific correctness bug.** At 24 kHz its encoder produces packets
+# that decode — through its own decoder *and* through real libopus 1.6 — to roughly the right
+# loudness with the spectrum destroyed. At 48 kHz the same signal round-trips through real libopus
+# to within 0.3 dB on every tone. `audio::SAMPLE_RATE` is 48 kHz because of that measurement and
+# `the_packets_are_ones_a_browser_can_decode` is what pins it.
+opus-rs = { version = "0.1.32", optional = true }
 
 [build-dependencies]
 regex = "1.12.2"

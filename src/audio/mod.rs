@@ -87,6 +87,15 @@ impl Audio {
         self.output.set_sample_rate(sample_rate);
     }
 
+    /// The rate the resampler is currently producing at.
+    ///
+    /// Exists so that "every `load_state` has to re-apply this" can be *asserted* rather than
+    /// inferred from how much audio came out — see `host::tests`. It reads derived state, so it
+    /// takes no part in equality or serialisation.
+    pub fn output_sample_rate(&self) -> u32 {
+        self.output.sample_rate()
+    }
+
     /// Tell the resampler how fast the emulator is running relative to real time (1.0 = realtime).
     ///
     /// Without this, fast-forwarding produces audio faster than the sink drains it: the queue grows
@@ -96,6 +105,12 @@ impl Audio {
     /// Like the output sample rate, this is not part of the serialised state.
     pub fn set_emulation_speed(&mut self, speed: f64) {
         self.output.set_speed(speed);
+    }
+
+    /// What [`Self::set_emulation_speed`] was last told. Same reason as
+    /// [`Self::output_sample_rate`]: a missed re-apply should fail a test, not a listener's ear.
+    pub fn emulation_speed(&self) -> f64 {
+        self.output.speed()
     }
 
     /// Fill `out` with interleaved L/R frames, returning the number of *frames* written; zero means

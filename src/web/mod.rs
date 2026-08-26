@@ -26,6 +26,7 @@
 //! GET  /api/healthz                 liveness
 //! GET  /api/events                  SSE — the status heartbeat, plus agent events as they happen
 //! GET  /api/video                   binary — a keyframe, then block deltas, deflated per connection
+//! GET  /api/audio                   binary — a header, then raw Opus packets; **not** compressed
 //! GET  /api/badges.png              the eight gym badges, decoded from the cartridge
 //! GET  /api/pokemon/{dex}/front.png one Pokémon's front sprite, decompressed from the cartridge
 //! GET  /api/tool-image/{seq}/image.png  the picture a tool answered with, while it is still held
@@ -35,6 +36,7 @@
 //! ```
 
 pub mod assets;
+pub mod audio;
 pub mod badges;
 pub mod leaderboard;
 pub mod published;
@@ -95,6 +97,12 @@ struct AppState {
     new_runs: Arc<NewRunRequests>,
     /// `GB_ADMIN_TOKEN`. `None` — the default — makes `POST /api/new-run` 404.
     admin_token: Option<String>,
+    /// The header every `/api/audio` connection opens with, or `None` when audio is off.
+    ///
+    /// Computed once in [`run`] from the same `GB_AUDIO_BITRATE` that built the encoder, and handed
+    /// to both halves — so the two cannot disagree about the rate, which is the one thing a listener
+    /// would hear rather than read.
+    audio: Option<[u8; audio::HEADER_LEN]>,
 }
 
 /// `gb serve`. Blocks until the process is interrupted.
@@ -208,6 +216,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
 
     let new_runs = Arc::new(NewRunRequests::default());
     let admin_token = admin_token();
+    let audio_bitrate = audio_bitrate(std::env::var("GB_AUDIO_BITRATE").ok().as_deref())?;
     let emulator = EmulatorHost::spawn(
         starting_state,
         make_policy,
@@ -217,6 +226,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             new_runs: Some(Arc::clone(&new_runs)),
             status_interval: status_interval()?,
             model: hardware_model(std::env::var("GB_HARDWARE").ok().as_deref())?,
+            audio_bitrate,
             // A resume must keep the trainer it already has; only a game starting from
             // `START_OF_GAME` is named after whoever is about to play it.
             fresh_game: matches!(origin, Origin::Fresh),
@@ -232,7 +242,14 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             None => "off — set GB_ADMIN_TOKEN to enable it",
         },
     );
-    let result = serve_http(port, Arc::clone(&published), current, new_runs, admin_token);
+    let result = serve_http(
+        port,
+        Arc::clone(&published),
+        current,
+        new_runs,
+        admin_token,
+        audio_bitrate.map(|_| audio::header()),
+    );
 
     // ⚠️ The order matters: the emulator's last act is a checkpoint (`EmulatorHost::run`), so it is
     // joined *before* the process is allowed to end. The transcript thread is woken by the next
@@ -286,12 +303,35 @@ fn hardware_model(value: Option<&str>) -> Result<Model, String> {
     }
 }
 
+/// The Opus stream's target rate, from `GB_AUDIO_BITRATE`, in bits per second.
+///
+/// **`0` turns audio off**, the way `0` turns off `GB_MAX_TOKENS` and `GB_STUCK_TIMEOUT_SECS` —
+/// one variable rather than a second flag whose only job is to contradict the first.
+///
+/// Refused rather than clamped, for `GB_HARDWARE`'s reason: a container quietly serving 8 kbit/s
+/// would be diagnosed by *listening* to it, which is the slowest route to a typo there is.
+fn audio_bitrate(value: Option<&str>) -> Result<Option<i32>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(HostConfig::default().audio_bitrate);
+    };
+    match value.parse::<i32>() {
+        Ok(0) => Ok(None),
+        Ok(rate) if (audio::MIN_BITRATE..=audio::MAX_BITRATE).contains(&rate) => Ok(Some(rate)),
+        _ => Err(format!(
+            "`GB_AUDIO_BITRATE={value}` is not 0 or a rate between {} and {}",
+            audio::MIN_BITRATE,
+            audio::MAX_BITRATE
+        )),
+    }
+}
+
 fn serve_http(
     port: u16,
     published: Arc<Published>,
     run: Arc<CurrentRun>,
     new_runs: Arc<NewRunRequests>,
     admin_token: Option<String>,
+    audio: Option<[u8; audio::HEADER_LEN]>,
 ) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -299,7 +339,8 @@ fn serve_http(
         .map_err(|e| format!("could not start the HTTP runtime: {e}"))?;
 
     let result = runtime.block_on(async move {
-        let state = AppState { published, started: Instant::now(), run, new_runs, admin_token };
+        let state =
+            AppState { published, started: Instant::now(), run, new_runs, admin_token, audio };
         let app = routes().with_state(state);
 
         // 0.0.0.0: the container publishes the port. Every endpoint is read-only except
@@ -357,6 +398,7 @@ fn routes() -> Router<AppState> {
         .route("/api/history", get(history))
         .route("/api/leaderboard", get(leaderboard::leaderboard))
         .route("/api/video", get(video_stream))
+        .route("/api/audio", get(audio_stream))
         .route("/api/badges.png", get(badges::badges))
         .route("/api/pokemon/{dex}/front.png", get(sprites::front_pic))
         .route("/api/tool-image/{seq}/image.png", get(tool_image))
@@ -727,6 +769,79 @@ async fn video_stream(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
+/// The audio stream: the header, then raw Opus packets, length-prefixed exactly as video's are.
+///
+/// ⚠️ **The one thing this must not copy from `/api/video` is the deflate**, and the section above
+/// spends a page explaining why deflate is worth 5× — so the next person to read both will be
+/// primed to apply that lesson here, where it is wrong twice over. Opus output is range-coded, so
+/// there is nothing left for LZ77 to find; and `VideoStream::frame` *has* to flush after every
+/// message, which would put a deflate block boundary around each ~60-byte packet and make the
+/// stream bigger. `bench_audio_deflate_is_not_worth_a_byte` measures both rather than asserting it.
+///
+/// ⚠️ **The first message is the header and the rest are bare packets, with nothing to tell them
+/// apart but position.** That is deliberate: the W3C WebCodecs Opus registration makes
+/// `AudioDecoderConfig.description` optional, and says that *supplying* one means the bitstream is
+/// Ogg-encapsulated. So an `OpusHead` here — the obvious "let us use the standard header" —
+/// would configure the page's decoder into the wrong mode entirely. Our twelve bytes carry the two
+/// numbers `configure()` needs and are never handed to the decoder.
+async fn audio_stream(State(state): State<AppState>) -> Response {
+    let Some(header) = state.audio else {
+        // ⚠️ **503 and not 404, and the client tells them apart.** A 404 is a build older than
+        // audio, where the page should hide the control for ever; a 503 is `GB_AUDIO_BITRATE=0` on
+        // a build that has it. Both stop the client retrying, which a plain error would not.
+        return (StatusCode::SERVICE_UNAVAILABLE, "audio is off (GB_AUDIO_BITRATE=0)").into_response();
+    };
+    let receiver = state.published.join_audio();
+    let mut stream = AudioStream;
+    let opening = stream.frame(&header);
+
+    // Merged rather than a separate task, for `video_stream`'s reason: one ordered byte stream.
+    let mut interval = tokio::time::interval(KEEP_ALIVE);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let beats = IntervalStream::new(interval).map(|_| None);
+    let packets = BroadcastStream::new(receiver).map(Some);
+    let live = packets.merge(beats).filter_map(move |item| match item {
+        // ⚠️ **The keep-alive is doing more work here than it does for video.** An idle screen is
+        // still a screen; a *parked* run produces no audio at all for hours, so this is the only
+        // traffic on the connection and the only thing keeping `STALE_MS` from firing.
+        None => Some(Ok::<_, Infallible>(stream.frame(&[]))),
+        Some(Ok(packet)) => Some(Ok(stream.frame(&packet))),
+        // ⚠️ **Skipped, and that is the whole of the handling.** A lagged video subscriber keeps a
+        // stale screen for ever unless it is handed a keyframe. A lagged audio subscriber has
+        // missed some sound, which is already gone and cannot be posted on. The client sees it as
+        // an underrun and re-anchors — the same path a `MAX_CATCHUP` gap and a park already take,
+        // so there is nothing here for a re-sync mechanism to repair.
+        Some(Err(BroadcastStreamRecvError::Lagged(_))) => None,
+    });
+
+    let body = tokio_stream::iter([Ok::<_, Infallible>(opening)]).chain(live);
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        axum::body::Body::from_stream(body),
+    )
+        .into_response()
+}
+
+/// One connection's framing, and nothing else.
+///
+/// ⚠️ **A unit struct on purpose.** It exists so the *absence* of a compressor is a visible
+/// decision with a test on it (`nothing_compresses_the_audio_stream`) rather than an omission
+/// someone tidies away into consistency with [`VideoStream`].
+struct AudioStream;
+
+impl AudioStream {
+    fn frame(&mut self, message: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + message.len());
+        out.extend_from_slice(&(message.len() as u32).to_le_bytes());
+        out.extend_from_slice(message);
+        out
+    }
+}
+
 /// One connection's compressor: a single deflate stream, flushed after every message.
 ///
 /// ⚠️ **The flush is the whole design and it is not free to forget.** Without it the encoder holds a
@@ -762,6 +877,65 @@ impl VideoStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── /api/audio ───────────────────────────────────────────────────────────────────────────────
+
+    /// The framing is a `u32` length and then the bytes, and a reader has to be able to split a
+    /// concatenation back into exactly what went in — including an empty message and a large one.
+    #[test]
+    fn the_audio_stream_is_length_prefixed_and_carries_its_payload_verbatim() {
+        let mut stream = AudioStream;
+        let sent: Vec<Vec<u8>> =
+            vec![audio::header().to_vec(), vec![0xff; 3], Vec::new(), vec![7; 1200], vec![1, 2, 3]];
+
+        let wire: Vec<u8> = sent.iter().flat_map(|message| stream.frame(message)).collect();
+
+        let mut read: Vec<Vec<u8>> = Vec::new();
+        let mut at = 0;
+        while at + 4 <= wire.len() {
+            let length = u32::from_le_bytes(wire[at..at + 4].try_into().unwrap()) as usize;
+            at += 4;
+            read.push(wire[at..at + length].to_vec());
+            at += length;
+        }
+        assert_eq!(at, wire.len(), "the last message did not end where the stream did");
+        assert_eq!(read, sent);
+    }
+
+    /// ⚠️ **The guard on the decision, not on the code.** It fails the moment someone wraps this in
+    /// a `ZlibEncoder` for consistency with `/api/video` — see `audio_stream`'s ⚠️ for why that
+    /// would cost bytes rather than save them.
+    #[test]
+    fn nothing_compresses_the_audio_stream() {
+        let mut stream = AudioStream;
+        let packet = vec![0u8; 64];
+        assert_eq!(stream.frame(&packet).len(), 4 + packet.len());
+        assert_eq!(&stream.frame(&packet)[4..], &packet[..], "the payload was transformed");
+    }
+
+    /// The twin of `a_keepalive_puts_bytes_on_the_wire_and_no_message_in_the_stream`, and it matters
+    /// more here: a parked run produces no audio for hours, so this is the only thing between a
+    /// listening page and its `STALE_MS` watchdog.
+    #[test]
+    fn an_audio_keepalive_puts_bytes_on_the_wire_and_no_packet_in_the_stream() {
+        let mut stream = AudioStream;
+        let beat = stream.frame(&[]);
+        assert_eq!(beat, vec![0, 0, 0, 0], "a keep-alive is a zero length and nothing after it");
+    }
+
+    /// `GB_AUDIO_BITRATE`: the default when nobody said, `0` for off, and a loud refusal otherwise.
+    #[test]
+    fn the_audio_bitrate_variable_defaults_and_refuses_nonsense() {
+        assert_eq!(audio_bitrate(None).unwrap(), Some(audio::DEFAULT_BITRATE));
+        assert_eq!(audio_bitrate(Some("  ")).unwrap(), Some(audio::DEFAULT_BITRATE));
+        assert_eq!(audio_bitrate(Some("0")).unwrap(), None, "0 is how audio is turned off");
+        assert_eq!(audio_bitrate(Some(" 32000 ")).unwrap(), Some(32_000));
+
+        for nonsense in ["12", "1000000", "lots", "-1"] {
+            let error = audio_bitrate(Some(nonsense)).expect_err("{nonsense} should be refused");
+            assert!(error.contains("GB_AUDIO_BITRATE") && error.contains(nonsense), "{error}");
+        }
+    }
 
     /// `GB_HARDWARE` picks the machine, and **the default is the DMG** — the whole test suite and
     /// every committed fixture were captured on one, and the video bench asserts a four-shade screen.

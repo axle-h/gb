@@ -51,6 +51,9 @@ ENVIRONMENT (any policy):
                                 cgb is compatibility mode, so Pokemon Red comes out red-tinted
                                 exactly as it does on real hardware, and the video stream costs
                                 about 1.6x as much for the extra colours
+    GB_AUDIO_BITRATE            What /api/audio's Opus stream targets, in bits per second
+                                [default: 24000; 0 turns sound off]. Nothing is encoded until a
+                                viewer turns the page's speaker on
     GB_BUILD_DATE, GB_GIT_BRANCH, GB_GIT_SHA
                                 Set by the container image, not by you: the build date, branch
                                 and short commit that GET /version serves and `gb serve` prints
@@ -218,7 +221,7 @@ mod tests {
     fn the_usage_names_every_flag_and_variable() {
         for name in [
             "--port", "--policy", "--new-run", "--help",
-            "GB_PORT", "GB_RUN_DIR", "GB_STATUS_HZ", "GB_HARDWARE",
+            "GB_PORT", "GB_RUN_DIR", "GB_STATUS_HZ", "GB_HARDWARE", "GB_AUDIO_BITRATE",
             "OPENAI_API_KEY", "GB_MODEL", "OPENAI_BASE_URL",
             "GB_CONTEXT_LIMIT", "GB_TEMPERATURE", "GB_MAX_TOOL_STEPS", "GB_STUCK_TIMEOUT_SECS",
         ] {
