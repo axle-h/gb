@@ -1697,6 +1697,20 @@ every one is a `make` output.
 checkpoints the run. A shell in between means `docker stop` loses everything since the last periodic
 checkpoint.
 
+⚠️ **And it must not be a *graceful* shutdown, which is what `axum::serve` invites and what this
+had.** `with_graceful_shutdown` stops accepting and then waits for the requests in flight — but
+`/api/events` and `/api/video` never finish by construction, each held open by its own keepalive so
+that a quiet run is not mistaken for a dead one, so what it actually waits for is every viewer to
+close their tab. A rollout with one browser on the page therefore refused new connections, kept
+serving the old ones, and sat there until the kubelet's 30 s grace period ran out and SIGKILL took
+the checkpoint with it — the exact loss the paragraph above exists to prevent, on the exact deploy
+that causes it. `serve_http` now `select!`s the accept loop against `shutdown_signal()` and drops
+it, and ⚠️ **that alone is not enough**: axum spawns a task per connection and they outlive the
+future, so `runtime.shutdown_timeout` below it is what actually ends the streams. Every endpoint
+here is read-only, so a dropped connection costs a viewer a reconnect and nothing else — and the
+page reconnects already, because a network that goes away looks the same from inside it
+(`STALE_MS`).
+
 ⚠️ **The build stamp (`/version`) is `ENV` in the runtime stage and must stay below the `COPY` of
 the binary.** `GB_BUILD_DATE` changes on every build, so an `ARG` the cargo stage read would
 invalidate stage 3 every single CI run — and `type=gha` caches *layers*, not the cache mounts the
