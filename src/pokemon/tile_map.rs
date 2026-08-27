@@ -8,7 +8,7 @@ use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::map_metadata::{CurrentMap, PlayerFacingDirection};
 use crate::pokemon::tile::{JumpDirection, WarpEvent};
 use crate::pokemon::sprite::Sprite;
-use crate::pokemon::tile::MetaTile;
+use crate::pokemon::tile::{HiddenObject, MetaTile};
 
 #[derive(Debug, Clone, Default)]
 pub struct MetaTileMap {
@@ -65,6 +65,15 @@ pub struct MetaTileMap {
     /// reasonably concluded the game was broken. An action nobody can carry out is worse than a
     /// missing one, so it is not offered.
     pub can_cut: bool,
+    /// Is Bill waiting inside his own machine?
+    ///
+    /// ⚠️ **The one hidden object in the table that is gated, and the gate is the whole point.**
+    /// `EVENT_BILL_SAID_USE_CELL_SEPARATOR` is set and `EVENT_USED_CELL_SEPARATOR_ON_BILL` is not,
+    /// which is exactly the window in which pressing that PC does something. Outside it the press
+    /// opens a storage menu with no tool behind it, which is the row `overworld_menu` withholds
+    /// `MetaTile::Pc` for. Same shape as [`Self::can_cut`], and on the map rather than in
+    /// `llm::tools` for the same reason: one place to be right rather than two.
+    pub bill_cell_separator: bool,
     /// Strength boulder-switch tiles on this map (invisible pressure plates, from the ROM map scripts):
     /// push a boulder onto one to open its barrier. Exposed so a policy (deterministic or LLM) can
     /// discover *where* to push without hardcoding coordinates. Empty for maps with no Strength puzzle.
@@ -232,6 +241,7 @@ impl MetaTileMap {
             meta_tiles,
             can_surf: false,
             can_cut: false,
+            bill_cell_separator: false,
             strength_switches: strength_switch_table(map.metadata.map).iter()
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
                 .collect(),
@@ -679,6 +689,12 @@ impl MetaTileMap {
         pc_locations_for(self.map)
     }
 
+    /// Fixed hidden-object sites on this map — see [`hidden_objects_for`]. `actions()` emits a row
+    /// per reachable one, the same way it does for a PC.
+    fn hidden_objects(&self) -> &'static [HiddenObjectSite] {
+        hidden_objects_for(self.map)
+    }
+
     pub fn actions(&self) -> Vec<OverworldAction> {
         let (full_dist,     full_from)     = self.bfs_from_player();
 
@@ -869,6 +885,52 @@ impl MetaTileMap {
             }
             route.push(JoypadButton::A);
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Pc, route });
+        }
+
+        // 5b. Hidden objects — gym bins, vending machines, the Game Corner poster, Mansion statues.
+        //     Routed exactly like a PC because the cartridge dispatches them the same way
+        //     (`CheckForHiddenEvent` on the tile in front of the player), with one difference: a PC
+        //     is only ever approached from below, and these carry the approach the routine behind
+        //     them actually demands. A statue checks `SPRITE_FACING_UP` like the PCs do; a bin and a
+        //     bg-event sign check nothing, so any side that can be reached will do.
+        //
+        //     ⚠️ **Not derived from the tileset, for the same reason `pc_locations_for` is not.** A
+        //     hidden object is drawn as the wall it is hiding in, so nothing in the block map tells
+        //     one from ordinary scenery; the table is transcribed and tested against the
+        //     disassembly.
+        for (index, site) in self.hidden_objects().iter().enumerate() {
+            if site.object == HiddenObject::CellSeparator && !self.bill_cell_separator { continue }
+            // Numbered within this map's table, over the whole table rather than per object kind, so
+            // a bin's ordinal is its `wGymTrashCanIndex` plus one and a row's number never shifts
+            // because something unrelated was added beside it.
+            let ordinal = index as u8 + 1;
+            // Below/above/left/right, each with the button that ends up facing the object.
+            let approaches: [(Option<Point8>, JoypadButton, PlayerFacingDirection); 4] = [
+                (site.at.y.checked_add(1).map(|y| Point8 { x: site.at.x, y }), JoypadButton::Up,    PlayerFacingDirection::Up),
+                (site.at.y.checked_sub(1).map(|y| Point8 { x: site.at.x, y }), JoypadButton::Down,  PlayerFacingDirection::Down),
+                (site.at.x.checked_add(1).map(|x| Point8 { x, y: site.at.y }), JoypadButton::Left,  PlayerFacingDirection::Left),
+                (site.at.x.checked_sub(1).map(|x| Point8 { x, y: site.at.y }), JoypadButton::Right, PlayerFacingDirection::Right),
+            ];
+            let best = approaches
+                .into_iter()
+                .filter(|(_, _, dir)| site.facing.is_none_or(|required| required == *dir))
+                .filter_map(|(dest, button, dir)| {
+                    let dest = dest?;
+                    if (dest.x as usize) >= self.width || (dest.y as usize) >= self.height { return None }
+                    if !matches!(self.meta_tiles[dest.x as usize + dest.y as usize * self.width], MetaTile::Empty) { return None }
+                    let (distances, came_from) = best_dist_from(&dest)?;
+                    Some((*distances.get(&dest)?, dest, button, dir, came_from))
+                })
+                .min_by_key(|(distance, dest, ..)| (*distance, dest.y, dest.x));
+            let Some((_, dest, face_button, face_dir, came_from)) = best else { continue };
+            let mut route = reconstruct(dest, came_from);
+            if route.is_empty() {
+                if face_dir != self.player_direction { route.push(face_button); }
+            } else if route.last() != Some(&face_button) {
+                route.push(face_button);
+            }
+            route.push(JoypadButton::A);
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Switch { object: site.object, ordinal }, route });
         }
 
         // 6. Cut trees: route to a walkable tile adjacent to a CutTree and face it (no A — the cut is
@@ -1091,6 +1153,7 @@ impl Display for MetaTileMap {
                     MetaTile::Jump(JumpDirection::West)  => write!(f, "<")?,
                     MetaTile::Jump(JumpDirection::East)  => write!(f, ">")?,
                     MetaTile::Counter => write!(f, "=")?,
+                    MetaTile::Switch { .. } => write!(f, "s")?,
                     MetaTile::CutTree => write!(f, "t")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
@@ -1160,6 +1223,133 @@ pub fn pc_locations_for(map: Map) -> &'static [Point8] {
     }
 }
 
+/// One hidden object the player can press A on, and how the cartridge insists on being approached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HiddenObjectSite {
+    /// The tile the player ends up **facing**, which is the one the ROM matches on. It is never
+    /// walkable: a hidden object is drawn as the wall or the scenery it hides in.
+    pub at: Point8,
+    pub object: HiddenObject,
+    /// The direction the player must be facing, where the routine behind the object checks. `None`
+    /// means any side that can be reached will do.
+    ///
+    /// ⚠️ **The `SPRITE_FACING_*` argument in `hidden_events.asm` is not this and does not restrict
+    /// anything** — `data/events/hidden_events.asm` says so itself, and matching is purely on the
+    /// tile in front. It is the *routines* that check, so this column is transcribed from the
+    /// handler rather than from the table: `Mansion?Script_Switches` opens
+    /// `cp SPRITE_FACING_UP / ret nz`, and `GymTrashScript` and the bg-event signs open with no such
+    /// test at all. Getting it wrong is silent — a side approach is dispatched and returns without
+    /// drawing anything, so the agent stands there pressing A for ever. That is the same trap
+    /// [`pc_locations_for`] carries.
+    pub facing: Option<PlayerFacingDirection>,
+}
+
+impl HiddenObjectSite {
+    const fn new(x: u8, y: u8, object: HiddenObject, facing: Option<PlayerFacingDirection>) -> Self {
+        Self { at: Point8 { x, y }, object, facing }
+    }
+}
+
+/// Every hidden object on `map` that a playthrough has to press, transcribed from pokered's
+/// `data/events/hidden_events.asm` and `data/maps/objects/*.asm`.
+///
+/// ⚠️ **This is a *shortlist*, and the omissions are the design.** The ROM's hidden-object tables
+/// also hold slot machines, town signs, gym statues, the Pokédex rating machine and every hidden
+/// item in the game. A sign is text the turn already puts on screen; a hidden item is invisible by
+/// construction, so a row pointing at one is the game's own secret given away; a slot machine is a
+/// menu with no tool behind it, which is the mistake `MetaTile::Pc` spent a release making. What is
+/// here is what a run **cannot finish without**:
+///
+/// - **Vermilion Gym's fifteen bins.** Two hold the switches that open Lt. Surge's door, and which
+///   two is re-rolled every time the first is found. No Thunder Badge without them.
+/// - **The Celadon Mart roof drink machines.** The Saffron gate guards want a drink and there is
+///   nowhere else in the game to buy one. No Saffron, so no Silph Co and no Marsh Badge.
+/// - **The Game Corner poster.** It is the only way into the Rocket Hideout, so no Silph Scope, no
+///   Pokémon Tower, no Poké Flute and no way past either Snorlax.
+/// - **The Pokémon Mansion statues.** They toggle the gates between the Secret Key and the door, so
+///   no Volcano Badge.
+///
+/// ⚠️ **The coordinates are `(x, y)` even though the macro reads `hidden_event Y, X`.** The
+/// disassembly's own argument order is the opposite of the one every coordinate in this file uses,
+/// and `bg_event 10, 1, …VENDING_MACHINE1` against `DeterministicPolicy`'s proven
+/// `UseVendingMachine { at: (10, 1) }` is what pins which way round it goes.
+pub fn hidden_objects_for(map: Map) -> &'static [HiddenObjectSite] {
+    use HiddenObject::{Poster, Statue, TrashCan, VendingMachine};
+    const UP: Option<PlayerFacingDirection> = Some(PlayerFacingDirection::Up);
+    const ANY: Option<PlayerFacingDirection> = None;
+
+    /// The bins, in the reading order the puzzle's own `wGymTrashCanIndex` numbers them.
+    const VERMILION_BINS: &[HiddenObjectSite] = &[
+        HiddenObjectSite::new(1,  7, TrashCan, ANY), HiddenObjectSite::new(1,  9, TrashCan, ANY),
+        HiddenObjectSite::new(1, 11, TrashCan, ANY), HiddenObjectSite::new(3,  7, TrashCan, ANY),
+        HiddenObjectSite::new(3,  9, TrashCan, ANY), HiddenObjectSite::new(3, 11, TrashCan, ANY),
+        HiddenObjectSite::new(5,  7, TrashCan, ANY), HiddenObjectSite::new(5,  9, TrashCan, ANY),
+        HiddenObjectSite::new(5, 11, TrashCan, ANY), HiddenObjectSite::new(7,  7, TrashCan, ANY),
+        HiddenObjectSite::new(7,  9, TrashCan, ANY), HiddenObjectSite::new(7, 11, TrashCan, ANY),
+        HiddenObjectSite::new(9,  7, TrashCan, ANY), HiddenObjectSite::new(9,  9, TrashCan, ANY),
+        HiddenObjectSite::new(9, 11, TrashCan, ANY),
+    ];
+    const CELADON_DRINKS: &[HiddenObjectSite] = &[
+        HiddenObjectSite::new(10, 1, VendingMachine, ANY),
+        HiddenObjectSite::new(11, 1, VendingMachine, ANY),
+        HiddenObjectSite::new(12, 2, VendingMachine, ANY),
+    ];
+    const GAME_CORNER_POSTER: &[HiddenObjectSite] = &[HiddenObjectSite::new(9, 4, Poster, ANY)];
+    const MANSION_1F: &[HiddenObjectSite] = &[HiddenObjectSite::new(2, 5, Statue, UP)];
+    const MANSION_2F: &[HiddenObjectSite] = &[HiddenObjectSite::new(2, 11, Statue, UP)];
+    const MANSION_3F: &[HiddenObjectSite] = &[HiddenObjectSite::new(10, 5, Statue, UP)];
+    const MANSION_B1F: &[HiddenObjectSite] = &[
+        HiddenObjectSite::new(20, 3, Statue, UP),
+        HiddenObjectSite::new(18, 25, Statue, UP),
+    ];
+
+    const BILLS_SEPARATOR: &[HiddenObjectSite] =
+        &[HiddenObjectSite::new(1, 4, HiddenObject::CellSeparator, UP)];
+
+    match map {
+        Map::BillsHouse        => BILLS_SEPARATOR,
+        Map::VermilionGym      => VERMILION_BINS,
+        Map::CeladonMartRoof   => CELADON_DRINKS,
+        Map::GameCorner        => GAME_CORNER_POSTER,
+        Map::PokemonMansion1F  => MANSION_1F,
+        Map::PokemonMansion2F  => MANSION_2F,
+        Map::PokemonMansion3F  => MANSION_3F,
+        Map::PokemonMansionB1F => MANSION_B1F,
+        _ => &[],
+    }
+}
+
+/// The floor panel on `map` and the floors its menu lists, in menu order — `None` for the 245 maps
+/// that are not a lift.
+///
+/// Transcribed from each lift's `*ElevatorWarpMaps` table in pokered `scripts/`, which is the list
+/// `DisplayElevatorFloorMenu` draws, so the index of a map here **is** the cursor row the driver has
+/// to land on.
+///
+/// ⚠️ **A menu index is not a thing to ask a model for.** `FieldMove::UseElevator` takes one because
+/// `DeterministicPolicy` writes routes against a table it can see; a model naming `SilphCo5F` and
+/// having it turned into `4` here cannot be off by one, and does not have to be told the order.
+pub fn elevator_for(map: Map) -> Option<(Point8, &'static [Map])> {
+    const ROCKET: &[Map] = &[Map::RocketHideoutB1F, Map::RocketHideoutB2F, Map::RocketHideoutB4F];
+    const CELADON: &[Map] = &[
+        Map::CeladonMart1F, Map::CeladonMart2F, Map::CeladonMart3F, Map::CeladonMart4F,
+        Map::CeladonMart5F,
+    ];
+    const SILPH: &[Map] = &[
+        Map::SilphCo1F, Map::SilphCo2F, Map::SilphCo3F, Map::SilphCo4F, Map::SilphCo5F,
+        Map::SilphCo6F, Map::SilphCo7F, Map::SilphCo8F, Map::SilphCo9F, Map::SilphCo10F,
+        Map::SilphCo11F,
+    ];
+    match map {
+        // ⚠️ B3F is missing on purpose: the hideout's lift serves three floors and the stairs serve
+        // the fourth, which is the cartridge's arrangement rather than an omission here.
+        Map::RocketHideoutElevator => Some((Point8 { x: 1, y: 1 }, ROCKET)),
+        Map::CeladonMartElevator   => Some((Point8 { x: 3, y: 0 }, CELADON)),
+        Map::SilphCoElevator       => Some((Point8 { x: 3, y: 0 }, SILPH)),
+        _ => None,
+    }
+}
+
 fn opposite_dir(dir: JoypadButton) -> JoypadButton {
     match dir {
         JoypadButton::Left  => JoypadButton::Right,
@@ -1187,6 +1377,78 @@ mod pc_location_tests {
         for &map in CENTRES {
             assert_eq!(pc_locations_for(map), &[Point8 { x: 13, y: 3 }], "no PC on {map}");
         }
+    }
+
+    /// ⚠️ **The bins have to be the ones the puzzle itself numbers, and a transposed `(x, y)` is the
+    /// failure this catches.** `hidden_events.asm` writes the pair the other way round from every
+    /// coordinate in this file, and both readings land inside Vermilion Gym, so a swap would produce
+    /// fifteen rows that route, walk and press A on the wrong tiles for ever.
+    /// [`trash_can_position`](crate::pokemon::trash_can_position) is derived independently — it is
+    /// what `DeterministicPolicy` turns `wFirstLockTrashCanIndex` into — so agreeing with it is a
+    /// real second opinion rather than the same transcription read twice.
+    #[test]
+    fn the_gym_bins_are_the_ones_the_puzzle_numbers() {
+        let bins = hidden_objects_for(Map::VermilionGym);
+        assert_eq!(bins.len(), 15, "the gym has fifteen bins");
+        for (index, site) in bins.iter().enumerate() {
+            assert_eq!(site.object, HiddenObject::TrashCan);
+            assert_eq!(
+                site.at,
+                crate::pokemon::trash_can_position(index as u8),
+                "bin {index} is not where the puzzle's own index says",
+            );
+            assert!(site.facing.is_none(), "GymTrashScript checks no facing");
+        }
+    }
+
+    /// The rest of the table, against the disassembly. ⚠️ **The facing column is the half that fails
+    /// silently**: a statue approached from the side is dispatched and returns without drawing
+    /// anything, so the agent stands there pressing A until `DRIVER_ESCAPE_SILENCE`. Every
+    /// `Mansion?Script_Switches` opens `cp SPRITE_FACING_UP / ret nz`; the bg-event machines and the
+    /// poster open with no such test.
+    #[test]
+    fn hidden_objects_are_where_the_disassembly_says() {
+        use PlayerFacingDirection::Up;
+        let sites = |map| hidden_objects_for(map).iter()
+            .map(|site| (site.at, site.object, site.facing)).collect::<Vec<_>>();
+
+        assert_eq!(sites(Map::CeladonMartRoof), vec![
+            (Point8 { x: 10, y: 1 }, HiddenObject::VendingMachine, None),
+            (Point8 { x: 11, y: 1 }, HiddenObject::VendingMachine, None),
+            (Point8 { x: 12, y: 2 }, HiddenObject::VendingMachine, None),
+        ]);
+        assert_eq!(sites(Map::GameCorner), vec![(Point8 { x: 9, y: 4 }, HiddenObject::Poster, None)]);
+        assert_eq!(sites(Map::PokemonMansion1F),  vec![(Point8 { x: 2,  y: 5  }, HiddenObject::Statue, Some(Up))]);
+        assert_eq!(sites(Map::PokemonMansion2F),  vec![(Point8 { x: 2,  y: 11 }, HiddenObject::Statue, Some(Up))]);
+        assert_eq!(sites(Map::PokemonMansion3F),  vec![(Point8 { x: 10, y: 5  }, HiddenObject::Statue, Some(Up))]);
+        assert_eq!(sites(Map::PokemonMansionB1F), vec![
+            (Point8 { x: 20, y: 3  }, HiddenObject::Statue, Some(Up)),
+            (Point8 { x: 18, y: 25 }, HiddenObject::Statue, Some(Up)),
+        ]);
+        // Bill's is the same tile `pc_locations_for` names, counted twice on purpose.
+        assert_eq!(sites(Map::BillsHouse), vec![(Point8 { x: 1, y: 4 }, HiddenObject::CellSeparator, Some(Up))]);
+        assert_eq!(pc_locations_for(Map::BillsHouse), &[Point8 { x: 1, y: 4 }]);
+        // A Pokémon Centre has a PC and no hidden object, which is what keeps the two tables apart.
+        assert!(hidden_objects_for(Map::CeruleanPokecenter).is_empty());
+        assert!(hidden_objects_for(Map::PalletTown).is_empty());
+    }
+
+    /// The three lifts, and the floors each one's own `*ElevatorWarpMaps` table lists — in order,
+    /// because the index **is** the cursor row `DisplayElevatorFloorMenu` lands on.
+    #[test]
+    fn the_lifts_serve_the_floors_the_disassembly_lists() {
+        assert_eq!(
+            elevator_for(Map::RocketHideoutElevator).map(|(panel, floors)| (panel, floors.len())),
+            Some((Point8 { x: 1, y: 1 }, 3)),
+            "the hideout's lift serves B1F, B2F and B4F, and B3F is the stairs",
+        );
+        let (_, floors) = elevator_for(Map::RocketHideoutElevator).expect("a lift");
+        assert_eq!(floors[2], Map::RocketHideoutB4F, "B4F is menu row 2 — Giovanni, so the Silph Scope");
+        assert_eq!(elevator_for(Map::SilphCoElevator).map(|(panel, floors)| (panel, floors.len())),
+                   Some((Point8 { x: 3, y: 0 }, 11)));
+        assert_eq!(elevator_for(Map::CeladonMartElevator).map(|(panel, floors)| (panel, floors.len())),
+                   Some((Point8 { x: 3, y: 0 }, 5)));
+        assert!(elevator_for(Map::CeladonMart1F).is_none(), "a floor is not a lift");
     }
 
     /// The exceptions, which is the whole reason this is a table and not a constant.
@@ -1250,7 +1512,7 @@ mod boulder_solver_tests {
             tile_pair_collisions: vec![],
             tile_pair_collisions_water: vec![], sprites,
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
-            spinners: HashMap::new(), can_surf: false, can_cut: false,
+            spinners: HashMap::new(), can_surf: false, can_cut: false, bill_cell_separator: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
             hidden_items: vec![], has_grass_encounters: false,
             // A hand-built grid for the boulder solver; there is no ROM map behind it to draw.

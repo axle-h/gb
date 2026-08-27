@@ -140,6 +140,9 @@ mod tests {
 
 pub trait BagReader {
     fn read_bag(&self) -> Bag;
+    /// PC item storage (`wNumBoxItems`/`wBoxItems`) — the same count-then-pairs layout as the bag,
+    /// which is why one trait serves both.
+    fn read_pc_items(&self) -> Bag;
 }
 
 impl BagReader for MMU {
@@ -157,6 +160,20 @@ impl BagReader for MMU {
             })
             .collect();
         Bag::new(items)
+    }
+
+    fn read_pc_items(&self) -> Bag {
+        let count = self.read_pointer(&pokered_symbols::wNumBoxItems) as usize;
+        let base  = pokered_symbols::wBoxItems.address;
+        Bag::new(
+            (0..count)
+                .filter_map(|i| {
+                    let item_base = base + i as u16 * 2;
+                    ItemId::from_repr(self.read(item_base))
+                        .map(|id| BagItem { id, quantity: self.read(item_base + 1) })
+                })
+                .collect(),
+        )
     }
 }
 

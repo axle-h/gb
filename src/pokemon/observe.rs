@@ -195,6 +195,64 @@ pub fn bag(state: &GameState, api: &PokemonApi<'_>) -> BagView {
     }
 }
 
+// ── PC ───────────────────────────────────────────────────────────────────────────────────────────
+
+view! {
+    pub struct BoxedPokemonView {
+        /// The slot `use_field_move` wants for `withdraw` and `release`.
+        pub box_slot: u8,
+        pub species: String,
+        pub nickname: String,
+        pub level: u8,
+        /// HP as it was on the day it was deposited. Withdrawing recomputes the stats; it does not
+        /// heal, so a hurt Pokémon comes back hurt.
+        pub hp: u16,
+        pub moves: Vec<String>,
+    }
+}
+
+view! {
+    pub struct PcView {
+        /// 1-based, the way the game's own CHANGE BOX menu numbers them.
+        pub open_box: u8,
+        pub boxes_total: u8,
+        pub slots_used: usize,
+        pub slots_total: usize,
+        pub pokemon: Vec<BoxedPokemonView>,
+        pub stored_items: Vec<String>,
+        pub party_size: usize,
+        /// ⚠️ **The honest caveat, and it is a real limit rather than a hedge.** Eleven of the twelve
+        /// boxes live in SRAM banks the emulator layer does not window, so only the open one can be
+        /// read — and `change_box` is what copies WRAM to SRAM, which means looking in another box
+        /// is a write that saves the game rather than a read.
+        pub note: String,
+    }
+}
+
+pub fn pc(state: &GameState, api: &PokemonApi<'_>) -> PcView {
+    use crate::pokemon::postgame::pc_box::{BOX_CAPACITY, BOX_COUNT};
+    PcView {
+        open_box: state.current_box + 1,
+        boxes_total: BOX_COUNT,
+        slots_used: state.boxed_pokemon.len(),
+        slots_total: BOX_CAPACITY,
+        pokemon: state.boxed_pokemon.iter().enumerate().map(|(slot, mon)| BoxedPokemonView {
+            box_slot: slot as u8,
+            species: format!("{:?}", mon.species),
+            nickname: mon.nickname.to_default_string(),
+            level: mon.level,
+            hp: mon.current_hp,
+            moves: mon.moves.iter().flatten().map(|mv| mv.name.to_string()).collect(),
+        }).collect(),
+        stored_items: api.pc_stored_items().iter().map(|item| item.to_string()).collect(),
+        party_size: state.pokemon.len(),
+        note: format!(
+            "Only box {} can be read. Switching to another with `change_box` saves the game.",
+            state.current_box + 1,
+        ),
+    }
+}
+
 // ── Map ──────────────────────────────────────────────────────────────────────────────────────────
 
 /// What each character of `impl Display for MetaTileMap` means.

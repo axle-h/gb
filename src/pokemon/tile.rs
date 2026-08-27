@@ -28,6 +28,24 @@ pub enum MetaTile {
     /// Impassable like `Obstacle`, but `actions()` emits a route that faces it and presses A. The
     /// tile is not classified from the tileset; PC coordinates are looked up per map (`pc_locations`).
     Pc,
+    /// A hidden object the player faces and presses A on: a gym trash can, a vending machine, a
+    /// poster switch, a Pokémon Mansion statue.
+    ///
+    /// ⚠️ **The same mechanism as [`Self::Pc`] and kept a separate variant on purpose.** Both are
+    /// `hidden_event`s dispatched by `CheckForHiddenEvent`, and both are looked up per map rather
+    /// than classified from the tileset — but a PC opens a menu with drivers of its own behind it
+    /// (`postgame::{pc_box, item_storage}`) and one of these is a single press and nothing more.
+    /// Folding them together would put every box operation behind a row whose whole contract is
+    /// "press A once".
+    /// ⚠️ **`ordinal` is 1-based and is in the id, because the approach tile is not unique.** An id
+    /// is `{map}:{x},{y}:{kind}` where the coordinate is the tile the player *stands on*, and two
+    /// hidden objects a tile apart share one: Vermilion Gym's bins at (9, 7) and (9, 9) are both
+    /// approached from (9, 8), so both rows minted `VermilionGym:9,8:TrashCan` and
+    /// `resolve_overworld`, which matches by string equality, could only ever reach the first. One
+    /// of the fifteen was silently unreachable. This is the same fix `MapSprite` already carries —
+    /// `Rocket1`, `Rocket2` — and it numbers within the map's own table, so a bin's ordinal is the
+    /// `wGymTrashCanIndex` the puzzle uses plus one.
+    Switch { object: HiddenObject, ordinal: u8 },
     /// Tall-grass tile (tile ID matches `wGrassTile` for the current tileset).
     /// Walkable; stepping on it can trigger a wild Pokémon encounter.
     Grass,
@@ -67,6 +85,11 @@ impl MetaTile {
         match self {
             Self::Sprite(name) if name.contains(' ') => name.replace(' ', "").into(),
             Self::Sprite(name) => (*name).into(),
+            // Same argument as `Sprite`, one step down: "Switch" is the mechanism's name and says
+            // nothing about what is being pressed. Four statues on one Mansion floor are already
+            // told apart by their coordinates, so this is about the row reading as English rather
+            // than about uniqueness.
+            Self::Switch { object, ordinal } => format!("{}{ordinal}", <&'static str>::from(object)).into(),
             other => other.kind().into(),
         }
     }
@@ -103,7 +126,50 @@ impl Display for MetaTile {
             Self::Counter => write!(f, "a counter"),
             Self::CutTree => write!(f, "a cuttable tree"),
             Self::Pc => write!(f, "the PC"),
+            Self::Switch { object, .. } => write!(f, "{object}"),
             Self::Grass => write!(f, "tall grass"),
+        }
+    }
+}
+
+/// What a [`MetaTile::Switch`] actually is. One press of A on each, and what it does is the
+/// cartridge's business.
+///
+/// ⚠️ **These are the ones a playthrough cannot avoid**, which is the whole reason the table exists;
+/// see [`hidden_objects_for`](crate::pokemon::tile_map::hidden_objects_for). Slot machines, signs
+/// and hidden items are `hidden_event`s too and are deliberately not here: a sign is text the model
+/// is already shown, and a hidden item has nothing to point the player at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, strum_macros::IntoStaticStr)]
+pub enum HiddenObject {
+    /// One of Vermilion Gym's fifteen bins. Two of them hold the switches that open Lt. Surge's door.
+    TrashCan,
+    /// A Celadon Mart roof drink machine. The menu opens with the cheapest drink under the cursor,
+    /// so one press buys a Fresh Water, which is what the Saffron gate guards want.
+    VendingMachine,
+    /// The Game Corner poster that opens the Rocket Hideout.
+    Poster,
+    /// A Pokémon Mansion statue. They toggle one shared switch, so pressing a second undoes the
+    /// first.
+    Statue,
+    /// Bill's cell separator: the PC in his house, pressed once to turn him back into a person.
+    ///
+    /// ⚠️ **The same tile `pc_locations_for(BillsHouse)` names, deliberately counted twice.** As a
+    /// PC it is storage the scripted policies drive through `FieldMove::UsePcBox`; as this it is a
+    /// one-press story beat, and it is the *only* way to the S.S. Ticket, so to HM01 Cut, so to the
+    /// rest of the game. It is offered only while pressing it would do that — see
+    /// [`MetaTileMap::bill_cell_separator`](crate::pokemon::tile_map::MetaTileMap::bill_cell_separator).
+    CellSeparator,
+}
+
+impl Display for HiddenObject {
+    /// Prose, and a noun phrase, for the same four frames [`MetaTile`]'s own `Display` serves.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TrashCan => write!(f, "a trash can"),
+            Self::VendingMachine => write!(f, "a vending machine"),
+            Self::Poster => write!(f, "the poster"),
+            Self::Statue => write!(f, "a statue"),
+            Self::CellSeparator => write!(f, "the cell separator"),
         }
     }
 }

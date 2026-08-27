@@ -258,6 +258,7 @@ mod tests {
         fn bag_item_quantity(&self, _item: crate::pokemon::item::ItemId) -> u8 { 0 }
         fn pc_box_item_position(&self, _item: crate::pokemon::item::ItemId) -> Option<u8> { None }
         fn pc_box_item_quantity(&self, _item: crate::pokemon::item::ItemId) -> u8 { 0 }
+        fn pc_stored_items(&self) -> crate::pokemon::bag::Bag { crate::pokemon::bag::Bag::default() }
 
         fn on_screen_text(&self, only_message_box: bool) -> Option<String> {
             self.on_screen_text.clone()

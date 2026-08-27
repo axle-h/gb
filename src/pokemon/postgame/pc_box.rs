@@ -127,7 +127,7 @@ impl PcBoxOp {
     /// pokered answers every one of these with a message and a bounce straight back to the Bill's-PC
     /// menu (`CantDepositLastMonText`, `BoxFullText`, `NoMonText`, `CantTakeMonText`) — from which a
     /// driver that re-picked the same entry would loop forever.
-    fn blocked_by(self, party: u8, boxed: u8, current_box: u8) -> Option<String> {
+    pub fn blocked_by(self, party: u8, boxed: u8, current_box: u8) -> Option<String> {
         match self {
             Self::Deposit { slot } => {
                 if slot >= party { Some(format!("party has no slot {slot} (count {party})")) }
