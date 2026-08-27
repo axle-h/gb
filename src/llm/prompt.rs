@@ -125,21 +125,15 @@ How the interface works:
   reorder between turns.
 - The game keeps running while you think. A menu action can therefore disappear before your answer \
   lands — you will be told when that happens, and shown the current menu, so simply pick again.
-- **One decision can be several actions.** Where you already know the next step, chain it onto \
-  `choose_action` with `then`: talk to the Nurse and then take the door out. Chain only what is on \
-  the menu now and stays true once the step before it is done; the chain stops the moment one does \
-  not, and you are told where it got to. `resume_after_battle` is the same saving for a walk a \
-  battle interrupts: it is taken up again rather than handed back to you to choose twice.
-- Read tools (`read_map`, `read_party`, …) do not end the turn. Request every read you need in a \
-  single message; they are all answered from one consistent snapshot of the game. Most turns should \
-  need none of them: the situation you are shown already carries the party, the money, the badges, \
-  what is on screen and the menu. Which reads exist depends on what is being decided, and the list \
-  at the bottom of each turn is the one that applies.
-- `screenshot` shows you the actual screen. It costs far more than a read does, so use it when you \
-  want to see something the other tools do not describe, not as a matter of routine.
-- Not everything is walking. `use_field_move` covers cutting a tree you are facing, using Strength \
-  or Flash or Dig from the party menu, flying, teaching an HM, using an item on something, pushing a \
-  boulder, and pressing A at a tile to find what is hidden there.
+- **One decision can be several actions.** Chain the steps you already know onto `choose_action` \
+  with `then` — talk to the Nurse, then take the door out — and set `resume_after_battle` on a walk \
+  a wild encounter might interrupt. Both are pure saving; their descriptions say what ends a chain.
+- Read tools do not end the turn, and **most turns should need none of them**: the situation \
+  already carries the party, the money, the badges, what is on screen and the menu, and a read \
+  whose answer you are already holding costs a whole round trip for nothing. Ask for the ones you \
+  do need together in one message; the list at the foot of each turn is the one that applies, and \
+  `screenshot` is the expensive one, for something the others do not describe.
+- Not everything is walking: `use_field_move` covers the rest, and its own description says what.
 - **The agent can be wrong, and `report_issue` is how you say so.** If the action menu does not \
   describe what is in front of you, or an action keeps failing for a reason you cannot see, file \
   one: what you were trying to do, what you expected, what happened instead. An action the game \
@@ -148,7 +142,7 @@ How the interface works:
   save state are filed with it. ⚠️ It does **not** end your turn and \
   nothing changes now — so having filed it, carry on and try a different way. Reporting a problem \
   and playing on are not alternatives. What can be wrong is the agent's *description* of the game — \
-  a menu row, a route, a name. The game itself is not wrong; see below.
+  a menu row, a route, a name — never the game itself.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
   everything not in that summary is gone. Your plan — `todo_set` and `todo_complete`, shown to you \
   every turn under 'Your plan' — is what survives that. It is the only thing that does, so put \
@@ -232,13 +226,11 @@ Things worth knowing about this particular game:
   battle. While that is true they are not offered to you at all, and the turn says so plainly under \
   'Blocked here'. That is a different errand, not a thing to keep trying.
 - There is a walkthrough for this game, and `read_guide` hands you the stretch of it you are in \
-  now: the order to do things in, what is blocking the way and what the next Gym Leader has. It is \
-  chosen from your badges alone, so it says exactly the same thing every turn until you win the \
-  next badge. Read it once at the start of each badge, before you spend turns wandering to work \
-  out where you are meant to be, and put what you need out of it on your plan. Asking again before \
-  the badge changes buys you a word-for-word copy of what you already have. The one exception is \
-  after this conversation has been summarised: the chapter you read is not in the summary, so if \
-  your plan no longer tells you what to do next, read it again.
+  now. Read it **once at the start of each badge**, before you spend turns wandering to work out \
+  where you are meant to be, and put what you need out of it on your plan — it is keyed on your \
+  badges alone, so asking again before the next one buys a word-for-word copy. Read it again after \
+  this conversation has been summarised: the chapter is not in the summary, and your plan is all \
+  that is left of it.
 
 Playing it well, and the clock you are playing against:
 
@@ -262,7 +254,8 @@ Playing it well, and the clock you are playing against:
   always run from is one you never had: weaken it first, or put it to sleep or paralyse it, then \
   throw a Poké Ball from the battle's item rows. A party that covers several types is what gets \
   through a gym; a single strong Pokémon loses to the first thing it has no answer to, and takes \
-  the run down with it.
+  the run down with it. **Your party holds six.** Anything caught past that is stored in a PC you \
+  have no way to reach through this interface, so the six you are carrying are the six you have.
 - **Bring the party up together.** A Pokémon that never battles never levels. Sending a weaker one \
   in first in an easy fight is how it catches up, and a trained party is what makes a bad matchup \
   survivable instead of fatal.
@@ -357,7 +350,12 @@ pub enum TurnContext<'a> {
     #[default]
     None,
     Nickname(crate::pokemon::species::PokemonSpecies),
-    ForgetMove { current: &'a [crate::pokemon::move_name::PokemonMove], new: crate::pokemon::move_name::PokemonMoveName },
+    ForgetMove {
+        /// Which party member is learning it. See `Policy::pick_move_to_forget`'s ⚠️.
+        slot: usize,
+        current: &'a [crate::pokemon::move_name::PokemonMove],
+        new: crate::pokemon::move_name::PokemonMoveName,
+    },
     /// **W9 / §14** — the watchdog's turn: what the agent believes it is doing, and for how long.
     /// Carried rather than read from the state for the same reason the two above are — nothing but
     /// the agent knows it.
@@ -405,10 +403,38 @@ pub fn situation(
              so pick one you will recognise. Keep the default only if you truly have nothing to \
              say.\n\n",
         )),
-        TurnContext::ForgetMove { new, .. } => out.push_str(&format!(
-            "A Pokémon is trying to learn **{new}** but already knows four moves. Pick one to \
-             replace, or decline and keep all four.\n\n",
-        )),
+        // ⚠️ **Three things this turn did not say, each of which decides it.** It opened "A Pokémon
+        // is trying to learn Surf" — not which one, so the model matched four move names against the
+        // party by eye; it priced neither the new move nor the four it would displace, so the swap
+        // was judged on names alone; and it never marked an HM, while `DeterministicPolicy` has
+        // always given HM moves max value so they are *never* forgotten. Losing Cut or Surf strands
+        // a run behind terrain the menu then stops offering a way past, which is the most expensive
+        // single answer available on this turn and the one nothing warned about.
+        TurnContext::ForgetMove { slot, new, current } => {
+            let metadata = new.metadata();
+            let learner = state.pokemon.iter().nth(slot);
+            out.push_str(&format!(
+                "{} is trying to learn **{new}** ({}, {}, {} pp) but already knows four moves. Pick \
+                 one to replace, or decline and keep all four.\n\n",
+                match learner {
+                    Some(mon) => format!("{} (slot {slot}, {})", named(mon), types_of(mon)),
+                    None => "A Pokémon".to_string(),
+                },
+                metadata.move_type,
+                match metadata.power {
+                    Some(power) => format!("{power} power"),
+                    None => "no damage".to_string(),
+                },
+                metadata.pp,
+            ));
+            if current.iter().any(|m| crate::llm::tools::hm_move(m.name).is_some()) {
+                out.push_str(
+                    "⚠️ One of the four is an HM move. An HM cannot be un-taught and cannot be \
+                     re-learnt from the machine, so forgetting one means finding another Pokémon to \
+                     teach it to before you can cross the terrain it clears again.\n\n",
+                );
+            }
+        }
         // **W9 / §14.** Said plainly, including that it is the agent's fault: a model told only "you
         // are stuck" tends to reason about the *game* being stuck and go looking for a puzzle.
         TurnContext::Stuck { agent_state, stuck_for } => out.push_str(&format!(
@@ -532,9 +558,10 @@ pub fn situation(
             .map(|m| format!("{} {}pp", m.name, m.pp))
             .collect();
         out.push_str(&format!(
-            "{slot}. {} Lv{} — {}/{} HP{} — {}\n",
-            mon.nickname.to_default_string(),
+            "{slot}. {} Lv{} ({}) — {}/{} HP{} — {}\n",
+            named(mon),
             mon.level,
+            types_of(mon),
             mon.current_hp,
             mon.stats.hp,
             ailment(mon.status),
@@ -544,11 +571,19 @@ pub fn situation(
 
     if let Some(battle) = state.battle.as_ref() {
         out.push_str("\n### Battle\n");
+        // ⚠️ **`Display`, not `{:?}`.** Both were debug formatting reaching the model, which is the
+        // bug `MetaTile`, `PokemonStatus` and `SwitchPokemon`'s menu row were each caught with — and
+        // each of those read acceptably right up until the type behind it grew a field. The types
+        // are the addition: a battle turn is decided on the matchup and nothing in the situation
+        // said what the thing in front of you *is*.
         let side = |who: &str, mon: &crate::pokemon::pokemon::PokemonSummary| {
-            format!("{who}: {:?} Lv{} — {}/{} HP{}\n",
-                    mon.species, mon.level, mon.current_hp, mon.stats.hp, ailment(mon.status))
+            let mut types: Vec<String> = mon.types.iter().map(|t| t.to_string()).collect();
+            types.dedup();
+            format!("{who}: {} Lv{} ({}) — {}/{} HP{}\n",
+                    mon.species, mon.level, types.join("/"),
+                    mon.current_hp, mon.stats.hp, ailment(mon.status))
         };
-        out.push_str(&format!("{:?} battle\n", battle.battle_type));
+        out.push_str(&format!("{} battle\n", battle.battle_type));
         out.push_str(&side("Yours", &battle.player));
         out.push_str(&side("Enemy", &battle.enemy));
         if battle.enemy_trapping {
@@ -622,6 +657,39 @@ pub fn situation(
 ///
 /// ⚠️ **`PokemonStatus`' `Display` is `strum`'s derive, so a healthy Pokémon prints `None`** — and
 /// every party line said `20/20 HP, None`, which reads as a missing value rather than as good news
+/// A party member as the header names it: the nickname, and the species behind it when the two
+/// differ.
+///
+/// ⚠️ **The species used to be missing entirely, and the nickname prompt is what made that
+/// expensive.** The line was `mon.nickname` alone, which is the species in capitals until the model
+/// names something — and the naming screen now asks it, in as many words, for a name that says what
+/// it makes of *this* Pokémon rather than the species again. So the better the model answers that
+/// prompt, the more completely the species disappears from every turn for the rest of the run, and
+/// the only way back was `read_party` — a whole round trip whose remaining content is species, types
+/// and stats. The idiom is `learnset::teach_refusal`'s, which had the same problem first.
+fn named(mon: &crate::pokemon::pokemon::Pokemon) -> String {
+    let nickname = mon.nickname.to_default_string();
+    let species = mon.species.to_string();
+    match nickname.eq_ignore_ascii_case(&species) {
+        true => nickname,
+        false => format!("{nickname} the {species}"),
+    }
+}
+
+/// A party member's types, deduplicated — the game stores a single-type mon's one type in both
+/// slots, so an undeduplicated `Normal/Normal` is the derive showing through.
+///
+/// ⚠️ **On the party line rather than behind `read_party`, and the argument is the module's own
+/// rule.** "Anything a read can answer from the situation should be in the situation": the prompt
+/// tells the model that a party covering several types is what gets through a gym and that a single
+/// strong Pokémon loses to the first thing it has no answer to, and then gave it no way to check
+/// either without buying a read. ~12 bytes a line against a read that costs a completion.
+fn types_of(mon: &crate::pokemon::pokemon::Pokemon) -> String {
+    let mut types: Vec<String> = mon.types.iter().map(|t| t.to_string()).collect();
+    types.dedup();
+    types.join("/")
+}
+
 /// and cost six characters per member of every turn for the privilege. Poisoned is worth a word;
 /// healthy is worth silence, and the HP beside it already says how the mon is doing.
 fn ailment(status: crate::pokemon::status::PokemonStatus) -> String {
@@ -841,7 +909,7 @@ mod tests {
             let context = match kind {
                 DecisionKind::Nickname => TurnContext::Nickname(PokemonSpecies::Eevee),
                 DecisionKind::ForgetMove => {
-                    TurnContext::ForgetMove { current: &party_moves, new: PokemonMoveName::Surf }
+                    TurnContext::ForgetMove { slot: 0, current: &party_moves, new: PokemonMoveName::Surf }
                 }
                 DecisionKind::Stuck => TurnContext::Stuck {
                     agent_state: "text→ReadingTextBox",
@@ -852,7 +920,7 @@ mod tests {
             let menu = match kind {
                 DecisionKind::Overworld => tools::overworld_menu(&state, snapshot.arrival),
                 DecisionKind::Battle => tools::battle_menu(&state),
-                DecisionKind::MartPurchase => tools::mart_menu(&snapshot),
+                DecisionKind::MartPurchase => tools::mart_menu(&snapshot, &state),
                 DecisionKind::ForgetMove => tools::forget_menu(&party_moves),
                 DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
             };
@@ -1134,6 +1202,61 @@ mod tests {
             "battle.ask()",
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
+        }
+    }
+
+    /// ⚠️ **A party line that names only the nickname stops naming the Pokémon at all.** The
+    /// naming screen asks, in as many words, for a name that says what the model makes of *this*
+    /// one rather than the species again — so the better it answers that prompt, the more
+    /// completely the species disappears from every turn for the rest of the run, and the only way
+    /// back was `read_party`, a whole round trip whose remaining content is species, types and
+    /// stats. The types are the other half: the prompt tells the model a party covering several
+    /// types is what gets through a gym, and then gave it no way to check without buying a read.
+    #[test]
+    fn a_party_line_names_the_species_and_its_types() {
+        let mut fixture = crate::pokemon::integration_tests::fixture::TestFixture::new(
+            include_bytes!("../pokemon/data/at-celadon.bin"),
+            std::time::Duration::from_secs(10),
+            vec![],
+        );
+        let state = fixture.game_state();
+        let snapshot = ApiSnapshot::read(&fixture.api());
+        let turn = situation(
+            DecisionKind::Overworld, &state, &snapshot, &[],
+            &crate::llm::tools::overworld_menu(&state, snapshot.arrival),
+            TurnContext::None, &[],
+        );
+        let party = turn.split("### Party").nth(1).expect("a party block").lines().nth(1).unwrap();
+        let mon = state.pokemon.iter().next().expect("the fixture has a party");
+        assert!(party.contains(&mon.species.to_string()),
+                "the species is on the line whatever the nickname is: {party}");
+        assert!(party.contains(&mon.types[0].to_string()), "and so are its types: {party}");
+        // ⚠️ A single-type mon stores its one type in both slots, so an undeduplicated line reads
+        // `Normal/Normal` — the derive showing through, which is the bug class this file keeps
+        // catching.
+        assert!(!party.contains("Normal/Normal") && !party.contains("Water/Water"),
+                "the duplicate type slot is folded: {party}");
+    }
+
+    /// ⚠️ **The one turn whose entire question is "what am I short of" kept the answer behind a
+    /// read.** This module's own rule is that anything a read can answer from the situation belongs
+    /// in the situation; a mart turn broke it, so playing the turn properly cost a `read_bag` round
+    /// trip every time, and the deployed run bought nothing at a mart across 429 decisions. Zero is
+    /// printed rather than omitted: "you have none" is the row that decides a purchase.
+    #[test]
+    fn a_mart_row_says_how_many_you_already_have() {
+        use crate::pokemon::item::ItemId;
+        let mut fixture = crate::pokemon::integration_tests::fixture::TestFixture::new(
+            include_bytes!("../pokemon/data/at-celadon.bin"),
+            std::time::Duration::from_secs(10),
+            vec![],
+        );
+        let state = fixture.game_state();
+        let mut snapshot = ApiSnapshot::read(&fixture.api());
+        snapshot.mart_stock = vec![(ItemId::PokeBall, Some(200)), (ItemId::Potion, Some(300))];
+        for row in crate::llm::tools::mart_menu(&snapshot, &state) {
+            assert!(row.description.contains("you have"),
+                    "every row says the holding, zero included: {}", row.description);
         }
     }
 

@@ -210,30 +210,32 @@ impl TodoList {
     /// A plan is a sequence; re-sorting it silently is a way to make the model's own numbering stop
     /// meaning anything. [`MAX_ITEMS`] is what keeps the whole thing short now, so nothing has to be
     /// hidden to make it fit.
+    ///
+    /// ⚠️ **The rules moved out of here and into the system prompt, which is the cache-cheap half of
+    /// the same split.** Four of this preamble's five paragraphs restated `SYSTEM_PROMPT`'s "Your
+    /// plan, and keeping it" bullets almost verbatim — draft-not-commitment, the cap counting
+    /// finished items, the order being kept — and the two copies pull opposite ways at the prompt
+    /// cache: message 0 is prefilled once and cached for the whole run, while this message is
+    /// **fresh tokens** on every edit and every `PLAN_REFRESH_TURNS` refresh. Restating the rules in
+    /// the expensive copy was the wrong way round.
+    ///
+    /// ⚠️ **What stays is the part that is not a rule.** "Look at it now and ask whether it still
+    /// describes what you are doing" is the only line here whose value *is* its recency — it is a
+    /// prompt to act, addressed to the plan directly below it, and it is the entire reason this
+    /// message is re-appended to a model that demonstrably stopped reading its own list. The cap is
+    /// kept as a clause rather than a paragraph because it is the one rule the very next call can
+    /// break. Everything else is one line back in message 0.
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push_str(PLAN_HEADING);
         out.push_str(
             &format!(
-                "\n\nThis is the only thing you write that survives a context compaction. Keep a \
-                 short plan going at all times, even when you are unsure: the next few things you \
-                 mean to do, each with its reason. Nothing here is \
-                 a commitment — when an item turns out wrong or impossible, rewrite or delete it \
-                 with `todo_set` rather than leaving it, and complete items as you actually finish \
-                 them.\n\n\
-                 **It holds {MAX_ITEMS} items and finished ones count towards that.** So this is \
-                 not a diary of the run: when it is full, tick off or delete something before you \
-                 add. A finished item is worth keeping only while it still explains what you are \
-                 doing next; once it does not, drop it. What you have achieved is carried forward \
-                 by the summary of this conversation, not by this list.\n\n\
-                 **The order is yours and it is kept.** Items are shown in the order you put them \
-                 in, done or not, and a new one goes on the end — so put them in the order you mean \
-                 to do them, and if that order changes, rewrite them.\n\n\
-                 Look at it now and ask whether it still describes what you are doing. If something \
-                 on it is done, `todo_complete` it. If you have been told something you will need \
-                 later — an errand, a place, a name, what is blocking you — add it, with who told \
-                 you. If the list has not changed while you have been going round in circles, it is \
-                 the list that is wrong.\n\n\
+                "\n\nLook at it now and ask whether it still describes what you are doing. If \
+                 something on it is done, `todo_complete` it. If you have been told something you \
+                 will need later — an errand, a place, a name, what is blocking you — add it, with \
+                 who told you. If the list has not changed while you have been going round in \
+                 circles, it is the list that is wrong. It holds {MAX_ITEMS}, finished ones \
+                 included, so tick off or delete before you add.\n\n\
                  ⚠️ This replaces any earlier `## Your plan` message in this conversation. Older \
                  copies are left where they were so nothing above them has to be rewritten; the one \
                  nearest the end is always the current one.\n\n"

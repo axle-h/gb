@@ -171,3 +171,41 @@ mod test {
         assert_eq!(expected_damage(&alakazam(), PokemonMoveName::ThunderWave, &arcanine()), None); // thunder wave
     }
 }
+
+/// The combined type multiplier `move_name` gets against `defender`, both of the defender's types
+/// folded together: `0.0`, `0.25`, `0.5`, `1.0`, `2.0` or `4.0`.
+///
+/// ⚠️ **One function, three callers, on purpose.** The battle script reads it as `mv.effectiveness`,
+/// `tools::battle_menu` prints it on the `fight:` row, and both have to agree with each other and
+/// with `expected_damage`, which folds the same multiplier in internally. A model that installs a
+/// script off one set of numbers and then answers a fallback turn off another has two type charts to
+/// reconcile, which is the thing this exists to stop it needing at all.
+pub fn type_multiplier(move_name: PokemonMoveName, defender: &PokemonSummary) -> f64 {
+    let move_type = move_name.metadata().move_type;
+    defender.types.iter().fold(1.0, |total, &against| {
+        total
+            * match move_type.attack_effectiveness(against) {
+                MoveEffectiveness::Double => 2.0,
+                MoveEffectiveness::Base => 1.0,
+                MoveEffectiveness::Half => 0.5,
+                MoveEffectiveness::None => 0.0,
+            }
+    })
+}
+
+/// [`type_multiplier`] as the cartridge's own words for it, or `None` at 1.0 — where the game says
+/// nothing and so does this.
+///
+/// ⚠️ **A multiplier of 1.0 prints nothing rather than "normally effective".** The same argument as
+/// `prompt::ailment` and the `34 → 34` rule in `battle_report`: a phrase on every row for the
+/// commonest case is noise that buries the two rows where the number is the whole decision.
+pub fn effectiveness_phrase(multiplier: f64) -> Option<&'static str> {
+    match multiplier {
+        m if m == 0.0 => Some("no effect"),
+        m if m >= 4.0 => Some("doubly super effective"),
+        m if m >= 2.0 => Some("super effective"),
+        m if m <= 0.25 => Some("doubly resisted"),
+        m if m < 1.0 => Some("not very effective"),
+        _ => None,
+    }
+}

@@ -24,9 +24,18 @@ you can open.
 - Agent and policy debugging goes to stdout, so add `--nocapture` when you care about it.
 - **Run `full_playthrough` after every major work item and before pushing.** The leg tier is not a
   substitute; the `test-suite` skill has the command and the argument.
-- **No em dashes in anything a viewer or a model reads** — see the `Display` ⚠️ in the
-  `pokemon-agent` skill. The punctuation in *this* file, in the skills and in code comments is a
-  different audience.
+- **No em dashes in the strings the *agent* generates** — `AgentEvent`'s `Display`, `MetaTile`'s,
+  a `Notice`, `learnset::teach_refusal` — because those go to the page as well as to the model and
+  are assembled a fragment at a time, where a dash reads as punctuation the writer did not choose.
+  See the `Display` ⚠️ in the `pokemon-agent` skill.
+  ⚠️ **This is narrower than it used to be, because the wider version was never true.** It read
+  "anything a viewer or a model reads", and the prompt has always broken it: `prompt.rs` and
+  `tools.rs` carry ~280 between them, the separator in every action-menu row and every party line
+  is one, and `battle_report.rs` calls the em dash on `PKMN Squirtle Lv12 — 292/292 HP` "not
+  allowed anywhere a model or a viewer reads" while `battle_menu` renders that exact row on every
+  battle turn. Nothing enforced it and nothing ever could have. A rule the codebase breaks by
+  design is worse than no rule: it is one more thing to argue about in review. The punctuation in
+  *this* file, in the skills and in code comments is a different audience again.
 
 ## Where the rest of it lives
 

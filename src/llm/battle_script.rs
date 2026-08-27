@@ -54,7 +54,7 @@ use rhai::{Array, Dynamic, Engine, EvalAltResult, Map, Position};
 use crate::pokemon::GameState;
 use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::damage::expected_damage;
-use crate::pokemon::pokemon::{MoveEffectiveness, PokemonSummary};
+use crate::pokemon::pokemon::PokemonSummary;
 use crate::pokemon::policy::battle_options;
 use crate::run::files;
 
@@ -334,19 +334,6 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
 // Building the facts
 // ---------------------------------------------------------------------------------------------
 
-fn effectiveness(attacker: &PokemonSummary, name: crate::pokemon::move_name::PokemonMoveName, defender: &PokemonSummary) -> f64 {
-    let move_type = name.metadata().move_type;
-    defender.types.iter().fold(1.0, |total, &against| {
-        total
-            * match move_type.attack_effectiveness(against) {
-                MoveEffectiveness::Double => 2.0,
-                MoveEffectiveness::Base => 1.0,
-                MoveEffectiveness::Half => 0.5,
-                MoveEffectiveness::None => 0.0,
-            }
-    })
-}
-
 /// One move, as the script sees it.
 ///
 /// ⚠️ **`damage` and `effectiveness` are the whole reason this is affordable to write.** Without
@@ -368,7 +355,7 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
     map.insert("pp".into(), Dynamic::from(battle_move.pp as i64));
     map.insert("max_pp".into(), Dynamic::from(metadata.pp as i64));
     map.insert("damage".into(), Dynamic::from(expected_damage(me, battle_move.name, foe).unwrap_or(0) as i64));
-    map.insert("effectiveness".into(), Dynamic::from(effectiveness(me, battle_move.name, foe)));
+    map.insert("effectiveness".into(), Dynamic::from(crate::pokemon::damage::type_multiplier(battle_move.name, foe)));
     map.insert("usable".into(), Dynamic::from(battle_move.pp > 0 && !disabled));
     map
 }

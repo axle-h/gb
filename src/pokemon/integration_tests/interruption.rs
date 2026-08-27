@@ -191,11 +191,11 @@ impl Policy for SlowPolicy {
         }
     }
 
-    fn pick_move_to_forget(&mut self, current: &[PokemonMove], new_move: PokemonMoveName)
+    fn pick_move_to_forget(&mut self, slot: usize, current: &[PokemonMove], new_move: PokemonMoveName)
         -> Option<Option<usize>>
     {
         match self.advance(Question::ForgetMove, "a forget-move prompt".to_string()) {
-            true => self.inner.pick_move_to_forget(current, new_move),
+            true => self.inner.pick_move_to_forget(slot, current, new_move),
             false => None,
         }
     }

@@ -539,9 +539,9 @@ fn probe_scripted_battles() {
             -> Option<Option<String>> { self.inner.pick_nickname(species) }
         fn pick_mart_purchase(&mut self, state: &GameState)
             -> Option<Option<crate::pokemon::bag::BagItem>> { self.inner.pick_mart_purchase(state) }
-        fn pick_move_to_forget(&mut self, current: &[crate::pokemon::move_name::PokemonMove],
+        fn pick_move_to_forget(&mut self, slot: usize, current: &[crate::pokemon::move_name::PokemonMove],
                                new: crate::pokemon::move_name::PokemonMoveName)
-            -> Option<Option<usize>> { self.inner.pick_move_to_forget(current, new) }
+            -> Option<Option<usize>> { self.inner.pick_move_to_forget(slot, current, new) }
         fn pick_field_move(&mut self, state: &GameState)
             -> Option<crate::pokemon::policy::FieldMove> { self.inner.pick_field_move(state) }
         fn is_exhausted(&self) -> bool { self.inner.is_exhausted() }

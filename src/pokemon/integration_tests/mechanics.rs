@@ -777,11 +777,11 @@ impl crate::pokemon::policy::Policy for RecordingPolicy {
     fn pick_mart_purchase(&mut self, state: &GameState) -> Option<Option<crate::pokemon::bag::BagItem>> {
         self.inner.pick_mart_purchase(state)
     }
-    fn pick_move_to_forget(&mut self, moves: &[crate::pokemon::move_name::PokemonMove],
+    fn pick_move_to_forget(&mut self, slot: usize, moves: &[crate::pokemon::move_name::PokemonMove],
                            new_move: crate::pokemon::move_name::PokemonMoveName)
         -> Option<Option<usize>>
     {
-        self.inner.pick_move_to_forget(moves, new_move)
+        self.inner.pick_move_to_forget(slot, moves, new_move)
     }
     fn pick_field_move(&mut self, state: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
         self.inner.pick_field_move(state)
