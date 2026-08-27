@@ -183,6 +183,17 @@ pub enum UiEventBody {
     /// on a timer, and replayed by `/api/history`, so a page opened an hour in shows the current
     /// list — the fold keeps the latest and discards every earlier one.
     Plan { items: Vec<TodoView> },
+    /// The model's battle script, whenever it changes — the program deciding its battle turns.
+    ///
+    /// ⚠️ **Send-on-change, like [`Self::Plan`], and for a stronger version of the same reason.** A
+    /// plan moves a few times an hour; a script is written once and then decides hundreds of battles
+    /// without another word, so the interval between two of these events can be the whole run. That
+    /// is what [`Published::latest_battle_script`] is for: a page opened an hour in still gets it.
+    ///
+    /// The source is carried whole rather than as a flag saying there is one, because the panel's
+    /// entire purpose is reading it — and it is bounded by `battle_script::MAX_SOURCE` (6 kB), which
+    /// a page pays once per change rather than per heartbeat.
+    BattleScript { source: Option<String>, armed: bool, last_failure: Option<String> },
     /// §9 — the history was compacted. `before` and `after` are tokens, on the calibrated scale
     /// `llm::accounting` describes.
     Compacted {
@@ -421,6 +432,10 @@ pub struct Published {
     /// The plan is *absolutely* stated — every event carries the whole list — so replaying the last
     /// one is complete, and a duplicate is idempotent at the client.
     latest_plan: RwLock<Option<UiEvent>>,
+    /// The battle script, as last published, for a client that has just connected — the same cell as
+    /// [`Self::latest_plan`] and needed more badly. A script is set once and then goes quiet for the
+    /// rest of the run, so "wait for the next one" here means an empty panel for ever.
+    latest_battle_script: RwLock<Option<UiEvent>>,
     /// The last few pictures a tool answered with, keyed by the seq of the `ToolResult` naming them.
     ///
     /// ⚠️ **Bounded, and a miss is an expected answer rather than an error.** A map render is a
@@ -465,6 +480,7 @@ impl Published {
             save_state: RwLock::new(None),
             latest_status: RwLock::new(None),
             latest_plan: RwLock::new(None),
+            latest_battle_script: RwLock::new(None),
             tool_images: RwLock::new(VecDeque::new()),
             throttled_until: AtomicU64::new(0),
             usage: RwLock::new(None),
@@ -571,6 +587,9 @@ impl Published {
         if matches!(event.body, UiEventBody::Plan { .. }) {
             *self.latest_plan.write().expect("plan lock poisoned") = Some(event.clone());
         }
+        if matches!(event.body, UiEventBody::BattleScript { .. }) {
+            *self.latest_battle_script.write().expect("battle script lock poisoned") = Some(event.clone());
+        }
         let _ = self.events.send(event);
         seq
     }
@@ -641,16 +660,18 @@ impl Published {
     /// complete in themselves, and the browser folds each into one piece of state rather than
     /// appending it to a list.
     ///
-    /// ⚠️ **Two cells, and the plan is the one that is easy to forget.** Both are published on
-    /// change; the heartbeat changes every couple of seconds and the plan can go an hour, so the
-    /// plan is the one where "wait for the next one" means an empty panel for the length of a
-    /// viewing. Anything else that becomes send-on-change belongs here too.
+    /// ⚠️ **Three cells, and the heartbeat is the only one that is hard to miss.** All three are
+    /// published on change; the heartbeat changes every couple of seconds, the plan can go an hour
+    /// and the battle script can go the whole run, so for the latter two "wait for the next one"
+    /// means an empty panel for the length of a viewing. Anything else that becomes send-on-change
+    /// belongs here too.
     ///
     /// Returned oldest-first so the page applies them in the order they happened.
     pub fn join_events(&self) -> (broadcast::Receiver<UiEvent>, Vec<UiEvent>) {
         let receiver = self.events.subscribe();
         let mut opening: Vec<UiEvent> = [
             self.latest_plan.read().expect("plan lock poisoned").clone(),
+            self.latest_battle_script.read().expect("battle script lock poisoned").clone(),
             self.latest_status.read().expect("status lock poisoned").clone(),
         ]
         .into_iter()
@@ -1026,6 +1047,54 @@ mod tests {
         });
         assert_eq!(plan.map(Vec::len), Some(2), "the latest list, not an accumulation of every one");
         assert!(opening.windows(2).all(|pair| pair[0].seq < pair[1].seq), "oldest first: {opening:#?}");
+    }
+
+    /// ⚠️ **The same hole as the plan's, one order of magnitude worse.** A plan moves a few times an
+    /// hour and would come back on its own; a battle script is written once and then decides every
+    /// battle for the rest of the run without another event, so for a page opened after that one
+    /// turn the cell is the *only* route it will ever have.
+    #[test]
+    fn a_joiner_is_handed_the_battle_script_as_well() {
+        let published = Published::new();
+        let armed = |source: &str| UiEventBody::BattleScript {
+            source: Some(source.to_string()),
+            armed: true,
+            last_failure: None,
+        };
+
+        published.publish_event(armed("battle.fight(battle.best_move);"));
+        // A run's worth of noise on top, which is what a `MAX_BACKLOG` window walks past in minutes.
+        for _ in 0..50 {
+            published.publish_event(UiEventBody::AssistantReasoning { turn: 1, text: "…".into() });
+        }
+        published.publish_event(UiEventBody::Plan { items: vec![TodoView {
+            id: 1,
+            text: "get the Boulder Badge".to_string(),
+            done: false,
+        }] });
+        published.publish_status(snapshot("wait", 100));
+
+        let (_receiver, opening) = published.join_events();
+        assert_eq!(opening.len(), 3, "the script, the plan and the heartbeat: {opening:#?}");
+        assert!(opening.windows(2).all(|pair| pair[0].seq < pair[1].seq), "oldest first: {opening:#?}");
+
+        // Absolutely stated, exactly as the plan is: the newest replaces the last rather than adding
+        // to it, so a disarm is delivered to a joiner as the whole current state.
+        published.publish_event(UiEventBody::BattleScript {
+            source: Some("battle.fight(battle.best_move);".to_string()),
+            armed: false,
+            last_failure: Some("it named a move the Pokémon does not know".to_string()),
+        });
+        let (_receiver, opening) = published.join_events();
+        let script = opening.iter().find_map(|event| match &event.body {
+            UiEventBody::BattleScript { armed, last_failure, .. } => Some((*armed, last_failure.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            script,
+            Some((false, Some("it named a move the Pokémon does not know".to_string()))),
+            "the latest state, not the first one it was armed with",
+        );
     }
 
     /// A picture is referenced by seq and fetched separately, so the ring is what decides whether a

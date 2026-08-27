@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { RunStatus, UsageView } from './api';
+import { BattleScriptPanel } from './components/BattleScriptPanel';
 import { Conversation } from './components/Conversation';
 import { Leaderboard } from './components/Leaderboard';
 import { PlanPanel } from './components/PlanPanel';
@@ -8,19 +9,25 @@ import { SoundButton } from './components/SoundButton';
 import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 
-/** The phone's three tabs: the log, the trainer card and party, the model's plan. */
-type PaneTab = 'log' | 'status' | 'plan';
+/**
+ * The phone's tabs: the log, the trainer card and party, the model's plan, and the program deciding
+ * its battles. The last two are conditional — see `pane` below.
+ */
+type PaneTab = 'log' | 'status' | 'plan' | 'script';
 
 export function App() {
-  const { status, entries, connection, usage, run, plan, speed } = useEventStream();
+  const { status, entries, connection, usage, run, plan, battleScript, speed } = useEventStream();
   // Which pane a phone is showing. From 640px up the stylesheet hides the tab bar and ignores the
   // tab classes, so this state is inert on a desk. The log is the default because it is the thing
   // the page is for.
   const [tab, setTab] = useState<PaneTab>('log');
-  // The Plan tab is only offered while there is a plan (PlanPanel renders nothing without one, and
-  // only an LLM ever has one), so a selection that outlives its pane falls back to the log rather
-  // than to an empty column.
-  const pane: PaneTab = tab === 'plan' && plan.length === 0 ? 'log' : tab;
+  // The Plan and Script tabs are only offered while there is something in them — neither panel draws
+  // anything otherwise, and only an LLM ever has either — so a selection that outlives its pane falls
+  // back to the log rather than to an empty column. Both can vanish under a running page: a
+  // `POST /api/new-run` clears the plan and the script together.
+  const scripted = battleScript?.source != null;
+  const chosen: PaneTab = tab === 'script' && !scripted ? 'log' : tab;
+  const pane: PaneTab = chosen === 'plan' && plan.length === 0 ? 'log' : chosen;
   // The leaderboard's only cue that it is stale. A win is rare enough that this counter changes at
   // most once per run, and the log is already carrying the event that says so.
   const wins = useMemo(
@@ -107,6 +114,11 @@ export function App() {
                 Plan
               </button>
             )}
+            {scripted && (
+              <button className={pane === 'script' ? 'on' : ''} onClick={() => setTab('script')}>
+                Script
+              </button>
+            )}
           </nav>
           <StatusPanel status={status} speed={speed} />
           {/* Phone-only: what the header gave up, under the trainer card. */}
@@ -123,6 +135,11 @@ export function App() {
           {/* Under the game rather than beside the conversation: it changes a few times an hour and
               is read at a glance, where the log is read as it scrolls. */}
           <PlanPanel plan={plan} />
+          {/* Under the plan, and closed: the plan is what the run is trying to do and moves every few
+              turns, this is how it fights and moves a handful of times a playthrough. On a phone it
+              is a tab of its own, where the pane it fills already answers the question the chevron
+              asks. */}
+          <BattleScriptPanel script={battleScript} alwaysOpen={pane === 'script'} />
         </section>
         <section className="right">
           <Conversation entries={entries} visible={pane === 'log'} />

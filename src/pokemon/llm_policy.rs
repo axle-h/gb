@@ -2928,6 +2928,48 @@ mod tests {
         assert!(results[0].starts_with("ok"), "and it armed: {}", results[0]);
     }
 
+    /// The page is told what is fighting for the run, once, and then left alone.
+    ///
+    /// ⚠️ **Both halves matter and the second one is the easy one to lose.** A scripted battle
+    /// publishes nothing at all — no turn, no decision, no request — so without this event a viewer
+    /// has no way of telling a run that is playing well from one a program is playing for. But the
+    /// script is up to 6 kB and does not change from one turn to the next, so publishing it beside
+    /// the plan on every turn would put a copy of it into the transcript and past a joiner's backlog
+    /// hundreds of times over. `Worker::publish_battle_script` is the dedupe, and this is what says
+    /// it is still there.
+    #[test]
+    fn the_page_is_told_about_the_script_once_and_not_once_a_turn() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let walk = format!(r#"{{"id":"{id}"}}"#);
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            replies.push_back(calls(&[
+                ("set_battle_script", &serde_json::json!({ "script": SCRIPT }).to_string()),
+                ("choose_action", &walk),
+            ]));
+            for _ in 0..3 {
+                replies.push_back(calls(&[("choose_action", &walk)]));
+            }
+        }
+        // The turn that arms it, then three that do not touch it.
+        for turn in 0..4 {
+            assert!(rig.pump_overworld(&mut policy).is_some(), "overworld turn {turn} decided nothing");
+        }
+
+        let published: Vec<(Option<String>, bool)> = rig
+            .events
+            .try_iter()
+            .filter_map(|event| match event.body {
+                UiEventBody::BattleScript { source, armed, .. } => Some((source, armed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(published.len(), 1, "one event for one script, not one per turn: {published:#?}");
+        assert_eq!(published[0].0.as_deref(), Some(SCRIPT), "and it carries the source, not a flag");
+        assert!(published[0].1, "armed, which is the fact the panel is drawn from");
+    }
+
     /// **The whole feature, in one number.** A battle is fought from beginning to end and the
     /// endpoint is never called: the request count after the battle is the request count before it.
     ///

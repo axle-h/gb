@@ -1006,6 +1006,168 @@ header .trophy:hover {
   text-decoration-color: color-mix(in srgb, var(--dim) 60%, transparent);
 }
 
+/* ── The battle script ────────────────────────────────────────────────────────────────────────── */
+
+/* Same chrome as the plan above it, for the reason the plan shares it with the status block: these
+   are three things about the run rather than three kinds of thing. */
+.battle-script {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.script-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.script-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* The one live fact on a panel that is otherwise a frozen copy of a file: whether the battles going
+   past are being decided here or one paid request at a time. So it is a chip rather than a word. */
+.script-state {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.script-state.armed {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.script-state.disarmed {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+}
+
+.script-size {
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.script-toggle {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.script-toggle:hover {
+  color: var(--text);
+}
+
+.script-body {
+  margin-top: 8px;
+}
+
+/* Why it stopped, above the code, because that is what a reader opens a disarmed script to find. */
+.script-failure {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
+.script-failure.quiet {
+  color: var(--dim);
+}
+
+.script-failure .mark {
+  color: var(--bad);
+}
+
+/* ⚠️ **The scroll is on the box and the wrapping is off.** A script is code: a line broken at the
+   panel's width to avoid a horizontal scrollbar puts the second half of a condition under a line
+   number that does not own it, which is exactly the confusion the numbers are there to remove. So
+   long lines scroll sideways, and the height is capped so a 200-line script cannot push the log off
+   a laptop screen. */
+.code {
+  max-height: 40vh;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: line;
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+/* ⚠️ **`max-content`, and without it the numbers scroll away.** A line is a flex container, so by
+   default its *box* is the width of the panel and only its contents overflow — which means at
+   `scrollLeft: 400` the box itself has left the scrollport entirely, taking the sticky gutter with
+   it, because sticky is clamped to its containing block and that block is no longer on screen. The
+   line has to be as wide as the line, and `min-width: 100%` is what keeps a short one filling the
+   panel rather than ending where its text does. */
+.code li {
+  counter-increment: line;
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+  white-space: pre;
+}
+
+/* The number is drawn rather than in the markup, so selecting the code and copying it gets the code
+   and not a column of numbers down the left of it.
+
+   ⚠️ **The 12px is padding rather than a margin, and that is the same bug as `max-content` above one
+   step on.** A stuck element overlays what scrolls under it, and a margin is outside the background:
+   the code slid up against the digits with nothing between them. Padding puts the gap inside the
+   thing that is painted. `content-box` because `* { box-sizing: border-box }` would otherwise take
+   the padding out of the 3ch and leave the numbers no room. */
+.code li::before {
+  content: counter(line);
+  position: sticky;
+  left: 0;
+  flex: none;
+  box-sizing: content-box;
+  width: 3ch;
+  padding-right: 12px;
+  background: var(--panel);
+  color: color-mix(in srgb, var(--dim) 55%, transparent);
+  text-align: right;
+  user-select: none;
+}
+
+/* Five colours and no more. The page has one font and a palette of four, so the highlighting is
+   built out of that palette rather than a syntax theme borrowed from an editor: comments recede,
+   strings and numbers are the accent, keywords and the sandbox's own names are the two that a reader
+   scans for. */
+.code .com {
+  color: color-mix(in srgb, var(--dim) 85%, transparent);
+  font-style: italic;
+}
+
+.code .str,
+.code .num {
+  color: var(--accent);
+}
+
+.code .kw {
+  color: var(--warn);
+}
+
+/* `battle`, `damage`, `effectiveness`, `print` — the handful of names the sandbox provides. */
+.code .api {
+  color: #7fb2e5;
+}
+
+.code .prop,
+.code .call {
+  color: #c9a6e0;
+}
+
 @media (width < 640px) {
   :root {
     /* The log is a wall of monospace read at arm's length on a handset. 13px is a desk size. */
@@ -1106,14 +1268,21 @@ header .trophy:hover {
   main.tab-log .status,
   main.tab-log .about,
   main.tab-log .plan,
+  main.tab-log .battle-script,
   main.tab-status .plan,
+  main.tab-status .battle-script,
   main.tab-plan .status,
-  main.tab-plan .about {
+  main.tab-plan .about,
+  main.tab-plan .battle-script,
+  main.tab-script .status,
+  main.tab-script .about,
+  main.tab-script .plan {
     display: none;
   }
 
   main.tab-status .right,
-  main.tab-plan .right {
+  main.tab-plan .right,
+  main.tab-script .right {
     display: none;
   }
 
@@ -1122,17 +1291,20 @@ header .trophy:hover {
      column plus `flex: 1` on the pane is what keeps the screen and the tab bar fixed while the
      pane's own `overflow-y` does all the scrolling. */
   main.tab-status,
-  main.tab-plan {
+  main.tab-plan,
+  main.tab-script {
     grid-template-rows: minmax(0, 1fr);
   }
 
   main.tab-status .left,
-  main.tab-plan .left {
+  main.tab-plan .left,
+  main.tab-script .left {
     overflow: hidden;
   }
 
   main.tab-status .status,
-  main.tab-plan .plan {
+  main.tab-plan .plan,
+  main.tab-script .battle-script {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
@@ -1209,6 +1381,19 @@ header .trophy:hover {
      it the column and the scrollbar, and a dozen items push nothing off the page. */
   .plan {
     padding: 8px 10px;
+  }
+
+  /* On a phone the script is a tab of its own, so the pane gives it the height and the scrollbar and
+     a second capped, scrolling box inside it would be one nested scroll too many — the shape the
+     tabs were introduced to get rid of. The sideways scroll stays: long lines are still long. */
+  .battle-script {
+    padding: 8px 10px;
+  }
+
+  .code {
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: visible;
   }
 
   /* ⚠️ **The log stops being a grid.** Three columns of 8ch + 10ch + the rest leaves under half the

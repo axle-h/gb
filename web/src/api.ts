@@ -119,6 +119,23 @@ export interface TodoView {
   done: boolean;
 }
 
+/**
+ * `published::UiEventBody::BattleScript` — the program deciding the run's battle turns.
+ *
+ * ⚠️ **`armed` and "there is a source" are different questions and the panel has to show both.** A
+ * script that failed once is **kept and disarmed**: the source is still there because it is the
+ * thing the model has to edit, and `last_failure` is why it stopped. Rendering a disarmed script as
+ * though it were running would be the page saying the opposite of what is happening.
+ */
+export interface BattleScriptView {
+  /** The Rhai source, verbatim, up to `battle_script::MAX_SOURCE` (6 kB). `null` when there is none. */
+  source: string | null;
+  /** Whether the policy is actually consulting it this turn. */
+  armed: boolean;
+  /** Why it was disarmed, when it was. `null` for a script that has never failed. */
+  last_failure: string | null;
+}
+
 /** `published::UsageView` — context occupancy after a turn, and the run's bill so far. */
 export interface UsageView {
   /** Prompt + completion of the most recent response: how full the window was, last time we knew. */
@@ -209,6 +226,12 @@ export type UiEvent = At &
    * one is discarded, including the ones `/api/history` replays into a page that just loaded.
    */
   | { seq: number; type: 'plan'; items: TodoView[] }
+  /**
+   * The battle script, whenever it changes — the same absolutely-stated, newest-wins shape as
+   * `plan`, and published far less often: a model writes one and then fights hundreds of battles
+   * without another word, which is why the server holds the last one for a page that joins later.
+   */
+  | ({ seq: number; type: 'battle_script' } & BattleScriptView)
   | {
       seq: number;
       type: 'compacted';
