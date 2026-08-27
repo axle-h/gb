@@ -18,6 +18,7 @@
 //! The contract is restated at the bottom of every turn (§7.5's second line of defence), which costs
 //! two lines of tokens and makes the rule the most recent instruction in the context every time.
 
+use crate::llm::battle_script::ScriptState;
 use crate::llm::tools::{DecisionKind, MenuItem, terminal_names};
 use crate::pokemon::GameState;
 use crate::pokemon::agent::AgentEvent;
@@ -372,6 +373,15 @@ pub enum TurnContext<'a> {
     /// Carried rather than read from the state for the same reason the two above are — nothing but
     /// the agent knows it.
     Stuck { agent_state: &'a str, stuck_for: std::time::Duration },
+    /// Whether a script is deciding battle turns, on a turn it did not decide. Only the policy
+    /// knows: the file is the worker's and `GameState` has never heard of it.
+    ///
+    /// ⚠️ **`TurnContext::None` is the fourth state and means "a note above already said it".** A
+    /// script that calls `battle.ask()` or fails writes a note carrying what it printed, prepended
+    /// to this whole situation, and that note is both more specific and more useful than a state
+    /// line — so the two are alternatives rather than a pair, and the caller picks. Repeating it
+    /// would be the same fact twice on the turn that is already the expensive one.
+    Battle { script: ScriptState },
 }
 
 pub fn situation(
@@ -447,6 +457,42 @@ pub fn situation(
                 );
             }
         }
+        // ⚠️ **At the top rather than as a footnote under `### Battle`, on the one piece of
+        // evidence this repo has about where a nudge lands.** `read_guide` and `set_battle_script`
+        // were both argued for in the system prompt at length and both were called zero times in 55
+        // overworld turns; what moved `read_guide` was a concrete *when*, put at the top of the turn
+        // ahead of the prose making the case (7d521e6). The system prompt is message 0 and is the
+        // least recent thing in every request by hundreds of turns, so an argument living only there
+        // is one the model reads once.
+        TurnContext::Battle { script } => out.push_str(match script {
+            // ⚠️ **The deployed run of 2026-08-27: 207 battle turns, 22.3 M prompt tokens, and
+            // `set_battle_script` never called once.** Not weighed and rejected — never reached, the
+            // same shape `read_guide` was in. This is the only line in the run that says, on the
+            // turn actually being charged for, that the charge is optional.
+            ScriptState::Unset => {
+                "⚠️ No battle script is set, so this turn costs you a request exactly like every \
+                 other battle turn: read `get_battle_script_docs` and call `set_battle_script` \
+                 on your next overworld turn, and the routine ones stop being asked at all.\n\n"
+            }
+            // The reason is deliberately not repeated here. It was reported in full by the note on
+            // the turn that failed, it is 6 kB away in `read_battle_script`, and a battle turn is
+            // not where a script gets fixed — the tools to fix it are offered in the overworld and
+            // nowhere else, this turn included.
+            ScriptState::Disarmed => {
+                "⚠️ Your battle script failed and is no longer deciding your battle turns, so they \
+                 are costing you a request each again: `read_battle_script` on your next \
+                 overworld turn to see it and the reason it stopped, then `set_battle_script` \
+                 to arm a fixed one.\n\n"
+            }
+            // Armed, consulted or not, and it did not answer — a Safari battle, which is never
+            // scripted, or a turn the model itself asked to `wait` through. Without this the run
+            // looks to the model exactly like a script that has quietly stopped working, which is a
+            // false alarm worth a request to avoid.
+            ScriptState::Armed => {
+                "Your battle script is armed and deciding your battle turns, but it did not decide \
+                 this one.\n\n"
+            }
+        }),
         // **W9 / §14.** Said plainly, including that it is the agent's fault: a model told only "you
         // are stuck" tends to reason about the *game* being stuck and go looking for a puzzle.
         TurnContext::Stuck { agent_state, stuck_for } => out.push_str(&format!(
@@ -927,6 +973,10 @@ mod tests {
                     agent_state: "text→ReadingTextBox",
                     stuck_for: Duration::from_secs(300),
                 },
+                // The deployed shape rather than the flattering one: every run so far has reached
+                // its battle turns with no script at all, and this is the turn the probe is read to
+                // find out what that costs.
+                DecisionKind::Battle => TurnContext::Battle { script: ScriptState::Unset },
                 _ => TurnContext::None,
             };
             let menu = match kind {

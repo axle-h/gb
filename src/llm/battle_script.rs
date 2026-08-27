@@ -720,6 +720,23 @@ impl BattleScript {
         self.saved.last_failure.as_deref()
     }
 
+    /// What [`Live`] should hold: the source only while the script is armed, since the policy runs
+    /// whatever it is given.
+    pub fn live_source(&self) -> Option<String> {
+        self.armed().then(|| self.saved.source.clone()).flatten()
+    }
+
+    /// The one line a battle turn says about the script. Three states rather than two, because
+    /// "you have never written one" and "yours broke" want opposite sentences and the difference is
+    /// invisible from the source alone: [`Live::failed`] drops the source the moment it fails.
+    pub fn state(&self) -> ScriptState {
+        match (self.armed(), self.saved.source.is_some() || self.saved.last_failure.is_some()) {
+            (true, _) => ScriptState::Armed,
+            (false, true) => ScriptState::Disarmed,
+            (false, false) => ScriptState::Unset,
+        }
+    }
+
     /// `set_battle_script`. Validates before arming, and the answer is the validation table.
     pub fn set(&mut self, source: Option<&str>) -> String {
         let Some(source) = source.map(str::trim).filter(|source| !source.is_empty()) else {
@@ -789,6 +806,30 @@ impl BattleScript {
 // The cell between the two threads
 // ---------------------------------------------------------------------------------------------
 
+/// Whether a script is deciding battle turns, as the battle turn reports it.
+///
+/// ⚠️ **This is a fact about the run, not about this turn, and it is why the state is carried
+/// rather than inferred.** A failure is reported once, by the note [`LlmPolicy`] writes on the turn
+/// that caused it; every battle turn after that one said nothing at all, so a run whose script broke
+/// on Route 3 spent the rest of its life paying for battle turns with no idea it had stopped being
+/// free. The deployed run of 2026-08-27 is the other half of the same hole: **207 battle turns, and
+/// `set_battle_script` was never called once** — nothing on a battle turn had ever mentioned that a
+/// script was an option, and the argument for one lives in the system prompt, which is the least
+/// recent thing in every request.
+///
+/// [`LlmPolicy`]: crate::pokemon::llm_policy::LlmPolicy
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScriptState {
+    /// No script has ever been set, or the model dropped the one it had.
+    #[default]
+    Unset,
+    /// Armed and deciding battle turns — so a turn carrying this is one it did not decide.
+    Armed,
+    /// One was written and has stopped deciding turns. The source is kept, because it is the thing
+    /// the model has to edit; `read_battle_script` says why it stopped.
+    Disarmed,
+}
+
 /// The armed script, shared between the worker thread that writes it and the emulator thread that
 /// runs it.
 ///
@@ -809,15 +850,17 @@ pub struct Live {
 #[derive(Debug, Default)]
 struct LiveInner {
     source: Option<String>,
+    state: ScriptState,
     failure: Option<String>,
 }
 
 impl Live {
     /// Point the policy at a script, or at none. Called by the worker after a successful
     /// `set_battle_script` and on a restart.
-    pub fn arm(&self, source: Option<String>) {
+    pub fn arm(&self, source: Option<String>, state: ScriptState) {
         let mut inner = self.locked();
         inner.source = source;
+        inner.state = state;
         inner.failure = None;
     }
 
@@ -826,12 +869,20 @@ impl Live {
         self.locked().source.clone()
     }
 
+    /// What the battle turn should say about it. Survives [`Self::take_failure`], which the worker
+    /// calls to persist the reason — the *reason* is spent by being reported once, and the fact that
+    /// there is a broken script to go and fix is not.
+    pub fn state(&self) -> ScriptState {
+        self.locked().state
+    }
+
     /// The policy found the script wanting. It stops deciding turns immediately — the source is
     /// dropped here rather than flagged, so nothing can consult it again before the worker has
     /// caught up — and `why` is left for the worker to persist.
     pub fn failed(&self, why: &str) {
         let mut inner = self.locked();
         inner.source = None;
+        inner.state = ScriptState::Disarmed;
         inner.failure = Some(why.to_string());
     }
 
