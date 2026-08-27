@@ -299,6 +299,42 @@ no completion, no round trip, no latency. The measurement it exists for: the 202
 of them `run` and none a Poké Ball**, each one a full prefill of a ~50 k-token history. One scripted wild encounter pays for
 the whole feature's 1372 bytes of Overworld tool array several hundred times over.
 
+⚠️ **Every run starts on `battle_script::DEFAULT`, and the empty state is gone.** That script calls
+`battle.ask()` and nothing else, so a run that never touches it behaves exactly as it did before —
+the reason for having one is that the model is asked to *edit* a file rather than to invent one, and
+that `read_battle_script` can no longer spend a round trip answering "there is no battle script".
+The evidence it is aimed at: two deployed runs called `set_battle_script` **zero** times and
+`get_battle_script_docs` **zero** times, 207 battle turns and 22.3 M prompt tokens in the second.
+Four ⚠️s, and the first two are the ones that would silently undo it:
+
+- ⚠️ **`BattleScript::armed()` is false for the default, and that one line is where the rule lives.**
+  The file's own `armed` flag is true — there is nothing else for it to say — but the default decides
+  nothing, so every reader downstream (`live_source`, the turn's `ScriptState`, `read`, the page's
+  `armed` chip) would otherwise tell the model and the viewer that the battles going past are free
+  while the run pays a full prefill for each one. Wrong in the one direction the nudge cannot afford.
+- ⚠️ **The default never reaches `Live` and is never evaluated.** `live_source` withholds it, so the
+  emulator thread's battle path is byte-for-byte what it was. Running it would build an engine per
+  battle turn, and — the half that matters — `run_battle_script`'s `Ask` arm sets `LlmPolicy::note`,
+  which `pick_battle_action` prefers over `TurnContext::Battle`; a default that ran would therefore
+  suppress the very line it exists to keep showing, on every battle turn of every run.
+- ⚠️ **`ScriptState::Unset` is now `Unedited`**, computed as `(armed, is_default)` rather than from
+  whether a source exists. A variant still called `Unset` while every run has one is exactly the
+  drift that costs the next reader an hour.
+- ⚠️ **`is_default` is on the SSE wire rather than inferred by the page.** The default is a real
+  source that is not armed, which is byte-identical to a script the model wrote and never armed; the
+  server knows which, and it costs one boolean a handful of times per playthrough. The chip is
+  three-way — `default` is a fact, not a fault, so it is neither the accent nor the warning colour.
+- ⚠️ **`BattleScript::open` normalises a missing source onto the default**, which is what carries a
+  run written before this across the change: `{"source": null}` reads back as `None` through the
+  per-field `#[serde(default)]`. A *disarmed* script is left alone — it has its own source and its
+  own reason, and both are what the model has to work from.
+- ⚠️ **`set_battle_script` with no `script` goes back to the default, not to nothing.** Behaviour is
+  identical, so nothing is lost, and the "there is no script" answer stays unreachable.
+- ⚠️ **`published_script` is seeded `None` and used to be seeded with the empty script.** That seed
+  suppressed a pointless `source: null` on the first turn of a run that would never write one. There
+  is no such run now, and the page *wants* the first event: `default` is the live fact that this
+  run's battles cost a request each.
+
 ⚠️ **The script filters `policy::battle_options`; it never invents an action.** A `Choice` is symbolic — a name or a slot —
 and `battle_script::resolve` matches it against the same list `RandomPolicy`, `DeterministicPolicy` and `tools::battle_menu`
 all use. Anything not on it is a **failure with a named reason**, never a dropped turn: the same rule `tools::classify`

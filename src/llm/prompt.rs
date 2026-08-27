@@ -469,10 +469,18 @@ pub fn situation(
             // `set_battle_script` never called once.** Not weighed and rejected — never reached, the
             // same shape `read_guide` was in. This is the only line in the run that says, on the
             // turn actually being charged for, that the charge is optional.
-            ScriptState::Unset => {
-                "⚠️ No battle script is set, so this turn costs you a request exactly like every \
-                 other battle turn: read `get_battle_script_docs` and call `set_battle_script` \
-                 on your next overworld turn, and the routine ones stop being asked at all.\n\n"
+            //
+            // ⚠️ **It names a script that exists rather than one to invent.** Every run now starts on
+            // `battle_script::DEFAULT`, which asks every turn, so what is being asked for here is an
+            // edit to a file the model can open in one call rather than a blank page. That is the
+            // whole of why the default is worth having, and why `read_battle_script` is named first.
+            ScriptState::Unedited => {
+                "⚠️ Your battle script is still the default one, which decides nothing and hands \
+                 every battle straight back to you, so this turn costs a request exactly like \
+                 every other battle turn. On your next overworld turn: `read_battle_script` to \
+                 see it, `get_battle_script_docs` for what a script can do, then \
+                 `set_battle_script` to replace it, and the routine battles stop being asked at \
+                 all.\n\n"
             }
             // The reason is deliberately not repeated here. It was reported in full by the note on
             // the turn that failed, it is 6 kB away in `read_battle_script`, and a battle turn is
@@ -976,7 +984,7 @@ mod tests {
                 // The deployed shape rather than the flattering one: every run so far has reached
                 // its battle turns with no script at all, and this is the turn the probe is read to
                 // find out what that costs.
-                DecisionKind::Battle => TurnContext::Battle { script: ScriptState::Unset },
+                DecisionKind::Battle => TurnContext::Battle { script: ScriptState::Unedited },
                 _ => TurnContext::None,
             };
             let menu = match kind {

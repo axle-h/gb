@@ -76,6 +76,29 @@ pub const DOCS: &str = include_str!("battle_script/DOCS.md");
 /// model asks for it and used here as a test.
 pub const DETERMINISTIC: &str = include_str!("battle_script/DETERMINISTIC.rhai");
 
+/// The script every run starts with, and the one a `set_battle_script` with no `script` goes back
+/// to. It calls `battle.ask()` and nothing else, so it decides no turns and the run behaves exactly
+/// as it did when the answer to "is there a script" was "no".
+///
+/// ⚠️ **The point is that the artefact exists, not that it does anything.** Two deployed runs never
+/// called `set_battle_script` once — 207 battle turns and 22.3 M prompt tokens in the run of
+/// 2026-08-27 — and `get_battle_script_docs` was never called either, so this was never weighed and
+/// rejected, it was never reached. A blank page asks the model to invent a file; a default asks it
+/// to edit one, which is a smaller step and the one `read_battle_script` can actually show it. That
+/// tool used to answer "There is no battle script", which is a round trip spent learning nothing.
+///
+/// ⚠️ **It is deliberately not a strategy.** `DETERMINISTIC` is right here and is known to finish
+/// the game, and shipping it as the default would make every run's battles somebody else's play
+/// rather than the model's, which is the thing the run exists to measure. The comments point at the
+/// docs instead of restating them, so the worked example cannot drift into a second copy.
+///
+/// ⚠️ **It never reaches [`Live`] and so is never evaluated.** `battle.ask()` and "no script" are
+/// the same outcome, so [`BattleScript::live_source`] withholds it and the emulator thread's battle
+/// path is byte-for-byte what it was: no engine built per battle turn, no failure surface, and — the
+/// half that matters — no `self.note`, which would otherwise be set on every battle turn and
+/// suppress the very `TurnContext::Battle` line this exists to keep showing.
+pub const DEFAULT: &str = include_str!("battle_script/DEFAULT.rhai");
+
 /// How long a script may be. Generous — it is written once and re-read only when the model asks for
 /// it — but bounded, because it is sent back whole by `read_battle_script` and quoted in full in
 /// every validation failure.
@@ -673,7 +696,7 @@ fn truncated(text: &str, limit: usize) -> String {
 // The persisted script
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Saved {
     #[serde(default)]
     source: Option<String>,
@@ -685,6 +708,18 @@ struct Saved {
     last_failure: Option<String>,
 }
 
+/// ⚠️ **A run always has a script, and the one it starts with is [`DEFAULT`].** The empty state is
+/// gone: there is no longer a difference between "no script" and "a script that asks every turn",
+/// so the file always has a source and the model always has something to edit rather than something
+/// to invent. ⚠️ **Per-field `#[serde(default)]` does not reach this** — it uses each field's own
+/// `Default`, so a file written before this change deserialises with `source: None`, which is what
+/// [`BattleScript::open`] normalises.
+impl Default for Saved {
+    fn default() -> Self {
+        Self { source: Some(DEFAULT.to_string()), armed: true, last_failure: None }
+    }
+}
+
 /// The script on disk, and the tool calls against it. Answered on the **worker thread**: validation
 /// runs the script six times and none of it needs the emulator.
 pub struct BattleScript {
@@ -694,17 +729,25 @@ pub struct BattleScript {
 }
 
 impl BattleScript {
-    /// Open the script in a run directory. Never fails: an unreadable file starts empty, on
-    /// `TodoList::open`'s argument that refusing to play is worse than losing the thing.
+    /// Open the script in a run directory. Never fails: an unreadable file starts on [`DEFAULT`],
+    /// on `TodoList::open`'s argument that refusing to play is worse than losing the thing.
+    ///
+    /// ⚠️ **A missing source is normalised to the default rather than left empty**, which is what
+    /// carries a run written before there was a default across the change: `{"source": null}`
+    /// deserialises to `None` through the per-field `#[serde(default)]`, and every reader below now
+    /// assumes there is always a source. A *disarmed* script keeps its own source and is left alone.
     pub fn open(run_dir: Option<&Path>) -> Self {
         let Some(run_dir) = run_dir else {
             return Self { path: None, saved: Saved::default() };
         };
         let path = run_dir.join(files::BATTLE_SCRIPT);
-        let saved: Saved = std::fs::read(&path)
+        let mut saved: Saved = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        if saved.source.is_none() {
+            saved = Saved::default();
+        }
         Self { path: Some(path), saved }
     }
 
@@ -712,8 +755,23 @@ impl BattleScript {
         self.saved.source.as_deref()
     }
 
+    /// Whether the script the model wrote is deciding battle turns.
+    ///
+    /// ⚠️ **The default does not count, and this is the one place that rule is made.** It is armed
+    /// in the file — there is nothing else for the flag to say — but it decides nothing, so every
+    /// reader downstream of this would otherwise tell the model and the page that the battles going
+    /// past are free when the run is paying a full prefill for each of them. That is the exact
+    /// direction the nudge cannot afford to be wrong in, and it is `false` here so that the turn
+    /// line, `read_battle_script`, [`live_source`](Self::live_source) and the page's `armed` chip
+    /// all inherit it rather than each remembering to ask.
     pub fn armed(&self) -> bool {
-        self.saved.armed && self.saved.source.is_some()
+        self.saved.armed && self.saved.source.is_some() && !self.is_default()
+    }
+
+    /// Whether what is installed is [`DEFAULT`], untouched. Trimmed on both sides, because
+    /// [`Self::set`] trims what it stores and a trailing newline is not an edit.
+    pub fn is_default(&self) -> bool {
+        self.saved.source.as_deref().map(str::trim) == Some(DEFAULT.trim())
     }
 
     pub fn last_failure(&self) -> Option<&str> {
@@ -721,19 +779,22 @@ impl BattleScript {
     }
 
     /// What [`Live`] should hold: the source only while the script is armed, since the policy runs
-    /// whatever it is given.
+    /// whatever it is given. `None` for the default, which is [`armed`](Self::armed)'s doing and is
+    /// what keeps the emulator thread's battle path exactly as it was.
     pub fn live_source(&self) -> Option<String> {
         self.armed().then(|| self.saved.source.clone()).flatten()
     }
 
     /// The one line a battle turn says about the script. Three states rather than two, because
-    /// "you have never written one" and "yours broke" want opposite sentences and the difference is
-    /// invisible from the source alone: [`Live::failed`] drops the source the moment it fails.
+    /// "yours is still the one we gave you" and "yours broke" want opposite sentences and the
+    /// difference is invisible from the source alone: [`Live::failed`] drops the source the moment
+    /// it fails, and the default never reaches [`Live`] at all.
     pub fn state(&self) -> ScriptState {
-        match (self.armed(), self.saved.source.is_some() || self.saved.last_failure.is_some()) {
+        match (self.armed(), self.is_default()) {
             (true, _) => ScriptState::Armed,
-            (false, true) => ScriptState::Disarmed,
-            (false, false) => ScriptState::Unset,
+            // Only reachable through a real failure, which keeps the source it failed on.
+            (false, false) => ScriptState::Disarmed,
+            (false, true) => ScriptState::Unedited,
         }
     }
 
@@ -742,8 +803,8 @@ impl BattleScript {
         let Some(source) = source.map(str::trim).filter(|source| !source.is_empty()) else {
             self.saved = Saved::default();
             self.persist();
-            return "ok, no battle script. Battle turns come back to you one at a time, which is \
-                    the default."
+            return "ok, back to the default script, which hands you every battle turn. They cost \
+                    you a request each again."
                 .to_string();
         };
         if source.len() > MAX_SOURCE {
@@ -764,16 +825,24 @@ impl BattleScript {
     }
 
     /// `read_battle_script`.
+    ///
+    /// ⚠️ **There is no "there is no script" answer any more, and that is most of why [`DEFAULT`]
+    /// exists.** This used to be able to spend a round trip saying only that the model had not
+    /// written anything, which it already knew. It now always comes back with a file to edit.
     pub fn read(&self) -> String {
         let Some(source) = self.source() else {
-            return "There is no battle script. Battle turns come back to you one at a time. \
-                    `get_battle_script_docs` says how to write one."
+            return "There is no battle script, which should not be possible. \
+                    `set_battle_script` will install one."
                 .to_string();
         };
-        let state = match (self.armed(), self.last_failure()) {
-            (true, _) => "Armed. This is deciding your battle turns.".to_string(),
-            (false, Some(why)) => format!("**Disarmed** after it failed: {why}\n\nFix it and call `set_battle_script` again, or pass `null` to drop it."),
-            (false, None) => "Not armed.".to_string(),
+        let state = match (self.armed(), self.is_default(), self.last_failure()) {
+            (true, _, _) => "Armed. This is deciding your battle turns.".to_string(),
+            (false, true, _) => "**This is the default script and it decides nothing** — it hands \
+                                 every battle turn back to you, so each one costs a request. \
+                                 Replace it with `set_battle_script`."
+                .to_string(),
+            (false, false, Some(why)) => format!("**Disarmed** after it failed: {why}\n\nFix it and call `set_battle_script` again, or pass `null` to go back to the default."),
+            (false, false, None) => "Not armed.".to_string(),
         };
         format!("{state}\n\n```rhai\n{source}\n```")
     }
@@ -820,9 +889,14 @@ impl BattleScript {
 /// [`LlmPolicy`]: crate::pokemon::llm_policy::LlmPolicy
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScriptState {
-    /// No script has ever been set, or the model dropped the one it had.
+    /// [`DEFAULT`] is installed, untouched: a script exists but decides nothing, so battle turns
+    /// cost what they always did.
+    ///
+    /// ⚠️ **Named for what is true rather than for what used to be.** This was `Unset`, back when a
+    /// run could genuinely have no script; a variant still called that while every run has one is
+    /// exactly the drift that costs the next reader an hour.
     #[default]
-    Unset,
+    Unedited,
     /// Armed and deciding battle turns — so a turn carrying this is one it did not decide.
     Armed,
     /// One was written and has stopped deciding turns. The source is kept, because it is the thing
@@ -1381,7 +1455,7 @@ mod tests {
         let answer = script.set(Some("battle.fight(battle.best_move);"));
         assert!(!script.armed(), "it must not arm: {answer}");
         assert!(answer.contains("no damaging pp left"), "the answer names the scenario:\n{answer}");
-        assert!(script.source().is_none(), "a refused script must not be stored");
+        assert!(script.is_default(), "a refused script must not be stored: the default is left where it was");
     }
 
     #[test]
@@ -1430,16 +1504,23 @@ mod tests {
         assert!(!BattleScript::open(Some(&scratch.0)).armed());
     }
 
+    /// ⚠️ **Unsetting goes back to [`DEFAULT`] rather than to nothing**, which is the whole of what
+    /// "a run always has a script" means at the tool boundary. The behaviour is identical either way
+    /// — the default hands every turn back — so nothing is lost, and what is gained is that
+    /// `read_battle_script` can never again answer a round trip with "there is no battle script".
     #[test]
-    fn unsetting_leaves_nothing_behind() {
+    fn unsetting_goes_back_to_the_default() {
         let scratch = Scratch::new("battle-script");
         let mut script = BattleScript::open(Some(&scratch.0));
         script.set(Some(ALWAYS_DECIDES));
         let answer = script.set(None);
-        assert!(!script.armed());
-        assert!(script.source().is_none());
+        assert!(!script.armed(), "the default is never armed: it decides nothing");
+        assert!(script.is_default());
+        assert_eq!(script.state(), ScriptState::Unedited);
+        assert!(script.live_source().is_none(), "and the policy is never handed it");
         assert!(answer.starts_with("ok"), "{answer}");
-        assert!(BattleScript::open(Some(&scratch.0)).source().is_none(), "and on disk");
+        let reopened = BattleScript::open(Some(&scratch.0));
+        assert!(reopened.is_default(), "and on disk");
     }
 
     #[test]
@@ -1452,14 +1533,80 @@ mod tests {
         assert!(script.armed());
     }
 
-    /// An unreadable file is an empty script, not a refusal to play — `TodoList::open`'s rule.
+    /// An unreadable file is the default script, not a refusal to play — `TodoList::open`'s rule.
     #[test]
-    fn a_corrupt_file_starts_empty_rather_than_failing() {
+    fn a_corrupt_file_starts_on_the_default_rather_than_failing() {
         let scratch = Scratch::new("battle-script");
         std::fs::write(scratch.0.join(files::BATTLE_SCRIPT), b"{ not json").unwrap();
         let script = BattleScript::open(Some(&scratch.0));
         assert!(!script.armed());
-        assert!(script.source().is_none());
+        assert!(script.is_default());
+    }
+
+    /// ⚠️ **A run written before there was a default is carried across it.** `{"source": null}` is
+    /// what every run's file said until this change, and the per-field `#[serde(default)]` reads it
+    /// back as `None` — which every reader below `open` now assumes cannot happen.
+    #[test]
+    fn a_run_from_before_the_default_is_brought_onto_it() {
+        let scratch = Scratch::new("battle-script");
+        let path = scratch.0.join(files::BATTLE_SCRIPT);
+        std::fs::write(&path, br#"{"source":null,"armed":false,"last_failure":null}"#).unwrap();
+        let script = BattleScript::open(Some(&scratch.0));
+        assert!(script.is_default(), "an empty file is the default now");
+        assert_eq!(script.state(), ScriptState::Unedited);
+
+        // ⚠️ A *disarmed* script is left exactly as it was: it has its own source, and replacing it
+        // with the default would throw away the thing the model has to edit and the reason it broke.
+        std::fs::write(&path, br#"{"source":"battle.run();","armed":false,"last_failure":"it fled"}"#).unwrap();
+        let broken = BattleScript::open(Some(&scratch.0));
+        assert_eq!(broken.source(), Some("battle.run();"));
+        assert_eq!(broken.state(), ScriptState::Disarmed);
+        assert_eq!(broken.last_failure(), Some("it fled"));
+    }
+
+    /// ⚠️ **The default has to compile and has to ask** — it ships as a `const` and is never run in
+    /// anger (`live_source` withholds it), so nothing else would ever find out that it did not.
+    #[test]
+    fn the_default_script_compiles_and_hands_every_turn_back() {
+        let table = validate(DEFAULT).expect("the default script must validate");
+        for (name, _) in SCENARIOS {
+            assert!(table.contains(name), "the table is missing `{name}`:\n{table}");
+        }
+        assert_eq!(
+            table.matches("hands the turn to you").count(),
+            SCENARIOS.len(),
+            "every scenario, not just most of them:\n{table}"
+        );
+    }
+
+    /// ⚠️ **The default never reaches the emulator thread, and that is what keeps this change free.**
+    /// A default that *was* run would evaluate an engine on every battle turn of every run and, far
+    /// worse, set `LlmPolicy::note` each time — which suppresses the `TurnContext::Battle` line that
+    /// is the entire point of having a default at all.
+    #[test]
+    fn the_default_is_never_handed_to_the_policy() {
+        let script = BattleScript::open(None);
+        assert!(script.is_default(), "a fresh run starts on it");
+        assert!(script.live_source().is_none(), "but the policy is handed nothing");
+        assert!(!script.armed(), "and nothing tells the model or the page that battles are free");
+        assert_eq!(script.state(), ScriptState::Unedited);
+
+        // Whereas a script the model actually wrote is handed over, which is the contrast.
+        let mut script = BattleScript::open(None);
+        script.set(Some(ALWAYS_DECIDES));
+        assert!(script.armed());
+        assert_eq!(script.live_source().as_deref(), Some(ALWAYS_DECIDES));
+        assert_eq!(script.state(), ScriptState::Armed);
+    }
+
+    /// ⚠️ **`read_battle_script` can no longer spend a round trip saying "there is nothing"**, which
+    /// is the reason the default exists at all: the model is asked to edit a file, not to invent one.
+    #[test]
+    fn reading_a_fresh_runs_script_answers_with_the_default_source() {
+        let answer = BattleScript::open(None).read();
+        assert!(answer.contains("default script"), "{answer}");
+        assert!(answer.contains("battle.ask()"), "the source itself, to edit: {answer}");
+        assert!(answer.contains("set_battle_script"), "and what to do about it: {answer}");
     }
 
     /// What `set_battle_script` actually answers with, printed rather than asserted.
@@ -1475,6 +1622,9 @@ mod tests {
     fn probe_battle_script_answers() {
         let example = DOCS.rsplit("```rhai").next().and_then(|t| t.split("```").next()).unwrap();
         let mut script = BattleScript::open(None);
+        // First, because it is the answer every run gets before it has written anything and the one
+        // that used to be a wasted round trip saying "there is no battle script".
+        println!("── read_battle_script, on a fresh run ──\n{}\n", script.read());
         println!("── set_battle_script, with the documented example ──\n{}\n", script.set(Some(example)));
         println!("── read_battle_script ──\n{}\n", script.read());
         script.disarm("`battle.fight` was given `Hydro Cannon`, which is not a move that can be used this turn.");

@@ -154,6 +154,16 @@ still be thought about while the Rattatas are not. Whatever the script chooses i
 the same `battle_options` list every other policy chooses from, so it can never take an action the
 game would not have offered.
 
+Every run starts with a script already installed, and it is one that calls `battle.ask()` and nothing
+else: it decides no turns and hands every battle straight back, so a run that never touches it plays
+exactly as it did before there was a default. The point is that there is a file to edit rather than
+one to invent. Two deployed runs never called `set_battle_script` once — 207 battle turns and 22.3 M
+prompt tokens in the second of them — and never called `get_battle_script_docs` either, so the
+feature was not weighed and rejected, it was never reached; `read_battle_script` used to answer a
+whole round trip with "there is no battle script", which is a thing the model already knew. Now it
+comes back with the file, and the battle turn says in one line that the default is what is deciding
+nothing. Passing no `script` goes back to that default rather than to nothing at all.
+
 Three things keep it honest. Nothing about it is trusted: the sandbox has no file, process or network
 API at all, and the engine caps operations, wall-clock time, string and collection sizes and call
 depth, because the thing being run was written by a model and the thread it runs on owns the
@@ -350,7 +360,7 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
 | `todo.json` | the model's own plan — what outlives a compaction |
-| `battle-script.json` | the program deciding its battle turns, and whether it is still armed |
+| `battle-script.json` | the program deciding its battle turns, and whether it is still armed — every run has one |
 | `history.json` | the live conversation, rewritten each turn — what a restart resumes on |
 | `conversation.jsonl` | every message ever sent, appended; the record of what a compaction replaced |
 | `issues/` | one directory per `report_issue`: the message, the screen, a save state, the conversation |
@@ -401,7 +411,10 @@ code. A scripted battle is otherwise completely invisible from outside — no re
 decision is published — so without this a viewer has no way of telling a run that is playing well
 from one that has written down how to. It is published on change rather than on the heartbeat, and
 held on the server for a page that opens an hour later: a script is written once and then decides
-three hundred battles without another word.
+three hundred battles without another word. The chip in its head has three states rather than two,
+because every run starts on the default: `default` says the run has not written one yet and its
+battles are costing a request each, which is a fact rather than a fault, and is neither the `armed`
+a working script earns nor the `disarmed` a broken one gets.
 
 **No graphics are committed to this repo.** The badges, the party sprites, the favicon, and every
 tile, person and letter in the map pictures the model is sent are all read out of the ROM at run

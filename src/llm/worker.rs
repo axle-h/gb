@@ -252,6 +252,7 @@ pub struct Worker {
     /// moment it might have changed without publishing the same list twice.
     published_plan: Option<Vec<TodoView>>,
     /// The same, for the battle script: `(source, armed, last_failure)` as the page last saw it.
+    /// `is_default` is not in here because it is a pure function of the source.
     /// See [`Self::publish_battle_script`] for why the dedupe matters more here than for the plan.
     published_script: Option<(Option<String>, bool, Option<String>)>,
     /// Turns since the plan message was last (re)placed at the tail of the history — see
@@ -317,14 +318,14 @@ pub fn channels(
         battle_script,
         live_script: Arc::clone(&live_script),
         published_plan: None,
-        // ⚠️ **Seeded with the empty script rather than with `None`, which is not what the plan does.**
-        // The dedupe's job here is to keep an event off the wire, and "there is no script" is the
-        // state every run starts in: seeding `None` publishes a `source: null` on the first turn of
-        // every run that will never have one, which is a line in its transcript and the cell a
-        // joiner is handed. It still has to be *publishable* — clearing a script with
-        // `set_battle_script(null)` is a real change and the panel has to hear about it — which is
-        // why this is a seed and not a special case in the publisher.
-        published_script: Some((None, false, None)),
+        // ⚠️ **`None`, and it used to be a seed of the empty script.** That seed existed to keep a
+        // pointless `source: null` off the wire on the first turn of every run that would never
+        // write a script — the state every run started in. There is no such state now:
+        // `battle_script::DEFAULT` is installed from the first turn and the page has to be told
+        // about it, because "your battles are costing a request each" is exactly the live fact the
+        // panel is there to carry. So the first turn publishes once, and the dedupe below does the
+        // rest of the work it always did.
+        published_script: None,
         turns_since_plan,
         accounting,
         restart: Arc::clone(&restart),
@@ -668,7 +669,10 @@ impl Worker {
         }
         self.published_script = Some(current.clone());
         let (source, armed, last_failure) = current;
-        self.published.publish_event(UiEventBody::BattleScript { source, armed, last_failure });
+        // Derived from the source rather than carried in the dedupe tuple above, which it would only
+        // duplicate: it is a pure function of what is installed.
+        let is_default = self.battle_script.is_default();
+        self.published.publish_event(UiEventBody::BattleScript { source, armed, is_default, last_failure });
     }
 
     /// Stop the run until `until_ms`, and stop the emulator with it. `false` if the turn was
