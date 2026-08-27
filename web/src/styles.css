@@ -723,7 +723,11 @@ header .run.error {
 .entry .disclose {
   margin-left: 6px;
   opacity: 0.55;
-  font-size: 0.85em;
+  /* Bigger than the text it sits beside rather than smaller: it is the only thing on the row that
+     is a control, and at 0.85em it read as punctuation. `line-height: 1` keeps the taller glyph
+     from growing the line box and shuffling every row in the log. */
+  font-size: 1.2em;
+  line-height: 1;
 }
 
 /* What a tool call reveals: what was asked, what came back, and the picture if there was one. */
@@ -1063,9 +1067,13 @@ header .trophy:hover {
 .script-toggle {
   border: none;
   background: none;
-  padding: 0 2px;
+  padding: 0 4px;
   color: var(--dim);
   font: inherit;
+  /* After the `font` shorthand, which resets size. Bigger than the head it sits in: it is the one
+     thing in that row you are meant to click. */
+  font-size: 17px;
+  line-height: 1;
   cursor: pointer;
 }
 
