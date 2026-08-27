@@ -580,6 +580,28 @@ fn drives_its_own_menus(state: &AgentState) -> bool {
 /// State machine for navigating a Pokémart purchase sequence.
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum PokemartState {
+    /// The Buy/Sell/Quit menu is up and the policy has not said what to buy yet.
+    ///
+    /// ⚠️ **Without this the shop is handed to the generic text reader, which mashes A through
+    /// it.** [`drives_its_own_menus`] is what keeps [`PokemonAgent::assert_text_box_state`] off a
+    /// driver's menus, and it keys on the *state* — so a mart that is not yet in a
+    /// `PokemartShopping` state is not covered. `assert_pokemart_state` used to enter one only when
+    /// the policy **answered**, which every scripted policy does on the first poll (the trait
+    /// default is `Some(None)`) and `LlmPolicy` does not do for the whole time the model is
+    /// thinking. In that window the reader owned the shop and pressed A: BUY, the first item in the
+    /// stock list, quantity 1, confirm, YES, and round again.
+    ///
+    /// ⚠️ **It buys.** Reproduced from `viridian-city-pokemart-shopping.bin` with an LLM's latency:
+    /// on ¥137 it merely loops on "You don't have enough money.", which is what the deployed run of
+    /// 2026-08-27 was doing and why this looked like a stuck menu — but seeded with ¥1200 the same
+    /// run ends `money now 0, bag [(TownMap, 1), (Potion, 1), (PokeBall, 6)]`. Six Poké Balls
+    /// nobody ordered and an empty wallet. The fifth closed-loop-under-A in this codebase and the
+    /// first one that spends money.
+    ///
+    /// ⚠️ **The poll happens here rather than at the transition into it**, so one seam asks and one
+    /// seam answers; and it is [`PokemonAgent::poll_policy`], not `service_tools` directly, or the
+    /// watchdog believes the run has been wedged since the shop opened.
+    AwaitingPolicy,
     /// Buy/Sell/Quit menu visible. Keep pressing A on "Buy" (position 0) until item list appears.
     ChoosingBuyOption(BagItem),
     /// Item list visible. Navigate to the target item.
@@ -767,6 +789,7 @@ impl AgentState {
 impl Display for PokemartState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PokemartState::AwaitingPolicy          => write!(f, "mart:policy"),
             PokemartState::ChoosingBuyOption(i)   => write!(f, "mart:buy({:?}×{})", i.id, i.quantity),
             PokemartState::ChoosingItem(i)         => write!(f, "mart:item({:?}×{})", i.id, i.quantity),
             PokemartState::AwaitingQtySelector(i)  => write!(f, "mart:await({:?}×{})", i.id, i.quantity),
@@ -1557,6 +1580,23 @@ impl PokemonAgent {
     }
 
     /// Detects the Buy/Sell/Quit menu and transitions into PokemartShopping.
+    /// Ask the policy what to buy, and start the order if it has an answer.
+    ///
+    /// ⚠️ **One helper because it is called from two ticks of the same visit** — the tick the shop
+    /// opens (so a policy that answers at once loses no frames) and every tick after it while a
+    /// slower one is still deciding. Two copies would be two places to forget the `affordable`
+    /// trim, which is the bug its own ⚠️ describes.
+    fn ask_mart_policy(&mut self, game_state: &GameState, api: &mut PokemonApi) {
+        self.poll_policy(game_state, api);
+        let Some(item) = self.policy.pick_mart_purchase(game_state) else { return };
+        // Trim the order to the wallet before ordering — see `affordable`, which is also what the
+        // second and later purchases of a visit go through.
+        match item.and_then(|item| affordable(api, game_state.money, item)) {
+            Some(item) => self.set_pokemart_state(PokemartState::ChoosingBuyOption(item)),
+            None => self.set_pokemart_state(PokemartState::Quitting),
+        }
+    }
+
     /// Must run before assert_text_box_state so the mart flow takes priority.
     fn assert_pokemart_state(&mut self, game_mode: GameMode, api: &mut PokemonApi) -> Result<(), String> {
         if game_mode != GameMode::TextBox {
@@ -1573,22 +1613,26 @@ impl PokemonAgent {
             // `SellingToMart` is excluded because it drives the *same* Buy/Sell/Quit menu itself:
             // `PokemartState` only knows how to buy, so letting it take over would answer a sell
             // step's menu with BUY. See `postgame::game_corner`.
+            // ⚠️ **Taken on sight of the menu, never on the policy's answer.** Whoever owns the
+            // shop has to own it from the moment it opens: the state is what `drives_its_own_menus`
+            // keys on, so any tick spent outside `PokemartShopping` is a tick the generic text
+            // reader spends pressing A through a shop. See `PokemartState::AwaitingPolicy` for what
+            // that bought.
+            //
+            // ⚠️ **And asked in the same tick, which is not tidiness — it is the frame timing.** A
+            // scripted policy answers on its first poll, so ordering here and ordering in the
+            // driver's next tick differ by one agent tick per shop; six shops into
+            // `full_playthrough` that is a different RNG line, and the run failed at 512/516 steps
+            // waiting for a Machop on Victory Road that never appeared. Every mart visit had
+            // succeeded on attempt 1. See the ⚠️ in the `test-suite` skill about
+            // `can_reach_lavender`: a timing change is priced by `full_playthrough` and by nothing
+            // else. Answering here leaves a scripted run byte-identical, and only a policy that
+            // says `None` — the model, thinking — is left holding `AwaitingPolicy`.
             if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::SellingToMart(_)) {
+                api.release_all_buttons();
+                self.set_state(AgentState::PokemartShopping(PokemartState::AwaitingPolicy));
                 let game_state = api.game_state()?;
-                self.poll_policy(&game_state, api);
-                if let Some(item) = self.policy.pick_mart_purchase(&game_state) {
-                    api.release_all_buttons();
-
-                    // Trim the order to the wallet before ordering — see `affordable`, which is
-                    // also what the second and later purchases of a visit go through.
-                    let item = item.and_then(|item| affordable(api, game_state.money, item));
-
-                    if let Some(item) = item {
-                        self.set_state(AgentState::PokemartShopping(PokemartState::ChoosingBuyOption(item)));
-                    } else {
-                        self.set_state(AgentState::PokemartShopping(PokemartState::Quitting));
-                    }
-                }
+                self.ask_mart_policy(&game_state, api);
             }
         }
 
@@ -3161,6 +3205,14 @@ CascadeBadge; not cutting".to_string(),
                 let menu = api.menu_state();
 
                 match pokemart_state {
+                    // The shop is open and nobody has said what to buy. Hold it, pressing nothing,
+                    // until the policy answers. See the ⚠️s on the variant.
+                    PokemartState::AwaitingPolicy => {
+                        api.release_all_buttons();
+                        let game_state = api.game_state()?;
+                        self.ask_mart_policy(&game_state, api);
+                    }
+
                     // Keep navigating/pressing A on the Buy/Sell/Quit menu until the item list appears.
                     PokemartState::ChoosingBuyOption(item) => {
                         if let Some(menu) = menu {

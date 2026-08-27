@@ -97,6 +97,37 @@ policies rather than `DeterministicPolicy` (which only ever reaches for the Pok�
 **decisions keep coming** and that the *words* arrive. ⚠️ **The target has to be reachable** or the driver
 reports "can't reach the field-item target" on its own and the test passes with the gate removed.
 
+⚠️ **A mart menu nobody has claimed yet is the same loop, and it is the first one that *spends
+money*.** `drives_its_own_menus` is what keeps the generic text reader off a driver's menus and it
+keys on the **state** — so a shop that is open while the agent is still `Idle` is not covered.
+`assert_pokemart_state` used to enter `PokemartShopping` only when the policy *answered* what to
+buy, which every scripted policy does on its first poll (the trait default is `Some(None)`) and
+`LlmPolicy` does not do for the whole time the model is thinking. In that window the reader pressed
+A through the shop: BUY, the first row of the stock list, quantity 1, confirm, YES, round again.
+`PokemartState::AwaitingPolicy` is the fix — the same shape `BattleState::AwaitingPolicy` has always
+had — entered **on sight of the menu**, pressing nothing, polling through `poll_policy` until an
+answer comes. ⚠️ **And the policy is asked in the same tick the state is entered, which is frame
+timing rather than tidiness.** The first version let the driver's next tick do the asking, which
+costs a scripted policy (they answer on the first poll) **one agent tick per shop** — and six shops
+into `full_playthrough` that is a different RNG line: the run failed at 512/516 steps waiting for a
+wild Machop on Victory Road 1F that never appeared, with all six mart visits having succeeded on
+attempt 1. Nothing else in the suite could see it; the default tier and the whole leg chain were
+green. `ask_mart_policy` is one helper called from both ticks, because two copies are two places to
+forget the `affordable` trim. ⚠️ **The `affordable` trim is not implicated and looking there first wastes an hour**:
+`item_price(PokeBall)` reads 200 off the ROM correctly and the trim would have quit the shop
+immediately, but the driver holding the trim was never running. ⚠️ **The deployed symptom is the
+harmless face of it.** On the ¥137 the run actually had, it can afford nothing and merely loops on
+"You don't have enough money."; seeded with ¥1200 the same fixture ends
+`money now 0, bag [(TownMap, 1), (Potion, 1), (PokeBall, 6)]`. Guards:
+`a_shop_left_waiting_on_the_policy_is_not_mashed_through` (¥137, counts refusals) and
+`a_shop_is_not_raided_while_the_policy_is_still_thinking` (¥1200, asserts the wallet) — ⚠️ **and the
+poor one cannot see what the rich one sees**, since a wallet too thin to buy anything is flat either
+way. Two traps in writing them: ⚠️ **withhold the answer for ever rather than merely delaying it**
+(the first draft used `SlowPolicy` at 200 ticks against a 30 s run and measured the *legitimate*
+purchase landing at tick 560, which is the driver working); and ⚠️ **count refusals off the screen
+on a rising edge, not out of `AgentEvent::TextBox`** — the box never closes on a run that short, so
+an event-counting version reported zero on the very run that produced sixteen.
+
 ### Screen versus RAM
 
 ⚠️ **The screen the agent reads lags the game's own tilemap, and its three horizontal bands can disagree.**
