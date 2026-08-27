@@ -35,11 +35,11 @@ web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum
 # ⚠️ **In `default` for the reason `web` is**, and it is the same argument a third time: every W4 test
 # — the SSE parser, the cancellation contract, the tool scoping, the mock-server playthrough — lives
 # in this module, and behind an opt-in feature a plain `cargo test --release` would run none of them.
-# The measured cost is **14 crates** — ureq and its rustls/ring TLS stack, most of whose transitive
-# dependencies the build already had — against the 175 without it, and it needs no system library
-# beyond a C compiler for `ring`. A container build is still
-# `--no-default-features --features llm`.
-llm = ["web", "dep:ureq"]
+# The measured cost was **14 crates** — ureq and its rustls/ring TLS stack, most of whose transitive
+# dependencies the build already had — against the 175 without it, and **13 more** for `rhai` below
+# (236 → 249 in `Cargo.lock`). Neither needs a system library beyond a C compiler for `ring`. A
+# container build is still `--no-default-features --features llm`.
+llm = ["web", "dep:ureq", "dep:rhai"]
 # The Pokémon integration tests are tiered by how much game time they emulate. The emulator runs at
 # ~23x realtime, so game time is the cost: a plain `cargo test --release` stays under a minute by
 # running only the mechanic tests and two navigation smoke tests.
@@ -136,6 +136,18 @@ flate2 = { version = "1", optional = true }
 # to within 0.3 dB on every tone. `audio::SAMPLE_RATE` is 48 kHz because of that measurement and
 # `the_packets_are_ones_a_browser_can_decode` is what pins it.
 opus-rs = { version = "0.1.32", optional = true }
+# The battle script sandbox (`src/llm/battle_script.rs`). **Pure Rust**, no build script and no
+# system library, so the container's only C dependency stays `ring`'s — the same bar `opus-rs`
+# above had to clear. Chosen over a Python-syntax runtime (`starlark`, 36 direct dependencies
+# including `blake3`, `dashmap`, `num-bigint` and `rustyline`) on weight alone.
+#
+# ⚠️ **The safety of this feature is the engine's limits, not the language.** A script is written
+# by the model and runs on the emulator thread, so `battle_script::engine` sets the operation,
+# string, array, map and call-depth caps and an `on_progress` wall-clock abort, and never enables
+# `unchecked`. `no_time` is on so a script cannot read a clock (nothing needs one, and a decision
+# that varies with wall time is one no test can pin); `no_custom_syntax` because the surface the
+# model writes against is smaller when the grammar cannot be extended.
+rhai = { version = "1.26", features = ["no_time", "no_custom_syntax"], optional = true }
 
 [build-dependencies]
 regex = "1.12.2"

@@ -29,6 +29,8 @@
 //! streams the response body through `impl Read`.
 
 pub mod accounting;
+pub mod battle_report;
+pub mod battle_script;
 pub mod client;
 pub mod compaction;
 pub mod config;

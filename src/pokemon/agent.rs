@@ -14,6 +14,7 @@ use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::menu::{is_forget_move_prompt, is_start_menu, BattleMenuState, START_MENU_ORIGIN};
+use crate::pokemon::learnset::teach_refusal;
 use crate::pokemon::pokedex::PokedexReader;
 use crate::pokemon::policy::{Jam, Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
@@ -454,6 +455,47 @@ const BATTLE_REFUSALS: &[&str] = &[
     "blocked the BALL",   // a ball thrown at a trainer's Pokémon
     "no will to fight",   // a fainted Pokémon chosen from the party menu
 ];
+
+/// Whether the box at the bottom of a battle screen is the game **talking**, rather than a menu the
+/// agent is driving.
+///
+/// ⚠️ **`wTopMenuItemX/Y` linger and `wTextBoxID` does not, and that difference is the whole of
+/// this.** Whoever is about to call `HandleMenuInput` writes the geometry, and nobody clears it
+/// afterwards — so for the entire time a turn is resolving, `battle_menu_state()` still reports the
+/// move list the policy chose from several seconds earlier. Measured over six Mt Moon battles:
+/// **6155 ticks** of turn resolution reporting `Some(MoveList)`, every one of them with
+/// `wTextBoxID` reading `MessageBox` and the sentence on screen; against **77 ticks** of a
+/// genuinely open menu, every one reading `BattleMenuTemplate`. The two never overlapped.
+///
+/// ⚠️ **What it cost was every word the game says in a battle.** The arms that see lingering
+/// geometry pressed A and deliberately did not read ("battle menu is showing, do not read the
+/// text"), so `PokemonTextReader` was fed on no tick of any turn: across 11 battle turns not one
+/// `AgentEvent::TextBox` was emitted. "It's super effective!", "ENEMY ZUBAT used LEECH LIFE!",
+/// "CHARMANDER fainted!" and "gained 56 EXP" reach the model through that event or not at all — so
+/// the model had **no way to see what the other Pokémon did**, and a battle report was a list of
+/// its own move names.
+///
+/// ⚠️ **Reading here is timing-neutral, and that is why it is safe.**
+/// [`PokemonTextReader::update`] presses A itself before it reads, so swapping
+/// `api.toggle_button(JoypadButton::A)` for `reader.update(api)` is the *same single press* on the
+/// same tick. That matters more here than almost anywhere: `with_original_battle_timing`'s ⚠️
+/// records that re-rolling the battle RNG stream broke `can_reach_lavender`, and handing extra
+/// menu states to the policy once blacked `full_playthrough` out in Mt Moon.
+///
+/// ⚠️ **And it waits out [`BattleState::confirming`], which is not belt-and-braces.** `wTextBoxID`
+/// flips to `MessageBox` the moment the move is confirmed, but `AutoBgMapTransfer` copies the
+/// tilemap into VRAM a third of the screen per V-blank — so for a few ticks the move list the player
+/// just chose from is *still drawn* under a box that RAM already calls dialogue, and the reader
+/// swallows it. It shows up as every quoted line in a report opening
+/// `"TACKLE TAIL WHIP BUBBLE WATER GUN Celina used TACKLE! …"`. `confirming` is the existing
+/// countdown for exactly this window, which is why it is reused rather than a second one invented.
+///
+/// ⚠️ **It must not be used to decide a *refusal*.** "No PP left" and the Disable message are
+/// `MessageBox` too, and their handling latches `backing_out` — so this is checked **after** those,
+/// never instead of them.
+fn reading_dialogue(menu_state: &crate::pokemon::menu::MenuState, confirming: u16) -> bool {
+    confirming == 0 && menu_state.text_box_id == crate::pokemon::menu::TextBoxId::MessageBox
+}
 
 /// Whether the screen is showing one of [`BATTLE_REFUSALS`].
 fn shows_battle_refusal(screen: &str) -> bool {
@@ -1818,6 +1860,36 @@ impl PokemonAgent {
                         }
                         Some(crate::pokemon::policy::FieldMove::TeachMove { item, target_slot }) => {
                             api.release_all_buttons();
+                            // ⚠️ **The same last line of defence `CutTree` has below, for the same
+                            // reason: this driver has no way back.** A TM or HM aimed at a Pokémon
+                            // that is not in its learnset is answered with
+                            // `MonCannotLearnMachineMoveText` and `jr .chooseMon`
+                            // (`engine/items/item_effects.asm`) — back to the party menu, cursor
+                            // untouched — so `TeachingMove` navigates to the same slot, presses A,
+                            // and is refused again. Its only exit is "the mon knows the move", which
+                            // never comes: the attempt is 60 s of A-mashing ended by
+                            // `DRIVER_ESCAPE_SILENCE`, after which the policy asks for the identical
+                            // teach and it all happens again. The deployed run of 2026-08-27 spent
+                            // its life in that loop.
+                            //
+                            // ⚠️ **The message has to name the alternative, not just the refusal.**
+                            // What the driver reported before this was "got no answer from the game
+                            // for 60s; starting over", which reads as a malfunction and tells a model
+                            // nothing it can act on — the same mistake "it was interrupted" made
+                            // about a guard turning the player back. So it says who in the party
+                            // *can* take it, or that nobody can, which is the whole decision.
+                            //
+                            // An *empty* slot is somebody else's problem and deliberately not
+                            // refused here: `pick_field_move` holds a `TeachMove` back until the
+                            // target is in the party, so a slot that is empty at this moment is a
+                            // policy still waiting rather than a teach that cannot work.
+                            let incompatible = game_state.pokemon.get(target_slot as usize)
+                                .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item));
+                            if incompatible {
+                                self.event(AgentEvent::TextBox { message: teach_refusal(&game_state, item, target_slot) });
+                                self.set_state(AgentState::Idle);
+                                return Ok(());
+                            }
                             self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu: false, settle: 0, evolve_from: None });
                             return Ok(());
                         }
@@ -2347,6 +2419,20 @@ CascadeBadge; not cutting".to_string(),
                                 new_events.push(AgentEvent::text_box_from_reader(reader));
                                 api.release_all_buttons();
                                 self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
+                                // ⚠️ **Drained here because this arm returns, and nothing else in
+                                // `update` does.** `new_events` is emptied at the very end of the
+                                // tick (see `PokemonAgent::event`'s doc), so an early `return`
+                                // throws the whole buffer on the floor — and of the six push sites
+                                // this is the only one that returns. What it cost was every battle
+                                // turn that handed back on the *text* test rather than on the menu
+                                // geometry: three turns of a six-turn trainer battle, each holding
+                                // the entire account of what the enemy did at the moment it was
+                                // discarded ("Enemy ODDISH fainted! Celina gained 183 EXP. Points!
+                                // LASS sent out BELLSPROUT!"). The reader was full and the flush
+                                // was correct; the event simply never left this function.
+                                for event in new_events {
+                                    self.event(event);
+                                }
                                 return Ok(());
                             }
                             match menu_state.battle_menu_state() {
@@ -2463,6 +2549,10 @@ CascadeBadge; not cutting".to_string(),
                                     if disabled || no_pp {
                                         *backing_out = BACKING_OUT_TICKS;
                                         api.toggle_button(JoypadButton::B);
+                                    } else if reading_dialogue(&menu_state, *confirming) {
+                                        // The geometry is stale and the game is talking: this is the
+                                        // turn resolving, not a move list. See `reading_dialogue`.
+                                        reader.update(api);
                                     } else {
                                         api.toggle_button(JoypadButton::A);
                                     }
@@ -2491,8 +2581,13 @@ CascadeBadge; not cutting".to_string(),
                                     // list, so `menu_state` reads `MessageBox` — is the net's, above.
                                     api.toggle_button(JoypadButton::B);
                                 },
+                                Some(_) if reading_dialogue(&menu_state, *confirming) => {
+                                    // Same as the move list above: the menu geometry has not caught
+                                    // up, and what is on screen is the game talking.
+                                    reader.update(api);
+                                },
                                 Some(_) => {
-                                    // battle menu is showing, do not read the text
+                                    // A menu really is showing. Confirm it; there is nothing to read.
                                     api.toggle_button(JoypadButton::A);
                                 },
                                 None => {

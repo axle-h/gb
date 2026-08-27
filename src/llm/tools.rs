@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
+use crate::llm::battle_script::MAX_SOURCE as MAX_BATTLE_SCRIPT;
 use crate::llm::todo::{MAX_ITEMS as MAX_TODO_ITEMS, MAX_TEXT as MAX_TODO_TEXT, TodoCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
 use crate::llm::worker::ToolAnswer;
@@ -172,6 +173,9 @@ pub enum CallKind {
     /// a file write and a screenshot from the frame the host already published — and, like a todo
     /// call, it does **not** end the turn. See [`report_issue_spec`] for why that matters.
     Issue(String),
+    /// A battle-script operation. Answered by the worker like a todo call, and like one it does
+    /// **not** end the turn: setting a script is not a decision about the game.
+    BattleScript(BattleScriptCall),
     /// The turn is over.
     Terminal(Terminal),
     /// Nothing this turn can use — an unknown name, a terminal tool belonging to the other decision
@@ -189,6 +193,10 @@ impl CallKind {
             Self::Read | Self::Screenshot => "read",
             Self::Todo(_) => "todo",
             Self::Issue(_) => "issue",
+            // ⚠️ Deliberately **not** a fifth word. `label` is a wire contract with `api.ts`, and a
+            // battle-script call is a non-terminal side effect that reads back as a sentence —
+            // exactly what the page already draws a `todo` row as.
+            Self::BattleScript(_) => "todo",
             Self::Terminal(_) => "terminal",
             Self::Rejected(_) => "rejected",
         }
@@ -342,7 +350,19 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             FieldMove::Fly { to: *to }
         }
         FieldMoveRequest::Teach { item, slot } => {
-            FieldMove::TeachMove { item: held(*item)?, target_slot: party_slot(*slot)? }
+            let item = held(*item)?;
+            let slot = party_slot(*slot)?;
+            // ⚠️ **A machine the game will refuse is the `CutTree` gate again, and it wedges the same
+            // way.** `MonCannotLearnMachineMoveText` drops back to the party menu with the cursor
+            // untouched (`engine/items/item_effects.asm`), and `TeachingMove`'s only exit is the mon
+            // knowing the move, so the attempt ends 60 s later at `DRIVER_ESCAPE_SILENCE` and the
+            // model, told only that the game stopped answering, asks for the identical teach again.
+            // Refused here it costs no round trip and the answer names which slot to aim at instead.
+            if state.pokemon.get(slot as usize)
+                .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item)) {
+                return Err(crate::pokemon::learnset::teach_refusal(state, item, slot));
+            }
+            FieldMove::TeachMove { item, target_slot: slot }
         }
         FieldMoveRequest::Evolve { stone, slot } => {
             let slot = party_slot(*slot)?;
@@ -615,6 +635,78 @@ pub fn todo_tools() -> Vec<ToolSpec> {
     ]
 }
 
+// ── The battle script ────────────────────────────────────────────────────────────────────────────
+
+/// One tool call against the model's battle script, parsed. Answered on the **worker thread** —
+/// validation runs the script over six hand-built states and none of it needs the emulator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BattleScriptCall {
+    /// `get_battle_script_docs`: the API reference, verbatim.
+    Docs,
+    /// `read_battle_script`: what is installed, and whether it is armed.
+    Read,
+    /// `set_battle_script`: `None` unsets. Validated before it is armed.
+    Set(Option<String>),
+}
+
+/// The three, by name. Non-terminal, so they are named in the turn contract beside the reads.
+pub const BATTLE_SCRIPT_TOOL_NAMES: &[&str] =
+    &["get_battle_script_docs", "read_battle_script", "set_battle_script"];
+
+/// ⚠️ **Offered on `Overworld` and nowhere else, which is a scoping decision rather than an
+/// oversight.** With a working script there *are* no battle turns to carry them on; when one fails,
+/// the fallback battle turn is about winning the battle in front of you, not about writing code —
+/// and the failure is waiting in the next overworld situation either way. It also keeps
+/// `DecisionKind::Battle`'s array where it is, which had ~380 bytes of headroom.
+fn offers_battle_script(kind: DecisionKind) -> bool {
+    kind == DecisionKind::Overworld
+}
+
+/// Their specs. A function for the reason [`todo_tools`] is one.
+pub fn battle_script_tools() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec::new(
+            "get_battle_script_docs",
+            "How to write a battle script: the language, everything a script can read about the              battle, and a worked example. Read this before `set_battle_script`.",
+            no_arguments(),
+        ),
+        ToolSpec::new(
+            "read_battle_script",
+            "The battle script you have installed, and whether it is still deciding your battle              turns.",
+            no_arguments(),
+        ),
+        ToolSpec::new(
+            "set_battle_script",
+            format!(
+                "Install a script that decides your battle turns for you, in Rhai. A turn it                  answers costs no request at all, so a routine wild encounter becomes free. It is                  run against six example battles before it is installed and you are told what it                  chose in each; if it later fails it is disarmed and that turn comes back to you                  with the reason. Omit `script` to go back to answering every battle turn yourself.                  At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "script": { "type": "string",
+                                "description": "The script. Omit to remove the one installed." },
+                },
+                "additionalProperties": false,
+            }),
+        ),
+    ]
+}
+
+fn classify_battle_script(name: &str, arguments: &Value) -> Option<CallKind> {
+    let call = match name {
+        "get_battle_script_docs" => BattleScriptCall::Docs,
+        "read_battle_script" => BattleScriptCall::Read,
+        // ⚠️ **`null` and an absent `script` mean the same thing and both have to work.** "Omit to
+        // remove" is what the schema says, but a model that has just been told a script can be
+        // removed writes `{"script": null}` at least as often.
+        "set_battle_script" => BattleScriptCall::Set(
+            arguments.get("script").and_then(Value::as_str).map(str::to_string),
+        ),
+        _ => return None,
+    };
+    Some(CallKind::BattleScript(call))
+}
+
 fn classify_todo(name: &str, arguments: &Value) -> Option<CallKind> {
     let call = match name {
         // `todo_add` is the old name, accepted so a resumed run imitating the calls in its own
@@ -641,6 +733,9 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
         })
         .collect();
     tools.extend(todo_tools());
+    if offers_battle_script(kind) {
+        tools.extend(battle_script_tools());
+    }
 
     match kind {
         DecisionKind::Overworld => {
@@ -1083,6 +1178,7 @@ pub fn non_terminal_names(kind: DecisionKind) -> Vec<&'static str> {
     reads_for(kind)
         .map(|tool| tool.name)
         .chain(TODO_TOOL_NAMES.iter().copied())
+        .chain(offers_battle_script(kind).then(|| BATTLE_SCRIPT_TOOL_NAMES.iter().copied()).into_iter().flatten())
         .chain(offers_issue_report(kind).then_some(REPORT_ISSUE))
         .collect()
 }
@@ -1208,6 +1304,20 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
 
     if let Some(todo) = classify_todo(name, &arguments) {
         return todo;
+    }
+
+    if BATTLE_SCRIPT_TOOL_NAMES.contains(&name) {
+        // ⚠️ Named with the reason, like a read from the wrong kind above. A battle turn *can*
+        // reach here — the script is disarmed mid-battle and the model reaches for the fix — and
+        // "there is no such tool" would be a lie it cannot act on.
+        if !offers_battle_script(kind) {
+            return CallKind::Rejected(format!(
+                "`{name}` is only offered on an overworld turn: mid-battle is not the moment to be                  writing one. Decide this turn, and set the script when you are back outside.",
+            ));
+        }
+        if let Some(call) = classify_battle_script(name, &arguments) {
+            return call;
+        }
     }
 
     if name == REPORT_ISSUE {
@@ -2006,12 +2116,31 @@ mod tests {
             // ⚠️ **The other five came down to match, as they did last time.** All five had
             // drifted ~40 bytes *smaller* and none was near its ceiling; leaving them where they
             // were would bank slack nobody decided to spend.
-            (DecisionKind::Overworld, 10_600),
-            (DecisionKind::Battle, 5_250),
-            (DecisionKind::Nickname, 3_950),
-            (DecisionKind::MartPurchase, 4_250),
-            (DecisionKind::ForgetMove, 4_150),
-            (DecisionKind::Stuck, 6_050),
+            //
+            // ⚠️ **Overworld's ceiling moved again on 2026-08-26, for the battle script, and this
+            // is the one entry here whose spend is measured against *requests* rather than
+            // against bytes.** Re-measured across all six: 11 200, 4869, 3645, 3926, 3822, 5595 —
+            // so the three tools cost **1372 bytes**, all of it on Overworld. Roughly: 236 for
+            // `get_battle_script_docs`, 202 for `read_battle_script` and 934 for
+            // `set_battle_script`, whose description has to say what a script *is*, that it is
+            // validated before it is armed, and what happens when it fails — because a model that
+            // installs one without knowing it can be disarmed reads a fallback battle turn as the
+            // feature being broken.
+            //
+            // ⚠️ **The arithmetic that justifies it is not the usual one.** Every other entry above
+            // trades bytes on every request for behaviour; this one trades ~340 tokens per
+            // overworld request against **whole requests removed**. A battle is 5 to 30 turns and
+            // each is a full prefill of a ~50 k-token history, so one scripted wild encounter pays
+            // for the addition several hundred times over. That is also why the three are scoped to
+            // Overworld and Battle's ceiling *fell*: see `offers_battle_script`.
+            //
+            // ⚠️ **The other five came down again**, for the reason they came down last time.
+            (DecisionKind::Overworld, 11_400),
+            (DecisionKind::Battle, 4_950),
+            (DecisionKind::Nickname, 3_750),
+            (DecisionKind::MartPurchase, 4_050),
+            (DecisionKind::ForgetMove, 3_950),
+            (DecisionKind::Stuck, 5_700),
         ] {
             let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
             assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
@@ -2325,6 +2454,19 @@ mod tests {
         assert!(stuck.contains(&"read_map") && stuck.contains(&SCREENSHOT));
         assert!(!names(DecisionKind::Battle).contains(&"use_field_move"), "field moves are overworld-only");
 
+        // ⚠️ **The battle-script tools are on the overworld turn and on no other, including the
+        // battle turn they are about.** With an armed script there is no battle turn to carry them;
+        // when one has failed, that turn is for winning the battle in front of you and the failure
+        // is waiting in the next overworld situation regardless. It is also what kept Battle's
+        // array where it was — see the ratchet in `the_tool_array_stays_within_its_budget`.
+        for name in BATTLE_SCRIPT_TOOL_NAMES {
+            assert!(names(DecisionKind::Overworld).contains(name), "the overworld turn writes the script");
+            for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::MartPurchase,
+                              DecisionKind::ForgetMove, DecisionKind::Stuck] {
+                assert!(!names(elsewhere).contains(name), "{elsewhere:?} must not offer {name}");
+            }
+        }
+
         for kind in KINDS {
             let offered = names(kind);
             assert!(offered.contains(&"wait"), "{kind:?} must always be able to wait");
@@ -2337,10 +2479,11 @@ mod tests {
                 offered.len(),
                 reads_for(kind).count()
                     + TODO_TOOL_NAMES.len()
+                    + match offers_battle_script(kind) { true => BATTLE_SCRIPT_TOOL_NAMES.len(), false => 0 }
                     + usize::from(offers_issue_report(kind))
                     + terminal_names(kind).len(),
-                "a turn is offered its own reads, the TODO tools, `report_issue` where it applies, \
-                 and its own terminal tools",
+                "a turn is offered its own reads, the TODO tools, the battle-script tools where \
+                 they apply, `report_issue` where it applies, and its own terminal tools",
             );
         }
     }
@@ -2774,6 +2917,65 @@ mod tests {
         assert_eq!(
             resolve_field_move(&state, &FieldMoveRequest::ReorderParty { slot: 0 }),
             Ok(FieldMove::ReorderParty { slot: 0 }),
+        );
+    }
+
+    /// **The machine gate, which is the HM gate one menu further in.**
+    ///
+    /// A TM or HM aimed at a Pokémon outside its learnset is answered with
+    /// `MonCannotLearnMachineMoveText` and `jr .chooseMon` (`engine/items/item_effects.asm`): back to
+    /// the party menu, cursor untouched. `TeachingMove` has no exit from that, so the attempt is 60 s
+    /// of A-mashing ended by `DRIVER_ESCAPE_SILENCE` and the model, told only that the game stopped
+    /// answering, asks for the same teach again. The deployed run of 2026-08-27 lived in that loop.
+    ///
+    /// ⚠️ **What the complaint has to carry is the alternative, not the refusal.** The decision on
+    /// the table is which party member takes the machine, so the sentence answers that; when nobody
+    /// can, it says so outright rather than leaving it to be read out of a missing list.
+    #[test]
+    fn a_machine_no_one_in_the_party_can_learn_is_refused_here_instead() {
+        use crate::pokemon::pokemon::Pokemon;
+        use crate::pokemon::species::PokemonSpecies;
+        let with_hm = |item: ItemId, party: &[PokemonSpecies]| {
+            let mut state = fixture_state();
+            state.bag.push(BagItem { id: item, quantity: 1 }).expect("the fixture's bag has room");
+            state.pokemon = Default::default();
+            for species in party {
+                state.pokemon.push(Pokemon::maxed(*species, "MON", [PokemonMoveName::Tackle; 4], "AI", 1))
+                    .expect("six is the limit and these are fewer");
+            }
+            state
+        };
+        let complaint = |state: &GameState, request| match resolve_field_move(state, &request) {
+            Err(complaint) => complaint,
+            Ok(resolved) => panic!("{request:?} should not have resolved to {resolved:?}"),
+        };
+
+        // Somebody can: the answer is which slot, which is the whole of what the model needs.
+        let mixed = with_hm(ItemId::Hm01Cut, &[PokemonSpecies::Venusaur, PokemonSpecies::Pidgey]);
+        let wrong_slot = complaint(&mixed, FieldMoveRequest::Teach { item: ItemId::Hm01Cut, slot: 1 });
+        assert!(wrong_slot.contains("cannot learn Cut"), "{wrong_slot}");
+        assert!(wrong_slot.contains("slot 0"), "it has to name who can: {wrong_slot}");
+
+        // …and the slot that can resolves, so the gate is not simply refusing every teach.
+        assert_eq!(
+            resolve_field_move(&mixed, &FieldMoveRequest::Teach { item: ItemId::Hm01Cut, slot: 0 }),
+            Ok(FieldMove::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 }),
+        );
+
+        // Nobody can, which is the case the deployed run was actually in: no slot to redirect to, so
+        // the sentence has to say that a different Pokémon is the only way past.
+        let none = with_hm(ItemId::Hm01Cut, &[PokemonSpecies::Pidgey, PokemonSpecies::Zubat]);
+        let hopeless = complaint(&none, FieldMoveRequest::Teach { item: ItemId::Hm01Cut, slot: 0 });
+        assert!(hopeless.contains("nor can anything else in the party"), "{hopeless}");
+        assert!(!hopeless.contains("In the party,"), "there is nobody to name: {hopeless}");
+
+        // ⚠️ Not a machine, so not a question: a stone rides the same menu chain and a check written
+        // for TMs must not refuse it. Eevee is in no learnset this test would find.
+        let stone = with_hm(ItemId::WaterStone, &[PokemonSpecies::Eevee]);
+        assert_eq!(
+            resolve_field_move(&stone, &FieldMoveRequest::Evolve { stone: ItemId::WaterStone, slot: 0 }),
+            Ok(FieldMove::EvolveWithStone { stone: ItemId::WaterStone, target_slot: 0,
+                                            evolve_from: PokemonSpecies::Eevee }),
         );
     }
 

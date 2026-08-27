@@ -1725,3 +1725,74 @@ fn talking_to_that_guard_reports_what_he_said() {
         "asking him what the problem is has to answer with what he said; heard {heard:?}",
     );
 }
+
+/// **The deployed run of 2026-08-27** — teaching Cut to a Pokémon that cannot learn it.
+///
+/// `post-ss-anne.bin` carries HM01 in the bag, a Venusaur in slot 0 and the Route-1 **Pidgey** in
+/// slot 1, and Pidgey is not in HM01's learnset. The cartridge answers a teach it will not allow
+/// with `MonCannotLearnMachineMoveText` and `jr .chooseMon` (`engine/items/item_effects.asm`) —
+/// straight back to the party menu with the cursor exactly where it was, which is the same
+/// closed-loop-under-A shape as the PC menus and the spent move. `TeachingMove` navigated back to
+/// the target slot, pressed A, and was refused again: **179 s of game time with no decision point**,
+/// ended not by anything noticing but by `DRIVER_ESCAPE_SILENCE` a minute in, after which the policy
+/// asked for the identical teach and it all began again.
+///
+/// ⚠️ **The policy is deliberately not a `DeterministicPolicy` here.** That one now skips an
+/// impossible teach before the agent ever sees it, which is right for a scripted leg and would make
+/// this test pass without touching the thing it is about. What is under test is the agent's own
+/// refusal — the layer every request goes through whatever asked for it, the same place
+/// `a_cut_with_no_cut_never_opens_the_party_menu` guards.
+///
+/// ⚠️ **And what it asserts is that the *words* arrive**, not merely that the agent escaped. Before
+/// this the model was told "teach:Hm01Cut got no answer from the game for 60s; starting over", which
+/// reads as a malfunction and gives it nothing to do differently — the same mistake "it was
+/// interrupted" made about a guard turning the player back.
+#[test]
+fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
+    /// Asks for the same impossible teach on every poll, which is what an unguarded `LlmPolicy`
+    /// re-issuing a refused decision looks like from the agent's side.
+    struct AlwaysTeaches;
+    impl crate::pokemon::policy::Policy for AlwaysTeaches {
+        fn name(&self) -> &'static str { "scripted" }
+        fn pick_overworld_action(&mut self, _: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction> { None }
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
+        fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
+            Some(crate::pokemon::policy::FieldMove::TeachMove { item: ItemId::Hm01Cut, target_slot: 1 })
+        }
+    }
+
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/post-ss-anne.bin"),
+        Duration::from_secs(240),
+        Box::new(AlwaysTeaches),
+    );
+
+    let mut worst = Duration::ZERO;
+    let mut worst_state = String::new();
+    let mut heard: Vec<String> = Vec::new();
+    for _ in 0..3000 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::TextBox { message } = event { heard.push(message); }
+        }
+        let gap = fixture.agent.since_last_policy_poll();
+        if gap > worst { worst = gap; worst_state = fixture.agent.state_debug(); }
+    }
+
+    println!("[teach] worst silence {worst:?} in {worst_state}, {} reported", heard.len());
+
+    // ⚠️ **Decisions keep coming**, which is the assertion rather than "it never entered
+    // `TeachingMove`": a guard that left the agent with nothing at all to do would satisfy the
+    // latter and still be the wedged run it replaces. One minute of game time is well under
+    // `DRIVER_ESCAPE_SILENCE`, so a driver that had entered the menu chain fails here.
+    assert!(
+        worst < Duration::from_secs(30),
+        "a teach the game will refuse went {worst:?} of game time without reaching a decision \
+         point — wedged in {worst_state}. heard {heard:?}",
+    );
+
+    let said = heard.first().unwrap_or_else(|| panic!("nothing was reported at all; state {worst_state}"));
+    assert!(said.contains("cannot learn Cut"), "it has to name the refusal: {said}");
+    assert!(said.contains("slot 0"), "and who in the party can take it instead: {said}");
+}

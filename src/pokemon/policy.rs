@@ -3877,6 +3877,16 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] TeachMove: {target:?} is not in the party — waiting");
                 return None;
             };
+            // A machine aimed at a Pokémon outside its learnset is refused by the cartridge back into
+            // the party menu with the cursor untouched, which the driver has no exit from — see the
+            // ⚠️ on `FieldMove::TeachMove` in `agent.rs`. The agent refuses it there too, but this is
+            // the layer that stops a scripted leg re-issuing the same impossible step every tick.
+            if state.pokemon.get(target_slot as usize)
+                .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item)) {
+                println!("[policy] TeachMove: {target:?} cannot learn {item:?} — skipping");
+                self.queue.pop_front();
+                return None;
+            }
             return Some(FieldMove::TeachMove { item, target_slot });
         }
         if let Some(&PolicyStep::UseRareCandy { slot }) = self.queue.front() {

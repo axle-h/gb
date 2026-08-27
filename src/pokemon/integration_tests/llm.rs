@@ -278,6 +278,7 @@ fn the_llm_plays_from_a_fixture() {
             config,
             Arc::clone(&published),
             crate::llm::todo::TodoList::open(None),
+            crate::llm::battle_script::BattleScript::open(None),
             crate::llm::history::History::open(None),
         );
     let _worker = worker.spawn().expect("the worker thread starts");
@@ -375,6 +376,7 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
         config,
         Arc::clone(&published),
         crate::llm::todo::TodoList::open(None),
+        crate::llm::battle_script::BattleScript::open(None),
         crate::llm::history::History::open(None),
     );
     // A real run directory, so the press is recorded the way a deployed one would be.
@@ -436,4 +438,252 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
     assert!(json.contains("the agent is wedged"), "the model's reason is the point of it: {json:.400}");
     assert!(json.contains("\"kind\": \"stuck\""), "a sanctioned press has to be tellable apart");
     assert!(json.contains("## Decision: the game is stuck"), "the turn that asked is in the slice");
+}
+
+// ── The bundled strategy, against real battles ───────────────────────────────────────────────────
+
+/// Drive the real agent through Mt Moon with [`battle_script::DETERMINISTIC`] deciding every battle
+/// turn, and print the reports the model would have been sent.
+///
+/// ⚠️ **The only place the sandbox meets the actual game.** Everything else about battle scripts is
+/// checked against hand-built `GameState`s or a static fixture: this is a real emulator, real wild
+/// encounters and real trainers, with the script answering each turn on the emulator thread exactly
+/// as a deployed run would. It prints rather than asserts — the thing worth checking is whether the
+/// reports read like an account of a battle — so it is `#[ignore]`d on top of its feature gate, as
+/// `CLAUDE.md` requires of every `probe_`.
+///
+/// ⚠️ **The overworld is still the deterministic policy's**, so the run walks Mt Moon the way the
+/// leg test does and the battles are the ones it would really have had. Only `pick_battle_action` is
+/// replaced. And the party is deliberately **not** `pimp_pokemon`'d: a maxed team one-shots
+/// everything and the reports would all be one line.
+#[cfg(feature = "diagnostics")]
+#[test]
+#[ignore]
+fn probe_scripted_battles() {
+    use crate::llm::battle_report::BattleReport;
+    use crate::llm::battle_script::{self, Outcome};
+    use crate::pokemon::GameState;
+    use crate::pokemon::agent::AgentEvent;
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::policy::{DeterministicPolicy, Policy, PolicyStep};
+    use crate::pokemon::world_graph::WorldGraph;
+    use std::sync::Mutex;
+
+    /// The deterministic policy with its battle turns handed to the sandbox.
+    struct Scripted {
+        inner: DeterministicPolicy,
+        report: Option<BattleReport>,
+        finishing: Option<BattleReport>,
+        last_battle: Option<GameState>,
+        turns: u32,
+        done: Arc<Mutex<Vec<String>>>,
+        /// How many `TextBox` events arrived while a battle was being written up, so the probe can
+        /// say whether the cartridge's own sentences reached the report or merely could have.
+        said: Arc<AtomicUsize>,
+    }
+
+    impl Policy for Scripted {
+        fn name(&self) -> &'static str { "scripted-battles" }
+
+        fn pick_overworld_action(&mut self, state: &GameState, graph: &WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction>
+        {
+            self.inner.pick_overworld_action(state, graph)
+        }
+
+        /// ⚠️ **This is what makes the probe faithful, and its absence was the first thing wrong
+        /// with it.** `LlmPolicy` keeps the last state that still had a battle in it from *every*
+        /// poll (see `LlmPolicy::last_battle_state`); a probe that only snapshotted at decision time
+        /// closed each turn against the state the turn *opened* with, so a one-shot KO reported the
+        /// foe at full HP.
+        fn service_tools(&mut self, state: &GameState, _api: &mut crate::pokemon::PokemonApi<'_>,
+                         _graph: &WorldGraph) {
+            if state.battle.is_some() && self.report.is_some() {
+                self.last_battle = Some(state.clone());
+            }
+            if self.finishing.is_some() && state.battle.is_none() {
+                let closing = self.last_battle.take();
+                if let Some(report) = self.finishing.take() {
+                    self.done.lock().unwrap().push(report.finish(Some(state).or(closing.as_ref())));
+                }
+            }
+        }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            if state.battle.as_ref()?.battle_type == crate::pokemon::battle::BattleType::Safari {
+                return self.inner.pick_battle_action(state);
+            }
+            let report = match self.report.as_mut() {
+                Some(report) => report,
+                None => self.report.insert(BattleReport::open(state, 0)?),
+            };
+            self.turns += 1;
+            let evaluation = battle_script::run(battle_script::DETERMINISTIC, state, self.turns);
+            match evaluation.outcome {
+                Outcome::Action(action) => {
+                    report.decided(state, &action, evaluation.prints);
+                    Some(action)
+                }
+                // Neither should ever happen here, and both are worth seeing loudly if they do:
+                // this is the strategy the game is finished with.
+                Outcome::Ask => {
+                    println!("  [script] asked for help on turn {}", self.turns);
+                    report.handed_back(state);
+                    self.inner.pick_battle_action(state)
+                }
+                Outcome::Failed(why) => panic!("the bundled strategy failed mid-battle: {why}"),
+            }
+        }
+
+        fn pick_nickname(&mut self, species: crate::pokemon::species::PokemonSpecies)
+            -> Option<Option<String>> { self.inner.pick_nickname(species) }
+        fn pick_mart_purchase(&mut self, state: &GameState)
+            -> Option<Option<crate::pokemon::bag::BagItem>> { self.inner.pick_mart_purchase(state) }
+        fn pick_move_to_forget(&mut self, current: &[crate::pokemon::move_name::PokemonMove],
+                               new: crate::pokemon::move_name::PokemonMoveName)
+            -> Option<Option<usize>> { self.inner.pick_move_to_forget(current, new) }
+        fn pick_field_move(&mut self, state: &GameState)
+            -> Option<crate::pokemon::policy::FieldMove> { self.inner.pick_field_move(state) }
+        fn is_exhausted(&self) -> bool { self.inner.is_exhausted() }
+        fn steps_remaining(&self) -> Option<usize> { self.inner.steps_remaining() }
+
+        fn on_event(&mut self, event: &AgentEvent) {
+            match event {
+                AgentEvent::TextBox { message } => {
+                    if let Some(report) = self.report.as_mut() {
+                        report.said(message);
+                        self.said.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                // ⚠️ **Handed over rather than finished, exactly as `LlmPolicy` does it.** There is
+                // nothing worth closing against yet: the last state this policy holds is the one the
+                // final turn *opened* with. It is closed at the next observation with no battle in
+                // it, where the party carries the real HP.
+                AgentEvent::BattleEnded => {
+                    self.turns = 0;
+                    self.finishing = self.report.take();
+                }
+                _ => {}
+            }
+            self.inner.on_event(event);
+        }
+    }
+
+    /// How many battles to print before stopping. Enough to show a wild encounter, a trainer and
+    /// whatever the script does when something goes wrong; not so many that the output is a wall.
+    const WANTED: usize = 6;
+
+    let done = Arc::new(Mutex::new(Vec::new()));
+    let said = Arc::new(AtomicUsize::new(0));
+    let policy = Scripted {
+        inner: DeterministicPolicy::new(42, PolicyStep::mt_moon_traversal()),
+        report: None,
+        finishing: None,
+        last_battle: None,
+        turns: 0,
+        done: Arc::clone(&done),
+        said: Arc::clone(&said),
+    };
+    // ⚠️ **No cartridge text reaches these reports, and it is not the script's doing.** Across 11
+    // battle turns not one `AgentEvent::TextBox` fires while `AgentState::Battle` is live, though
+    // the box that *opens* the battle is captured and overworld boxes are captured normally. It is
+    // not the harness's fast options either: `with_original_battle_timing` changes nothing. The
+    // reader is only fed from one arm of `BattleState::WaitingForMenu`, and `update_with` presses a
+    // button as it reads, so feeding it from the others is a battle-timing change rather than an
+    // observation. Left alone deliberately — see the ⚠️ on `with_original_battle_timing`.
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/mt-moon.bin"),
+        Duration::from_mins(40),
+        Box::new(policy),
+    );
+
+    while done.lock().unwrap().len() < WANTED && !fixture.agent.policy_exhausted() {
+        fixture.step();
+    }
+
+    let said = said.load(Ordering::Relaxed);
+    let reports = done.lock().unwrap();
+    println!("\n════════ {} battles, {said} lines of cartridge text ════════\n", reports.len());
+    for report in reports.iter() {
+        println!("{report}");
+    }
+}
+
+/// **What the other Pokémon did reaches the model.**
+///
+/// ⚠️ **It did not, for the whole life of the battle layer, and nothing noticed.** Across eleven
+/// battle turns not one `AgentEvent::TextBox` was emitted while a battle was live, though the box
+/// that *opens* a battle was captured and overworld boxes were captured normally. `TextBox` is the
+/// only channel the enemy's turn has: `BattleActionStarted` is the **player's** intent and the enemy
+/// never gets one, and `### On screen` is a rolling fragment read at the decision point, by which
+/// time the battle menu is back. So the model could see the move it chose and the HP that resulted,
+/// and never "ENEMY ODDISH used ABSORB!", "It's super effective!", "fainted" or "gained 198 EXP".
+///
+/// The cause is in `agent::reading_dialogue`'s ⚠️: `wTopMenuItemX/Y` linger, so for the whole of a
+/// turn's resolution the agent believed a move list was open and the arm that handles one
+/// deliberately did not read. Asserted on the game's own words rather than on an event count,
+/// because the bug produced a healthy stream of *empty* boxes and `PokemonAgent::event` drops those.
+///
+/// ⚠️ **Here rather than in `mechanics.rs`** only because that file was being edited by someone else
+/// at the time; it belongs beside the other battle-timing tests whenever it is safe to move it.
+#[test]
+fn what_the_enemy_did_is_reported_rather_than_only_what_we_did() {
+    use crate::pokemon::GameState;
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::agent::AgentEvent;
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::policy::Policy;
+    use crate::pokemon::world_graph::WorldGraph;
+    use std::sync::Mutex;
+
+    /// Always the first move, collecting every word the agent reports on the way.
+    struct Probe { said: Arc<Mutex<Vec<String>>> }
+
+    impl Policy for Probe {
+        fn name(&self) -> &'static str { "scripted" }
+        fn pick_overworld_action(&mut self, _: &GameState, _: &WorldGraph) -> Option<OverworldAction> { None }
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            state.battle.as_ref().and_then(|b| b.player.moves[0])
+                .map(|battle_move| BattleAction::Fight { slot: 0, battle_move })
+        }
+        fn on_event(&mut self, event: &AgentEvent) {
+            if let AgentEvent::TextBox { message } = event {
+                self.said.lock().expect("the log is never poisoned").push(message.clone());
+            }
+        }
+    }
+
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let mut fixture = TestFixture::with_policy(
+        crate::pokemon::integration_tests::BATTLE_STATE,
+        Duration::from_secs(120),
+        Box::new(Probe { said: Arc::clone(&said) }),
+    );
+
+    let mut ticks = 0;
+    while fixture.total_cycles < fixture.max_cycles {
+        ticks += 1;
+        fixture.step();
+        if ticks > 50 && fixture.try_game_state().map_or(true, |s| s.battle.is_none()) {
+            break;
+        }
+    }
+
+    let said = said.lock().expect("the log is never poisoned");
+    let all = said.join(" | ");
+    assert!(
+        said.iter().any(|line| line.to_uppercase().contains("ENEMY")),
+        "nothing the enemy did was reported. What was: {all}",
+    );
+    assert!(said.iter().any(|line| line.contains("used")), "no move was named in the game's own words: {all}");
+
+    // ⚠️ **And the move list must not bleed into it.** `wTextBoxID` flips to `MessageBox` before
+    // `AutoBgMapTransfer` has cleared the list the player just chose from, so a read taken too early
+    // prefixes every quoted line with the whole moveset. `reading_dialogue` waits out `confirming`
+    // for exactly this; without it these lines open "TACKLE TAIL WHIP BUBBLE WATER GUN Celina …".
+    for line in said.iter() {
+        let listed = ["TACKLE", "TAIL WHIP", "BUBBLE", "WATER GUN"]
+            .iter().filter(|name| line.contains(**name)).count();
+        assert!(listed < 3, "the move list leaked into a message box: {line:?}");
+    }
 }
