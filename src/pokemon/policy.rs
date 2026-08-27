@@ -86,15 +86,43 @@ pub trait Policy {
         Some(None) // default: open the mart but buy nothing
     }
 
+    /// Another purchase for the **same** mart visit, asked once the previous one has gone through
+    /// and the Buy/Sell/Quit menu is back on screen. `None` closes the shop, which is what every
+    /// policy but [`LlmPolicy`](crate::pokemon::llm_policy::LlmPolicy) does.
+    ///
+    /// ⚠️ **A defaulted second method rather than a list out of `pick_mart_purchase`, and the reason
+    /// is [`DeterministicPolicy`].** That policy does *not* pop its `BuyFromMart` step here — the
+    /// overworld arm pops it once the bag reflects the purchase, so a dropped YES-confirm re-opens
+    /// the shop and retries. Re-asking the existing method would therefore hand back the item just
+    /// bought and buy it a second time, silently, in every scripted leg that shops. Defaulting to
+    /// `None` means the scripted policies keep exactly the behaviour they have.
+    ///
+    /// ⚠️ **The quantity is not trimmed to the wallet here**, for the same reason the first purchase
+    /// is not: `drive_pokemart` does it against the ROM's own price table, because Gen 1 hands over
+    /// nothing at all for an order it cannot afford.
+    fn next_mart_purchase(&mut self) -> Option<BagItem> {
+        None
+    }
+
     /// Called on the level-up "Which move should be forgotten?" prompt, when a Pokémon that already
     /// knows 4 moves would learn `new_move`. `current_moves` are the 4 known moves (slot order).
+    ///
+    /// ⚠️ **`party_slot` is which Pokémon is doing the learning, and the prompt could not be
+    /// written without it.** The turn used to open "A Pokémon is trying to learn Surf" — the
+    /// indefinite article is not a style choice, it was the whole of what was known. Identifying it
+    /// meant matching four move names against the party by eye, and the decision on the table is
+    /// which of *this* mon's moves to lose. Every caller already has the index: `drive_forget_menu`
+    /// reads it from `learning_pokemon_index` one line above the call.
     ///
     /// - `None`             → not ready yet; asked again next frame.
     /// - `Some(None)`       → decline learning; keep the current four moves.
     /// - `Some(Some(slot))` → forget the move in `slot` (0-3) and learn `new_move`.
-    fn pick_move_to_forget(&mut self, _current_moves: &[PokemonMove], _new_move: PokemonMoveName)
-        -> Option<Option<usize>>
-    {
+    fn pick_move_to_forget(
+        &mut self,
+        _party_slot: usize,
+        _current_moves: &[PokemonMove],
+        _new_move: PokemonMoveName,
+    ) -> Option<Option<usize>> {
         Some(None) // default: never drop an existing move
     }
 
@@ -3647,9 +3675,12 @@ impl Policy for DeterministicPolicy {
         Some(Some(name))
     }
 
-    fn pick_move_to_forget(&mut self, current_moves: &[PokemonMove], new_move: PokemonMoveName)
-        -> Option<Option<usize>>
-    {
+    fn pick_move_to_forget(
+        &mut self,
+        _party_slot: usize,
+        current_moves: &[PokemonMove],
+        new_move: PokemonMoveName,
+    ) -> Option<Option<usize>> {
         // Forget the *weakest* move rather than the default slot-0 (which was silently discarding
         // Tackle). Value = base power, with any damaging move ranked above every status move (the +1
         // tie-break also covers fixed-damage moves like Seismic Toss that list no power); HM moves are
@@ -4146,7 +4177,7 @@ mod move_learn_tests {
         let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
         // Ivysaur: [Tackle(dmg), Growl(status), LeechSeed(status), VineWhip(dmg)] learning Poisonpowder.
         let moves = [mv(Tackle), mv(Growl), mv(LeechSeed), mv(VineWhip)];
-        let slot = p.pick_move_to_forget(&moves, Poisonpowder).flatten().expect("should pick a slot");
+        let slot = p.pick_move_to_forget(0, &moves, Poisonpowder).flatten().expect("should pick a slot");
         assert!(slot == 1 || slot == 2,
             "forgot slot {slot} ({:?}) — must forget a status move, not Tackle/Vine Whip", moves[slot].name);
     }
@@ -4156,7 +4187,7 @@ mod move_learn_tests {
         let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
         let moves = [mv(Tackle), mv(Growl), mv(LeechSeed), mv(VineWhip)];
         // Learning Razor Leaf (strong) should still forget a status slot, keeping both damaging moves.
-        let slot = p.pick_move_to_forget(&moves, RazorLeaf).flatten().unwrap();
+        let slot = p.pick_move_to_forget(0, &moves, RazorLeaf).flatten().unwrap();
         assert!(slot == 1 || slot == 2, "should forget a status move to learn Razor Leaf");
     }
 
@@ -4164,7 +4195,7 @@ mod move_learn_tests {
     fn never_forgets_hm() {
         let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
         let moves = [mv(Cut), mv(Growl), mv(LeechSeed), mv(Poisonpowder)];
-        let slot = p.pick_move_to_forget(&moves, Poisonpowder).flatten().unwrap();
+        let slot = p.pick_move_to_forget(0, &moves, Poisonpowder).flatten().unwrap();
         assert_ne!(moves[slot].name, Cut, "must never forget an HM move (Cut)");
     }
 }

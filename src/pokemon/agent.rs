@@ -21,6 +21,28 @@ use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::text::PokemonTextReader;
 use crate::pokemon::world_graph::WorldGraph;
 
+/// Trim an order to what the wallet actually covers, or `None` when it covers nothing.
+///
+/// ⚠️ **Gen 1 does not sell you as many as you can afford.** An unaffordable quantity gets "You
+/// don't have enough money!" and hands over *nothing*, which from outside the menu is
+/// indistinguishable from a dropped YES-confirm — so the policy retries, hits `MAX_MART_ATTEMPTS`,
+/// prints "gave up" and the leg walks on with an empty bag. `silph_co_card_key_steps` had been
+/// asking for 15 Hyper Potions (¥18,000) on ¥7,838 and buying zero of them every run since it was
+/// written, which is what left `can_beat_silph_giovanni` blacking out on Silph 11F. The price comes
+/// from the ROM's own `ItemPrices` table.
+///
+/// ⚠️ **A function rather than the two inline copies it replaced**: both the first purchase of a
+/// visit and every one after it go through here, and a second purchase that forgot the trim would
+/// reproduce that bug exactly, in the arm nobody was looking at.
+fn affordable(api: &PokemonApi<'_>, money: u32, item: BagItem) -> Option<BagItem> {
+    let item = match api.item_price(item.id) {
+        Some(price) => BagItem::new(item.id, item.quantity.min((money / price) as u8)),
+        // Not in the price table (a key item, or a mart-specific TM): order as asked.
+        None => item,
+    };
+    (item.quantity > 0).then_some(item)
+}
+
 // too long and player veers off course on the overworld, too short and the game doesn't get chance to update values between turns
 pub const AGENT_RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
 
@@ -1330,7 +1352,7 @@ impl PokemonAgent {
             .map(|p| p.moves.iter().flatten().copied().collect())
             .unwrap_or_default();
         match api.move_to_learn() {
-            Some(new_move) => match self.policy.pick_move_to_forget(&current_moves, new_move) {
+            Some(new_move) => match self.policy.pick_move_to_forget(which, &current_moves, new_move) {
                 None => {} // still deciding — wait
                 Some(Some(slot)) => {
                     let slot = slot as u8;
@@ -1496,19 +1518,9 @@ impl PokemonAgent {
                 if let Some(item) = self.policy.pick_mart_purchase(&game_state) {
                     api.release_all_buttons();
 
-                    // **Trim the order to the wallet before ordering.** Gen 1 does not sell you as many
-                    // as you can afford — an unaffordable quantity gets "You don't have enough money!"
-                    // and hands over *nothing*. From outside the menu that is indistinguishable from a
-                    // dropped YES-confirm, so the policy retries, hits `MAX_MART_ATTEMPTS`, prints "gave
-                    // up" and the leg walks on with an empty bag. `silph_co_card_key_steps` had been
-                    // asking for 15 Hyper Potions (¥18,000) on ¥7,838 and buying zero of them every run
-                    // since it was written, which is what left `can_beat_silph_giovanni` blacking out on
-                    // Silph 11F. The price comes from the ROM's own `ItemPrices` table.
-                    let item = item.map(|item| match api.item_price(item.id) {
-                        Some(price) => BagItem::new(item.id, item.quantity.min((game_state.money / price) as u8)),
-                        // Not in the price table (a key item, or a mart-specific TM): order as asked.
-                        None => item,
-                    }).filter(|item| item.quantity > 0);
+                    // Trim the order to the wallet before ordering — see `affordable`, which is
+                    // also what the second and later purchases of a visit go through.
+                    let item = item.and_then(|item| affordable(api, game_state.money, item));
 
                     if let Some(item) = item {
                         self.set_state(AgentState::PokemartShopping(PokemartState::ChoosingBuyOption(item)));
@@ -3177,7 +3189,18 @@ CascadeBadge; not cutting".to_string(),
                         // NLL: borrow of self.state via pokemart_state ends here (value copied)
                         if menu.map_or(false, |m| m.is_mart_buy_sell_menu()) {
                             api.release_all_buttons();
-                            self.set_pokemart_state(PokemartState::Quitting);
+                            // ⚠️ **One mart visit can be several purchases**, because Potions and
+                            // Poké Balls are one errand and the model was paying two overworld turns
+                            // and two mart turns for it. The Buy/Sell/Quit menu is already back on
+                            // screen here, so the next order costs nothing but this branch.
+                            // `next_mart_purchase` defaults to `None`, so every scripted policy
+                            // still quits exactly here — see its ⚠️ for why re-asking
+                            // `pick_mart_purchase` instead would double-buy.
+                            let money = api.game_state().map(|s| s.money).unwrap_or(0);
+                            match self.policy.next_mart_purchase().and_then(|item| affordable(api, money, item)) {
+                                Some(item) => self.set_pokemart_state(PokemartState::ChoosingBuyOption(item)),
+                                None => self.set_pokemart_state(PokemartState::Quitting),
+                            }
                         } else if menu.map_or(false, |m| m.is_yes_no_menu()) {
                             // HandleMenuInput runs Delay3 (3 VBlanks ≈ 50ms) before reading
                             // joypad. Toggle A so hJoyLast[A] resets to 0 on one tick and

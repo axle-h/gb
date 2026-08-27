@@ -396,6 +396,13 @@ view! {
         pub hp: u16,
         pub max_hp: u16,
         pub status: String,
+        /// ⚠️ **The field that made this read answerable.** Every `MoveView` carries its own
+        /// `move_type` and `power`, so a model reading this had the *attacking* half of every
+        /// matchup and never the defending half — no types on either side, so the multiplier could
+        /// not be worked out from the result at all, and `read_party` (which does carry types) only
+        /// ever covers your own. Paying for a read and still needing the type chart from memory is
+        /// the read not doing its job.
+        pub types: Vec<String>,
         /// Slot of a move Disable has locked out this battle. The game bounces straight back to the
         /// move menu if it is chosen, so a decider that ignores this can loop forever.
         pub disabled_move_slot: Option<u8>,
@@ -432,6 +439,11 @@ pub fn battle(state: &GameState) -> Option<BattleView> {
         hp: summary.current_hp,
         max_hp: summary.stats.hp,
         status: format!("{}", summary.status),
+        types: {
+            let mut types: Vec<String> = summary.types.iter().map(|t| format!("{t:?}")).collect();
+            types.dedup(); // a single-type mon stores its one type in both slots
+            types
+        },
         disabled_move_slot: summary.disabled_move_slot,
         moves: summary.moves.iter().flatten().map(move_view).collect(),
     };

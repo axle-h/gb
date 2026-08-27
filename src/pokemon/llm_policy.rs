@@ -108,6 +108,9 @@ pub struct LlmPolicy {
     /// ⚠️ **Not one slot.** `resume_after_battle` exists precisely so several battles can happen
     /// between two overworld decisions, and a single slot would silently drop all but the last.
     reports: Vec<String>,
+    /// Kinds `buy_item`'s `then` queued for the current mart visit, drained by
+    /// [`Policy::next_mart_purchase`]. Cleared whenever the model is asked a fresh mart turn.
+    mart_queue: std::collections::VecDeque<BagItem>,
     /// A report whose battle has ended, waiting for the game to be observed once more so it can be
     /// closed against something.
     ///
@@ -245,6 +248,7 @@ impl LlmPolicy {
             battle_report: None,
             finishing: None,
             reports: Vec::new(),
+            mart_queue: std::collections::VecDeque::new(),
             last_battle_state: None,
         }
     }
@@ -325,7 +329,7 @@ impl LlmPolicy {
                 let menu = match kind {
                     DecisionKind::Overworld => tools::overworld_menu(state, self.snapshot.arrival),
                     DecisionKind::Battle => tools::battle_menu(state),
-                    DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot),
+                    DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot, state),
                     DecisionKind::ForgetMove => match context {
                         TurnContext::ForgetMove { current, .. } => tools::forget_menu(current),
                         _ => Vec::new(),
@@ -803,11 +807,19 @@ impl Policy for LlmPolicy {
     }
 
     fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
+        // ⚠️ **Cleared here rather than when the shop closes.** This is the one call that means "the
+        // model is being asked afresh", so draining it here is what makes a leftover order from an
+        // abandoned visit impossible to spend at the *next* mart — there is no shop-closed callback
+        // to hang it on, and a queue with no single point of truth is one that outlives its turn.
+        self.mart_queue.clear();
         match self.advance(DecisionKind::MartPurchase, TurnContext::None)? {
             // ⚠️ The quantity is **not** trimmed to the wallet here — `assert_pokemart_state` does
             // that against the ROM's own price table, because Gen 1 hands over *nothing* for an
             // order it cannot afford and the agent has been trimming since long before this policy.
-            Terminal::BuyItem { item } => Some(item),
+            Terminal::BuyItem { item, then } => {
+                self.mart_queue = then.into();
+                Some(item)
+            }
             Terminal::Wait { ticks } => {
                 self.waiting = Some((DecisionKind::MartPurchase, ticks));
                 None
@@ -819,12 +831,25 @@ impl Policy for LlmPolicy {
         }
     }
 
+    /// The next kind queued by this visit's `buy_item`. See `Policy::next_mart_purchase`'s ⚠️ for
+    /// why this is a method of its own rather than a longer answer to `pick_mart_purchase`.
+    ///
+    /// ⚠️ **It touches neither `pending`, `waiting` nor the generation** — the same shape
+    /// `advance_queue` and `pick_field_move` have, and for the same reason: a decision already taken
+    /// is being handed over, not asked for. Starting a turn here would cancel nothing and buy a
+    /// completion for an answer already in hand.
+    fn next_mart_purchase(&mut self) -> Option<BagItem> {
+        self.mart_queue.pop_front()
+    }
+
     fn pick_move_to_forget(
         &mut self,
+        party_slot: usize,
         current_moves: &[PokemonMove],
         new_move: PokemonMoveName,
     ) -> Option<Option<usize>> {
-        let context = TurnContext::ForgetMove { current: current_moves, new: new_move };
+        let context =
+            TurnContext::ForgetMove { slot: party_slot, current: current_moves, new: new_move };
         match self.advance(DecisionKind::ForgetMove, context)? {
             Terminal::ForgetMove { slot } => match slot {
                 // A slot the mon does not have would be navigated to and never reached, so the
@@ -916,6 +941,8 @@ impl Policy for LlmPolicy {
         self.battle_report = None;
         self.finishing = None;
         self.reports.clear();
+        // A queued order belongs to a mart in a game that no longer exists.
+        self.mart_queue.clear();
         self.last_battle_state = None;
         // ⚠️ **Disarmed here as well as in `Worker::apply_restart`, because the two happen at
         // different moments.** The worker only learns about a restart at the top of its next turn,
@@ -2495,6 +2522,51 @@ mod tests {
         assert!(offered.contains(&"buy_item") && !offered.contains(&"choose_action"));
     }
 
+    /// ⚠️ **One mart visit, several kinds, and the queue must not outlive the visit.** Balls *and*
+    /// Potions was two mart turns and the two overworld turns that reach them, on the errand the
+    /// prompt tells the model to run at every mart it passes. The tail is handed over by
+    /// `next_mart_purchase`, a method of its own so the scripted policies keep quitting exactly
+    /// where they always did — see its ⚠️ for why re-asking `pick_mart_purchase` would double-buy.
+    #[test]
+    fn a_mart_turn_can_buy_several_kinds_in_one_visit() {
+        use crate::pokemon::item::ItemId;
+        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
+            "buy_item",
+            r#"{"item":"Potion","quantity":3,"then":[{"item":"PokeBall","quantity":10},{"item":"Antidote"}]}"#,
+        )])]);
+
+        let head = rig
+            .pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state))
+            .expect("the mart menu is answered");
+        assert_eq!(head, Some(BagItem::new(ItemId::Potion, 3)));
+        assert_eq!(policy.next_mart_purchase(), Some(BagItem::new(ItemId::PokeBall, 10)));
+        // An omitted quantity is one here exactly as it is on the head order.
+        assert_eq!(policy.next_mart_purchase(), Some(BagItem::new(ItemId::Antidote, 1)));
+        assert_eq!(policy.next_mart_purchase(), None, "and then the shop closes");
+    }
+
+    /// ⚠️ **A queued order must never be spendable at the *next* mart.** There is no shop-closed
+    /// callback to drain it on, so `pick_mart_purchase` — the one call that means "the model is
+    /// being asked afresh" — clears it. Without this a chain abandoned halfway (a battle, a reset,
+    /// the model walking out) would buy its tail the next time the player talked to any clerk.
+    #[test]
+    fn an_abandoned_chain_is_not_spent_at_the_next_mart() {
+        use crate::pokemon::item::ItemId;
+        let (mut rig, mut policy) = Rig::new(vec![
+            calls(&[("buy_item", r#"{"item":"Potion","then":[{"item":"PokeBall","quantity":10}]}"#)]),
+            calls(&[("buy_item", r#"{"item":"Antidote"}"#)]),
+        ]);
+
+        rig.pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state))
+            .expect("the first mart is answered");
+        // The visit is abandoned with the PokeBall still queued, and a fresh turn is asked.
+        let second = rig
+            .pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state))
+            .expect("the second mart is answered");
+        assert_eq!(second, Some(BagItem::new(ItemId::Antidote, 1)));
+        assert_eq!(policy.next_mart_purchase(), None, "the abandoned tail went with the old turn");
+    }
+
     /// ⚠️ The forget prompt fires **mid-battle**, and answering it means cancelling the battle turn
     /// in flight — which is correct, because the prompt is the live question. This pins that the
     /// cancellation happens and that the answer is the slot the model named.
@@ -2524,7 +2596,7 @@ mod tests {
         .collect();
 
         let answer = rig
-            .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(&moves, PokemonMoveName::Bite))
+            .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(0, &moves, PokemonMoveName::Bite))
             .expect("the forget prompt is answered");
         assert_eq!(answer, Some(2));
         release.store(true, Ordering::SeqCst);
@@ -2547,7 +2619,7 @@ mod tests {
             [PokemonMoveName::Tackle, PokemonMoveName::Growl].into_iter().map(PokemonMove::with_max_pp).collect();
 
         let answer = rig
-            .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(&moves, PokemonMoveName::Bite))
+            .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(0, &moves, PokemonMoveName::Bite))
             .expect("it is answered rather than left hanging");
         assert_eq!(answer, None, "declining keeps all the moves it has");
     }

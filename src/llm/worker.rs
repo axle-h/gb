@@ -1256,8 +1256,14 @@ fn describe(decision: &Terminal) -> String {
             Some(name) => format!("set_nickname {name}"),
             None => "set_nickname (keep the default)".to_string(),
         },
-        Terminal::BuyItem { item } => match item {
-            Some(item) => format!("buy_item {item}"),
+        Terminal::BuyItem { item, then } => match item {
+            Some(item) => match then.is_empty() {
+                true => format!("buy_item {item}"),
+                false => format!(
+                    "buy_item {item}, then {}",
+                    then.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "),
+                ),
+            },
             None => "buy_item (nothing)".to_string(),
         },
         Terminal::ForgetMove { slot } => match slot {

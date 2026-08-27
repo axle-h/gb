@@ -27,6 +27,13 @@ use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
 use crate::llm::battle_script::MAX_SOURCE as MAX_BATTLE_SCRIPT;
+
+/// How many *extra* kinds one `buy_item` may order in a single mart visit.
+///
+/// ⚠️ **Three, matching `MAX_CHAINED_ACTIONS`' tail rather than being reasoned out afresh.** A
+/// stocked-up trip is Balls, Potions and an Antidote or two; past that the money is gone anyway, and
+/// a long list is a long way for one mistyped name to waste.
+const MAX_CHAINED_PURCHASES: usize = 3;
 use crate::llm::todo::{MAX_ITEMS as MAX_TODO_ITEMS, MAX_TEXT as MAX_TODO_TEXT, TodoCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
 use crate::llm::worker::ToolAnswer;
@@ -135,7 +142,11 @@ pub enum Terminal {
     /// The escape hatch (§17 risk 1): raw joypad presses, delivered ahead of the state machine.
     PressButtons { buttons: Vec<JoypadButton> },
     SetNickname { name: Option<String> },
-    BuyItem { item: Option<BagItem> },
+    BuyItem {
+        item: Option<BagItem>,
+        /// More kinds to buy in the **same** visit, in order. See `buy_item`'s description.
+        then: Vec<BagItem>,
+    },
     ForgetMove { slot: Option<u8> },
     /// Do nothing for this many agent ticks (20 ms of emulated time each). The honest answer when
     /// the game is mid-animation, and the forced answer when a model will not call anything else.
@@ -254,6 +265,16 @@ const HM_BADGES: &[(PokemonMoveName, crate::pokemon::badge::Badge)] = &[
     (PokemonMoveName::Strength, crate::pokemon::badge::Badge::RainbowBadge),
     (PokemonMoveName::Surf, crate::pokemon::badge::Badge::SoulBadge),
 ];
+
+/// Whether `name` is one of the five HM moves, and which HM teaches it.
+///
+/// ⚠️ **The point of asking is that an HM move cannot be un-taught.** Gen 1 has no move deleter, and
+/// the machine is a one-way write — so a Pokémon that forgets Cut cannot get it back, and the run is
+/// behind the terrain that Cut clears until something else in the party learns it. `HM_BADGES` is the
+/// list either way, so this and the field-move gate cannot drift apart.
+pub fn hm_move(name: PokemonMoveName) -> Option<PokemonMoveName> {
+    HM_BADGES.iter().find(|(hm, _)| *hm == name).map(|(hm, _)| *hm)
+}
 
 /// Refuse a field move the game itself would refuse, and say which half is missing.
 ///
@@ -491,9 +512,9 @@ pub const READ_TOOLS: &[ReadTool] = &[
     },
     ReadTool {
         name: "read_battle",
-        description: "The live battle: both sides' species, level, HP, status and moves, the \
+        description: "The live battle: both sides' species, level, HP, status, types and moves, the \
                       enemy's catch rate, and which of your moves Disable has locked out. The \
-                      actions you can take are in the turn's own battle menu, not here.",
+                      turn's battle menu already costs your moves against it; this is the detail.",
         // ⚠️ `ForgetMove` legitimately fires mid-fight, and which move to drop is a battle question.
         kinds: &[DecisionKind::Battle, DecisionKind::ForgetMove],
         parameters: None,
@@ -615,9 +636,16 @@ pub fn todo_tools() -> Vec<ToolSpec> {
             json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "integer", "minimum": 1,
+                    // ⚠️ **The cap is in the schema as well as in the prose, and it was not.**
+                    // `TodoList` truncates at `MAX_TEXT` on the way in, so an over-long item was
+                    // silently cut mid-sentence — the exact schema-says-one-thing-parser-does-another
+                    // shape that left 543 of 749 `why`s null. `maximum` on `id` is the same fix:
+                    // the list can never hold more than `MAX_ITEMS`, so an edit past it was a round
+                    // trip spent finding that out.
+                    "id": { "type": "integer", "minimum": 1, "maximum": MAX_TODO_ITEMS,
                             "description": "An existing item's number, to replace or delete it. Omit to add." },
-                    "text": { "type": "string", "description": "What to do, and why. Omit to delete `id`." },
+                    "text": { "type": "string", "maxLength": MAX_TODO_TEXT,
+                              "description": "What to do, and why. Omit to delete `id`." },
                 },
                 "additionalProperties": false,
             }),
@@ -627,7 +655,8 @@ pub fn todo_tools() -> Vec<ToolSpec> {
             "Mark one item on your plan done, by the number shown beside it.",
             json!({
                 "type": "object",
-                "properties": { "id": { "type": "integer", "minimum": 1, "description": "The item's number." } },
+                "properties": { "id": { "type": "integer", "minimum": 1, "maximum": MAX_TODO_ITEMS,
+                                        "description": "The item's number." } },
                 "required": ["id"],
                 "additionalProperties": false,
             }),
@@ -667,18 +696,18 @@ pub fn battle_script_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec::new(
             "get_battle_script_docs",
-            "How to write a battle script: the language, everything a script can read about the              battle, and a worked example. Read this before `set_battle_script`.",
+            "How to write a battle script: the language, everything a script can read about the battle, and a worked example. Read this before `set_battle_script`.",
             no_arguments(),
         ),
         ToolSpec::new(
             "read_battle_script",
-            "The battle script you have installed, and whether it is still deciding your battle              turns.",
+            "The battle script you have installed, and whether it is still deciding your battle turns.",
             no_arguments(),
         ),
         ToolSpec::new(
             "set_battle_script",
             format!(
-                "Install a script that decides your battle turns for you, in Rhai. A turn it                  answers costs no request at all, so a routine wild encounter becomes free. It is                  run against six example battles before it is installed and you are told what it                  chose in each; if it later fails it is disarmed and that turn comes back to you                  with the reason. Omit `script` to go back to answering every battle turn yourself.                  At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
+                "Install a script that decides your battle turns for you, in Rhai. A turn it answers costs no request at all, so a routine wild encounter becomes free. It is run against six example battles before it is installed and you are told what it chose in each; if it later fails it is disarmed and that turn comes back to you with the reason. Omit `script` to go back to answering every battle turn yourself. At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
             ),
             json!({
                 "type": "object",
@@ -808,16 +837,34 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
         )),
         DecisionKind::MartPurchase => tools.push(ToolSpec::new(
             "buy_item",
-            "ENDS THE TURN. Buy one kind of item from the mart, then leave. `item` is a name from \
-             the stock list, copied exactly. Omit `item` to walk away without buying anything. The \
-             order is trimmed to what the money covers — Gen 1 sells you nothing at all if you \
-             cannot afford the whole order — and you can talk to the clerk again to buy something \
-             else.",
+            "ENDS THE TURN. Buy from the mart, then leave. `item` is a name from the stock list, \
+             copied exactly, and `quantity` how many. `then` buys more kinds in the same visit \
+             without asking you again — Poké Balls and Potions in one stop rather than two. Omit \
+             `item` to walk away without buying anything. Each order is trimmed to what the money \
+             covers, in order, because Gen 1 sells you nothing at all for an order you cannot \
+             afford; the row for each item says how many you already have.",
             json!({
                 "type": "object",
                 "properties": {
                     "item": { "type": "string", "description": "A name from the stock list." },
-                    "quantity": { "type": "integer", "minimum": 1, "maximum": 99, "default": 1 },
+                    "quantity": {
+                        "type": "integer", "minimum": 1, "maximum": 99, "default": 1,
+                        "description": "How many of `item` to buy.",
+                    },
+                    "then": {
+                        "type": "array",
+                        "description": "More kinds to buy in this same visit, in order.",
+                        "maxItems": MAX_CHAINED_PURCHASES,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item": { "type": "string" },
+                                "quantity": { "type": "integer", "minimum": 1, "maximum": 99, "default": 1 },
+                            },
+                            "required": ["item"],
+                            "additionalProperties": false,
+                        },
+                    },
                 },
                 "additionalProperties": false,
             }),
@@ -1026,7 +1073,10 @@ fn use_field_move_spec() -> ToolSpec {
                     "additionalProperties": false,
                     "description": "A tile on the current map, in the coordinates `read_map` uses.",
                 },
-                "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+                "direction": {
+                    "type": "string", "enum": ["up", "down", "left", "right"],
+                    "description": "For `push_boulder`: which way to shove it.",
+                },
                 "facing": {
                     "type": "string",
                     "enum": ["up", "down", "left", "right"],
@@ -1399,22 +1449,41 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
             }
         }
         "buy_item" if kind == DecisionKind::MartPurchase => {
-            match arguments.get("item").and_then(Value::as_str).filter(|name| !name.is_empty()) {
-                None => CallKind::Terminal(Terminal::BuyItem { item: None }),
-                Some(name) => match item_by_name(name) {
-                    Some(item) => {
-                        let quantity = arguments
-                            .get("quantity")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(1)
-                            .clamp(1, 99) as u8;
-                        CallKind::Terminal(Terminal::BuyItem { item: Some(BagItem::new(item, quantity)) })
+            let Some(name) = arguments.get("item").and_then(Value::as_str).filter(|n| !n.is_empty())
+            else {
+                return CallKind::Terminal(Terminal::BuyItem { item: None, then: Vec::new() });
+            };
+            let head = match purchase(name, arguments.get("quantity")) {
+                Ok(item) => item,
+                Err(failure) => return CallKind::Rejected(failure),
+            };
+            // ⚠️ **Every chained order is parsed here, before any of them happens** — the same rule
+            // `chosen_actions` follows for `then`. A chain accepted by the parser and refused on the
+            // third order has already spent the money on the first two, and reports the mistake in
+            // the *next* turn's situation rather than as a tool result this turn can still act on.
+            let mut then = Vec::new();
+            if let Some(more) = arguments.get("then") {
+                let Some(list) = more.as_array() else {
+                    return CallKind::Rejected(
+                        "`then` has to be a list of `{item, quantity}` objects.".to_string());
+                };
+                if list.len() > MAX_CHAINED_PURCHASES {
+                    return CallKind::Rejected(format!(
+                        "`then` takes at most {MAX_CHAINED_PURCHASES} more kinds and you gave {}. \
+                         Nothing was bought — ask again with a shorter list.", list.len()));
+                }
+                for entry in list {
+                    let Some(name) = entry.get("item").and_then(Value::as_str) else {
+                        return CallKind::Rejected(
+                            "Every entry in `then` needs an `item` name from the stock list.".to_string());
+                    };
+                    match purchase(name, entry.get("quantity")) {
+                        Ok(item) => then.push(item),
+                        Err(failure) => return CallKind::Rejected(failure),
                     }
-                    None => CallKind::Rejected(format!(
-                        "`{name}` is not an item this game has. Copy a name from the stock list exactly."
-                    )),
-                },
+                }
             }
+            CallKind::Terminal(Terminal::BuyItem { item: Some(head), then })
         }
         "forget_move" if kind == DecisionKind::ForgetMove => {
             match arguments.get("slot").and_then(Value::as_u64) {
@@ -1456,6 +1525,16 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
             terminal_names(kind).join(", "),
         )),
     }
+}
+
+/// One `{item, quantity}` order, resolved against the game's item list.
+fn purchase(name: &str, quantity: Option<&Value>) -> Result<BagItem, String> {
+    let Some(item) = item_by_name(name) else {
+        return Err(format!(
+            "`{name}` is not an item this game has. Copy a name from the stock list exactly."));
+    };
+    let quantity = quantity.and_then(Value::as_u64).unwrap_or(1).clamp(1, 99) as u8;
+    Ok(BagItem::new(item, quantity))
 }
 
 fn string_argument(arguments: &Value, key: &str) -> Result<String, String> {
@@ -1834,6 +1913,15 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
         }
     };
     let mut actions = state.map.actions();
+    // ⚠️ **The PC is withheld, and it is the one row here that lied by succeeding.** `actions()`
+    // offers it in every Pokémon Centre — which the prompt now sends the model into constantly — and
+    // choosing it walks over, presses A, reports `✓ used the PC` and accomplishes nothing the model
+    // can observe: `FieldMoveRequest` deliberately carries no `UsePcBox` or `UseItemPc`, so there is
+    // no tool for anything behind that menu. That is the inverse of the rule the `CutTree` and
+    // `ConnectionWater` gates keep — an action the game will refuse is not an action — and it is the
+    // worse half of it, because a refusal at least says something. `MetaTile::Pc` stays in
+    // `actions()` for the scripted policies, which drive the boxes through `FieldMove` directly.
+    actions.retain(|action| !matches!(action.tile, MetaTile::Pc));
     // `id_kind`, not `kind`: two people can share the tile an action approaches them from, and
     // "Sprite" == "Sprite" leaves that pair to `sort_by_key`'s stability over a `HashSet` walk.
     actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.id_kind()));
@@ -1870,12 +1958,77 @@ pub fn battle_id(action: &BattleAction) -> String {
     }
 }
 
+/// The battle menu, with every `fight:` row costed against the Pokémon actually in front of you.
+///
+/// ⚠️ **The type chart is the agent's job, not the model's, and this was the one decision kind
+/// where it was not.** `set_battle_script` hands a script `mv.damage` and `mv.effectiveness` on the
+/// argument that "a script that had to carry its own type chart is one no model would get right from
+/// memory" — and every word of that applies to a model answering the turn by hand, which had neither.
+/// Worse, the system prompt tells it in as many words that **prior knowledge of Pokémon Red is not
+/// evidence**, so the only source left for a matchup was the one source the prompt forbids. Both
+/// numbers come from [`type_multiplier`] and [`expected_damage`], the same two functions the script
+/// reads, so a fallback turn and a scripted one cannot disagree.
+///
+/// ⚠️ **On the row rather than in `BattleAction`'s `Display`.** That `Display` is a *menu row* shared
+/// with `battle_report::intent`'s neighbour and the battle-script validation table, and neither of
+/// those has a defender to cost a move against; it also has no `GameState`. The damage belongs to the
+/// pairing, not to the action, so it is appended here where both sides are in hand.
+///
+/// ⚠️ **A status move gets no number at all**, the `34 -> 34` rule from `battle_report`: Growl has no
+/// expected damage, and printing `0 dmg` beside it reads as "this move is useless" rather than "this
+/// move does something other than damage".
 pub fn battle_menu(state: &GameState) -> Vec<MenuItem> {
+    let sides = state.battle.as_ref().map(|battle| (&battle.player, &battle.enemy));
     battle_options(state)
         .unwrap_or_default()
         .iter()
-        .map(|action| MenuItem { id: battle_id(action), description: format!("{action}") })
+        .map(|action| {
+            let mut description = format!("{action}");
+            if let (BattleAction::Fight { battle_move, .. }, Some((me, foe))) = (action, sides) {
+                description.push_str(&fight_row_note(battle_move.name, me, foe));
+            }
+            MenuItem { id: battle_id(action), description }
+        })
         .collect()
+}
+
+/// What a `fight:` row says beyond its name and PP: roughly what it would take off, and the
+/// cartridge's own words for the multiplier when there is one to report.
+fn fight_row_note(
+    name: crate::pokemon::move_name::PokemonMoveName,
+    me: &crate::pokemon::pokemon::PokemonSummary,
+    foe: &crate::pokemon::pokemon::PokemonSummary,
+) -> String {
+    use crate::pokemon::damage::{effectiveness_phrase, expected_damage, is_damaging_move, type_multiplier};
+    // ⚠️ **The multiplier is only reported for a move that deals damage**, and this gate is the
+    // whole of that. Growl is a Normal move and Normal has no effect on Ghost, so a chart consulted
+    // blindly labels it "no effect" against a Gastly — which is false: Gen 1 applies type immunity
+    // to the damage calculation, and a status move lands regardless. Printing it would send the model
+    // hunting for a different debuff for the one matchup where debuffing is the plan.
+    if !is_damaging_move(name) {
+        return String::new();
+    }
+    match (expected_damage(me, name, foe), effectiveness_phrase(type_multiplier(name, foe))) {
+        // ⚠️ The immune case has no damage *and* a phrase, and it is the one row where the phrase
+        // is the entire decision — so it must not fall through to the arm below.
+        (_, Some(phrase @ "no effect")) => format!(" — {phrase}"),
+        (Some(damage), Some(phrase)) => format!(
+            " — ~{damage} damage ({}% of its HP), {phrase}", percent_of(damage, foe.stats.hp)),
+        (Some(damage), None) => format!(
+            " — ~{damage} damage ({}% of its HP)", percent_of(damage, foe.stats.hp)),
+        // A damaging move the estimator declines to price (it has the immunity arm above covered).
+        (None, _) => String::new(),
+    }
+}
+
+/// Damage as a share of the defender's *maximum* HP, which is the figure that says "this is a
+/// two-hit kill" without the model doing the division. Capped at 100 because an overkill reported as
+/// 240% reads as a bug rather than as certainty.
+fn percent_of(damage: u16, max_hp: u16) -> u16 {
+    match max_hp {
+        0 => 0,
+        max => ((damage as u32 * 100 / max as u32) as u16).min(100),
+    }
 }
 
 pub fn resolve_battle(state: &GameState, id: &str) -> Option<BattleAction> {
@@ -1884,18 +2037,33 @@ pub fn resolve_battle(state: &GameState, id: &str) -> Option<BattleAction> {
 
 /// What the mart in front of the player sells, read from its own ROM list at the poll (see
 /// [`ApiSnapshot`]). The id is the item's name, because that is what `buy_item` takes.
-pub fn mart_menu(snapshot: &ApiSnapshot) -> Vec<MenuItem> {
+///
+/// ⚠️ **How many you already hold is on the row, and its absence was the module's own rule broken on
+/// the one turn it mattered most.** "Anything a read can answer from the situation should be in the
+/// situation": a mart turn is entirely the question *what am I short of*, and the answer lived behind
+/// `read_bag` — so playing this turn properly cost a round trip, every time, and the deployed run
+/// bought nothing at a mart across 429 decisions. ⚠️ **Zero is printed, not omitted**: "you have
+/// none" is the row that decides a purchase, and leaving it blank makes the commonest reason to buy
+/// the one thing the menu does not say.
+pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
     snapshot
         .mart_stock
         .iter()
-        .map(|(item, price)| MenuItem {
-            id: item.to_string(),
-            description: match price {
-                Some(price) => format!("¥{price}"),
-                // Every mart item has a price; a missing one means the ROM's table did not have it,
-                // which is worth showing rather than hiding behind a plausible number.
-                None => "price unknown".to_string(),
-            },
+        .map(|(item, price)| {
+            let held = state.bag.iter().find(|entry| entry.id == *item).map_or(0, |e| e.quantity);
+            MenuItem {
+                id: item.to_string(),
+                description: format!(
+                    "{} — you have {held}",
+                    match price {
+                        // Every mart item has a price; a missing one means the ROM's table did not
+                        // have it, which is worth showing rather than hiding behind a plausible
+                        // number.
+                        Some(price) => format!("¥{price}"),
+                        None => "price unknown".to_string(),
+                    },
+                ),
+            }
         })
         .collect()
 }
@@ -1903,13 +2071,39 @@ pub fn mart_menu(snapshot: &ApiSnapshot) -> Vec<MenuItem> {
 /// The four moves the forget prompt is choosing between. The id is the slot, which is what
 /// `forget_move` takes — there is no reordering hazard here, because the prompt itself is indexed by
 /// slot and lives for as long as the question does.
+/// The four moves the forget prompt is choosing between, each costed so the choice can be made from
+/// the row.
+///
+/// ⚠️ **A row used to be a name and its PP, and that is not enough to answer with.** Which of four
+/// moves to lose is decided on power, on type coverage and on whether the move is an HM — none of
+/// which was here, so the model either guessed from the name or spent `read_party` on a turn where
+/// the whole question is four moves it is already being shown. ⚠️ The **HM marker is the one that
+/// matters**: Gen 1 has no move deleter, so forgetting Cut or Surf is not a trade, it is a loss, and
+/// `DeterministicPolicy` has protected against it since long before the model was ever asked.
 pub fn forget_menu(current: &[PokemonMove]) -> Vec<MenuItem> {
     current
         .iter()
         .enumerate()
-        .map(|(slot, known)| MenuItem {
-            id: slot.to_string(),
-            description: format!("{} — {} pp", known.name, known.pp),
+        .map(|(slot, known)| {
+            let metadata = known.name.metadata();
+            MenuItem {
+                id: slot.to_string(),
+                description: format!(
+                    "{} — {}, {}, {}/{} pp{}",
+                    known.name,
+                    metadata.move_type,
+                    match metadata.power {
+                        Some(power) => format!("{power} power"),
+                        None => "no damage".to_string(),
+                    },
+                    known.pp,
+                    metadata.pp,
+                    match hm_move(known.name) {
+                        Some(_) => " — ⚠️ an HM move, and it cannot be re-learnt",
+                        None => "",
+                    },
+                ),
+            }
         })
         .collect()
 }
@@ -2135,10 +2329,35 @@ mod tests {
             // Overworld and Battle's ceiling *fell*: see `offers_battle_script`.
             //
             // ⚠️ **The other five came down again**, for the reason they came down last time.
-            (DecisionKind::Overworld, 11_400),
+            //
+            // ⚠️ **`MartPurchase` moved 4050 → 4500 on 2026-08-27, and it is the second entry here
+            // whose spend is measured in requests rather than in bytes.** Re-measured across all
+            // six: 11 188, 4926, 3685, 4425, 3879, 5635. `buy_item` gained a `then` — up to
+            // `MAX_CHAINED_PURCHASES` more kinds bought in the same visit — for **375 bytes**, and
+            // what it buys is the arithmetic `choose_action`'s chain buys: Poké Balls *and* Potions
+            // is one mart turn instead of two mart turns and the two overworld turns that reach
+            // them, on the errand the prompt now tells the model to run at every mart it passes.
+            // The deployed run bought nothing at a mart across 429 decisions, so the thing being
+            // optimised is a turn count that was zero; the row-level "you have N" that goes with it
+            // is in the *situation* and costs this array nothing.
+            //
+            // ⚠️ **The inner `then` items carry no descriptions and that is deliberate.** The first
+            // draft repeated "A name from the stock list" and "How many to buy" inside the array
+            // items as well as beside `item` and `quantity`, which is the same two sentences three
+            // times for 77 bytes; the outer pair say it once and the array's own description says
+            // what the array is. Same split that kept the HM gate and the chain affordable.
+            //
+            // ⚠️ **Overworld came *down* 11 400 → 11 350 while gaining two things**, which is worth
+            // a line because it looks like nothing happened. `todo_set` gained `maxLength` and
+            // `maximum` and `use_field_move`'s `direction` gained the description it never had
+            // (+~99), and three battle-script descriptions lost 111 bytes of continuation
+            // whitespace that had been baked into their string literals — runs of spaces the model
+            // was reading. A cleanup that pays for a fix is still a cleanup nobody measured, so it
+            // is measured here.
+            (DecisionKind::Overworld, 11_350),
             (DecisionKind::Battle, 4_950),
             (DecisionKind::Nickname, 3_750),
-            (DecisionKind::MartPurchase, 4_050),
+            (DecisionKind::MartPurchase, 4_500),
             (DecisionKind::ForgetMove, 3_950),
             (DecisionKind::Stuck, 5_700),
         ] {
@@ -2193,6 +2412,118 @@ mod tests {
     /// of every battle turn for the length of a run. Same class of bug as `MetaTile`'s and
     /// `PokemonStatus`' old `strum` derives, and found the same way one would hope: by reading
     /// `prompt::tests::probe_turn_requests`' output.
+    /// A `PokemonSummary` for the two costing tests below. `stats` are flat so the arithmetic in
+    /// `expected_damage` is the type chart and the base power and nothing else.
+    fn summary(
+        species: crate::pokemon::species::PokemonSpecies,
+        types: [crate::pokemon::pokemon::PokemonType; 2],
+        moves: &[PokemonMoveName],
+    ) -> crate::pokemon::pokemon::PokemonSummary {
+        let mut slots = [None, None, None, None];
+        for (slot, name) in moves.iter().enumerate() {
+            slots[slot] = Some(PokemonMove { name: *name, pp: 20 });
+        }
+        crate::pokemon::pokemon::PokemonSummary {
+            species,
+            current_hp: 100,
+            status: crate::pokemon::status::PokemonStatus::None,
+            types,
+            level: 25,
+            moves: slots,
+            stats: crate::pokemon::pokemon::PokemonStats {
+                attack: 50, defense: 50, speed: 50, special: 50, hp: 100,
+            },
+            disabled_move_slot: None,
+        }
+    }
+
+    /// ⚠️ **The type chart is the agent's job on this turn too, and for a long time it was not.**
+    /// `set_battle_script` hands a script `mv.damage` and `mv.effectiveness` on the stated argument
+    /// that no model gets a Gen 1 type chart right from memory — and a model answering the turn by
+    /// hand had neither, on a turn where the system prompt tells it in as many words that prior
+    /// knowledge of Pokémon Red is not evidence. Both numbers come from the same two functions the
+    /// script reads, so a scripted turn and a fallback turn cannot disagree.
+    #[test]
+    fn a_fight_row_is_costed_against_the_pokemon_in_front_of_it() {
+        use crate::pokemon::pokemon::PokemonType::*;
+        use crate::pokemon::species::PokemonSpecies;
+
+        let me = summary(PokemonSpecies::Charmander, [Fire, Fire],
+                         &[PokemonMoveName::Ember, PokemonMoveName::Growl, PokemonMoveName::Scratch]);
+        let foe = summary(PokemonSpecies::Bulbasaur, [Grass, Poison], &[PokemonMoveName::Tackle]);
+
+        let ember = fight_row_note(PokemonMoveName::Ember, &me, &foe);
+        assert!(ember.contains("super effective"), "Fire on Grass is doubled: {ember}");
+        assert!(ember.contains("damage") && ember.contains("% of its HP"),
+                "a number and what share of the target it is: {ember}");
+
+        // ⚠️ **A status move gets no number, the `34 -> 34` rule.** Growl has no power, and `0
+        // damage` beside it reads as "this move is useless" rather than "this move is not damage".
+        assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &foe), "",
+                   "a status move is not priced");
+
+        // ⚠️ **And the multiplier is withheld from a status move as well, which is the subtler
+        // half.** Growl is Normal and Normal has *no effect* on Ghost, so a chart consulted blindly
+        // labels it "no effect" against a Gastly — false: Gen 1 applies type immunity to the damage
+        // calculation and a debuff lands regardless. Printing it would send the model looking for a
+        // different debuff in the one matchup where debuffing is the whole plan.
+        let ghost = summary(PokemonSpecies::Gastly, [Ghost, Poison], &[PokemonMoveName::Lick]);
+        assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &ghost), "",
+                   "a status move is never labelled by the type chart");
+
+        // A damaging move that genuinely cannot land says so, and says only that.
+        let normal = summary(PokemonSpecies::Rattata, [Normal, Normal], &[PokemonMoveName::Tackle]);
+        let row = fight_row_note(PokemonMoveName::Tackle, &normal, &ghost);
+        assert_eq!(row, " — no effect", "immunity is the whole row: {row}");
+    }
+
+    /// ⚠️ **The PC is the one menu row that lied by succeeding.** `actions()` offers it in every
+    /// Pokémon Centre, which is where the prompt now sends the model constantly — and choosing it
+    /// walks over, presses A, reports `✓ used the PC` and accomplishes nothing observable, because
+    /// `FieldMoveRequest` deliberately carries no `UsePcBox` or `UseItemPc`. That is the inverse of
+    /// the rule the `CutTree` and `ConnectionWater` gates keep, and the worse half of it: a refusal
+    /// at least tells the model something. ⚠️ **Withheld from the menu, not from `actions()`** —
+    /// the scripted policies drive the boxes through `FieldMove` directly and must keep seeing it.
+    #[test]
+    fn the_menu_does_not_offer_a_pc_nothing_can_use() {
+        use crate::pokemon::tile::MetaTile;
+        let mut fixture = crate::pokemon::integration_tests::fixture::TestFixture::new(
+            include_bytes!("../pokemon/data/at-celadon.bin"),
+            std::time::Duration::from_secs(10),
+            vec![],
+        );
+        let state = fixture.game_state();
+        assert!(
+            !overworld_menu(&state, None).iter().any(|row| row.id.ends_with(":Pc")),
+            "no row offers the PC",
+        );
+        // The action itself is untouched, or every scripted deposit in `postgame::pc_box` breaks.
+        assert_eq!(
+            MetaTile::Pc.id_kind(), "Pc",
+            "the id form stays, because `actions()` still yields it for the scripted policies",
+        );
+    }
+
+    /// ⚠️ **Four move names and their PP is not enough to choose between four moves.** Power and
+    /// type decide it, and the HM marker decides it outright: Gen 1 has no move deleter, so
+    /// forgetting Cut or Surf is a loss rather than a trade, and `DeterministicPolicy` has given HM
+    /// moves max value — never forget one — since long before a model was ever asked this question.
+    #[test]
+    fn a_forget_row_says_what_losing_the_move_would_cost() {
+        let moves = [
+            PokemonMove { name: PokemonMoveName::Tackle, pp: 30 },
+            PokemonMove { name: PokemonMoveName::Cut, pp: 30 },
+            PokemonMove { name: PokemonMoveName::Growl, pp: 40 },
+        ];
+        let rows = forget_menu(&moves);
+        assert!(rows[0].description.contains("Normal") && rows[0].description.contains("power"),
+                "type and power: {}", rows[0].description);
+        assert!(rows[1].description.contains("HM move"), "the HM is marked: {}", rows[1].description);
+        assert!(!rows[0].description.contains("HM move"), "and only the HM is");
+        assert!(rows[2].description.contains("no damage"),
+                "a status move says so rather than showing 0 power: {}", rows[2].description);
+    }
+
     #[test]
     fn a_battle_menu_row_is_a_sentence_and_not_a_debug_dump() {
         let switch = BattleAction::SwitchPokemon {
@@ -2851,11 +3182,11 @@ mod tests {
 
         assert!(matches!(
             parse(DecisionKind::MartPurchase, "buy_item", "{}"),
-            CallKind::Terminal(Terminal::BuyItem { item: None }),
+            CallKind::Terminal(Terminal::BuyItem { item: None, .. }),
         ));
         assert_eq!(
             match parse(DecisionKind::MartPurchase, "buy_item", r#"{"item":"Potion","quantity":4}"#) {
-                CallKind::Terminal(Terminal::BuyItem { item }) => item,
+                CallKind::Terminal(Terminal::BuyItem { item, .. }) => item,
                 _ => panic!("a stocked item is a purchase"),
             },
             Some(BagItem::new(ItemId::Potion, 4)),
@@ -2863,8 +3194,31 @@ mod tests {
         // An omitted quantity is one, not zero — zero would be an order the mart silently refuses.
         assert!(matches!(
             parse(DecisionKind::MartPurchase, "buy_item", r#"{"item":"Potion"}"#),
-            CallKind::Terminal(Terminal::BuyItem { item: Some(BagItem { quantity: 1, .. }) }),
+            CallKind::Terminal(Terminal::BuyItem { item: Some(BagItem { quantity: 1, .. }), .. }),
         ));
+
+        // ⚠️ **A chain is parsed whole before any of it is spent.** Gen 1 takes the money order by
+        // order, so a `then` accepted here and refused on its third entry has already bought the
+        // first two and can only complain about it on the *next* turn — the `chosen_actions` bug one
+        // shop along. Both failure shapes are rejections that buy nothing.
+        assert_eq!(
+            match parse(DecisionKind::MartPurchase, "buy_item",
+                        r#"{"item":"Potion","then":[{"item":"PokeBall","quantity":10}]}"#) {
+                CallKind::Terminal(Terminal::BuyItem { then, .. }) => then,
+                _ => panic!("a chained order is a purchase"),
+            },
+            vec![BagItem::new(ItemId::PokeBall, 10)],
+        );
+        assert!(matches!(
+            parse(DecisionKind::MartPurchase, "buy_item",
+                  r#"{"item":"Potion","then":[{"item":"Nonsense"}]}"#),
+            CallKind::Rejected(_),
+        ), "a name in the tail is checked exactly as the head is");
+        assert!(matches!(
+            parse(DecisionKind::MartPurchase, "buy_item",
+                  r#"{"item":"Potion","then":[{"item":"Potion"},{"item":"Potion"},{"item":"Potion"},{"item":"Potion"}]}"#),
+            CallKind::Rejected(_),
+        ), "over-length is a rejection, not a truncation");
 
         assert!(matches!(
             parse(DecisionKind::ForgetMove, "forget_move", "{}"),
