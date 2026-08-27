@@ -61,6 +61,7 @@ pub mod map_header;
 // `buy_item`, `use_field_move { teach, use_item, toss_item }` — and it lives outside `pokemon`, so
 // reaching them through `policy`'s one re-export would have meant re-exporting the other half too.
 pub mod item;
+pub mod item_use;
 pub mod bag;
 mod menu;
 pub mod delay;
@@ -802,8 +803,14 @@ pub struct TrashCanPuzzle {
 /// count byte followed by `(id, quantity)` pairs, so the two readers below serve either.
 ///
 /// These read **raw** RAM rather than going through [`Bag`], which silently drops every id [`ItemId`]
-/// cannot name — most of the TMs — and so reports both the wrong count and shifted indices. Menu
-/// navigation and occupancy checks must use these.
+/// cannot name and so reports both the wrong count and shifted indices. Menu navigation and
+/// occupancy checks must use these.
+///
+/// ⚠️ **The gap is much smaller than it was and the rule is unchanged.** [`ItemId`] named only
+/// twelve of the fifty TMs until 2026-08-27, which put a hole in `read_bag`'s own occupancy count;
+/// all fifty are named now, so what `Bag` still drops is ids the game never puts in a bag at all.
+/// That is not a reason to read through it here: the same drop would be silent, and this is the
+/// layer whose whole job is to agree with the cursor on the screen.
 fn inventory_position(mmu: &MMU, count_ptr: &symbols::DmgPointer, base_ptr: &symbols::DmgPointer, item: ItemId) -> Option<u8> {
     let count = mmu.read_pointer(count_ptr) as usize;
     (0..count)

@@ -393,8 +393,10 @@ fn dump_fixture_states() {
 /// **raw** bag read.
 ///
 /// The bag is read from `wNumBagItems`/`wBagItems` rather than `GameState::bag`, because the latter
-/// silently drops every id [`ItemId`] cannot name — most of the TMs — so it under-reports occupancy
-/// against the 20-slot ceiling that is the whole reason Phase 0 exists. Unnamed ids print as `$xx`.
+/// silently drops every id [`ItemId`] cannot name, so it can under-report occupancy against the
+/// 20-slot ceiling that is the whole reason Phase 0 exists. Unnamed ids print as `$xx`. ⚠️ **That
+/// used to be most of the TMs**, which is what put the same hole in `read_bag`; all fifty are named
+/// since 2026-08-27, so a `$xx` here now means an id the game does not hand out.
 ///
 /// Run with
 /// `cargo test --release --bin gb -- probe_coverage --exact --ignored --nocapture`.

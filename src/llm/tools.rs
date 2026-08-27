@@ -397,7 +397,20 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             FieldMove::EvolveWithStone { stone: held(*stone)?, target_slot: slot, evolve_from }
         }
         FieldMoveRequest::UseItem { item, target } => {
-            FieldMove::UseFieldItem { item: held(*item)?, target: *target }
+            // ⚠️ **`CutTree`'s gate and `Teach`'s, for an item the game will not use at all.**
+            // `UnusableItem` is `jp ItemUseNotTime` — "This isn't the time to use that!" and back to
+            // the bag list, cursor untouched — and `UsingFieldItem`'s only completion is "we are in
+            // the overworld again", which that never reaches, so the attempt is 60 s of A-mashing
+            // ended by `DRIVER_ESCAPE_SILENCE`. The deployed run of 2026-08-27 alternated a
+            // `use_item HelixFossil` with talking to the Mt Moon Rocket who says "if you find a
+            // fossil, give it to me", which is flavour rather than a handoff. Refused here it costs
+            // no round trip and the answer says the thing nothing else in the turn would: that the
+            // item is carried rather than used, so there is nothing to retry.
+            let item = held(*item)?;
+            if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
+                return Err(refusal);
+            }
+            FieldMove::UseFieldItem { item, target: *target }
         }
         FieldMoveRequest::TossItem { item } => FieldMove::TossItem { item: held(*item)? },
         FieldMoveRequest::PushBoulder { boulder, direction } => {
@@ -2229,6 +2242,59 @@ mod tests {
         assert_eq!(find(":Hiker"), "talk to Hiker");
     }
 
+    /// **`read_bag` has to agree with the bag the game is holding, row for row.**
+    ///
+    /// ⚠️ **It did not, and the deployed run of 2026-08-27 saw both halves.** `observe::bag` reads
+    /// `GameState::bag`, which is a [`Bag`](crate::pokemon::bag::Bag), which **drops every id
+    /// `ItemId` cannot name**. Only twelve of the fifty TMs were named, so a bag holding
+    /// `TM34, HELIX FOSSIL, MOON STONE, TM01` was answered as three items with `slots_used: 3`, and
+    /// the run then found TM01 on screen with nothing having ever mentioned it and filed a bug about
+    /// the "unrelated TM34/bag menu prompt" it thought it had caused.
+    ///
+    /// ⚠️ **The count is the dangerous half, not the missing row.** The bag holds twenty kinds and a
+    /// pickup into a full one is refused in a way that looks from outside exactly like a pickup that
+    /// worked, which is what `toss_item` exists to avoid; a model told it has four free slots when
+    /// it has three walks into that hole with the tool in its hand.
+    ///
+    /// The fixture is chosen for holding two TMs, an HM and a key item at once. Both sides are read
+    /// from the same cartridge: `wNumBagItems` raw against what the tool would answer.
+    #[test]
+    fn read_bag_counts_every_slot_the_game_counts() {
+        use crate::pokemon::PokemonApiTrait;
+        use crate::pokemon::symbols::DmgPointerRead;
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/post-ss-anne.bin")).expect("the committed fixture loads");
+        let mut api = crate::pokemon::PokemonApi::new(&mut gb);
+        let state = api.game_state().expect("readable");
+        let view = crate::pokemon::observe::bag(&state, &api);
+
+        let raw = api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wNumBagItems) as usize;
+        assert_eq!(view.slots_used, raw, "read_bag says {} of the bag's slots are used, the game says {raw}", view.slots_used);
+        assert_eq!(view.items.len(), raw, "and every one of them has to be listed: {:?}", view.items);
+
+        // The machines are the ones that went missing, and the name has to be the one the model can
+        // quote back into `toss_item` or `teach`.
+        let named: Vec<&str> = view.items.iter().map(|i| i.item.as_str()).collect();
+        assert!(named.contains(&"Tm34Bide"), "{named:?}");
+        assert!(named.contains(&"Hm01Cut"), "{named:?}");
+        for name in &named {
+            assert!(item_by_name(name).is_some(), "{name} is listed but cannot be named back");
+        }
+
+        // ⚠️ **This fixture cannot prove the bug on its own** and the loop below is what does. Its
+        // bag holds TM11, TM28 and TM34, which were three of the twelve machines that *were* named,
+        // so the agreement above passed throughout. What made the deployed run's bag disagree was
+        // TM01. So the assertion is over the whole machine range rather than over one save: every
+        // id `$C4`-`$FA` has to be nameable, and nameable *back*, since the name is the handle the
+        // model quotes into `toss_item` and `teach`.
+        for id in 0xC4..=0xFAu8 {
+            let item = ItemId::from_repr(id)
+                .unwrap_or_else(|| panic!("${id:02X} is a machine and `read_bag` would drop it"));
+            let name = item.to_string();
+            assert_eq!(item_by_name(&name), Some(item), "{name} does not resolve back to ${id:02X}");
+        }
+    }
+
     /// **What the `tools` array costs, per kind, with a ceiling on each.**
     ///
     /// ⚠️ **It is paid per *completion*, not per turn.** The whole array goes out again with every
@@ -3331,6 +3397,64 @@ mod tests {
             Ok(FieldMove::EvolveWithStone { stone: ItemId::WaterStone, target_slot: 0,
                                             evolve_from: PokemonSpecies::Eevee }),
         );
+    }
+
+    /// **The item gate, which is the machine gate one bag row along.**
+    ///
+    /// `ItemUsePtrTable` sends most of the key items to `UnusableItem`, which is `jp ItemUseNotTime`:
+    /// "This isn't the time to use that!" and back to the bag list, cursor untouched.
+    /// `UsingFieldItem` has no exit from that either, so a `use_item` on one is 60 s of A-mashing
+    /// ended by `DRIVER_ESCAPE_SILENCE`. The deployed run of 2026-08-27 spent turn after turn on it
+    /// in Mt Moon, because the Rocket standing there says "if you find a fossil, give it to me" and
+    /// that is flavour rather than a handoff.
+    ///
+    /// ⚠️ **Refused here it costs no round trip**, and the sentence has to say the thing the model
+    /// cannot work out for itself: that the item is carried rather than used, so there is nothing to
+    /// retry. `crate::pokemon::item_use` reads the table rather than transcribing it, and this test
+    /// is about the gate rather than the list.
+    #[test]
+    fn an_item_the_game_will_never_use_is_refused_here_instead() {
+        let holding = |item: ItemId| {
+            let mut state = fixture_state();
+            state.bag.push(BagItem { id: item, quantity: 1 }).expect("the fixture's bag has room");
+            state
+        };
+        let at = Point8 { x: 5, y: 6 };
+        let complaint = |state: &GameState, item: ItemId| {
+            match resolve_field_move(state, &FieldMoveRequest::UseItem { item, target: at }) {
+                Err(complaint) => complaint,
+                Ok(resolved) => panic!("{item} should not have resolved to {resolved:?}"),
+            }
+        };
+
+        let fossil = complaint(&holding(ItemId::HelixFossil), ItemId::HelixFossil);
+        assert!(fossil.contains("no bag use for HelixFossil"), "{fossil}");
+        assert!(fossil.contains("carry"), "it has to say what to do instead: {fossil}");
+        assert!(complaint(&holding(ItemId::SilphScope), ItemId::SilphScope).contains("no bag use"));
+
+        // A ball is the same `ItemUseNotTime` by a different route, and the alternative is a tool
+        // rather than a shrug.
+        let ball = complaint(&holding(ItemId::PokeBall), ItemId::PokeBall);
+        assert!(ball.contains("choose_battle_action"), "{ball}");
+
+        // A machine never reaches the table at all (`cp HM01 / jp nc, ItemUseTMHM`) and has its own
+        // tool, so it is pointed at `teach` rather than called unusable.
+        let machine = complaint(&holding(ItemId::Hm01Cut), ItemId::Hm01Cut);
+        assert!(machine.contains("teach"), "{machine}");
+
+        // ⚠️ **The gate is not "refuse every key item"**: the Poké Flute is a key item, is
+        // `ItemUsePokeFlute`, and is the one use the scripted route actually makes. A check that
+        // refused it would break Snorlax.
+        assert!(ItemId::PokeFlute.is_key_item(), "the point of the case");
+        assert_eq!(
+            resolve_field_move(&holding(ItemId::PokeFlute), &FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: at }),
+            Ok(FieldMove::UseFieldItem { item: ItemId::PokeFlute, target: at }),
+        );
+
+        // And an item that is not in the bag is still the bag's complaint, not the gate's: the
+        // `held` check runs first, so "you do not have one" beats "it would not work".
+        let empty = complaint(&fixture_state(), ItemId::HelixFossil);
+        assert!(empty.contains("no HelixFossil in the bag"), "{empty}");
     }
 
     /// **The HM gate, and why it is worth a test of its own.**

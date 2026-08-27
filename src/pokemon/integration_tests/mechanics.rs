@@ -1796,3 +1796,147 @@ fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
     assert!(said.contains("cannot learn Cut"), "it has to name the refusal: {said}");
     assert!(said.contains("slot 0"), "and who in the party can take it instead: {said}");
 }
+
+
+/// **The deployed run of 2026-08-27, later the same day** — the Helix Fossil, on the Mt Moon Rocket.
+///
+/// He says "If you find a fossil, give it to me and scram!", which is flavour rather than a handoff:
+/// nothing in Mt Moon takes a fossil, and `ItemUsePtrTable` sends `HELIX_FOSSIL` to `UnusableItem`,
+/// which is `jp ItemUseNotTime` — "This isn't the time to use that!" and back to the bag list with
+/// the cursor exactly where it was. `UsingFieldItem`'s only completion is "we are in the overworld
+/// again", which that never reaches, so the attempt was **60 s of A-mashing** ended by
+/// `DRIVER_ESCAPE_SILENCE`, reported as "use-item:HelixFossil got no answer from the game for 60s",
+/// which reads as a malfunction. The model read it as one and alternated between talking to him and
+/// re-issuing the identical use, three turns and a minute of wall clock at a time.
+///
+/// This is [`teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge`]'s test one item along, and
+/// deliberately the same shape: a hand-rolled policy rather than a `DeterministicPolicy` (which only
+/// ever reaches for the Poké Flute and would pass without touching the guard), and the assertion is
+/// that **decisions keep coming** rather than that the driver was skipped.
+///
+/// ⚠️ **The target is a real, reachable person three tiles away.** A target the router cannot serve
+/// would make this pass with the guard removed: `UsingFieldItem` reports "Can't reach the field-item
+/// target" and drops to `Idle` on its own, which is not the wedge under test.
+#[test]
+fn using_an_item_the_game_will_not_use_does_not_wedge() {
+    /// Asks for the same impossible use on every poll, which is what an unguarded `LlmPolicy`
+    /// re-issuing a refused decision looks like from the agent's side.
+    struct AlwaysUsesTheFossil;
+    impl crate::pokemon::policy::Policy for AlwaysUsesTheFossil {
+        fn name(&self) -> &'static str { "scripted" }
+        fn pick_overworld_action(&mut self, _: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction> { None }
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
+        fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
+            // Sailor 1, at (19, 30) on Vermilion's dock front, three steps from where the fixture
+            // stands. Standing in for the Mt Moon Rocket: an ordinary person, reachable, facing whom
+            // changes nothing about what the bag will do.
+            Some(crate::pokemon::policy::FieldMove::UseFieldItem {
+                item: ItemId::HelixFossil,
+                target: crate::geometry::Point8 { x: 19, y: 30 },
+            })
+        }
+    }
+
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/post-ss-anne.bin"),
+        Duration::from_secs(240),
+        Box::new(AlwaysUsesTheFossil),
+    );
+
+    assert!(
+        fixture.game_state().bag.iter().any(|it| it.id == ItemId::HelixFossil),
+        "the fixture has to be carrying the fossil, or this is a test about an empty bag",
+    );
+
+    let mut worst = Duration::ZERO;
+    let mut worst_state = String::new();
+    let mut heard: Vec<String> = Vec::new();
+    for _ in 0..3000 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::TextBox { message } = event { heard.push(message); }
+        }
+        let gap = fixture.agent.since_last_policy_poll();
+        if gap > worst { worst = gap; worst_state = fixture.agent.state_debug(); }
+    }
+
+    println!("[use-item] worst silence {worst:?} in {worst_state}, {} reported", heard.len());
+
+    assert!(
+        worst < Duration::from_secs(30),
+        "a use the game will refuse went {worst:?} of game time without reaching a decision point, \
+         wedged in {worst_state}. heard {heard:?}",
+    );
+
+    let said = heard.first().unwrap_or_else(|| panic!("nothing was reported at all; state {worst_state}"));
+    assert!(said.contains("HelixFossil"), "it has to name what was refused: {said}");
+    assert!(said.contains("carry"), "and say the item is carried rather than used: {said}");
+}
+
+/// The other half of the same wedge: an item the ROM table says *is* usable, refused by **where the
+/// player is standing**.
+///
+/// `ItemUsePtrTable` sends `ESCAPE_ROPE` to `ItemUseEscapeRope`, which is a real effect, so
+/// `item_use::field_use_refusal` lets it through and should. But the routine checks the map's
+/// tileset against `EscapeRopeTilesets` (FOREST, CEMETERY, CAVERN, FACILITY, INTERIOR) and answers
+/// anywhere else with `jp ItemUseNotTime` — the same "This isn't the time to use that!" and the same
+/// bag list with the cursor untouched. Vermilion City is OVERWORLD, so this is that case.
+///
+/// ⚠️ **No table can predict this one**, which is why the driver reads the screen as well:
+/// `BattleState` has had that net since `soak` found the identical loop inside a fight, and it is
+/// the same sentence off the same `ItemUseNotTime`. Without it the cost is the full
+/// `DRIVER_ESCAPE_SILENCE` minute reported as "got no answer from the game", which is what the
+/// deployed run filed a bug about.
+#[test]
+fn an_item_the_map_refuses_backs_out_rather_than_mashing_for_a_minute() {
+    struct AlwaysRopes;
+    impl crate::pokemon::policy::Policy for AlwaysRopes {
+        fn name(&self) -> &'static str { "scripted" }
+        fn pick_overworld_action(&mut self, _: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction> { None }
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
+        fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
+            Some(crate::pokemon::policy::FieldMove::UseFieldItem {
+                item: ItemId::EscapeRope,
+                target: crate::geometry::Point8 { x: 19, y: 30 },
+            })
+        }
+    }
+
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/post-ss-anne.bin"),
+        Duration::from_secs(240),
+        Box::new(AlwaysRopes),
+    );
+    // `pimp_pokemon` writes `EPIC_BAG`, which carries the rope; the fixture's own bag does not.
+    fixture.pimp_pokemon();
+    assert!(
+        fixture.game_state().bag.iter().any(|it| it.id == ItemId::EscapeRope),
+        "the rope has to be in the bag or the driver never reaches the refusal",
+    );
+
+    let mut worst = Duration::ZERO;
+    let mut worst_state = String::new();
+    let mut heard: Vec<String> = Vec::new();
+    for _ in 0..3000 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::TextBox { message } = event { heard.push(message); }
+        }
+        let gap = fixture.agent.since_last_policy_poll();
+        if gap > worst { worst = gap; worst_state = fixture.agent.state_debug(); }
+    }
+
+    println!("[rope] worst silence {worst:?} in {worst_state}, {} reported", heard.len());
+
+    assert!(
+        worst < Duration::from_secs(30),
+        "a rope the map refuses went {worst:?} of game time without reaching a decision point, \
+         wedged in {worst_state}. heard {heard:?}",
+    );
+    assert!(
+        heard.iter().any(|line| line.contains("refused to use EscapeRope")),
+        "the refusal has to be reported in words rather than as a timeout; heard {heard:?}",
+    );
+}

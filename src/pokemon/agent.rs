@@ -520,6 +520,12 @@ fn reading_dialogue(menu_state: &crate::pokemon::menu::MenuState, confirming: u1
 }
 
 /// Whether the screen is showing one of [`BATTLE_REFUSALS`].
+///
+/// ⚠️ **Not battle-only, despite the list's name.** `UsingFieldItem` asks the same question of the
+/// overworld bag, because "OAK: <PLAYER>! This isn't the time to use that!" is the *same sentence*
+/// from the same `ItemUseNotTime` and drops back to the same kind of list. The two battle-only
+/// entries cannot appear outside a fight, so one list serves both and there is no second one to
+/// drift. See the ⚠️ on [`BATTLE_REFUSALS`] about it being a poor detector on any single tick.
 fn shows_battle_refusal(screen: &str) -> bool {
     BATTLE_REFUSALS.iter().any(|r| screen.contains(r))
 }
@@ -698,7 +704,14 @@ pub(crate) enum AgentState {
     /// START→ITEM→(bag, navigate to the item)→USE. The item's field effect takes over (e.g. the Poké
     /// Flute wakes a Snorlax → a battle, which the battle handler wins). `press` alternates for plain
     /// press/release mashing; `entered_menu` tracks that we left the overworld into the bag menus.
-    UsingFieldItem { item: crate::pokemon::item::ItemId, target: Point8, press: bool, entered_menu: bool },
+    /// Uses a bag item on a tile: walk to face `target`, open START → ITEM → the item → USE.
+    ///
+    /// ⚠️ **`backing_out` is the refusal latch, and it is a countdown for
+    /// [`BACKING_OUT_TICKS`]' reason.** A refused item drops back to the bag list with the cursor
+    /// untouched, and one B dismisses the message onto that list, where this driver's own
+    /// navigation would press A on the same row again. So the intent is latched and held, exactly
+    /// as `BattleState::WaitingForMenu` holds it for a refused move.
+    UsingFieldItem { item: crate::pokemon::item::ItemId, target: Point8, press: bool, entered_menu: bool, backing_out: u16 },
 
     /// Executing ONE Strength boulder push (the primitive behind `FieldMove::PushBoulder`): route the
     /// player to the tile behind the boulder at `boulder` (via `route_to`), face it, and hold `dir` — the
@@ -1975,7 +1988,21 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::UseFieldItem { item, target }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: false });
+                            // ⚠️ **The last line of defence `CutTree` and `TeachMove` have, for the
+                            // third member of the same family.** `ItemUsePtrTable` sends a great many
+                            // ids to `UnusableItem`, which is `jp ItemUseNotTime`: the bag list comes
+                            // back with the cursor where it was, and this driver's only exit is
+                            // `game_mode == Overworld`, which a refusal never reaches. So the attempt
+                            // is 60 s of A-mashing ended by `DRIVER_ESCAPE_SILENCE`, reported as "got
+                            // no answer from the game", which reads as a malfunction and has the
+                            // policy ask for the identical use again. `tools::resolve_field_move`
+                            // refuses it first; this is here because that is one place to forget.
+                            if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
+                                self.event(AgentEvent::TextBox { message: refusal });
+                                self.set_state(AgentState::Idle);
+                                return Ok(());
+                            }
+                            self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: false, backing_out: 0 });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::UsePcBox { op, pc }) => {
@@ -3719,7 +3746,7 @@ CascadeBadge; not cutting".to_string(),
                     }
                 }
             }
-            AgentState::UsingFieldItem { item, target, press, entered_menu } => {
+            AgentState::UsingFieldItem { item, target, press, entered_menu, backing_out } => {
                 use crate::pokemon::menu::TextBoxId;
                 // Back in the overworld after entering the bag menus → this attempt has resolved (the
                 // item's effect ran and, for the Poké Flute, its battle was fought). Bail to Idle so the
@@ -3736,12 +3763,12 @@ CascadeBadge; not cutting".to_string(),
                         Some([]) => {
                             api.release_all_buttons();
                             if press { api.press_button(JoypadButton::Start); }
-                            self.set_state(AgentState::UsingFieldItem { item, target, press: !press, entered_menu });
+                            self.set_state(AgentState::UsingFieldItem { item, target, press: !press, entered_menu, backing_out });
                         }
                         Some(&[btn, ..]) => {
                             api.release_all_buttons();
                             api.press_button(btn);
-                            self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu });
+                            self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu, backing_out });
                         }
                         _ => {
                             self.event(AgentEvent::TextBox { message: format!("Can't reach the field-item target at {target}") });
@@ -3751,10 +3778,48 @@ CascadeBadge; not cutting".to_string(),
                     }
                     return Ok(());
                 }
+                // ⚠️ **The generic net for a refusal the table could not predict**, and the
+                // reason it exists even though `item_use::field_use_refusal` already turns the
+                // known ones away: a refusal can be *contextual*. `ItemUseEscapeRope` outside the
+                // five tilesets in `EscapeRopeTilesets`, `ItemUseBicycle` indoors and a stone on
+                // the wrong Pokémon are all `ItemUsePtrTable` entries that do something, and every
+                // one of them ends at the same `ItemUseNotTime` and the same bag list with the
+                // cursor untouched. `BattleState` has had this net since `soak` found the identical
+                // loop inside a fight; this is the overworld half, and the same sentence.
+                //
+                // ⚠️ **Latched for [`BACKING_OUT_TICKS`], not a single B, and not a drop to
+                // `Idle`.** One B dismisses the message onto the bag list, where the navigation
+                // below would press A on the same row and start again. And dropping to `Idle` with
+                // the bag still open hands a menu this driver opened to the generic reader, which
+                // spends **33 s** of game time getting out of it and reports the whole screen it
+                // walked through as one `TextBox` — measured, and it is where the deployed run's
+                // "unrelated TM34/bag menu prompt" came from. B until the game is back in the
+                // overworld, then the arm at the top of this state exits cleanly.
+                //
+                // ⚠️ **Reported once, on the tick the latch is set, and it quotes the outcome.**
+                // What the model needs is the refusal; the alternative is the silence that reads as
+                // a malfunction.
+                if entered_menu && backing_out == 0
+                    && api.on_screen_text(false).is_some_and(|t| shows_battle_refusal(&t)) {
+                    self.event(AgentEvent::TextBox { message: format!(
+                        "the game refused to use {item:?} here and put the bag back; it will refuse \
+                         again wherever you are standing, so use the turn on something else") });
+                    api.release_all_buttons();
+                    self.set_state(AgentState::UsingFieldItem {
+                        item, target, press: true, entered_menu, backing_out: BACKING_OUT_TICKS });
+                    return Ok(());
+                }
+                if backing_out > 0 {
+                    api.release_all_buttons();
+                    if press { api.press_button(JoypadButton::B); }
+                    self.set_state(AgentState::UsingFieldItem {
+                        item, target, press: !press, entered_menu, backing_out: backing_out - 1 });
+                    return Ok(());
+                }
                 // In the bag menus. Plain press/release mashing (fresh rising edge every 2 ticks).
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: true });
+                    self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: true, backing_out });
                     return Ok(());
                 }
                 let (top_x, top_y, current, scroll) = api.menu_geometry();
@@ -3779,7 +3844,7 @@ CascadeBadge; not cutting".to_string(),
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::UsingFieldItem { item, target, press: false, entered_menu: true });
+                self.set_state(AgentState::UsingFieldItem { item, target, press: false, entered_menu: true, backing_out });
             }
             AgentState::NamingPokemon { species, decided, ticks } => {
                 /// Agent ticks (20 ms each) the *submitted* naming screen gets to close itself. A
