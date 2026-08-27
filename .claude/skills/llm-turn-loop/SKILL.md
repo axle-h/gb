@@ -448,6 +448,27 @@ report's mark, because it has just cleared the events there would be nothing lef
 overworld decisions. ⚠️ It is **cleared by the turn that carried it**, or the same report is re-rendered into every turn until
 the next battle overwrites it.
 
+⚠️ **A blackout is the one ending whose numbers are gone before anything can read them, and the report used to say
+the opposite of what happened.** `ResetStatusAndHalveMoneyOnBlackout` heals the whole party, so `finish`'s
+"no battle in the state" arm — which reads our side out of `state.pokemon` — turned the losing turn's delta into
+`Ember 12 → 76` and closed with `Ended with Ember on 76/76 HP`. The deployed run of 2026-08-27 lost to Misty **six
+times** and was told each time that it had finished at full health; a scripted battle's report is its *only* account,
+because `events_mark` takes the message boxes back. Three ⚠️s:
+- **`wBattleResult` is not the witness and is actively wrong**: `HandlePlayerBlackOut` sets it to LOSE and
+  `black_out.asm:3-4` zeroes it — back to *win* — before anything here runs. The cartridge's own sentence is all
+  that is left, so `battle_report::is_blackout` matches on it.
+- **`MAX_QUOTE` truncated head-only and the outcome is always at the end.** `"… AI is out of useable POKéMON! A…"`
+  cut off the two words that said what had happened. It keeps `QUOTE_TAIL` bytes of the end as well, both taken a
+  `char` at a time because the prose is full of `é`.
+- **The blackout arm sits *above* the in-battle arm in `finish`.** A state that still holds a battle after a blackout
+  is a *different* battle — the trainer on the other side of the Centre, a wild encounter on the walk back — and its
+  HP bars are nothing to do with this one.
+
+⚠️ **Saying "you blacked out" is not the verdict `ending`'s ⚠️ refuses to guess.** That one forbids reading a *result*
+out of the HP, where a faint, a capture and a successful run are indistinguishable. This is the cartridge saying it
+out loud, and what follows is fixed: half the money, and the Centre `SetLastBlackoutMap` recorded. Without it the
+situation around the report reads as an ordinary walk out of the gym, at full HP, with the money quietly halved.
+
 ⚠️ **A turn where no HP moved prints no numbers.** A status move, a miss and a failed run all look like that, and `34 → 34`
 twice a turn buries the turns that did something.
 

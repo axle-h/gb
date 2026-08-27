@@ -29,9 +29,18 @@ use crate::pokemon::battle::{BattleAction, BattleType};
 /// than truncated at the end: the turns worth reading are the first few, where the script's plan is
 /// visible, and the last few, where it went wrong.
 pub const MAX_TURNS_SHOWN: usize = 8;
-/// How much of one message box is quoted. The cartridge says several things per turn and only the
-/// first sentence of each is ever the point.
+/// How much of one message box is quoted.
+///
+/// ⚠️ **Head *and* tail, because the outcome is always at the end.** The first draft kept the head
+/// alone, on the argument that only the first sentence of each box is the point — which is true of
+/// the middle of a battle and false of the sentence that ends one. A blackout arrives as
+/// `"… Ember fainted! AI is out of useable POKéMON! AI blacked out!"`, 131 bytes, and a head-only
+/// cut landed on `"AI is out of useable POKéMON! A…"`: the two words saying what had happened were
+/// the two the truncation removed. The deployed run of 2026-08-27 lost to Misty six times and was
+/// never once told so.
 const MAX_QUOTE: usize = 120;
+/// How much of [`MAX_QUOTE`] is spent on the end of the box rather than the beginning.
+const QUOTE_TAIL: usize = 44;
 /// How many battles may queue up before the model is next asked anything. Deliberately small: past
 /// this the reports are describing a stretch of play the model can do nothing about, and the count
 /// says more than the detail.
@@ -99,6 +108,9 @@ pub struct BattleReport {
     /// out of Pokémon, and three of those look identical from here. The HP of both sides at the end
     /// is a fact, and the cartridge's own sentences quoted above it say the rest.
     ending: Option<(Side, Option<Side>)>,
+    /// The cartridge said the player blacked out. See [`is_blackout`] for why this is the only
+    /// witness, and [`Self::finish`] for what it stops the report claiming.
+    blacked_out: bool,
     /// Where `LlmPolicy::events` stood when this battle began.
     ///
     /// ⚠️ **This is what stops the report being said twice.** The agent's own events are folded into
@@ -124,6 +136,7 @@ impl BattleReport {
             asked: 0,
             my_slot: battle.active_party_slot as usize,
             ending: None,
+            blacked_out: false,
             events_mark,
         })
     }
@@ -155,6 +168,9 @@ impl BattleReport {
         if message.is_empty() {
             return;
         }
+        // ⚠️ **Tested before the truncation, not after.** The two words are at the very end of a
+        // box that is longer than `MAX_QUOTE`, which is the whole reason this flag exists.
+        self.blacked_out |= is_blackout(message);
         let quoted = truncated(message, MAX_QUOTE);
         match self.open.as_mut() {
             Some(turn) => turn.said.push(quoted),
@@ -176,6 +192,20 @@ impl BattleReport {
     /// were the HP it ended on.
     pub fn finish(mut self, state: Option<&GameState>) -> String {
         match state {
+            // ⚠️ **First, above the in-battle arm, because a state that still holds a battle after a
+            // blackout is a *different* battle** — the trainer waiting on the other side of the
+            // Centre, or a wild encounter on the walk back — and its HP bars are nothing to do with
+            // this one.
+            //
+            // ⚠️ **A blackout heals the party before this can read it, so the party is not evidence
+            // about the battle any more — it is evidence about the recovery.** The arm below reads
+            // our side out of `state.pokemon`, which after
+            // `ResetStatusAndHalveMoneyOnBlackout` is every Pokémon at full HP. That turned the
+            // losing turn's delta into `Ember 12 → 76` and closed six consecutive defeats with
+            // "Ended with Ember on 76/76 HP", on a run whose only account of a scripted battle is
+            // this report. No number at all is the honest answer; `render` says what happened
+            // instead, in the cartridge's own terms.
+            _ if self.blacked_out => self.close(None, None),
             Some(state) if state.battle.is_some() => {
                 self.close_in_battle(state);
                 if let (Some(me), Some(foe)) = (side(state, true), side(state, false)) {
@@ -285,6 +315,21 @@ impl BattleReport {
                 None => out.push_str(&format!("\nEnded with {}.\n", standing(me))),
             }
         }
+        // ⚠️ **This is not the verdict the ⚠️ on `ending` refuses to guess.** That one is about
+        // reading a *result* out of the HP, where a faint, a capture and a successful run are
+        // indistinguishable. A blackout is none of those: the cartridge said it out loud, and what
+        // follows from it is fixed — `ResetStatusAndHalveMoneyOnBlackout` halves the money, and
+        // `SetLastBlackoutMap` (written only when a heal was *accepted*) decides where the player
+        // wakes up. Without this the situation around the report reads as an ordinary walk out of
+        // the building, at full HP, with the money quietly halved and nothing pointing at it.
+        if self.blacked_out {
+            out.push_str(
+                "\n**You lost. Your last Pokémon fainted, so you blacked out.** The game has taken \
+                 you back to the Pokémon Center you last accepted a heal at and half your money is \
+                 gone. Your party is at full HP now because blacking out healed it, not because the \
+                 battle went well.\n",
+            );
+        }
         out.push('\n');
         out
     }
@@ -352,18 +397,53 @@ pub(crate) fn intent(action: &BattleAction) -> String {
     }
 }
 
+/// The first `limit - QUOTE_TAIL` bytes and the last `QUOTE_TAIL`, with the middle elided.
+///
+/// ⚠️ **Byte budgets over a `&str`, so both ends are taken a `char` at a time.** The cartridge's
+/// prose carries `é` (`POKéMON`, in most of the sentences that end a battle) and `¥`, so slicing on
+/// a byte index panics on exactly the boxes this exists to keep.
 fn truncated(text: &str, limit: usize) -> String {
-    match text.len() <= limit {
-        true => text.to_string(),
-        false => text
-            .chars()
-            .scan(0usize, |used, c| {
-                *used += c.len_utf8();
-                (*used <= limit).then_some(c)
-            })
-            .collect::<String>()
-            + "…",
+    if text.len() <= limit {
+        return text.to_string();
     }
+    let head: String = text
+        .chars()
+        .scan(0usize, |used, c| {
+            *used += c.len_utf8();
+            (*used <= limit.saturating_sub(QUOTE_TAIL)).then_some(c)
+        })
+        .collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .scan(0usize, |used, c| {
+            *used += c.len_utf8();
+            (*used <= QUOTE_TAIL).then_some(c)
+        })
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    // Overlapping ends mean the whole thing fits after all, which the length test above already
+    // ruled out — but a `limit` smaller than `QUOTE_TAIL` would reach here, so say it rather than
+    // printing the same words twice.
+    match head.len() + tail.len() >= text.len() {
+        true => text.to_string(),
+        false => format!("{head}…{tail}"),
+    }
+}
+
+/// The cartridge saying the player has just blacked out.
+///
+/// ⚠️ **Matched on the game's own sentence rather than read out of RAM, because the byte that says
+/// so is cleared by the blackout itself.** `wBattleResult` is set to `LOSE` by `HandlePlayerBlackOut`
+/// and then zeroed — back to *win* — three instructions into
+/// `ResetStatusAndHalveMoneyOnBlackout` (`engine/events/black_out.asm:3-4`), which runs before
+/// anything here gets to look. The party is fully healed by the same routine and the money is
+/// halved, so every number a report could read has already moved. The sentence is the only witness
+/// left, and it is the one the model would be reading anyway.
+pub fn is_blackout(message: &str) -> bool {
+    message.contains("blacked out")
 }
 
 #[cfg(test)]
@@ -564,6 +644,65 @@ mod tests {
         let mut beaten = BattleReport::open(&start, 0).unwrap();
         beaten.decided(&start, &ember(), Vec::new());
         assert!(beaten.finish(Some(&hurt(state(), 20, 0))).contains("fainted"));
+    }
+
+    /// ⚠️ **A blackout is the one ending whose numbers are gone by the time anything reads them.**
+    /// `ResetStatusAndHalveMoneyOnBlackout` heals the whole party, so the state the report is
+    /// finished against says full HP — and the deployed run of 2026-08-27 was therefore told, six
+    /// times in a row, that a battle it had lost to Misty "ended with Ember on 76/76 HP", with the
+    /// losing turn's delta reading as a heal. Both halves are asserted: no invented number, and the
+    /// words that say what happened.
+    #[test]
+    fn a_blackout_is_reported_rather_than_read_off_a_healed_party() {
+        let start = state();
+        let mut report = BattleReport::open(&start, 0).unwrap();
+        report.decided(&hurt(state(), 12, 40), &ember(), Vec::new());
+        // One box, exactly as the cartridge sends it, and longer than `MAX_QUOTE`.
+        let final_box = "Ember used SCRATCH! Enemy STARMIE used WATER GUN! It's super effective! \
+                         Ember fainted! AI is out of useable POKéMON! AI blacked out!";
+        assert!(final_box.len() > MAX_QUOTE, "the case only exists because the box is long");
+        report.said(final_box);
+
+        // Finished against the state the game leaves behind: no battle, party healed to full.
+        let mut after = state();
+        after.battle = None;
+        let rendered = report.finish(Some(&after));
+
+        assert!(rendered.contains("blacked out"), "the two words survive the quote: {rendered}");
+        assert!(rendered.contains("You lost."), "and the report says so in its own line: {rendered}");
+        // ⚠️ **Read out of the rendered string, never the source.** A multi-line Rust literal
+        // without a trailing `\\` carries the whole indent into the prose; this repo has shipped
+        // that twice.
+        let sentence = rendered.lines().find(|l| l.contains("You lost.")).expect("asserted above");
+        assert!(
+            !sentence.contains("  "),
+            "no continuation whitespace in the prose the model reads: {sentence:?}",
+        );
+        assert!(
+            !rendered.contains("Ended with"),
+            "a healed party is not how the battle ended: {rendered}",
+        );
+        assert!(
+            !rendered.contains("12 → "),
+            "and the heal must not be attributed to the losing turn: {rendered}",
+        );
+    }
+
+    /// ⚠️ **The head-only truncation cut the answer off every box that had one.** What ends a battle
+    /// is always the last sentence, so the quote keeps both ends.
+    #[test]
+    fn a_long_quote_keeps_the_sentence_that_ends_the_battle() {
+        let start = state();
+        let mut report = BattleReport::open(&start, 0).unwrap();
+        report.decided(&start, &ember(), Vec::new());
+        report.said(
+            "Ember used SCRATCH! MISTY used X DEFEND on STARYU! Enemy STARYU's DEFENSE rose! \
+             Enemy STARYU fainted! Ember gained 408 EXP. Points!",
+        );
+        let rendered = report.finish(Some(&state()));
+        assert!(rendered.contains("Ember used SCRATCH!"), "the head is still there: {rendered}");
+        assert!(rendered.contains("gained 408 EXP"), "and so is the tail: {rendered}");
+        assert!(rendered.contains('…'), "with the middle elided: {rendered}");
     }
 
     /// `battle.ask()` and a disarm both land here, and both are worth counting apart: they are the
