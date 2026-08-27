@@ -1658,7 +1658,7 @@ impl PokemonAgent {
     /// Unreadable state answers `false`: the abort is the safe report, since it only costs the
     /// policy another decision.
     fn interaction_landed(&self, destination: MetaTile, api: &PokemonApi) -> bool {
-        if !matches!(destination, MetaTile::Sprite(_) | MetaTile::Pc) {
+        if !matches!(destination, MetaTile::Sprite(_) | MetaTile::Pc | MetaTile::Switch { .. }) {
             return false;
         }
         let Ok(state) = self.observe_state(api) else { return false };
@@ -1671,6 +1671,15 @@ impl PokemonAgent {
             // tile would therefore never fire, silently, and only for PCs: the coordinate is the
             // only thing that identifies one.
             MetaTile::Pc => crate::pokemon::tile_map::pc_locations_for(state.map.map).contains(&at),
+            // Same argument, same table shape: a bin, a drink machine, the poster and a statue are
+            // all hidden events drawn as the scenery they hide in, so the coordinate is again the
+            // only thing that identifies one. The *object* is compared too — a map can carry two
+            // kinds, and reporting a press on a vending machine as a press on the poster would be
+            // the `Obstacle` bug wearing a better disguise.
+            MetaTile::Switch { object, ordinal } => crate::pokemon::tile_map::hidden_objects_for(state.map.map)
+                .iter()
+                .enumerate()
+                .any(|(index, site)| site.at == at && site.object == object && index as u8 + 1 == ordinal),
             _ => false,
         }
     }

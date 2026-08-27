@@ -82,3 +82,121 @@ fn can_reach_vermilion() {
     assert_eq!(s.map.map, Map::VermilionCity, "should reach Vermilion City via the trashed-house bridge");
     fixture.save_state_named("src/pokemon/data/at-vermilion.bin").unwrap();
 }
+
+/// **The S.S. Ticket, taken entirely through the action menu — the one thing an `LlmPolicy` can
+/// see.** `can_reach_vermilion` above proves the same errand for the *scripted* policy, and proved
+/// nothing about this: it drives the cell separator with `PolicyStep::UsePc`, which resolves
+/// `MetaTile::Pc` straight out of `actions()` and never goes near `llm::tools::overworld_menu`.
+///
+/// ⚠️ **That gap was a hard progression blocker for four months and cost a deployed run its
+/// life.** `overworld_menu` withheld every `MetaTile::Pc` row — correctly, for the storage PCs it
+/// was written about — and Bill's is not storage, it is one press and the only route to the ticket.
+/// No ticket means `EVENT_GOT_SS_TICKET` never fires, so `BillsHouse.asm` never hides
+/// `CERULEANCITY_GUARD2`, who stands on the only approach to the Trashed House door at raw (27,11)
+/// — the only crossing between Cerulean's two terraces. The run of 2026-08-27 walked Cerulean and
+/// Routes 24/25 for four and a half hours of cartridge time and filed six issue reports about it.
+///
+/// So the policy here takes the row and nothing else: `MetaTile::Switch(CellSeparator)`, exactly
+/// what `overworld_menu` renders and `resolve_overworld` re-mints from an id. ⚠️ **Hand-rolled
+/// rather than `DeterministicPolicy`**, which would drive the PC through `UsePc` before the agent
+/// ever saw the row, and pass with the whole thing reverted.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn the_action_menu_alone_gets_the_ss_ticket_from_bill() {
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::map::MapSprite;
+    use crate::pokemon::policy::{DeterministicPolicy, FieldMove, Policy};
+    use crate::pokemon::tile::{HiddenObject, MetaTile};
+    use crate::pokemon::world_graph::WorldGraph;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+
+    // 0 = not sampled yet, 1 = the row was absent, 2 = the row was already there.
+    const UNSAMPLED: u8 = 0;
+    const ABSENT: u8 = 1;
+    const PRESENT: u8 = 2;
+
+    /// Everything but the separator is the scripted route; the separator is the menu row.
+    struct MenuPressesTheSeparator {
+        inner: DeterministicPolicy,
+        /// ⚠️ **The negative half, and it has to be sampled before the conversation.** Entering the
+        /// map is a step of its own and completes first, so the first poll on `BillsHouse` is
+        /// necessarily before Bill has been spoken to — which is the moment the row must *not* be
+        /// there, or the gate is doing nothing and the test would pass ungated.
+        /// Shared with the test, because `TestFixture` owns the policy once it is boxed.
+        row_before_talking: Arc<AtomicU8>,
+        pressed: bool,
+    }
+
+    impl MenuPressesTheSeparator {
+        fn separator(state: &GameState) -> Option<OverworldAction> {
+            state.map.actions().into_iter()
+                .find(|action| matches!(action.tile,
+                    MetaTile::Switch { object: HiddenObject::CellSeparator, .. }))
+        }
+    }
+
+    impl Policy for MenuPressesTheSeparator {
+        fn name(&self) -> &'static str { "menu-separator" }
+
+        fn pick_overworld_action(&mut self, state: &GameState, graph: &WorldGraph) -> Option<OverworldAction> {
+            if state.map.map == Map::BillsHouse {
+                let offered = Self::separator(state).is_some();
+                let _ = self.row_before_talking.compare_exchange(
+                    UNSAMPLED,
+                    match offered { true => PRESENT, false => ABSENT },
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                if !self.pressed && offered {
+                    self.pressed = true;
+                    return Self::separator(state);
+                }
+            }
+            self.inner.pick_overworld_action(state, graph)
+        }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            self.inner.pick_battle_action(state)
+        }
+
+        fn pick_field_move(&mut self, state: &GameState) -> Option<FieldMove> {
+            self.inner.pick_field_move(state)
+        }
+
+        fn is_exhausted(&self) -> bool { self.pressed && self.inner.is_exhausted() }
+    }
+
+    // The leg's own route to Bill and its eight talks afterwards — but no `UsePc` between them.
+    let mut steps = vec![
+        PolicyStep::enter(Map::CeruleanCity),
+        PolicyStep::enter(Map::Route24),
+        PolicyStep::enter(Map::Route25),
+        PolicyStep::enter(Map::BillsHouse),
+        PolicyStep::Interact(MapSprite::BILLSHOUSE_BILL_POKEMON),
+    ];
+    steps.extend(std::iter::repeat_n(PolicyStep::Interact(MapSprite::BILLSHOUSE_BILL1), 8));
+
+    let row_before_talking = Arc::new(AtomicU8::new(UNSAMPLED));
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/post-cascade.bin"),
+        Duration::from_mins(30),
+        Box::new(MenuPressesTheSeparator {
+            inner: DeterministicPolicy::new(42, steps),
+            row_before_talking: Arc::clone(&row_before_talking),
+            pressed: false,
+        }),
+    );
+    let state = fixture.run_until(|state| state.bag.contains(&ItemId::SSTicket));
+    assert!(state.bag.contains(&ItemId::SSTicket), "the ticket came out of the action menu");
+    // ⚠️ Without this the test passes with the gate deleted, which is the whole reason it is here:
+    // an ungated row is offered on arrival, pressed into a storage menu that does nothing, and the
+    // run merely takes longer to reach the same ticket.
+    assert_eq!(
+        row_before_talking.load(Ordering::Relaxed),
+        ABSENT,
+        "the separator must not be on the menu before Bill has asked for it — outside that window \
+         the same tile is a storage PC, which is the row `overworld_menu` withholds",
+    );
+}

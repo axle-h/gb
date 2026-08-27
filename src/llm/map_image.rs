@@ -103,7 +103,10 @@ fn tint_for(tile: MetaTile) -> Option<Tint> {
         MetaTile::Connection { .. } => CONNECTION,
         MetaTile::CutTree => CUT_TREE,
         MetaTile::Counter => COUNTER,
-        MetaTile::Pc => PC,
+        // Neither a PC nor a hidden object is ever *in* `meta_tiles` — both are looked up per map,
+        // and the tile they sit on reads as the wall they are drawn in. The arms exist so that
+        // adding a variant is a compile error here rather than a silently untinted square.
+        MetaTile::Pc | MetaTile::Switch { .. } => PC,
         MetaTile::Empty | MetaTile::Obstacle | MetaTile::Sprite(_) => return None,
     })
 }

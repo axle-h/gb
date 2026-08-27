@@ -44,6 +44,7 @@ fn dump_map(fixture: &mut TestFixture, x0: u8, x1: u8, y0: u8, y1: u8) {
                 Some(MetaTile::CutTree) => 'T',
                 Some(MetaTile::Counter) => 'n',
                 Some(MetaTile::Pc) => 'P',
+                Some(MetaTile::Switch { .. }) => 's',
                 None => ' ',
             })
             .collect();

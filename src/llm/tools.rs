@@ -249,9 +249,24 @@ pub enum FieldMoveRequest {
     PushBoulder { boulder: Point8, direction: JoypadButton },
     /// Rearrange the party so `slot` leads. Instant — the agent writes it straight to RAM.
     ReorderParty { slot: u8 },
-    /// Face a tile and press A. Every "hidden object" in the game is this: hidden items, the
-    /// Vermilion Gym bins, the Pokémon Mansion statue switches, the Rocket Hideout poster.
+    /// Face a tile and press A. Every "hidden object" in the game is this.
+    ///
+    /// ⚠️ **The ones a playthrough needs are in the action menu now** — `MetaTile::Switch`, the bins
+    /// and the drink machines and the statues and the poster — so what is left for this is the
+    /// hidden *items*, which are invisible by construction and cannot be offered as a row without
+    /// giving them away. It stays the escape hatch for a hidden object the table has not got.
     Interact { target: Point8, facing: Option<PlayerFacingDirection> },
+    /// Move a Pokémon between the party and the open PC box, or open a different box.
+    ///
+    /// ⚠️ **The agent walks to the PC itself**, from `pc_locations_for` — so unlike `Interact` this
+    /// is not "press the thing at these coordinates" and needs no menu row. That is the whole
+    /// difference between a PC and the hidden objects beside it: one press is the entire interaction
+    /// for a statue, and for a PC the press is only the way in.
+    UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp },
+    /// Move items between the bag and PC item storage. Same walk, different menu.
+    UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8 },
+    /// Ride the lift the player is standing in to `to`.
+    UseElevator { to: Map },
 }
 
 /// The five HM field moves and the badge each one needs before the game will let it be used outside
@@ -312,6 +327,21 @@ fn hm_available(state: &GameState, name: PokemonMoveName) -> Result<(), String> 
 /// Turn a request into the [`FieldMove`] the agent executes, or into the sentence the model is told
 /// instead. Everything that can be checked from the state is checked here rather than left to fail
 /// silently three seconds later inside a menu driver.
+/// The PC on the map the player is standing on, or the reason there is not one.
+///
+/// ⚠️ **The coordinate is never asked of the model.** `pc_locations_for` is a transcribed table
+/// because a PC is a hidden event drawn as the wall it sits in, so a model naming coordinates would
+/// be guessing at something it is shown nowhere; the agent walks there, faces up and presses A on
+/// its own. Every Pokémon Centre has one in the same place.
+fn the_pc_here(state: &GameState) -> Result<Point8, String> {
+    crate::pokemon::tile_map::pc_locations_for(state.map.map).first().copied().ok_or_else(|| {
+        format!(
+            "There is no PC on {}. Every Pokémon Centre has one, and so does the player's bedroom.",
+            state.map.map,
+        )
+    })
+}
+
 pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Result<FieldMove, String> {
     let party_slot = |slot: u8| -> Result<u8, String> {
         match (slot as usize) < state.pokemon.len() {
@@ -433,6 +463,60 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
         FieldMoveRequest::Interact { target, facing } => {
             FieldMove::CheckTrashCan { target: *target, facing: *facing }
         }
+        FieldMoveRequest::UsePcBox { op } => {
+            let pc = the_pc_here(state)?;
+            // ⚠️ **`blocked_by` is the game's own refusals, asked before a button is pressed.**
+            // pokered answers every one of these with a message and a bounce straight back to the
+            // Bill's-PC menu (`CantDepositLastMonText`, `BoxFullText`, `NoMonText`), from which a
+            // driver that re-picked the same entry loops until `DRIVER_ESCAPE_SILENCE` — the closed
+            // loop `MetaTile::Pc` and the TM learnset gate are both about. Asking here costs no
+            // round trip and the reason is the one the model can act on.
+            if let Some(refusal) = op.blocked_by(
+                state.pokemon.len() as u8,
+                state.boxed_pokemon.len() as u8,
+                state.current_box,
+            ) {
+                return Err(format!("The game will not do that: {refusal}."));
+            }
+            FieldMove::UsePcBox { op: *op, pc }
+        }
+        FieldMoveRequest::UseItemPc { op, item, qty } => {
+            use crate::pokemon::postgame::item_storage::PcItemOp;
+            let pc = the_pc_here(state)?;
+            if *qty == 0 {
+                return Err("A quantity of 0 moves nothing.".to_string());
+            }
+            // Withdrawing reads PC storage rather than the bag, so `held` is the wrong question for
+            // half of this and would refuse every withdrawal of something not also carried.
+            if matches!(op, PcItemOp::Deposit) { held(*item)?; }
+            FieldMove::UseItemPc { op: *op, item: *item, qty: *qty, pc }
+        }
+        FieldMoveRequest::UseElevator { to } => {
+            let Some((panel, floors)) = crate::pokemon::tile_map::elevator_for(state.map.map) else {
+                return Err(format!(
+                    "There is no lift on {}. A lift is a room of its own, reached by a warp: the \
+                     Rocket Hideout's, Celadon Mart's and Silph Co's are the three in the game.",
+                    state.map.map,
+                ));
+            };
+            let Some(floor) = floors.iter().position(|floor| floor == to) else {
+                return Err(format!(
+                    "This lift does not stop at {to}. It serves {}.",
+                    floors.iter().map(|floor| floor.to_string()).collect::<Vec<_>>().join(", "),
+                ));
+            };
+            // ⚠️ **The Rocket Hideout's lift is the one that needs a key**, and it is the one that
+            // matters: `RocketHideoutElevatorText` opens `ld b, LIFT_KEY`, and B4F — Giovanni, so
+            // the Silph Scope — is only reachable through it. Without the key the panel prints a
+            // message and no menu opens, which the driver would sit through for a minute.
+            if state.map.map == Map::RocketHideoutElevator {
+                held(ItemId::LiftKey).map_err(|_| {
+                    "This lift needs the LIFT_KEY, which is somewhere in the hideout. Without it \
+                     the panel does nothing.".to_string()
+                })?;
+            }
+            FieldMove::UseElevator { panel, floor: floor as u8 }
+        }
     })
 }
 
@@ -512,6 +596,14 @@ pub const READ_TOOLS: &[ReadTool] = &[
             DecisionKind::MartPurchase,
             DecisionKind::ForgetMove,
         ],
+        parameters: None,
+    },
+    ReadTool {
+        name: "read_pc",
+        description: "What is in the PC: the Pokémon in the open box with the slot numbers \
+                      `use_field_move` wants, what is in PC item storage, and which of the twelve \
+                      boxes is open. Only the open box can be read.",
+        kinds: &[DecisionKind::Overworld],
         parameters: None,
     },
     ReadTool {
@@ -1059,9 +1151,15 @@ fn use_field_move_spec() -> ToolSpec {
              - `push_boulder` — shove the boulder at `target` one tile in `direction`. Strength must \
              be armed first.\n\
              - `reorder_party` — make the Pokémon in `slot` the party leader.\n\
-             - `interact` — stand next to `target`, face it and press A. This is how every hidden \
-             thing in the game is found: hidden items, the Vermilion Gym bins, the Pokémon Mansion \
-             switches.\n\
+             - `interact` — stand next to `target`, face it and press A. For a hidden item; the \
+             bins, drink machines, statues and the poster are rows in the action menu.\n\
+             - `pc_pokemon` — at a PC: `op` is `deposit` (party `slot` → box), `withdraw` or \
+             `release` (a `box_slot`), or `change_box` (`box`, 1-12, which also saves the game). \
+             Only the open box can be read; `read_pc` shows it.\n\
+             - `pc_items` — at a PC: `op` `deposit` or `withdraw` moves `quantity` of `item` \
+             between the bag and PC storage. The bag holds only 20 kinds.\n\
+             - `elevator` — inside a lift, ride it to `map`. The three lifts are in the Rocket \
+             Hideout, Celadon Mart and Silph Co.\n\
              Surf is not here — the agent mounts it by itself as soon as a route crosses water.\n\
              `cut`, `fly`, `strength` and `flash` each need a Pokémon taught that HM *and* a \
              particular badge; until you have both the game refuses them, and retrying will not \
@@ -1078,7 +1176,7 @@ fn use_field_move_spec() -> ToolSpec {
                 },
                 "slot": { "type": "integer", "minimum": 0, "maximum": 5, "description": "A party slot, 0-based." },
                 "item": { "type": "string", "description": "A bag item, named as `read_bag` names it." },
-                "map": { "type": "string", "description": "A map name, for `fly`." },
+                "map": { "type": "string", "description": "A map name, for `fly` and `elevator`." },
                 "target": {
                     "type": "object",
                     "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
@@ -1096,6 +1194,14 @@ fn use_field_move_spec() -> ToolSpec {
                     "description": "For `interact`: approach so the player ends up facing this way. \
                                     Rarely needed; the Pokémon Mansion switches want `up`.",
                 },
+                "op": {
+                    "type": "string",
+                    "enum": ["deposit", "withdraw", "release", "change_box"],
+                    "description": "For `pc_pokemon` and `pc_items`: which way things move.",
+                },
+                "box_slot": { "type": "integer", "minimum": 0, "maximum": 19, "description": "A slot in the open box, 0-based." },
+                "box": { "type": "integer", "minimum": 1, "maximum": 12, "description": "Which box to open, for `change_box`." },
+                "quantity": { "type": "integer", "minimum": 1, "maximum": 99, "description": "How many, for `pc_items`. Default 1." },
             },
             "required": ["move"],
             "additionalProperties": false,
@@ -1107,7 +1213,7 @@ fn field_move_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = PARTY_MOVES.iter().map(|(name, _, _)| *name).collect();
     names.extend([
         "cut", "fly", "teach", "evolve", "use_item", "toss_item", "push_boulder", "reorder_party",
-        "interact",
+        "interact", "pc_pokemon", "pc_items", "elevator",
     ]);
     names
 }
@@ -1663,6 +1769,55 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
         "evolve" => Ok(FieldMoveRequest::Evolve { stone: item("item")?, slot: slot()? }),
         "use_item" => Ok(FieldMoveRequest::UseItem { item: item("item")?, target: target()? }),
         "toss_item" => Ok(FieldMoveRequest::TossItem { item: item("item")? }),
+        "pc_pokemon" => {
+            use crate::pokemon::postgame::pc_box::{PcBoxOp, BOX_CAPACITY, BOX_COUNT};
+            let op = string_argument(arguments, "op")?;
+            let box_slot = || -> Result<u8, String> {
+                match arguments.get("box_slot").and_then(Value::as_u64) {
+                    Some(slot) if (slot as usize) < BOX_CAPACITY => Ok(slot as u8),
+                    Some(slot) => Err(format!("There is no box slot {slot}; a box holds {BOX_CAPACITY}.")),
+                    None => Err(format!("`{op}` needs a `box_slot` — `read_pc` numbers them.")),
+                }
+            };
+            Ok(FieldMoveRequest::UsePcBox {
+                op: match op.trim().to_ascii_lowercase().as_str() {
+                    "deposit" => PcBoxOp::Deposit { slot: slot()? },
+                    "withdraw" => PcBoxOp::Withdraw { box_slot: box_slot()? },
+                    "release" => PcBoxOp::Release { box_slot: box_slot()? },
+                    "change_box" => match arguments.get("box").and_then(Value::as_u64) {
+                        // 1-based for the model, because the game's own menu is; 0-based inside.
+                        Some(n) if (1..=u64::from(BOX_COUNT)).contains(&n) => PcBoxOp::ChangeBox { n: n as u8 - 1 },
+                        Some(n) => return Err(format!("There is no box {n}; there are {BOX_COUNT}.")),
+                        None => return Err("`change_box` needs a `box`, 1 to 12.".to_string()),
+                    },
+                    other => return Err(format!(
+                        "`{other}` is not a PC operation: deposit, withdraw, release or change_box.")),
+                },
+            })
+        }
+        "pc_items" => {
+            use crate::pokemon::postgame::item_storage::PcItemOp;
+            let op = string_argument(arguments, "op")?;
+            Ok(FieldMoveRequest::UseItemPc {
+                op: match op.trim().to_ascii_lowercase().as_str() {
+                    "deposit" => PcItemOp::Deposit,
+                    "withdraw" => PcItemOp::Withdraw,
+                    other => return Err(format!("`{other}` is not a PC item operation: deposit or withdraw.")),
+                },
+                item: item("item")?,
+                qty: match arguments.get("quantity").and_then(Value::as_u64) {
+                    Some(qty) if (1..=99).contains(&qty) => qty as u8,
+                    Some(qty) => return Err(format!("{qty} is not a quantity the game can move; 1 to 99.")),
+                    None => 1,
+                },
+            })
+        }
+        "elevator" => {
+            let name = string_argument(arguments, "map")?;
+            map_by_name(&name)
+                .map(|to| FieldMoveRequest::UseElevator { to })
+                .ok_or_else(|| format!("`{name}` is not a map. The lift's own panel lists the floors it serves."))
+        }
         "push_boulder" => {
             let direction = string_argument(arguments, "direction")?;
             Ok(FieldMoveRequest::PushBoulder {
@@ -1776,6 +1931,7 @@ pub fn service_read(
         "read_map" => serde_json::to_value(observe::map_view(state)),
         "read_party" => serde_json::to_value(observe::party(state)),
         "read_bag" => serde_json::to_value(observe::bag(state, api)),
+        "read_pc" => serde_json::to_value(observe::pc(state, api)),
         "read_battle" => serde_json::to_value(observe::battle(state)),
         READ_ROUTE => serde_json::to_value(route_answer(call, state, graph)),
         other => Ok(json!({ "error": format!("`{other}` is not a read tool") })),
@@ -1881,7 +2037,7 @@ pub fn overworld_id(state: &GameState, action: &OverworldAction) -> String {
 /// not the raw warp table's.
 fn overworld_description(state: &GameState, action: &OverworldAction) -> String {
     use crate::pokemon::sprite::PictureId;
-    use crate::pokemon::tile::MetaTile;
+    use crate::pokemon::tile::{HiddenObject, MetaTile};
     match action.tile {
         MetaTile::Warp { to_map, to_position } => {
             let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
@@ -1891,6 +2047,16 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
         MetaTile::ConnectionWater(to_map) => format!("surf into {to_map}"),
         MetaTile::Grass => "walk into tall grass to find wild Pokémon".to_string(),
         MetaTile::Pc => "use the PC".to_string(),
+        // One press of A each; what it does is the cartridge's business. The verb has to carry the
+        // *point* rather than the mechanism, because these are the rows a model has no prior idea
+        // exist — a bin it is told to search gets searched, a bin it is told it can press does not.
+        MetaTile::Switch { object, .. } => match object {
+            HiddenObject::TrashCan => "search this bin for one of the gym's two switches",
+            HiddenObject::VendingMachine => "buy the cheapest drink from this machine",
+            HiddenObject::Poster => "look behind the poster",
+            HiddenObject::Statue => "press this statue's switch",
+            HiddenObject::CellSeparator => "run the cell separator to turn Bill back into a person",
+        }.to_string(),
         MetaTile::CutTree => "walk up to a tree that Cut can clear".to_string(),
         MetaTile::Sprite(name) => {
             let picture = state.map.sprites.iter().find(|s| s.name == name).map(|s| s.picture_id);
@@ -1926,14 +2092,24 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
         }
     };
     let mut actions = state.map.actions();
-    // ⚠️ **The PC is withheld, and it is the one row here that lied by succeeding.** `actions()`
-    // offers it in every Pokémon Centre — which the prompt now sends the model into constantly — and
-    // choosing it walks over, presses A, reports `✓ used the PC` and accomplishes nothing the model
-    // can observe: `FieldMoveRequest` deliberately carries no `UsePcBox` or `UseItemPc`, so there is
-    // no tool for anything behind that menu. That is the inverse of the rule the `CutTree` and
-    // `ConnectionWater` gates keep — an action the game will refuse is not an action — and it is the
-    // worse half of it, because a refusal at least says something. `MetaTile::Pc` stays in
-    // `actions()` for the scripted policies, which drive the boxes through `FieldMove` directly.
+    // ⚠️ **The PC is withheld, and the reason changed on 2026-08-27 without the answer changing.**
+    // It used to be that nothing could be done behind that menu at all: `FieldMoveRequest` carried
+    // no `UsePcBox` or `UseItemPc`, so choosing the row walked over, pressed A, reported
+    // `✓ used the PC` and accomplished nothing observable. It carries both now — so the row is no
+    // longer a dead end, it is a *duplicate*. Every PC operation is a field move that walks to the
+    // PC itself (`the_pc_here`, off `pc_locations_for`), which means a row whose whole contract is
+    // "walk there and press A" leaves the agent holding an open storage menu with no operation
+    // chosen and nothing but `BACKING_OUT_TICKS` to get out of it. One way in, not two.
+    //
+    // ⚠️ **Bill's cell separator is not this and must not be folded back into it.** It is the same
+    // tile and a different thing: one press, no menu, and the only route to the S.S. Ticket. It is
+    // offered as `MetaTile::Switch(CellSeparator)` while its event window is open — see
+    // `MetaTileMap::bill_cell_separator` — which is why withholding `Pc` no longer costs the run the
+    // game. Before that gate existed this line was a hard progression blocker: a deployed run sat in
+    // Cerulean for four and a half hours of cartridge time with no way to press it.
+    //
+    // `MetaTile::Pc` stays in `actions()` for the scripted policies, which drive the boxes through
+    // `FieldMove` directly.
     actions.retain(|action| !matches!(action.tile, MetaTile::Pc));
     // `id_kind`, not `kind`: two people can share the tile an action approaches them from, and
     // "Sprite" == "Sprite" leaves that pair to `sort_by_key`'s stability over a `HashSet` walk.
@@ -2161,6 +2337,134 @@ mod tests {
         gb.load_state(include_bytes!("../pokemon/data/oaks-lab-just-got-squirtle.bin"))
             .expect("the committed fixture loads");
         { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }.expect("the fixture has a readable state")
+    }
+
+    /// ⚠️ **Every one of these is refused inside the turn, which is the whole point of resolving
+    /// here rather than letting the policy find out.** A PC operation with no PC, or a lift that is
+    /// not in the room, would otherwise be published as a `Decision`, sent to the policy and dropped
+    /// there — and the complaint rides on the *next* turn, a second full prefill of the history, by
+    /// which time the model has moved on. The wording matters as much as the refusal: each says what
+    /// to do instead, which is what `learnset::teach_refusal` had to be taught.
+    #[test]
+    fn a_pc_or_a_lift_that_is_not_here_is_refused_inside_the_turn() {
+        use crate::pokemon::postgame::item_storage::PcItemOp;
+        use crate::pokemon::postgame::pc_box::PcBoxOp;
+        // Oak's lab: no PC, no lift.
+        let state = fixture_state();
+
+        let refused = |request| resolve_field_move(&state, &request).expect_err("refused");
+        let no_pc = refused(FieldMoveRequest::UsePcBox { op: PcBoxOp::Deposit { slot: 0 } });
+        assert!(no_pc.contains("no PC on"), "says which map has none: {no_pc}");
+        assert!(no_pc.contains("Pokémon Centre"), "and where one is: {no_pc}");
+        let no_pc_items = refused(FieldMoveRequest::UseItemPc {
+            op: PcItemOp::Deposit, item: ItemId::Potion, qty: 1,
+        });
+        assert!(no_pc_items.contains("no PC on"), "{no_pc_items}");
+
+        let no_lift = refused(FieldMoveRequest::UseElevator { to: Map::SilphCo5F });
+        assert!(no_lift.contains("no lift on"), "{no_lift}");
+        assert!(no_lift.contains("Silph"), "names where the three lifts are: {no_lift}");
+    }
+
+    /// ⚠️ **A floor the lift does not stop at is a different refusal from a lift that is not
+    /// here**, and it has to list the floors — the model cannot see the panel, and guessing again is
+    /// the retry loop the whole catalogue is arranged to avoid.
+    #[test]
+    fn a_lift_says_which_floors_it_serves() {
+        let mut state = fixture_state();
+        state.map.map = Map::RocketHideoutElevator;
+        let wrong_floor = resolve_field_move(&state, &FieldMoveRequest::UseElevator { to: Map::SilphCo5F })
+            .expect_err("this lift does not go to Silph Co");
+        assert!(wrong_floor.contains("does not stop at"), "{wrong_floor}");
+        assert!(wrong_floor.contains("RocketHideoutB4F"), "lists the floors: {wrong_floor}");
+
+        // ⚠️ The hideout's lift is the one that needs the key, and B4F behind it is Giovanni — so
+        // the Silph Scope, the Poké Flute and both Snorlax. `RocketHideoutElevatorText` opens
+        // `ld b, LIFT_KEY`; without it the panel prints a line and no menu opens at all.
+        let no_key = resolve_field_move(&state, &FieldMoveRequest::UseElevator { to: Map::RocketHideoutB4F })
+            .expect_err("no Lift Key in Oak's lab");
+        assert!(no_key.contains("LIFT_KEY"), "names the key: {no_key}");
+    }
+
+    /// ⚠️ **`read_pc` is the one read added since the "nothing may duplicate the situation" rule was
+    /// written that had to argue against it.** A deposit names a party slot every turn already
+    /// lists; a *withdrawal* names a box slot, and no section of the situation carries the box — so
+    /// without this the model picks a number blind. It is Overworld-only for the ordinary reason: a
+    /// battle, a naming screen and a mart cannot act on it.
+    #[test]
+    fn read_pc_is_offered_on_the_only_turn_that_can_use_it() {
+        assert!(names(DecisionKind::Overworld).contains(&"read_pc"));
+        for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::MartPurchase,
+                          DecisionKind::ForgetMove, DecisionKind::Stuck] {
+            assert!(!names(elsewhere).contains(&"read_pc"), "{elsewhere:?} must not offer read_pc");
+        }
+    }
+
+    /// The three verbs the model could not reach at all before 2026-08-27, parsed off the wire the
+    /// way a model writes them.
+    #[test]
+    fn the_pc_and_the_lift_are_field_moves_a_model_can_name() {
+        use crate::pokemon::postgame::item_storage::PcItemOp;
+        use crate::pokemon::postgame::pc_box::PcBoxOp;
+        let request = |arguments: &str| field_move_arguments(
+            &serde_json::from_str::<Value>(arguments).expect("valid JSON")).expect("parses");
+
+        assert_eq!(request(r#"{"move":"pc_pokemon","op":"deposit","slot":2}"#),
+                   FieldMoveRequest::UsePcBox { op: PcBoxOp::Deposit { slot: 2 } });
+        assert_eq!(request(r#"{"move":"pc_pokemon","op":"withdraw","box_slot":7}"#),
+                   FieldMoveRequest::UsePcBox { op: PcBoxOp::Withdraw { box_slot: 7 } });
+        // ⚠️ 1-based on the wire, 0-based inside, because the cartridge's own CHANGE BOX menu counts
+        // from one and the model is reading the same numbers a player would.
+        assert_eq!(request(r#"{"move":"pc_pokemon","op":"change_box","box":1}"#),
+                   FieldMoveRequest::UsePcBox { op: PcBoxOp::ChangeBox { n: 0 } });
+        assert_eq!(request(r#"{"move":"pc_items","op":"withdraw","item":"Potion","quantity":3}"#),
+                   FieldMoveRequest::UseItemPc { op: PcItemOp::Withdraw, item: ItemId::Potion, qty: 3 });
+        // A quantity nobody gave is one, which is what a model omitting it means.
+        assert_eq!(request(r#"{"move":"pc_items","op":"deposit","item":"Potion"}"#),
+                   FieldMoveRequest::UseItemPc { op: PcItemOp::Deposit, item: ItemId::Potion, qty: 1 });
+        assert_eq!(request(r#"{"move":"elevator","map":"SilphCo5F"}"#),
+                   FieldMoveRequest::UseElevator { to: Map::SilphCo5F });
+
+        // A misspelt operation is named rather than falling through to a wrong default.
+        let bad = field_move_arguments(&serde_json::from_str::<Value>(
+            r#"{"move":"pc_pokemon","op":"store","slot":0}"#).expect("valid JSON")).expect_err("refused");
+        assert!(bad.contains("deposit, withdraw, release or change_box"), "{bad}");
+    }
+
+    /// ⚠️ **Two menu rows may never share an id, and hidden objects broke it the day they were
+    /// added.** An id is `{map}:{x},{y}:{kind}` where the coordinate is the tile the player stands
+    /// on to act, not the thing acted on — so two objects a tile apart share one. Vermilion Gym's
+    /// bins at (9, 7) and (9, 9) are both reached from (9, 8), and both rows minted
+    /// `VermilionGym:9,8:TrashCan`; `resolve_overworld` matches by string equality, so the second
+    /// bin was unreachable and nothing said so. It is the failure `MapSprite`'s `Rocket1`/`Rocket2`
+    /// numbering already prevents for people, which is why the fix is the same one.
+    ///
+    /// ⚠️ **The gym is the fixture because it is the worst case in the game** — fifteen identical
+    /// objects on a 10-wide map — and it is also the map where a silently unreachable row costs a
+    /// badge: two of those bins hold the switches and which two is re-rolled on every attempt.
+    #[test]
+    fn no_two_menu_rows_can_share_an_id() {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/gym-trash-solved.bin")).expect("the fixture loads");
+        let state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("a readable state");
+        let menu = overworld_menu(&state, None);
+        assert!(
+            menu.iter().filter(|row| row.id.contains(":TrashCan")).count() >= 15,
+            "all fifteen bins are rows, or this proves nothing: {menu:#?}",
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        for row in &menu {
+            assert!(seen.insert(row.id.clone()), "`{}` is offered twice; one of them can never be chosen", row.id);
+        }
+
+        // ⚠️ And every one of them still resolves. Uniqueness alone would be satisfied by ids that
+        // are unique and wrong — the pair this caught differed only in a suffix, so a mis-numbered
+        // ordinal would pass the check above and match nothing here.
+        for row in &menu {
+            assert!(resolve_overworld(&state, &row.id).is_some(), "`{}` is offered but does not resolve", row.id);
+        }
     }
 
     /// Every kind, so a loop that meant "all of them" cannot quietly stop meaning it when a seventh
@@ -2420,7 +2724,39 @@ mod tests {
             // whitespace that had been baked into their string literals — runs of spaces the model
             // was reading. A cleanup that pays for a fix is still a cleanup nobody measured, so it
             // is measured here.
-            (DecisionKind::Overworld, 11_350),
+            // ⚠️ **Overworld moved 11 350 → 12 750 on 2026-08-27, for the PC and the lift, and this
+            // is the third entry here whose spend is measured in something other than bytes: it is
+            // measured in *whether the game can be finished at all*. Re-measured across all six:
+            // 12 598, 4926, 3685, 4425, 3879, 5635 — so the addition is **1410 bytes**, all of it on
+            // Overworld, split 1076 for the three `use_field_move` verbs and **334** for `read_pc`.
+            //
+            // What forced it: `overworld_menu` withheld every `MetaTile::Pc` row and
+            // `FieldMoveRequest` carried no PC or lift operation, so a model could not press Bill's
+            // cell separator. No press, no S.S. Ticket, so `EVENT_GOT_SS_TICKET` never fires, so
+            // `CERULEANCITY_GUARD2` never stops standing on the only approach to the Trashed House
+            // door — and that door is the only crossing between Cerulean's two terraces. The
+            // deployed run of 2026-08-27 walked laps of Cerulean and Routes 24/25 for **four and a
+            // half hours of cartridge time**, filed six issue reports about it, and correctly
+            // worked out that it was in a loop it could not leave. The same gap held the Rocket
+            // Hideout lift, and with it Giovanni, the Silph Scope, the Poké Flute and both Snorlax.
+            //
+            // ⚠️ **The verbs are the cheap half and `read_pc` is the one that had to be argued
+            // for.** A deposit names a party slot the turn already lists, but a withdrawal names a
+            // *box* slot, and the box is in none of the situation's sections — so without the read
+            // the model would be picking a number blind, which is the one thing `READ_TOOLS`'
+            // "nothing here may duplicate the situation" rule has never had to worry about.
+            //
+            // ⚠️ **Three additions were paid for out of the same change rather than added to it.**
+            // The `interact` line lost the clause listing the gym bins and the Mansion switches,
+            // because both are rows in the action menu now (`MetaTile::Switch`) and a schema that
+            // still pointed at coordinates would be teaching the harder way round; `map`'s
+            // description is shared with `elevator` rather than duplicated; and the four new
+            // properties carry one sentence each rather than restating what `op` means per verb.
+            //
+            // ⚠️ **The other five did not move, because they did not drift.** 4926/3685/4425/3879/
+            // 5635 are byte-for-byte the figures recorded above, and none of this reaches them:
+            // `read_pc` is Overworld-only and `use_field_move` is a terminal only Overworld offers.
+            (DecisionKind::Overworld, 12_750),
             (DecisionKind::Battle, 4_950),
             (DecisionKind::Nickname, 3_750),
             (DecisionKind::MartPurchase, 4_500),

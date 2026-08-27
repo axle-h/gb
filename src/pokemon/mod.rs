@@ -154,6 +154,9 @@ pub trait PokemonApiTrait {
     /// player's-PC deposit/withdraw list shows. Same `(id, quantity)` pair layout as the bag.
     fn pc_box_item_position(&self, item: ItemId) -> Option<u8>;
     fn pc_box_item_quantity(&self, item: ItemId) -> u8;
+    /// Everything in PC item storage. `read_pc` answers with it, because a withdrawal names an item
+    /// and there is nowhere else the model could learn what is banked.
+    fn pc_stored_items(&self) -> Bag;
     /// Returns the species currently being named on the nickname-entry screen.
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String>;
 
@@ -429,6 +432,13 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         // walk whose only follow-up is a field move the game will refuse. See `MetaTileMap::can_cut`.
         let can_use_cut = badges.contains(Badge::CascadeBadge) && has_move(&pokemon, PokemonMoveName::Cut);
         map.can_cut = can_use_cut;
+        // Bill's cell separator, while pressing it would do something. Both events live in the same
+        // `wEventFlags` byte: EVENT_BILL_SAID_USE_CELL_SEPARATOR = 0x55E → byte 171 bit 6,
+        // EVENT_USED_CELL_SEPARATOR_ON_BILL = 0x55B → byte 171 bit 3.
+        map.bill_cell_separator = map.map == Map::BillsHouse && {
+            let flags = mmu.read(pokered_symbols::wEventFlags.address + 171);
+            flags & 0x40 != 0 && flags & 0x08 == 0
+        };
         // Vermilion Gym trash-can puzzle: EVENT_1ST_LOCK_OPENED = 0x161 → wEventFlags[44] bit 1,
         // EVENT_2ND_LOCK_OPENED = 0x160 → wEventFlags[44] bit 0.
         let trash_cans = (map.map == Map::VermilionGym).then(|| {
@@ -616,6 +626,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
     fn pc_box_item_position(&self, item: ItemId) -> Option<u8> {
         inventory_position(self.mmu(), &pokered_symbols::wNumBoxItems, &pokered_symbols::wBoxItems, item)
+    }
+
+    fn pc_stored_items(&self) -> Bag {
+        self.mmu().read_pc_items()
     }
 
     fn pc_box_item_quantity(&self, item: ItemId) -> u8 {
