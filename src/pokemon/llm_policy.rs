@@ -28,6 +28,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
 use crate::joypad::JoypadButton;
+use crate::llm::battle_report::{BattleReport, MAX_QUEUED as MAX_QUEUED_REPORTS};
+use crate::llm::battle_script::{self, Outcome as ScriptOutcome};
 use crate::llm::prompt::{self, ApiSnapshot, TurnContext};
 use crate::llm::tools::{self, DecisionKind, Terminal};
 use crate::llm::worker::{ToolBatchResult, TurnHandles, TurnRequest};
@@ -97,6 +99,47 @@ pub struct LlmPolicy {
     /// **W9** — `GB_STUCK_TIMEOUT_SECS`, handed to the agent once at construction
     /// ([`Policy::stuck_timeout`]). `None` turns the watchdog off entirely.
     stuck_timeout: Option<std::time::Duration>,
+    /// The battle being fought by the script, written up as it goes. `None` outside a battle and in
+    /// any battle the script is not deciding — a battle the model answers turn by turn narrates
+    /// itself through the ordinary event buffer and needs no report.
+    battle_report: Option<BattleReport>,
+    /// Finished reports, waiting for the next turn of any kind to carry them.
+    ///
+    /// ⚠️ **Not one slot.** `resume_after_battle` exists precisely so several battles can happen
+    /// between two overworld decisions, and a single slot would silently drop all but the last.
+    reports: Vec<String>,
+    /// A report whose battle has ended, waiting for the game to be observed once more so it can be
+    /// closed against something.
+    ///
+    /// ⚠️ **`BattleEnded` is the wrong moment to finish, and finishing there was the bug.**
+    /// `service_tools` runs only at decision points, so the last state this policy holds when a
+    /// battle ends is the one the *last turn opened with* — closing against that reports every
+    /// one-shot KO as the foe standing at full HP. Held here instead until the next observation,
+    /// where the party carries our real HP.
+    finishing: Option<BattleReport>,
+    /// The most recent state that still had a battle in it, for closing the last turn of a report.
+    ///
+    /// ⚠️ **`self.state` is not good enough and the turn it gets wrong is the interesting one.**
+    /// `BattleEnded` arrives on a tick whose `GameState` may already have `battle: None`, and a
+    /// report closed against that has no HP to diff — so the move that actually won the fight is
+    /// the one turn reported without a number. ⚠️ **It costs nothing**: the previous poll's box is
+    /// *moved* here rather than cloned, so this is a pointer swap on a `GameState` that was already
+    /// allocated.
+    last_battle_state: Option<Box<GameState>>,
+}
+
+/// A note about the script, with whatever it printed before it stopped.
+///
+/// ⚠️ **The prints are the half that is actionable.** "It chose a move BULBASAUR does not know" says
+/// what happened; the script's own `print` lines say which branch it was in when it did.
+fn script_note(headline: &str, prints: &[String]) -> String {
+    match prints.is_empty() {
+        true => headline.to_string(),
+        false => format!(
+            "{headline}\n\nIt printed, before it stopped:\n{}",
+            prints.iter().map(|line| format!("  {line}\n")).collect::<String>(),
+        ),
+    }
 }
 
 /// What every LLM-played run calls its trainer. See [`Policy::player_name`] below for why this is a
@@ -199,6 +242,10 @@ impl LlmPolicy {
             outcome: None,
             manual: Vec::new(),
             note: None,
+            battle_report: None,
+            finishing: None,
+            reports: Vec::new(),
+            last_battle_state: None,
         }
     }
 
@@ -288,7 +335,7 @@ impl LlmPolicy {
                     DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
                 };
                 let situation =
-                    prompt::situation(kind, state, &self.snapshot, &self.events, &menu, context);
+                    prompt::situation(kind, state, &self.snapshot, &self.events, &menu, context, &self.reports);
                 let headline = format!(
                     "{} · {} at ({}, {})",
                     kind.label(),
@@ -311,6 +358,14 @@ impl LlmPolicy {
             situation = format!("{note}\n\n{situation}");
         }
         self.events.clear();
+        // ⚠️ **Spent by the turn that carried them.** They are in `situation` now, and a report left
+        // here would be re-rendered into every turn until the next battle overwrote it.
+        self.reports.clear();
+        // The events this report was going to replace have just gone, so it has nothing left to
+        // take back — see `BattleReport::events_mark`.
+        if let Some(report) = self.battle_report.as_mut() {
+            report.events_mark = 0;
+        }
 
         if self.handles.turns.send(TurnRequest { id, kind, situation, headline, menu }).is_ok() {
             self.pending = Some((kind, id));
@@ -324,6 +379,105 @@ impl LlmPolicy {
     /// silently doing nothing — §7.4: an id with no match is a message, not a panic and not a no-op.
     fn reject(&mut self, note: String) {
         self.note = Some(note);
+    }
+
+    /// Let the model's own script decide this battle turn, if it has one and it can.
+    ///
+    /// ⚠️ **Four guards, and each is a case that would otherwise be wrong rather than merely
+    /// wasteful.** A Safari battle has a different action set entirely and `postgame::safari` has
+    /// bespoke logic for it; a turn already in flight has been paid for and must be allowed to
+    /// land — including the one the script asked for a moment ago; and with no script there is
+    /// nothing to run. The `state.battle` check is what makes the report's `open` infallible.
+    ///
+    /// ⚠️ **A failure disarms the script for the whole run, not for this battle.** It is one strike
+    /// because each failure costs a full request against the history to report — so disarming for a
+    /// battle only moves that cost to the next one, and disarming for a turn pays it every turn.
+    /// The reason goes back through [`battle_script::Live`], which the worker drains onto disk at
+    /// the top of the very turn the failure caused.
+    fn run_battle_script(&mut self, state: &GameState) -> Option<BattleAction> {
+        if self.pending.is_some() || self.waiting.is_some() {
+            return None;
+        }
+        let battle = state.battle.as_ref()?;
+        if battle.battle_type == crate::pokemon::battle::BattleType::Safari {
+            return None;
+        }
+        let source = self.handles.live_script.source()?;
+
+        // ⚠️ **No `expect` here, even though the `?` above makes one unreachable.** This runs on
+        // the thread that owns the `GameBoy`, so a panic takes the run's checkpoint with it — the
+        // argument `web::audio` makes for wrapping the encoder. A `None` simply means this turn is
+        // not scripted, which is always a safe answer.
+        // A second battle can start before the game was ever observed out of the first — a trainer
+        // straight after a wild encounter. Close the old one on what there is rather than letting it
+        // collect a different battle's turns.
+        if self.finishing.is_some() {
+            self.close_battle_report(None);
+        }
+        let report = match self.battle_report.as_mut() {
+            Some(report) => report,
+            None => self.battle_report.insert(BattleReport::open(state, self.events.len())?),
+        };
+        let turn = report.decisions() as u32 + 1;
+        let evaluation = battle_script::run(&source, state, turn);
+
+        match evaluation.outcome {
+            ScriptOutcome::Action(action) => {
+                report.decided(state, &action, evaluation.prints);
+                Some(action)
+            }
+            // The script wants this one answered properly. It stays armed; the turn falls through to
+            // the ordinary path, and anything it printed rides on the situation as its argument.
+            ScriptOutcome::Ask => {
+                report.handed_back(state);
+                self.note = Some(script_note("Your battle script handed this turn to you.", &evaluation.prints));
+                None
+            }
+            ScriptOutcome::Failed(why) => {
+                report.handed_back(state);
+                self.handles.live_script.failed(&why);
+                self.note = Some(script_note(
+                    &format!(
+                        "**Your battle script failed and is no longer deciding your battle turns.** \
+                         {why}\n\nAnswer this turn yourself. When you are next in the overworld, \
+                         `read_battle_script` to see it, fix it and `set_battle_script` again, or \
+                         leave it off and keep answering battles as you always have.",
+                    ),
+                    &evaluation.prints,
+                ));
+                None
+            }
+        }
+    }
+
+    /// Close the report whose battle has ended and queue it for the next turn.
+    ///
+    /// `observed` is the game as it stands now, if it has been looked at since the battle finished.
+    /// `Some` with no battle in it is the **ordinary** case and is what lets the closing line read
+    /// our own HP out of the party; `None` falls back to the last state that still had a battle,
+    /// which is all a second battle starting immediately leaves us.
+    ///
+    /// ⚠️ **`self.state` is deliberately not a fallback, and using it was the bug.** It is the state
+    /// of the last *decision*, so closing against it reports every one-shot KO as the foe standing
+    /// at the HP it started the turn on. No line at all beats a wrong one.
+    ///
+    /// ⚠️ **The events the report replaces are taken back.** Every message box in a scripted battle
+    /// was folded into `self.events` on its way past and would appear under
+    /// `### Since your last decision` as well as in the report, in two shapes, in the same request.
+    /// `events_mark` is where the buffer stood when the battle opened; anything after it is the
+    /// battle, and the report is the better account of it.
+    fn close_battle_report(&mut self, observed: Option<&GameState>) {
+        let Some(report) = self.finishing.take() else { return };
+        let mark = report.events_mark.min(self.events.len());
+        self.events.truncate(mark);
+        let fallback = self.last_battle_state.take();
+        let rendered = report.finish(observed.or(fallback.as_deref()));
+        // Oldest first: a run that fought five battles between two overworld turns has more use for
+        // the two most recent, and the count of what went is on the report itself.
+        if self.reports.len() >= MAX_QUEUED_REPORTS {
+            self.reports.remove(0);
+        }
+        self.reports.push(rendered);
     }
 
     /// The turn the model does not pay for: the next action of a `choose_action` that carried more
@@ -511,7 +665,19 @@ impl Policy for LlmPolicy {
         // it is doing nothing else with the other 95% of the time.
         self.snapshot = ApiSnapshot::read(api);
         self.snapshot.arrival = graph.arrival();
-        self.state = Some(Box::new(state.clone()));
+        // The outgoing box is *moved* rather than cloned, so keeping the last in-battle state for
+        // `close_battle_report` costs a pointer swap. See `last_battle_state`.
+        if let Some(previous) = self.state.replace(Box::new(state.clone())) {
+            if self.battle_report.is_some() && previous.battle.is_some() {
+                self.last_battle_state = Some(previous);
+            }
+        }
+        // ⚠️ **This is the observation the report was waiting for.** It runs immediately before
+        // every poll site, so a report closed here is on `self.reports` before the very next
+        // `start_turn` renders them.
+        if self.finishing.is_some() && state.battle.is_none() {
+            self.close_battle_report(Some(state));
+        }
 
         while let Ok(batch) = self.handles.tool_calls.try_recv() {
             let current = batch.turn == live
@@ -582,6 +748,13 @@ impl Policy for LlmPolicy {
     }
 
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+        // ⚠️ **Before `advance`, for the reason `advance_queue` is** — a decision already taken is
+        // being handed over rather than asked for, and starting a turn here would buy a completion
+        // for an answer that is in hand. The difference is that this one *takes* the decision, so it
+        // is also the seam that makes a whole battle cost no requests at all.
+        if let Some(action) = self.run_battle_script(state) {
+            return Some(action);
+        }
         match self.advance(DecisionKind::Battle, TurnContext::None)? {
             Terminal::ChooseBattleAction { id } => match tools::resolve_battle(state, &id) {
                 Some(action) => Some(action),
@@ -739,6 +912,17 @@ impl Policy for LlmPolicy {
         self.outcome = None;
         self.manual.clear();
         self.note = None;
+        // The game is a different game now, so a battle half-written up is about nothing.
+        self.battle_report = None;
+        self.finishing = None;
+        self.reports.clear();
+        self.last_battle_state = None;
+        // ⚠️ **Disarmed here as well as in `Worker::apply_restart`, because the two happen at
+        // different moments.** The worker only learns about a restart at the top of its next turn,
+        // and a battle can start before then — so without this the first battles of the new game
+        // are fought by the previous game's script. The worker re-arms from the *new* run's file
+        // when it catches up, which is empty for a fresh run and correct for a resumed one.
+        self.handles.live_script.arm(None);
     }
 
     /// Collected by the agent at the top of its next tick, ahead of the state machine.
@@ -762,6 +946,16 @@ impl Policy for LlmPolicy {
             AgentEvent::OverworldActionAborted { reason, .. } => {
                 self.outcome = Some(ActionOutcome::Stopped(*reason));
             }
+            // ⚠️ **The cartridge's own words are the only account of a battle turn there is.**
+            // `BattleActionStarted` is the *intent*, published the moment the policy commits, and
+            // the enemy's action is never an event at all — so "It's super effective!",
+            // "SPARKY fainted!" and "gained 56 EXP" reach the model through here or not at all.
+            AgentEvent::TextBox { message } => {
+                if let Some(report) = self.battle_report.as_mut() {
+                    report.said(message);
+                }
+            }
+            AgentEvent::BattleEnded => self.finishing = self.battle_report.take(),
             _ => {}
         }
 
@@ -1000,6 +1194,7 @@ mod tests {
                 // Without a run directory the note tools work, they simply keep nothing (W6b), and
                 // the conversation is forgotten at the end of the test exactly as it used to be.
                 crate::llm::todo::TodoList::open(run_dir),
+                crate::llm::battle_script::BattleScript::open(run_dir),
                 crate::llm::history::History::open(run_dir),
             );
             let handle = worker.spawn().expect("the worker thread starts");
@@ -2614,5 +2809,199 @@ mod tests {
         let started = std::fs::read_to_string(new.0.join(crate::run::files::HISTORY))
             .expect("the new run has a history of its own from the moment it starts");
         assert!(!started.contains(said), "and the new run inherits none of it: {started}");
+    }
+
+    // ── The battle script ────────────────────────────────────────────────────────────────────────
+
+    /// A script that reaches an action on every one of `battle_script`'s validation scenarios *and*
+    /// on the committed battle fixture. `best_move` is `()` only when nothing can damage the foe.
+    const SCRIPT: &str = "if battle.best_move != () { battle.fight(battle.best_move); }\n\
+                          if battle.can_run { battle.run(); }\n\
+                          battle.ask();";
+
+    /// A rig whose first overworld turn installs `source` and then walks somewhere, plus however
+    /// many further replies the test needs. The id has to be read off the live menu, so the rig is
+    /// built empty and the replies queued afterwards.
+    fn armed_with(source: &str, then: usize) -> (Rig, LlmPolicy) {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let walk = format!(r#"{{"id":"{id}"}}"#);
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            replies.push_back(calls(&[
+                ("set_battle_script", &serde_json::json!({ "script": source }).to_string()),
+                ("choose_action", &walk),
+            ]));
+            for _ in 0..then {
+                replies.push_back(calls(&[("choose_action", &walk)]));
+            }
+        }
+        arm(&mut rig, &mut policy);
+        (rig, policy)
+    }
+
+    /// Install a script on an overworld turn, the way the model would.
+    fn arm(rig: &mut Rig, policy: &mut LlmPolicy) {
+        let armed = rig.pump_overworld(policy);
+        assert!(armed.is_some(), "the overworld turn still has to decide something");
+        let results: Vec<String> = rig
+            .events
+            .try_iter()
+            .filter_map(|event| match event.body {
+                UiEventBody::ToolResult { name, content, .. } if name == "set_battle_script" => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1, "one script was installed");
+        assert!(results[0].starts_with("ok"), "and it armed: {}", results[0]);
+    }
+
+    /// **The whole feature, in one number.** A battle is fought from beginning to end and the
+    /// endpoint is never called: the request count after the battle is the request count before it.
+    ///
+    /// ⚠️ **This is the assertion that matters, not that an action came back.** A script that
+    /// worked but still started a turn would pass every other test here and buy nothing at all —
+    /// the saving is the request, and a battle is five to thirty of them against a history that by
+    /// then is tens of thousands of tokens.
+    #[test]
+    fn a_scripted_battle_is_fought_without_a_single_request() {
+        let (mut rig, mut policy) = armed_with(SCRIPT, 0);
+        let before = rig.requests().len();
+
+        rig.enter_battle();
+        // Ten turns of a battle, each answered by the script alone.
+        for turn in 0..10 {
+            let action = rig
+                .pump_battle(&mut policy, Duration::from_millis(200))
+                .unwrap_or_else(|| panic!("the script did not decide battle turn {turn}"));
+            assert!(
+                crate::pokemon::policy::battle_options(&rig.state()).unwrap().contains(&action),
+                "turn {turn} chose something the game never offered: {action}",
+            );
+        }
+
+        assert_eq!(rig.requests().len(), before, "a scripted battle costs no requests at all");
+    }
+
+    /// The other half: the model is told what happened, once, on its next turn.
+    #[test]
+    fn what_the_script_did_reaches_the_model_on_the_next_turn() {
+        let (mut rig, mut policy) = armed_with(SCRIPT, 1);
+
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("the script decides");
+        policy.on_event(&AgentEvent::TextBox { message: "It's super effective!".into() });
+        policy.on_event(&AgentEvent::BattleEnded);
+
+        // Back outside, and the next turn carries the account of a battle nobody was asked about.
+        rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
+        rig.pump_overworld(&mut policy).expect("the next overworld turn lands");
+        rig.wait_for_requests(2, Duration::from_secs(5));
+
+        let situation = rig.requests().last().expect("a second request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(situation.contains("### Battle report"), "no report in:\n{situation}");
+        assert!(situation.contains("battle."), "{situation}");
+        assert!(situation.contains("It's super effective!"), "the cartridge's own words: {situation}");
+
+        // ⚠️ And exactly once. A report left queued would be re-rendered into every turn after it.
+        assert_eq!(situation.matches("### Battle report").count(), 1, "{situation}");
+    }
+
+    /// ⚠️ **The report replaces the raw event stream rather than sitting beside it.** Every message
+    /// box in the battle also went into `events`, and without `events_mark` the same prose would be
+    /// in the same request twice, in two shapes.
+    #[test]
+    fn a_scripted_battle_is_not_narrated_twice_in_the_same_request() {
+        let (mut rig, mut policy) = armed_with(SCRIPT, 1);
+
+        rig.enter_battle();
+        policy.on_event(&AgentEvent::BattleStarted);
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("the script decides");
+        policy.on_event(&AgentEvent::TextBox { message: "WILD RATTATA appeared!".into() });
+        policy.on_event(&AgentEvent::BattleEnded);
+
+        rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
+        rig.pump_overworld(&mut policy).expect("the next overworld turn lands");
+        rig.wait_for_requests(2, Duration::from_secs(5));
+
+        let situation = rig.requests().last().expect("a second request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert_eq!(
+            situation.matches("WILD RATTATA appeared!").count(), 1,
+            "the battle is accounted for once, not once per mechanism:\n{situation}",
+        );
+    }
+
+    /// One strike. The failing turn comes straight back to the model with the reason, and every
+    /// battle turn after it does too.
+    #[test]
+    fn a_script_that_fails_disarms_and_hands_the_turn_back() {
+        // ⚠️ **Broken on the second turn, and validated clean — which is the honest shape of this
+        // failure.** Every validation scenario is turn 1, so a script whose behaviour depends on
+        // the turn number is exactly what validation cannot catch, and exactly what the disarm is
+        // for. See `battle_script::SCENARIOS`.
+        let broken = "if battle.turn > 1 { battle.fight(\"Hydro Cannon\"); }\n\
+                      if battle.best_move != () { battle.fight(battle.best_move); }\n\
+                      if battle.can_run { battle.run(); }\n\
+                      battle.ask();";
+        let (mut rig, mut policy) = armed_with(broken, 0);
+        rig.endpoint.replies.lock().unwrap()
+            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+        let before = rig.requests().len();
+
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("turn 1 is fine");
+        assert_eq!(rig.requests().len(), before, "and cost nothing");
+
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers turn 2 instead");
+        rig.wait_for_requests(before + 1, Duration::from_secs(5));
+
+        let situation = rig.requests().last().expect("a battle request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(situation.contains("no longer deciding your battle turns"), "{situation}");
+        assert!(situation.contains("Hydro Cannon"), "the reason names what it asked for: {situation}");
+        assert!(situation.contains("set_battle_script"), "and how to fix it: {situation}");
+
+        // ⚠️ And it stays disarmed: the next battle turn is the model's too, not a second failure.
+        assert!(policy.handles.live_script.source().is_none(), "one strike disarms for the run");
+    }
+
+    /// ⚠️ **A reset disarms immediately, not at the worker's next turn.** `POST /api/new-run`
+    /// checkpoints the old run and starts a fresh game on the emulator thread, and a battle can
+    /// begin before the worker has looked at the restart cell — so the cell is cleared here too, or
+    /// the new game's first battles are fought by the previous game's script.
+    #[test]
+    fn a_reset_stops_the_old_games_script_deciding_the_new_games_battles() {
+        let (mut rig, mut policy) = armed_with(SCRIPT, 0);
+        assert!(policy.handles.live_script.source().is_some(), "armed to begin with");
+
+        policy.restart(None);
+        assert!(policy.handles.live_script.source().is_none(), "and disarmed the moment the game changed");
+
+        // Which means the very next battle turn is the model's, not a script's.
+        rig.endpoint.replies.lock().unwrap()
+            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers it");
+    }
+
+    /// `battle.ask()` is the granular half of the feature: the script keeps deciding, and hands
+    /// back only the turns it says are worth paying for.
+    #[test]
+    fn a_script_can_hand_one_turn_back_and_stay_armed() {
+        let asking = "if battle.me.level > 3 { battle.ask(); }\nbattle.ask();";
+        let (mut rig, mut policy) = armed_with(asking, 0);
+        rig.endpoint.replies.lock().unwrap()
+            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers the asked turn");
+
+        let situation = rig.requests().last().expect("a battle request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(situation.contains("handed this turn to you"), "{situation}");
+        assert!(!situation.contains("no longer deciding"), "asking is not failing: {situation}");
+        assert!(policy.handles.live_script.source().is_some(), "and the script is still armed");
     }
 }

@@ -200,6 +200,9 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // **W6b** — the model's own plan lives in the run directory, so it survives both a
             // compaction and a restart.
             let todo = TodoList::open(Some(run.path()));
+            // The battle script, beside the plan and for the same reason: it is a decision about
+            // how to play that has to survive both a compaction and a restart.
+            let battle_script = crate::llm::battle_script::BattleScript::open(Some(run.path()));
             // The conversation itself, beside the plan and for the same reason. ⚠️ **A constructor
             // argument rather than `with_run`, unlike the incident records below**: this one is
             // read at construction, so it has to be in hand before `Accounting` is built — the
@@ -227,7 +230,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             // `with_run` rather than a constructor argument: it is the one thing the worker does
             // that is not part of answering a turn, and the records go to whichever run is current
             // when the press happens rather than to this one — see `llm::incident`.
-            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo, history);
+            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo, battle_script, history);
             let worker = worker.with_run(Arc::clone(&current));
             // The worker outlives this function; it ends when the policy is dropped and its channels
             // close, which happens when the emulator thread stops.

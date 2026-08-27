@@ -51,6 +51,14 @@ pub mod files {
     /// The model's plan: what outlives a compaction, which is the one thing that still empties the
     /// conversation now that [`HISTORY`] carries it across a restart.
     pub const TODO: &str = "todo.json";
+    /// The model's battle script and whether it is armed: what lets a whole battle be fought
+    /// without a single request. See [`crate::llm::battle_script`].
+    ///
+    /// ⚠️ **One file, holding the source *and* the armed flag *and* the last failure**, rather than
+    /// a `.rhai` beside a `.json`. The stem rule two doc comments below is why: a
+    /// `battle-script.rhai` next to a `battle-script.json` would stage to the same
+    /// `battle-script.tmp` and the two writes would race.
+    pub const BATTLE_SCRIPT: &str = "battle-script.json";
     /// The live conversation, rewritten whole once a turn: what a restarted process resumes on.
     /// See [`crate::llm::history`].
     ///

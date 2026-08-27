@@ -17,6 +17,7 @@
 //!             transcript.jsonl.gz             the whole story, up to and including the win
 //!             transcript.jsonl.1.gz           the rotated half, when there is one
 //!             memories/  todo.json            the model's own notes
+//!             battle-script.json                   how it chose to fight
 //! ```
 //!
 //! ⚠️ **The nesting is load-bearing, not tidiness.** [`crate::run::resumable`] lists the *direct*
@@ -195,6 +196,13 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
     if todo.exists() {
         std::fs::copy(&todo, into.join(files::TODO))
             .map_err(|e| format!("could not copy {}: {e}", todo.display()))?;
+    }
+    // The battle script, if the run wrote one. It is a decision the model made about how to play
+    // rather than a cache, so a finished run's archive is incomplete without it.
+    let script = job.run_dir.join(files::BATTLE_SCRIPT);
+    if script.exists() {
+        std::fs::copy(&script, into.join(files::BATTLE_SCRIPT))
+            .map_err(|e| format!("could not copy {}: {e}", script.display()))?;
     }
 
     // The conversation, both halves. `history.json` is written by rename, so a plain copy of it is
@@ -411,6 +419,7 @@ mod tests {
         std::fs::create_dir_all(run.path().join(files::MEMORIES)).expect("memories");
         std::fs::write(run.path().join(files::MEMORIES).join("plan.md"), "beat brock").expect("a memory");
         std::fs::write(run.path().join(files::TODO), "[]").expect("a todo list");
+        std::fs::write(run.path().join(files::BATTLE_SCRIPT), "{}").expect("a battle script");
         std::fs::write(run.path().join(files::HISTORY), r#"{"version":1,"messages":[]}"#)
             .expect("a saved conversation");
         std::fs::write(
@@ -436,6 +445,7 @@ mod tests {
         assert_eq!(std::fs::read(into.join(files::SRAM)).unwrap(), b"sram");
         assert_eq!(std::fs::read_to_string(into.join(files::MEMORIES).join("plan.md")).unwrap(), "beat brock");
         assert!(into.join(files::TODO).is_file(), "the model's plan travels with the run");
+        assert!(into.join(files::BATTLE_SCRIPT).is_file(), "the battle script travels with the run");
         assert!(into.join(files::META).is_file(), "the archive is self-describing without the ledger");
         assert!(into.join(files::HISTORY).is_file(), "the conversation travels with the run");
 

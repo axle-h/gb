@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::llm::accounting::Accounting;
+use crate::llm::battle_script::{self, BattleScript};
 use crate::llm::client::{ChatEndpoint, RetryPolicy, stream_with_retries};
 use crate::llm::compaction;
 use crate::llm::config::LlmConfig;
@@ -130,6 +131,9 @@ pub struct TurnHandles {
     pub generation: Arc<AtomicU64>,
     /// **`POST /api/new-run`** — a pending "the game restarted" notice. See [`Restart`].
     pub restart: Restarts,
+    /// The armed battle script, which the policy runs on its own thread rather than asking for.
+    /// See [`crate::llm::battle_script::Live`].
+    pub live_script: Arc<battle_script::Live>,
 }
 
 /// The game has been restarted underneath a live worker, so the conversation is now about a game
@@ -239,6 +243,11 @@ pub struct Worker {
     /// **W6b / §10** — the model's plan. Answered here rather than at the policy poll: none of it
     /// needs the emulator.
     todo: TodoList,
+    /// The model's battle script, and the cell the policy reads it through. Answered here for the
+    /// reason the plan is: validation runs the script six times over hand-built states and none of
+    /// it touches the emulator. See [`crate::llm::battle_script`].
+    battle_script: BattleScript,
+    live_script: Arc<battle_script::Live>,
     /// What the page was last told the plan is, so [`Self::publish_todo`] can be called from every
     /// moment it might have changed without publishing the same list twice.
     published_plan: Option<Vec<TodoView>>,
@@ -265,6 +274,7 @@ pub fn channels(
     config: LlmConfig,
     published: Arc<Published>,
     todo: TodoList,
+    battle_script: BattleScript,
     history: History,
 ) -> (Worker, TurnHandles) {
     let (turn_tx, turn_rx) = mpsc::channel();
@@ -273,6 +283,13 @@ pub fn channels(
     let (result_tx, result_rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
     let restart: Restarts = Arc::new(Mutex::new(None));
+    // ⚠️ **Armed from the file at construction, not on the first `set_battle_script`.** A resumed
+    // run's script is on disk and the model has no reason to send it again, so a cell that started
+    // empty would fight the rest of the run one paid turn at a time and nothing would say why.
+    let live_script = Arc::new(battle_script::Live::default());
+    if battle_script.armed() {
+        live_script.arm(battle_script.source().map(str::to_string));
+    }
 
     // ⚠️ **The calibration comes back with the conversation, and nothing else does.** A restored
     // history is measured on the endpoint's scale or not at all: see `Accounting::resumed`, which
@@ -296,6 +313,8 @@ pub fn channels(
         tool_results: result_rx,
         history,
         todo,
+        battle_script,
+        live_script: Arc::clone(&live_script),
         published_plan: None,
         turns_since_plan,
         accounting,
@@ -309,6 +328,7 @@ pub fn channels(
         tool_results: result_tx,
         generation,
         restart,
+        live_script,
     };
     (worker, handles)
 }
@@ -395,6 +415,14 @@ impl Worker {
     fn apply_restart(&mut self, restart: Restart) {
         self.todo = TodoList::open(restart.run_dir.as_deref());
         self.publish_todo();
+        // ⚠️ **Reopened against the new directory, and the cell re-armed from what it finds.**
+        // Without this a `POST /api/new-run` leaves the *old* game's script deciding the new game's
+        // battles, and `set_battle_script` writing into a run that has been set aside.
+        self.battle_script = BattleScript::open(restart.run_dir.as_deref());
+        self.live_script.arm(match self.battle_script.armed() {
+            true => self.battle_script.source().map(str::to_string),
+            false => None,
+        });
         // ⚠️ **`fresh`, never `open`.** The two differ in exactly one way and it is the whole point
         // of having both: `open` would read the new run directory back, and this is the one call
         // site where reading is wrong. Today `RunDir::open`'s fresh path always mints an empty
@@ -420,6 +448,17 @@ impl Worker {
         // set aside.
         if let Some(restart) = self.restart.lock().ok().and_then(|mut cell| cell.take()) {
             self.apply_restart(restart);
+        }
+        // ⚠️ **The policy disarms in memory and this is what makes it durable.** The emulator thread
+        // cannot write the run directory — one writer per run, the rule `transcript` and `history`
+        // both keep — so it leaves the reason here and the file learns about it at the top of the
+        // very turn the failure caused. Anything later and a restart re-arms a broken script.
+        if let Some(why) = self.live_script.take_failure() {
+            self.battle_script.disarm(&why);
+            self.published.publish_event(UiEventBody::Notice {
+                level: "warn",
+                message: format!("the battle script was disarmed: {why}"),
+            });
         }
         let TurnRequest { id, kind, situation, headline, menu } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
@@ -547,6 +586,26 @@ impl Worker {
         self.turns_since_plan = 0;
         self.history.push(plan);
         true
+    }
+
+    /// Service one battle-script call, returning the sentence the model is shown.
+    ///
+    /// ⚠️ **The cell is re-armed from the *file's* view rather than from the call**, so the policy
+    /// can only ever be running a script that was validated and written down. A `set` that was
+    /// refused leaves both exactly as they were.
+    fn apply_battle_script(&mut self, call: tools::BattleScriptCall) -> String {
+        match call {
+            tools::BattleScriptCall::Docs => battle_script::DOCS.to_string(),
+            tools::BattleScriptCall::Read => self.battle_script.read(),
+            tools::BattleScriptCall::Set(source) => {
+                let answer = self.battle_script.set(source.as_deref());
+                self.live_script.arm(match self.battle_script.armed() {
+                    true => self.battle_script.source().map(str::to_string),
+                    false => None,
+                });
+                answer
+            }
+        }
     }
 
     /// One TODO call, applied and published. The UI gets the whole list — a viewer reads it as what
@@ -802,6 +861,10 @@ impl Worker {
                         CallKind::Issue(message) => {
                             self.file_issue(id, kind, message, summary.as_deref())
                         }
+                        // ⚠️ **The same exception a third time.** "Install this script, and walk
+                        // north" is one message, and dropping the first half because the turn ended
+                        // would silently lose the thing the model went and read the docs for.
+                        CallKind::BattleScript(call) => self.apply_battle_script(call.clone()),
                         CallKind::Rejected(complaint) => complaint.clone(),
                         _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
                     };
@@ -919,6 +982,7 @@ impl Worker {
                     }
                     CallKind::Todo(call) => self.apply_todo(call.clone()),
                     CallKind::Issue(message) => self.file_issue(id, kind, message, None),
+                    CallKind::BattleScript(call) => self.apply_battle_script(call.clone()),
                     CallKind::Rejected(complaint) => complaint.clone(),
                     CallKind::Terminal(_) => unreachable!("handled above"),
                 };

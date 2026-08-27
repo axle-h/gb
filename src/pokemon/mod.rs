@@ -31,6 +31,7 @@ pub mod badge;
 pub mod rom_gfx;
 pub mod badge_gfx;
 pub mod mon_gfx;
+pub mod learnset;
 pub mod map_gfx;
 pub mod map;
 pub mod pokemon;

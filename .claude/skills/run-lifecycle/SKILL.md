@@ -102,6 +102,15 @@ level of nesting is load-bearing.** `run::resumable` lists the *direct* children
 so beside the runs it would be the newest resumable thing on the volume and the next `gb serve` would resume a
 game that had already been won and filed. `hall_of_fame::tests::an_archive_carries_the_whole_run_including_the_conversation_and_is_not_resumable`.
 
+⚠️ **Every artifact the archive carries is named by hand, so a new one is dropped silently.** `archive` copies
+`memories/`, `todo.json`, `battle-script.json` and both halves of the conversation by name — there is no "copy
+everything" — and the assertion list in
+`an_archive_carries_the_whole_run_including_the_conversation_and_is_not_resumable` is the only thing that would
+notice one missing. Restore is the same shape and for the same reason: nothing central reloads a run directory,
+so `TodoList::open`, `BattleScript::open` and `History::open` each read their own file, each tolerate it being
+absent or corrupt, and each has to be reopened in `Worker::apply_restart` or a `POST /api/new-run` leaves the old
+game's state in the worker.
+
 ⚠️ **The transcript is followed, not copied.** The completion event is *published* in the tick the archive is
 triggered from and written by a different thread, so `fs::copy` produces an archive of a victory with no victory
 in it — and can catch a torn line between `writeln!` and `flush`. `publish_event` returns the seq; the follow

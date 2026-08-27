@@ -132,6 +132,41 @@ ever a battle — a text box is the game talking, and resuming through one is ex
 and it gives up after five, because the model is answering battle turns throughout but is locked out
 of the overworld, which is where "half the party has fainted, go and heal instead" lives.
 
+The bigger saving is that the model can decide not to be asked at all. Battles are where a run's
+tokens go and where its play is worst: one deployed run made **204 battle decisions of which 31 were
+`run` and none was a Poké Ball**, and reached Mt Moon on 92 minutes of cartridge time with a single
+Lv19 starter as its whole party — every one of those 204 a full request against a ~50 k-token
+history, to answer a question that is usually mechanical. So `set_battle_script` lets it write the
+mechanical part down once, as a short program in [Rhai](https://rhai.rs), and the policy runs it. The
+script is evaluated **on the emulator thread**, inside `pick_battle_action`, so a scripted turn comes
+back on the first poll: no request, no round trip, no latency. A wild encounter interrupting a walk
+now costs nothing and resumes by itself.
+
+It reads a `battle` object — both sides, the party, the bag — where every move already carries the
+damage it would do to the Pokémon actually in front of it and the type multiplier that goes with it,
+because a script that had to carry its own type chart is one no model would get right from memory.
+It ends by calling exactly one of `battle.fight`, `battle.switch_to`, `battle.use_item`,
+`battle.run` or `battle.ask` — the last of which hands *that one turn* back, so a gym leader can
+still be thought about while the Rattatas are not. Whatever the script chooses is resolved against
+the same `battle_options` list every other policy chooses from, so it can never take an action the
+game would not have offered.
+
+Three things keep it honest. Nothing about it is trusted: the sandbox has no file, process or network
+API at all, and the engine caps operations, wall-clock time, string and collection sizes and call
+depth, because the thing being run was written by a model and the thread it runs on owns the
+emulator. `set_battle_script` puts the script through six made-up battles before arming it and
+answers with a table of what it chose in each, which is the only chance the model gets to notice that
+a rule it meant does something else. And a script that fails — crashes, runs too long, chooses
+nothing, or names a move the Pokémon does not know — is **disarmed on the first failure**, with that
+turn handed straight back and the reason attached: one strike, because each failure costs a whole
+request to report, and a script that failed once will fail again.
+
+After every scripted battle the model gets a report on its next turn: what it did each turn, the
+damage either way, the cartridge's own sentences ("It's super effective!", "SPARKY gained 56 EXP!"),
+anything the script printed, and how many decisions it took. That report is the entire feedback loop
+— a scripted battle is otherwise invisible — so if the script is losing Pokémon or fleeing from
+things worth catching, that is where the model finds out.
+
 The model keeps a **plan** it edits itself, shown to it every turn and drawn on the page beside the
 game. It is the only thing it writes that survives a context compaction, so an item is meant to carry
 its reason as well as its intent. History is compacted once it passes `GB_COMPACT_ABOVE` of the
@@ -298,6 +333,7 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
 | `todo.json` | the model's own plan — what outlives a compaction |
+| `battle-script.json` | the program deciding its battle turns, and whether it is still armed |
 | `history.json` | the live conversation, rewritten each turn — what a restart resumes on |
 | `conversation.jsonl` | every message ever sent, appended; the record of what a compaction replaced |
 | `issues/` | one directory per `report_issue`: the message, the screen, a save state, the conversation |
@@ -521,6 +557,8 @@ src/
 │   ├── map_image.rs     — the whole current map as a labelled picture, ditto
 │   ├── accounting.rs    — tokens reported vs tokens estimated, and the calibration between them
 │   ├── todo.rs          — the model's plan: the only thing it writes that survives a compaction
+│   ├── battle_script.rs — the Rhai sandbox a scripted battle is decided in, and the script on disk
+│   ├── battle_report.rs — what happened in a battle nobody was asked about
 │   ├── history.rs       — the conversation on disk: restored on a restart, logged past a compaction
 │   ├── compaction.rs    — image eviction + summarising compaction, as pure functions over the history
 │   └── worker.rs        — the turn loop: stream → tool batch → terminal call, with cancellation
@@ -603,8 +641,9 @@ There is no top-level `LICENSE` here yet. If one is added, the constraint to che
 original C++ and its licence are vendored under `tools/blip-golden/`.
 
 The other codec in the audio path constrains nothing: `opus-rs` is BSD-3-Clause, a Rust port of
-libopus, which is BSD-3 itself — so it asks for attribution and nothing more. It is named here
-because this paragraph is the list, and a dependency absent from it is one nobody checked.
+libopus, which is BSD-3 itself — so it asks for attribution and nothing more. Neither does `rhai`,
+the battle-script sandbox, which is MIT OR Apache-2.0. Both are named here because this paragraph is
+the list, and a dependency absent from it is one nobody checked.
 
 The ROM is not distributed and cannot be — `pokered/` is a submodule of the disassembly project, and
 the cartridge is assembled locally from it.

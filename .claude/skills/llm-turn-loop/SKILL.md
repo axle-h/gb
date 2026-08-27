@@ -291,6 +291,100 @@ into the naming screen's buffer, so nothing else checks it**: `PokemonString::fr
 unreadable for the rest of the run. `tools::unencodable` rejects it by round-tripping through the charmap rather than by
 asking whether it is alphanumeric, since `/` is a perfectly writable `$F3`.
 
+### The battle script
+
+⚠️ **The point is requests removed, not tokens saved, and every decision below follows from that.** `battle_script::run` is
+called from `pick_battle_action` **on the emulator thread**, before `advance`, so a scripted turn returns on the first poll —
+no completion, no round trip, no latency. The measurement it exists for: the 2026-08-26 run made **204 battle decisions, 31
+of them `run` and none a Poké Ball**, each one a full prefill of a ~50 k-token history. One scripted wild encounter pays for
+the whole feature's 1372 bytes of Overworld tool array several hundred times over.
+
+⚠️ **The script filters `policy::battle_options`; it never invents an action.** A `Choice` is symbolic — a name or a slot —
+and `battle_script::resolve` matches it against the same list `RandomPolicy`, `DeterministicPolicy` and `tools::battle_menu`
+all use. Anything not on it is a **failure with a named reason**, never a dropped turn: the same rule `tools::classify`
+follows for an invented id, one layer down.
+
+⚠️ **Rhai, and the safety is the engine's limits rather than the language.** `battle_script::engine` is **one builder used by
+both** the live run and validation — a validation pass on a differently-configured engine proves something about a program
+that never executes. It sets `max_operations` (20 000), an `on_progress` wall-clock abort (50 ms), string/array/map ceilings,
+a call-depth cap, and `disable_symbol("eval")`; `Cargo.toml` never enables rhai's `unchecked`. ⚠️ **`catch_unwind` on top,
+the `web::audio` pattern** — a panic here would unwind the emulator and take the run's checkpoint with it — ⚠️ **and it is
+not enough on its own**: it catches a panic and does nothing at all about a hang, which is what the fuel and the deadline are
+for.
+
+⚠️ **Two of this API's names were parse errors before they were anything else.** `mv.type` and `battle.switch(…)` are both
+reserved words in rhai — the second even in method position — so the fields are `move_type` and `switch_to`. A name the model
+cannot type is worse than a missing feature: the script does not misbehave, it does not compile, and the round trip is spent
+finding out. `every_name_the_docs_use_is_one_the_parser_accepts` parses every field and every action mechanically and checks
+`DOCS.md` mentions each, which is the only thing that would catch a third.
+
+⚠️ **`damage` and `effectiveness` are what make a script affordable to write**, and both are wrappers over
+`damage::expected_damage` and `PokemonType::attack_effectiveness` rather than new logic. Without them a script has to carry a
+type chart from memory, in a file it is charged for storing and cannot test.
+
+⚠️ **The choice cell is the authority, not the abort.** An action records its choice and returns an `EvalAltResult`, which is
+what makes "calling an action ends the script" true rather than documentation. But rhai has `try`/`catch`, so the abort can
+be swallowed — the cell keeps the **first** choice and ignores later ones, so the rule holds however the script is written.
+`the_first_action_wins_even_when_the_abort_is_caught`.
+
+⚠️ **Validation is six scenarios and every one of them is turn 1, so it is not a proof.** A script that depends on
+`battle.turn`, on a party member the run does not have yet, or on the bag holding something cannot be checked on the worker
+thread at all — there is no game there. That gap is what the disarm is for, and it is why the two are separate mechanisms
+rather than a fallback nobody expects to need. ⚠️ **The table that comes back matters as much as the pass/fail**: it shows
+the model its own rules acting on six turns it never has to describe.
+
+⚠️ **One strike disarms for the run, not for the battle.** Each failure costs a whole request to report, so disarming for a
+battle only moves that cost to the next one and disarming for a turn pays it every turn. The source is **kept** — it is the
+thing the model has to edit.
+
+⚠️ **The worker owns the file; `battle_script::Live` is the cell, and it carries traffic both ways.** The worker arms and
+disarms deliberately, and the policy disarms *because a battle went wrong* — so the reason travels back through the cell and
+`run_one` drains it into `BattleScript::disarm` at the top of the very next turn. ⚠️ The policy must never persist: one writer
+per run directory is the rule `run::transcript` and `llm::history` both keep. ⚠️ **`Live` is armed from the file at
+construction**, or a resumed run fights every battle one paid turn at a time with a perfectly good script on disk and nothing
+saying why. ⚠️ And `apply_restart` reopens it, or `POST /api/new-run` leaves the old game's script deciding the new game's
+battles.
+
+⚠️ **The three tools are on `Overworld` and nowhere else, the battle turn they are about included.** With a working script
+there are no battle turns to carry them; when one has failed, that turn is for winning the battle in front of you and the
+failure is waiting in the next overworld situation regardless. It is also what kept `DecisionKind::Battle`'s array where it
+was — it had ~380 bytes of headroom. A call from the wrong kind is **named with the reason** rather than falling through to
+"there is no such tool", which is a lie the model cannot act on.
+
+⚠️ **Safari battles are never scripted.** `battle_options` short-circuits to a different action set there and
+`postgame::safari` has bespoke logic; those turns go to the model exactly as they always did.
+
+⚠️ **A turn already in flight is always allowed to land.** `run_battle_script` returns early on `pending` or `waiting`,
+including the turn the script itself asked for a moment ago.
+
+### The battle report
+
+⚠️ **The numbers are inferred and the prose is the cartridge's, because there is no third option.** There is no per-turn
+battle outcome event in this codebase: `BattleActionStarted` is the *intent*, published the moment the policy commits, and
+the enemy's action is never an event at all. So damage is a diff of the HP seen at consecutive decisions and everything else
+— "It's super effective!", "SPARKY fainted!", "gained 56 EXP" — is read off `AgentEvent::TextBox`.
+
+⚠️ **A turn's damage is only known at the *next* decision**, so a turn is held open and closed by whatever follows it, which
+is why `finish` takes a final state rather than being a plain `render`. ⚠️ **`close` compares the side's *name* as well as its
+HP**: a switch or a trainer sending out their next Pokémon replaces a side outright, and reporting `RATTATA 21 → 30` when the
+30 belongs to a PIDGEY is worse than reporting nothing.
+
+⚠️ **It is rendered into the situation, not appended as a message.** The plan is a message because it is re-read every turn
+and wants the prefix cache; a report is read once, by the turn straight after it, so a message would be a permanent extra
+entry in a history that is compacted for length. The situation is fresh tokens either way.
+
+⚠️ **`events_mark` is what stops the battle being narrated twice in one request.** Every message box also went into
+`LlmPolicy::events` on its way past and would appear under `### Since your last decision` beside the report, in two shapes.
+`close_battle_report` truncates the buffer back to where it stood when the battle opened. ⚠️ `start_turn` zeroes an open
+report's mark, because it has just cleared the events there would be nothing left to take back.
+
+⚠️ **`reports` is a queue, not a slot.** `resume_after_battle` exists precisely so several battles happen between two
+overworld decisions. ⚠️ It is **cleared by the turn that carried it**, or the same report is re-rendered into every turn until
+the next battle overwrites it.
+
+⚠️ **A turn where no HP moved prints no numbers.** A status move, a miss and a failed run all look like that, and `34 → 34`
+twice a turn buries the turns that did something.
+
 ### The plan
 
 ⚠️ **It holds five items (`MAX_ITEMS`) and finished ones count towards that; it used to hold 32 and they did not have

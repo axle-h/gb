@@ -301,6 +301,20 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
     }
     case 'todo_complete':
       return args.id === undefined ? 'Ticked something off' : `Ticked off plan item ${args.id}`;
+    case 'get_battle_script_docs':
+      return 'Read how to script a battle';
+    case 'read_battle_script':
+      return 'Read its battle script';
+    // ⚠️ **The size, not the script.** `report_issue` inlines its message because that message is
+    // written to be read by a person; a script is written to be read by the sandbox, runs to
+    // dozens of lines, and would take over the log on the one turn it appears. The row already
+    // opens onto its own arguments, so the source is one click away where it belongs.
+    case 'set_battle_script': {
+      const script = text('script');
+      if (!script) return 'Stopped scripting its battles';
+      const lines = script.trim().split('\n').length;
+      return `Wrote a battle script (${lines} line${lines === 1 ? '' : 's'})`;
+    }
     case 'choose_action':
     case 'choose_battle_action': {
       const id = text('id');

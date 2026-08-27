@@ -270,6 +270,14 @@ Playing it well, and the clock you are playing against:
   once. Errands, free items, HMs and the directions you need next all come from people standing in \
   rooms you had no particular reason to enter, and each of them says it once. Items lying on the \
   ground appear in the action menu; pick them up as you pass.
+- **Write your battles down.** Most battle turns are the same decision: hit it with whatever does \
+  the most damage, heal or switch when you are nearly dead, throw a ball at something you want. \
+  `set_battle_script` installs a short program that makes those decisions for you, and a turn it \
+  answers costs nothing at all, so a wild encounter on the way somewhere stops interrupting you. \
+  Read `get_battle_script_docs` once and write one early: the time it saves is the whole of the \
+  clock above, and the moves and type matchups are worked out for you. Keep the fights that matter \
+  by calling `battle.ask()` inside it, and change it when the report after a battle shows it doing \
+  something you did not intend.
 ";
 
 /// The line that ends every turn request, and the reason the loop can rely on exactly one terminal
@@ -363,6 +371,9 @@ pub fn situation(
     events: &[String],
     menu: &[MenuItem],
     context: TurnContext<'_>,
+    // Battles the script fought without asking — see `crate::llm::battle_report`. Drained into the
+    // next turn of **any** kind, because a battle can end on a naming screen or a mart.
+    reports: &[String],
 ) -> String {
     let mut out = String::with_capacity(2048);
 
@@ -442,22 +453,53 @@ pub fn situation(
     // ⚠️ **Only on the turn that has an action menu.** It is a fact about that menu, and the other
     // five kinds do not have one — on a naming screen it is overworld trivia in the middle of a
     // question about a word.
+    //
+    // ⚠️ **And it has to say which half is actually missing, or it sends the model at the one that
+    // is not.** The line used to read "an HM to be found and taught, and needs the CascadeBadge"
+    // whatever the run was holding, so a party carrying HM01 and the badge with nothing in it that
+    // can learn Cut was told to go and find HM01. That is the state the deployed run of 2026-08-27
+    // was in, and what it did instead was try the teach over and over.
     if kind == DecisionKind::Overworld {
+        use crate::pokemon::badge::Badge;
+        use crate::pokemon::item::ItemId;
+        use crate::pokemon::learnset::can_learn;
         use crate::pokemon::tile::MetaTile;
-        let obstacles: [(bool, fn(&MetaTile) -> bool, &str, &str); 2] = [
+        let obstacles: [(bool, fn(&MetaTile) -> bool, &str, ItemId, &str, Badge); 2] = [
             (!state.can_use_cut, |tile| matches!(tile, MetaTile::CutTree), "Cuttable trees",
-             "Cut, which is an HM to be found and taught, and needs the CascadeBadge"),
+             ItemId::Hm01Cut, "Cut", Badge::CascadeBadge),
             // `ConnectionWater` too: the sea at a map edge is the same wall as the pond inside it.
             (!state.can_use_surf, |tile| matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_)),
-             "Water", "Surf, which is an HM to be found and taught, and needs the SoulBadge"),
+             "Water", ItemId::Hm03Surf, "Surf", Badge::SoulBadge),
         ];
-        for (blocked, is_obstacle, noun, what) in obstacles {
-            if blocked && state.map.meta_tiles.iter().any(is_obstacle) {
-                out.push_str(&format!(
-                    "Blocked here: {noun} on this map cannot be passed yet — that needs {what}. \
-                     Nothing in the menu below leads past that, and retrying will not change it.\n",
-                ));
-            }
+        for (blocked, is_obstacle, noun, hm, name, badge) in obstacles {
+            if !blocked || !state.map.meta_tiles.iter().any(is_obstacle) { continue; }
+            let held = state.bag.iter().any(|entry| entry.id == hm);
+            let taker = state.pokemon.iter().position(|mon| can_learn(mon.species, hm));
+            let badged = state.badges.contains(badge);
+            let what = match (held, taker, badged) {
+                // Everything is in hand: this is one tool call away, so say which one.
+                (true, Some(slot), true) => format!(
+                    "teaching {name} to a party member. {hm} is in your bag and slot {slot} can learn \
+                     it, so `use_field_move` with `teach` is all that is left"),
+                (true, Some(slot), false) => format!(
+                    "the {badge}, which you do not have yet. {hm} is already in your bag and slot \
+                     {slot} can learn it, so the gym is the only thing in the way"),
+                // The one the deployed run was in, and the one nothing used to say out loud.
+                (true, None, _) => format!(
+                    "a Pokémon that can learn {name}. {hm} is in your bag, but nothing in your party \
+                     is in its learnset and the game refuses the teach, so catching or swapping one \
+                     in is what this needs{}",
+                    if badged { String::new() } else { format!(", and the {badge} after that") }),
+                (false, _, true) => format!(
+                    "{name}, which is taught by {hm}: you have the {badge} but not the HM, so finding \
+                     it is the errand"),
+                (false, _, false) => format!(
+                    "{name}, which is an HM to be found and taught, and needs the {badge}"),
+            };
+            out.push_str(&format!(
+                "Blocked here: {noun} on this map cannot be passed yet. That needs {what}. \
+                 Nothing in the menu below leads past it, and retrying will not change that.\n",
+            ));
         }
     }
     let badges: Vec<String> = state.badges.iter_names().map(|(name, _)| name.to_string()).collect();
@@ -515,6 +557,15 @@ pub fn situation(
             out.push_str("⚠️ You are trapped (Wrap/Bind/Fire Spin): a move will not execute this \
                           turn, but items, switching and running still work.\n");
         }
+    }
+
+    // ⚠️ **Above `### On screen` and below `### Battle`, which is where "what just happened" goes.**
+    // It is rendered into the situation rather than appended as a message of its own: unlike the
+    // plan, it is read once by the very next turn, so a message would be a permanent extra entry in
+    // a history that is compacted for length. See `battle_report`'s last ⚠️.
+    for report in reports {
+        out.push('\n');
+        out.push_str(report);
     }
 
     if let Some(text) = snapshot.screen_text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
@@ -653,6 +704,59 @@ mod tests {
     /// about to learn, which is a fact about an event and not about memory. Both are supplied here.
     /// Everything else — the map, the party, the bag, the battle, the menus and their ids — is read
     /// out of a real fixture by the same functions the run uses.
+    /// A battle report for the probe to render, built the way the policy builds one.
+    ///
+    /// ⚠️ **Several turns, not one.** The block that needs eyeballing is the one whose prose nothing
+    /// else prints, and a one-hit battle exercises none of what makes it hard to read: the damage
+    /// on both sides, a turn where nothing moved, an item, a switch, and the closing line.
+    #[cfg(feature = "diagnostics")]
+    fn probe_reports(kind: DecisionKind) -> Vec<String> {
+        use crate::llm::battle_report::BattleReport;
+        use crate::llm::battle_script::test_scenario;
+        use crate::pokemon::battle::BattleAction;
+        use crate::pokemon::item::ItemId;
+        use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
+
+        if kind != DecisionKind::Overworld {
+            return Vec::new();
+        }
+        // Both sides' HP at each decision, which is where the report's numbers come from.
+        let at = |mine: u16, theirs: u16| {
+            let mut state = test_scenario();
+            if let Some(battle) = state.battle.as_mut() {
+                battle.player.current_hp = mine;
+                battle.enemy.current_hp = theirs;
+            }
+            state
+        };
+        let fight = |name| BattleAction::Fight { slot: 1, battle_move: PokemonMove::with_max_pp(name) };
+
+        let opening = at(48, 25);
+        let mut report = BattleReport::open(&opening, 0).expect("the scenario is a battle");
+
+        report.decided(&opening, &fight(PokemonMoveName::Ember),
+                       vec!["Ember x2 vs Grass, 17 expected".to_string()]);
+        report.said("Enemy RATTATA used TACKLE!");
+
+        let second = at(44, 8);
+        report.decided(&second, &fight(PokemonMoveName::Growl), Vec::new());
+        report.said("Enemy RATTATA's ATTACK fell!");
+
+        let third = at(44, 8);
+        report.decided(&third, &BattleAction::UseItem {
+            slot: 0,
+            item: crate::pokemon::bag::BagItem::new(ItemId::PokeBall, 4),
+        }, vec!["8/25 HP, worth a ball".to_string()]);
+        report.said("Darn! The POKéMON broke free!");
+
+        let fourth = at(39, 8);
+        report.decided(&fourth, &fight(PokemonMoveName::Ember), Vec::new());
+        report.said("Enemy RATTATA fainted!");
+        report.said("SPARKY gained 56 EXP. Points!");
+
+        vec![report.finish(Some(&at(39, 0)))]
+    }
+
     #[cfg(feature = "diagnostics")]
     #[test]
     #[ignore]
@@ -758,7 +862,9 @@ mod tests {
             let messages = vec![
                 system_message(),
                 plan_message(&todo),
-                Message::user(situation(kind, &state, &snapshot, &events, &menu, context)),
+                // ⚠️ A battle report on the battle turn, because that is where the probe is worth
+                // reading: it is the one block whose prose nothing else prints.
+                Message::user(situation(kind, &state, &snapshot, &events, &menu, context, &probe_reports(kind))),
             ];
             let request = ChatRequest {
                 model: config.model.clone(),
@@ -893,7 +999,7 @@ mod tests {
         assert!(!state.can_use_cut, "the fixture reaches Vermilion before the HM");
 
         let rendered = |kind, state: &GameState| situation(
-            kind, state, &ApiSnapshot::default(), &[], &[], TurnContext::None,
+            kind, state, &ApiSnapshot::default(), &[], &[], TurnContext::None, &[],
         );
         let blocked = rendered(DecisionKind::Overworld, &state);
         assert!(blocked.contains("Blocked here: Cuttable trees"), "{blocked}");
@@ -905,6 +1011,32 @@ mod tests {
             let other = rendered(elsewhere, &state);
             assert!(!other.contains("Blocked here"), "{elsewhere:?} has no action menu: {other}");
         }
+
+        // ⚠️ **Which half is missing is the *point* of the line, and getting it wrong sends the
+        // model at the half that is not.** This fixture holds the CascadeBadge and no HM01, so the
+        // errand is the HM; saying "and needs the CascadeBadge" here would be advice to go and win a
+        // badge already on the trainer card.
+        assert!(blocked.contains("not the HM"), "the badge is held; the HM is the errand: {blocked}");
+
+        // ⚠️ **The case the deployed run of 2026-08-27 was actually in, and the one nothing said out
+        // loud**: HM01 in the bag, the badge won, and a party with nothing in Cut's learnset. It
+        // spent its life re-issuing a teach the cartridge refuses.
+        let mut hopeless = state.clone();
+        hopeless.bag.push(crate::pokemon::bag::BagItem { id: crate::pokemon::item::ItemId::Hm01Cut, quantity: 1 })
+            .expect("the fixture's bag has room");
+        hopeless.pokemon = Default::default();
+        hopeless.pokemon.push(crate::pokemon::pokemon::Pokemon::maxed(
+            crate::pokemon::species::PokemonSpecies::Pidgey, "MON",
+            [crate::pokemon::move_name::PokemonMoveName::Gust; 4], "AI", 1)).expect("room for one");
+        let none = rendered(DecisionKind::Overworld, &hopeless);
+        assert!(none.contains("nothing in your party is in its learnset"),
+                "it has to name the party rather than the HM it is already holding: {none}");
+
+        // …and with a Pokémon that *can* take it, the line becomes the tool call to make.
+        let mut ready = hopeless.clone();
+        ready.pokemon.get_mut(0).expect("one member").species = crate::pokemon::species::PokemonSpecies::Venusaur;
+        let teachable = rendered(DecisionKind::Overworld, &ready);
+        assert!(teachable.contains("`use_field_move` with `teach`"), "{teachable}");
 
         // ⚠️ **And it stops the moment it stops being true**, or it is a line on every turn of the
         // rest of the game telling the model about a thing it can already do.
@@ -994,6 +1126,12 @@ mod tests {
             "Look round a town before you leave it",
             // The walkthrough is only worth carrying if the prompt says when to reach for it.
             "There is a walkthrough for this game",
+            // ⚠️ The three tools exist and are described in the catalogue, but nothing there says a
+            // battle turn is *worth avoiding* — that argument only fits in prose, and a model that
+            // never installs a script pays for every battle it ever has. Both halves are pinned:
+            // that scripting exists, and that `battle.ask()` is how the hard fights are kept.
+            "Write your battles down",
+            "battle.ask()",
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
         }

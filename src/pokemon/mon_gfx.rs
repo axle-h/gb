@@ -107,7 +107,10 @@ fn front_pic(species: PokemonSpecies) -> &'static [u8] {
 /// in the table at all: it has an entry of its own in another bank, so a lookup that forgets it
 /// reads Mewtwo's, which is a valid pointer into the wrong bank and decodes to noise rather than
 /// failing.
-fn base_stats_entry(species: PokemonSpecies) -> &'static [u8] {
+///
+/// Shared with [`crate::pokemon::learnset`], which reads the TM/HM flag array out of the same 28
+/// bytes: the Mew arm above is the whole reason it is one function rather than two.
+pub(crate) fn base_stats_entry(species: PokemonSpecies) -> &'static [u8] {
     let pointer = if species == PokemonSpecies::Mew {
         pokered_symbols::MewBaseStats
     } else {

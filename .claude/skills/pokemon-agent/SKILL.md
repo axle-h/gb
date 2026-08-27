@@ -51,6 +51,27 @@ implements only `pick_overworld_action`/`pick_battle_action`, so `soak` never is
 chain and `full_playthrough` reach those drivers long after the Pokédex. Pre-Pokédex they are reachable by an LLM
 policy and nothing else — which is the general lesson, not a fact about this menu.
 
+⚠️ **A TM or HM aimed at a Pokémon outside its learnset is the same loop, and `TeachingMove` has no exit from
+it.** `CanLearnTM` tests a bitfield in the base-stats entry; a miss prints `MonCannotLearnMachineMoveText` and
+then `jr .chooseMon` (`engine/items/item_effects.asm`) — back to the party menu, cursor untouched — so the
+driver navigates to the same slot, presses A and is refused again. Its only completion is "the mon knows the
+move", which never comes, so the attempt is 60 s of A-mashing ended by `DRIVER_ESCAPE_SILENCE`, after which the
+policy asks for the identical teach. The deployed run of 2026-08-27 lived there. ⚠️ **Compatibility is knowable
+before a button is pressed** and `pokemon::learnset` reads it out of the ROM rather than transcribing 151 × 55
+bits; ⚠️ **`\1_TMNUM` is not the item id and the two run in opposite directions** — the HMs are TMNUM 51-55 at
+item ids `$C4-$C8`, *below* the fifty TMs at `$C9-$FA`, and the flag index is `TMNUM - 1`. Three gates, the same
+shape as Cut's: `tools::resolve_field_move` refuses the call in the turn, `agent.rs` refuses on the way into the
+state, and `DeterministicPolicy::pick_field_move` skips the step so a scripted leg cannot re-issue one every
+tick. ⚠️ **What the refusal says is the alternative, not the refusal** — "got no answer from the game for 60s"
+reads as a malfunction and gives a model nothing to do differently, which is "it was interrupted" all over
+again, so `learnset::teach_refusal` names who in the party *can* take it or says outright that nobody can.
+⚠️ **And the proactive half was pointing at the wrong errand**: `prompt`'s `Blocked here:` line said "an HM to
+be found and taught, and needs the CascadeBadge" whatever the run was holding, so a party carrying HM01 with the
+badge won and nothing able to learn Cut was told to go and find HM01. It names the half actually missing now.
+`teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge` is the guard, and ⚠️ **it runs on a hand-rolled
+policy rather than `DeterministicPolicy`**, which would skip the teach before the agent ever saw it and pass
+without touching the thing under test.
+
 ### Screen versus RAM
 
 ⚠️ **The screen the agent reads lags the game's own tilemap, and its three horizontal bands can disagree.**
