@@ -393,6 +393,16 @@ than carried on the event, out of a small ring on the server: a map render is a 
 kilobytes and everything published is also a line of the transcript, so a page watching live can open
 the map the model was looking at, and one replaying an old backlog gets the caption on its own.
 
+Under the plan is the **battle script**, syntax-highlighted and behind a disclosure — a tab of its own
+on a phone. It is closed by default and its head is the part that earns a permanent line, because
+`armed` is a live fact: it says whether the battles going past are being decided by that program or
+one paid request at a time, and a script that failed is kept, disarmed, with the reason above the
+code. A scripted battle is otherwise completely invisible from outside — no request, no turn, no
+decision is published — so without this a viewer has no way of telling a run that is playing well
+from one that has written down how to. It is published on change rather than on the heartbeat, and
+held on the server for a page that opens an hour later: a script is written once and then decides
+three hundred battles without another word.
+
 **No graphics are committed to this repo.** The badges, the party sprites, the favicon, and every
 tile, person and letter in the map pictures the model is sent are all read out of the ROM at run
 time. The Pokémon sprites are the interesting ones: Gen 1 pics are

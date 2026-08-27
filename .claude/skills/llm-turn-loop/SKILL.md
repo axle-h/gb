@@ -351,6 +351,23 @@ failure is waiting in the next overworld situation regardless. It is also what k
 was — it had ~380 bytes of headroom. A call from the wrong kind is **named with the reason** rather than falling through to
 "there is no such tool", which is a lie the model cannot act on.
 
+⚠️ **The script is published to the page on change, and the dedupe is the load-bearing half.**
+`Worker::publish_battle_script` mirrors `publish_todo` — same three moments it can change (the model
+set one; `POST /api/new-run` swapped the file; the process opened a run that already had one, which
+has no event of its own) — but the arithmetic is the opposite way round. A plan is ~1.3 kB and moves
+a few times an hour; a script is up to 6 kB and moves a handful of times a *playthrough*, so a
+publish per turn would push a copy of it into the transcript and past a joiner's `MAX_BACKLOG`
+hundreds of times. ⚠️ `published_script` is seeded with the **empty** script rather than with `None`,
+or every run that never writes one still publishes a `source: null` on its first turn; clearing a
+script is still a real change and still publishes, which is why that is a seed and not a special case
+in the publisher. ⚠️ A disarm needs no call site: the policy's failure is drained into
+`BattleScript::disarm` at the *top* of the next turn, above the publish, so the event the page gets
+already carries `armed: false` and the reason. ⚠️ And it needs `Published::latest_battle_script` more
+badly than the plan needs its cell — a script that goes quiet for the rest of the run is off both
+delivery routes within minutes, so that cell is the only one a late page will ever have.
+`a_joiner_is_handed_the_battle_script_as_well` and
+`the_page_is_told_about_the_script_once_and_not_once_a_turn` hold the two halves.
+
 ⚠️ **Safari battles are never scripted.** `battle_options` short-circuits to a different action set there and
 `postgame::safari` has bespoke logic; those turns go to the model exactly as they always did.
 

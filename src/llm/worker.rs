@@ -251,6 +251,9 @@ pub struct Worker {
     /// What the page was last told the plan is, so [`Self::publish_todo`] can be called from every
     /// moment it might have changed without publishing the same list twice.
     published_plan: Option<Vec<TodoView>>,
+    /// The same, for the battle script: `(source, armed, last_failure)` as the page last saw it.
+    /// See [`Self::publish_battle_script`] for why the dedupe matters more here than for the plan.
+    published_script: Option<(Option<String>, bool, Option<String>)>,
     /// Turns since the plan message was last (re)placed at the tail of the history — see
     /// [`Self::sync_plan`] and [`PLAN_REFRESH_TURNS`].
     turns_since_plan: u32,
@@ -316,6 +319,14 @@ pub fn channels(
         battle_script,
         live_script: Arc::clone(&live_script),
         published_plan: None,
+        // ⚠️ **Seeded with the empty script rather than with `None`, which is not what the plan does.**
+        // The dedupe's job here is to keep an event off the wire, and "there is no script" is the
+        // state every run starts in: seeding `None` publishes a `source: null` on the first turn of
+        // every run that will never have one, which is a line in its transcript and the cell a
+        // joiner is handed. It still has to be *publishable* — clearing a script with
+        // `set_battle_script(null)` is a real change and the panel has to hear about it — which is
+        // why this is a seed and not a special case in the publisher.
+        published_script: Some((None, false, None)),
         turns_since_plan,
         accounting,
         restart: Arc::clone(&restart),
@@ -423,6 +434,7 @@ impl Worker {
             true => self.battle_script.source().map(str::to_string),
             false => None,
         });
+        self.publish_battle_script();
         // ⚠️ **`fresh`, never `open`.** The two differ in exactly one way and it is the whole point
         // of having both: `open` would read the new run directory back, and this is the one call
         // site where reading is wrong. Today `RunDir::open`'s fresh path always mints an empty
@@ -465,6 +477,7 @@ impl Worker {
 
         let carried = self.sync_plan(kind);
         self.publish_todo();
+        self.publish_battle_script();
         // ⚠️ **The turn that does not carry the plan has to say so.** The copy in the history is
         // still there, but it is behind however many turns have passed since it last changed, and a
         // model reading a fifty-turn conversation does not treat a message that far back as a live
@@ -603,6 +616,7 @@ impl Worker {
                     true => self.battle_script.source().map(str::to_string),
                     false => None,
                 });
+                self.publish_battle_script();
                 answer
             }
         }
@@ -631,6 +645,38 @@ impl Worker {
         }
         self.published_plan = Some(items.clone());
         self.published.publish_event(UiEventBody::Plan { items });
+    }
+
+    /// Tell the page what is deciding the battles, if that has changed.
+    ///
+    /// ⚠️ **The dedupe carries more weight here than [`Self::publish_todo`]'s, because this is
+    /// called once a turn and a script does not change once a turn.** A model writes one and then
+    /// fights three hundred battles without touching it; publishing unconditionally would put up to
+    /// 6 kB of unchanged source on the wire, into the transcript and past `MAX_BACKLOG` on every
+    /// single turn, which is the shape that pushes everything else off the end of a joiner's
+    /// backlog.
+    ///
+    /// The three moments it *does* change are the same three the plan has, in the same order of how
+    /// easy they are to miss: the model called `set_battle_script`; a `POST /api/new-run` swapped
+    /// the file for the new run's; and the process opened a run that already had one on disk. The
+    /// last has no event of its own, which is why the turn loop calls this rather than only the
+    /// tool.
+    ///
+    /// A disarm needs no call site of its own: the policy's failure is drained into
+    /// [`BattleScript::disarm`] at the top of the turn, above the [`Self::publish_todo`] beside this
+    /// one, so the next line the page gets already carries `armed: false` and the reason.
+    fn publish_battle_script(&mut self) {
+        let current = (
+            self.battle_script.source().map(str::to_string),
+            self.battle_script.armed(),
+            self.battle_script.last_failure().map(str::to_string),
+        );
+        if self.published_script.as_ref() == Some(&current) {
+            return;
+        }
+        self.published_script = Some(current.clone());
+        let (source, armed, last_failure) = current;
+        self.published.publish_event(UiEventBody::BattleScript { source, armed, last_failure });
     }
 
     /// Stop the run until `until_ms`, and stop the emulator with it. `false` if the turn was

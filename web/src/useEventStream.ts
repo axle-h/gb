@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { STALE_MS } from './api';
-import type { Connection, Entry, EntryBody, RunStatus, Status, TodoView, UiEvent, UsageView } from './api';
+import type {
+  BattleScriptView,
+  Connection,
+  Entry,
+  EntryBody,
+  RunStatus,
+  Status,
+  TodoView,
+  UiEvent,
+  UsageView,
+} from './api';
 
 /** How long the conversation keeps. A run is hours long; the DOM is not the transcript (W7 is). */
 const MAX_ENTRIES = 500;
@@ -122,6 +132,15 @@ export interface EventStream {
    * model ever ticks off, and the page's job is to show what the plan *is*.
    */
   plan: TodoView[];
+  /**
+   * The program deciding the run's battle turns, as of the last time it changed — `null` under every
+   * policy that has never set one, which is every policy that is not an LLM.
+   *
+   * ⚠️ **State, not a log row, for the same reason the plan is** — each event carries the whole
+   * script, so folding it into the conversation would print the source again every time it moved.
+   * The log already has the `set_battle_script` row, which is the *event*; this is the *thing*.
+   */
+  battleScript: BattleScriptView | null;
 }
 
 /**
@@ -274,6 +293,7 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
     case 'status':
     case 'run_status':
     case 'plan':
+    case 'battle_script':
       return entries; // handled separately — none of these may re-render the log
     case 'turn_started':
       return push(entries, { type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }, event);
@@ -344,6 +364,7 @@ export function useEventStream(): EventStream {
   const [usage, setUsage] = useState<UsageView | null>(null);
   const [run, setRun] = useState<RunStatus>({ state: 'booting' });
   const [plan, setPlan] = useState<TodoView[]>([]);
+  const [battleScript, setBattleScript] = useState<BattleScriptView | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
   // The heartbeat the current speed window is measured from — see `SPEED_WINDOW_MS`.
   const anchor = useRef<{ wall: number; emulated: number } | null>(null);
@@ -383,6 +404,19 @@ export function useEventStream(): EventStream {
           const planned = backlog.filter((event) => event.type === 'plan');
           const latest = planned[planned.length - 1];
           if (latest?.type === 'plan') setPlan((live) => (live.length > 0 ? live : latest.items));
+          // The same rule for the script, and it needs the backlog more than the plan does: a script
+          // is set once and never touched again, so its event is the *first* thing to fall off the
+          // end of a live stream and the last thing a joiner would otherwise ever see.
+          const scripts = backlog.filter((event) => event.type === 'battle_script');
+          const script = scripts[scripts.length - 1];
+          if (script?.type === 'battle_script') {
+            const view: BattleScriptView = {
+              source: script.source,
+              armed: script.armed,
+              last_failure: script.last_failure,
+            };
+            setBattleScript((live) => live ?? view);
+          }
           const older = backlog.reduce(fold, [] as Entry[]);
           setEntries((live) => {
             // Anything the stream has already delivered wins; the transcript only fills in what
@@ -418,6 +452,7 @@ export function useEventStream(): EventStream {
       frame.current = undefined;
       setEntries([]);
       setPlan([]);
+      setBattleScript(null);
       setUsage(null);
       // A speed window must not span the gap: the first heartbeat after a reconnect is a new anchor.
       anchor.current = null;
@@ -444,6 +479,10 @@ export function useEventStream(): EventStream {
         }
         if (event.type === 'plan') {
           setPlan(event.items);
+          return;
+        }
+        if (event.type === 'battle_script') {
+          setBattleScript({ source: event.source, armed: event.armed, last_failure: event.last_failure });
           return;
         }
         if (event.type === 'decision' && event.usage) setUsage(event.usage);
@@ -488,7 +527,7 @@ export function useEventStream(): EventStream {
 
   useEffect(() => () => cancelAnimationFrame(frame.current ?? 0), []);
 
-  return { status, entries, connection, usage, run, plan, speed };
+  return { status, entries, connection, usage, run, plan, battleScript, speed };
 }
 
 /**
