@@ -309,6 +309,20 @@ pub struct StatusSnapshot {
     /// Emulated milliseconds the catch-up clamp has discarded on this run. Zero on a host that has
     /// kept up throughout; a one-off number is a stall that has already been recovered from.
     pub dropped_ms: u64,
+    /// Emulated milliseconds over the run's **whole life**, across every process that has played it:
+    /// `meta.json`'s total as it stood when this process opened the directory, plus `emulated_ms`
+    /// above.
+    ///
+    /// ⚠️ **This is the one the page shows as "played", and the two are not interchangeable.**
+    /// `emulated_ms` is this process's share and restarts at zero with it, so a run resumed nightly
+    /// for a week displayed the last night as the whole playthrough — the same bug `RunProgress`
+    /// documents in `meta.json`, still live on the panel because the heartbeat never carried a total.
+    /// It is `emulated_ms` and not this that the speed derivation must difference: the baseline is a
+    /// constant, so either would do, but only `emulated_ms` returns to zero on a new run, which is
+    /// how the browser spots the reset.
+    ///
+    /// A host with no run directory has no baseline and reports this as `emulated_ms` exactly.
+    pub run_emulated_ms: u64,
     pub target_speed: f64,
     /// `"random"` or `"llm"`.
     pub policy: &'static str,
@@ -333,9 +347,9 @@ impl StatusSnapshot {
     /// Whether this says anything the previous one did not — the test the host suppresses a
     /// heartbeat on.
     ///
-    /// ⚠️ **A derived `PartialEq` would be useless here**, and quietly so: `wall_ms` and
-    /// `emulated_ms` differ on every single sample, so nothing would ever compare equal and the
-    /// suppression would silently never fire. They are excluded for the same reason `Audio` and
+    /// ⚠️ **A derived `PartialEq` would be useless here**, and quietly so: `wall_ms`,
+    /// `emulated_ms` and `run_emulated_ms` differ on every single sample, so nothing would ever
+    /// compare equal and the suppression would silently never fire. They are excluded for the same reason `Audio` and
     /// `PPU` exclude their derived state (see `CLAUDE.md`) — they are the clock, not the state.
     ///
     /// `frame_seq` is excluded too. It advances at 30 Hz whenever *anything* on screen moves, which
@@ -348,6 +362,7 @@ impl StatusSnapshot {
         let Self {
             wall_ms: _,
             emulated_ms: _,
+            run_emulated_ms: _,
             frame_seq: _,
             dropped_ms,
             target_speed,
@@ -952,6 +967,7 @@ mod tests {
         StatusSnapshot {
             wall_ms,
             emulated_ms: wall_ms,
+            run_emulated_ms: wall_ms,
             dropped_ms: 0,
             target_speed: 1.0,
             policy: "llm",

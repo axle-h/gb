@@ -492,6 +492,15 @@ impl EmulatorHost {
         }
     }
 
+    /// What the current run had already been played for before this process opened it — all zeroes
+    /// for a fresh run, and for a host with no run directory at all.
+    ///
+    /// The other half of [`Self::progress`]: that one is this process's share, this one is
+    /// everything before it, and the two are added wherever a *run's* total is wanted.
+    fn run_baseline(&self) -> RunProgress {
+        self.config.run.as_ref().map(|current| current.get().baseline()).unwrap_or_default()
+    }
+
     /// What **this process** has contributed to the current run since it opened it.
     ///
     /// ⚠️ Cumulative since the run became current, not since the last checkpoint:
@@ -1043,6 +1052,16 @@ impl EmulatorHost {
                 .saturating_sub(self.paused_total)
                 .as_millis() as u64,
             emulated_ms: self.emulated.to_duration().as_millis() as u64,
+            // ⚠️ **The run's clock rather than this process's, and it is read from the run directory
+            // on every heartbeat rather than remembered here.** `emulated` above is zeroed by
+            // `start_new_run` and by every restart, so the panel's "played" reported the *last
+            // process's* share as the whole playthrough — a run resumed nightly for a week showed
+            // last night. The baseline is what `meta.json` said when this process opened the
+            // directory, so this sum is exactly what the next checkpoint will write there; asking
+            // `CurrentRun` for it costs one uncontended read lock and cannot fall out of step with a
+            // swap, which a field mirrored in `start_new_run` and `file_completed_run` could.
+            run_emulated_ms: self.run_baseline().emulated_ms
+                + self.emulated.to_duration().as_millis() as u64,
             dropped_ms: self.dropped.as_millis() as u64,
             target_speed: self.config.target_speed,
             // Asked of the decider itself rather than configured alongside it: two places naming the
@@ -1306,6 +1325,72 @@ mod tests {
         );
         assert_eq!(after.emulated_ms, 0, "the new game has not been played yet");
         assert_eq!(after.dropped_ms, 0, "and it starts owing nothing");
+    }
+
+    /// ⚠️ **The panel's "played" is the *run's* total, so it has to survive the process that is
+    /// serving it.** Every clock on the host starts at zero with the process, and the heartbeat used
+    /// to carry only those — so a run resumed nightly for a week reported the last night as the whole
+    /// playthrough, and every rollout sent the figure on the page back to `00:00` while the
+    /// cartridge's own clock beside it carried on. It is the same bug `RunProgress` documents in
+    /// `meta.json`, fixed there and still live on the wire.
+    ///
+    /// The fix is the baseline `RunDir` already reads at open, added to what this process has
+    /// emulated — which makes the heartbeat's total exactly what the next checkpoint writes to disk.
+    #[test]
+    fn a_resumed_run_reports_the_play_that_came_before_it() {
+        use crate::run::RunDir;
+
+        let scratch = crate::run::tests::Scratch::new("host-run-total");
+        let validate = |bytes: &[u8]| GameBoy::dmg(crate::pokemon::roms::POKERED).load_state(bytes).is_ok();
+
+        // The first process: play a little, then checkpoint, which is what a `SIGTERM` does.
+        let (run, _, _) = RunDir::open(&scratch.0, false, "random", &validate).expect("a fresh run");
+        let first = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let mut host = host_with(Published::new(), |config| config.run = Some(Arc::clone(&first)));
+        assert_eq!(host.run_baseline(), RunProgress::default(), "a fresh run has nothing behind it");
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            host.tick();
+        }
+        host.checkpoint();
+        let played = host.run_baseline().emulated_ms + host.emulated.to_duration().as_millis() as u64;
+        assert!(played > 0, "the first process emulated nothing at all");
+        drop(host);
+
+        // The second process, resuming the same directory — which is the newest one under the root.
+        let (run, origin, state) = RunDir::open(&scratch.0, false, "random", &validate).expect("the resume");
+        assert_eq!(origin, crate::run::Origin::Resumed);
+        let second = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let mut host = host_from(&state.expect("a resumed run has a state"), Published::new(), |config| {
+            config.run = Some(Arc::clone(&second));
+        });
+        assert_eq!(
+            host.run_baseline().emulated_ms,
+            played,
+            "the resume did not pick up what the first process wrote",
+        );
+
+        host.last_status = None;
+        host.publish_status(Instant::now());
+        let resumed = host.last_status.clone().expect("the first heartbeat is never suppressed");
+        assert!(
+            resumed.emulated_ms < played,
+            "this process cannot have played the whole run: {} ms of {played}",
+            resumed.emulated_ms,
+        );
+        assert_eq!(
+            resumed.run_emulated_ms,
+            played + resumed.emulated_ms,
+            "the heartbeat reported this process's share as the run's total",
+        );
+
+        // And a new run owes nothing: the baseline is the *current* directory's, so the swap moves it
+        // without anything here having to remember to.
+        host.start_new_run().expect("a host built with a run directory can start another");
+        host.last_status = None;
+        host.publish_status(Instant::now());
+        let fresh = host.last_status.clone().expect("the run change is always published");
+        assert_eq!(fresh.run_emulated_ms, 0, "the new run inherited the old one's clock");
     }
 
     /// **Send on change.** Every heartbeat that goes out must either say something new or be the

@@ -130,6 +130,17 @@ and turns reach the emulator thread through `Published`, which folds them out of
 already publishes: ⚠️ **decisions that landed, not `max(turn)`** — a turn id is `llm::worker`'s cancellation
 generation, which counts abandoned turns and restarts per process.
 
+⚠️ **The same bug's third half was on the wire, and it outlived the fix above by months.** `StatusSnapshot`'s
+`wall_ms`/`emulated_ms` are still elapsed times *since this process started* — that is what the speed derivation
+needs, since only a counter that returns to zero on a new run lets the browser spot the reset — so the panel's
+"played" line reported the serving process's share as the run's total, and every rollout sent it back to `00:00`
+beside a cartridge clock that carried on. `StatusSnapshot::run_emulated_ms` is `RunDir::baseline()` plus what
+this process has emulated, which is exactly what the next checkpoint writes, so the page and `meta.json` cannot
+disagree. ⚠️ **The baseline is asked of `CurrentRun` on every heartbeat rather than mirrored into a host field**:
+`start_new_run` and `file_completed_run` both swap the directory, and a field is two more places to remember.
+⚠️ And it is read **once at open** — `RunDir::baseline` is a copy taken before the first checkpoint overwrites
+`meta.json`, so re-reading it after one would already hold this process's contribution and count it twice.
+
 ⚠️ **After the credits pokered clears WRAM**, so `agent.update` answers `Err("Not in game")` on every tick for
 ever. The host publishes an agent failure **on change only** for that reason; without it a finished run puts
 fifty notices a second into the transcript and every open browser.

@@ -86,6 +86,16 @@ export interface Status {
    * overruns, so that ratio only ever converges on the truth from below.
    */
   emulated_ms: number;
+  /**
+   * Emulated milliseconds over the run's **whole life**, across every process that has played it —
+   * `meta.json`'s total when this process opened the run directory, plus `emulated_ms` above.
+   *
+   * ⚠️ **This is what the panel shows as "played"; `emulated_ms` is not.** That one restarts at zero
+   * with the process, so a run resumed nightly for a week displayed the last night as the whole
+   * playthrough. It is still the right input to `EventStream.speed`, which differences consecutive
+   * heartbeats and needs the counter that returns to zero on a new run to spot the reset.
+   */
+  run_emulated_ms: number;
   /** How much emulated time the host has discarded on this run. Zero when it has kept up throughout. */
   dropped_ms: number;
   target_speed: number;

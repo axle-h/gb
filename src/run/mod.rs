@@ -330,6 +330,18 @@ impl RunDir {
         self.meta.lock().expect("run meta lock poisoned").clone()
     }
 
+    /// What the run had already been played for when this process opened it — zero for a fresh one.
+    ///
+    /// Every clock the host keeps starts at zero with the process, so this is the only way anything
+    /// live can report a *run's* totals rather than this process's share of them: the heartbeat adds
+    /// it to what it has measured, which is exactly the sum the next [`Self::checkpoint`] writes.
+    /// ⚠️ **Read once at open and never again**, for the reason [`RunProgress`] gives: it is a
+    /// baseline, and a re-read after a checkpoint would already have this process's contribution in
+    /// it and count it twice.
+    pub fn baseline(&self) -> RunProgress {
+        self.baseline
+    }
+
     /// Write a checkpoint: the save state, the SRAM beside it, and the updated `meta.json`.
     ///
     /// `progress` is what **this process** has contributed since it opened the directory; it is added
