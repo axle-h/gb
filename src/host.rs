@@ -1125,6 +1125,11 @@ fn event_kind(event: &AgentEvent) -> &'static str {
         // load-bearing rather than decorative: folded back into the line above, every conversation
         // in the run would reappear in the log as a "✓" the dialogue underneath already said.
         AgentEvent::OverworldInteractionCompleted { .. } => "overworld_interaction_completed",
+        // ⚠️ **Deliberately *not* in `useEventStream`'s `UNLOGGED` set beside the line above.** The
+        // "✓ talked to" row is dropped because the dialogue underneath repeats it; this one says
+        // the opposite of what the dialogue appears to say, and is the only place a failed pickup
+        // is ever reported.
+        AgentEvent::OverworldPickupFailed { .. } => "overworld_pickup_failed",
         AgentEvent::BattleStarted => "battle_started",
         AgentEvent::BattleActionStarted { .. } => "battle_action_started",
         AgentEvent::BattleEnded => "battle_ended",

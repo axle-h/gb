@@ -1940,3 +1940,91 @@ fn an_item_the_map_refuses_backs_out_rather_than_mashing_for_a_minute() {
         "the refusal has to be reported in words rather than as a timeout; heard {heard:?}",
     );
 }
+
+/// ⚠️ **A pickup that the game refuses looks exactly like one that worked.** Both are the same three
+/// events — walk up, text box, back to the overworld — and the run is told `✓ talked to Charmander
+/// Poke Ball` either way. The deployed run of 2026-08-27 spent turns 7 to 24 pressing A on the
+/// starter balls before Oak had offered them, read "Those are POKé BALLs. They contain POKéMON!"
+/// six times, and filed a `report_issue` saying its party and bag were both empty.
+///
+/// The evidence is that the sprite is **still in the map**: a real pickup `HideObject`s it. Both
+/// halves are asserted here, because a check that always fired would pass the first one alone —
+/// and the second is the one that would break every item in the game.
+#[test]
+fn a_pickup_the_game_refuses_says_the_item_is_still_there() {
+    // ⚠️ **Charmander's ball, not Bulbasaur's.** The rival takes the starter that beats yours, so a
+    // fixture where the player took Squirtle is one where Bulbasaur has gone and *Charmander* is the
+    // ball left on the floor. Oak's last one keeps its row for the rest of the game and answers
+    // every A with "That's PROF.OAK's last POKéMON!", which is the refusal this is about.
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/oaks-lab-just-got-squirtle.bin"),
+        Duration::from_secs(120),
+        vec![PolicyStep::Interact(MapSprite::OAKSLAB_CHARMANDER_POKE_BALL)],
+    );
+
+    // ⚠️ **Not `step_until_exhausted`.** `Interact` pops when the item reaches the bag, and the
+    // whole point of this fixture is that it never does — the queue would sit at 1/1 until the
+    // cycle budget ran out and the test would fail as a timeout rather than as an assertion.
+    let mut events = Vec::new();
+    for _ in 0..3000 {
+        fixture.step();
+        events.extend(fixture.agent.drain_events());
+        if events.iter().any(|e| matches!(e, AgentEvent::OverworldPickupFailed { .. })) {
+            break;
+        }
+    }
+
+    let said = events.iter().map(|e| format!("{e}")).collect::<Vec<_>>().join("\n");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::OverworldPickupFailed { target: MetaTile::Sprite("Charmander Poke Ball") },
+        )),
+        "the ball is still on the floor and nothing said so:\n{said}",
+    );
+    // ⚠️ **Read out of the rendered line, not the source.** The whitespace in a Rust string
+    // continuation is a trap this repo has been caught by before: a literal written across two
+    // lines without a trailing backslash carries every space of the indent into the prose a model reads.
+    let line = events
+        .iter()
+        .find(|e| matches!(e, AgentEvent::OverworldPickupFailed { .. }))
+        .map(|e| format!("{e}"))
+        .expect("asserted above");
+    assert_eq!(
+        line,
+        "✗ nothing was picked up: the Charmander Poke Ball is still lying there. \
+         The message above says why.",
+        "it has to read as a fact rather than as a malfunction, and with single spaces",
+    );
+}
+
+/// The other half: a pickup that **works** must say nothing at all. Without this the check above
+/// passes by firing on everything, which would put a false failure under every item in the game.
+#[test]
+fn a_pickup_that_works_reports_no_failure() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/viridian-forest.bin"),
+        Duration::from_secs(300),
+        vec![PolicyStep::Interact(MapSprite::VIRIDIANFOREST_ANTIDOTE)],
+    );
+
+    let mut events = Vec::new();
+    while !fixture.agent.policy_exhausted() {
+        fixture.step();
+        events.extend(fixture.agent.drain_events());
+    }
+    for _ in 0..200 {
+        fixture.step();
+        events.extend(fixture.agent.drain_events());
+    }
+
+    let said = events.iter().map(|e| format!("{e}")).collect::<Vec<_>>().join("\n");
+    assert!(
+        said.contains("Antidote"),
+        "the leg has to actually reach the Antidote or it proves nothing:\n{said}",
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::OverworldPickupFailed { .. })),
+        "the Antidote was picked up, so nothing failed:\n{said}",
+    );
+}

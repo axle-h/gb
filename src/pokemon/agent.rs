@@ -161,6 +161,21 @@ pub enum AgentEvent {
     /// conversation had failed, in the one field the prompt calls the most useful thing the agent
     /// can say.
     OverworldInteractionCompleted { target: MetaTile },
+    /// An item lying on the ground was walked up to and is **still lying there**, so nothing was
+    /// picked up.
+    ///
+    /// ⚠️ **The refusal and the success are the same three events, which is why this had to be its
+    /// own one.** Every ball on the floor is a sprite: the agent walks to it, the game opens a text
+    /// box, the box closes and the walk is reported as `✓ talked to Charmander Poke Ball`. When the
+    /// pickup *worked* the game `HideObject`s the sprite; when it did not, the sprite is still in
+    /// the map and the only difference is a sentence the model has to infer the meaning of. The
+    /// deployed run of 2026-08-27 read `Those are POKé BALLs. They contain POKéMON!` six times in
+    /// Oak's lab, spent turns 7 to 24 there, and filed a `report_issue` saying its party and its
+    /// bag were both empty. The starter balls refuse until Oak has offered them, a ball already
+    /// taken keeps its row, and ⚠️ **a bag with twenty kinds in it refuses every pickup in the game
+    /// in exactly the same shape** — which is the case this is really for, since nothing else
+    /// anywhere reports it.
+    OverworldPickupFailed { target: MetaTile },
     BattleStarted,
     /// ⚠️ **`actor` and `opponent` are carried rather than looked up later** because nothing
     /// downstream can look them up: the host formats events off the emulator thread and the battle
@@ -246,6 +261,18 @@ impl Display for AgentEvent {
             AgentEvent::OverworldInteractionCompleted { target } => match target {
                 MetaTile::Sprite(name) => write!(f, "✓ talked to {name}"),
                 other => write!(f, "✓ used {other}"),
+            },
+            // ⚠️ **Says what is true rather than that something failed.** "the pickup failed" is
+            // the `it was interrupted` wording all over again: it reads as a malfunction, and the
+            // commonest causes are the game working — a full bag, or an item the script has not
+            // released yet. What the model can act on is that the thing is still on the floor, and
+            // the box it just read says why.
+            AgentEvent::OverworldPickupFailed { target } => match target {
+                MetaTile::Sprite(name) => {
+                    write!(f, "✗ nothing was picked up: the {name} is still lying there. ")?;
+                    write!(f, "The message above says why.")
+                }
+                other => write!(f, "✗ nothing was picked up from {other}"),
             },
             AgentEvent::BattleStarted =>
                 write!(f, "battle started"),
@@ -365,6 +392,11 @@ const MENU_HANDOVER_TICKS: u16 = 50;
 /// PC deposit, a Fly — far inside it; the leg chain and `full_playthrough` are what say so. It is a
 /// *net*, not a schedule: anything that needs it has already failed to notice something.
 const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
+
+/// Overworld ticks between a pickup's text box closing and asking the map whether the item is still
+/// there. See [`PokemonAgent::pending_pickup`] — 10 ticks is 200 ms of game time, far longer than
+/// the `HideObject` at the end of the script needs and far shorter than a decision.
+const PICKUP_SETTLE_TICKS: u16 = 10;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum BattleState {
@@ -865,6 +897,21 @@ pub struct PokemonAgent {
     /// starts and once per timeout after that rather than fifty times a second.
     stuck_reported_at: MachineCycles,
 
+    /// An item ball the agent has just walked up to and pressed A on, waiting for the overworld to
+    /// come back so the map can be asked whether it is still there.
+    ///
+    /// ⚠️ **The answer is only readable once the game is back in the overworld.** The pickup runs as
+    /// a script — text box, `GiveItem`, `HideObject` — so the sprite is still in the map for the
+    /// whole of the conversation, and testing while the box is open reports every successful pickup
+    /// as a failure. See [`AgentEvent::OverworldPickupFailed`].
+    ///
+    /// ⚠️ **With a settle counter, because "the overworld is back" is true a beat before the script
+    /// has finished with it.** `HideObject` runs at the end of the pickup script and the mode can
+    /// read `Overworld` in between, which would report every successful pickup as a failure — the
+    /// worst possible way for this to be wrong, since it would put a false line under every item in
+    /// the game.
+    pending_pickup: Option<(MetaTile, u16)>,
+
     // ── The end of the game ──────────────────────────────────────────────────────────────────────
     /// `wNumHoFTeams` as of the last tick, and `None` until the first one — see
     /// [`Self::check_hall_of_fame`], where the whole of the edge trigger lives.
@@ -902,6 +949,7 @@ impl PokemonAgent {
             manual_input_held: 0,
             escaping_menus: false,
             menu_handover_ticks: 0,
+            pending_pickup: None,
             hall_of_fame_teams: None,
         }
     }
@@ -1583,6 +1631,40 @@ impl PokemonAgent {
         }
     }
 
+    /// Is `destination` an item lying on the floor, i.e. a sprite drawn as a Poké Ball?
+    ///
+    /// ⚠️ **The picture, never the name.** Everything the player can walk up to is a sprite to this
+    /// game — people, boulders, fossils, the lab's Pokédex — and only `PictureId` separates
+    /// `Potion1` from `Hiker`. This is the same test `llm::tools` verbs a menu row with, which is
+    /// what keeps "pick up the Potion" and "nothing was picked up" talking about the same set.
+    fn is_item_ball(&self, destination: MetaTile, api: &PokemonApi) -> bool {
+        let MetaTile::Sprite(name) = destination else { return false };
+        let Ok(state) = self.observe_state(api) else { return false };
+        state
+            .map
+            .sprites
+            .iter()
+            .any(|sprite| sprite.name == name && sprite.picture_id == crate::pokemon::sprite::PictureId::PokeBall)
+    }
+
+    /// The overworld is back after a pickup: is the ball still on the floor?
+    ///
+    /// ⚠️ **Cleared whatever the answer is.** A latch that only cleared on success would report the
+    /// same failure on every overworld tick for the rest of the run.
+    fn check_pending_pickup(&mut self, api: &PokemonApi) {
+        let Some((target, settle)) = self.pending_pickup else { return };
+        if settle > 0 {
+            self.pending_pickup = Some((target, settle - 1));
+            return;
+        }
+        let Ok(state) = self.observe_state(api) else { return };
+        self.pending_pickup = None;
+        let MetaTile::Sprite(name) = target else { return };
+        if state.map.sprites.iter().any(|sprite| sprite.name == name) {
+            self.event(AgentEvent::OverworldPickupFailed { target });
+        }
+    }
+
     fn assert_text_box_state(&mut self, game_mode: GameMode, api: &PokemonApi) {
         // wFontLoaded=1 while the naming screen is active too; NamingPokemon{decided:true}
         // handles its own exit, so don't interfere.
@@ -1598,6 +1680,13 @@ impl PokemonAgent {
                     // behind: the `set_state(ReadingTextBox)` below is what clears it, exactly as
                     // `abort_overworld`'s own `set_state(Idle)` used to be overwritten by it.
                     if self.interaction_landed(destination, api) {
+                        // ⚠️ **Armed here rather than answered here.** The pickup script has not
+                        // run yet, so the sprite is still in the map whether or not it is about to
+                        // be taken; the question is asked again by `check_pending_pickup` once the
+                        // overworld is back. See [`AgentEvent::OverworldPickupFailed`].
+                        if self.is_item_ball(destination, api) {
+                            self.pending_pickup = Some((destination, PICKUP_SETTLE_TICKS));
+                        }
                         self.event(AgentEvent::OverworldInteractionCompleted { target: destination });
                     } else {
                         let at = self.player_at(api);
@@ -1769,6 +1858,13 @@ impl PokemonAgent {
         // drive their own menu input.
         if !drives_its_own_menus(&self.state) {
             self.assert_text_box_state(game_mode, api);
+        }
+
+        // ⚠️ **Below the asserts, so the text box and any script behind it have both finished.**
+        // The pickup is a script: the box, `GiveItem`, then `HideObject`. Asking any earlier finds
+        // the sprite still in the map and calls every successful pickup a failure.
+        if game_mode == GameMode::Overworld {
+            self.check_pending_pickup(api);
         }
 
         // ⚠️ **The net under every driver that drives its own menus.** Each of them is a private
