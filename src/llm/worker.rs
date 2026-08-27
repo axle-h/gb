@@ -290,9 +290,7 @@ pub fn channels(
     // run's script is on disk and the model has no reason to send it again, so a cell that started
     // empty would fight the rest of the run one paid turn at a time and nothing would say why.
     let live_script = Arc::new(battle_script::Live::default());
-    if battle_script.armed() {
-        live_script.arm(battle_script.source().map(str::to_string));
-    }
+    live_script.arm(battle_script.live_source(), battle_script.state());
 
     // ⚠️ **The calibration comes back with the conversation, and nothing else does.** A restored
     // history is measured on the endpoint's scale or not at all: see `Accounting::resumed`, which
@@ -430,10 +428,7 @@ impl Worker {
         // Without this a `POST /api/new-run` leaves the *old* game's script deciding the new game's
         // battles, and `set_battle_script` writing into a run that has been set aside.
         self.battle_script = BattleScript::open(restart.run_dir.as_deref());
-        self.live_script.arm(match self.battle_script.armed() {
-            true => self.battle_script.source().map(str::to_string),
-            false => None,
-        });
+        self.live_script.arm(self.battle_script.live_source(), self.battle_script.state());
         self.publish_battle_script();
         // ⚠️ **`fresh`, never `open`.** The two differ in exactly one way and it is the whole point
         // of having both: `open` would read the new run directory back, and this is the one call
@@ -612,10 +607,7 @@ impl Worker {
             tools::BattleScriptCall::Read => self.battle_script.read(),
             tools::BattleScriptCall::Set(source) => {
                 let answer = self.battle_script.set(source.as_deref());
-                self.live_script.arm(match self.battle_script.armed() {
-                    true => self.battle_script.source().map(str::to_string),
-                    false => None,
-                });
+                self.live_script.arm(self.battle_script.live_source(), self.battle_script.state());
                 self.publish_battle_script();
                 answer
             }

@@ -29,7 +29,7 @@ use std::sync::atomic::Ordering;
 
 use crate::joypad::JoypadButton;
 use crate::llm::battle_report::{BattleReport, MAX_QUEUED as MAX_QUEUED_REPORTS};
-use crate::llm::battle_script::{self, Outcome as ScriptOutcome};
+use crate::llm::battle_script::{self, Outcome as ScriptOutcome, ScriptState};
 use crate::llm::prompt::{self, ApiSnapshot, TurnContext};
 use crate::llm::tools::{self, DecisionKind, Terminal};
 use crate::llm::worker::{ToolBatchResult, TurnHandles, TurnRequest};
@@ -759,7 +759,19 @@ impl Policy for LlmPolicy {
         if let Some(action) = self.run_battle_script(state) {
             return Some(action);
         }
-        match self.advance(DecisionKind::Battle, TurnContext::None)? {
+        // ⚠️ **Read after `run_battle_script`, never before.** A failure inside it disarms `Live` on
+        // its way out, and this line has to agree with the note that failure just wrote rather than
+        // report the state the turn started in.
+        //
+        // A note *is* the script's own account of this turn — it says whether the script asked or
+        // broke and carries what it printed — so where there is one it stands alone. `TurnContext`
+        // is the alternative, for the turns nothing else explains: no script at all, one disarmed
+        // several battles ago, or an armed one that was never consulted.
+        let context = match self.note.is_some() {
+            true => TurnContext::None,
+            false => TurnContext::Battle { script: self.handles.live_script.state() },
+        };
+        match self.advance(DecisionKind::Battle, context)? {
             Terminal::ChooseBattleAction { id } => match tools::resolve_battle(state, &id) {
                 Some(action) => Some(action),
                 None => {
@@ -949,7 +961,7 @@ impl Policy for LlmPolicy {
         // and a battle can start before then — so without this the first battles of the new game
         // are fought by the previous game's script. The worker re-arms from the *new* run's file
         // when it catches up, which is empty for a fresh run and correct for a resumed one.
-        self.handles.live_script.arm(None);
+        self.handles.live_script.arm(None, ScriptState::Unset);
     }
 
     /// Collected by the agent at the top of its next tick, ahead of the state machine.
@@ -2913,13 +2925,23 @@ mod tests {
     }
 
     /// Install a script on an overworld turn, the way the model would.
+    ///
+    /// ⚠️ **`events_until`, never `try_iter`** — this drained the channel once, the instant the
+    /// overworld action came back, and the tool result is published by the *worker* thread while
+    /// the action arrives on this one. It is the race `events_until` was written for and its doc
+    /// comment describes, and it made every test built on this helper fail about half the time,
+    /// serially, on an idle box, always as `one script was installed: left 0`. Each run picked a
+    /// different victim, which is what kept it looking like a real regression in whatever had just
+    /// been edited.
     fn arm(rig: &mut Rig, policy: &mut LlmPolicy) {
         let armed = rig.pump_overworld(policy);
         assert!(armed.is_some(), "the overworld turn still has to decide something");
         let results: Vec<String> = rig
-            .events
-            .try_iter()
-            .filter_map(|event| match event.body {
+            .events_until(Duration::from_secs(5), |event| {
+                matches!(event, UiEventBody::ToolResult { name, .. } if name == "set_battle_script")
+            })
+            .into_iter()
+            .filter_map(|event| match event {
                 UiEventBody::ToolResult { name, content, .. } if name == "set_battle_script" => Some(content),
                 _ => None,
             })
@@ -3100,6 +3122,73 @@ mod tests {
         rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers it");
     }
 
+    /// ⚠️ **The measurement this line exists for.** The deployed run of 2026-08-27 answered **207
+    /// battle turns by hand and never once called `set_battle_script`** — not weighed and rejected,
+    /// never reached, exactly as `read_guide` was before 7d521e6. Nothing on the turn being charged
+    /// for had ever said the charge was optional; the case for a script lived only in the system
+    /// prompt, which by then was four hundred turns from the end of the context.
+    #[test]
+    fn a_battle_turn_with_no_script_says_there_is_none_and_names_both_tools() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        rig.endpoint.replies.lock().unwrap()
+            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers it");
+
+        let situation = rig.requests().last().expect("a battle request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(situation.contains("No battle script is set"), "{situation}");
+        // Both, and in the order they have to be called: the docs are what make the second
+        // affordable, and a model sent straight at `set_battle_script` writes from memory.
+        let docs = situation.find("get_battle_script_docs").unwrap_or_else(|| panic!("{situation}"));
+        let set = situation.find("set_battle_script").unwrap_or_else(|| panic!("{situation}"));
+        assert!(docs < set, "named in the order they are called: {situation}");
+    }
+
+    /// ⚠️ **The half of the disarm that was silent, and the expensive half.** The failure is
+    /// reported once, by the note on the turn it happened; before this every battle turn after that
+    /// one said nothing at all, so a script that broke on Route 3 left the run paying for battle
+    /// turns for the rest of its life with nothing anywhere saying it had stopped being free.
+    #[test]
+    fn every_battle_turn_after_a_failure_still_says_the_script_is_broken() {
+        let broken = "if battle.turn > 1 { battle.fight(\"Hydro Cannon\"); }\n\
+                      if battle.best_move != () { battle.fight(battle.best_move); }\n\
+                      battle.ask();";
+        let (mut rig, mut policy) = armed_with(broken, 0);
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            for _ in 0..2 {
+                replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            }
+        }
+        let before = rig.requests().len();
+
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("turn 1 is scripted");
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("turn 2 fails and comes back");
+        rig.wait_for_requests(before + 1, Duration::from_secs(5));
+
+        let failing = rig.requests().last().expect("the failing turn").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(failing.contains("Hydro Cannon"), "the note carries the reason: {failing}");
+        // ⚠️ The note *is* the account of that turn, so the state line stands down rather than
+        // saying the same thing again underneath it.
+        assert!(!failing.contains("failed and is no longer deciding your battle turns, so they"),
+                "the note and the state line are alternatives: {failing}");
+
+        // The turn after: no note left, and this is the one that used to say nothing.
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("and the next turn too");
+        rig.wait_for_requests(before + 2, Duration::from_secs(5));
+        let next = rig.requests().last().expect("the turn after").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(next.contains("no longer deciding your battle turns"),
+                "a run whose script broke has to keep being told: {next}");
+        assert!(next.contains("read_battle_script"), "and where to go and look: {next}");
+        assert!(!next.contains("Hydro Cannon"),
+                "but not the reason a second time - that is what `read_battle_script` is for: {next}");
+    }
+
     /// `battle.ask()` is the granular half of the feature: the script keeps deciding, and hands
     /// back only the turns it says are worth paying for.
     #[test]
@@ -3116,6 +3205,11 @@ mod tests {
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(situation.contains("handed this turn to you"), "{situation}");
         assert!(!situation.contains("no longer deciding"), "asking is not failing: {situation}");
+        // ⚠️ And it is not told twice: the note above already accounts for this turn, and carries
+        // what the script printed on its way out, which the state line cannot.
+        assert!(!situation.contains("but it did not decide this one"),
+                "the note stands alone where there is one: {situation}");
+        assert!(!situation.contains("No battle script is set"), "there very much is one: {situation}");
         assert!(policy.handles.live_script.source().is_some(), "and the script is still armed");
     }
 }
