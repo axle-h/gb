@@ -19,6 +19,18 @@ use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::world_graph::WorldGraph;
 
+/// The one [`Policy::name`] that means a model is playing.
+///
+/// ⚠️ **`run::RunMeta::model` holds the *policy's* name under every other policy** — `random`,
+/// `scripted` — because a run directory always records something for it. So "is that string a model
+/// id?" is answered by asking the policy, and this is the string both askers compare against and
+/// `LlmPolicy::name` returns. A list of names to *exclude* instead is a list a fourth policy joins
+/// silently, which is how `scripted` would have reached the leaderboard as if it were a model.
+///
+/// A free constant rather than an associated one: an associated const on `Policy` costs the trait
+/// its dyn compatibility, and every holder of a policy in this crate holds a `Box<dyn Policy>`.
+pub const LLM_POLICY_NAME: &str = "llm";
+
 /// Non-blocking policy interface.
 ///
 /// All methods return `Option<_>`. `None` means "not ready yet — ask again next frame".
@@ -34,6 +46,9 @@ pub trait Policy {
     ///
     /// ⚠️ **`"llm"` and `"random"` are a wire contract**, not free text: the SPA reads
     /// `StatusSnapshot.policy` and the deployment's status line is built from it.
+    ///
+    /// It is also what decides whether the run has a *model* to name at all — see
+    /// [`LLM_POLICY_NAME`] and the two readers of it in [`crate::host`].
     ///
     /// The *model* is deliberately not part of this. `run::RunMeta::model` already holds `GB_MODEL`,
     /// and `LlmPolicy` could not answer anyway — `LlmConfig` is moved into the worker thread when

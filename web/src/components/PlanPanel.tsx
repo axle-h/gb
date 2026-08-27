@@ -17,9 +17,9 @@ import type { TodoView } from '../api';
  * capped at `todo::MAX_ITEMS` including them, so there is no tail to push out of the way.
  */
 export function PlanPanel({ plan }: { plan: TodoView[] }) {
-  // Nothing published yet: a fresh run, or `--policy random`, which has no plan and never will.
-  // Rendering an empty box in either case would be a panel that is permanently blank on half the
-  // deployments.
+  // Nothing published yet: a fresh run, or a policy that is not an LLM, which has no plan and
+  // never will. Rendering an empty box in either case would be a panel that is permanently blank
+  // on half the deployments.
   if (plan.length === 0) return null;
 
   const open = plan.filter((item) => !item.done).length;

@@ -10,6 +10,39 @@ kind: ConfigMap
 metadata:
   name: gb
 data:
+  # **What plays the game.** `llm`, `random` or `deterministic`; unset or blank means `llm`.
+  #
+  # ⚠️ **This used to be `--policy` on the container's `args`, and it is here now so that switching
+  # the run is an edit to a ConfigMap rather than to a Deployment's command line.** The container's
+  # `args` are `["gb", "serve"]` and name no policy at all; `--policy` still exists and still wins,
+  # which makes it the override for a one-off `kubectl -n gb set args`, not the normal way in.
+  #
+  # ⚠️ **Editing this restarts nothing on its own.** `envFrom` is read once at process start and the
+  # pod template carries no checksum annotation, so this is exactly the Secret's trap:
+  #
+  #   kubectl -n gb apply -f ./gb/configmap.yml
+  #   kubectl -n gb rollout restart deploy/gb
+  #
+  #   llm            a model over the endpoint below. ⚠️ **Billed** — see GB_MODEL. The API key in
+  #                  the Secret has to be present, non-empty and *valid*, since every request is
+  #                  authenticated and a placeholder is a 401 per turn rather than something the
+  #                  endpoint shrugs off.
+  #   random         random legal choices. No key, no model, no spend, and it still exercises the
+  #                  whole stack — the agent, the video pipeline, the page and the volume. This is
+  #                  what to switch to while an agent bug is being fixed or the credit has run out,
+  #                  rather than leaving the pod erroring at every turn.
+  #   deterministic  the scripted route `full_playthrough` plays, at 1x on the page instead of in a
+  #                  test harness. No key and no spend either. ⚠️ **It starts in Red's bedroom and
+  #                  every step is relative to that**, so it wants a game at the beginning: switch to
+  #                  it, restart, and then `POST /api/new-run` (see `../new-run.sh`), or it will
+  #                  replay a route the resumed world has already moved past. ⚠️ **It ends on
+  #                  Victory Road 2F, not in the Hall of Fame** — the VR2F/VR3F puzzle and the Elite
+  #                  Four are left out of that step list as PP-marginal for the team the route
+  #                  arrives with, so the run parks there rather than filing a hall-of-fame entry.
+  #                  The trainer is called CLAUDE, which is the name in the save state the route was
+  #                  captured against; that policy deliberately does not rename it.
+  GB_POLICY: "llm"
+
   # Any OpenAI-compatible endpoint. Leave unset for api.openai.com.
   #
   # OpenRouter.

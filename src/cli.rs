@@ -9,6 +9,7 @@
 //! gb                        SDL UI, ConsolePolicy on stdin   (requires the `sdl` feature)
 //! gb serve [--port 8080]    web UI + LlmPolicy, resuming the newest run if there is one
 //! gb serve --policy random  web UI, RandomPolicy — no API key, the video-pipeline harness
+//! gb serve --policy deterministic   web UI, DeterministicPolicy on the scripted route — ditto
 //! gb serve --new-run        start from the beginning of the game rather than resuming (W7)
 //! ```
 
@@ -32,7 +33,13 @@ USAGE:
 
 SERVE OPTIONS:
     --port <PORT>               Port to listen on [default: $GB_PORT, else 8080]
-    --policy <llm|random>       What plays the game [default: llm]
+    --policy <POLICY>           What plays the game [default: $GB_POLICY, else llm]:
+                                  llm            a model over an OpenAI-compatible API
+                                  random         random legal choices; no API key, no spend
+                                  deterministic  the scripted route the full_playthrough test
+                                                 plays, from the start of the game to Victory
+                                                 Road 2F, at whatever speed the emulator is
+                                                 running. Needs no API key either
     --new-run                   Start the game from the beginning, in a new run directory,
                                 instead of resuming the newest resumable run
 
@@ -45,6 +52,7 @@ ENVIRONMENT (--policy llm):
 
 ENVIRONMENT (any policy):
     GB_PORT                     Port to listen on; --port wins
+    GB_POLICY                   What plays the game: llm, random or deterministic; --policy wins
     GB_RUN_DIR                  Where runs are kept [default: ./runs]
     GB_STATUS_HZ                How often the status panel is sampled [default: 2]
     GB_HARDWARE                 Which Game Boy the cartridge runs on: dmg or cgb [default: dmg].
@@ -91,6 +99,38 @@ pub enum ServePolicy {
     /// Random legal choices. Needs nothing, which is what makes it the harness for exercising the
     /// video pipeline and the web UI without spending tokens.
     Random,
+    /// `DeterministicPolicy` on `PolicyStep::complete_game_steps` — the same queue `full_playthrough`
+    /// runs, on the same fresh save, played out on the page instead of in a test harness. Needs no
+    /// API key and spends nothing.
+    ///
+    /// ⚠️ **It ends on Victory Road 2F, not in the Hall of Fame**, because that step list does: the
+    /// VR2F/VR3F puzzle and the Elite Four are deliberately left out of it as PP-marginal for the
+    /// team this route arrives with, and are proved separately from their own fixtures
+    /// (`endgame::can_solve_victory_road_2f_3f`, `endgame::can_beat_elite_four`). When the queue
+    /// empties the policy simply stops answering and the run parks where it stands.
+    ///
+    /// ⚠️ **It expects a game at the beginning.** The queue starts in Red's bedroom and every step
+    /// is relative to that, so pointing it at a *resumed* mid-game save replays a route the world has
+    /// already moved past. Pair it with `--new-run`, or `POST /api/new-run` once the process is up.
+    Deterministic,
+}
+
+impl ServePolicy {
+    /// The spellings `--policy` and `GB_POLICY` share.
+    ///
+    /// One parser for both on purpose: the whole point of the variable is that a Deployment sets the
+    /// same thing an operator would type, and two lists of names is two lists to fall out of step.
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "llm" => Some(Self::Llm),
+            "random" => Some(Self::Random),
+            "deterministic" => Some(Self::Deterministic),
+            _ => None,
+        }
+    }
+
+    /// What a rejection offers instead, in both messages.
+    const EXPECTED: &'static str = "`llm`, `random` or `deterministic`";
 }
 
 pub const DEFAULT_PORT: u16 = 8080;
@@ -136,7 +176,19 @@ where
         },
         None => DEFAULT_PORT,
     };
-    let mut policy = ServePolicy::Llm;
+    // `GB_POLICY` is the container's way of setting this and `--policy` is the operator's, exactly as
+    // above — so the ConfigMap can move a deployment between the model, the random harness and the
+    // scripted playthrough with a `kubectl rollout restart` rather than an edited command line.
+    let mut policy = match env("GB_POLICY").map(|value| value.trim().to_string()).filter(|v| !v.is_empty()) {
+        Some(value) => match ServePolicy::parse(&value) {
+            Some(parsed) => parsed,
+            // Refused rather than defaulted, for `GB_PORT`'s reason: a container quietly playing at
+            // random when it was told `llm` is diagnosed by *watching* it, which is the slowest
+            // route to a typo there is.
+            None => return fail(format!("`GB_POLICY={value}` is not {}", ServePolicy::EXPECTED)),
+        },
+        None => ServePolicy::Llm,
+    };
     let mut new_run = false;
     while let Some(flag) = rest.next() {
         // `--new-run` is the only flag that is a switch rather than a setting, so it is taken before
@@ -156,10 +208,11 @@ where
                 Ok(parsed) => port = parsed,
                 Err(_) => return fail(format!("`--port {value}` is not a port number")),
             },
-            "--policy" => match value {
-                "llm" => policy = ServePolicy::Llm,
-                "random" => policy = ServePolicy::Random,
-                other => return fail(format!("`--policy {other}` — expected `llm` or `random`")),
+            "--policy" => match ServePolicy::parse(value) {
+                Some(parsed) => policy = parsed,
+                None => {
+                    return fail(format!("`--policy {value}` — expected {}", ServePolicy::EXPECTED));
+                }
             },
             other => return fail(format!("unknown option `{other}`")),
         }
@@ -221,12 +274,72 @@ mod tests {
     fn the_usage_names_every_flag_and_variable() {
         for name in [
             "--port", "--policy", "--new-run", "--help",
-            "GB_PORT", "GB_RUN_DIR", "GB_STATUS_HZ", "GB_HARDWARE", "GB_AUDIO_BITRATE",
+            "GB_PORT", "GB_POLICY", "GB_RUN_DIR", "GB_STATUS_HZ", "GB_HARDWARE", "GB_AUDIO_BITRATE",
             "OPENAI_API_KEY", "GB_MODEL", "OPENAI_BASE_URL",
             "GB_CONTEXT_LIMIT", "GB_TEMPERATURE", "GB_MAX_TOOL_STEPS", "GB_STUCK_TIMEOUT_SECS",
+            // Every spelling `--policy` and `GB_POLICY` accept, since the same argument holds for
+            // a value as for a flag: for a tool whose only discovery mechanism is `--help`, a
+            // policy the parser takes and the usage does not name may as well not exist.
+            "llm", "random", "deterministic",
         ] {
             assert!(USAGE.contains(name), "`{name}` is accepted but `--help` does not mention it");
         }
+    }
+
+    /// ⚠️ The flag and the variable are one parser, and this is what says so: a name accepted by one
+    /// and not the other is the trap the shared [`ServePolicy::parse`] exists to close.
+    #[test]
+    fn every_policy_is_spelled_the_same_on_the_command_line_and_in_the_environment() {
+        for (name, expected) in [
+            ("llm", ServePolicy::Llm),
+            ("random", ServePolicy::Random),
+            ("deterministic", ServePolicy::Deterministic),
+        ] {
+            assert_eq!(
+                parse(["serve", "--policy", name]),
+                Ok(Command::Serve { port: DEFAULT_PORT, policy: expected, new_run: false }),
+                "--policy {name}",
+            );
+            let env = |var: &str| (var == "GB_POLICY").then(|| name.to_string());
+            assert_eq!(
+                parse_with_env(["serve"], &env),
+                Ok(Command::Serve { port: DEFAULT_PORT, policy: expected, new_run: false }),
+                "GB_POLICY={name}",
+            );
+        }
+    }
+
+    /// **The ConfigMap sets it; the operator overrides it.** The same contract `GB_PORT` has, and
+    /// for the same reason — the deployment's command line should not have to be edited to move the
+    /// run between the model and a policy that spends nothing.
+    #[test]
+    fn gb_policy_is_the_default_and_the_flag_overrides_it() {
+        let env = |name: &str| (name == "GB_POLICY").then(|| "random".to_string());
+        assert_eq!(
+            parse_with_env(["serve"], &env),
+            Ok(Command::Serve { port: DEFAULT_PORT, policy: ServePolicy::Random, new_run: false }),
+        );
+        assert_eq!(
+            parse_with_env(["serve", "--policy", "llm"], &env),
+            Ok(Command::Serve { port: DEFAULT_PORT, policy: ServePolicy::Llm, new_run: false }),
+        );
+
+        // Blank and whitespace are what a placeholder looks like in a Deployment, and mean "unset".
+        for blank in ["", "   "] {
+            let env = |name: &str| (name == "GB_POLICY").then(|| blank.to_string());
+            assert_eq!(
+                parse_with_env(["serve"], &env),
+                Ok(Command::Serve { port: DEFAULT_PORT, policy: ServePolicy::Llm, new_run: false }),
+                "GB_POLICY={blank:?}",
+            );
+        }
+
+        // Anything else is reported rather than silently ignored, and the message names the
+        // variable and the value — a container playing the wrong game costs whatever it plays.
+        let env = |name: &str| (name == "GB_POLICY").then(|| "magic-8-ball".to_string());
+        let error = parse_with_env(["serve"], &env).expect_err("not a policy");
+        assert!(error.contains("GB_POLICY") && error.contains("magic-8-ball"), "{error}");
+        assert!(error.contains(USAGE), "{error}");
     }
 
     /// Every rejection prints the usage under it, so a mistyped flag is self-correcting.

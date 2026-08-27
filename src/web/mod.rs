@@ -78,6 +78,13 @@ const KEEP_ALIVE: Duration = Duration::from_secs(2);
 /// to drain — see the ⚠️ in [`serve_http`] — so this only bounds the case where a task is wedged.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The seed `--policy deterministic` plays under.
+///
+/// 42 because that is what `full_playthrough` and every leg fixture were tuned against: the route is
+/// deterministic only against the RNG stream it was written for, and a served run that picked its own
+/// seed would be a playthrough nothing has ever proved.
+const SCRIPTED_SEED: u64 = 42;
+
 /// The header `POST /api/new-run` reads its token from.
 const ADMIN_TOKEN_HEADER: &str = "x-gb-token";
 
@@ -117,13 +124,18 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     #[cfg(feature = "llm")]
     let llm = match policy {
         ServePolicy::Llm => Some(crate::llm::LlmConfig::from_env()?),
-        ServePolicy::Random => None,
+        ServePolicy::Random | ServePolicy::Deterministic => None,
     };
     #[cfg(not(feature = "llm"))]
     let llm: Option<()> = None;
 
+    // ⚠️ **`RunMeta::model` is the *policy's* name under anything but `--policy llm`**, and it is a
+    // model id only there. Everything that reports it filters on the policy rather than on this
+    // string (`EmulatorHost`, the leaderboard row, the status heartbeat), so a column that reads
+    // like a model name never carries `random` or `scripted` in it.
     let model = match policy {
         ServePolicy::Random => "random".to_string(),
+        ServePolicy::Deterministic => "scripted".to_string(),
         #[cfg(feature = "llm")]
         ServePolicy::Llm => llm.as_ref().expect("built above").model.clone(),
         #[cfg(not(feature = "llm"))]
@@ -186,6 +198,14 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let make_policy: Box<dyn FnOnce() -> Box<dyn crate::pokemon::policy::Policy> + Send> = match policy
     {
         ServePolicy::Random => Box::new(|| Box::new(RandomPolicy::default())),
+        // The same policy, the same seed and the same queue `full_playthrough` runs — it is that
+        // test with the page in front of it rather than a second route that could disagree with it.
+        // ⚠️ **It plays the game from the beginning**, so it wants a fresh run under it; see
+        // [`ServePolicy::Deterministic`], which carries that warning and where the route stops.
+        ServePolicy::Deterministic => Box::new(|| {
+            use crate::pokemon::policy::{DeterministicPolicy, PolicyStep};
+            Box::new(DeterministicPolicy::new(SCRIPTED_SEED, PolicyStep::complete_game_steps()))
+        }),
         #[cfg(feature = "llm")]
         ServePolicy::Llm => {
             use crate::llm::{client::OpenAiClient, todo::TodoList, worker};
