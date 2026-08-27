@@ -195,6 +195,21 @@ closes, so the *first* box of a battle got the message-box reader and every one 
 and all. It reads `wIsInBattle` (`BattleStateReader::read_battle_state`) now, which is the condition that actually says
 a HUD is on screen.
 
+⚠️ **A pickup the game refuses is the same three events as one that works.** Every item on the floor is a sprite: walk
+up, text box, back to the overworld, `✓ talked to Charmander Poke Ball` either way. The difference is that a real
+pickup `HideObject`s the sprite, so `PokemonAgent::check_pending_pickup` asks the map again once the overworld is back
+and emits `AgentEvent::OverworldPickupFailed` when it is still there. ⚠️ **Armed on the interaction and answered later,
+never both at once**: the pickup runs as a script (box, `GiveItem`, `HideObject`), so testing while the box is open
+calls every success a failure. ⚠️ **The latch clears whatever the answer is**, or one refusal is re-reported on every
+overworld tick for the rest of the run. ⚠️ **`PictureId::PokeBall`, never the name** — the same test `llm::tools` verbs
+the menu row with, which is what keeps "pick up the Potion" and "nothing was picked up" talking about one set. The
+deployed run of 2026-08-27 spent turns 7 to 24 on Oak's starter balls and filed a `report_issue`; ⚠️ **the case it is
+really for is a full bag**, which refuses every pickup in the game in exactly this shape and is otherwise reported
+nowhere. Guards: `a_pickup_the_game_refuses_says_the_item_is_still_there` and
+`a_pickup_that_works_reports_no_failure` — ⚠️ **both, because the first passes on its own if the check fires on
+everything**, and ⚠️ the refusing fixture cannot use `step_until_exhausted` (`PolicyStep::Interact` pops when the item
+reaches the bag, which is the thing that never happens).
+
 ⚠️ **A textbox is detected before its characters are drawn**, so the reader emits a stream of empty ones — on the
 deployed run they were most of the log. `PokemonAgent::event` drops them, and it is the funnel *every* event goes
 through (including those collected into `update`'s local `new_events`), so the transcript is clean as well as the page.
