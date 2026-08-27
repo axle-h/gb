@@ -2028,3 +2028,124 @@ fn a_pickup_that_works_reports_no_failure() {
         "the Antidote was picked up, so nothing failed:\n{said}",
     );
 }
+
+/// ⚠️ **Whoever owns a menu has to own it from the moment it opens, and the mart did not.**
+///
+/// `assert_pokemart_state` entered a `PokemartShopping` state only when the policy *answered* what
+/// to buy. Every scripted policy answers on its first poll — the trait default is `Some(None)` — so
+/// this looked correct for the whole life of the driver. `LlmPolicy` answers `None` for as long as
+/// the model is thinking, and `drives_its_own_menus` keys on the **state**, so in that window the
+/// generic text reader owned the shop and did what it does to every text box: pressed A. BUY, the
+/// first item in the stock list, quantity 1, confirm, YES, and round again.
+///
+/// This is the ¥137 face of it, which is what the deployed run of 2026-08-27 was doing when it was
+/// reported as a stuck menu: too poor to afford a ¥200 Poké Ball, so the loop shows only as the
+/// game repeating "You don't have enough money." — 5 times in 30 s here, ~16 per visit deployed.
+/// The test below is the same bug with money in the wallet, and is the one that shows what it costs.
+#[test]
+fn a_shop_left_waiting_on_the_policy_is_not_mashed_through() {
+    let (money, refusals, before, after) = shop_with_a_policy_that_never_answers(137);
+
+    assert_eq!(refusals, 0, "the game was asked {refusals} times to sell something it cannot");
+    assert_eq!(money, 137, "and nothing was spent");
+    assert_eq!(after, before, "on a bag nothing was added to");
+}
+
+/// The half that says what the loop above is worth. ⚠️ **The poor case cannot see this and an
+/// earlier draft of it could see nothing at all**: a run that cannot afford the first row of the
+/// stock list never completes a purchase however hard the reader mashes, so the wallet is flat
+/// either way and only the refusal *count* separates the two. This one asserts the wallet, which is
+/// what the loop is actually costing a run that has money in it.
+///
+/// Before the fix, seeded with ¥1200 against ¥200 Poké Balls, the same run ended
+/// `money now 0, bag [(TownMap, 1), (Potion, 1), (PokeBall, 6)]` — the whole wallet, six balls, and
+/// no decision behind any of them.
+#[test]
+fn a_shop_is_not_raided_while_the_policy_is_still_thinking() {
+    let (money, _refusals, before, after) = shop_with_a_policy_that_never_answers(1200);
+
+    assert_eq!(money, 1200, "the wallet is untouched until the policy chooses; bag {after:?}");
+    assert_eq!(after, before, "and the first row of the stock list is not bought by default");
+}
+
+/// Walk to the Viridian Mart counter with `money` in the wallet under a policy that opens the shop
+/// and then never says what to buy, and report what the wallet and the bag look like afterwards.
+///
+/// ⚠️ **The mart answer never comes, rather than merely coming late.** A latency long enough to
+/// outlast the run is the obvious way to write this and makes the test a race against its own
+/// budget — the first draft used `SlowPolicy` at 200 ticks against a 30 s run and measured the
+/// *legitimate* purchase landing at tick 560. Withholding one answer for ever is the property
+/// actually under test: while nobody has decided, nothing is bought.
+fn shop_with_a_policy_that_never_answers(money: u32) -> (u32, usize, Vec<(ItemId, u8)>, Vec<(ItemId, u8)>) {
+    use crate::pokemon::map_metadata::MapMetadataCache;
+    use crate::game_boy::GameBoy;
+    use crate::pokemon::policy::{DeterministicPolicy, Policy};
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::world_graph::WorldGraph;
+
+    /// A `DeterministicPolicy` that walks to the clerk and then thinks about the shop for ever.
+    struct StillThinking(DeterministicPolicy);
+
+    impl Policy for StillThinking {
+        fn name(&self) -> &'static str { "still-thinking" }
+
+        fn pick_overworld_action(&mut self, state: &GameState, graph: &WorldGraph) -> Option<OverworldAction> {
+            self.0.pick_overworld_action(state, graph)
+        }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            self.0.pick_battle_action(state)
+        }
+
+        // The whole of the fixture: the shop is open and the answer is still coming.
+        fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
+            None
+        }
+    }
+
+    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+    gb.load_state(include_bytes!("../data/viridian-city-pokemart-shopping.bin")).expect("fixture loads");
+    let mut cache = MapMetadataCache::default();
+    PokemonApi::with_cache(&mut gb, &mut cache).debug_set_money(money);
+    // ⚠️ The fixture already carries a Town Map and a Potion, so "nothing was bought" is the bag
+    // being *unchanged* rather than the bag being empty.
+    let before: Vec<(ItemId, u8)> = PokemonApi::with_cache(&mut gb, &mut cache)
+        .game_state().expect("readable").bag.iter().map(|i| (i.id, i.quantity)).collect();
+
+    let steps = vec![PolicyStep::BuyFromMart {
+        map: Map::ViridianMart,
+        item: BagItem::new(ItemId::PokeBall, 1),
+    }];
+    let mut agent = PokemonAgent::new(Box::new(StillThinking(DeterministicPolicy::new(1, steps))));
+
+    // ⚠️ Inside `DRIVER_ESCAPE_SILENCE` (60 s), which is the net under a driver that stops making
+    // progress. Past it the agent is entitled to abandon the shop, and this is about the window
+    // before that, not about the net.
+    let budget = MachineCycles::from_duration(Duration::from_secs(30));
+    let mut emulated = MachineCycles::ZERO;
+    // ⚠️ **Counted off the screen on a rising edge, not out of `AgentEvent::TextBox`.** The box
+    // never closes on a run this short, so nothing is ever emitted and a test that counted events
+    // would report zero refusals on the very run that produced sixteen. The latch is what makes it
+    // a count of *refusals* rather than of ticks one refusal happened to be legible for.
+    let mut refusals = 0usize;
+    let mut refusing = false;
+    while emulated < budget {
+        let ran = gb.run(AGENT_RESOLUTION);
+        emulated += ran;
+        let showing = PokemonApi::with_cache(&mut gb, &mut cache)
+            .on_screen_text(true)
+            .is_some_and(|text| text.contains("don't have enough money"));
+        if showing && !refusing {
+            refusals += 1;
+        }
+        refusing = showing;
+        let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
+        agent.update(&mut api, ran).ok();
+        agent.drain_events();
+    }
+
+    let state = PokemonApi::with_cache(&mut gb, &mut cache).game_state().expect("readable");
+    let after = state.bag.iter().map(|i| (i.id, i.quantity)).collect();
+    (state.money, refusals, before, after)
+}
