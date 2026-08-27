@@ -119,7 +119,12 @@ function describeSpeed(status: Status, speed: number | null): string {
   const achieved = speed === null ? '—' : `${speed.toFixed(2)}×`;
   const dropped =
     status.dropped_ms > 0 ? ` · ${formatDuration(status.dropped_ms)} dropped` : '';
-  return `${achieved} ${target} · ${formatDuration(status.emulated_ms)} played${dropped}`;
+  // ⚠️ **`run_emulated_ms`, never `emulated_ms`.** This line is the run's total, and `emulated_ms`
+  // is only what the process currently serving the page has played — so a run resumed nightly for a
+  // week read as one night, and every restart, `/reset-game` aside, sent it back to `00:00`. The
+  // rate beside it is the other way round: it is measured between heartbeats, off the counter that
+  // does reset.
+  return `${achieved} ${target} · ${formatDuration(status.run_emulated_ms)} played${dropped}`;
 }
 
 /**

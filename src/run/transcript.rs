@@ -271,6 +271,7 @@ mod tests {
         UiEventBody::Status(Box::new(StatusSnapshot {
             wall_ms: 0,
             emulated_ms: 0,
+            run_emulated_ms: 0,
             dropped_ms: 0,
             target_speed: 1.0,
             policy: "random",
