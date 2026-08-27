@@ -241,6 +241,19 @@ different mechanisms on purpose:
   a guard that left the agent with nothing to do would pass "never entered `CuttingTree`" and still be the wedged run it
   replaces.
 
+⚠️ **`read_bag` was under-reporting the bag, and the count was the dangerous half.** `observe::bag` answers from
+`GameState::bag`, which is a `Bag`, which **drops every id `ItemId` cannot name** — and only twelve of the fifty TMs
+were named. The deployed run of 2026-08-27 was told `slots_used: 3` over a bag holding four things, then found TM01
+on screen with nothing having ever mentioned it and filed a bug about the prompt it thought it had triggered. The bag
+holds twenty kinds and a pickup into a full one is refused in a way that looks exactly like a pickup that worked,
+which is the whole reason `toss_item` exists, so a model told it has a free slot it does not have walks into that
+hole with the tool in its hand. All fifty TMs are named now, which `from_repr` and `item_by_name` both pick up for
+free. ⚠️ **The fixture check cannot prove it alone** — `post-ss-anne`'s bag holds TM11, TM28 and TM34, three of the
+twelve that *were* named — so `read_bag_counts_every_slot_the_game_counts` asserts over the whole `$C4`-`$FA` range
+and that every name resolves *back*, since the name is the handle the model quotes into `toss_item` and `teach`.
+⚠️ The raw-RAM rule in `pokemon/mod.rs` still stands: what `Bag` drops now is ids the game never hands out, and menu
+navigation must still not depend on that staying true.
+
 ### Chaining actions
 
 ⚠️ **`choose_action` carries up to `MAX_CHAINED_ACTIONS` (4) ids and the chain buys turns, not tokens.**

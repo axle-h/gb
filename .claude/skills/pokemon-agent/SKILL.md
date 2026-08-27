@@ -72,6 +72,31 @@ badge won and nothing able to learn Cut was told to go and find HM01. It names t
 policy rather than `DeterministicPolicy`**, which would skip the teach before the agent ever saw it and pass
 without touching the thing under test.
 
+⚠️ **A bag item the game will not use is the same loop again, and `UsingFieldItem` had no exit from it
+either.** `ItemUsePtrTable` (`engine/items/item_effects.asm`) sends most key items to `UnusableItem`, which is
+`jp ItemUseNotTime`: "This isn't the time to use that!" and back to the bag list with the cursor untouched.
+This driver's only completion is `game_mode == Overworld`, which a refusal never reaches, so it was 60 s of
+A-mashing ended by `DRIVER_ESCAPE_SILENCE`. The deployed run of **2026-08-27** alternated a
+`use_item HelixFossil` with talking to the Mt Moon Rocket whose flavour line is "if you find a fossil, give it
+to me", four minutes of wall clock at a time. Two gates and a net, and all three are needed:
+- **`item_use::field_use_refusal`**, read out of `ItemUsePtrTable` rather than transcribed, refuses the known
+  ones in `tools::resolve_field_move` (no round trip) and again in `agent.rs` on the way into the state.
+  ⚠️ **Reading the ROM is not pedantry here**: the Card Key, the Poké Flute and the Coin Case are usable while
+  the Silph Scope and the Lift Key beside them are not, and item ids `$15`/`$16` are the Safari Zone's BAIT and
+  ROCK as well as the first two badges, so "the badges are unusable" would have been wrong.
+- ⚠️ **The on-screen net in the driver, because a refusal can be *contextual* and no table predicts one.**
+  `ItemUseEscapeRope` outside `EscapeRopeTilesets` and `ItemUseBicycle` indoors are real effects that end at the
+  same `ItemUseNotTime`. It reuses `shows_battle_refusal` (one list, not two) and **latches
+  `BACKING_OUT_TICKS` of B** rather than pressing one or dropping to `Idle`: one B lands back on the bag list
+  where the driver's own navigation presses A again, and ⚠️ **`Idle` with the bag still open costs 33 s** of
+  the generic reader getting out and emits the whole screen it walked through as one `TextBox` — which is what
+  the deployed run called an "unrelated TM34/bag menu prompt". Measured 60 s → 5.4 s.
+`using_an_item_the_game_will_not_use_does_not_wedge` and
+`an_item_the_map_refuses_backs_out_rather_than_mashing_for_a_minute` are the guards, both on hand-rolled
+policies rather than `DeterministicPolicy` (which only ever reaches for the Poké Flute), both asserting that
+**decisions keep coming** and that the *words* arrive. ⚠️ **The target has to be reachable** or the driver
+reports "can't reach the field-item target" on its own and the test passes with the gate removed.
+
 ### Screen versus RAM
 
 ⚠️ **The screen the agent reads lags the game's own tilemap, and its three horizontal bands can disagree.**

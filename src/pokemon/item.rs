@@ -90,32 +90,81 @@ pub enum ItemId {
     Hm03Surf = 0xC6,
     Hm04Strength = 0xC7,
     Hm05Flash = 0xC8,
-    // TMs are 0xC9 (TM01) .. 0xFA (TM50). Only the ones the agent teaches — or has to shift out of a
-    // full bag — are enumerated; anything unnamed here is dropped by `GameState::bag`, which is why
-    // occupancy and menu indices must come from raw `wBagItems` (`bag_item_position`) instead.
-    Tm06Toxic = 0xCE,       // TM01(0xC9) + 5
-    Tm11Bubblebeam = 0xD3,  // TM01(0xC9) + 10
-    Tm14Blizzard = 0xD6, // TM01(0xC9) + 13 — Ice, 120 power; the Elite-Four Lance answer (found in Mansion B1F)
-    Tm21MegaDrain = 0xDD,   // TM01(0xC9) + 20
-    /// TM01(0xC9) + 22 — DRAGON RAGE, the cheapest of the three **Game Corner prize TMs** at 3300
-    /// coins, and so the one workstream F proves the prize room's `GiveItem` branch with.
+    // TMs, 0xC9 (TM01) to 0xFA (TM50), in the cartridge's own order
+    // (`add_tm`, `constants/item_constants.asm`).
+    //
+    // ⚠️ **All fifty are named, and the twelve that used to be here were not enough.** `Bag` drops
+    // every id `ItemId` cannot name, and `observe::bag` is what `read_bag` answers with, so an
+    // unnamed TM was invisible to the model *and* uncounted against the 20-slot ceiling. The
+    // deployed run of 2026-08-27 was told `slots_used: 3` over a bag holding four things, and the
+    // fourth (TM01) turned up on screen with nothing having ever mentioned it; the model filed a
+    // bug about the "unrelated TM34/bag menu prompt" it thought it had triggered. A bag that
+    // silently fills is the worse half: a pickup into a full bag is refused in a way that reads
+    // from outside exactly like a pickup that worked. There is nothing to weigh here, since
+    // `from_repr` and `item_by_name` both pick a variant up for free.
+    Tm01MegaPunch = 0xC9,
+    Tm02RazorWind = 0xCA,
+    Tm03SwordsDance = 0xCB,
+    Tm04Whirlwind = 0xCC,
+    Tm05MegaKick = 0xCD,
+    Tm06Toxic = 0xCE,
+    Tm07HornDrill = 0xCF,
+    Tm08BodySlam = 0xD0,
+    Tm09TakeDown = 0xD1,
+    Tm10DoubleEdge = 0xD2,
+    Tm11Bubblebeam = 0xD3,
+    Tm12WaterGun = 0xD4,
+    Tm13IceBeam = 0xD5,
+    /// Ice, 120 power: the Elite-Four Lance answer, found in Mansion B1F.
+    Tm14Blizzard = 0xD6,
+    Tm15HyperBeam = 0xD7,
+    Tm16PayDay = 0xD8,
+    Tm17Submission = 0xD9,
+    Tm18Counter = 0xDA,
+    Tm19SeismicToss = 0xDB,
+    Tm20Rage = 0xDC,
+    Tm21MegaDrain = 0xDD,
+    Tm22Solarbeam = 0xDE,
+    /// The cheapest of the three **Game Corner prize TMs** at 3300 coins, and so the one
+    /// workstream F proves the prize room's `GiveItem` branch with.
     Tm23DragonRage = 0xDF,
-    Tm24Thunderbolt = 0xE0, // TM01(0xC9) + 23
-    Tm27Fissure = 0xE3,     // TM01(0xC9) + 26
-    Tm28Dig = 0xE4,      // TM01(0xC9) + 27 — DIG doubles as a reusable Escape Rope out of any cave
-    /// TM01(0xC9) + 28 — PSYCHIC, given away by the old man in `MrPsychicsHouse` for nothing at all.
+    Tm24Thunderbolt = 0xE0,
+    Tm25Thunder = 0xE1,
+    Tm26Earthquake = 0xE2,
+    Tm27Fissure = 0xE3,
+    /// DIG doubles as a reusable Escape Rope out of any cave.
+    Tm28Dig = 0xE4,
+    /// Given away by the old man in `MrPsychicsHouse` for nothing at all.
     Tm29Psychic = 0xE5,
-    /// TM01(0xC9) + 30 — MIMIC, the Copycat's swap for a **Poké Doll**. Her script checks
-    /// `IsItemInBag POKE_DOLL` and silently says nothing else without one, so this TM arriving is the
-    /// only evidence the doll was in hand (`scripts/CopycatsHouse2F.asm:22`).
+    Tm30Teleport = 0xE6,
+    /// The Copycat's swap for a **Poké Doll**. Her script checks `IsItemInBag POKE_DOLL` and
+    /// silently says nothing else without one, so this TM arriving is the only evidence the doll
+    /// was in hand (`scripts/CopycatsHouse2F.asm:22`).
     Tm31Mimic = 0xE7,
-    Tm34Bide = 0xEA,     // TM01(0xC9) + 33 — BIDE, the bag's most useless item: tossed to make room
-    /// TM01(0xC9) + 44 — THUNDER WAVE, a free pickup on Route 24 and the **only** paralysis move the
-    /// party can learn (Slowpoke is the sole compatible member). Workstream D throws balls at the
-    /// legendaries behind it: a status ailment is worth 12 off Rand1 in the Gen 1 catch formula, which
-    /// on a catch-rate-3 target is the difference between ~2 % and ~9 % per ball. See
-    /// `postgame::legendaries`.
+    Tm32DoubleTeam = 0xE8,
+    Tm33Reflect = 0xE9,
+    /// BIDE, the bag's most useless item: tossed to make room.
+    Tm34Bide = 0xEA,
+    Tm35Metronome = 0xEB,
+    Tm36Selfdestruct = 0xEC,
+    Tm37EggBomb = 0xED,
+    Tm38FireBlast = 0xEE,
+    Tm39Swift = 0xEF,
+    Tm40SkullBash = 0xF0,
+    Tm41Softboiled = 0xF1,
+    Tm42DreamEater = 0xF2,
+    Tm43SkyAttack = 0xF3,
+    Tm44Rest = 0xF4,
+    /// A free pickup on Route 24 and the **only** paralysis move the party can learn (Slowpoke is
+    /// the sole compatible member). Workstream D throws balls at the legendaries behind it: a
+    /// status ailment is worth 12 off Rand1 in the Gen 1 catch formula, which on a catch-rate-3
+    /// target is the difference between ~2 % and ~9 % per ball. See `postgame::legendaries`.
     Tm45ThunderWave = 0xF5,
+    Tm46Psywave = 0xF6,
+    Tm47Explosion = 0xF7,
+    Tm48RockSlide = 0xF8,
+    Tm49TriAttack = 0xF9,
+    Tm50Substitute = 0xFA,
 
 }
 
