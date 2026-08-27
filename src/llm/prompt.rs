@@ -115,6 +115,12 @@ Your goal is to play the game well: explore, catch and train Pokémon, beat the 
 and finish the Elite Four. Take it at a sensible pace and think about what you are doing, but do \
 not deliberate at length over routine steps — most decisions are simply 'walk to the next place'.
 
+**Everything below is instruction rather than background**, and every line of it is here because a \
+run before yours lost hours to the mistake it names. Two of them are worth doing in your first few \
+turns, before you settle into playing: call `read_guide` for the stretch of the game you are in, \
+and `set_battle_script` so that routine battles stop costing you a decision each. Both pay for \
+themselves within the hour and neither gets cheaper by being put off.
+
 How the interface works:
 
 - The agent handles all button pressing, pathfinding and menu navigation. You choose *what* to do; \
@@ -256,9 +262,15 @@ Playing it well, and the clock you are playing against:
   through a gym; a single strong Pokémon loses to the first thing it has no answer to, and takes \
   the run down with it. **Your party holds six.** Anything caught past that is stored in a PC you \
   have no way to reach through this interface, so the six you are carrying are the six you have.
-- **Bring the party up together.** A Pokémon that never battles never levels. Sending a weaker one \
-  in first in an easy fight is how it catches up, and a trained party is what makes a bad matchup \
-  survivable instead of fatal.
+- **Experience is only paid out for a knockout.** The cartridge awards it when the opposing \
+  Pokémon faints and at no other moment: running away pays nothing, and neither does catching it. \
+  So a fight broken off halfway is the one outcome that costs you turns and buys nothing at all. \
+  If something is worth attacking it is worth finishing; if it is not, run on the first turn \
+  rather than the third.
+- **Bring the party up together.** A Pokémon that never battles never levels, and what a knockout \
+  pays is divided between every Pokémon that was sent out during the battle — so sending a weaker \
+  one in first in an easy fight is how it catches up, and a trained party is what makes a bad \
+  matchup survivable instead of fatal.
 - **Look round a town before you leave it.** Go into the buildings, read the signs, talk to everyone \
   once. Errands, free items, HMs and the directions you need next all come from people standing in \
   rooms you had no particular reason to enter, and each of them says it once. Items lying on the \
@@ -1192,6 +1204,12 @@ mod tests {
             "Keep stocked up",
             "Catch Pokémon",
             "Look round a town before you leave it",
+            // ⚠️ **A cartridge fact, not advice, and the run that forced it damaged a Pidgey twice
+            // and then tried to flee.** `GainExperience` has exactly two call sites, both under
+            // `HandleEnemyMonFainted`; the capture path returns through
+            // `.returnAfterCapturingMon`, which sets `wBattleResult` and never reaches them. So a
+            // fight broken off pays nothing whatever, which is the half no model infers.
+            "Experience is only paid out for a knockout",
             // The walkthrough is only worth carrying if the prompt says when to reach for it.
             "There is a walkthrough for this game",
             // ⚠️ The three tools exist and are described in the catalogue, but nothing there says a
@@ -1200,6 +1218,14 @@ mod tests {
             // that scripting exists, and that `battle.ask()` is how the hard fights are kept.
             "Write your battles down",
             "battle.ask()",
+            // ⚠️ **The two early actions are named at the top as well as argued below, because
+            // the deployed run of 2026-08-27 did neither and never reasoned about either.** Across
+            // 828 `assistant_reasoning` events the strings `read_guide` and `walkthrough` appear
+            // zero times, and `set_battle_script` was never called in 55 overworld turns — while
+            // both were in the tool array of every one of them and argued for in the prose below.
+            // Emphasis is the weak lever here (`press_buttons`' "a last resort" moved nothing);
+            // what this adds is a concrete *when*, which is the shape that worked for the nickname.
+            "Everything below is instruction rather than background",
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
         }
