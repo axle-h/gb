@@ -70,6 +70,9 @@ Then pick a way to run it:
 # The web UI, played at random — no API key, no spend. http://localhost:8080
 cargo run --release -- serve --policy random
 
+# The web UI, playing the scripted route the full playthrough test plays, at 1x. Also free.
+cargo run --release -- serve --policy deterministic --new-run
+
 # The web UI, played by a model.
 OPENAI_API_KEY=sk-… GB_MODEL=gpt-5 cargo run --release -- serve
 
@@ -322,6 +325,20 @@ endpoint does *not* date is treated as the ordinary transient one and backed off
 The other policies are `RandomPolicy`, `ConsolePolicy` (stdin, for the desktop UI) and
 `DeterministicPolicy` (scripted, used by the tests — including the full playthrough).
 
+`--policy deterministic` is that last one served rather than tested: the same queue, the same seed
+and the same fresh save `full_playthrough` runs, played out on the page at 1× instead of as fast as
+the emulator will go. It needs no API key and spends nothing, and it is the only way to watch the
+game actually being *played well* rather than felt out. Two things to know before starting one. It
+begins in Red's bedroom and every step is relative to that, so it wants a game at the beginning —
+`--new-run`, or `POST /api/new-run` on a process that is already up. And it stops on **Victory Road
+2F rather than in the Hall of Fame**, because the step list does: the VR2F/VR3F boulder puzzle and
+the Elite Four are left out of it as PP-marginal for the team the route arrives with, and are proved
+separately from their own fixtures. When the queue empties the policy stops answering and the run
+parks where it stands.
+
+Which policy runs is `--policy`, or `GB_POLICY` for a deployment that would rather edit a ConfigMap
+than a command line. The flag wins where both are set.
+
 ## The run directory
 
 Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
@@ -489,6 +506,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_MAX_TOKENS` | ceiling on one completion (`8192`); `0` removes it |
 | `GB_REASONING_EFFORT` | sent as `reasoning_effort` when set — `none` turns thinking off entirely |
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog; `0` turns it off |
+| `GB_POLICY` | what plays the game: `llm` (default), `random` or `deterministic`; `--policy` wins |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
 | `GB_AUDIO_BITRATE` | the Opus stream's target, bits/s (`24000`); `0` turns sound off entirely |

@@ -627,7 +627,7 @@ impl LlmPolicy {
 }
 
 impl Policy for LlmPolicy {
-    fn name(&self) -> &'static str { "llm" }
+    fn name(&self) -> &'static str { crate::pokemon::policy::LLM_POLICY_NAME }
 
     /// Every LLM run is played by `AI`, whatever the model.
     ///

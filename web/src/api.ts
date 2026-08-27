@@ -89,11 +89,12 @@ export interface Status {
   /** How much emulated time the host has discarded on this run. Zero when it has kept up throughout. */
   dropped_ms: number;
   target_speed: number;
-  /** `"random"` or `"llm"`. */
+  /** `Policy::name()` — `"llm"`, `"random"` or `"scripted"` (`--policy deterministic`). */
   policy: string;
   /**
    * `GB_MODEL` — who is playing. `null` under any policy that is not an LLM, which is the same rule
-   * the leaderboard's column follows: `"random"` is not a model name and must not be shown as one.
+   * the leaderboard's column follows: `"random"` and `"scripted"` are not model names and must not
+   * be shown as ones.
    */
   model: string | null;
   /** Which arm of the agent's state machine is driving — the field that says why a run looks stuck. */

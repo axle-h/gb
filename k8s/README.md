@@ -12,7 +12,7 @@ whole state is one directory on one volume. There is nothing to scale and nothin
 re-applies the deployment. So the template is kept where a directory apply cannot reach it: copy it
 to `gb/secret.axh.yml` (gitignored), fill it in, and it is applied along with everything else.
 
-Set `GB_MODEL` in `gb/configmap.yml` and the hostname in `ingress.yml` first.
+Set `GB_POLICY` and `GB_MODEL` in `gb/configmap.yml` and the hostname in `ingress.yml` first.
 
 ```shell
 # Create the namespace. ⚠️ It must be `gb`: the ingress names the redirect middleware as
@@ -72,9 +72,38 @@ kubectl -n gb rollout restart deploy/gb    # resumes where it was
 kubectl -n gb exec deploy/gb -- ls /runs   # the run directories
 ```
 
-To watch it without spending anything, change the container's `args` to
-`["gb", "serve", "--policy", "random"]` — that policy needs no API key and no model, and it
-exercises the video pipeline, the page and the volume just the same.
+## What plays the game
+
+`GB_POLICY` in `gb/configmap.yml` — `llm`, `random` or `deterministic`. It used to be `--policy` on
+the container's `args`; the flag still exists and still wins over the variable, which makes it the
+override for a one-off `kubectl -n gb set args` rather than the standing configuration.
+
+⚠️ **A ConfigMap edit restarts nothing** — `envFrom` is read once at process start and the pod
+template has no checksum annotation, so it is always apply *then* restart:
+
+```shell
+$EDITOR ./gb/configmap.yml
+kubectl -n gb apply -f ./gb/configmap.yml
+kubectl -n gb rollout restart deploy/gb
+```
+
+Two of the three need no API key, no model and no spend, and both exercise the whole stack — the
+agent, the video pipeline, the page and the volume:
+
+- **`random`** picks a legal action at random. This is the one to switch to while an agent bug is
+  being fixed or the credit has run out, rather than leaving the pod erroring at every turn.
+- **`deterministic`** plays the scripted route `full_playthrough` plays, at 1× on the page instead of
+  in a test harness — a whole playthrough to watch, for nothing. ⚠️ **It starts in Red's bedroom and
+  every step is relative to that**, so it wants a game at the beginning: apply, restart, and then
+  `POST /api/new-run`. Resumed onto a mid-game save it replays a route the world has already moved
+  past. ⚠️ **It ends on Victory Road 2F rather than in the Hall of Fame**, because that step list
+  does: the VR2F/VR3F puzzle and the Elite Four are left out of it as PP-marginal for the team the
+  route arrives with (they are proved separately, from their own fixtures). The run parks there and
+  files no hall-of-fame entry.
+
+⚠️ **Moving to or from `--policy` on the args is one rollout, and the ConfigMap has to land first.**
+Applying `deployment.yml` changes the args and therefore rolls the pod, which is what picks up the
+variable; applying it before the ConfigMap rolls a pod that reads the old one.
 
 ## The image
 

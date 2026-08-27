@@ -18,8 +18,8 @@ export function App() {
   // the page is for.
   const [tab, setTab] = useState<PaneTab>('log');
   // The Plan tab is only offered while there is a plan (PlanPanel renders nothing without one, and
-  // `--policy random` never has one), so a selection that outlives its pane falls back to the log
-  // rather than to an empty column.
+  // only an LLM ever has one), so a selection that outlives its pane falls back to the log rather
+  // than to an empty column.
   const pane: PaneTab = tab === 'plan' && plan.length === 0 ? 'log' : tab;
   // The leaderboard's only cue that it is stale. A win is rare enough that this counter changes at
   // most once per run, and the log is already carrying the event that says so.
@@ -28,8 +28,9 @@ export function App() {
     [entries],
   );
 
-  // Who is playing. `null` under `--policy random`, where the run has no model and saying it has one
-  // would be a small lie — the policy name beside it is the honest answer there.
+  // Who is playing. `null` under every policy that is not an LLM — `random`, `scripted` — where the
+  // run has no model and saying it has one would be a small lie; the policy name beside it is the
+  // honest answer there.
   const player = status?.model ?? null;
 
   // ⚠️ **The tab is a third audience, and it is the one that is read while the page is not.** A

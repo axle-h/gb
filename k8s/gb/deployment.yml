@@ -50,24 +50,33 @@ spec:
         - name: gb
           image: ghcr.io/axle-h/gb:latest
           imagePullPolicy: Always
-          # ⚠️ **This line is what the cluster is actually running, and it is here so that applying
-          # this file is not a change.** It used to be commented out while the live Deployment was
-          # applied from a generated copy carrying `--policy random` — so a plain
-          # `kubectl -n gb apply -f ./gb` silently switched the run to `--policy llm` against a
-          # placeholder key and crash-looped it. `secret.axh.yml` closes the other half of that trap.
+          # ⚠️ **No `--policy` here any more: `GB_POLICY` in `configmap.yml` is what chooses the
+          # decider, and that is the one line to edit to move the run between the model, the random
+          # harness and the scripted playthrough.** `--policy` still exists and still *wins* over the
+          # variable, which is what makes it the right shape for a one-off `kubectl -n gb set args`
+          # and the wrong shape for the standing configuration — a flag lives in a file nobody reads
+          # while looking for a knob, and this one already caused a crash loop once: the live
+          # Deployment was applied from a generated copy carrying `--policy random` while the line
+          # here said `llm`, so a plain `kubectl -n gb apply -f ./gb` silently switched the run to a
+          # placeholder key. Both halves of that trap are now closed by the files that own them —
+          # `configmap.yml` for the policy, `secret.axh.yml` for the key.
           #
-          # **`--policy llm`**, against OpenRouter — see `configmap.yml` for the endpoint, the model
-          # and the context limit, and the ⚠️ there about `:floor` buying the flex service tier at
-          # half price in exchange for a queue.
+          # ⚠️ **A ConfigMap edit restarts nothing.** `envFrom` is read once at process start and
+          # this template has no checksum annotation, so a policy change is always
+          # `apply` **then** `kubectl -n gb rollout restart deploy/gb`.
           #
-          # ⚠️ `OPENAI_API_KEY` must be present and non-empty in the Secret for `--policy llm` to
-          # start at all, and against this endpoint it must also be **valid** — every request is
-          # authenticated, so a placeholder gets a 401 per turn rather than being ignored.
-          # `--policy random` needs no endpoint and no key and still exercises the whole stack — the
-          # agent, the video pipeline, the page and the volume — so it is what to switch back to when
-          # the credit runs out or the endpoint is refusing, rather than leaving the pod erroring at
-          # every turn. ⚠️ **The model is paid now, so a wedged run costs money rather than a
-          # quota**: `--policy random` is also the right answer while an agent bug is being fixed.
+          # The live setting is **`GB_POLICY: "llm"`**, against OpenRouter — see `configmap.yml` for
+          # that line, the endpoint, the model and the context limit, and the ⚠️ there about `:floor`
+          # buying the flex service tier at half price in exchange for a queue.
+          #
+          # ⚠️ `OPENAI_API_KEY` must be present and non-empty in the Secret for `GB_POLICY=llm` to
+          # start at all, and against OpenRouter it must also be **valid** — every request is
+          # authenticated, so a placeholder gets a 401 per turn rather than being ignored. The two
+          # policies that need neither an endpoint nor a key still exercise the whole stack — the
+          # agent, the video pipeline, the page and the volume — so one of them is what to switch to
+          # when the credit runs out or the endpoint is refusing, rather than leaving the pod
+          # erroring at every turn. ⚠️ **The model is paid now, so a wedged run costs money rather
+          # than a quota**: that is also the right answer while an agent bug is being fixed.
           #
           # `gb serve` RESUMES the newest run under $GB_RUN_DIR, which is what makes a pod restart
           # continue the playthrough instead of starting a new one. **To start the game over, do not
@@ -75,7 +84,7 @@ spec:
           # (see ../README.md). `--new-run` here is the fallback for a process that is not answering,
           # and ⚠️ left in place it would wipe the run on *every* restart, which is why it is not the
           # first thing this comment offers any more.
-          args: ["gb", "serve", "--policy", "llm"]
+          args: ["gb", "serve"]
           envFrom:
             - configMapRef:
                 name: gb

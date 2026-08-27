@@ -22,7 +22,7 @@ use crate::game_boy::GameBoy;
 use crate::model::Model;
 use crate::pokemon::agent::{AgentEvent, PokemonAgent};
 use crate::pokemon::map_metadata::MapMetadataCache;
-use crate::pokemon::policy::Policy;
+use crate::pokemon::policy::{LLM_POLICY_NAME, Policy};
 use crate::pokemon::{PokemonApi, PokemonApiTrait, observe};
 use crate::run::{CurrentRun, RunProgress};
 use crate::web::published::{
@@ -579,9 +579,13 @@ impl EmulatorHost {
                 started_at: meta.started_at.clone(),
                 app_version: crate::cli::VERSION.to_string(),
                 policy: self.agent.policy_name().to_string(),
-                // `RunMeta::model` is the literal `"random"` under `--policy random`; a leaderboard
-                // column that says "random" as if it were a model name would be a small lie.
-                model: (meta.model != "random").then(|| meta.model.clone()),
+                // ⚠️ **`RunMeta::model` is the *policy's* name under every policy but the LLM** —
+                // `"random"`, `"scripted"` — so it is asked of the policy rather than matched
+                // against a list of strings to keep out. A leaderboard column that said `scripted`
+                // as if it were a model name would be a small lie, and a list is a thing a fourth
+                // policy joins without anyone noticing.
+                model: (self.agent.policy_name() == LLM_POLICY_NAME)
+                    .then(|| meta.model.clone()),
                 playtime_seconds: *playtime_seconds,
                 playtime: playtime.clone(),
                 playtime_maxed,
@@ -1046,14 +1050,12 @@ impl EmulatorHost {
             policy: self.agent.policy_name(),
             // Who is playing, for the page's title and header. Cloned per *published* heartbeat
             // rather than per sample, and the heartbeat is send-on-change, so this is a handful of
-            // short strings a minute. `None` under `--policy random` — see the field.
-            model: self
-                .config
-                .run
-                .as_ref()
-                .map(|run| run.model())
-                .filter(|model| *model != "random")
-                .map(str::to_string),
+            // short strings a minute. `None` under every policy that is not the LLM, for the reason
+            // the hall-of-fame row above gives: that field holds the *policy's* name otherwise, and
+            // the page renders this one as the model.
+            model: (self.agent.policy_name() == LLM_POLICY_NAME)
+                .then(|| self.config.run.as_ref().map(|run| run.model().to_string()))
+                .flatten(),
             agent_state: self.agent.state_debug(),
             frame_seq: self.encoder.seq(),
             game,
