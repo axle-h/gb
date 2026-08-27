@@ -731,32 +731,66 @@ impl PPU {
         indexes
     }
 
+    /// Where each of `tile_indexes` appears **on the 20x18 screen**, in screen tile coordinates.
+    ///
+    /// Used by the Pokémon layer to read the game's own text out of the tile map — see
+    /// [`crate::pokemon::PokemonApiTrait::on_screen_text`].
+    ///
+    /// ⚠️ **Only what is actually displayed, and this used to scan all 32x32 of both maps at raw
+    /// map coordinates.** A tile map is 256x256 pixels and the screen shows 160x144 of it, so most
+    /// of both maps is off-screen at any moment — and Pokémon Red leaves things there. During a
+    /// battle a stale copy of the enemy's HUD sits below the visible rows of the window map, so
+    /// every read of the message box came back as
+    /// `"GEODUDE BRN Ember 23 22/ 63 Enemy GEODUDE's hurt by the burn! GEODUDE 10"`: the message,
+    /// with an invisible `GEODUDE 10` welded onto the end of it. Sorted by position that lands
+    /// *after* the message, so every frame of a page ended with the same nine characters, no frame
+    /// was a prefix of the next, and [`crate::pokemon::text::PokemonTextReader`] broke the page up
+    /// into one fragment per frame — 1456 bytes of `GEODUDE 10 Ene GEODUDE 10 Enem …` in a single
+    /// text box, on the deployed run of 2026-08-27.
+    ///
+    /// ⚠️ **The window is asked about per screen tile, not once for the frame.** The old version
+    /// took "the window is enabled" to mean "the window is everything", so anything in the window
+    /// map won over the background wherever it was. WX and WY decide that, and Pokémon Red parks
+    /// the window at WY=144 — entirely off-screen — for the whole of the overworld while its map
+    /// still holds the last screen drawn through it.
     pub fn tile_coordinates(&self, tile_indexes: &[u8]) -> Vec<(usize, Point8)> {
-        let mut coordinates = Vec::new();
         let bg_tile_map = self.tile_map(self.lcd_control.background_tile_map());
         let window_tile_map = self.tile_map(self.lcd_control.window_tile_map());
-        
+
         // map of tile indexes to their position in the tile_indexes array
         let tile_lookups: HashMap<u8, usize> = tile_indexes.iter().enumerate()
             .map(|(i, &index)| (index, i))
-            .collect(); 
+            .collect();
 
-        let window_enabled = self.lcd_control.window_enabled();
-        for y in 0..TILE_MAP_SIZE {
-            for x in 0..TILE_MAP_SIZE {
+        // ⚠️ **[`Self::window_enabled`], not `LcdControl`'s.** The window-enable bit is gated by
+        // LCDC bit 0 on DMG and means something else entirely on CGB, and this has to agree with
+        // the pixel loop about which surface is on screen.
+        let window_enabled = self.window_enabled();
+        let (wx, wy) = (self.window_position.x as usize, self.window_position.y as usize);
 
-                if window_enabled {
-                    let window_tile_index = window_tile_map.tile_index(x, y);
-
-                    if let Some(&index) = tile_lookups.get(&window_tile_index) {
-                        coordinates.push((index, Point8 { x: x as u8, y: y as u8 }));
-                        continue; // window overlays bg
+        let mut coordinates = Vec::new();
+        for y in 0..LCD_HEIGHT / TILE_PIXELS {
+            for x in 0..LCD_WIDTH / TILE_PIXELS {
+                let (px, py) = (x * TILE_PIXELS, y * TILE_PIXELS);
+                // The same test the pixel loop makes — see [`Self::in_window`]. `window_state` is
+                // per-scanline and only meaningful mid-frame, so the static half of it is used
+                // here: the window covers this tile if it starts at or above this row and at or
+                // left of this column.
+                let index = match window_enabled && py >= wy && px + 7 >= wx {
+                    true => {
+                        let (wtx, wty) = ((px + 7 - wx) / TILE_PIXELS, (py - wy) / TILE_PIXELS);
+                        match wtx < TILE_MAP_SIZE && wty < TILE_MAP_SIZE {
+                            true => window_tile_map.tile_index(wtx, wty),
+                            false => continue,
+                        }
                     }
-                }
-
-                let bg_tile_index = bg_tile_map.tile_index(x, y);
-                if let Some(&index) = tile_lookups.get(&bg_tile_index) {
-                    coordinates.push((index, Point8 { x: x as u8, y: y as u8 }));
+                    false => bg_tile_map.tile_index(
+                        (px as u8).wrapping_add(self.scroll.x) as usize / TILE_PIXELS,
+                        (py as u8).wrapping_add(self.scroll.y) as usize / TILE_PIXELS,
+                    ),
+                };
+                if let Some(&found) = tile_lookups.get(&index) {
+                    coordinates.push((found, Point8 { x: x as u8, y: y as u8 }));
                 }
             }
         }
