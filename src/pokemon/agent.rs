@@ -1604,10 +1604,21 @@ impl PokemonAgent {
                         self.abort_overworld(destination, OverworldActionAbortedReason::Textbox, at);
                     }
                 }
-                let reader = if matches!(self.state, AgentState::Battle(_)) {
-                    PokemonTextReader::message_box_only()
-                } else {
-                    PokemonTextReader::default()
+                // ⚠️ **Which reader is a fact about the *game*, not about the agent's own state,
+                // and reading it off the state was the bug.** A battle screen has the two HUDs on
+                // it — `ONIX` and its level at y=0, ours at y=7 — and a full-screen reader splices
+                // them into the front of every frame of the message. That is only correct while
+                // `self.state` is `Battle(_)`, and it is not: the arm below drops to `Idle` when a
+                // box closes, so the *first* box of a battle got the message-box reader and every
+                // one after it got the full-screen one. Deployed, that read as
+                // `Emb ONIX 14Ember ONIX 14Ember us …`. `wIsInBattle` is the condition that
+                // actually says a HUD is on screen, and `read_battle_state` returns on that byte
+                // before it reads anything else.
+                let in_battle = crate::pokemon::battle::BattleStateReader::read_battle_state(api.mmu())
+                    .is_some();
+                let reader = match in_battle {
+                    true => PokemonTextReader::message_box_only(),
+                    false => PokemonTextReader::default(),
                 };
                 // ⚠️ **A menu the agent did not open is closed, not confirmed — it must never begin
                 // reading one as though it were a conversation.** This is the transition where the

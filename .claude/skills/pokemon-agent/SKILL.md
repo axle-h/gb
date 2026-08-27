@@ -153,6 +153,48 @@ sort key and the tests.
 
 ### What the agent reports
 
+⚠️ **The screen is a *page being typed*, and `PokemonTextReader` used to treat it as a stream to splice.** Frames of
+one page are prefixes of one another; the page then clears and the next is typed. The old accumulator instead
+appended `screen[longest_suffix_of_buffer_that_is_a_prefix_of_screen ..]` — which works while frames arrive in order
+and fails **permanently** the first time one does not, because the re-appended screen makes the tail match again next
+frame and not the frame after. A sawtooth that grows quadratically: **1456 bytes in one text box**, deployed. Three
+rules now, and the second and third are the ones that look optional: a frame in a prefix relation either way extends
+the page; anything else is spliced on the overlap **against the page, never against the buffer** (overlap against the
+whole history is the old algorithm again); and ⚠️ **a blank frame commits nothing** — it is far more often a battle
+animation mid-redraw than a page break, and committing on it was half the sawtooth. ⚠️ **One mismatching read is not a
+page break either**, because `AutoBgMapTransfer` tears a two-line box across a frame
+(`"Our POKéMON's an outsider, outsider, so it's"`); `MISMATCHES_BEFORE_PAGE_BREAK` is 2, the smallest number that
+outlives a tear. ⚠️ **`take` reports the open page as well as the committed ones**, or every blocker's last page goes
+on the floor — which is the bug `flush_text_reader` exists to fix, one level down.
+
+⚠️ **`commit_page` joins pages verbatim, and both attempts to tidy up there deleted real text.** Splicing a page onto
+the buffer's tail on their overlap, and dropping a page already contained in it, are the obvious cleanup for a tear
+committed mid-scroll — and the cartridge repeats itself constantly (`"Ember used RAGE!"` once per turn of a five-turn
+battle, `"Critical hit!"`, `"Got away safely!"`), so any lookback long enough to catch a tear catches those too.
+Measured on the deployed states it took the worst box from 654 bytes to 398 **by deleting four turns of a battle**.
+Deduplication belongs only where a frame is compared with the page it is redrawing.
+
+**The numbers, and the recipe for reproducing any of this**: `issues/turn-{170,206,440}/state.gbst` from the deployed
+run, driven by `RandomPolicy::seeded(1..=3)` for 600 s emulated, collecting `AgentEvent::TextBox`. Worst box
+**1456 → 654 bytes**, and every box still over 200 is a real one — a Metapod HARDEN stalemate, the nurse's dialogue
+with `HEAL CANCEL` genuinely on screen, the museum's money window. No sawtooth at any seed.
+
+⚠️ **`PPU::tile_coordinates` answered with tiles that are not on the screen, and that is what fed the reader the
+contamination.** It walked all 32×32 of both tile maps at raw map coordinates; a tile map is 256×256 pixels and the
+screen shows 160×144 of it. Pokémon Red leaves a stale copy of the enemy HUD below the visible rows of the **window**
+map, which sorts *after* the message box, so every frame of a battle message came back as
+`"… Enemy GEODUDE's hurt by the burn! GEODUDE 10"` — the same nine invisible characters welded onto the end of every
+frame, so no frame was ever a prefix of the next. It now walks the **20×18 screen** and returns screen coordinates
+(which is what `MESSAGE_BOX_MIN_Y` always assumed). ⚠️ **The window is decided per tile, not once per frame**: the old
+code read "window enabled" as "the window is everything", and Red parks the window at **WY=144, entirely off-screen**,
+for the whole of the overworld while its map still holds the last screen drawn through it.
+
+⚠️ **Which reader is a fact about the *game*, not about `AgentState`.** `assert_text_box_state` picked
+`message_box_only` on `matches!(self.state, AgentState::Battle(_))` — but its own other arm drops to `Idle` when a box
+closes, so the *first* box of a battle got the message-box reader and every one after it got the full-screen one, HUDs
+and all. It reads `wIsInBattle` (`BattleStateReader::read_battle_state`) now, which is the condition that actually says
+a HUD is on screen.
+
 ⚠️ **A textbox is detected before its characters are drawn**, so the reader emits a stream of empty ones — on the
 deployed run they were most of the log. `PokemonAgent::event` drops them, and it is the funnel *every* event goes
 through (including those collected into `update`'s local `new_events`), so the transcript is clean as well as the page.
