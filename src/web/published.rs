@@ -193,7 +193,12 @@ pub enum UiEventBody {
     /// The source is carried whole rather than as a flag saying there is one, because the panel's
     /// entire purpose is reading it — and it is bounded by `battle_script::MAX_SOURCE` (6 kB), which
     /// a page pays once per change rather than per heartbeat.
-    BattleScript { source: Option<String>, armed: bool, last_failure: Option<String> },
+    /// ⚠️ **`is_default` is on the wire rather than inferred from the other two.** Every run now
+    /// starts on `battle_script::DEFAULT`, which is a real source that is `armed: false` because it
+    /// decides nothing — the same shape as a script the model wrote and never armed, which the page
+    /// would otherwise have to distinguish by guessing that the second case is unreachable. The
+    /// server knows; it costs one boolean a handful of times per playthrough.
+    BattleScript { source: Option<String>, armed: bool, is_default: bool, last_failure: Option<String> },
     /// §9 — the history was compacted. `before` and `after` are tokens, on the calibrated scale
     /// `llm::accounting` describes.
     Compacted {
@@ -1059,6 +1064,7 @@ mod tests {
         let armed = |source: &str| UiEventBody::BattleScript {
             source: Some(source.to_string()),
             armed: true,
+            is_default: false,
             last_failure: None,
         };
 
@@ -1083,6 +1089,7 @@ mod tests {
         published.publish_event(UiEventBody::BattleScript {
             source: Some("battle.fight(battle.best_move);".to_string()),
             armed: false,
+            is_default: false,
             last_failure: Some("it named a move the Pokémon does not know".to_string()),
         });
         let (_receiver, opening) = published.join_events();

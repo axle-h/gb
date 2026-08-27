@@ -701,19 +701,19 @@ pub fn battle_script_tools() -> Vec<ToolSpec> {
         ),
         ToolSpec::new(
             "read_battle_script",
-            "The battle script you have installed, and whether it is still deciding your battle turns.",
+            "The battle script you have installed, and whether it is still deciding your battle turns. Every run starts on a default one that decides nothing, so this always has something to show you.",
             no_arguments(),
         ),
         ToolSpec::new(
             "set_battle_script",
             format!(
-                "Install a script that decides your battle turns for you, in Rhai. A turn it answers costs no request at all, so a routine wild encounter becomes free. It is run against six example battles before it is installed and you are told what it chose in each; if it later fails it is disarmed and that turn comes back to you with the reason. Omit `script` to go back to answering every battle turn yourself. At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
+                "Install a script that decides your battle turns for you, in Rhai. A turn it answers costs no request at all, so a routine wild encounter becomes free. It is run against six example battles before it is installed and you are told what it chose in each; if it later fails it is disarmed and that turn comes back to you with the reason. Omit `script` to go back to the default, which hands you every turn. At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
             ),
             json!({
                 "type": "object",
                 "properties": {
                     "script": { "type": "string",
-                                "description": "The script. Omit to remove the one installed." },
+                                "description": "The script. Omit to go back to the default one." },
                 },
                 "additionalProperties": false,
             }),

@@ -25,6 +25,11 @@ export function App() {
   // anything otherwise, and only an LLM ever has either — so a selection that outlives its pane falls
   // back to the log rather than to an empty column. Both can vanish under a running page: a
   // `POST /api/new-run` clears the plan and the script together.
+  //
+  // ⚠️ **The Script tab is now offered from an LLM run's first turn**, because every run starts on
+  // `battle_script::DEFAULT` rather than on nothing. That is the honest answer and not clutter: the
+  // chip in the head says `default`, which is the live fact that this run's battles are costing it a
+  // request each. A run under `random` or `deterministic` still publishes no script and gets no tab.
   const scripted = battleScript?.source != null;
   const chosen: PaneTab = tab === 'script' && !scripted ? 'log' : tab;
   const pane: PaneTab = chosen === 'plan' && plan.length === 0 ? 'log' : chosen;

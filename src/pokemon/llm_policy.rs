@@ -961,7 +961,7 @@ impl Policy for LlmPolicy {
         // and a battle can start before then — so without this the first battles of the new game
         // are fought by the previous game's script. The worker re-arms from the *new* run's file
         // when it catches up, which is empty for a fresh run and correct for a resumed one.
-        self.handles.live_script.arm(None, ScriptState::Unset);
+        self.handles.live_script.arm(None, ScriptState::Unedited);
     }
 
     /// Collected by the agent at the top of its next tick, ahead of the state machine.
@@ -2979,17 +2979,24 @@ mod tests {
             assert!(rig.pump_overworld(&mut policy).is_some(), "overworld turn {turn} decided nothing");
         }
 
-        let published: Vec<(Option<String>, bool)> = rig
+        let published: Vec<(Option<String>, bool, bool)> = rig
             .events
             .try_iter()
             .filter_map(|event| match event.body {
-                UiEventBody::BattleScript { source, armed, .. } => Some((source, armed)),
+                UiEventBody::BattleScript { source, armed, is_default, .. } => Some((source, armed, is_default)),
                 _ => None,
             })
             .collect();
-        assert_eq!(published.len(), 1, "one event for one script, not one per turn: {published:#?}");
-        assert_eq!(published[0].0.as_deref(), Some(SCRIPT), "and it carries the source, not a flag");
-        assert!(published[0].1, "armed, which is the fact the panel is drawn from");
+        // ⚠️ **Two, and the first one is the default.** Every run starts on `battle_script::DEFAULT`
+        // now, so the page is told once that the run has a script deciding nothing — which is the
+        // live fact that its battles are costing a request each — and once when that stops being
+        // true. The three turns after the arming still publish nothing, which is what this is for.
+        assert_eq!(published.len(), 2, "one event per change, not one per turn: {published:#?}");
+        assert!(published[0].2, "the first is the default: {published:#?}");
+        assert!(!published[0].1, "which is never armed, or the page would call the battles free");
+        assert_eq!(published[1].0.as_deref(), Some(SCRIPT), "and it carries the source, not a flag");
+        assert!(published[1].1, "armed, which is the fact the panel is drawn from");
+        assert!(!published[1].2, "and no longer the default");
     }
 
     /// **The whole feature, in one number.** A battle is fought from beginning to end and the
@@ -3128,7 +3135,7 @@ mod tests {
     /// for had ever said the charge was optional; the case for a script lived only in the system
     /// prompt, which by then was four hundred turns from the end of the context.
     #[test]
-    fn a_battle_turn_with_no_script_says_there_is_none_and_names_both_tools() {
+    fn a_battle_turn_on_the_default_script_says_so_and_names_the_tools_in_order() {
         let (mut rig, mut policy) = Rig::new(vec![]);
         rig.endpoint.replies.lock().unwrap()
             .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
@@ -3138,12 +3145,15 @@ mod tests {
 
         let situation = rig.requests().last().expect("a battle request").messages.last()
             .expect("a situation").text().unwrap_or_default().to_string();
-        assert!(situation.contains("No battle script is set"), "{situation}");
-        // Both, and in the order they have to be called: the docs are what make the second
-        // affordable, and a model sent straight at `set_battle_script` writes from memory.
+        assert!(situation.contains("still the default one"), "{situation}");
+        // ⚠️ **All three, in the order they have to be called.** `read_battle_script` leads because
+        // the default makes it answer with a file to edit rather than with "there is none", which is
+        // the whole of what this change bought; the docs are what make `set_battle_script`
+        // affordable, and a model sent straight at it writes a script from memory.
+        let read = situation.find("read_battle_script").unwrap_or_else(|| panic!("{situation}"));
         let docs = situation.find("get_battle_script_docs").unwrap_or_else(|| panic!("{situation}"));
         let set = situation.find("set_battle_script").unwrap_or_else(|| panic!("{situation}"));
-        assert!(docs < set, "named in the order they are called: {situation}");
+        assert!(read < docs && docs < set, "named in the order they are called: {situation}");
     }
 
     /// ⚠️ **The half of the disarm that was silent, and the expensive half.** The failure is

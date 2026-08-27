@@ -413,6 +413,7 @@ export function useEventStream(): EventStream {
             const view: BattleScriptView = {
               source: script.source,
               armed: script.armed,
+              is_default: script.is_default,
               last_failure: script.last_failure,
             };
             setBattleScript((live) => live ?? view);
@@ -482,7 +483,12 @@ export function useEventStream(): EventStream {
           return;
         }
         if (event.type === 'battle_script') {
-          setBattleScript({ source: event.source, armed: event.armed, last_failure: event.last_failure });
+          setBattleScript({
+            source: event.source,
+            armed: event.armed,
+            is_default: event.is_default,
+            last_failure: event.last_failure,
+          });
           return;
         }
         if (event.type === 'decision' && event.usage) setUsage(event.usage);

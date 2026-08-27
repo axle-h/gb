@@ -1044,6 +1044,12 @@ header .trophy:hover {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }
 
+/* The run that has not written a script yet: a fact rather than a fault, so it is neither the
+   accent the armed chip earns nor the warning colour a failure gets. */
+.script-state.default {
+  color: var(--dim);
+}
+
 .script-state.disarmed {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 40%, var(--line));

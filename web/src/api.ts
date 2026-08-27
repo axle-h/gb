@@ -130,8 +130,14 @@ export interface TodoView {
 export interface BattleScriptView {
   /** The Rhai source, verbatim, up to `battle_script::MAX_SOURCE` (6 kB). `null` when there is none. */
   source: string | null;
-  /** Whether the policy is actually consulting it this turn. */
+  /** Whether the policy is actually consulting it this turn. False for the default, which decides nothing. */
   armed: boolean;
+  /**
+   * Whether this is `battle_script::DEFAULT`, which every run starts on and which hands every battle
+   * turn back to the model. It is a real source that is not armed, so it cannot be told apart from a
+   * script the model wrote and never armed without being told — hence a field rather than a guess.
+   */
+  is_default: boolean;
   /** Why it was disarmed, when it was. `null` for a script that has never failed. */
   last_failure: string | null;
 }

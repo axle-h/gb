@@ -46,14 +46,17 @@ export function BattleScriptPanel({
 
   const showing = alwaysOpen || open;
   const count = lines.length;
+  const state = script.armed ? 'armed' : script.is_default ? 'default' : 'disarmed';
 
   return (
     <div className={`battle-script${showing ? ' open' : ''}`}>
       <div className="script-head">
         <span className="script-title">Battle script</span>
-        <span className={`script-state ${script.armed ? 'armed' : 'disarmed'}`}>
-          {script.armed ? 'armed' : 'disarmed'}
-        </span>
+        {/* Three states, not two. `default` is the run that has not written a script yet: a real
+            source, not armed, nothing wrong with it — calling that "disarmed" would report a fault
+            where there is none, and calling it "armed" would say the battles going past are free
+            when the run is paying a full request for every one. */}
+        <span className={`script-state ${state}`}>{state}</span>
         <span className="dim script-size">
           {count} line{count === 1 ? '' : 's'}
         </span>
@@ -72,7 +75,7 @@ export function BattleScriptPanel({
         <div className="script-body">
           {/* Above the code rather than below it: a disarmed script is still the thing being read,
               and the question a reader opens this with is why it stopped. */}
-          {!script.armed && script.last_failure && (
+          {state === 'disarmed' && script.last_failure && (
             <p className="script-failure">
               <span className="mark" aria-hidden="true">
                 ✗
@@ -80,7 +83,13 @@ export function BattleScriptPanel({
               {script.last_failure}
             </p>
           )}
-          {!script.armed && !script.last_failure && (
+          {state === 'default' && (
+            <p className="script-failure quiet">
+              The default script, which every run starts on. It decides nothing and hands every battle turn back to the
+              model, so each one costs a request.
+            </p>
+          )}
+          {state === 'disarmed' && !script.last_failure && (
             <p className="script-failure quiet">Written but not armed. Battle turns are being decided one at a time.</p>
           )}
           <ol className="code" aria-label="battle script source">
