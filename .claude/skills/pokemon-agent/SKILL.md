@@ -28,6 +28,45 @@ it must not reset the clock it reads**, or the jam clears the instant it is noti
 run: `ordinary_play_stays_far_inside_the_stuck_timeout` measures the longest silence at ~6 s against the 300 s
 default.
 
+### The scripted policy's detours, and what a new run forgets
+
+⚠️ **Every branch of `DeterministicPolicy` that routes must be bounded, and the heal-return detour was
+the one that was not.** `route_toward` reads the **incremental** world graph, whose nodes are keyed on the
+entry the agent actually *landed* on — so a section reached any other way has no node, and `bfs_nodes`'
+`SNAP_THRESHOLD` of 8 tiles will not reach it. The deployed run of **2026-08-28** blacked out in Mt Moon,
+walked back in through B1F's (5,5), and fled a Zubat in the fossil chamber on 4 HP: its only two exits land
+on B1F at (23,3) and (21,17), 20 and 28 tiles from the single observed node, so both resolve to dangling
+targets and `pick_shortest_path_action` answered `None`. The branch returned that unconditionally — and,
+being an early return **above** the `[policy] map=…` print, it went *silent*: no line, no counter, no
+watchdog (the agent reaches a decision point every tick, so `GB_STUCK_TIMEOUT_SECS` never fires), the
+emulator still running and the page still green. Hours, until a human looked. `MAX_HEAL_ROUTE_WAIT` is the
+bound and it matches `MAX_GYM_ROUTE_WAIT`'s reasoning — a black-out warp leaves the map unsettled for a few
+ticks, so waiting first is right and waiting for ever is not. ⚠️ **Handing back to the main queue is the
+right give-up, not parking**: the queue is a *route*, so its next step walks out of the dungeon, which is
+where the Pokémon Centre is. Fainting on the way is not a failure — the black-out heals the party and the
+queue resumes. Guards: `a_heal_detour_that_cannot_route_hands_back_to_the_route` and
+`a_heal_detour_that_is_moving_is_never_abandoned`, and ⚠️ **the second cannot be the first inverted** —
+from inside Mt Moon no centre is an edge target of any observed node, so it returns `None` honestly and an
+`if is_some()` around the assertions asserts nothing at all. It has to be Cerulean, where the centre is one
+warp from the observed node.
+
+⚠️ **`Policy::restart` resets a *run*, and the queue was only the half of it anyone had noticed.**
+`POST /api/new-run` starts the cartridge over in a live process, so every field scoped to a run is now
+about a game that no longer exists: `gym_beaten` would skip gyms the fresh save has not beaten,
+`last_pokemon_center` and `heal_return` would send Red's bedroom detouring to Mt Moon, `train_slot` would
+switch in a party slot that is not there. It survived only because the one deployed reset followed a
+process wedged at step 0 with all of it still empty. The policy is rebuilt from its **seed** rather than
+patched field by field, so a field added later is untainted by construction — which is the property a list
+of assignments cannot promise, and the reason `seed` is stored at all.
+
+⚠️ **"No cursor on disk" does not mean "a new game", and reading it that way destroys a run.** A run
+started before `scripted-progress.json` existed has no file *and* a save in the middle of the game. The
+rollout of 2026-08-28 resumed one standing in Victory Road, restarted the route at
+`EnterMap { RedsHouse1F }`, and burned 745 polls failing to route out of a map the route knows nothing
+about. The absence of the file cannot tell the two apart, so `resuming_in` takes the answer from the caller
+(`Origin::Fresh`) and **parks** otherwise — the same argument as the changed-route branch beside it, which
+was already right for exactly this reason.
+
 ### Closed loops the agent walks into
 
 ⚠️ **Every Gen 1 PC menu is a closed loop under A-only input, and `ReadingTextBox` presses B when

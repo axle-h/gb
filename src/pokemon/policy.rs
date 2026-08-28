@@ -2468,6 +2468,9 @@ struct ScriptedCursor {
 
 pub struct DeterministicPolicy {
     rng: StdRng,
+    /// The seed both `rng` and `name_picker` were built from, kept so [`Policy::restart`] can
+    /// rebuild this policy exactly as a fresh process would build it.
+    seed: u64,
     queue: VecDeque<PolicyStep>,
     /// Where to record how far along the route this run is, and what it last recorded. `None`
     /// everywhere but `gb serve` — a test builds its own queue and has nothing to resume into.
@@ -2499,6 +2502,10 @@ pub struct DeterministicPolicy {
     /// afford at all. Comparing this against the next visit is what tells "the shop is not working"
     /// from "the wallet is empty", without needing the ROM price table here.
     mart_baseline: Option<(u32, u8)>,
+    /// Consecutive ticks the heal-return detour has been unable to move: no route to the Pokémon
+    /// Centre it is aiming at, or no Nurse in sight after arriving. Bounded because the detour is
+    /// otherwise a silent permanent stall — see the ⚠️ on the branch in `pick_overworld_action`.
+    heal_route_stuck: u32,
     /// Consecutive ticks the current `DefeatGymLeader` step has failed to find a route to its gym.
     /// A lost gym battle blacks the player out, and for a few ticks after that warp the map/actions are
     /// still unsettled, so routing legitimately fails; popping the step on the first failure (as this
@@ -2611,6 +2618,10 @@ impl DeterministicPolicy {
     /// Ticks a `DefeatGymLeader` step waits for a route to its gym before concluding there isn't one
     /// (20 ms each, so ~8 s of game time — long enough to cover a black-out warp and its dialogue).
     const MAX_GYM_ROUTE_WAIT: u32 = 400;
+    /// Ticks the heal-return detour waits before concluding it cannot get to the Pokémon Centre and
+    /// handing back to the main queue. Same units and the same reason as `MAX_GYM_ROUTE_WAIT`
+    /// (20 ms each, ~8 s of game time — long enough to cover a black-out warp and its dialogue).
+    const MAX_HEAL_ROUTE_WAIT: u32 = 400;
     const MAX_MART_ATTEMPTS: u32 = 4;
     /// How many times to hand one `UseBagItem` step to the driver before giving up (workstream I).
     /// A use the game declines consumes nothing, so without a bound the step retries for the whole
@@ -2637,21 +2648,39 @@ impl DeterministicPolicy {
     /// were we". Every test builds its queue and its expectations together and must keep starting
     /// from step 0.
     ///
-    /// Three outcomes, and the third is the one worth reading:
-    /// - **no file** — a run that has never recorded one, i.e. a new game. Start at the beginning.
+    /// Four outcomes, and the last two are the ones worth reading:
+    /// - **no file, on a run starting from the beginning of the game** — nothing to resume. Start
+    ///   at step 0, and record a cursor immediately so the next process has one.
     /// - **it matches** — skip that many steps and carry on. This is a rollout surviving.
     /// - **the route has changed under it** — the queue is emptied and the policy parks. ⚠️ **Not
     ///   "start from 0"**, which is the very failure this exists to prevent: a cursor is only
     ///   meaningful against the list it was counted on, and replaying a different route from the
     ///   beginning against a mid-game save is how a run gets destroyed rather than merely stopped. A
     ///   parked run is obvious, keeps its save, and is one `POST /api/new-run` from playing again.
+    /// - ⚠️ **no file, on a run being *resumed*** — parks, for that same reason, and this is not a
+    ///   hypothetical. A run started before cursors existed has no file and a save in the middle of
+    ///   the game, and "no file means a new game" read that as Red's bedroom: the rollout of
+    ///   2026-08-28 resumed a run standing in Victory Road, restarted the route at
+    ///   `EnterMap { RedsHouse1F }`, and sat there failing to route for 745 polls until a human
+    ///   started a new run. **Which of the two it is cannot be inferred from the file's absence**,
+    ///   so the caller — who knows whether it just created this directory — passes it in.
     #[cfg(feature = "web")]
-    pub fn resuming_in(mut self, run_dir: &std::path::Path) -> Self {
+    pub fn resuming_in(mut self, run_dir: &std::path::Path, from_the_beginning: bool) -> Self {
         let total = self.queue.len();
         let route = scripted_progress::fingerprint(self.queue.make_contiguous());
         let full_route: Vec<PolicyStep> = self.queue.iter().cloned().collect();
         match scripted_progress::load(run_dir) {
-            None => println!("[policy] no scripted progress on disk — starting the route from the beginning"),
+            None if from_the_beginning =>
+                println!("[policy] no scripted progress on disk — starting the route from the beginning"),
+            None => {
+                println!(
+                    "[policy] ⚠️ this run is being resumed but recorded no scripted progress, so \
+                     there is no telling how much of the {total}-step route its save has already \
+                     played. Parking rather than replaying the route over a game that may be \
+                     part-way through it. Start a new run to play this one.",
+                );
+                self.queue.clear();
+            }
             Some((completed, saved_total, saved_route)) if saved_total == total && saved_route == route => {
                 println!("[policy] resuming the scripted route at step {completed}/{total}");
                 self.queue.drain(..completed.min(total));
@@ -2697,12 +2726,14 @@ impl DeterministicPolicy {
     pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
+            seed,
             queue: steps.into_iter().collect(),
             #[cfg(feature = "web")]
             progress: None,
             name_picker: PokemonNamePicker::seed_from_u64(seed),
             last_pokemon_center: None,
             heal_return: None,
+            heal_route_stuck: 0,
             mart_attempts: 0,
             mart_baseline: None,
             gym_route_stuck: 0,
@@ -2793,20 +2824,57 @@ impl Policy for DeterministicPolicy {
         // stored the target Pokémon Center in `heal_return`.  Route there over the
         // incrementally-built graph (the pokecenter and the way back are already known,
         // since we walked here) and talk to the Nurse before resuming the main queue.
+        //
+        // ⚠️ **The detour is bounded, because the graph it routes over can be missing the way
+        // back.** `route_toward` reads the *incremental* world graph, whose nodes are keyed on the
+        // entry the agent actually landed on — so a section reached some other way (walked to from
+        // a neighbouring section, or arrived in by a black-out warp) has no node, and every exit
+        // leading to one is a dangling target the BFS dead-ends on. Mt Moon B2F is the case that
+        // shipped: the deployed run of 2026-08-28 blacked out, walked back in through B1F's (5,5),
+        // and fled a Zubat in the fossil chamber whose only two exits land on B1F at (23,3) and
+        // (21,17), 20 and 28 tiles from the one observed node and so past `SNAP_THRESHOLD` both.
+        // `route_toward` answered `None`, this branch returned it, and — being an unconditional
+        // early return above the `[policy]` print — the run went **silent and motionless for
+        // hours** with the emulator still running. Every other step that routes carries a bound
+        // (`gym_route_stuck`, `enter_stuck`, `interact_skip_waits`); this one did not.
         if let Some(pokecenter) = self.heal_return {
-            return if state.map.map == pokecenter {
+            if state.map.map == pokecenter {
                 // Arrived — find and interact with the Nurse.
                 if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Sprite("Nurse")) {
                     self.heal_return = None;
-                    Some(action.clone())
-                } else {
-                    // Pokecenter map but Nurse tile not visible yet — wait.
-                    None
+                    self.heal_route_stuck = 0;
+                    return Some(action.clone());
                 }
+                // Pokecenter map but Nurse tile not visible yet — wait, but not for ever: the
+                // sprite is a tile or two away on a map that always has one, so this is the
+                // arrival settling rather than a state to sit in.
+                self.heal_route_stuck += 1;
+                if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT {
+                    return None;
+                }
+                println!("[policy] no Nurse in sight on {pokecenter} — carrying on without the heal");
+                self.heal_return = None;
+                self.heal_route_stuck = 0;
+            } else if let Some(action) = Self::route_toward(world_graph, &actions, pokecenter) {
+                // Still travelling — take the next step toward the pokecenter.
+                self.heal_route_stuck = 0;
+                return Some(action);
             } else {
-                // Still travelling — pick next step toward the pokecenter.
-                Self::route_toward(world_graph, &actions, pokecenter)
-            };
+                // Right after a black-out warp the map and its actions are briefly unsettled, so
+                // wait rather than abandoning on the first miss — the same reason `gym_route_stuck`
+                // waits. Past the bound the centre is genuinely unroutable from here and the main
+                // queue is the better answer: it is a *route*, so its next step walks out of the
+                // dungeon, which is where the centre is. Fainting on the way is not a failure —
+                // the black-out heals the party and the queue picks up where it was.
+                self.heal_route_stuck += 1;
+                if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT {
+                    return None;
+                }
+                println!("[policy] no route from {} to {} to heal — carrying on with the route",
+                    state.map.map, pokecenter);
+                self.heal_return = None;
+                self.heal_route_stuck = 0;
+            }
         }
 
         println!("[policy] map={} pos={} front={:?} queue_len={}",
@@ -4530,13 +4598,23 @@ impl Policy for DeterministicPolicy {
     /// copy taken when the cursor was set up, and the file is deleted rather than rewritten — the
     /// run directory is a different one by now, and the `run_dir` handed in is the authority on
     /// where the next cursor goes.
+    /// ⚠️ **And the queue was only the half of it that had already gone wrong.** Everything else
+    /// this policy remembers is scoped to a run and none of it was being cleared, so a new game
+    /// started in a live process inherited the dead one's memory: `gym_beaten` would skip gyms the
+    /// fresh save has not beaten, `last_pokemon_center` and `heal_return` would send Red's bedroom
+    /// detouring to Mt Moon, and `train_slot` would switch in a party slot that does not exist.
+    /// It survived only because the one deployed `POST /api/new-run` happened to follow a process
+    /// that had wedged at step 0 with all of it still empty. So the policy is rebuilt from its
+    /// seed rather than patched field by field — a new field is then untainted by construction,
+    /// which is the property a list of assignments cannot promise.
     #[cfg(feature = "web")]
     fn restart(&mut self, run_dir: Option<&std::path::Path>) {
-        let Some(cursor) = self.progress.as_mut() else { return };
+        let Some(mut cursor) = self.progress.take() else { return };
         scripted_progress::clear(&cursor.dir);
-        self.queue = cursor.full_route.iter().cloned().collect();
         if let Some(dir) = run_dir { cursor.dir = dir.to_path_buf(); }
         cursor.written = usize::MAX;
+        *self = Self::new(self.seed, cursor.full_route.iter().cloned());
+        self.progress = Some(cursor);
         println!("[policy] new run — the scripted route starts again at step 0");
         self.record_progress();
     }
@@ -4678,6 +4756,85 @@ mod policy_helper_tests {
     }
 }
 
+#[cfg(test)]
+mod heal_detour_tests {
+    use super::*;
+    use crate::pokemon::integration_tests::fixture::TestFixture;
+
+    /// ⚠️ **The heal-return detour must hand back rather than wait for ever, and this is the
+    /// deployed run of 2026-08-28.** It fled a wild battle on Mt Moon B2F on 4 HP, aimed itself at
+    /// the Mt Moon Pokémon Centre, and `route_toward` had nothing to answer with: the incremental
+    /// world graph is keyed on the entry the agent *landed* on, the fossil chamber's only two exits
+    /// land on B1F 20 and 28 tiles from the single observed node, and `SNAP_THRESHOLD` is 8. The
+    /// branch returned that `None` unconditionally — above the `[policy]` print — so the run went
+    /// silent and motionless for hours with the emulator still running and the page still live.
+    ///
+    /// A fresh `WorldGraph` reproduces the condition exactly and from any fixture: it knows nothing,
+    /// so there is no route to anywhere. What is asserted is that the wait is **bounded** and that
+    /// the main queue is consulted again on the other side of it — the queue is a *route*, so its
+    /// next step is the way out of the dungeon, which is where the Pokémon Centre is.
+    #[test]
+    fn a_heal_detour_that_cannot_route_hands_back_to_the_route() {
+        let mut fixture = TestFixture::new(
+            include_bytes!("data/mt-moon.bin"), std::time::Duration::from_secs(1), vec![]);
+        let state = fixture.game_state();
+        let centre = Map::MtMoonPokecenter;
+        assert_ne!(state.map.map, centre, "the fixture must be somewhere the detour has to travel to");
+
+        // The step is `enter` the map the player is already on, which pops on sight — so the queue
+        // shrinking is proof the detour let go, whatever the fixture happens to be standing on.
+        let mut policy = DeterministicPolicy::new(42, vec![PolicyStep::enter(state.map.map)]);
+        policy.last_pokemon_center = Some(centre);
+        policy.heal_return = Some(centre);
+        let graph = WorldGraph::new();
+
+        for poll in 1..DeterministicPolicy::MAX_HEAL_ROUTE_WAIT {
+            assert!(policy.pick_overworld_action(&state, &graph).is_none(), "poll {poll}");
+            assert_eq!(policy.heal_return, Some(centre), "still trying at poll {poll}");
+            assert_eq!(policy.steps_remaining(), Some(1), "the queue is untouched at poll {poll}");
+        }
+
+        policy.pick_overworld_action(&state, &graph);
+        assert_eq!(policy.heal_return, None, "the detour let go");
+        assert_eq!(policy.steps_remaining(), Some(0), "and the route is being played again");
+    }
+
+    /// ⚠️ **The bound must not fire on a detour that is working**, or a heal several maps away is
+    /// abandoned part-way and the fix is worse than the bug. The counter is reset by every step the
+    /// detour actually takes, so a long walk to the Nurse never runs it down.
+    ///
+    /// Cerulean rather than Mt Moon because the graph has to be able to *answer*: the centre is a
+    /// warp out of the city the fixture is standing in, so one observed node is a route. ⚠️ **The
+    /// negative test above cannot be inverted to make this one** — from inside Mt Moon no centre is
+    /// an edge target of any observed node, so it returns `None` for the honest reason and an
+    /// `if is_some()` around the assertions would quietly assert nothing at all.
+    #[test]
+    fn a_heal_detour_that_is_moving_is_never_abandoned() {
+        let mut fixture = TestFixture::new(
+            include_bytes!("data/back-in-cerulean.bin"), std::time::Duration::from_secs(1), vec![]);
+        let state = fixture.game_state();
+        let centre = Map::CeruleanPokecenter;
+        assert_eq!(state.map.map, Map::CeruleanCity, "the fixture moved out from under this test");
+
+        let mut policy = DeterministicPolicy::new(42, vec![PolicyStep::enter(state.map.map)]);
+        policy.heal_return = Some(centre);
+        // A graph that can route: one observed node here, carrying the exits the agent can actually
+        // see from where it stands — the centre's door among them.
+        let mut graph = WorldGraph::new();
+        graph.observe(state.map.map, state.map.player_position, &state.map);
+
+        // One poll short of the bound, so a counter that was not reset would give up on the next.
+        policy.heal_route_stuck = DeterministicPolicy::MAX_HEAL_ROUTE_WAIT - 1;
+        let action = policy.pick_overworld_action(&state, &graph)
+            .expect("the centre is one warp away and the graph has been shown it");
+        assert!(matches!(action.tile, MetaTile::Warp { to_map, .. } if to_map == centre),
+            "the detour walks to the centre's door, not {:?}", action.tile);
+        assert_eq!(policy.heal_route_stuck, 0, "a detour that moved was still being counted out");
+        assert_eq!(policy.heal_return, Some(centre), "and it is still going");
+        assert_eq!(policy.steps_remaining(), Some(1), "the main queue waits its turn");
+    }
+}
+
 /// The scripted route's cursor: what makes a rollout survivable, and what stops a changed route
 /// being replayed over a game that is part-way through the old one.
 #[cfg(all(test, feature = "web"))]
@@ -4695,8 +4852,14 @@ mod scripted_progress_tests {
         ]
     }
 
+    /// A process starting this run **from the beginning of the game** — `Origin::Fresh`.
     fn policy_in(dir: &std::path::Path, steps: Vec<PolicyStep>) -> DeterministicPolicy {
-        DeterministicPolicy::new(42, steps).resuming_in(dir)
+        DeterministicPolicy::new(42, steps).resuming_in(dir, true)
+    }
+
+    /// A process **resuming** this run from a checkpoint — `Origin::Resumed`, the rollout case.
+    fn resumed_policy_in(dir: &std::path::Path, steps: Vec<PolicyStep>) -> DeterministicPolicy {
+        DeterministicPolicy::new(42, steps).resuming_in(dir, false)
     }
 
     /// ⚠️ **The whole point, in three lines.** Before this a restart mid-route rebuilt the queue at
@@ -4713,7 +4876,7 @@ mod scripted_progress_tests {
         first.queue.drain(..3);
         first.record_progress();
 
-        let second = policy_in(&scratch.0, route());
+        let second = resumed_policy_in(&scratch.0, route());
         assert_eq!(second.steps_remaining(), Some(2), "the route resumes at step 3 of 5");
         assert_eq!(second.queue.front(), Some(&PolicyStep::enter(Map::Route2)));
     }
@@ -4727,6 +4890,19 @@ mod scripted_progress_tests {
         assert_eq!(policy.steps_remaining(), Some(5));
         // ⚠️ And it records one immediately, so the *next* restart resumes rather than guessing.
         assert!(scratch.0.join(scripted_progress::FILE).exists(), "step 0 is still a cursor");
+    }
+
+    /// ⚠️ **A run being *resumed* with no cursor parks too, and this one shipped.** A run started
+    /// before cursors existed has no file and a save in the middle of the game; "no file means a new
+    /// game" walked the rollout of 2026-08-28 into restarting the route in Red's bedroom against a
+    /// save standing in Victory Road, where it failed to route for 745 polls. The absence of the
+    /// file cannot tell the two apart, so the caller says which it is.
+    #[test]
+    fn a_resumed_run_with_no_cursor_parks_rather_than_replaying_the_route() {
+        let scratch = Scratch::new("scripted-progress-cursorless");
+        let parked = resumed_policy_in(&scratch.0, route());
+        assert_eq!(parked.steps_remaining(), Some(0), "parked");
+        assert!(parked.is_exhausted(), "a parked policy stops answering, which is what parks the run");
     }
 
     /// ⚠️ **A changed route parks the run; it must never replay from 0.** A cursor counts steps in
@@ -4743,14 +4919,14 @@ mod scripted_progress_tests {
         // Same length, different steps — so the length alone would have accepted this.
         let mut changed = route();
         changed[4] = PolicyStep::enter(Map::CeruleanCity);
-        let parked = policy_in(&scratch.0, changed);
+        let parked = resumed_policy_in(&scratch.0, changed);
         assert_eq!(parked.steps_remaining(), Some(0), "parked");
         assert!(parked.is_exhausted(), "a parked policy stops answering, which is what parks the run");
 
         // And a route of a different length is caught too, by the cheaper half of the same check.
         let mut shorter = route();
         shorter.pop();
-        assert_eq!(policy_in(&scratch.0, shorter).steps_remaining(), Some(0));
+        assert_eq!(resumed_policy_in(&scratch.0, shorter).steps_remaining(), Some(0));
     }
 
     /// ⚠️ **`POST /api/new-run` is the same desync from the other side.** `Policy::restart` defaults
@@ -4771,6 +4947,39 @@ mod scripted_progress_tests {
         // The cursor follows the run: the old directory's is gone, the new one's says step 0.
         assert!(!scratch.0.join(scripted_progress::FILE).exists(), "the old run's cursor is not left behind");
         assert!(next.0.join(scripted_progress::FILE).exists(), "the new run records its own");
+    }
+
+    /// ⚠️ **And a new run must forget what the old one learned, not just its queue.** Every field
+    /// here is scoped to a run, and `restart` used to reset only the queue — so a game started over
+    /// in a live process kept the dead run's badges (skipping gyms the fresh save has not beaten),
+    /// its last Pokémon Centre, a heal detour aimed across the map, and a training slot pointing at
+    /// a party member that no longer exists. Rebuilding from the seed is what makes a field added
+    /// later untainted without anyone remembering to come back here.
+    #[test]
+    fn a_new_run_forgets_everything_the_old_one_learned() {
+        let scratch = Scratch::new("scripted-progress-taint");
+        let next = Scratch::new("scripted-progress-taint-2");
+
+        let mut policy = policy_in(&scratch.0, route());
+        policy.queue.drain(..2);
+        policy.record_progress();
+        policy.last_pokemon_center = Some(Map::MtMoonPokecenter);
+        policy.heal_return = Some(Map::MtMoonPokecenter);
+        policy.heal_route_stuck = 7;
+        policy.gym_beaten.insert(Point8 { x: 4, y: 13 });
+        policy.train_slot = Some(3);
+        policy.collect_item_seen = true;
+
+        policy.restart(Some(&next.0));
+
+        assert_eq!(policy.heal_return, None, "a fresh game does not owe the old run a heal");
+        assert_eq!(policy.heal_route_stuck, 0);
+        assert_eq!(policy.last_pokemon_center, None);
+        assert!(policy.gym_beaten.is_empty(), "a fresh save has beaten no gyms");
+        assert_eq!(policy.train_slot, None);
+        assert!(!policy.collect_item_seen);
+        // And the queue, which is the half that was already right.
+        assert_eq!(policy.steps_remaining(), Some(5));
     }
 
     /// ⚠️ **Not `DefaultHasher`.** The fingerprint is compared across processes and across builds,

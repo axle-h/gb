@@ -208,10 +208,13 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         // route from the game and destroys it. See `DeterministicPolicy::resuming_in`.
         ServePolicy::Deterministic => {
             let run_dir = run.path().to_path_buf();
+            // ⚠️ **Only this knows a cursorless run from a new one**, and `resuming_in` parks
+            // rather than guessing — see its doc comment for the rollout that made the difference.
+            let from_the_beginning = matches!(origin, Origin::Fresh);
             Box::new(move || {
                 use crate::pokemon::policy::{DeterministicPolicy, PolicyStep};
                 Box::new(DeterministicPolicy::new(SCRIPTED_SEED, PolicyStep::complete_game_steps())
-                    .resuming_in(&run_dir))
+                    .resuming_in(&run_dir, from_the_beginning))
             })
         }
         #[cfg(feature = "llm")]
