@@ -68,7 +68,7 @@ fn probe_resume_playthrough() {
 /// recovery the early dungeons rely on. Seafoam then adds a **Slowpoke** HM-slave (Strength + Dig) and
 /// **Articuno**.
 ///
-/// It emulates every frame, so even in `--release` it takes ~20 min of wall clock — hence its own
+/// It emulates every frame, so even in `--release` it takes ~5 min of wall clock — hence its own
 /// feature gate, separate from the leg chain:
 /// `cargo test --release --features full-playthrough full_playthrough`. The per-leg tests (each seeded
 /// from a saved fixture) cover the same ground quickly and in parallel.
@@ -79,18 +79,23 @@ fn probe_resume_playthrough() {
 /// after its queue emptied, a fixture that hands a leg a party or a bag the run could not actually
 /// have earned, and any change to frame timing re-rolling the RNG stream every route is tuned against.
 ///
-/// ⚠️ **Its end point is Victory Road 2F, not the Hall of Fame** — `victory_road_2f_3f_steps` and
-/// `elite_four_steps` are deliberately excluded as PP-marginal for this team (see their notes) and are
-/// proved separately by `endgame::can_solve_victory_road_2f_3f` and `endgame::can_beat_elite_four`.
-/// Saying otherwise is how this test came to be believed green while it was not: it sat broken for a
-/// long time behind doc comments — this one included — claiming it played to the Hall of Fame.
+/// ⚠️ **Its end point is Victory Road 2F, and that is a cost decision rather than a limitation.**
+/// The route `gb serve --policy deterministic` plays goes all the way to the Hall of Fame — see
+/// [`PolicyStep::complete_game_steps`] and `hall_of_fame_playthrough`, which is the same run carried
+/// through the gauntlet grind, both Victory Road puzzles and the Elite Four. That takes **~50 min**
+/// against this one's five, almost entirely the grind's 2306 wild battles, so it lives behind its own
+/// `hall-of-fame` feature and this stays the gate you run before pushing.
+///
+/// ⚠️ **This doc comment has lied before, so keep it honest.** The test sat broken for a long time
+/// while this very paragraph claimed it reached the Hall of Fame. It does not, on purpose, and the
+/// assertion at the bottom is what says where it does stop — not this.
 #[test]
 #[cfg_attr(not(feature = "full-playthrough"), ignore = "full playthrough; run with --features full-playthrough")]
 fn full_playthrough() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/start-of-game-state.bin"),
         Duration::from_mins(800),
-        PolicyStep::complete_game_steps(),
+        PolicyStep::eight_badge_steps(),
     );
 
     {
@@ -99,15 +104,15 @@ fn full_playthrough() {
         assert_eq!(state.pokemon.len(), 0, "player should have no pokemon before Oak's script");
     }
 
-    // ⚠️ **`step_until_exhausted`, never `run_leg`.** The queue emptying is the *only* thing this test
-    // is allowed to accept as "the run finished". `run_leg` would keep stepping afterwards until the
-    // assertions happened to come true, which turns "the step list plays the game" into "the step list
-    // plus whatever the agent does on its own eventually gets there" — and that is precisely the hole
-    // the Poké Flute fell through for a long time (see `TestFixture::run_leg`). Everything below has to
-    // be true the instant the last step pops.
+    // ⚠️ **`step_until_exhausted`, never `run_leg`.** The queue emptying is the *only* thing this
+    // test is allowed to accept as "the run finished". `run_leg` would keep stepping afterwards until
+    // the assertions happened to come true, which turns "the step list plays the game" into "the step
+    // list plus whatever the agent does on its own eventually gets there" — and that is precisely the
+    // hole the Poké Flute fell through for a long time (see `TestFixture::run_leg`). Everything below
+    // has to be true the instant the last step pops.
     fixture.step_until_exhausted();
-
     let state = fixture.game_state();
+
     for pokemon in state.pokemon.iter() {
         println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);
     }
@@ -138,13 +143,57 @@ fn full_playthrough() {
     assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Articuno),
         "should have caught Articuno in the Seafoam Islands");
 
-    // Post-Earth: Victory Road 1F — caught a Machop HM-slave, taught it Strength, solved the boulder
-    // puzzle (a real push onto the (17,13) switch) and climbed to VR2F. The full VR2F/VR3F puzzle and
-    // the Elite Four are validated separately (`endgame::can_solve_victory_road_2f_3f`,
-    // `endgame::can_beat_elite_four`) — chaining them here is PP-marginal for this team.
+    // Post-Earth: Victory Road 1F — a Machop HM-slave caught and taught Strength, the boulder pushed
+    // onto the (17,13) switch and the ladder climbed to VR2F.
     assert!(state.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| m.name == PokemonMoveName::Strength)),
         "a party member should know Strength (the Seafoam Slowpoke, and the Victory Road Machop)");
     assert_eq!(state.map.map, Map::VictoryRoad2F, "should have solved VR1F and climbed to Victory Road 2F");
 
     fixture.save_state_named("src/pokemon/data/post-victory-road-1f.bin").unwrap();
+}
+
+/// **The whole game, to the Hall of Fame** — [`PolicyStep::complete_game_steps`], which is what
+/// `gb serve --policy deterministic` plays.
+///
+/// ⚠️ **Its own `hall-of-fame` feature because it is ~50 minutes against `full_playthrough`'s five,
+/// and a gate that long is a gate nobody runs.** Almost all of the difference is
+/// `gauntlet_grind_steps`: 2306 wild battles in the Pokémon Mansion to bring Venusaur, Articuno and
+/// Vaporeon to lv75, measured at 2829 s on its own. Run this when the endgame changes — the grind,
+/// either Victory Road puzzle, or the Elite Four — and `full_playthrough` the rest of the time.
+///
+/// ⚠️ **`run_until`, not `step_until_exhausted`, and this is the one test allowed that.** The final
+/// step is the rival in the Champion's room, and beating him hands the agent to
+/// `drive_post_champion_cutscene`, which stops polling the policy — so the queue never empties and
+/// waiting on it would hang. The exception is kept honest by asserting afterwards that everything
+/// except that last battle popped, so "reached the Hall of Fame" cannot be satisfied by the agent
+/// wandering into the credits on its own.
+#[test]
+#[cfg_attr(not(feature = "hall-of-fame"), ignore = "~50 min — run with --features hall-of-fame")]
+fn hall_of_fame_playthrough() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/start-of-game-state.bin"),
+        Duration::from_mins(6000),
+        PolicyStep::complete_game_steps(),
+    );
+
+    let state = fixture.run_until(|state| state.map.map == Map::HallOfFame);
+    let left = fixture.agent.policy_steps_remaining().expect("the scripted policy counts its queue");
+    assert!(
+        left <= 1,
+        "{left} steps never ran — the run reached the Hall of Fame without playing the route",
+    );
+
+    for pokemon in state.pokemon.iter() {
+        println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);
+    }
+    assert!(state.badges.contains(Badge::EarthBadge), "all eight badges");
+    // ⚠️ **Three fighters over the target, not two.** A seeded run at Venusaur 75 / Articuno 75 with
+    // the mainline's lv26 Vaporeon behind them still blacked out in the Champion's room; see
+    // `PolicyStep::gauntlet_grind_steps`.
+    for species in [PokemonSpecies::Venusaur, PokemonSpecies::Articuno, PokemonSpecies::Vaporeon] {
+        let mon = state.pokemon.iter().find(|p| p.species == species)
+            .unwrap_or_else(|| panic!("the party should carry a {species:?}"));
+        assert!(mon.level >= PolicyStep::GAUNTLET_LEVEL,
+            "{species:?} is lv{} — the gauntlet grind did not run", mon.level);
+    }
 }

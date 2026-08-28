@@ -689,6 +689,17 @@ impl MetaTileMap {
         pc_locations_for(self.map)
     }
 
+    /// Does this map draw tall grass anywhere, reachable or not?
+    ///
+    /// ⚠️ **"Has grass" and "has encounters" are different questions and confusing them loops the
+    /// grind for ever.** A cave has `has_grass_encounters` true and no `MetaTile::Grass` at all,
+    /// because pokered points `wGrassTile` at the cave floor and every step rolls; a route has both.
+    /// So a route where no grass is *reachable* is a map the trainee cannot be levelled on, while a
+    /// cave with no grass is the ordinary case — and only this tells them apart.
+    pub fn has_grass_tiles(&self) -> bool {
+        self.meta_tiles.iter().any(|tile| *tile == MetaTile::Grass)
+    }
+
     /// Fixed hidden-object sites on this map — see [`hidden_objects_for`]. `actions()` emits a row
     /// per reachable one, the same way it does for a PC.
     fn hidden_objects(&self) -> &'static [HiddenObjectSite] {

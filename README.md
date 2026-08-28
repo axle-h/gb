@@ -32,9 +32,11 @@ RAM, BG map attributes, OAM-index sprite priority, KEY1 double speed, HDMA/GDMA.
 cartridge on a CGB gets compatibility mode including the boot ROM's title-derived palette, which is
 why Pokémon Red comes out red-tinted here exactly as it does on real hardware.
 
-**The game.** The agent layer can play Pokémon Red from a fresh save to all eight badges and beyond;
-`full_playthrough` is a test that does exactly that in about five minutes of wall clock, because the
-emulator runs at roughly 50× real time with the agent on top of it.
+**The game.** The agent layer can play Pokémon Red from a fresh save all the way to the credits,
+because the emulator runs at roughly 50× real time with the agent on top of it: `full_playthrough`
+reaches all eight badges in about five minutes of wall clock, and `hall_of_fame_playthrough` carries
+the same run on through Victory Road and the Elite Four in about fifty — most of that difference
+being the 2306 wild battles it grinds to make the gauntlet a certainty rather than a coin flip.
 
 **The LLM layer** drives that same agent over any OpenAI-compatible API. Its end-to-end tests run
 against a mock server — a whole playthrough's worth of turns, cancellation and compaction included —
@@ -338,13 +340,25 @@ The other policies are `RandomPolicy`, `ConsolePolicy` (stdin, for the desktop U
 `--policy deterministic` is that last one served rather than tested: the same queue, the same seed
 and the same fresh save `full_playthrough` runs, played out on the page at 1× instead of as fast as
 the emulator will go. It needs no API key and spends nothing, and it is the only way to watch the
-game actually being *played well* rather than felt out. Two things to know before starting one. It
-begins in Red's bedroom and every step is relative to that, so it wants a game at the beginning —
-`--new-run`, or `POST /api/new-run` on a process that is already up. And it stops on **Victory Road
-2F rather than in the Hall of Fame**, because the step list does: the VR2F/VR3F boulder puzzle and
-the Elite Four are left out of it as PP-marginal for the team the route arrives with, and are proved
-separately from their own fixtures. When the queue empties the policy stops answering and the run
-parks where it stands.
+game actually being *played well* rather than felt out. It plays the game **to the Hall of Fame** —
+all eight badges, a grind in the Pokémon Mansion that brings Venusaur, Articuno and Vaporeon to
+lv75, both Victory Road boulder puzzles and the Elite Four — and the finished run is then archived
+and a new one started, exactly as a winning LLM run would be. When the queue does empty the policy
+simply stops answering and the run parks where it stands.
+
+⚠️ The grind is most of a scripted run's length and it is not optional: the Elite Four at the levels
+the route otherwise arrives with is a coin flip, and losing it is terminal — a blackout inside the
+gauntlet warps the player out and the route has no way back to the room it was in.
+
+It **survives a restart**, which it did not used to. The route is rebuilt from the same pure function
+on every process start, so a rollout used to resume the *save* wherever it was and the *route* at step
+0 in Red's bedroom, and the two would then diverge until the run ended somewhere arbitrary — a
+deployment that looked like a pause but was the end of the run. The cursor is now recorded beside the
+save in `scripted-progress.json` and read back on the way up. ⚠️ If the route itself has changed under
+a run in flight, that cursor counts steps in a list that no longer exists, so the run **parks** rather
+than replaying a different route over a game part-way through the old one; start a new one to play the
+new route. A fresh run has no cursor, which is read as "start at the beginning", so nothing special
+happens on a first run.
 
 Which policy runs is `--policy`, or `GB_POLICY` for a deployment that would rather edit a ConfigMap
 than a command line. The flag wins where both are set.
@@ -361,6 +375,7 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
 | `todo.json` | the model's own plan — what outlives a compaction |
 | `battle-script.json` | the program deciding its battle turns, and whether it is still armed — every run has one |
+| `scripted-progress.json` | how far along the scripted route this run is — only under `--policy deterministic` |
 | `history.json` | the live conversation, rewritten each turn — what a restart resumes on |
 | `conversation.jsonl` | every message ever sent, appended; the record of what a compaction replaced |
 | `issues/` | one directory per `report_issue`: the message, the screen, a save state, the conversation |
@@ -668,7 +683,8 @@ a mock-server playthrough are all default-tier tests, and behind an opt-in featu
 ```shell
 cargo test --release                                              # ~7 s, the default tier
 cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
-cargo test --release --features full-playthrough full_playthrough # the whole game, ~5 min
+cargo test --release --features full-playthrough full_playthrough # 8 badges, ~5 min
+cargo test --release --features hall-of-fame --bin gb -- hall_of_fame # to the credits, ~50 min
 ```
 
 Always `--release`: these tests emulate every frame and are unusably slow otherwise. The suite is

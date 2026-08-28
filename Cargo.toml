@@ -55,12 +55,22 @@ slow-tests = []
 # reclaim. Its siblings in `slow-tests` still cover every Safari *mechanism*; see the test's docs.
 #   cargo test --release --features very-slow-tests --bin gb -- can_sweep_the_safari_zone --exact
 very-slow-tests = []
-# `full_playthrough` alone — a fresh save played to all 8 badges and Victory Road 2F (NOT the Hall of
-# Fame: the Elite Four is proved separately), ~20 min of wall clock. Kept off the `slow-tests` gate so
-# the leg chain can be run without paying for it. Run it after every major work item and before pushing
-# — it is the only test that proves the legs compose. See CLAUDE.md.
+# `full_playthrough` alone — a fresh save played to all 8 badges and Victory Road 2F, ~5 min of wall
+# clock. Kept off the `slow-tests` gate so the leg chain can be run without paying for it. Run it after
+# every major work item and before pushing — it is the only test that proves the legs compose. See
+# CLAUDE.md.
 #   cargo test --release --features full-playthrough full_playthrough
 full-playthrough = []
+# The same run carried through to the **Hall of Fame**: the gauntlet grind, both Victory Road puzzles
+# and the Elite Four, measured at **~50 min** against the five above.
+#
+# ⚠️ **Its own flag rather than a longer `full-playthrough`, and the split is the point.** The route
+# `gb serve --policy deterministic` plays finishes the game, so something has to prove that end to
+# end — but the fast one is the pre-commit gate, and a 50-minute gate is one nobody runs, which is how
+# `full_playthrough` came to sit broken behind a doc comment claiming it was green. The grind is
+# essentially all of the difference: 2306 wild battles to bring three Pokémon to lv75.
+#   cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
+hall-of-fame = []
 # The stall hunt: hours of `RandomPolicy` play, failing if the agent ever goes longer than
 # `GB_STUCK_TIMEOUT_SECS` without reaching a decision point — i.e. exactly when a deployed
 # `LlmPolicy`'s watchdog would fire. A random decider explores the agent's state machine far more

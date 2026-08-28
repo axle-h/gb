@@ -10,7 +10,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
         ROUTE1_STATE,
         Duration::from_secs(200),
         vec![
-            PolicyStep::GrindUntilLevel { target_level: 100, on_map: Map::Route1, slot: 0 },
+            PolicyStep::GrindUntilLevel { target_level: 100, on_map: Map::Route1, target: PartyRef::Slot(0) },
         ]
     );
 
