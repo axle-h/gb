@@ -97,7 +97,7 @@ pub trait Policy {
     /// - `None`       → not ready yet; will be called again next frame.
     /// - `Some(None)` → do not buy anything.
     /// - `Some(Some(item))` → buy the item.
-    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
+    fn pick_mart_purchase(&mut self, state: &GameState) -> Option<Option<BagItem>> {
         Some(None) // default: open the mart but buy nothing
     }
 
@@ -738,7 +738,11 @@ pub enum PolicyStep {
     /// Walk in grass until the party member in `slot` reaches at least `target_level`. During grind
     /// battles the policy switches that slot in so it earns the XP (usually `slot: 0`, the lead; use a
     /// higher slot to train a bench mon, e.g. a freshly-evolved Vaporeon).
-    GrindUntilLevel { target_level: u8, on_map: Map, slot: u8 },
+    /// ⚠️ **`PartyRef`, not a slot, and that is the `machop_slot` lesson again.** A grind late in
+    /// the run happens after several `MovePokemonToFront` rotations and two catches, so the index a
+    /// route was written against is not the index it executes against — and this step's completion
+    /// check reads the *same* index it trains, so a wrong one trains nothing and never finishes.
+    GrindUntilLevel { target_level: u8, on_map: Map, target: PartyRef },
     /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
     BuyFromMart { map: Map, item: BagItem },
     /// Teach an HM/TM `item` (e.g. HM01 Cut) to the party member `target` names, from the overworld.
@@ -1957,7 +1961,26 @@ impl PolicyStep {
     /// solve the 1F boulder puzzle (push a boulder onto the (17,13) switch) and climb the now-open (1,1)
     /// ladder to VR2F. Reliable from a fresh run; folded into `complete_game_steps`. The deeper VR2F/VR3F
     /// puzzle is `victory_road_2f_3f_steps` (PP-marginal from a fresh run — see its note).
+    /// What the two gauntlet leads are taken to. Public so `endgame::can_finish_from_victory_road`
+    /// can seed to exactly the number the grind targets rather than a second one that drifts.
+    pub const GAUNTLET_LEVEL: u8 = 75;
+
+    /// The whole of VR1F: the approach and the climb, with no grind between them.
+    ///
+    /// ⚠️ **The grind is deliberately *not* in here, and it was for one build.** This is what
+    /// `endgame::can_solve_victory_road_1f` runs, on a 180-minute budget sized for a walk, a catch, a
+    /// teach and one boulder — and `gauntlet_grind_steps` is several thousand minutes of wild
+    /// battles. Folding it in turned a two-minute leg test into one that could not pass. Only
+    /// `complete_game_steps` wants both, so only it splices them: see there.
     pub fn victory_road_1f_steps() -> Vec<Self> {
+        let mut steps = Self::victory_road_1f_approach_steps();
+        steps.extend(Self::victory_road_1f_climb_steps());
+        steps
+    }
+
+    /// Viridian → the Route-22 rival → Route 23 → VR1F, ending with a Machop caught and taught
+    /// Strength. Everything up to the point where the party is standing on the floor it grinds on.
+    pub fn victory_road_1f_approach_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::ViridianCity),          // out of the gym
             // The Route-22 rival is a Silph-rival redux (Alakazam + Charizard). Beat it like Silph: heal
@@ -1986,6 +2009,12 @@ impl PolicyStep {
             // Catch a wild Machop (learns Strength) as the boulder HM-slave — Master Ball, thrown at once.
             Self::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F, ball: None },
             Self::TeachMove { item: ItemId::Hm04Strength, target: Self::MACHOP }, // caught just above
+        ]
+    }
+
+    /// The boulder onto (17, 13) and the climb to VR2F.
+    pub fn victory_road_1f_climb_steps() -> Vec<Self> {
+        vec![
             // VR1F: push a boulder onto (17,13), climb to VR2F.
             Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
@@ -2037,37 +2066,129 @@ impl PolicyStep {
     /// The Elite Four gauntlet, from the Indigo Plateau lobby to the Champion: stock up, heal, then
     /// Lorelei → Bruno → Agatha → Lance → the rival. Validated by `can_beat_elite_four`.
     ///
-    /// The two leads are passed in as slots rather than hardcoded because `MovePokemonToFront` rotates
-    /// the party — where Articuno sits after Venusaur is pulled to the front depends on where both
-    /// started, and a grinded fixture arrives in a different order from an ungrinded one. Callers should
-    /// look both up **by species** (see `can_beat_elite_four`), not assume a layout.
-    ///
-    /// Not folded into `complete_game_steps`: that run stops on Victory Road 2F, because chaining
-    /// `victory_road_2f_3f_steps` onto a fresh party is PP-marginal (see its note), so the plateau is
-    /// out of reach from there.
+    /// ⚠️ **The two leads are named by species and the slot arguments are gone.** They used to be
+    /// `u8`s the caller worked out, on the argument that `MovePokemonToFront` rotates the party — and
+    /// a caller computing an index it cannot verify is exactly the `machop_slot` bug that made
+    /// `can_solve_victory_road_1f` unfixable for months. `PartyRef::Species` is resolved against the
+    /// live party at the moment the step runs, which is the only time the answer is knowable.
     ///
     /// `ice_lead` takes over before Lance. The battle policy only switches when the active mon has *no*
     /// damaging move left, so without the swap Vaporeon stays in and chips away with Bite once
     /// Blizzard's 5 PP is gone — which is exactly how the first Articuno attempt ran Lance's room out of
     /// the clock. Ice Beam is 4× on Dragonair/Dragonite, 2× on Gyarados and Aerodactyl, and 2× again on
     /// the Champion's Pidgeot/Exeggutor/Rhydon/Gyarados.
-    pub fn elite_four_steps(lead: u8, ice_lead: u8) -> Vec<Self> {
+    /// Bring the two fighters the gauntlet is built around up to weight, on the Victory Road floor
+    /// the run is already standing on.
+    ///
+    /// ⚠️ **The mainline arrives far weaker than the fixture the Elite Four was proved on.**
+    /// `can_beat_elite_four` runs from `at-indigo-articuno.bin` — Articuno lv71, Venusaur lv70,
+    /// Vaporeon lv70 — while a fresh `complete_game_steps` reaches Victory Road with Venusaur lv60,
+    /// Articuno lv51 and a Vaporeon that is still **lv26**, because the mainline catches the bird at
+    /// 50 and never grinds it. That gap, not the boulder puzzle, is what "the plateau is out of
+    /// reach from here" actually meant.
+    ///
+    /// ⚠️ **The Pokémon Mansion, and the three rejected sites are each rejected for a different
+    /// measured reason.** This one took four attempts, so all of them are written down.
+    ///
+    /// *Route 23* looks ideal, next door to the plateau — but its grass is not reachable from either
+    /// end the run can stand on (probed from (9, 1): `grass_tiles=true`, `grass_reachable=0`, and the
+    /// only two actions are ways off the map). `GrindUntilLevel` fell through to the cave-pacing
+    /// branch, paced to the one thing it could reach, was routed back because that is not `on_map`,
+    /// and repeated it with no battles at all. `has_grass_tiles` now keeps a route out of that branch.
+    ///
+    /// *Victory Road 2F* is a cave, so pacing is right there — but it is in `pick_battle_action`'s
+    /// center-less-dungeon list, which flees every wild outright so the boulder traversal keeps its
+    /// PP. Measured: **375 encounters, 375 runs, zero experience.** `GrindUntilLevel` is exempt from
+    /// that now, which was worth fixing regardless, and VR2F is still wrong for the next reason.
+    ///
+    /// *Victory Road 1F* is a cave and is *not* in that list, so both problems go away — and it fails
+    /// on distance. The trainee is switched in to earn the experience, wears down over ten or twenty
+    /// battles with nothing healing it between, and faints; the detour then routes to the nearest
+    /// Pokémon Centre, which from inside Victory Road is **Viridian, four maps away**. Measured on the
+    /// mainline: three round trips and not one level gained.
+    ///
+    /// So: the Mansion. It is a building, so every step rolls an encounter and there is no grass to be
+    /// unreachable; its wilds are lv30-39 rather than Victory Road's lv22-36; it is not in the
+    /// center-less list; and Cinnabar's Centre is **one** map from its door. The run is already here —
+    /// `seafoam_articuno_steps` ends on Cinnabar Island with the last party member caught — so the
+    /// grind costs no travel to reach, which is the other thing every Victory Road placement paid for.
+    pub fn gauntlet_grind_steps() -> Vec<Self> {
+        /// What the two leads are taken to before the gauntlet.
+        ///
+        /// ⚠️ **Deliberately well over the fight rather than level with it, and the margin is the
+        /// feature.** The Elite Four tops out at Lance's lv62 Dragonite and the rival's lv65, and a
+        /// party that merely matches them makes the gauntlet a coin flip: two ungrinded attempts at
+        /// Venusaur lv60 / Articuno lv51 lost in different rooms, one to the rival's Exeggutor and
+        /// one to a Hyper Beam crit from Lance's Gyarados. A coin flip is not something
+        /// `full_playthrough` can assert on.
+        ///
+        /// ⚠️ **It is also what makes a re-entry story unnecessary.** A blackout inside the gauntlet
+        /// warps the player out to the Indigo Plateau, and the queue's next step is the *next room* —
+        /// which is only reachable back through the ones already beaten, and there are no steps left
+        /// to redo them. The run does not recover; it spun 29,915 polls on `EnterMap(ChampionsRoom)`
+        /// before the harness called it. Rather than teach the route to re-walk five rooms, the
+        /// cheaper and more honest fix is to not lose.
+
         vec![
-            // ¥3000 and ¥1500 each — 12 + 4 is ¥42,000, inside what the Articuno team arrives with
-            // (~¥50k). `BuyFromMart` gives up rather than buying fewer, so asking for more than the
-            // wallet holds silently leaves the gauntlet with nothing.
+            // ⚠️ **The heal is not a courtesy, it is what makes the grind survivable.** It sets
+            // `last_pokemon_center`, which is the only thing the trainee-fainted detour below routes
+            // to — and a trainee wears down over ten or twenty wild battles and then faints, so that
+            // detour runs over and over. One map each way is the difference between a grind and a
+            // walking simulator.
+            Self::enter(Map::CinnabarPokecenter),
+            Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
+            Self::enter(Map::CinnabarIsland),
+            Self::enter(Map::PokemonMansion1F),
+            // Articuno first: it arrives at 50 against Venusaur's 60, so it is the longer job, and
+            // doing it while the party is fresh keeps the heal detours down.
+            Self::GrindUntilLevel { target_level: Self::GAUNTLET_LEVEL, on_map: Map::PokemonMansion1F,
+                target: PartyRef::Species(PokemonSpecies::Articuno) },
+            Self::GrindUntilLevel { target_level: Self::GAUNTLET_LEVEL, on_map: Map::PokemonMansion1F,
+                target: PartyRef::Species(PokemonSpecies::Venusaur) },
+            // ⚠️ **The third one is not optional, and two at seventy-five is not a substitute for
+            // three.** A seeded run at Venusaur 75 / Articuno 75 still blacked out in the Champion's
+            // room: the two leads carried four rooms, wore down across the fifth, and the party
+            // behind them is a lv26 Vaporeon, a lv30 Slowpoke and a lv24 Machop — so the moment the
+            // second lead falls, three fodder mons faint in a row. The last Pokémon standing against
+            // the rival's Charizard was the Machop.
+            //
+            // ⚠️ **And the items cannot cover it, which is the thing worth writing down.**
+            // `elite_four_steps` buys twelve Full Restores and four Revives, and `pick_battle_action`
+            // has no arm that uses either: measured across that whole gauntlet, **57 Fights, one
+            // switch and zero item uses**. The purchases are decorative and always were — the
+            // `at-indigo-articuno` fixture this was proved on did not win on its ¥42,000 of healing,
+            // it won on Vaporeon lv70. So the third fighter is the fix.
+            Self::GrindUntilLevel { target_level: Self::GAUNTLET_LEVEL, on_map: Map::PokemonMansion1F,
+                target: PartyRef::Species(PokemonSpecies::Vaporeon) },
+            Self::enter(Map::CinnabarIsland),
+        ]
+    }
+
+    pub fn elite_four_steps() -> Vec<Self> {
+        vec![
+            // ¥3000 and ¥1500 each — 12 + 4 is ¥42,000, which is inside what the grinded
+            // `at-indigo-articuno` fixture arrives with (~¥50k) and well outside what the mainline
+            // does (¥9,710 at Victory Road 2F, plus whatever VR2F/VR3F's trainers pay).
+            //
+            // ⚠️ **Asking for more than the wallet holds is safe, and the comment here used to say
+            // the opposite.** It claimed `BuyFromMart` gives up rather than buying fewer — that was
+            // true of the *step*, and stopped being true when `agent::affordable` was added to trim
+            // an order down to what the money covers (which is itself the fix for
+            // `silph_co_card_key_steps` ordering ¥18,000 of Hyper Potions on ¥7,838 and buying zero
+            // every run). So this stays an ask rather than a budget: a rich party gets twelve, and
+            // the mainline gets as many as it can pay for.
             Self::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 12), map: Map::IndigoPlateauLobby },
             Self::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
             Self::Interact(MapSprite::INDIGOPLATEAULOBBY_NURSE),   // revive + restore all PP
             // Venusaur leads: Razor Leaf is 2× on all of Lorelei's Water types and 4× on Bruno's Onix.
-            Self::MovePokemonToFront { target: PartyRef::Slot(lead) },
+            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Venusaur) },
             Self::enter(Map::LoreleisRoom),
             Self::BattleTrainer { trainer: MapSprite::LORELEISROOM_LORELEI },
             Self::enter(Map::BrunosRoom),
             Self::BattleTrainer { trainer: MapSprite::BRUNOSROOM_BRUNO },
             Self::enter(Map::AgathasRoom),
             Self::BattleTrainer { trainer: MapSprite::AGATHASROOM_AGATHA },
-            Self::MovePokemonToFront { target: PartyRef::Slot(ice_lead) },
+            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Articuno) },
             Self::enter(Map::LancesRoom),
             Self::BattleTrainer { trainer: MapSprite::LANCESROOM_LANCE },
             Self::enter(Map::ChampionsRoom),
@@ -2081,6 +2202,29 @@ impl PolicyStep {
     /// graph. Starter is **Bulbasaur** — its Grass typing is super-effective against both Brock
     /// (Rock/Ground) and Misty (Water), the two badges this run proves.
     pub fn complete_game_steps() -> Vec<Self> {
+        Self::game_steps(true)
+    }
+
+    /// The same route stopped at the eighth badge and Victory Road 2F, with no gauntlet grind and no
+    /// Elite Four.
+    ///
+    /// ⚠️ **This exists so the pre-commit gate stays affordable, and that is a real trade.**
+    /// `full_playthrough` runs this in about five minutes; [`Self::complete_game_steps`] takes **50**,
+    /// essentially all of it the 2306 wild battles `gauntlet_grind_steps` needs. A fifty-minute gate is
+    /// one nobody runs — which is exactly how `full_playthrough` came to sit broken for a long time
+    /// behind a doc comment claiming it was green — so the long one gets its own `hall-of-fame`
+    /// feature and this one keeps the job it has always had.
+    ///
+    /// ⚠️ **What is given up is named rather than hidden:** nothing in the fast tier proves the
+    /// endgame *composes onto a run that earned its own party*. `can_grind_for_the_gauntlet` proves
+    /// the grind from a fixture and `can_finish_from_victory_road` proves the rest from another, with
+    /// the levels seeded between them; only `hall_of_fame_playthrough` joins them up.
+    pub fn eight_badge_steps() -> Vec<Self> {
+        Self::game_steps(false)
+    }
+
+    /// `finish` adds the gauntlet grind and everything past the eighth badge.
+    fn game_steps(finish: bool) -> Vec<Self> {
         let mut steps = vec![
             // ── Pallet Town: fetch a starter ──
             Self::enter(Map::RedsHouse1F),
@@ -2125,7 +2269,7 @@ impl PolicyStep {
 
             // ── Grind the starter on Route 1 ──
             Self::enter(Map::Route1),
-            Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1, slot: 0 },
+            Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1, target: PartyRef::Slot(0) },
             Self::enter(Map::ViridianCity),
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
@@ -2154,7 +2298,7 @@ impl PolicyStep {
 
             // ── Route 3 grind → heal at the Mt Moon Pokécenter ──
             Self::enter(Map::Route3),
-            Self::GrindUntilLevel { target_level: 18, on_map: Map::Route3, slot: 0 },
+            Self::GrindUntilLevel { target_level: 18, on_map: Map::Route3, target: PartyRef::Slot(0) },
             Self::enter(Map::Route4),
             Self::enter(Map::MtMoonPokecenter),
             Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
@@ -2221,20 +2365,115 @@ impl PolicyStep {
         // Starts and ends on Cinnabar Island, so it drops straight in ahead of the Earth Badge. It adds
         // two party members: a Slowpoke HM-slave (Strength + Dig) at slot 2 and Articuno at slot 3.
         steps.extend(Self::seafoam_articuno_steps());
+        // ── The gauntlet grind, on Cinnabar's doorstep while the party is finally complete ──
+        // ⚠️ **Here rather than at Victory Road, and the four attempts are in `gauntlet_grind_steps`.**
+        // This is the first point in the route where all three Elite Four fighters are in the party,
+        // and it is a map away from the Pokémon Centre the faint detour needs. It is also the whole
+        // cost difference between the two step lists, which is why it is the thing `finish` gates.
+        if finish {
+            steps.extend(Self::gauntlet_grind_steps());
+        }
         // ── Cinnabar → Viridian Gym → Earth Badge (Giovanni), the 8th and final gym badge ──
         steps.extend(Self::earth_badge_steps());
         // ── Victory Road 1F: catch a Strength HM-slave, solve the boulder puzzle, climb to VR2F ──
-        // (The full VR2F/VR3F puzzle works — `can_solve_victory_road_2f_3f` — but chaining it here is
-        // PP-marginal for this team; see `victory_road_2f_3f_steps`.)
-        steps.extend(Self::victory_road_1f_steps());
+        steps.extend(Self::victory_road_1f_approach_steps());
+        steps.extend(Self::victory_road_1f_climb_steps());
+        if finish {
+            // ── VR2F/VR3F: the interconnected Strength puzzle, out to the Indigo Plateau lobby ──
+            steps.extend(Self::victory_road_2f_3f_steps());
+            // ── Lorelei → Bruno → Agatha → Lance → the rival → the Hall of Fame ──
+            steps.extend(Self::elite_four_steps());
+        }
 
         steps
     }
 }
 
+/// The scripted route's own cursor, kept beside the save it belongs to.
+///
+/// ⚠️ **A scripted run had no memory at all, and a restart did not merely interrupt it — it
+/// desynchronised it.** `web::serve` builds the policy with `PolicyStep::complete_game_steps()` on
+/// every process start, so a rollout resumed the *save* wherever it was and restarted the *route* at
+/// step 0, in Red's bedroom. Several hundred steps then fail to resolve against a game halfway
+/// across Kanto, pop one after another, and the run ends somewhere arbitrary. `POST /api/new-run`
+/// was the same bug from the other side: it starts a fresh game and, before this, left the queue
+/// half-consumed against it.
+///
+/// ⚠️ **A cursor rather than the queue itself.** `complete_game_steps()` is a pure function, so the
+/// route can always be rebuilt; what cannot be rebuilt is how far along it the game is. Serialising
+/// `PolicyStep` would mean `Serialize` on every type it reaches — `Map`, `MapSprite`, `ItemId`,
+/// `PartyRef`, the Safari and Game Corner enums — for a number that fits in a `u32`.
+#[cfg(feature = "web")]
+mod scripted_progress {
+    use std::path::Path;
+
+    pub const FILE: &str = "scripted-progress.json";
+
+    /// FNV-1a over each step's `Debug`, which is what makes the cursor safe to trust.
+    ///
+    /// ⚠️ **Not `DefaultHasher`**, whose output is explicitly not stable across Rust releases — the
+    /// same reason `llm::history` compares the system prompt by text rather than by hash. A
+    /// toolchain bump must not silently invalidate a run's cursor, because the failure it causes is
+    /// the parked run below rather than a wrong answer.
+    pub fn fingerprint(steps: &[super::PolicyStep]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for step in steps {
+            for byte in format!("{step:?}").bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x1000_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// `(completed, total, route)`, or `None` for a run that has never written one — which is what a
+    /// brand-new run looks like, and is correctly read as "start at the beginning".
+    pub fn load(dir: &Path) -> Option<(usize, usize, u64)> {
+        let text = std::fs::read_to_string(dir.join(FILE)).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let field = |name: &str| value.get(name)?.as_u64();
+        Some((field("completed")? as usize, field("total")? as usize, field("route")?))
+    }
+
+    pub fn save(dir: &Path, completed: usize, total: usize, route: u64) {
+        let body = serde_json::json!({ "completed": completed, "total": total, "route": route });
+        if let Err(failure) = crate::run::write_atomically(
+            &dir.join(FILE), body.to_string().as_bytes()) {
+            // A cursor that cannot be written is a run that will restart badly later, not one that
+            // should stop now — so it is loud and not fatal, exactly like a failed checkpoint.
+            println!("[policy] could not record scripted progress: {failure}");
+        }
+    }
+
+    pub fn clear(dir: &Path) {
+        let _ = std::fs::remove_file(dir.join(FILE));
+    }
+}
+
+/// Where a scripted run records its place, and what it last recorded there.
+#[cfg(feature = "web")]
+struct ScriptedCursor {
+    dir: std::path::PathBuf,
+    /// The route entire, so `restart` can put it back. ⚠️ **`POST /api/new-run` was the same
+    /// desync from the other side**: it starts the game over and, without this, left the queue
+    /// half-consumed against a fresh save. `Policy::restart`'s default is a no-op and this policy
+    /// never overrode it.
+    full_route: Vec<PolicyStep>,
+    /// The length of the route this cursor is counted against — half of what makes it safe to trust.
+    total: usize,
+    route: u64,
+    /// `usize::MAX` until the first write, so a run that resumes at step 0 still records one.
+    written: usize,
+}
+
 pub struct DeterministicPolicy {
     rng: StdRng,
     queue: VecDeque<PolicyStep>,
+    /// Where to record how far along the route this run is, and what it last recorded. `None`
+    /// everywhere but `gb serve` — a test builds its own queue and has nothing to resume into.
+    /// See [`scripted_progress`].
+    #[cfg(feature = "web")]
+    progress: Option<ScriptedCursor>,
     name_picker: PokemonNamePicker,
     /// The last Pokémon Center where the player was healed.
     pub last_pokemon_center: Option<Map>,
@@ -2247,6 +2486,19 @@ pub struct DeterministicPolicy {
     /// joypad rising edge), so the step verifies the bag and retries a few times before giving up
     /// (e.g. for an item the mart doesn't actually sell).
     mart_attempts: u32,
+    /// `(money, quantity held)` as the last `BuyFromMart` shop visit was opened.
+    ///
+    /// ⚠️ **A purchase the wallet cannot cover in full is a *success*, and the completion check used
+    /// to call it a failure.** `agent::affordable` trims an order to what the money buys — the fix
+    /// for `silph_co_card_key_steps` ordering ¥18,000 of potions on ¥7,838 and getting zero — but
+    /// the step's own check is "the bag holds ≥ the quantity asked for", which a trimmed purchase can
+    /// never satisfy. So a poor party re-opened the shop `MAX_MART_ATTEMPTS` times and printed "gave
+    /// up" over a purchase that had worked as far as the money went. Observed at the Indigo Plateau
+    /// on ¥9,710: twelve Full Restores asked, three bought on the first visit, three more visits that
+    /// could buy nothing, "gave up", and then four more wasted on the Revives it could no longer
+    /// afford at all. Comparing this against the next visit is what tells "the shop is not working"
+    /// from "the wallet is empty", without needing the ROM price table here.
+    mart_baseline: Option<(u32, u8)>,
     /// Consecutive ticks the current `DefeatGymLeader` step has failed to find a route to its gym.
     /// A lost gym battle blacks the player out, and for a few ticks after that warp the map/actions are
     /// still unsettled, so routing legitimately fails; popping the step on the first failure (as this
@@ -2379,14 +2631,80 @@ impl DeterministicPolicy {
     /// about in only one direction; keep this small.
     const MAX_ENTER_WAIT: u32 = 60;
 
+    /// Resume this route where the last process left it, and keep recording as it advances.
+    ///
+    /// ⚠️ **Only `gb serve` calls this**, because only a run directory can answer "how far along
+    /// were we". Every test builds its queue and its expectations together and must keep starting
+    /// from step 0.
+    ///
+    /// Three outcomes, and the third is the one worth reading:
+    /// - **no file** — a run that has never recorded one, i.e. a new game. Start at the beginning.
+    /// - **it matches** — skip that many steps and carry on. This is a rollout surviving.
+    /// - **the route has changed under it** — the queue is emptied and the policy parks. ⚠️ **Not
+    ///   "start from 0"**, which is the very failure this exists to prevent: a cursor is only
+    ///   meaningful against the list it was counted on, and replaying a different route from the
+    ///   beginning against a mid-game save is how a run gets destroyed rather than merely stopped. A
+    ///   parked run is obvious, keeps its save, and is one `POST /api/new-run` from playing again.
+    #[cfg(feature = "web")]
+    pub fn resuming_in(mut self, run_dir: &std::path::Path) -> Self {
+        let total = self.queue.len();
+        let route = scripted_progress::fingerprint(self.queue.make_contiguous());
+        let full_route: Vec<PolicyStep> = self.queue.iter().cloned().collect();
+        match scripted_progress::load(run_dir) {
+            None => println!("[policy] no scripted progress on disk — starting the route from the beginning"),
+            Some((completed, saved_total, saved_route)) if saved_total == total && saved_route == route => {
+                println!("[policy] resuming the scripted route at step {completed}/{total}");
+                self.queue.drain(..completed.min(total));
+            }
+            Some((completed, saved_total, saved_route)) => {
+                println!(
+                    "[policy] ⚠️ the scripted route has changed under this run ({saved_total} steps \
+                     / {saved_route:016x} recorded, {total} / {route:016x} now), so step \
+                     {completed} means nothing here. Parking rather than replaying a different \
+                     route over a game that is already part-way through it. Start a new run to play \
+                     this one.",
+                );
+                self.queue.clear();
+            }
+        }
+        self.progress = Some(ScriptedCursor {
+            dir: run_dir.to_path_buf(),
+            full_route,
+            total,
+            route,
+            written: usize::MAX,
+        });
+        self.record_progress();
+        self
+    }
+
+    /// Write the cursor when it has moved. Called from the overworld poll, which is the busiest one
+    /// — the comparison is an integer and the write only happens on a step boundary, of which a
+    /// whole playthrough has a few hundred.
+    #[cfg(feature = "web")]
+    fn record_progress(&mut self) {
+        let remaining = self.queue.len();
+        let Some(cursor) = self.progress.as_mut() else { return };
+        let completed = cursor.total.saturating_sub(remaining);
+        if cursor.written == completed { return }
+        cursor.written = completed;
+        scripted_progress::save(&cursor.dir, completed, cursor.total, cursor.route);
+    }
+
+    #[cfg(not(feature = "web"))]
+    fn record_progress(&mut self) {}
+
     pub fn new(seed: u64, steps: impl IntoIterator<Item = PolicyStep>) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
             queue: steps.into_iter().collect(),
+            #[cfg(feature = "web")]
+            progress: None,
             name_picker: PokemonNamePicker::seed_from_u64(seed),
             last_pokemon_center: None,
             heal_return: None,
             mart_attempts: 0,
+            mart_baseline: None,
             gym_route_stuck: 0,
             dig_from_map: None,
             collect_item_seen: false,
@@ -2457,6 +2775,11 @@ impl Policy for DeterministicPolicy {
 
 
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction> {
+        // ⚠️ **The cursor is written here rather than at every `pop_front`.** There are around forty
+        // of those and a missed one is a silent regression to the desync `resuming_in` describes;
+        // this is one place, on the poll that every step passes through, and it costs an integer
+        // comparison per tick.
+        self.record_progress();
         // Back in the overworld = the previous battle is over; clear the per-battle grind participation flag.
         self.trainee_participated = false;
         if state.map.map.is_pokemon_center() {
@@ -2698,7 +3021,12 @@ impl Policy for DeterministicPolicy {
                         }
                     }
                 },
-                PolicyStep::GrindUntilLevel { target_level, on_map, slot } => {
+                PolicyStep::GrindUntilLevel { target_level, on_map, target } => {
+                    let Some(slot) = target.resolve(state) else {
+                        println!("[policy] nothing matching {target:?} to level up");
+                        self.queue.pop_front();
+                        continue;
+                    };
                     if let Some(pokemon) = state.pokemon.get(slot as usize) {
                         if pokemon.level >= target_level {
                             self.queue.pop_front();
@@ -2736,23 +3064,55 @@ impl Policy for DeterministicPolicy {
                         // one-way ledge into a pocket from which the Pokémon Center becomes unreachable,
                         // stranding the heal-return trek; staying near the entry keeps the center routable.
                         Some(action.clone())
-                    } else if let Some(action) = actions.iter()
+                    } else if !state.map.has_grass_tiles() && let Some(action) = actions.iter()
                         .filter(|a| match a.tile {
-                            // Pace to the farthest reachable object/warp so wild encounters (which fire on
+                            // Pace to the farthest reachable object so wild encounters (which fire on
                             // EVERY step in a cave/building) keep coming as the trainee ping-pongs across the
                             // map. EXCLUDE item-ball sprites (`PictureId::PokeBall`): walking onto one triggers
-                            // a pickup that aborts on a full bag and loops forever (Pokémon Mansion). Warps
-                            // (stairs) are fine targets — taking one just changes floor, and GrindUntilLevel
-                            // routes back; the transit still triggers encounters.
-                            MetaTile::Sprite(name) => !state.map.sprites.iter()
-                                .any(|s| s.name == name && s.picture_id == crate::pokemon::sprite::PictureId::PokeBall),
-                            MetaTile::Warp { .. } => true,
+                            // a pickup that aborts on a full bag and loops forever (Pokémon Mansion).
+                            //
+                            // ⚠️ **A warp is only paced to when there is nothing else, and it used to be
+                            // preferred because it is usually farthest.** The claim it rested on — "taking
+                            // one just changes floor and `GrindUntilLevel` routes back" — assumes every
+                            // floor can route back, and Victory Road's cannot: grinding on VR1F paced up
+                            // the stairs and stranded the party on VR2F at (25, 14), a pocket whose only
+                            // action is a warp deeper in, from which `on_map` is unreachable. The arm above
+                            // then routed for ever. Staying on the floor is both safer and better grinding,
+                            // since a floor change costs the transit rather than spending it on steps.
+                            // ⚠️ **Boulders are excluded beside the item balls, for a neighbouring
+                            // reason.** An item ball aborts the walk on a full bag; a boulder cannot
+                            // be walked onto at all, so the approach ends in "This requires STRENGTH
+                            // to move!" against a target the pacer will pick again next tick. Victory
+                            // Road is full of them.
+                            MetaTile::Sprite(name) => !state.map.sprites.iter().any(|s| s.name == name
+                                && matches!(s.picture_id, crate::pokemon::sprite::PictureId::PokeBall
+                                                        | crate::pokemon::sprite::PictureId::Boulder)),
                             _ => false,
                         })
-                        .max_by_key(|a| a.route.len()) {
+                        .max_by_key(|a| a.route.len())
+                        // Only when the floor offers nothing to pace between at all.
+                        .or_else(|| actions.iter()
+                            .filter(|a| matches!(a.tile, MetaTile::Warp { .. }))
+                            .max_by_key(|a| a.route.len()))
+                    {
                         Some(action.clone())
                     } else {
-                        println!("[policy] cannot level up a Pokemon, no grass or cave objects nearby!");
+                        // ⚠️ **The pacing branch above is for a *cave*, and letting a route into it
+                        // is an infinite loop that generates nothing.** Encounters outdoors fire only
+                        // in grass, so on a route whose grass cannot be reached the farthest
+                        // "reachable object" is the way off the map: the trainee walks out, the arm
+                        // above routes it back because it is no longer `on_map`, and the two repeat
+                        // for ever without a single battle. Observed on Route 23 at (14, 33), which
+                        // is where Victory Road drops you and where the grass is not reachable:
+                        // VictoryRoad2F ↔ Route23, thousands of times, queue never moving.
+                        println!(
+                            "[policy] cannot level up a Pokemon on {}: {}",
+                            state.map.map,
+                            match state.map.has_grass_tiles() {
+                                true => "its grass is not reachable from here",
+                                false => "no grass and nothing to pace between",
+                            },
+                        );
                         self.queue.pop_front();
                         continue;
                     }
@@ -3158,6 +3518,25 @@ impl Policy for DeterministicPolicy {
                     } else if state.bag.iter().any(|i| i.id == item.id && i.quantity >= item.quantity) {
                         // Purchase registered (bag now holds ≥ the target quantity) — done.
                         self.mart_attempts = 0;
+                        self.mart_baseline = None;
+                        self.queue.pop_front();
+                        continue;
+                    } else if let Some((money, held)) = self.mart_baseline
+                        && self.mart_attempts > 0
+                        && state.money == money
+                        && held == state.bag.iter().find(|i| i.id == item.id).map_or(0, |i| i.quantity)
+                    {
+                        // ⚠️ **A visit that moved neither the money nor the bag is the wallet talking,
+                        // not a dropped confirm.** `agent::affordable` buys as many as the money
+                        // covers and no more, so once it covers none the next visit is identical to
+                        // this one — and the retry loop below would spend three more of them before
+                        // announcing a failure that had already happened. See `mart_baseline`.
+                        println!(
+                            "[policy] bought {} of {} from {} — the wallet covers no more",
+                            held, item, map,
+                        );
+                        self.mart_attempts = 0;
+                        self.mart_baseline = None;
                         self.queue.pop_front();
                         continue;
                     } else if self.mart_attempts >= Self::MAX_MART_ATTEMPTS {
@@ -3168,6 +3547,7 @@ impl Policy for DeterministicPolicy {
                         // name for (every TM, mostly). Give up either way.
                         println!("[policy] gave up buying {} from {} after {} attempts", item, map, self.mart_attempts);
                         self.mart_attempts = 0;
+                        self.mart_baseline = None;
                         self.queue.pop_front();
                         continue;
                     } else {
@@ -3413,6 +3793,13 @@ impl Policy for DeterministicPolicy {
             let flee = match self.queue.front() {
                 Some(PolicyStep::CatchPokemon { .. }) | Some(PolicyStep::SweepDex { .. }) =>
                     self.catch_target(state, battle_state.enemy.species).is_none(),
+                // ⚠️ **A grind is the one step whose whole purpose is the encounter**, so the
+                // obstacle reasoning above is exactly inverted for it — the same way `CatchPokemon`
+                // is exempt one line up. Without this a `GrindUntilLevel` inside a center-less
+                // dungeon runs from every wild it works so hard to find: measured on Victory Road 2F
+                // at **375 encounters, 375 runs and not one point of experience**, with the step
+                // still at the front of the queue and the harness eventually calling it a stall.
+                Some(PolicyStep::GrindUntilLevel { .. }) => false,
                 _ => in_center_less_dungeon,
             };
             if flee {
@@ -3429,7 +3816,8 @@ impl Policy for DeterministicPolicy {
         // the trainee into a much stronger foe (e.g. the rival's ace) — the lead handles those.
         let is_grinding = matches!(self.queue.front(), Some(&PolicyStep::GrindUntilLevel { .. }));
         let train_slot = match self.queue.front() {
-            Some(&PolicyStep::GrindUntilLevel { slot, .. }) if battle_state.battle_type == BattleType::Wild => Some(slot),
+            Some(&PolicyStep::GrindUntilLevel { target, .. }) if battle_state.battle_type == BattleType::Wild =>
+                target.resolve(state),
             _ => self.train_slot,
         };
         if let Some(slot) = train_slot {
@@ -4102,7 +4490,7 @@ impl Policy for DeterministicPolicy {
         None
     }
 
-    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
+    fn pick_mart_purchase(&mut self, state: &GameState) -> Option<Option<BagItem>> {
         let result = match self.queue.front() {
             Some(PolicyStep::BuyFromMart { item, .. }) => {
                 // Count this shop-open as an attempt. The `BuyFromMart` overworld arm pops the step
@@ -4112,6 +4500,13 @@ impl Policy for DeterministicPolicy {
                 // `AgentState::PokemartShopping`), because Gen 1 answers an unaffordable quantity by
                 // selling nothing at all.
                 self.mart_attempts += 1;
+                // Snapshot what this visit starts with, so the arm in `pick_overworld_action` can
+                // tell a visit that bought nothing because the wallet is empty from one that bought
+                // nothing because the confirm was dropped. See `mart_baseline`.
+                self.mart_baseline = Some((
+                    state.money,
+                    state.bag.iter().find(|entry| entry.id == item.id).map_or(0, |entry| entry.quantity),
+                ));
                 println!("[policy] BuyFromMart: {:?} (attempt {})", item, self.mart_attempts);
                 Some(*item)
             }
@@ -4126,6 +4521,24 @@ impl Policy for DeterministicPolicy {
 
     fn is_exhausted(&self) -> bool {
         self.queue.is_empty()
+    }
+
+    /// ⚠️ **A new game is a new route, and this used to be the trait's no-op default.**
+    /// `POST /api/new-run` resets the cartridge to Red's bedroom; a policy that kept its
+    /// half-consumed queue would then run the *end* of the route against the *start* of the game,
+    /// which is `resuming_in`'s disaster wearing different clothes. The route is rebuilt from the
+    /// copy taken when the cursor was set up, and the file is deleted rather than rewritten — the
+    /// run directory is a different one by now, and the `run_dir` handed in is the authority on
+    /// where the next cursor goes.
+    #[cfg(feature = "web")]
+    fn restart(&mut self, run_dir: Option<&std::path::Path>) {
+        let Some(cursor) = self.progress.as_mut() else { return };
+        scripted_progress::clear(&cursor.dir);
+        self.queue = cursor.full_route.iter().cloned().collect();
+        if let Some(dir) = run_dir { cursor.dir = dir.to_path_buf(); }
+        cursor.written = usize::MAX;
+        println!("[policy] new run — the scripted route starts again at step 0");
+        self.record_progress();
     }
 
     fn steps_remaining(&self) -> Option<usize> {
@@ -4262,5 +4675,117 @@ mod policy_helper_tests {
         assert!(sprite_is_species("Zapdos", PokemonSpecies::Zapdos));
         assert!(!sprite_is_species("Electrode 1", PokemonSpecies::Voltorb));
         assert!(!sprite_is_species("Rare Candy", PokemonSpecies::Electrode));
+    }
+}
+
+/// The scripted route's cursor: what makes a rollout survivable, and what stops a changed route
+/// being replayed over a game that is part-way through the old one.
+#[cfg(all(test, feature = "web"))]
+mod scripted_progress_tests {
+    use super::*;
+    use crate::run::tests::Scratch;
+
+    fn route() -> Vec<PolicyStep> {
+        vec![
+            PolicyStep::enter(Map::PalletTown),
+            PolicyStep::enter(Map::Route1),
+            PolicyStep::enter(Map::ViridianCity),
+            PolicyStep::enter(Map::Route2),
+            PolicyStep::enter(Map::PewterCity),
+        ]
+    }
+
+    fn policy_in(dir: &std::path::Path, steps: Vec<PolicyStep>) -> DeterministicPolicy {
+        DeterministicPolicy::new(42, steps).resuming_in(dir)
+    }
+
+    /// ⚠️ **The whole point, in three lines.** Before this a restart mid-route rebuilt the queue at
+    /// step 0 while the save resumed where it was, so the deployed scripted run would have replayed
+    /// Red's bedroom against a game halfway to Vermilion.
+    #[test]
+    fn a_restarted_process_resumes_the_route_where_it_left_off() {
+        let scratch = Scratch::new("scripted-progress");
+
+        let mut first = policy_in(&scratch.0, route());
+        assert_eq!(first.steps_remaining(), Some(5));
+        // Three steps land. `record_progress` is driven by the overworld poll in the real thing;
+        // here the queue is advanced directly so the test is about the cursor and nothing else.
+        first.queue.drain(..3);
+        first.record_progress();
+
+        let second = policy_in(&scratch.0, route());
+        assert_eq!(second.steps_remaining(), Some(2), "the route resumes at step 3 of 5");
+        assert_eq!(second.queue.front(), Some(&PolicyStep::enter(Map::Route2)));
+    }
+
+    /// A run that has never recorded a cursor is a new game, and must start at the beginning rather
+    /// than be treated as an error.
+    #[test]
+    fn a_run_with_no_cursor_starts_at_the_beginning() {
+        let scratch = Scratch::new("scripted-progress-fresh");
+        let policy = policy_in(&scratch.0, route());
+        assert_eq!(policy.steps_remaining(), Some(5));
+        // ⚠️ And it records one immediately, so the *next* restart resumes rather than guessing.
+        assert!(scratch.0.join(scripted_progress::FILE).exists(), "step 0 is still a cursor");
+    }
+
+    /// ⚠️ **A changed route parks the run; it must never replay from 0.** A cursor counts steps in
+    /// one particular list, so against a different list it means nothing — and "start over" against
+    /// a mid-game save is the failure the whole mechanism exists to prevent, not a fallback from it.
+    #[test]
+    fn a_route_that_changed_under_a_run_parks_it_rather_than_replaying_it() {
+        let scratch = Scratch::new("scripted-progress-changed");
+
+        let mut first = policy_in(&scratch.0, route());
+        first.queue.drain(..3);
+        first.record_progress();
+
+        // Same length, different steps — so the length alone would have accepted this.
+        let mut changed = route();
+        changed[4] = PolicyStep::enter(Map::CeruleanCity);
+        let parked = policy_in(&scratch.0, changed);
+        assert_eq!(parked.steps_remaining(), Some(0), "parked");
+        assert!(parked.is_exhausted(), "a parked policy stops answering, which is what parks the run");
+
+        // And a route of a different length is caught too, by the cheaper half of the same check.
+        let mut shorter = route();
+        shorter.pop();
+        assert_eq!(policy_in(&scratch.0, shorter).steps_remaining(), Some(0));
+    }
+
+    /// ⚠️ **`POST /api/new-run` is the same desync from the other side.** `Policy::restart` defaults
+    /// to a no-op and this policy never overrode it, so a new game got the *end* of the old route.
+    #[test]
+    fn a_new_run_starts_the_route_again() {
+        let scratch = Scratch::new("scripted-progress-restart");
+        let next = Scratch::new("scripted-progress-restart-2");
+
+        let mut policy = policy_in(&scratch.0, route());
+        policy.queue.drain(..4);
+        policy.record_progress();
+        assert_eq!(policy.steps_remaining(), Some(1));
+
+        policy.restart(Some(&next.0));
+        assert_eq!(policy.steps_remaining(), Some(5), "the whole route is back");
+        assert_eq!(policy.queue.front(), Some(&PolicyStep::enter(Map::PalletTown)));
+        // The cursor follows the run: the old directory's is gone, the new one's says step 0.
+        assert!(!scratch.0.join(scripted_progress::FILE).exists(), "the old run's cursor is not left behind");
+        assert!(next.0.join(scripted_progress::FILE).exists(), "the new run records its own");
+    }
+
+    /// ⚠️ **Not `DefaultHasher`.** The fingerprint is compared across processes and across builds,
+    /// so it has to be a function of the steps alone — a toolchain bump that changed it would park
+    /// every running scripted deployment.
+    #[test]
+    fn the_route_fingerprint_is_about_the_route_and_nothing_else() {
+        assert_eq!(scripted_progress::fingerprint(&route()), scripted_progress::fingerprint(&route()));
+        let mut different = route();
+        different[0] = PolicyStep::enter(Map::ViridianCity);
+        assert_ne!(scripted_progress::fingerprint(&route()), scripted_progress::fingerprint(&different));
+        // The real one, so a fingerprint that silently collapsed to a constant would show up here.
+        assert_ne!(
+            scripted_progress::fingerprint(&PolicyStep::complete_game_steps()),
+            scripted_progress::fingerprint(&route()),
+        );
     }
 }

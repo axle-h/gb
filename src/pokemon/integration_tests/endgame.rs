@@ -126,24 +126,14 @@ fn can_solve_victory_road_2f_3f() {
 /// Lorelei → Bruno → Agatha → Lance → the rival, and on through Oak's post-Champion script into the
 /// **Hall of Fame**.
 ///
-/// The two leads are looked up **by species**, not hardcoded: `MovePokemonToFront` rotates the party,
-/// so where Articuno sits after Venusaur is pulled to the front depends on where both started — and a
-/// grinded fixture arrives in a different order from an ungrinded one.
+/// ⚠️ **The lead lookup this test used to do is gone**, and so are `elite_four_steps`' slot
+/// arguments: the steps name Venusaur and Articuno by species and resolve them against the live
+/// party. Working an index out here and passing it in is the `machop_slot` mistake, and this test
+/// was the caller that had to get it right.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_beat_elite_four() {
     const FIXTURE: &[u8] = include_bytes!("../data/at-indigo-articuno.bin");
-
-    let (venusaur, articuno_after) = {
-        let mut probe = TestFixture::new(FIXTURE, Duration::from_mins(1), vec![]);
-        let party = probe.game_state().pokemon;
-        let idx = |species| party.iter().position(|p| p.species == species);
-        let v = idx(PokemonSpecies::Venusaur).expect("fixture should carry a Venusaur") as u8;
-        let a = idx(PokemonSpecies::Articuno).expect("fixture should carry an Articuno") as u8;
-        // After `move_to_front(v)`, anything that sat before v shifts one later.
-        (v, if a < v { a + 1 } else { a })
-    };
-    println!("leads: Venusaur slot {venusaur}, Articuno slot {articuno_after} after the rotation");
 
     // 180 min covers the five rooms plus Oak's post-Champion speech and the walk to the Hall of Fame.
     // ⚠️ Pinned to the pre-**J** battle timing — see `TestFixture::with_original_battle_timing`. The
@@ -153,7 +143,7 @@ fn can_beat_elite_four() {
     let mut fixture = TestFixture::new(
         FIXTURE,
         Duration::from_mins(180),
-        PolicyStep::elite_four_steps(venusaur, articuno_after),
+        PolicyStep::elite_four_steps(),
     ).with_original_battle_timing();
 
     // The rival's battle starts from a map script rather than from a step, and once it is won the
@@ -194,4 +184,103 @@ fn can_enter_hall_of_fame() {
     );
     let s = fixture.run_until(|s| s.map.map == Map::HallOfFame);
     println!("credits rolling at {} @ {}", s.map.map, s.map.player_position);
+}
+
+/// **The mainline's own tail: Victory Road 2F to the Hall of Fame, from the party the playthrough
+/// actually arrives with.** This is the composition `full_playthrough` now runs, on the fixture that
+/// run writes, and it exists so the endgame can be iterated on in minutes rather than by replaying
+/// the whole game each time.
+///
+/// ⚠️ **It is a different question from `can_beat_elite_four`, which is why both are kept.** That
+/// one runs from `at-indigo-articuno.bin` — a rich fixture, ¥49,975 — pinned to the pre-J battle
+/// timing, so it proves the gauntlet against one known-good RNG line. This one runs the *mainline's*
+/// composition on the live timing and the ¥9,710 the run actually arrives with, which is where the
+/// three-Full-Restore ceiling and `agent::affordable`'s trim actually bite.
+///
+/// ⚠️ **The two leads are seeded to `GAUNTLET_LEVEL` rather than grinded, and this test therefore
+/// proves nothing about the grind.** The grind lives in `victory_road_1f_steps`, one floor below and
+/// several hours of game time before this fixture, and it needs the Viridian Centre in the world
+/// graph to recover PP — which a fixture that starts on VR2F does not have. Seeding is the same
+/// device (and the same warning) as [`seed_seafoam_articuno`]: it keeps this test about the puzzle,
+/// the shopping and the five rooms, and leaves "can the run reach that weight" to `full_playthrough`,
+/// which is the only thing that can answer it.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_finish_from_victory_road() {
+    let mut steps = PolicyStep::victory_road_2f_3f_steps();
+    steps.extend(PolicyStep::elite_four_steps());
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/post-victory-road-1f.bin"),
+        Duration::from_mins(3000),
+        steps,
+    );
+    seed_gauntlet_levels(&mut fixture);
+    {
+        let s = fixture.game_state();
+        println!("start: {} @ {} | ¥{}", s.map.map, s.map.player_position, s.money);
+        for p in s.pokemon.iter() { println!("  {:?} lv{}", p.species, p.level); }
+    }
+
+    let s = fixture.run_until(|s| s.map.map == Map::HallOfFame);
+    println!("HALL OF FAME — final team:");
+    for p in s.pokemon.iter() { println!("  {:?} lv{} {}/{}hp", p.species, p.level, p.current_hp, p.stats.hp); }
+}
+
+/// Wind the three gauntlet fighters up to what `victory_road_grind_steps` would have left them at.
+///
+/// ⚠️ **Seeded state, not earned state** — the same device as [`seed_seafoam_articuno`], and read
+/// that one before touching this. The experience is set from the species' own growth curve and the
+/// stats recomputed, so these are ordinary Pokémon at that level rather than the max-IV specimens
+/// `Pokemon::maxed` would build.
+fn seed_gauntlet_levels(fixture: &mut TestFixture) {
+    let mut party = fixture.game_state().pokemon;
+    for slot in 0..party.len() {
+        let mon = party.get_mut(slot).expect("in range");
+        if !matches!(mon.species,
+            PokemonSpecies::Venusaur | PokemonSpecies::Articuno | PokemonSpecies::Vaporeon) { continue }
+        if mon.level >= PolicyStep::GAUNTLET_LEVEL { continue }
+        mon.experience = mon.species.metadata().experience_group
+            .experience_for_level(PolicyStep::GAUNTLET_LEVEL);
+        mon.recalculate();
+        mon.current_hp = mon.stats.hp;
+    }
+    fixture.api().debug_set_party(&party).expect("the party is unchanged in length");
+}
+
+/// **The gauntlet grind on its own**, from the fixture the route reaches it at.
+///
+/// ⚠️ **Its own test because it is the expensive step and it took four sites to place.** Running it
+/// through `full_playthrough` costs half an hour before the grind even starts, and the three failure
+/// modes it went through — a route whose grass is unreachable, a cave that flees every wild, and a
+/// cave four maps from a Pokémon Centre — are all things this can show in minutes. See
+/// [`PolicyStep::gauntlet_grind_steps`].
+/// ⚠️ **`hall-of-fame`, not `slow-tests`, and the wrong gate showed up immediately**: the leg chain
+/// runs in about 55 seconds and this is **47 minutes**, so one careless attribute turned the whole
+/// tier into something nobody would run. It shares a flag with `hall_of_fame_playthrough` because it
+/// is the same cost and the same subject — the grind is almost all of that test's 50 minutes — and
+/// the flag does *not* imply `slow-tests`, so both are named in the message.
+#[test]
+#[cfg_attr(not(feature = "hall-of-fame"), ignore = "47 min, the slowest test in the repo — run \
+    with --features slow-tests,hall-of-fame")]
+fn can_grind_for_the_gauntlet() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/post-articuno.bin"),
+        Duration::from_mins(3000),
+        PolicyStep::gauntlet_grind_steps(),
+    );
+    {
+        let s = fixture.game_state();
+        println!("start: {} @ {}", s.map.map, s.map.player_position);
+        for p in s.pokemon.iter() { println!("  {:?} lv{}", p.species, p.level); }
+    }
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    for p in s.pokemon.iter() { println!("  {:?} lv{}", p.species, p.level); }
+    for species in [PokemonSpecies::Venusaur, PokemonSpecies::Articuno, PokemonSpecies::Vaporeon] {
+        let mon = s.pokemon.iter().find(|p| p.species == species)
+            .unwrap_or_else(|| panic!("the party should carry a {species:?}"));
+        assert!(mon.level >= PolicyStep::GAUNTLET_LEVEL,
+            "{species:?} only reached lv{}", mon.level);
+    }
 }

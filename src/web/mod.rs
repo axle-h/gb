@@ -202,10 +202,18 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         // test with the page in front of it rather than a second route that could disagree with it.
         // ⚠️ **It plays the game from the beginning**, so it wants a fresh run under it; see
         // [`ServePolicy::Deterministic`], which carries that warning and where the route stops.
-        ServePolicy::Deterministic => Box::new(|| {
-            use crate::pokemon::policy::{DeterministicPolicy, PolicyStep};
-            Box::new(DeterministicPolicy::new(SCRIPTED_SEED, PolicyStep::complete_game_steps()))
-        }),
+        // ⚠️ **`resuming_in` is what makes a rollout survivable.** Without it this factory hands
+        // back a route at step 0 on every process start, while `run` resumes the save wherever it
+        // actually is — so a restart mid-playthrough does not pause the run, it desynchronises the
+        // route from the game and destroys it. See `DeterministicPolicy::resuming_in`.
+        ServePolicy::Deterministic => {
+            let run_dir = run.path().to_path_buf();
+            Box::new(move || {
+                use crate::pokemon::policy::{DeterministicPolicy, PolicyStep};
+                Box::new(DeterministicPolicy::new(SCRIPTED_SEED, PolicyStep::complete_game_steps())
+                    .resuming_in(&run_dir))
+            })
+        }
         #[cfg(feature = "llm")]
         ServePolicy::Llm => {
             use crate::llm::{client::OpenAiClient, todo::TodoList, worker};

@@ -275,6 +275,11 @@ impl Map {
                 | Map::FuchsiaPokecenter
                 | Map::CinnabarPokecenter
                 | Map::SaffronPokecenter
+                // ⚠️ **The Indigo Plateau lobby is a Pokémon Centre in every way this asks about.**
+                // It has the nurse `elite_four_steps` heals at and the mart it buys from, and it is
+                // the only one within reach of Victory Road and Route 23 — so a grind or a faint out
+                // there routed all the way back to Viridian without it.
+                | Map::IndigoPlateauLobby
         )
     }
 }
