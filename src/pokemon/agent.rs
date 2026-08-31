@@ -684,14 +684,14 @@ pub(crate) enum AgentState {
     /// "mashing", navigating each menu's cursor to its target index and then confirming with A (never
     /// carrying a held direction into the next menu). `entered_menu` tracks that we left the overworld
     /// (so returning to it means the cut animation finished). `tree_pos` is the tile being cut.
-    CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8 },
+    CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8, slot: u8, move_index: u8 },
 
     /// Mounting Surf to cross water: the route is about to step onto a `Water` tile while the player is
     /// on foot, so drive START→POKéMON→(surf mon at `slot`)→SURF (the game then mounts the player and
     /// auto-steps onto `water_pos`). Same press/release mashing + cursor-navigate pattern as
     /// `CuttingTree`; `entered_menu` tracks that we left the overworld, so a return to it with the surf
     /// state active means the mount finished. `water_pos` is the tile being surfed onto (used to face it).
-    Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8 },
+    Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8, move_index: u8 },
 
     /// Using a party field move that has no target tile: drive START→POKéMON→(the mon at `slot`)→the
     /// field-move entry at `move_index`. STRENGTH arms `BIT_STRENGTH_ACTIVE` so boulders become
@@ -2104,7 +2104,20 @@ CascadeBadge; not cutting".to_string(),
                             }
                             let tree_pos = game_state.map.tile_in_front().map(|(p, _)| p)
                                 .unwrap_or(game_state.map.player_position);
-                            self.set_state(AgentState::CuttingTree { press: true, entered_menu: false, tree_pos });
+                            // ⚠️ **Whoever in the party knows Cut, not the lead.** `can_use_cut` above
+                            // has always asked the *party*, so a run whose Cut lives on an HM slave
+                            // passed the gate and then drove the menu onto slot 0, which cannot cut and
+                            // has no CUT row — the same closed loop the gate exists to prevent, one
+                            // step further in.
+                            let Some((slot, move_index)) =
+                                crate::pokemon::policy::field_move_carrier(&game_state, crate::pokemon::move_name::PokemonMoveName::Cut)
+                            else {
+                                self.event(AgentEvent::TextBox {
+                                    message: "nobody in the party knows Cut; not cutting".to_string() });
+                                self.set_state(AgentState::Idle);
+                                return Ok(());
+                            };
+                            self.set_state(AgentState::CuttingTree { press: true, entered_menu: false, tree_pos, slot, move_index });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::CheckTrashCan { target, facing }) => {
@@ -2378,9 +2391,10 @@ CascadeBadge; not cutting".to_string(),
                                 );
                                 let surfing = api.mmu().read_pointer(&pokered_symbols::wWalkBikeSurfState) == 2;
                                 if onto_water && !surfing {
-                                    if let (Some(water_pos), Some(slot)) = (next, surf_slot(&game_state)) {
+                                    if let (Some(water_pos), Some((slot, move_index))) = (next,
+                                        crate::pokemon::policy::field_move_carrier(&game_state, crate::pokemon::move_name::PokemonMoveName::Surf)) {
                                         api.release_all_buttons();
-                                        self.set_state(AgentState::Surfing { press: true, entered_menu: false, water_pos, slot });
+                                        self.set_state(AgentState::Surfing { press: true, entered_menu: false, water_pos, slot, move_index });
                                         return Ok(());
                                     }
                                 }
@@ -3524,7 +3538,7 @@ CascadeBadge; not cutting".to_string(),
                 api.press_button(button);
                 self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0, evolve_from });
             }
-            AgentState::CuttingTree { press, entered_menu, tree_pos } => {
+            AgentState::CuttingTree { press, entered_menu, tree_pos, slot, move_index } => {
                 use crate::pokemon::menu::TextBoxId;
                 // A successful Cut opens the Pokémon menu, plays a fade/animation, then returns to the
                 // overworld. So once we've entered a menu, the first return to the overworld means the
@@ -3554,22 +3568,22 @@ CascadeBadge; not cutting".to_string(),
                 // held direction never carries into the next menu.
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::CuttingTree { press: true, entered_menu, tree_pos });
+                    self.set_state(AgentState::CuttingTree { press: true, entered_menu, tree_pos, slot, move_index });
                     return Ok(());
                 }
 
                 // In the overworld a Down/Up would move the player off the tree, so there we only open
-                // the menu; from there the shared chain drives to CUT on party slot 0.
+                // the menu; from there the shared chain drives to CUT on the mon that knows it.
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start // facing the tree, no menu yet → open START
                 } else {
-                    field_move_menu_button(api, 0, 0)
+                    field_move_menu_button(api, slot, move_index)
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos });
+                self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos, slot, move_index });
             }
-            AgentState::Surfing { press, entered_menu, water_pos, slot } => {
+            AgentState::Surfing { press, entered_menu, water_pos, slot, move_index } => {
                 use crate::pokemon::menu::TextBoxId;
                 // Mounting Surf opens the party menu, plays the field-move menu + a mount animation,
                 // then returns to the overworld now surfing (the game auto-steps onto the water tile).
@@ -3612,7 +3626,7 @@ CascadeBadge; not cutting".to_string(),
                 // Plain press/release mashing (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::Surfing { press: true, entered_menu, water_pos, slot });
+                    self.set_state(AgentState::Surfing { press: true, entered_menu, water_pos, slot, move_index });
                     return Ok(());
                 }
 
@@ -3629,11 +3643,11 @@ CascadeBadge; not cutting".to_string(),
                     }
                 } else {
                     // SURF is the surf mon's only field move, hence index 0.
-                    field_move_menu_button(api, slot, 0)
+                    field_move_menu_button(api, slot, move_index)
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::Surfing { press: false, entered_menu, water_pos, slot });
+                self.set_state(AgentState::Surfing { press: false, entered_menu, water_pos, slot, move_index });
             }
             AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map } => {
                 use crate::pokemon::menu::TextBoxId;
@@ -4233,10 +4247,9 @@ pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index:
 }
 
 fn surf_slot(state: &crate::pokemon::GameState) -> Option<u8> {
-    state.pokemon.iter().position(|p| {
-        p.moves.iter().flatten().any(|m| m.name == crate::pokemon::move_name::PokemonMoveName::Surf)
-    }).map(|i| i as u8)
+    crate::pokemon::policy::field_move_carrier(state, crate::pokemon::move_name::PokemonMoveName::Surf).map(|(slot, _)| slot)
 }
+
 
 /// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.
 /// Two adjacent plain-floor tiles to pace between for cave encounters, the first of them next to

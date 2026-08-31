@@ -31,6 +31,21 @@ use crate::pokemon::symbols::{pokered_symbols, DmgBank, DmgPointer};
 /// `CHANCES[i] - CHANCES[i-1]` out of 256.
 const SLOT_CHANCES: [u16; 10] = [51, 102, 141, 166, 191, 216, 229, 242, 253, 256];
 
+/// Where the EXP yield sits in a 28-byte base-stats entry — byte 9, between the catch rate and the
+/// sprite dimensions. Same entry (and same fixed-width prologue) `crate::pokemon::learnset`'s
+/// `BASE_LEARNSET` counts to 20 over.
+const BASE_EXP: usize = 9;
+
+/// `species`' EXP yield, out of the ROM's own base-stats table.
+///
+/// Gen 1 pays `base_exp * level / 7` for a knockout, divided between **every** party member that
+/// took the field during the battle (`engine/battle/core.asm`, `DivideExpDataByNumMonsGainingExp`).
+/// That divisor is the whole reason a grind leads with its trainee rather than switching it in: two
+/// participants is half the experience for twice the turns.
+pub fn base_exp(species: PokemonSpecies) -> u8 {
+    crate::pokemon::mon_gfx::base_stats_entry(species)[BASE_EXP]
+}
+
 /// The ten slots of one encounter block, in ROM order.
 pub type Slots = [(u8, PokemonSpecies); 10];
 
@@ -74,6 +89,69 @@ impl WildEncounters {
         }
         out.sort_by(|a, b| b.1.total_cmp(&a.1));
         out
+    }
+
+    /// The `(rate, slots)` pair `terrain` names.
+    fn block(&self, terrain: Terrain) -> (u8, &[(u8, PokemonSpecies)]) {
+        match terrain {
+            Terrain::Grass => (self.grass_rate, &self.grass),
+            Terrain::Water => (self.water_rate, &self.water),
+        }
+    }
+
+    /// Experience from **one** `terrain` encounter, knocked out by a single Pokémon: each slot's
+    /// `base_exp * level / 7` weighted by how often that slot comes up.
+    ///
+    /// ⚠️ Per **slot**, not per species. [`Self::species`] reports a species' *highest* level across
+    /// the slots it holds, which is the right answer for "what can I catch here" and an over-estimate
+    /// for this — Pokémon Mansion B1F's Ditto sits at 32, 38 and 42 in three different slots.
+    pub fn expected_exp(&self, terrain: Terrain) -> f64 {
+        let (rate, slots) = self.block(terrain);
+        if rate == 0 { return 0.0; }
+        slots.iter().enumerate().map(|(i, &(level, species))| {
+            let share = f64::from(SLOT_CHANCES[i] - if i == 0 { 0 } else { SLOT_CHANCES[i - 1] }) / 256.0;
+            share * f64::from(base_exp(species)) * f64::from(level) / 7.0
+        }).sum()
+    }
+
+    /// The same experience per **step taken**: `TryDoWildEncounter` rolls once per step on grass, cave
+    /// and water alike against this map's own rate out of 256, so the rate and the payout multiply.
+    ///
+    /// ⚠️ **The correction, not the figure to choose a site on — [`Self::expected_exp`] is.** A grind's
+    /// time goes mostly into battles rather than into walking, and the split is derivable rather than
+    /// felt: the measured gauntlet grind is 1552 wild battles in 1229 s of wall clock, which at this
+    /// emulator's ~50× is about **40 s of cartridge time per encounter cycle** — and at the Pokémon
+    /// Mansion's 10/256 that cycle contains 25.6 steps, which at the cartridge's 16 frames a step is
+    /// **under 7 s of it**. So the battle is four fifths of the cost and the walk to it one fifth, and
+    /// a site paying twice as much a knockout at half the encounter rate still wins.
+    pub fn exp_per_step(&self, terrain: Terrain) -> f64 {
+        let (rate, _) = self.block(terrain);
+        f64::from(rate) / 256.0 * self.expected_exp(terrain)
+    }
+
+    /// The share of `terrain`'s encounters that are **Poison-type**, which is the closest thing to a
+    /// "how often does a walk here end in a poisoned party" number that the encounter table alone can
+    /// answer.
+    ///
+    /// It matters to a grind and to nothing else: Gen 1's overworld poison ticks 1 HP every four steps
+    /// and is cured only at a Centre or with an Antidote, so a site whose wilds poison is a site whose
+    /// trainee eventually falls over and walks home.
+    ///
+    /// ⚠️ **A tiebreaker too, and a small one — do not trade payout for it.** Watching a run grind,
+    /// the walks back to the Centre are the thing that looks like the problem, and measured they are
+    /// not: the Pokémon Mansion is the worst site in the game for poison (half its slots) and the
+    /// whole gauntlet grind still only made **twelve** round trips against 1552 battles. `poison_share`
+    /// is worth reading when two sites are otherwise close, and worth ignoring when they are not.
+    pub fn poison_share(&self, terrain: Terrain) -> f64 {
+        let (rate, slots) = self.block(terrain);
+        if rate == 0 { return 0.0; }
+        use crate::pokemon::pokemon::PokemonType::Poison;
+        slots.iter().enumerate().filter_map(|(i, &(_, species))| {
+            let meta = species.metadata();
+            (meta.type1 == Poison || meta.type2 == Some(Poison)).then(|| {
+                f64::from(SLOT_CHANCES[i] - if i == 0 { 0 } else { SLOT_CHANCES[i - 1] }) / 256.0
+            })
+        }).sum()
     }
 
     /// Every species this map can produce on foot *or* on the water.
@@ -175,5 +253,55 @@ mod tests {
     fn an_indoor_map_has_no_encounters() {
         assert_eq!(encounters(Map::ViridianPokecenter), None);
         assert_eq!(encounters(Map::Route11Gate2F), None);
+    }
+
+    /// Bulbasaur's 64 and Chansey's 255 against `data/pokemon/base_stats/`, which is what says byte 9
+    /// is the EXP yield and not the catch rate beside it (Bulbasaur's is 45).
+    #[test]
+    fn base_exp_comes_off_the_rom() {
+        assert_eq!(base_exp(PokemonSpecies::Bulbasaur), 64);
+        assert_eq!(base_exp(PokemonSpecies::Chansey), 255);
+        assert_eq!(base_exp(PokemonSpecies::Rattata), 57);
+        assert_eq!(base_exp(PokemonSpecies::Mew), 64, "Mew's entry is in a bank of its own");
+    }
+
+    /// **Every grind site in the game, ranked** — what a route's `GrindUntilLevel` should be pointed
+    /// at, out of the ROM rather than out of memory.
+    ///
+    /// ```text
+    /// cargo test --release --features diagnostics --bin gb -- \
+    ///   pokemon::wild::tests::probe_grind_sites --exact --ignored --nocapture
+    /// ```
+    ///
+    /// ROM-only and instant. Read the columns together rather than taking the top row: `exp/step` is
+    /// the throughput, `poison` is how much of the *travel* cost the site adds by sending a poisoned
+    /// trainee back to a Pokémon Centre, and neither knows how far the nearest Centre actually is.
+    #[test]
+    #[cfg(feature = "diagnostics")]
+    #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+    fn probe_grind_sites() {
+        use strum::IntoEnumIterator;
+
+        let mut rows: Vec<(f64, String)> = Vec::new();
+        for map in Map::iter() {
+            let Some(wild) = encounters(map) else { continue };
+            for terrain in [Terrain::Grass, Terrain::Water] {
+                let (rate, slots) = wild.block(terrain);
+                if rate == 0 { continue; }
+                let per_step = wild.exp_per_step(terrain);
+                let levels = slots.iter().map(|&(l, _)| l);
+                let (lo, hi) = (levels.clone().min().unwrap(), levels.max().unwrap());
+                let who = wild.species(terrain).iter().take(4)
+                    .map(|(s, share, _)| format!("{s} {:.0}%", share * 100.0))
+                    .collect::<Vec<_>>().join(", ");
+                rows.push((per_step, format!(
+                    "{per_step:7.1}  {:6.0}  {rate:3}/256  lv{lo:>2}-{hi:<2}  {:3.0}% poison  {map:?} ({terrain:?}): {who}",
+                    wild.expected_exp(terrain), wild.poison_share(terrain) * 100.0)));
+            }
+        }
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        println!("exp/step  exp/KO    rate    levels    poison  map");
+        for (_, line) in &rows { println!("{line}"); }
+        println!("\n{} encounter blocks in the ROM", rows.len());
     }
 }

@@ -1,5 +1,5 @@
 use crate::pokemon::battle::{BattleAction, BattleState};
-use crate::pokemon::move_name::PokemonMoveName;
+use crate::pokemon::move_name::{PokemonMoveEffect, PokemonMoveName};
 use crate::pokemon::pokemon::{MoveEffectiveness, Pokemon, PokemonSummary, PokemonTypeCategory};
 
 fn expected_psywave_damage(level: u8) -> u16 {
@@ -110,13 +110,34 @@ pub fn expected_damage(attacker: &PokemonSummary, move_name: PokemonMoveName, de
     Some(damage as u16)
 }
 
+/// What a move is worth **per turn**, which is what choosing between two of them is actually about.
+///
+/// ⚠️ **A charge move is half the damage and a free hit for the opponent, and ranking on raw power
+/// hides both.** `PokemonMoveEffect::Charge` — Skull Bash, Razor Wind, Solarbeam, Sky Attack and Dig
+/// — spends the first turn winding up, so its 100 power is 50 a turn, and the enemy attacks into it.
+/// Measured in Koga's gym: a Blastoise holding Surf *and* Dig picked **Skull Bash** (equal raw power,
+/// Normal against a Poison type), was badly poisoned mid-charge, and fainted without landing it — and
+/// the Oddish behind it went down with the gym.
+///
+/// Halving is enough to get this right without a special case: Dig into Poison is 2× before the
+/// halving and still wins, which is what the route relies on for Koga, Surge and Giovanni.
+fn damage_per_turn(name: PokemonMoveName, damage: u16) -> u16 {
+    match name.metadata().effect {
+        PokemonMoveEffect::Charge => damage / 2,
+        _ => damage,
+    }
+}
+
 pub fn pick_best_move(battle_state: &BattleState, actions: &[BattleAction], catching_pokemon: bool) -> Option<BattleAction> {
     actions.iter()
         .filter_map(|a| match a {
             BattleAction::Fight { battle_move, .. } => {
                 let dmg = expected_damage(&battle_state.player, battle_move.name, &battle_state.enemy)?;
                 if dmg > 0 && (!catching_pokemon || dmg < battle_state.enemy.current_hp) {
-                    Some((dmg, *a))
+                    // ⚠️ Ranked per turn, but the *catching* guard above stays on the raw number:
+                    // what must not happen there is a knockout, and a charge move lands its full
+                    // damage when it finally goes off.
+                    Some((damage_per_turn(battle_move.name, dmg), *a))
                 } else {
                     None
                 }

@@ -1758,7 +1758,11 @@ fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
             -> Option<crate::pokemon::actions::OverworldAction> { None }
         fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
         fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
-            Some(crate::pokemon::policy::FieldMove::TeachMove { item: ItemId::Hm01Cut, target_slot: 1 })
+            // ⚠️ **Slot 0, because that is the one that *cannot* take it.** The starter is a
+            // Squirtle line and `wartortle.asm` has no CUT; slot 1 is the Oddish the route catches to
+            // carry it, which would simply learn the move and prove nothing. This test aimed at slot 1
+            // for as long as the starter was the Cut holder.
+            Some(crate::pokemon::policy::FieldMove::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 })
         }
     }
 
@@ -1794,7 +1798,7 @@ fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
 
     let said = heard.first().unwrap_or_else(|| panic!("nothing was reported at all; state {worst_state}"));
     assert!(said.contains("cannot learn Cut"), "it has to name the refusal: {said}");
-    assert!(said.contains("slot 0"), "and who in the party can take it instead: {said}");
+    assert!(said.contains("slot 1"), "and who in the party can take it instead: {said}");
 }
 
 

@@ -39,15 +39,16 @@ fn seed_seafoam_articuno(fixture: &mut TestFixture) {
     fixture.api().debug_set_party(&party).expect("the lone party has room for another mon");
 }
 
-/// From `post-volcano-lone.bin` (in Blaine's gym after the Volcano Badge, the full-playthrough party —
-/// Venusaur + Vaporeon, 7 badges): Surf back to Pallet and up to Viridian, then clear Giovanni's
+/// From `post-volcano-badge.bin` (in Blaine's gym with 7 badges — exactly where the mainline is; the
+/// Seafoam detour is no longer on the route): Surf back to Pallet and up to Viridian, then clear
+/// Giovanni's
 /// **Viridian Gym** spinner-tile maze for the **Earth Badge**, the 8th and final gym badge. Exercises
 /// the `ViridianGym` arrow-tile table.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_earth_badge() {
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/post-volcano-lone.bin"),
+        include_bytes!("../data/post-volcano-badge.bin"),
         Duration::from_mins(40),
         PolicyStep::earth_badge_steps(),
     );
@@ -80,45 +81,80 @@ fn can_solve_victory_road_1f() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-earth-badge.bin"),
         Duration::from_mins(180),
-        PolicyStep::victory_road_1f_steps(),
-    );
-    seed_seafoam_articuno(&mut fixture);
+        PolicyStep::victory_road_1f_approach_steps(),
+    ).with_stall_tolerance(Duration::from_mins(30));
     fixture.step_until_exhausted();
     let s = fixture.game_state();
     let has_strength = s.pokemon.iter()
         .any(|p| p.moves.iter().flatten().any(|m| m.name == PokemonMoveName::Strength));
     println!("final: {} @ {}  strength={has_strength}", s.map.map, s.map.player_position);
-    assert!(has_strength, "should have caught + taught a Strength HM-slave");
-    assert_eq!(s.map.map, Map::VictoryRoad2F, "should solve VR1F and climb to VR2F");
+    assert!(has_strength, "a party member should know Strength for the boulder puzzle");
+    assert_eq!(s.map.map, Map::VictoryRoad1F, "should walk to Victory Road 1F");
     fixture.save_state_named("src/pokemon/data/vr1f-strength.bin").unwrap();
+}
+
+/// The 1F boulder onto (17,13) and the climb to VR2F, split out from the approach above.
+///
+/// ⚠️ **`vr1f-strength.bin` has to be cut *on 1F*, and running the whole of
+/// `victory_road_1f_steps` here moved it to 2F.** Two other tests read that fixture for what its name
+/// says it is: `mechanics::strength_switches_are_exposed` asserts VR1F's single switch is exposed on
+/// it (a pure state read, no emulation, which is why it is in the fast tier), and the VR2F/VR3F leg
+/// wants the floor *above*. So the approach and the climb are two tests and two fixtures.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn can_climb_victory_road_1f() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/vr1f-strength.bin"),
+        Duration::from_mins(60),
+        PolicyStep::victory_road_1f_climb_steps(),
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("final: {} @ {}", s.map.map, s.map.player_position);
+    assert_eq!(s.map.map, Map::VictoryRoad2F, "should solve VR1F and climb to VR2F");
+    fixture.save_state_named("src/pokemon/data/vr2f-ladder.bin").unwrap();
 }
 
 /// The interconnected VR2F/VR3F Strength puzzle, through to the Indigo Plateau lobby: switch1 → 3F →
 /// hole-drop reveals the hidden 2F boulder → fall → switch2 → return trip → exit. Every boulder is a
 /// real Strength push.
 ///
-/// Self-contained from `vr1f-strength.bin` (Machop HM-slave already caught and taught) because
-/// chaining it onto a *fresh* run is PP-marginal — Victory Road's ~9 mandatory trainers plus the
-/// Route-22 rival drain the lead past its damaging PP in some RNG lines and there is no Pokémon Center
-/// inside. That is why `victory_road_2f_3f_steps` is not in `complete_game_steps`, and why this proof
-/// lives here instead.
+/// Self-contained from `vr1f-strength.bin` because chaining it onto a *fresh* run is PP-marginal —
+/// Victory Road's ~9 mandatory trainers plus the Route-22 rival drain the lead past its damaging PP
+/// in some RNG lines and there is no Pokémon Center inside. That is why `victory_road_2f_3f_steps` is
+/// not in `complete_game_steps`, and why this proof lives here instead.
+///
+/// ⚠️ **The Strength it re-arms is the starter's, and this line still named the Machop the route used
+/// to catch.** `PolicyStep::UseStrength` waits rather than failing when its `PartyRef` does not
+/// resolve — which is right, because a `Species` target may not be caught yet — so a name no party
+/// member has any more is a silent stall, and it sat here for a whole budget.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_solve_victory_road_2f_3f() {
-    let mut steps = vec![
-        PolicyStep::UseStrength { target: PartyRef::Species(PokemonSpecies::Machop) },
-        PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
-        PolicyStep::enter(Map::VictoryRoad2F),
-    ];
+    // ⚠️ **The 1F climb is part of this test, not a leftover.** Seeded on VR1F with Strength ready,
+    // it pushes 1F's boulder, climbs the ladder and then solves the interconnected floors — which is
+    // the sequence `complete_game_steps` plays. Starting it on VR2F instead (from a fixture cut after
+    // the climb) lands the player on a different tile of a Sokoban puzzle and the second switch is
+    // then unreachable: the run finishes eleven of fourteen steps and stalls with only VR1F and VR3F
+    // warps in reach.
+    let mut steps = PolicyStep::victory_road_1f_climb_steps();
     steps.extend(PolicyStep::victory_road_2f_3f_steps());
     let mut fixture = TestFixture::new(
         include_bytes!("../data/vr1f-strength.bin"),
         Duration::from_mins(60),
         steps,
     );
-    let s = fixture.run_until(|s| s.map.map == Map::IndigoPlateauLobby);
+    // ⚠️ **Stopped on the plateau *outside* the lobby, and the reason is not this test.**
+    // `at-indigo.bin`'s only other reader is `llm::map_image`, whose fixture list is chosen for what
+    // each state makes *drawable* — its entry for this one is "a `Plateau` map whose strip tileset
+    // differs from its own", which is the open-air `IndigoPlateau` and not the building standing on
+    // it. The committed file had been an outdoor state for a long time because nothing regenerated
+    // it; the first regeneration in a year replaced it with the lobby and both map-render tests went
+    // red with "only 0 ring pixels". Nothing needs the lobby: `elite_four_steps` opens by routing to
+    // its mart, and the Elite Four leg is seeded from `at-indigo-articuno.bin`. Walking out of
+    // Victory Road onto the plateau is what this leg is proving either way.
+    let s = fixture.run_until(|s| s.map.map == Map::IndigoPlateau);
     println!("final: {} @ {}", s.map.map, s.map.player_position);
-    // Snapshot the Indigo Plateau lobby for fast Elite Four iteration.
     fixture.save_state_named("src/pokemon/data/at-indigo.bin").unwrap();
 }
 
@@ -237,8 +273,7 @@ fn seed_gauntlet_levels(fixture: &mut TestFixture) {
     let mut party = fixture.game_state().pokemon;
     for slot in 0..party.len() {
         let mon = party.get_mut(slot).expect("in range");
-        if !matches!(mon.species,
-            PokemonSpecies::Venusaur | PokemonSpecies::Articuno | PokemonSpecies::Vaporeon) { continue }
+        if !matches!(mon.species, PokemonSpecies::Blastoise) { continue }
         if mon.level >= PolicyStep::GAUNTLET_LEVEL { continue }
         mon.experience = mon.species.metadata().experience_group
             .experience_for_level(PolicyStep::GAUNTLET_LEVEL);
@@ -250,19 +285,25 @@ fn seed_gauntlet_levels(fixture: &mut TestFixture) {
 
 /// **The gauntlet grind on its own**, from the fixture the route reaches it at.
 ///
-/// ⚠️ **Its own test because it is the expensive step and it took four sites to place.** Running it
-/// through `full_playthrough` costs half an hour before the grind even starts, and the three failure
-/// modes it went through — a route whose grass is unreachable, a cave that flees every wild, and a
-/// cave four maps from a Pokémon Centre — are all things this can show in minutes. See
-/// [`PolicyStep::gauntlet_grind_steps`].
+/// ⚠️ **Its own test because it is the expensive step and it took five sites to place.** Running it
+/// through `full_playthrough` costs half an hour before the grind even starts, and the four failure
+/// modes it went through — a route whose grass is unreachable, a cave that flees every wild, a cave
+/// four maps from a Pokémon Centre, and a cave whose door has a man standing in it — are all things
+/// this can show in minutes. See [`PolicyStep::gauntlet_grind_steps`].
+///
 /// ⚠️ **`hall-of-fame`, not `slow-tests`, and the wrong gate showed up immediately**: the leg chain
-/// runs in about 55 seconds and this is **47 minutes**, so one careless attribute turned the whole
+/// runs in about 55 seconds and this is **20 minutes**, so one careless attribute turned the whole
 /// tier into something nobody would run. It shares a flag with `hall_of_fame_playthrough` because it
-/// is the same cost and the same subject — the grind is almost all of that test's 50 minutes — and
-/// the flag does *not* imply `slow-tests`, so both are named in the message.
+/// is the same subject — the grind is most of that test — and the flag does *not* imply `slow-tests`,
+/// so both are named in the message.
+///
+/// It is also the number to watch when anything touches how a grind battle is fought: **1552 wild
+/// battles in 1229 s**, twelve heal round trips and no black-outs. It was 2306 battles in 2829 s
+/// until the trainee stopped being switched in and started leading — half the experience per
+/// knockout and a wasted turn in every one of them, which is 2.3× of this test.
 #[test]
-#[cfg_attr(not(feature = "hall-of-fame"), ignore = "47 min, the slowest test in the repo — run \
-    with --features slow-tests,hall-of-fame")]
+#[cfg_attr(not(feature = "hall-of-fame"), ignore = "20 min, the slowest test in the repo but one — \
+    run with --features slow-tests,hall-of-fame")]
 fn can_grind_for_the_gauntlet() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-articuno.bin"),
@@ -282,5 +323,40 @@ fn can_grind_for_the_gauntlet() {
             .unwrap_or_else(|| panic!("the party should carry a {species:?}"));
         assert!(mon.level >= PolicyStep::GAUNTLET_LEVEL,
             "{species:?} only reached lv{}", mon.level);
+    }
+}
+
+/// Dump what the agent can see and reach from a save — map, position, money, party, bag, tile under
+/// foot, sprites and every action. Instant; the point is to answer "why did that `EnterMap` have
+/// nowhere to go" without re-running the leg that produced it.
+///
+/// ```text
+/// GB_PROBE_STATE=src/pokemon/data/post-articuno.bin \
+/// cargo test --release --features diagnostics --bin gb -- probe_stall_actions --ignored --nocapture
+/// ```
+#[test]
+#[cfg(feature = "diagnostics")]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_stall_actions() {
+    let path = std::env::var("GB_PROBE_STATE")
+        .unwrap_or_else(|_| "target/test-artifacts/test_stall_state.bin".to_string());
+    let Ok(bytes) = std::fs::read(&path) else {
+        println!("no state at {path}");
+        return;
+    };
+    let mut fixture = TestFixture::new(&bytes, Duration::from_secs(1), Vec::new());
+    let s = fixture.game_state();
+    println!("{} @ {}  money ¥{}", s.map.map, s.map.player_position, s.money);
+    for mon in s.pokemon.iter() {
+        println!("  party {:?} lv{} {}/{}hp {:?}", mon.species, mon.level, mon.current_hp,
+            mon.stats.hp, mon.status);
+    }
+    println!("  bag: {:?}", s.bag.iter().map(|i| (i.id, i.quantity)).collect::<Vec<_>>());
+    println!("tile under player: {:?}", s.map.tile_at_checked(s.map.player_position));
+    for sprite in &s.map.sprites {
+        println!("  sprite {:?} hidden={} @ {}", sprite.name, sprite.hidden, sprite.position);
+    }
+    for action in s.map.actions() {
+        println!("  action {:?} → {} ({} steps)", action.tile, action.destination, action.route.len());
     }
 }

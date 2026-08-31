@@ -495,6 +495,83 @@ impl Policy for ConsolePolicy {
 }
 
 
+/// Whether a step can be interrupted by a walk to a Pokémon Centre and still finish afterwards.
+///
+/// ⚠️ **`Map::is_overworld` is the safe answer and it is too narrow, because the fights that need a
+/// heal most are indoors.** Koga's gym is six trainers and an invisible-wall maze with no Centre in
+/// it: the run walked in, was poisoned by the second trainer, ticked down through the third and
+/// black-ed out on a junior's Hypno — one warp from the Fuchsia Centre it was standing next to ten
+/// steps earlier. What makes that detour safe is not the map, it is the *step*: these all re-derive
+/// their own route every tick, so leaving and coming back costs a walk and nothing else.
+///
+/// ⚠️ **Everything else stays out, and the exclusions are the point.** `EnterMap` is a deliberate
+/// single hop — a chain of them through Mt Moon, Silph Co or the Seafoam Islands cannot be resumed
+/// from a Pokémon Centre, which is how a black-out on a cave floor strands a run for good — and
+/// `BattleTrainer`, `SolveBoulders` and the pad-maze steps are the same shape.
+fn step_finds_its_own_way_back(step: &PolicyStep) -> bool {
+    matches!(step,
+        PolicyStep::GrindUntilLevel { .. } | PolicyStep::CatchPokemon { .. }
+        | PolicyStep::SweepDex { .. } | PolicyStep::Goto { .. }
+        | PolicyStep::DefeatGymLeader { .. } | PolicyStep::CutTree { .. })
+}
+
+/// Whether the run should walk to a Pokémon Centre *before* the next battle rather than after it.
+///
+/// ⚠️ **A black-out is the same walk with the levels kept and the money halved, and the route used to
+/// take it seven times a run.** Every early black-out measured on the Squirtle route was the same
+/// shape: the lead goes into an encounter already worn from the last one, loses in one or two turns,
+/// and the party wakes in a Centre anyway. Nothing was *wrong* — the in-battle "heal below 25%" arm
+/// fires correctly, it simply had nothing in the bag to reach for, and the flee-to-heal arm cannot
+/// fire in a trainer battle at all. So the decision moves out of the battle and into the overworld
+/// tick before it.
+///
+/// Three reasons to go, and they are deliberately different:
+/// * the lead is **fainted** — nothing else in this file revives it outside a grind;
+/// * its attacks are **spent**, which no purchase can fix: no Gen 1 mart sells Ether or Elixer
+///   (`data/items/marts.asm`), so a Centre is the only PP in the game before the S.S. Anne's floor
+///   items;
+/// * it is **badly hurt and the bag is empty of medicine** — with a potion in the bag the in-battle
+///   arm is the cheaper answer and this stays quiet.
+fn needs_a_centre(state: &GameState, grinding: bool) -> bool {
+    let Some(lead) = state.pokemon.get(0) else { return false };
+    if lead.current_hp == 0 { return true; }
+
+    // ⚠️ **A grind goes home on empty, not on low, and the difference is nineteen minutes.** Out on
+    // the route a fifth of a tank is the right moment to turn back, because the next fight is a
+    // trainer who cannot be fled. Inside the gauntlet grind every wild *can* be fled and the trainee
+    // is handed off to a tank whenever one threatens it, so turning back at a fifth cost **46 round
+    // trips** from the Pokémon Mansion to Cinnabar and back — measured, `hall_of_fame_playthrough`
+    // went from 31 minutes to 51 on 5% more battles.
+    let (pp, max) = lead.moves.iter().flatten()
+        .filter(|m| is_damaging_move(m.name))
+        .fold((0u32, 0u32), |(have, cap), m| (have + m.pp as u32, cap + m.name.metadata().pp as u32));
+    let dry = match grinding { true => pp == 0, false => pp * 5 <= max };
+    if max > 0 && dry { return true; }
+
+    // ⚠️ **"Is there medicine?" is the wrong question — "can it fix this?" is the right one.** A
+    // Potion is +20, which is a fifth of a lv21 Wartortle and none of a lv50 Blastoise, so a bag
+    // holding nothing but Potions kept this quiet while the in-battle arm chipped away and the run
+    // black-ed out on Route 3 anyway. The test is whether the best thing in the bag covers what is
+    // missing.
+    let heals = |id: ItemId| match id {
+        ItemId::FullRestore | ItemId::MaxPotion => u32::MAX,
+        ItemId::HyperPotion => 200,
+        ItemId::SuperPotion => 50,
+        ItemId::Potion => 20,
+        _ => 0,
+    };
+    let best = state.bag.iter().filter(|i| i.quantity > 0).map(|i| heals(i.id)).max().unwrap_or(0);
+    let missing = lead.stats.hp.saturating_sub(lead.current_hp) as u32;
+    lead.current_hp as u32 * 3 < lead.stats.hp as u32 && best < missing
+}
+
+/// Every party member at full HP, full PP and no status — what a Pokémon Centre leaves behind.
+fn party_is_fresh(state: &GameState) -> bool {
+    state.pokemon.iter().all(|p| p.current_hp == p.stats.hp
+        && p.status == crate::pokemon::status::PokemonStatus::None
+        && p.moves.iter().flatten().all(|m| m.pp == m.name.metadata().pp))
+}
+
 pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     let battle_state = state.battle.as_ref()?;
 
@@ -510,6 +587,27 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     }
 
     let mut opts = battle_state.player.available_battle_moves();
+
+    // ⚠️ **Every move at zero PP is Struggle, not "no move", and reading it as no move stops the run
+    // dead in silence.** `available_battle_moves` filters on `pp > 0`, so a mon that has run dry
+    // offers no `Fight` at all — and in a *trainer* battle there is no `Run` either, and a party with
+    // nothing else conscious offers no `SwitchPokemon`, so the whole list is bag items.
+    // `pick_battle_action`'s last resort deliberately refuses to fall through to a `UseItem` (the
+    // first bag entry is often a key item the game will not use, which deadlocks on "This isn't the
+    // time to use that!"), so it answered `None` — and `None` from a policy means *still thinking*.
+    //
+    // ⚠️ **The watchdog cannot see that.** `since_last_policy_poll` is reset by `poll_policy` whatever
+    // the answer is, so a policy asked every tick and answering nothing every tick looks perfectly
+    // healthy: the agent sits at the main battle menu, the emulator runs and nothing is printed.
+    // Three `full_playthrough` runs died in that silence — twice against Erika's Victreebel and once
+    // her Vileplume, once for **seven hundred minutes of game time**. The cartridge's own answer is
+    // that FIGHT with no PP anywhere uses Struggle, which resolves the battle one way or the other,
+    // so offer the moves and let it. Guard: `a_party_with_no_pp_anywhere_still_gets_an_answer`, which
+    // asserts on **battle actions taken** rather than on silence, for the reason above.
+    if opts.is_empty() {
+        opts.extend(battle_state.player.moves.iter().enumerate()
+            .filter_map(|(i, m)| m.map(|battle_move| BattleAction::Fight { slot: i as u8, battle_move })));
+    }
 
     for (i, item) in state.bag.iter().enumerate() {
         opts.push(BattleAction::UseItem { slot: i as u8, item: item.clone() });
@@ -572,6 +670,15 @@ pub enum PartyRef {
     Slot(u8),
     /// The first member of this species.
     Species(PokemonSpecies),
+    /// The first member of **any** of these species — an evolution line named as one mon.
+    ///
+    /// ⚠️ **A grind across an evolution needs this and `Species` cannot do it.** `GrindUntilLevel`
+    /// checks the level of the same index it trains, so a target that stops resolving part-way
+    /// through never completes: an Abra caught at lv10 and trained to 16 *becomes a Kadabra* on the
+    /// level that finishes the step, and `Species(Abra)` then answers `None` for ever. The starter is
+    /// the same shape and got away with it only because nothing addressed it by species until after
+    /// both evolutions.
+    Line(&'static [PokemonSpecies]),
 }
 
 impl PartyRef {
@@ -581,6 +688,9 @@ impl PartyRef {
             Self::Slot(slot) => (usize::from(slot) < state.pokemon.len()).then_some(slot),
             Self::Species(species) => state.pokemon.iter()
                 .position(|p| p.species == species)
+                .map(|i| i as u8),
+            Self::Line(line) => state.pokemon.iter()
+                .position(|p| line.contains(&p.species))
                 .map(|i| i as u8),
         }
     }
@@ -770,7 +880,7 @@ pub enum PolicyStep {
     /// `wLastBlackoutMap`, the town of the last Pokémon Center used, so healing before a dungeon also
     /// chooses where Dig lands. Completes on the map change. This is how the Seafoam leg gets home:
     /// every walkable route back east is script-sealed until the boulder chain no one needs is done.
-    Dig { slot: u8 },
+    Dig { target: PartyRef },
     /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge). Routes to face a
     /// `MetaTile::CutTree`, then uses the Cut field move. Persists until no reachable tree remains.
     CutTree { map: Map },
@@ -932,6 +1042,30 @@ pub(crate) fn field_move_index(state: &GameState, slot: u8, want: PokemonMoveNam
     state.pokemon.get(slot as usize).map_or(0, |mon| field_move_index_of(mon, want))
 }
 
+/// The party member that knows `want`, and `want`'s row in that member's field-move box.
+///
+/// ⚠️ **A field move is answered by whoever in the party knows it, never by a slot the caller
+/// guessed — and both halves of that used to be assumed.** `CuttingTree` drove the party menu onto
+/// **slot 0** unconditionally, which is right only while the starter is the Cut carrier; a starter
+/// that cannot learn Cut (Squirtle: `data/pokemon/base_stats/wartortle.asm` lists SURF and STRENGTH
+/// and no CUT) needs an HM slave, and the driver would then have opened the menu on the wrong mon
+/// for ever, since its only exit is the overworld coming back. `Surfing` hard-coded the *move index*
+/// to 0, which is right only while the surfer knows exactly one field move; a Blastoise carrying
+/// Surf, Strength and Dig lists three, and index 0 is whichever sits earliest in its move list
+/// rather than the one asked for.
+///
+/// So every path that uses a field move goes through this: find the move, then drive the menus into
+/// that Pokémon and that row. The first holder wins — a party with two Surfers has no interesting
+/// choice to make.
+pub(crate) fn field_move_carrier(
+    state: &GameState,
+    want: PokemonMoveName,
+) -> Option<(u8, u8)> {
+    state.pokemon.iter().enumerate()
+        .find(|(_, p)| p.moves.iter().flatten().any(|m| m.name == want))
+        .map(|(i, p)| (i as u8, field_move_index_of(p, want)))
+}
+
 /// `want`'s row in `mon`'s field-move box, for callers that hold the mon but not a whole `GameState`.
 pub(crate) fn field_move_index_of(mon: &crate::pokemon::pokemon::Pokemon, want: PokemonMoveName) -> u8 {
     mon.moves.iter().flatten().map(|m| m.name).filter(|&n| is_field_move(n))
@@ -939,11 +1073,6 @@ pub(crate) fn field_move_index_of(mon: &crate::pokemon::pokemon::Pokemon, want: 
 }
 
 impl PolicyStep {
-    /// The Victory Road boulder slave, named by species because it is caught *inside*
-    /// [`Self::victory_road_1f_steps`] — the slot it lands in depends on how many mons the run arrived
-    /// with, which is exactly what the old `machop_slot` argument was guessing at (and `complete_game_steps`
-    /// and the leg test guessed differently: 4 versus 2).
-    const MACHOP: PartyRef = PartyRef::Species(PokemonSpecies::Machop);
 
     pub const fn goto(map: Map) -> Self {
         Self::Goto { map, strict: true }
@@ -1032,7 +1161,7 @@ impl PolicyStep {
             Self::enter_at(Map::SSAnne1FRooms, 10, 10), Self::Interact(MapSprite::SSANNE1FROOMS_YOUNGSTER),
                                                         Self::Interact(MapSprite::SSANNE1FROOMS_COOLTRAINER_F), Self::enter(Map::SSAnne1F),
         ]);
-        s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity)]); // disembark
+        s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity), Self::enter(Map::VermilionPokecenter), Self::Interact(MapSprite::VERMILIONPOKECENTER_NURSE), Self::enter(Map::VermilionCity), ]); // disembark + heal
 
         // ── B1F cabins (6 trainers) ──
         s.extend(Self::heal_at_vermilion());
@@ -1045,7 +1174,7 @@ impl PolicyStep {
             Self::enter_at(Map::SSAnneB1FRooms, 2, 15), Self::Interact(MapSprite::SSANNEB1FROOMS_SAILOR1),
                                                         Self::Interact(MapSprite::SSANNEB1FROOMS_SAILOR2), Self::enter(Map::SSAnneB1F),
         ]);
-        s.extend([Self::enter(Map::SSAnne1F), Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity)]); // disembark
+        s.extend([Self::enter(Map::SSAnne1F), Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity), Self::enter(Map::VermilionPokecenter), Self::Interact(MapSprite::VERMILIONPOKECENTER_NURSE), Self::enter(Map::VermilionCity), ]); // disembark + heal
 
         // ── 2F cabins (4 trainers) + Bow (2 trainers, via 3F) ──
         s.extend(Self::heal_at_vermilion());
@@ -1062,7 +1191,7 @@ impl PolicyStep {
             Self::Interact(MapSprite::SSANNEBOW_SAILOR2), Self::Interact(MapSprite::SSANNEBOW_SAILOR3),
             Self::enter(Map::SSAnne3F), Self::enter(Map::SSAnne2F),
         ]);
-        s.extend([Self::enter(Map::SSAnne1F), Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity)]); // disembark
+        s.extend([Self::enter(Map::SSAnne1F), Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity), Self::enter(Map::VermilionPokecenter), Self::Interact(MapSprite::VERMILIONPOKECENTER_NURSE), Self::enter(Map::VermilionCity), ]); // disembark + heal
 
         // ── Rival + Captain (HM01) ── (heal first — the rival is 6 Pokémon in one battle)
         s.extend(Self::heal_at_vermilion());
@@ -1073,17 +1202,41 @@ impl PolicyStep {
         s.extend([
             Self::enter(Map::SSAnne2F), Self::enter(Map::SSAnne1F),
             Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity),
+            Self::enter(Map::VermilionPokecenter), Self::Interact(MapSprite::VERMILIONPOKECENTER_NURSE), Self::enter(Map::VermilionCity), 
         ]);
         s
     }
 
-    /// From Cerulean City (post-Cascade): fetch the **SS Ticket** from Bill, then cross to Vermilion
-    /// City via the **trashed-house terrace bridge** + Underground Path (Route 5 → 6). The trashed
-    /// house is the only way between Cerulean's split terraces: its back door lands in the Route-5
-    /// terrace (`enter_at(CeruleanCity, 27, 9)` — front door ~27,11 does not reach it). See
+    /// From Cerulean City (no badge needed): cross the Nugget Bridge, fetch the **SS Ticket** from
+    /// Bill, come back and **beat Misty**, then cross to Vermilion City via the **trashed-house
+    /// terrace bridge** + Underground Path (Route 5 → 6), catching the Cut carrier on the way. The
+    /// trashed house is the only way between Cerulean's split terraces: its back door lands in the
+    /// Route-5 terrace (`enter_at(CeruleanCity, 27, 9)` — front door ~27,11 does not reach it). See
     /// `can_reach_vermilion`. Bill's guard on Route 25 clears once you meet him, opening the bridge.
     pub fn cerulean_to_vermilion_steps() -> Vec<Self> {
         let mut steps = vec![
+            Self::enter(Map::CeruleanCity),
+            // Poké Balls for the two catches this route now depends on: the Cut carrier on Route 25
+            // below, and the Drowzee on Route 11 in `saffron_to_cinnabar_steps`. Bought here rather
+            // than after the bridge because every black-out halves the wallet and the bridge is where
+            // they happen. `agent::affordable` trims the order to what the money covers.
+            Self::enter(Map::CeruleanMart),
+            Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 6), map: Map::CeruleanMart },
+            // Top the Potions back up before the nine trainers on the bridge — the same argument as
+            // the Pewter stop, at the last counter before them. Ordered *after* the balls so that
+            // when the wallet runs short it is the potions that thin out, not the catch.
+            Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 10), map: Map::CeruleanMart },
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::Route24),
+            Self::enter(Map::Route25),
+            // ⚠️ **Back across the bridge to a Centre before Bill, because what runs out here is PP.**
+            // Route 24 is five trainers in a row and Route 25 four more, and this leg used to fight all
+            // of them, Bill, the Underground Path and Route 6 on a single tank. The trainers are beaten
+            // by now, so the walk back over the bridge is only a walk.
+            Self::enter(Map::Route24),
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
             Self::enter(Map::CeruleanCity),
             Self::enter(Map::Route24),
             Self::enter(Map::Route25),
@@ -1092,7 +1245,38 @@ impl PolicyStep {
         steps.extend(Self::bill_ss_ticket_steps());
         steps.extend([
             Self::enter(Map::Route25),
+            // ── The Cut carrier. See `CUT_SLAVE`: Blastoise cannot learn Cut and this route needs it
+            // four times. ⚠️ **Route 25 and not Route 5, which is where this was first written and
+            // where it stalled for the rest of the run.** Route 5 has an Oddish in its table, but the
+            // strip the route walks is the plain path down from Cerulean, and `wander_action` paces
+            // whatever open tiles are nearest — measured, 57 s of game time a lap with no encounter at
+            // all, for four thousand log lines. Route 25 is grass end to end and the run walks its
+            // whole length anyway.
+            Self::CatchPokemon { species: PokemonSpecies::Oddish, on_map: Map::Route25,
+                                 ball: Some(ItemId::PokeBall) },
             Self::enter(Map::Route24),
+            // ⚠️ **Misty is fought *after* the bridge, and the reorder is the whole of how this route
+            // affords Bite.** Wartortle's Water Gun is resisted by both of her Water types and hers is
+            // resisted right back, which is a slugfest it loses; **Bite at lv24 is Normal in Gen 1**,
+            // so it is neutral into Starmie and the fight stops being close. Getting to 24 by grinding
+            // is the expensive way to buy it — Route 3's wilds are lv3-8 Pidgey and Spearow, about
+            // **170 battles** from 18 — where Route 24 and 25's nine trainers hand over most of it for
+            // a walk the route was making anyway. Nothing on this side of Cerulean needs the Cascade
+            // Badge: the bridge, Bill, the trashed house and the Underground Path are all open from
+            // the start, and the first thing that does need it is Cut, in Vermilion, two legs later.
+            //
+            // Whatever the trainers left short is topped up here rather than earlier, because Route 24
+            // is a far better site than Route 3 for it (lv12-14 Oddish, Abra and Pidgey against lv3-8).
+            Self::GrindUntilLevel { target_level: 24, on_map: Map::Route24, target: Self::STARTER_LINE },
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+            Self::enter(Map::CeruleanCity),
+            Self::DefeatGymLeader { leader: MapSprite::CERULEANGYM_MISTY, badge: Badge::CascadeBadge },
+            // Exit the gym to the city (a single warp) before entering the Pokécenter.
+            Self::enter(Map::CeruleanCity),
+            Self::enter(Map::CeruleanPokecenter),
+            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
             Self::enter(Map::CeruleanCity),
             Self::enter(Map::CeruleanTrashedHouse),   // front door (main terrace, ~27,11)
             Self::enter_at(Map::CeruleanCity, 27, 9), // back door lands in the Route-5 terrace
@@ -1115,7 +1299,20 @@ impl PolicyStep {
     pub fn thunder_badge_steps() -> Vec<Self> {
         let mut s = Self::heal_at_vermilion();
         s.extend([
-            Self::TeachMove { item: ItemId::Hm01Cut, target: PartyRef::Slot(0) }, // the lead: `CuttingTree` only ever asks slot 0
+            // ⚠️ **The carrier, not the lead.** `CuttingTree` used to drive the party menu onto slot
+            // 0 unconditionally, which was right only while the starter was the Cut holder;
+            // `agent::field_move_carrier` now resolves whoever knows it, so the HM can live on the
+            // slave and the lead can stay the thing that fights.
+            Self::TeachMove { item: ItemId::Hm01Cut, target: Self::CUT_SLAVE },
+            // ⚠️ **Dig goes on before Lt. Surge, not after him, and it is the difference between
+            // losing that gym twice and walking it.** Surge is Electric and the starter is Water, so
+            // every one of his attacks is 2× and every one of the starter's is neutral at best —
+            // measured, the run black-ed out in that gym **twice in a row at lv33**. TM28 is
+            // 100-power **Ground**, which Electric takes 2× from, and Dig's first turn is spent
+            // underground where a Thunderbolt cannot reach. The run has been carrying the TM since
+            // the Rocket outside the Cerulean trashed house handed it back
+            // (`scripts/CeruleanCity.asm`, `.beatRocketThief`), two legs ago.
+            Self::TeachMove { item: ItemId::Tm28Dig, target: Self::STARTER_LINE },
             Self::CutTree { map: Map::VermilionCity },
             Self::enter(Map::VermilionGym),
             Self::SolveTrashCans,
@@ -1134,6 +1331,7 @@ impl PolicyStep {
             Self::enter(Map::VermilionCity), // exit the gym into the Cut-tree enclosure
             Self::CutTree { map: Map::VermilionCity },
         ];
+        s.extend(Self::heal_at_vermilion());
         s.extend(Self::heal_at_vermilion());
         s.extend([
             // **Stock healing items before leaving Vermilion.** Everything from here to Celadon —
@@ -1229,6 +1427,13 @@ impl PolicyStep {
     /// Normal move (Cut/Body Slam) + level lead — the party is ~lv35+ Venusaur by now.
     pub fn celadon_rainbow_steps() -> Vec<Self> {
         vec![
+            // ⚠️ **Heal on the way in, because the gym is the last chance.** The garden's junior
+            // trainers engage by line of sight while `CutTree` is clearing the maze, so whatever HP
+            // and PP the party walks in with is what it fights Erika on — and the first Squirtle run
+            // reached her at 86/118 and fell asleep.
+            Self::enter(Map::CeladonPokecenter),
+            Self::Interact(MapSprite::CELADONPOKECENTER_NURSE),
+            Self::enter(Map::CeladonCity),
             Self::CutTree { map: Map::CeladonCity },   // cut the trees sealing the gym entrance
             Self::enter(Map::CeladonGym),
             // The gym is a garden maze whose paths are blocked by real cuttable trees (GYM tileset
@@ -1495,6 +1700,10 @@ impl PolicyStep {
             Self::CollectItem(MapSprite::SAFARIZONEWEST_GOLD_TEETH),
             Self::enter(Map::SafariZoneSecretHouse),
             Self::Interact(MapSprite::SAFARIZONESECRETHOUSE_FISHING_GURU), // hands over HM03 Surf
+            // Straight onto the starter, which is what retired the Eevee → Vaporeon leg: Blastoise
+            // learns Surf and Strength itself (`data/pokemon/base_stats/blastoise.asm`), so the only
+            // thing that leg was still buying was a second body to hang the HMs on.
+            Self::TeachMove { item: ItemId::Hm03Surf, target: Self::STARTER_LINE },
         ]
     }
 
@@ -1515,6 +1724,11 @@ impl PolicyStep {
             Self::enter(Map::FuchsiaCity),
             Self::enter(Map::WardensHouse),
             Self::Interact(MapSprite::WARDENSHOUSE_WARDEN), // give Gold Teeth → HM04 Strength
+            // ⚠️ **HM04 stays in the bag.** Strength is 80-power Normal that the starter never wants
+            // to use, and an HM is the one move `pick_move_to_forget` will not drop — so teaching it
+            // here costs a permanent slot in the only Pokémon this route fights with. It goes on the
+            // Victory Road Machop instead, caught two tiles from the boulder it is for. Surf is the
+            // exception because Surf is a 95-power STAB attack that happens to be an HM.
         ]
     }
 
@@ -1570,6 +1784,16 @@ impl PolicyStep {
     /// Hideout's (panel bg-event at (3,0), 11-floor menu: 1F=0 … 5F=4 … 11F=10, redirected exit warp).
     pub fn silph_co_card_key_steps() -> Vec<Self> {
         vec![
+            // ⚠️ **Heal first, because Silph Co is the longest Pokémon-Centre-less stretch in the
+            // game and what runs out in it is PP.** Eleven floors of Rockets, the rival and Giovanni
+            // are fought on whatever the party walks in with, and the Hyper Potions below restore HP
+            // and nothing else. Measured: the first Squirtle run lost Blastoise somewhere in the
+            // middle of the building and finished the rival's Venusaur with a **lv19 Oddish using
+            // Cut**, then blacked out on 11F one room from Giovanni — which warps to Celadon, where
+            // the queue's next step is a Silph floor it cannot reach, and the run is over.
+            Self::enter(Map::SaffronPokecenter),
+            Self::Interact(MapSprite::SAFFRONPOKECENTER_NURSE),
+            Self::enter(Map::SaffronCity),
             // Stock up on HYPER Potions at the Saffron Mart before entering Silph. The Silph rival /
             // Giovanni / Sabrina and Blaine fights need a heal big enough to lift the healer back above
             // the enemy's per-turn damage — a Super Potion's +50 just cancels Alakazam's Psychic (an
@@ -1589,6 +1813,15 @@ impl PolicyStep {
             // now adjacent to the pocket. Then collect.
             Self::enter(Map::SilphCo9F),                                // via 5F (9,15) → 9F (17,15)
             Self::enter(Map::SilphCo5F),                                // via 9F (17,15) → arrive at 5F (9,15)
+            // ⚠️ **Free two bag slots before reaching for the Card Key.** The run arrives at Silph on
+            // exactly **20 entries**, Gen 1's cap, and a full bag refuses every pickup in the game
+            // *silently* — the step simply never completes. Measured: 3000 polls standing one tile
+            // from the key, then a give-up, and the run walked on without the thing the rest of the
+            // building is locked behind. The Nugget is sell-fodder this route never sells and TM34
+            // Bide is the deadest weight it carries; the Bide toss used to be two legs later, for the
+            // Master Ball, and that was always the wrong side of the door.
+            Self::TossItem { item: ItemId::Nugget },
+            Self::TossItem { item: ItemId::Tm34Bide },
             Self::CollectItem(MapSprite::SILPHCO5F_CARD_KEY),
         ]
     }
@@ -1615,6 +1848,28 @@ impl PolicyStep {
             // straight for the 11F pad instead trips his line-of-sight mid-walk at a stray tile and the
             // subsequent 11F warp resolves off a desynced position. This mirrors the proven route.
             Self::Interact(MS::SILPHCO7F_RIVAL),
+            // ── Out, heal, and back in before Giovanni ────────────────────────────────────────
+            // ⚠️ **Silph Co has no Pokémon Centre and its two hardest fights are back to back**: the
+            // rival's six mons, then Giovanni one pad away. The route heals before every other fight
+            // of that size and could not before this one, and it shows — the leg chain lost
+            // Giovanni's Kangaskhan twice on a Blastoise that came out of the rival at half HP, and a
+            // black-out on 11F is the worst place in the game to have one.
+            //
+            // The way out is the way in, reversed: 7F(5,3) is the same pad that brought us from
+            // 3F(11,11), and 3F has the elevator. ⚠️ **Every hop is `IfReachable` and the elevator
+            // steps pop when they are not in one**, so on any floor plan where this cannot be walked
+            // the whole detour evaporates and the run goes straight to Giovanni exactly as before.
+            Self::EnterMapIfReachable { to_map: Map::SilphCo3F },       // 7F(5,3) pad, back the way we came
+            Self::EnterMapIfReachable { to_map: Map::SilphCoElevator },
+            Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 }, // 1F
+            Self::EnterMapIfReachable { to_map: Map::SaffronCity },
+            Self::EnterMapIfReachable { to_map: Map::SaffronPokecenter },
+            Self::InteractIfReachable(MS::SAFFRONPOKECENTER_NURSE),
+            Self::EnterMapIfReachable { to_map: Map::SaffronCity },
+            Self::EnterMapIfReachable { to_map: Map::SilphCo1F },
+            Self::EnterMapIfReachable { to_map: Map::SilphCoElevator },
+            Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 2 }, // 3F
+            Self::EnterMapIfReachable { to_map: Map::SilphCo7F },        // 3F(11,11) pad
             Self::EnterMap { to_map: Map::SilphCo11F, to_position: Some(Point8 { x: 3, y: 2 }) },  // 7F(5,7) pad
             Self::InteractIfReachable(MS::SILPHCO11F_ROCKET1),
         ];
@@ -1629,14 +1884,25 @@ impl PolicyStep {
             // success. The Master Ball then never arrives, and the failure surfaces 100 steps later in
             // the Seafoam Islands, where `CatchPokemon { ball: MasterBall }` silently falls back to the
             // best ball in the bag, throws a Great Ball at a lv50 Articuno and loses the party.
-            // TM34 Bide is the deadest weight the run carries — picked up in Cerulean, never taught.
-            Self::TossItem { item: ItemId::Tm34Bide },
+            // ⚠️ **A second slot, because the Card Key spent the one the first toss freed.** TM34 Bide
+            // used to be tossed here and is now gone two legs earlier (the bag runs out at the Card
+            // Key first), so this needs its own: TM11 Bubblebeam is a 65-power Water move on a party
+            // whose only fighter has Surf, and it is never taught. Without it the President's speech
+            // ends in "You have no room for this.", the `Interact` completes looking exactly like a
+            // success, and the failure surfaces at the Seafoam Islands as "no Pokéballs left".
+            Self::TossItem { item: ItemId::Tm11Bubblebeam },
             Self::Interact(MS::SILPHCO11F_SILPH_PRESIDENT),             // Master Ball + Rockets leave Saffron
-            Self::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 7 }) },   // 11F(3,2) pad
-            Self::EnterMap { to_map: Map::SilphCo3F, to_position: Some(Point8 { x: 11, y: 11 }) }, // 7F(5,3) pad
-            Self::enter(Map::SilphCoElevator),
+            // ⚠️ **The way *out* gives up rather than stalling, because a black-out has already
+            // taken it.** Losing anywhere in this building warps the run to the Saffron Centre — and
+            // these four steps then describe a walk down a pad maze the run is no longer standing
+            // in, which a single-hop `EnterMap` cannot resolve from a city and will sit on for ever
+            // (measured: the leg chain stalled here at 23 of 31 steps, twice). Reaching Saffron is
+            // the *point* of the sequence, so arriving there early makes each of them a no-op.
+            Self::EnterMapIfReachable { to_map: Map::SilphCo7F },   // 11F(3,2) pad
+            Self::EnterMapIfReachable { to_map: Map::SilphCo3F },   // 7F(5,3) pad
+            Self::EnterMapIfReachable { to_map: Map::SilphCoElevator },
             Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 }, // 1F
-            Self::enter(Map::SaffronCity),
+            Self::EnterMapIfReachable { to_map: Map::SaffronCity },
             Self::enter(Map::SaffronPokecenter),
             Self::Interact(MS::SAFFRONPOKECENTER_NURSE),
             Self::enter(Map::SaffronCity),
@@ -1652,54 +1918,6 @@ impl PolicyStep {
         vec![
             Self::enter(Map::SaffronGym),
             Self::DefeatGymLeader { leader: MS::SAFFRONGYM_SABRINA, badge: Badge::MarshBadge },
-        ]
-    }
-
-    /// From Saffron: fetch the free **Eevee** (Celadon Mansion roof house), buy a **Water Stone** (Celadon
-    /// Dept Store 4F), evolve Eevee → **Vaporeon** and teach it **Surf** — the lone Grass starter can't
-    /// learn Surf, and Surf is needed to reach Cinnabar. Ends back in Celadon.
-    pub fn eevee_vaporeon_surf_steps() -> Vec<Self> {
-        use crate::pokemon::map::MapSprite as MS;
-        vec![
-            // Saffron → Celadon via the Route-7 gate (east crossing at (19,10); the plain connection lands
-            // in a ledge-sealed pocket).
-            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 19, y: 10 }) },
-            Self::enter(Map::Route7Gate),
-            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
-            Self::enter(Map::CeladonCity),
-            // Free Eevee from the Celadon Mansion roof house (BACK entrance (24,3)→1F(4,0); the front door
-            // is the dead-end condos). Climb the stairwell to the roof.
-            Self::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
-            Self::enter(Map::CeladonMansion2F),
-            Self::enter(Map::CeladonMansion3F),
-            Self::enter(Map::CeladonMansionRoof),
-            Self::enter(Map::CeladonMansionRoofHouse),
-            Self::CollectItem(MS::CELADONMANSION_ROOF_HOUSE_EEVEE_POKEBALL),
-            Self::enter(Map::CeladonMansionRoof),
-            Self::enter(Map::CeladonMansion3F),
-            Self::enter(Map::CeladonMansion2F),
-            Self::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
-            Self::enter(Map::CeladonCity),
-            // Dept Store 4F: buy a Water Stone.
-            Self::enter(Map::CeladonMart1F),
-            Self::enter(Map::CeladonMart2F),
-            Self::enter(Map::CeladonMart3F),
-            Self::enter(Map::CeladonMart4F),
-            Self::BuyFromMart { item: BagItem::new(ItemId::WaterStone, 1), map: Map::CeladonMart4F },
-            Self::enter(Map::CeladonMart1F),
-            Self::enter(Map::CeladonCity),
-            // Evolve the Eevee → Vaporeon and teach it Surf. Vaporeon is the answer to the Silph
-            // rival's Alakazam (Surf ignores its huge Special wall better than Venusaur's resisted Razor
-            // Leaf) and to Blaine's Fire team, plus it carries Surf for the Cinnabar crossing.
-            // Both name the mon by **species**: where the gift Eevee lands depends on how many members
-            // the party already has, and the fixture chain's parties are not the mainline's.
-            Self::EvolveWithStone { stone: ItemId::WaterStone, target: PartyRef::Species(PokemonSpecies::Eevee) },
-            Self::TeachMove { item: ItemId::Hm03Surf, target: PartyRef::Species(PokemonSpecies::Vaporeon) },
-            // Back to Saffron for Silph Co (Celadon → Route 7 → Saffron).
-            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 11, y: 10 }) },
-            Self::enter(Map::Route7Gate),
-            Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 19, y: 10 }) },
-            Self::enter(Map::SaffronCity),
         ]
     }
 
@@ -1755,13 +1973,21 @@ impl PolicyStep {
             Self::enter(Map::PokemonMansion1F),   // fall through a hole → 1F (16,14)
             Self::enter(Map::PokemonMansionB1F),  // (21,23) staircase down
             Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
-            // NB: TM14 **Blizzard** sits at (19,25), right beside this switch, and taking it here is
-            // tempting — it is the Elite Four's Lance answer once it is on Articuno. It is deliberately
-            // NOT collected: adding it shifted the RNG line onto the losing side of the Route-22 rival
-            // fight, which is a coin flip this run cannot afford (see `victory_road_1f_steps` — its
-            // Hyper Potion restock is a no-op because the Viridian Mart does not stock them, so that
-            // fight is fought on leftovers and stalemates on PP). `probe_get_blizzard` takes the TM for
-            // the Elite Four fixture chain instead, where `seafoam_articuno_steps` teaches it.
+            // ⚠️ **TM14 Blizzard, at (19,25) right beside this switch, and it used to be walked past.**
+            // The old note said collecting it shifted the RNG onto the losing side of the Route-22
+            // rival — a coin flip the run could not afford, because the Viridian Mart does not stock
+            // the Hyper Potions that leg tries to restock and the fight was had on leftovers. That
+            // argument is spent: the rival is now met by a starter fifteen levels higher with a full
+            // bag, and Articuno — the mon this TM used to be saved for — is no longer on the route.
+            // It is the only Ice the party can get, and Ice is 2× on Lance's dragons and 4× on
+            // Dragonite.
+            Self::CollectItem(MapSprite::POKEMONMANSIONB1F_TM_BLIZZARD),
+            // ⚠️ **Taught here rather than after the Secret Key, because a TM is consumed on use and
+            // the bag has no room for both.** The Rare Candy at the top of this leg frees exactly one
+            // entry; picking up Blizzard fills it again, and the *next* pickup — the Secret Key the
+            // gym is locked behind — is then refused in silence. Measured: 3000 polls one tile from
+            // the key, a give-up, and the run walked to a Cinnabar Gym it could not open.
+            Self::TeachMove { item: ItemId::Tm14Blizzard, target: Self::STARTER_LINE },
             Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 20, y: 3 }, reveals: Map::PokemonMansion1F },
             Self::CollectItem(MapSprite::POKEMONMANSIONB1F_SECRET_KEY),
         ]
@@ -1781,9 +2007,14 @@ impl PolicyStep {
             Self::enter(Map::CinnabarPokecenter), // heal before the gym gauntlet
             Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
             Self::enter(Map::CinnabarIsland),
-            // Lead with Vaporeon for Blaine — his all-Fire team takes 2× from Surf, and Venusaur (Grass)
-            // is 2× weak to Fire. Party is [Venusaur, Vaporeon] here, so slot 1 → front puts Vaporeon up.
-            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Venusaur) },
+            // ⚠️ **Venusaur leads Blaine, and the comment here used to say Vaporeon — read the code, not
+            // the sentence.** On type alone Vaporeon is the answer: Blaine's team is all Fire, which
+            // takes 2× from Surf, and Venusaur is Grass and takes 2× back. On levels it is not close —
+            // the gift Eevee is still around lv25 here against a Venusaur in the fifties — and a lv25
+            // lead in a gym gauntlet is a black-out, so bulk wins the argument. The step was
+            // `Slot(1)` when the party was exactly `[Venusaur, Vaporeon]`, which is what the old
+            // comment was describing; naming the species is what made the disagreement visible.
+            Self::MovePokemonToFront { target: Self::STARTER_LINE },
             Self::enter(Map::CinnabarGym),
             Self::DefeatGymLeader { leader: MapSprite::CINNABARGYM_BLAINE, badge: Badge::VolcanoBadge },
         ]
@@ -1861,25 +2092,16 @@ impl PolicyStep {
     /// ledges (Jump West/South) so it can only be walked *out of*, never surfed into; and on B2F the
     /// east column stops at row 10 on an elevation boundary, putting (25,3) out of reach from (25,11).
     ///
-    /// ## The Strength slave
+    /// ## Strength, and the slave that used to carry it
     ///
-    /// Neither Venusaur nor Vaporeon learns HM04, so the pushes need a slave. **Slowpoke** does learn
-    /// it and is one of the two commonest land encounters on Seafoam 1F (which has the highest
-    /// encounter rate of the five floors, and whose entry pocket is all land), so it is caught on the
-    /// way in — with **Great Balls**, explicitly, because `Bag::best_pokeball` would otherwise spend the
-    /// Master Ball earmarked for Articuno on it. It lands at party slot 2 and Strength is re-armed on
-    /// every floor, since `BIT_STRENGTH_ACTIVE` resets on each map change.
-    ///
-    /// The floors are decoded offline from the ROM block maps by `probe_seafoam_actions_offline`,
-    /// `probe_seafoam_connectivity_offline` (which floods the whole dungeon through its warps) and
-    /// `probe_seafoam_boulder_and_exit_offline` (which runs the Sokoban planner on both pairs) — all
-    /// ROM-only and instant, so the whole chain below is checked before paying for an emulator run.
+    /// ⚠️ **This leg caught a Slowpoke for years and no longer needs to.** Neither Venusaur nor
+    /// Vaporeon learns HM04, so the boulder pushes needed a body; **Blastoise learns Strength itself**
+    /// (`data/pokemon/base_stats/blastoise.asm`), and it is already the lead, so the catch, the teach,
+    /// the Great Balls bought for it and the party slot all go. The same line retires the Victory Road
+    /// Machop. Dig comes off TM28 onto the starter for the same reason — it is the way out of here.
     pub fn seafoam_articuno_steps() -> Vec<Self> {
         // Strength is armed per floor: `BIT_STRENGTH_ACTIVE` is cleared on every map change, and the
         // route leaves and re-enters each boulder floor.
-        // The HM slave is named by species, not by slot: it is caught *inside* this step list, so any
-        // slot index would be an assumption about how big the party was on arrival.
-        const SLAVE: PartyRef = PartyRef::Species(PokemonSpecies::Slowpoke);
         vec![
             // Heal and stock balls first: Route 20's swimmer gauntlet is fought on the way over, and
             // there is no Pokémon Center inside Seafoam (its wilds are fled — `in_center_less_dungeon`).
@@ -1902,12 +2124,21 @@ impl PolicyStep {
             // Surf east across Route 20 to the east Seafoam entrance.
             Self::enter(Map::Route20),
             Self::enter_at(Map::SeafoamIslands1F, 26, 17),
-            // The HM slave, before anything needs pushing.
+            // ⚠️ **This leg catches its own Strength slave again, because the route no longer carries
+            // one past Cinnabar.** Strength lives on the Victory Road Machop now — caught two legs
+            // *after* this one — and the starter deliberately does not learn it (an HM is a permanent
+            // slot in the only mon that fights). Seafoam is not on `complete_game_steps` any more, so
+            // it has to be self-contained: a Slowpoke off 1F's own table takes HM04 and TM28.
+            // ⚠️ **Poké Balls, and the pin is load-bearing.** `Bag::best_pokeball` ranks by
+            // effectiveness, so a fallback with a Master Ball in the bag spends *it* on the HM slave
+            // and leaves nothing for the bird — which is exactly what happened when the Great Ball
+            // purchase above came back "the wallet covers no more". The run carries Poké Balls left
+            // over from Cerulean (the Drowzee that used to spend them is no longer caught), and a
+            // Slowpoke's catch rate is 190.
             Self::CatchPokemon { species: PokemonSpecies::Slowpoke, on_map: Map::SeafoamIslands1F,
-                                 ball: Some(ItemId::GreatBall) },
-            Self::TeachMove { item: ItemId::Hm04Strength, target: SLAVE },
-            // TM28 is dead weight in the bag and the way home in the slave's move list.
-            Self::TeachMove { item: ItemId::Tm28Dig, target: SLAVE },
+                                 ball: Some(ItemId::PokeBall) },
+            Self::TeachMove { item: ItemId::Hm04Strength, target: PartyRef::Species(PokemonSpecies::Slowpoke) },
+            Self::TeachMove { item: ItemId::Tm28Dig, target: PartyRef::Species(PokemonSpecies::Slowpoke) },
             // Down the east side, one walled pocket at a time, then across to B3F's west half.
             Self::enter_at(Map::SeafoamIslandsB1F, 23, 15),
             Self::enter_at(Map::SeafoamIslandsB2F, 25, 11),
@@ -1916,7 +2147,7 @@ impl PolicyStep {
             Self::enter_at(Map::SeafoamIslandsB3F, 8, 6),
             // ── SEAFOAM4: two of B3F's four boulders into its two holes. The planner moves (5,14) out
             // of the corridor first — it is the only tile from which (3,15) can be reached at all.
-            Self::UseStrength { target: SLAVE },
+            Self::UseStrength { target: PartyRef::Species(PokemonSpecies::Slowpoke) },
             Self::DropBoulderInHole { hole: Point8 { x: 3, y: 16 } },
             Self::DropBoulderInHole { hole: Point8 { x: 6, y: 16 } },
             // Fall through the (6,16) hole into the west lake, already surfing, and Master-Ball the bird.
@@ -1930,7 +2161,7 @@ impl PolicyStep {
             // Out with DIG: there is no walkable way back east (see the doc above), and it lands on
             // Cinnabar Island because that is where the Pokémon Center at the top of this list set
             // `wLastBlackoutMap`.
-            Self::Dig { slot: 2 }, // the Slowpoke: caught after Vaporeon + Venusaur, so slot 2 (`Dig` is still slot-addressed)
+            Self::Dig { target: PartyRef::Species(PokemonSpecies::Slowpoke) },
             Self::enter(Map::CinnabarIsland),
         ]
     }
@@ -1961,17 +2192,90 @@ impl PolicyStep {
     /// solve the 1F boulder puzzle (push a boulder onto the (17,13) switch) and climb the now-open (1,1)
     /// ladder to VR2F. Reliable from a fresh run; folded into `complete_game_steps`. The deeper VR2F/VR3F
     /// puzzle is `victory_road_2f_3f_steps` (PP-marginal from a fresh run — see its note).
-    /// What the two gauntlet leads are taken to. Public so `endgame::can_finish_from_victory_road`
-    /// can seed to exactly the number the grind targets rather than a second one that drifts.
-    pub const GAUNTLET_LEVEL: u8 = 75;
-
-    /// The whole of VR1F: the approach and the climb, with no grind between them.
+    /// What the gauntlet lead is taken to. Public so `endgame::can_finish_from_victory_road` can seed
+    /// to exactly the number the grind targets rather than a second one that drifts.
     ///
-    /// ⚠️ **The grind is deliberately *not* in here, and it was for one build.** This is what
-    /// `endgame::can_solve_victory_road_1f` runs, on a 180-minute budget sized for a walk, a catch, a
-    /// teach and one boulder — and `gauntlet_grind_steps` is several thousand minutes of wild
-    /// battles. Folding it in turned a two-minute leg test into one that could not pass. Only
-    /// `complete_game_steps` wants both, so only it splices them: see there.
+    /// ⚠️ **Eighty-five for one mon, where it used to be seventy-five for three.** See
+    /// `gauntlet_grind_steps`: the three-target grind was 1.4 M experience and this is 425 k, because
+    /// experience is cubic and the top of one curve is cheaper than the middle of three.
+    pub const GAUNTLET_LEVEL: u8 = 85;
+
+    /// **Which starter this route plays**, as one pair of constants rather than a species name
+    /// scattered through six legs.
+    ///
+    /// ⚠️ **Grass is the beginner's answer and this is a speed run.** Bulbasaur is 4× into Brock and
+    /// 2× into Misty, which is the whole of its case, and from Cerulean onward Grass is resisted by
+    /// Poison, Bug, Fire and Flying — most of what Kanto fields. Koga is where that ends: four
+    /// Poison-types with Razor Leaf at 0.5× on all of them, so the lone starter does not run out of
+    /// *levels*, it runs out of **turns**. The same shape black-outs the Nugget Bridge and Route 6.
+    ///
+    /// ⚠️ **What actually decided it was PP rather than power.** Bulbasaur's only damaging moves are
+    /// Tackle's 35 PP and Vine Whip's **10 at lv13**; once both are dry `pick_best_move` returns
+    /// nothing and the fall-through picks a status move *on purpose*, so the battle resolves into a
+    /// black-out — which against a trainer that cannot be fled it does over and over. Squirtle has
+    /// **Bubble at 30 PP from lv8 and Water Gun at 25 from lv15**, and Water is 4× into Brock exactly
+    /// as Grass is. Measured end to end, that alone removed the five black-outs on the Nugget Bridge
+    /// and Route 6, and **Bite at lv24 — which is *Normal* in Gen 1, so neutral into Starmie** —
+    /// removed Misty's five: twelve down to four.
+    ///
+    /// ⚠️ **Blastoise cannot cut a tree, and that is the price of the swap rather than an objection
+    /// to it.** `data/pokemon/base_stats/wartortle.asm` lists SURF and STRENGTH and no CUT, where
+    /// `ivysaur.asm` has CUT; this route needs Cut four times (the Vermilion Gym tree, Celadon's gym
+    /// maze twice, Route 2 on the way to Cinnabar). So the lone-starter party is gone and
+    /// [`Self::CUT_SLAVE`] is what replaces it. What Blastoise buys back is the rest of the party:
+    /// it carries **Surf and Strength itself**, which retires the whole Eevee → Vaporeon leg (a
+    /// Celadon round trip and a Water Stone), the Seafoam Slowpoke and the Victory Road Machop —
+    /// three catches and two HM slaves for one.
+    const STARTER_BALL: MapSprite = MapSprite::OAKSLAB_SQUIRTLE_POKE_BALL;
+    /// The starter, named as its whole line.
+    ///
+    /// ⚠️ **A line and not a species, because a dozen steps address it and two of them run before it
+    /// is a Blastoise.** Squirtle evolves at 16 and Wartortle at 36, and the grind that reaches 24 for
+    /// Bite, the Cut-era teaches and the Safari HMs are all on the near side of that — so
+    /// `Species(Blastoise)` would simply answer `None` and the step would wait for ever.
+    const STARTER_LINE: PartyRef = PartyRef::Line(&[
+        PokemonSpecies::Squirtle, PokemonSpecies::Wartortle, PokemonSpecies::Blastoise]);
+
+    /// **The Cut carrier, and the reason the party is not just a starter any more.**
+    ///
+    /// ⚠️ **Blastoise cannot learn Cut and four legs of this route need it.**
+    /// `data/pokemon/base_stats/wartortle.asm` lists SURF and STRENGTH and no CUT, where
+    /// `ivysaur.asm` has it — so the Bulbasaur route got Cut, Surf and Strength out of one mon and
+    /// this one cannot. An HM slave is the whole difference, and it is cheap: Oddish is 20% of Route
+    /// 5's grass, which the route already walks through on its way to the Underground Path, and it
+    /// is the earliest thing on the map that learns Cut (`grep CUT data/pokemon/base_stats/*.asm`:
+    /// the Oddish and Bellsprout lines, Paras, Sandshrew, Krabby, Tentacool and the two starters that
+    /// are not this one).
+    ///
+    /// ⚠️ **It is named by species and never by slot**, and it evolves at 21 — which does not matter,
+    /// because the only step that names it is the teach immediately after the catch, and every *use*
+    /// of Cut resolves the carrier out of the live party (`agent::field_move_carrier`). Gloom learns
+    /// Cut too.
+    const CUT_SLAVE: PartyRef = PartyRef::Species(PokemonSpecies::Oddish);
+
+    /// The Victory Road boulder slave, named by species because it is caught *inside* the leg that
+    /// uses it — the slot it lands in depends on how many mons the run arrived with, which is exactly
+    /// what the old `machop_slot` argument was guessing at (and its two callers guessed differently).
+    const MACHOP: PartyRef = PartyRef::Species(PokemonSpecies::Machop);
+
+    /// **The Psychic**, and the one place this route argues with the brief it was given.
+    ///
+    /// Gen 1 Psychic is the strongest attacking type in the game — resisted by nothing that matters,
+    /// 2× on the Poison and Fighting that Agatha and Bruno are made of — so a psychic in the gauntlet
+    /// is worth a party slot. **Abra is the wrong one, and it is wrong for a mechanical reason rather
+    /// than a stats one**: a wild Abra knows Teleport and nothing else, and Teleport *ends a wild
+    /// battle*. A trainee that leads a grind therefore escapes every encounter it is put into and
+    /// earns nothing, and the only way round it is the turn-one switch that halves the payout and
+    /// costs the turn — which is precisely what `pick_field_move`'s lead-with-the-trainee rule was
+    /// written to delete. Sixteen levels of that is not a saving.
+    ///
+    /// Drowzee is the same type from a mon that can fight the moment it is caught: Pound and
+    /// Hypnosis on arrival, Confusion at 17, **Psychic at 32** (Kadabra's is 38), Hypno at 26 with
+    /// 115 Special and far more bulk than Kadabra's 40 HP. And it is free: Route 11 is already on the
+    /// walk from Vermilion to Diglett's Cave in [`Self::saffron_to_cinnabar_steps`], so the catch is
+    /// a step rather than a detour.
+    const PSYCHIC_LINE: PartyRef = PartyRef::Line(&[PokemonSpecies::Drowzee, PokemonSpecies::Hypno]);
+
     pub fn victory_road_1f_steps() -> Vec<Self> {
         let mut steps = Self::victory_road_1f_approach_steps();
         steps.extend(Self::victory_road_1f_climb_steps());
@@ -2000,15 +2304,21 @@ impl PolicyStep {
             // Slowpoke and Articuno, and their arrival order is not fixed — so the "lead the bulky
             // Venusaur" comment could put the lv30 HM-slave in front instead, which is how a party
             // that should beat VR1F's nine trainers ended up blacked out on the way to the ladder.
-            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Venusaur) },
+            Self::MovePokemonToFront { target: Self::STARTER_LINE },
             Self::enter(Map::Route22),
             Self::enter(Map::Route22Gate),           // walk west → rival ambush → gate to Route 23
             Self::Interact(MapSprite::ROUTE22GATE_GUARD), // walk to (5,2): badge check + flips the dynamic warp
             Self::enter(Map::Route23),
             Self::goto(Map::VictoryRoad1F),
-            // Catch a wild Machop (learns Strength) as the boulder HM-slave — Master Ball, thrown at once.
+            // ⚠️ **The boulder slave, caught two tiles from the boulder it is for.** Blastoise *can*
+            // learn Strength, and for a while it did — but an HM is the one move
+            // `pick_move_to_forget` will never drop, so 80-power Normal would sit in a permanent slot
+            // of the only Pokémon this route fights with. A Machop off Victory Road's own wild table
+            // costs one catch and keeps that slot for an attack.
             Self::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F, ball: None },
-            Self::TeachMove { item: ItemId::Hm04Strength, target: Self::MACHOP }, // caught just above
+            Self::TeachMove { item: ItemId::Hm04Strength, target: Self::MACHOP },
+            // The catch leaves the Machop leading, and the nine VR trainers below are not its fight.
+            Self::MovePokemonToFront { target: Self::STARTER_LINE },
         ]
     }
 
@@ -2053,10 +2363,17 @@ impl PolicyStep {
             // VR2F east: push the revealed boulder onto switch2 (9,16); this leaves the player in the west.
             Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 9, y: 16 } },
-            // Return trip: climb back to VR3F and fall through the hole again → back east with switch2 open.
+            // Return trip: climb back to VR3F and come down on the **exit** side.
             Self::enter(Map::VictoryRoad3F),
-            Self::enter_at(Map::VictoryRoad2F, 22, 16),
-            // Out the (29,7/8) exit → Route 23 → Indigo Plateau → the Elite Four lobby.
+            // ⚠️ **(27,7), not the (22,16) the trip in uses, and the difference is the whole exit.**
+            // VR3F has two ways down and only one of them lands in the pocket the Route 23 warp is in.
+            // Asking for (22,16) here puts the player at (25,14), from which the only reachable warps
+            // are VR1F(1,1) and VR3F — so the last step stalls for good. The mainline survived it by
+            // accident: `EnterMap` falls back to re-routing over the incremental world graph, which by
+            // then knew the (27,7) landing, and a leg test's fresh agent does not. Naming the landing
+            // the run actually needs makes it a single hop again, which is what `enter_at` is for.
+            Self::enter_at(Map::VictoryRoad2F, 27, 7),
+            // Out the exit beside it → Route 23 → Indigo Plateau → the Elite Four lobby.
             Self::enter(Map::Route23),
             Self::enter(Map::IndigoPlateau),
             Self::enter(Map::IndigoPlateauLobby),
@@ -2087,8 +2404,9 @@ impl PolicyStep {
     /// 50 and never grinds it. That gap, not the boulder puzzle, is what "the plateau is out of
     /// reach from here" actually meant.
     ///
-    /// ⚠️ **The Pokémon Mansion, and the three rejected sites are each rejected for a different
-    /// measured reason.** This one took four attempts, so all of them are written down.
+    /// ⚠️ **The Pokémon Mansion, and the four rejected sites are each rejected for a different
+    /// measured reason.** This one took five attempts, so all of them are written down — and the fifth
+    /// is the one that looks right on paper, so read it before proposing it again.
     ///
     /// *Route 23* looks ideal, next door to the plateau — but its grass is not reachable from either
     /// end the run can stand on (probed from (9, 1): `grass_tiles=true`, `grass_reachable=0`, and the
@@ -2107,11 +2425,56 @@ impl PolicyStep {
     /// Pokémon Centre, which from inside Victory Road is **Viridian, four maps away**. Measured on the
     /// mainline: three round trips and not one level gained.
     ///
-    /// So: the Mansion. It is a building, so every step rolls an encounter and there is no grass to be
-    /// unreachable; its wilds are lv30-39 rather than Victory Road's lv22-36; it is not in the
+    /// *Cerulean Cave* is the fifth, and it is the one the numbers actually point at — which is why it
+    /// is written down at length rather than left for someone to rediscover.
+    /// `wild::tests::probe_grind_sites` ranks every encounter block in the ROM out of the cartridge's
+    /// own tables, and the ranking is not close: **Cerulean Cave 1F pays 1055 experience a knockout
+    /// against the Mansion's 588**, at the same 10/256 encounter rate, with wilds at lv46-53 instead of
+    /// lv28-39; B1F pays 1264 and 2F 1110. It is also next door to a Pokémon Centre. Experience per
+    /// *knockout* is the figure that matters here rather than per step, because a grind's time goes
+    /// into battles: the measured leg is 1552 wild battles in 1229 s, which is about 40 s of cartridge
+    /// time an encounter cycle, under 7 s of it the walk between them.
+    ///
+    /// ⚠️ **And it is not gated by a script, whatever it looks like.** `wNumHoFTeams` is read by
+    /// exactly four things in the ROM — the League PC, the save screen, the ceremony and Bill's PC —
+    /// and none of them is in Cerulean; `CeruleanCity_Script`'s only two coordinate triggers are the
+    /// Rocket thief and the rival. The man beside the door is `CERULEANCITY_SUPER_NERD3` and his whole
+    /// contribution is the line "The #MON LEAGUE champion is the only person who is allowed in!",
+    /// which is text and nothing else.
+    ///
+    /// ⚠️ **It is gated by his body, and that is what actually stops this.** He stands at (4,12), one
+    /// tile below `warp_event 4, 11, CERULEAN_CAVE_1F`, on a ledge-ringed terrace whose only approach
+    /// to the door is through him. Probed from a walked-in, pre-Champion save standing on the terrace's
+    /// water at (19,1), the whole reachable set is three actions — the Route 4 connection, the Route 24
+    /// water crossing, and the man himself at 26 steps. **The cave warp is not in it at all.** So a
+    /// mid-run grind there is not a route problem to be solved; there is no route.
+    /// (`postgame::legendaries::mewtwo_steps` *does* get in, from a save that has been Champion for a
+    /// while — so he evidently moves once the game is finished. Nothing in this route is ever in that
+    /// state, and the Elite Four is precisely what the grind is for.)
+    ///
+    /// ⚠️ **The walk itself works and was not the obstacle**, which is worth knowing if anyone revisits
+    /// this. Cinnabar → Cerulean as twenty-two explicit `enter` hops — Route 21 by Surf, Viridian,
+    /// Route 2's gate, Diglett's Cave, Vermilion, Saffron's two gate houses — crossed first time from a
+    /// cold fixture. Two things it taught: a `Goto` cannot do that job from a leg test, because
+    /// `route_toward` reads the incremental world graph and a fixture builds a fresh agent that has
+    /// observed nothing (measured: the step sat on `CinnabarIsland (11, 13)` for a whole budget); and
+    /// every gate crossing has to be an `enter_at`, because a gate warps to `LAST_MAP` so a plain
+    /// `enter` back onto the route is satisfied by the door just walked in through.
+    ///
+    /// So: the Mansion, still. It is a building, so every step rolls an encounter and there is no grass
+    /// to be unreachable; its wilds are lv30-39 rather than Victory Road's lv22-36; it is not in the
     /// center-less list; and Cinnabar's Centre is **one** map from its door. The run is already here —
     /// `seafoam_articuno_steps` ends on Cinnabar Island with the last party member caught — so the
     /// grind costs no travel to reach, which is the other thing every Victory Road placement paid for.
+    /// Of everything the run *can* stand on before the Elite Four, it is the best there is: the four
+    /// Mansion floors and Victory Road's three are the only entries above 450 experience a knockout in
+    /// the whole ranking, and the Mansion's are the ones with a Centre beside them.
+    ///
+    /// ⚠️ **Its one real cost is poison, and it is the worst site in the game for it.** Half of 1F's
+    /// encounter slots are Poison-type — Koffing at 40%, and Grimer behind it — and Gen 1 ticks
+    /// overworld poison at 1 HP every four steps and cures it nowhere but a Centre, so the trainee
+    /// walks home over and over. `wild::poison_share` is the column that says so, and the
+    /// `trip #` counter on the fainted-trainee line beside it is what a run actually costs.
     pub fn gauntlet_grind_steps() -> Vec<Self> {
         /// What the two leads are taken to before the gauntlet.
         ///
@@ -2135,31 +2498,65 @@ impl PolicyStep {
             // to — and a trainee wears down over ten or twenty wild battles and then faints, so that
             // detour runs over and over. One map each way is the difference between a grind and a
             // walking simulator.
+            // ⚠️ **Out of Blaine's gym first.** `volcano_badge_steps` ends standing *inside* it, and
+            // this leg used to follow `seafoam_articuno_steps`, whose own first step was this hop.
+            // With Seafoam gone the grind inherited a queue that opens on a Pokémon Centre two warps
+            // away, which `EnterMap` — a deliberate single hop — cannot resolve.
+            Self::enter(Map::CinnabarIsland),
             Self::enter(Map::CinnabarPokecenter),
             Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
             Self::enter(Map::CinnabarIsland),
-            Self::enter(Map::PokemonMansion1F),
-            // Articuno first: it arrives at 50 against Venusaur's 60, so it is the longer job, and
-            // doing it while the party is fresh keeps the heal detours down.
-            Self::GrindUntilLevel { target_level: Self::GAUNTLET_LEVEL, on_map: Map::PokemonMansion1F,
-                target: PartyRef::Species(PokemonSpecies::Articuno) },
-            Self::GrindUntilLevel { target_level: Self::GAUNTLET_LEVEL, on_map: Map::PokemonMansion1F,
-                target: PartyRef::Species(PokemonSpecies::Venusaur) },
-            // ⚠️ **The third one is not optional, and two at seventy-five is not a substitute for
-            // three.** A seeded run at Venusaur 75 / Articuno 75 still blacked out in the Champion's
-            // room: the two leads carried four rooms, wore down across the fifth, and the party
-            // behind them is a lv26 Vaporeon, a lv30 Slowpoke and a lv24 Machop — so the moment the
-            // second lead falls, three fodder mons faint in a row. The last Pokémon standing against
-            // the rival's Charizard was the Machop.
+            // ⚠️ **The run arrives at its longest grind with ¥37,655 and not one healing item, and
+            // that — not the site — is what all the walking back to the Centre was.** Measured on
+            // `post-articuno.bin`: seventeen bag entries, none of them a potion or a status cure. So
+            // `pick_battle_action`'s "heal below 25%" arm has nothing to reach for and never fires
+            // once in 1552 battles, and the trainee is left to be ticked to death by a Ponyta's burn
+            // or a Koffing's Smog — which is exactly what happened, twelve times, each costing a
+            // four-warp round trip to Cinnabar and back. **Full Heals** are the cure and Cinnabar
+            // stocks them (`data/items/marts.asm`: it is the only mart on the route that does);
+            // the Hyper Potions are what the 25% arm needs to exist at all.
             //
-            // ⚠️ **And the items cannot cover it, which is the thing worth writing down.**
-            // `elite_four_steps` buys twelve Full Restores and four Revives, and `pick_battle_action`
-            // has no arm that uses either: measured across that whole gauntlet, **57 Fights, one
-            // switch and zero item uses**. The purchases are decorative and always were — the
-            // `at-indigo-articuno` fixture this was proved on did not win on its ¥42,000 of healing,
-            // it won on Vaporeon lv70. So the third fighter is the fix.
+            // Buying is the whole of the fix on the route side; using them is `pick_field_move`'s
+            // status arm and the battle arm that was always there. The money is otherwise dead:
+            // `elite_four_steps`' twelve Full Restores are famously never used (57 Fights, one switch,
+            // zero items).
+            //
+            // ⚠️ **On the *fixture* this buys twenty and the trips go to zero. On the mainline it buys
+            // three and they do not — and the difference is the whole fixture-versus-mainline trap.**
+            // `post-articuno.bin` carries **¥37,655**; the run that earns its own way to the same point
+            // arrives with about **¥2,000**, so `agent::affordable` trims the order to what the wallet
+            // covers and `can_grind_for_the_gauntlet` measures a grind the real route cannot pay for
+            // (0 trips from the fixture, 13 on `hall_of_fame_playthrough`). Do not quote the leg test's
+            // number as the run's.
+            //
+            // ⚠️ **And the reason it is poor is the black-outs, which is a loop worth seeing.** A
+            // black-out halves the money; the route has eleven, all of them before this shop; so the
+            // medicine that would prevent them is the thing they make unaffordable. Fixing the early
+            // game is therefore upstream of fixing this — see the black-out table on `game_steps`.
+            Self::BuyFromMart { item: BagItem::new(ItemId::FullHeal, 40), map: Map::CinnabarMart },
+            Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 10), map: Map::CinnabarMart },
+            Self::enter(Map::CinnabarIsland),
+            Self::enter(Map::PokemonMansion1F),
+            // ⚠️ **One fighter, taken further, and it is *cheaper* than three at seventy-five —
+            // experience is cubic, so the top of one curve costs less than the middle of three.**
+            // Measured on the three-target version: Hypno 26→75 is about 404 k experience, Articuno
+            // 50→75 about 610 k and the starter 60→75 about 400 k — **1.4 M** in all, and thirty
+            // minutes of the run. The starter alone from 60 to 85 is about **425 k**, under a third,
+            // and the levels buy more than the bodies they replace: the Elite Four tops out at
+            // Lance's lv62 Dragonite and the rival's lv65, so a lv85 lead one-shots almost everything
+            // it meets rather than trading turns with it.
+            //
+            // ⚠️ **That makes PP the binding constraint rather than power.** Five rooms is about
+            // twenty-six knockouts against Surf's 15, Blizzard's 5 and Dig's 10 — which is why the
+            // starter's slots are not spent on HMs it never attacks with (see
+            // `safari_zone_strength_steps`) and why the lobby nurse in `elite_four_steps` matters.
+            //
+            // ⚠️ **This replaced "three fighters or you lose the Champion's room".** That was true of
+            // three mons at *seventy-five*: the party behind them was a lv26 Vaporeon, a lv30
+            // Slowpoke and a lv24 Machop, so the moment the second lead fell three fodder mons
+            // fainted in a row. Depth of bench was never the answer — height was.
             Self::GrindUntilLevel { target_level: Self::GAUNTLET_LEVEL, on_map: Map::PokemonMansion1F,
-                target: PartyRef::Species(PokemonSpecies::Vaporeon) },
+                target: Self::STARTER_LINE },
             Self::enter(Map::CinnabarIsland),
         ]
     }
@@ -2180,15 +2577,17 @@ impl PolicyStep {
             Self::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 12), map: Map::IndigoPlateauLobby },
             Self::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
             Self::Interact(MapSprite::INDIGOPLATEAULOBBY_NURSE),   // revive + restore all PP
-            // Venusaur leads: Razor Leaf is 2× on all of Lorelei's Water types and 4× on Bruno's Onix.
-            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Venusaur) },
+            // Blastoise leads every room, because it is the only thing in the party that fights.
+            Self::MovePokemonToFront { target: Self::STARTER_LINE },
             Self::enter(Map::LoreleisRoom),
             Self::BattleTrainer { trainer: MapSprite::LORELEISROOM_LORELEI },
             Self::enter(Map::BrunosRoom),
             Self::BattleTrainer { trainer: MapSprite::BRUNOSROOM_BRUNO },
             Self::enter(Map::AgathasRoom),
             Self::BattleTrainer { trainer: MapSprite::AGATHASROOM_AGATHA },
-            Self::MovePokemonToFront { target: PartyRef::Species(PokemonSpecies::Articuno) },
+            // (No swap for Lance. Articuno used to come in here for its Ice STAB against his
+            // dragons; TM14 Blizzard is on the starter now — see `mansion_secret_key_steps` — and Ice
+            // is 2× on Dragon and on Flying, so Dragonite takes 4× from the mon already out.)
             Self::enter(Map::LancesRoom),
             Self::BattleTrainer { trainer: MapSprite::LANCESROOM_LANCE },
             Self::enter(Map::ChampionsRoom),
@@ -2199,8 +2598,14 @@ impl PolicyStep {
 
     /// The full deterministic playthrough. Every forward map transition is an explicit `EnterMap`;
     /// on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the incrementally-observed
-    /// graph. Starter is **Bulbasaur** — its Grass typing is super-effective against both Brock
-    /// (Rock/Ground) and Misty (Water), the two badges this run proves.
+    /// graph.
+    ///
+    /// The party is **one Blastoise and two HM slaves** — an Oddish for Cut ([`Self::CUT_SLAVE`]) and
+    /// a Victory Road Machop for Strength ([`Self::MACHOP`]). Only the starter ever fights, and the
+    /// gauntlet grind takes it far enough above the Elite Four to do it alone; see
+    /// [`Self::gauntlet_grind_steps`] for why one mon taken further is cheaper than three taken less
+    /// far. Surf is the one HM it carries, because Surf is a 95-power STAB attack that happens to be
+    /// an HM.
     pub fn complete_game_steps() -> Vec<Self> {
         Self::game_steps(true)
     }
@@ -2210,7 +2615,7 @@ impl PolicyStep {
     ///
     /// ⚠️ **This exists so the pre-commit gate stays affordable, and that is a real trade.**
     /// `full_playthrough` runs this in about five minutes; [`Self::complete_game_steps`] takes **50**,
-    /// essentially all of it the 2306 wild battles `gauntlet_grind_steps` needs. A fifty-minute gate is
+    /// most of it the ~1830 wild battles `gauntlet_grind_steps` needs. A half-hour gate is
     /// one nobody runs — which is exactly how `full_playthrough` came to sit broken for a long time
     /// behind a doc comment claiming it was green — so the long one gets its own `hall-of-fame`
     /// feature and this one keeps the job it has always had.
@@ -2223,14 +2628,20 @@ impl PolicyStep {
         Self::game_steps(false)
     }
 
-    /// `finish` adds the gauntlet grind and everything past the eighth badge.
-    fn game_steps(finish: bool) -> Vec<Self> {
-        let mut steps = vec![
+    /// Pallet Town, the starter, Brock, the Route 3 grind and into Mt Moon — everything the route
+    /// does before [`Self::mt_moon_traversal`] puts it in Cerulean.
+    ///
+    /// Its own function so a fixture can be *produced* from it: `post-cascade.bin` and everything
+    /// downstream of it is a committed chain rooted in a state no test builds, which is fine until
+    /// the mainline party changes under it — and swapping the starter changes every one of them at
+    /// once. `regen_early_game_fixture` plays this and saves the root.
+    pub fn pallet_to_cerulean_steps() -> Vec<Self> {
+        vec![
             // ── Pallet Town: fetch a starter ──
             Self::enter(Map::RedsHouse1F),
             Self::enter(Map::PalletTown),
             Self::soft_goto(Map::Route1),                        // Oak stops you → OaksLab
-            Self::Interact(MapSprite::OAKSLAB_BULBASAUR_POKE_BALL), // pick Bulbasaur (+ rival battle)
+            Self::Interact(Self::STARTER_BALL),                   // pick the starter (+ rival battle)
 
             // ── Viridian Mart: pick up Oak's Parcel ──
             Self::enter(Map::PalletTown),
@@ -2266,10 +2677,59 @@ impl PolicyStep {
             // crossing (observed in Mt Moon). With just the starter, a faint triggers a black-out →
             // heal → re-enter and re-fight already a little stronger, which clears Mt Moon and the
             // Nugget Bridge by convergent recovery. (So we also skip buying Poké Balls above.)
+            //
+            // ⚠️ **The convergent recovery used to cost twelve black-outs a run, and the cause was
+            // never the levels — it was an empty bag and a dry move.** The first healing item this
+            // route bought was at *Vermilion*, so black-outs 1-9 were all fought with nothing for
+            // `pick_battle_action`'s "HP critical" arm to reach for; and the lone starter's only
+            // damaging move is Vine Whip's **10 PP**, after which the fall-through picks a status move
+            // on purpose so the battle resolves into a black-out — which against a trainer that cannot
+            // be fled it does over and over.
+            //
+            // ⚠️ **Five variants were measured and every one of them reduced the black-outs and
+            // broke the run somewhere else. Read this before trying a sixth.** The route is not robust
+            // here, it is *tuned*: it survives on one RNG stream, and anything added before Vermilion
+            // re-rolls that stream onto a different pre-existing fault.
+            //
+            // | change | black-outs | where it broke |
+            // |---|---|---|
+            // | Potions at Pewter + Cerulean | 12 → 3 over the first 13% | Nugget Bridge, Vine Whip dry |
+            // | Potions at Pewter only | — | Route 6, five black-outs on one screen |
+            // | + a Cerulean Centre heal after Bill | **12 → 4 over the whole route** | Silph Co 5F |
+            // | + tossing the Potions at Vermilion | 12 → 4 | Celadon Gym |
+            // | the Centre heal on its own | 12 → 8 | Mt Moon, then Celadon |
+            //
+            // What each one taught, because none of it is about the purchase:
+            // * A potion refills HP and **what runs out is the move** — Tackle's 35 and Vine Whip's 10,
+            //   across five Nugget Bridge trainers, Bill, the Underground Path and Route 6 on one tank.
+            //   A Pokémon Centre restores PP and is the only thing on this half of the map that does:
+            //   **no mart in Gen 1 stocks Ether or Elixer** (`data/items/marts.asm`), they are floor
+            //   items, and the nearest to this route are on the S.S. Anne, three legs too late.
+            // * ⚠️ **The bag is the binding constraint and a full one refuses pickups in silence.** The
+            //   run reaches Silph Co on exactly 20 entries, Gen 1's cap. One extra Potion stack meant
+            //   the Card Key at 5F (21,16) could not be picked up, and `CollectItem` — whose only
+            //   completion is the sprite disappearing, and which has no give-up — stood the player at
+            //   (20,16) *one tile away* for 16,763 polls until the cycle budget ran out.
+            // * The Centre heal is worth having and is not sufficient on its own: placed after Bill it
+            //   misses Mt Moon and the outbound bridge, which is the 8 in the last row.
+            //
+            // So the honest prerequisite is neither medicine nor a shopping list: it is a starter that
+            // can still damage something when its one good move is dry. Until that exists, this leg
+            // keeps the stream it is tuned to — and the same argument is why swapping the starter for
+            // Squirtle (Bubble at lv8 is 30 PP against Vine Whip's 10 at lv13, and Blastoise's Cut +
+            // Surf + Strength would retire the whole Eevee leg) cannot be a first move: it re-rolls
+            // every stream in the run at once and would surface all five of the above together.
 
             // ── Grind the starter on Route 1 ──
             Self::enter(Map::Route1),
-            Self::GrindUntilLevel { target_level: 13, on_map: Map::Route1, target: PartyRef::Slot(0) },
+            // ⚠️ **Twelve rather than thirteen, and the level is bounded by what there is to fight
+            // *with*.** Squirtle learns **Bubble at lv8** — 4× into every one of Brock's Rock/Ground
+            // mons, the same multiplier Bulbasaur's Vine Whip had at lv13 — so the badge is already
+            // won by 10, and everything past that is a lone starter grinding with an empty bag,
+            // because **no mart before Pewter sells a Potion** (`data/items/marts.asm`: Viridian's
+            // counter is POKE_BALL, ANTIDOTE, PARLYZ_HEAL, BURN_HEAL). Ten was tried and is two
+            // levels too thin for Viridian Forest's Bug Catchers, who cannot be fled.
+            Self::GrindUntilLevel { target_level: 12, on_map: Map::Route1, target: PartyRef::Slot(0) },
             Self::enter(Map::ViridianCity),
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
@@ -2295,34 +2755,51 @@ impl PolicyStep {
             Self::enter(Map::PewterPokecenter),
             Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
             Self::enter(Map::PewterCity),
+            // ⚠️ **The first medicine the route can buy, and for a long time it bought none until
+            // Vermilion.** `pick_battle_action`'s "heal below 25%" arm works and simply had nothing to
+            // reach for, which is what every early black-out was: the lead walks into an encounter
+            // worn from the last one and loses in two turns. Pewter is the first mart on the route
+            // that stocks Potions at all — Viridian's counter is POKE_BALL, ANTIDOTE, PARLYZ_HEAL,
+            // BURN_HEAL (`data/items/marts.asm`) — and `agent::affordable` trims the order to
+            // whatever Brock's prize money covers.
+            Self::enter(Map::PewterMart),
+            Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 10), map: Map::PewterMart },
+            Self::enter(Map::PewterCity),
 
             // ── Route 3 grind → heal at the Mt Moon Pokécenter ──
             Self::enter(Map::Route3),
-            Self::GrindUntilLevel { target_level: 18, on_map: Map::Route3, target: PartyRef::Slot(0) },
+            // ⚠️ **Twenty-two, and the four extra levels are bought here because the next fight after
+            // Mt Moon is the rival.** He ambushes the north exit of Cerulean before any of the Nugget
+            // Bridge experience has been earned, and his Bulbasaur is Grass into a Water starter:
+            // measured, the run lost that fight at lv21 twice, to Leech Seed and a run of missed
+            // Tackles. ⚠️ **Not inside Mt Moon, which is where this was tried first and is cheaper per
+            // battle.** A black-out on a cave floor warps the run to the Mt Moon Centre, and the
+            // traversal's next step is an `enter_at` *between two of its own floors* — a warp
+            // `route_toward` cannot find from outside, so the run stalls there for good. Route 3 is
+            // outdoors, one connection from Pewter, and every recovery works.
+            Self::GrindUntilLevel { target_level: 22, on_map: Map::Route3, target: PartyRef::Slot(0) },
             Self::enter(Map::Route4),
             Self::enter(Map::MtMoonPokecenter),
             Self::Interact(MapSprite::MTMOONPOKECENTER_NURSE),
             Self::enter(Map::Route4),
             Self::enter(Map::MtMoon1F),
-        ];
+        ]
+    }
 
+    /// `finish` adds the gauntlet grind and everything past the eighth badge.
+    fn game_steps(finish: bool) -> Vec<Self> {
+        // ── Pallet Town → the starter → Brock → the Route 3 grind → into Mt Moon ──
+        let mut steps = Self::pallet_to_cerulean_steps();
         // ── Cross Mt Moon → Cerulean City ──
         steps.extend(Self::mt_moon_traversal());
 
         steps.extend([
-            // ── Heal in Cerulean, then beat Misty (Cascade Badge) ──
-            Self::enter(Map::CeruleanPokecenter),
-            Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-            Self::enter(Map::CeruleanCity),
-            Self::DefeatGymLeader { leader: MapSprite::CERULEANGYM_MISTY, badge: Badge::CascadeBadge },
-            // Exit the gym to the city (single warp) before entering the Pokécenter — see the
-            // Pewter gym note above.
-            Self::enter(Map::CeruleanCity),
+            // ── Heal in Cerulean ──
             Self::enter(Map::CeruleanPokecenter),
             Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
         ]);
 
-        // ── Bill (SS Ticket) → trashed-house bridge → Vermilion City ──
+        // ── Nugget Bridge → Bill (SS Ticket) → Misty → trashed-house bridge → Vermilion City ──
         steps.extend(Self::cerulean_to_vermilion_steps());
         // ── S.S. Anne: clear every trainer, beat the rival, get HM01 Cut from the captain ──
         steps.extend(Self::ss_anne_steps());
@@ -2348,9 +2825,9 @@ impl PolicyStep {
         steps.extend(Self::safari_zone_strength_steps());
         // ── Fuchsia → Celadon (buy Super Potions) → Saffron ──
         steps.extend(Self::saffron_entry_steps());
-        // ── Celadon: free Eevee → Vaporeon, teach Surf, grind it — needed to beat the Silph rival's
-        //    Alakazam (and for Surf to Cinnabar). Done BEFORE Silph. ──
-        steps.extend(Self::eevee_vaporeon_surf_steps());
+        // (No Eevee leg. It existed to put Surf on a second body and to answer the Silph rival's
+        // Alakazam; Blastoise carries Surf itself and takes the Alakazam on bulk, so what is left is
+        // a Celadon round trip and a Water Stone.)
         // ── Silph Co: Card Key → Giovanni (liberates Saffron) → out + heal ──
         steps.extend(Self::silph_co_card_key_steps());
         steps.extend(Self::silph_giovanni_steps());
@@ -2361,10 +2838,9 @@ impl PolicyStep {
         // ── Pokémon Mansion → Secret Key → Cinnabar Gym → Volcano Badge (Blaine) ──
         steps.extend(Self::mansion_secret_key_steps());
         steps.extend(Self::volcano_badge_steps());
-        // ── Seafoam Islands (off Cinnabar) → Master-Ball ARTICUNO, the Elite-Four Ice sweeper ──
-        // Starts and ends on Cinnabar Island, so it drops straight in ahead of the Earth Badge. It adds
-        // two party members: a Slowpoke HM-slave (Strength + Dig) at slot 2 and Articuno at slot 3.
-        steps.extend(Self::seafoam_articuno_steps());
+        // (No Seafoam detour. It existed to add Articuno as the Elite Four's Ice sweeper, and a
+        // single over-levelled starter does not need a second sweeper — see `gauntlet_grind_steps`.
+        // `seafoam_articuno_steps` is still here and still tested; it is simply not on the route.)
         // ── The gauntlet grind, on Cinnabar's doorstep while the party is finally complete ──
         // ⚠️ **Here rather than at Victory Road, and the four attempts are in `gauntlet_grind_steps`.**
         // This is the first point in the route where all three Elite Four fighters are in the party,
@@ -2506,6 +2982,15 @@ pub struct DeterministicPolicy {
     /// Centre it is aiming at, or no Nurse in sight after arriving. Bounded because the detour is
     /// otherwise a silent permanent stall — see the ⚠️ on the branch in `pick_overworld_action`.
     heal_route_stuck: u32,
+    /// Set once a heal detour has given up because the Centre could not be routed to, and cleared by
+    /// the next actual heal. While it is set the low-PP flee stops arming another detour — see the ⚠️
+    /// where it is assigned.
+    heal_unreachable: bool,
+    /// Where a heal detour set off from, so it can put the run back. See the return block in
+    /// `pick_overworld_action`.
+    heal_came_from: Option<Map>,
+    /// Consecutive polls spent waiting for a nurse to finish. See `MAX_HEAL_WAITS`.
+    heal_waits: u32,
     /// Consecutive ticks the current `DefeatGymLeader` step has failed to find a route to its gym.
     /// A lost gym battle blacks the player out, and for a few ticks after that warp the map/actions are
     /// still unsettled, so routing legitimately fails; popping the step on the first failure (as this
@@ -2520,6 +3005,10 @@ pub struct DeterministicPolicy {
     /// "not yet revealed" — some item balls stay hidden until their guard is beaten (e.g. the Rocket
     /// Hideout Lift Key / Silph Scope), and popping on the initial hidden state would skip them.
     collect_item_seen: bool,
+    /// Polls the current `CollectItem` has spent on an item that has not been picked up, so a pickup
+    /// the game silently refuses gives up with a reason instead of spinning. See
+    /// [`Self::MAX_COLLECT_ITEM_WAITS`].
+    collect_item_waits: u32,
     /// Consecutive ticks a `CatchPokemon` step has found no encounter source (no grass/cave-object/water).
     /// On map entry the tile grid is momentarily unsettled (sprites can read out of bounds), so we WAIT a
     /// bounded number of ticks for it to settle rather than popping the catch immediately.
@@ -2585,6 +3074,32 @@ pub struct DeterministicPolicy {
     /// step spends exactly one of each, and "spent" has to be measured against a baseline because
     /// several of them (X Attack, Dire Hit) leave no trace once the battle ends.
     battle_item_baseline: Option<Vec<u8>>,
+    /// Black-outs this run has had, and whether the newest one is still waiting to be reported.
+    ///
+    /// ⚠️ **A black-out costs a route far more than the walk back, and nothing counted them.** It
+    /// halves the money, warps the party to the last Centre — which is how a run that was two maps
+    /// into Victory Road ends up in Viridian — and inside the Elite Four it is terminal, because the
+    /// queue's next step is the next room and there are no steps left to redo the ones before it. The
+    /// fix for a black-out is always upstream of it (a grind, a heal, a different lead), so the only
+    /// thing worth recording is *where the run was standing and what it was carrying* when it lost.
+    ///
+    /// Reported from the overworld poll rather than from [`Policy::on_event`], because the event has
+    /// no [`GameState`] to say what the party was. Where it *happened* comes from
+    /// [`Self::last_battle_map`] instead, for the reason written there.
+    blackouts: u32,
+    blackout_pending: bool,
+    /// Round trips a `GrindUntilLevel` has made to a Pokémon Centre because its trainee fainted.
+    grind_heal_trips: u32,
+    /// The map the last battle was fought on, which is the one a black-out has to be reported against.
+    ///
+    /// ⚠️ **Recorded from `pick_battle_action` rather than from the overworld poll, because the
+    /// cartridge's own sentence arrives *late*.** The first version kept the last overworld map and
+    /// printed it beside the map at report time; both came out as the map the run had already walked
+    /// back to (`lost on MtMoonB2F, woke on MtMoonB2F` for a black-out that warps to Route 4's Centre),
+    /// because the "blacked out" text box is only committed once the reader is flushed, several
+    /// overworld decisions after the warp. A battle map cannot be overwritten by the walk home, so it
+    /// still says where the run actually lost.
+    last_battle_map: Option<Map>,
 }
 
 
@@ -2627,6 +3142,18 @@ impl DeterministicPolicy {
     /// A use the game declines consumes nothing, so without a bound the step retries for the whole
     /// leg — the same shape as the full-bag trap, and just as quiet.
     const MAX_ITEM_USE_ATTEMPTS: u32 = 4;
+
+    /// How many polls a `CollectItem` may spend on an item that will not be picked up.
+    ///
+    /// ⚠️ **Generous on purpose, because the step legitimately waits.** An item ball can be hidden
+    /// until its guard is beaten (the Rocket Hideout Lift Key, the Silph Scope) and a pickup can be
+    /// interrupted by a wild battle on the approach tile (the Mt Moon fossil), so a small bound would
+    /// abandon errands that were about to work. This is only there to stop the *silent* case — a
+    /// pickup the game refuses — burning a whole run's cycle budget, which it did: 16,763 polls.
+    const MAX_COLLECT_ITEM_WAITS: u32 = 3000;
+    /// Polls a nurse gets to finish healing before the route carries on without her. A heal is a few
+    /// seconds of cartridge time; this is about thirty at the agent's 20 ms tick.
+    const MAX_HEAL_WAITS: u32 = 1500;
     /// **Policy polls**, not ticks, that one `EnterMapIfReachable` spends before giving up.
     ///
     /// Polls rather than ticks because that is what the policy can count, and it is the better
@@ -2734,11 +3261,15 @@ impl DeterministicPolicy {
             last_pokemon_center: None,
             heal_return: None,
             heal_route_stuck: 0,
+            heal_unreachable: false,
+            heal_came_from: None,
+            heal_waits: 0,
             mart_attempts: 0,
             mart_baseline: None,
             gym_route_stuck: 0,
             dig_from_map: None,
             collect_item_seen: false,
+            collect_item_waits: 0,
             catch_wander_stuck: 0,
             mansion_flip_baseline: None,
             hidden_item_baseline: None,
@@ -2755,6 +3286,10 @@ impl DeterministicPolicy {
             item_use_baseline: None,
             item_use_attempts: 0,
             battle_item_baseline: None,
+            blackouts: 0,
+            blackout_pending: false,
+            grind_heal_trips: 0,
+            last_battle_map: None,
         }
     }
 
@@ -2765,7 +3300,15 @@ impl DeterministicPolicy {
     /// the explicit `EnterMap` steps have already led through) and returns `None` for a not-yet-
     /// visited target — the signal that the deterministic policy is under-specified.
     pub(crate) fn route_toward(world_graph: &WorldGraph, actions: &[OverworldAction], target: Map) -> Option<OverworldAction> {
-        world_graph.pick_shortest_path_action(actions, target)
+        // ⚠️ **A transition to the target on *this* map is the shortest path, and asking the graph
+        // first could miss it.** `pick_shortest_path_action` reads the incremental world graph, whose
+        // nodes are keyed on the entry the agent actually landed on, so a player who has walked far
+        // enough from that entry to fall outside `bfs_nodes`' `SNAP_THRESHOLD` gets `None` — while
+        // the door or the connection it wants is sitting in the very `actions()` list passed in.
+        // That is what "no route from Route3 to PewterPokecenter" was, on a map whose western
+        // connection *is* Pewter.
+        Self::enter_map_action(actions, target, None)
+            .or_else(|| world_graph.pick_shortest_path_action(actions, target))
     }
 
     /// Plan the Sokoban to land a boulder on `target` (a Strength switch or a floor hole) and return the
@@ -2804,6 +3347,22 @@ impl DeterministicPolicy {
 impl Policy for DeterministicPolicy {
     fn name(&self) -> &'static str { "scripted" }
 
+    /// Count black-outs. See [`Self::blackouts`] for why a route cares.
+    ///
+    /// ⚠️ **The cartridge saying so is the only reliable signal, and it says so exactly once.**
+    /// `wBattleResult` is `LOSE` for a moment and then cleared by
+    /// `ResetStatusAndHalveMoneyOnBlackout`, and the party is healed before any `pick_*` could read
+    /// it, so a black-out is indistinguishable from a heal by the time the policy is next asked.
+    /// `llm::battle_report::is_blackout` is the same test on the same sentence; it is repeated here
+    /// rather than called because that module is behind the `llm` feature and this file is not.
+    fn on_event(&mut self, event: &crate::pokemon::agent::AgentEvent) {
+        if let crate::pokemon::agent::AgentEvent::TextBox { message } = event
+            && message.contains("blacked out")
+        {
+            self.blackouts += 1;
+            self.blackout_pending = true;
+        }
+    }
 
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction> {
         // ⚠️ **The cursor is written here rather than at every `pop_front`.** There are around forty
@@ -2813,11 +3372,41 @@ impl Policy for DeterministicPolicy {
         self.record_progress();
         // Back in the overworld = the previous battle is over; clear the per-battle grind participation flag.
         self.trainee_participated = false;
+        if self.blackout_pending {
+            self.blackout_pending = false;
+            println!("[policy] BLACKOUT #{} — lost on {}; queue at {} with {:?}; party {:?}",
+                self.blackouts,
+                self.last_battle_map.map_or_else(|| "an unrecorded map".to_string(), |m| m.to_string()),
+                self.queue.len(),
+                self.queue.front(),
+                state.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
+        }
         if state.map.map.is_pokemon_center() {
             self.last_pokemon_center = Some(state.map.map);
+            // Standing in a Centre is the one place the give-up above is certainly stale.
+            self.heal_unreachable = false;
         }
 
         let actions = state.map.actions();
+
+        // ── Go and heal before the next fight, not after it ───────────────────
+        // See `needs_a_centre`. ⚠️ **Only outdoors**, which is what `Map::is_overworld` is for: from a
+        // town or a route the walk back is a walk, and from inside a building it abandons a chain of
+        // single-hop `EnterMap` steps that resolve from nowhere else. ⚠️ And only while
+        // `heal_unreachable` is clear, or this re-arms the detour that just gave up — the same latch
+        // the low-PP flee needed, for the same reason.
+        if self.heal_return.is_none()
+            && !self.heal_unreachable
+            && (state.map.map.is_overworld() || self.queue.front().is_some_and(step_finds_its_own_way_back))
+            && let Some(centre) = self.last_pokemon_center
+            && needs_a_centre(state,
+                matches!(self.queue.front(), Some(PolicyStep::GrindUntilLevel { .. })))
+        {
+            println!("[policy] the lead cannot fight another battle — detouring to {centre} first");
+            self.heal_return = Some(centre);
+            self.heal_came_from = Some(state.map.map);
+            self.heal_route_stuck = 0;
+        }
 
         // ── Heal-return detour ────────────────────────────────────────────────
         // When the active Pokémon ran low on PP in a wild battle we fled and
@@ -2845,6 +3434,7 @@ impl Policy for DeterministicPolicy {
                     self.heal_route_stuck = 0;
                     return Some(action.clone());
                 }
+                // (falls through to the give-up below)
                 // Pokecenter map but Nurse tile not visible yet — wait, but not for ever: the
                 // sprite is a tile or two away on a map that always has one, so this is the
                 // arrival settling rather than a state to sit in.
@@ -2855,7 +3445,15 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] no Nurse in sight on {pokecenter} — carrying on without the heal");
                 self.heal_return = None;
                 self.heal_route_stuck = 0;
-            } else if let Some(action) = Self::route_toward(world_graph, &actions, pokecenter) {
+            } else if let Some(action) = Self::route_toward(world_graph, &actions, pokecenter)
+                // ⚠️ **Then the town it stands in**, which is a strictly easier question and the one
+                // that actually gets a hurt party home: towns are joined by walkable connections, so
+                // every hop of that walk is a transition the current map's own `actions()` offers,
+                // and the door is in the town's. See `Map::pokemon_center_town`.
+                .or_else(|| pokecenter.pokemon_center_town()
+                    .filter(|&town| town != state.map.map)
+                    .and_then(|town| Self::route_toward(world_graph, &actions, town)))
+            {
                 // Still travelling — take the next step toward the pokecenter.
                 self.heal_route_stuck = 0;
                 return Some(action);
@@ -2873,6 +3471,44 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] no route from {} to {} to heal — carrying on with the route",
                     state.map.map, pokecenter);
                 self.heal_return = None;
+                self.heal_route_stuck = 0;
+                // ⚠️ **Latch it, or the give-up is undone by the very next battle.** Handing back to
+                // the route is only half an answer while the *reason* the detour was armed is still
+                // true: the low-PP arm in `pick_battle_action` re-arms `heal_return` on the next wild
+                // encounter, the detour fails to route again, and the run flees everything in between.
+                // Measured on a Route 3 grind that had wandered past `bfs_nodes`' 8-tile
+                // `SNAP_THRESHOLD` from its entry node: **2750 flees against 217 fights**, 1759 "no
+                // route" lines, and a grind that never gained the two levels it was asked for before
+                // the cycle budget died. Fighting on is the right behaviour once the Centre is out of
+                // reach — that is exactly what black-out recovery is for — so the flee stays disabled
+                // until something clears it, which a heal or a new run does.
+                self.heal_unreachable = true;
+            }
+        }
+
+        // ── Walk back to where the detour set off from ────────────────────────
+        // ⚠️ **A heal detour that does not *return* strands the step it interrupted.** `EnterMap` is
+        // a deliberate single hop, so a queue sitting on `EnterMap { PalletTown }` cannot be resumed
+        // from inside the Cinnabar Pokémon Centre two maps away — and its recovery, re-routing over
+        // the incremental world graph, needs an edge the run may only ever have walked the other way
+        // (Pallet → Route 21 → Cinnabar records nothing about coming back). Measured: a detour off
+        // Route 21 healed and then sat in the Centre for the rest of the budget.
+        //
+        // ⚠️ **Only for a step that cannot find its own way**, or this walks back to a grind map the
+        // grind was about to route to anyway; and bounded by the same counter as the outward leg,
+        // because the way back can be missing from the graph exactly as the way there can.
+        if let Some(from) = self.heal_came_from {
+            let front_reroutes = self.queue.front().is_some_and(step_finds_its_own_way_back);
+            if self.heal_return.is_some() || from == state.map.map || front_reroutes {
+                if self.heal_return.is_none() { self.heal_came_from = None; }
+            } else if let Some(action) = Self::route_toward(world_graph, &actions, from) {
+                self.heal_route_stuck = 0;
+                return Some(action);
+            } else {
+                self.heal_route_stuck += 1;
+                if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT { return None; }
+                println!("[policy] healed, but no route back to {from} — carrying on with the route");
+                self.heal_came_from = None;
                 self.heal_route_stuck = 0;
             }
         }
@@ -3104,8 +3740,33 @@ impl Policy for DeterministicPolicy {
                         // the party alive, so there's no black-out to auto-heal it — detour to the last
                         // Pokémon Center, then the grind resumes with a revived mon.
                         if pokemon.current_hp == 0 {
+                            // ⚠️ **The detour's give-up has to be honoured *here*, or the give-up is
+                            // not one.** `MAX_HEAL_ROUTE_WAIT` correctly abandons a heal it cannot
+                            // route — but this arm re-arms `heal_return` on the very next tick,
+                            // because the trainee is still fainted and this step is still at the
+                            // front. Measured on a Route 11 grind whose return edge to Vermilion the
+                            // agent had never walked: **158 trips, none of which moved a tile**, and
+                            // the run sat there until its budget ran out. The right give-up is the
+                            // same one every other unroutable branch makes — hand the route back —
+                            // and a grind the party cannot heal for is one this run is not going to
+                            // finish anyway.
+                            if self.heal_unreachable {
+                                println!("[policy] grind mon (slot {slot}) is fainted and no Pokémon \
+                                    Centre can be routed to from {} — giving up on the grind",
+                                    state.map.map);
+                                self.heal_unreachable = false;
+                                self.queue.pop_front();
+                                continue;
+                            }
                             if let Some(center) = self.last_pokemon_center {
-                                println!("[policy] grind mon (slot {slot}) fainted — routing to {center} to heal");
+                                // Counted, because the round trip is the grind's *other* cost and the
+                                // only way to price a site against another one is to know how often it
+                                // sends the trainee home. A poisoned trainee walks back over and over:
+                                // Gen 1 ticks 1 HP every four steps in the overworld and cures it
+                                // nowhere but a Centre, which is why `wild::poison_share` exists.
+                                self.grind_heal_trips += 1;
+                                println!("[policy] grind mon (slot {slot}) fainted — routing to {center} to heal (trip #{})",
+                                    self.grind_heal_trips);
                                 self.heal_return = Some(center);
                                 return Self::route_toward(world_graph, &actions, center);
                             }
@@ -3158,12 +3819,26 @@ impl Policy for DeterministicPolicy {
                             _ => false,
                         })
                         .max_by_key(|a| a.route.len())
-                        // Only when the floor offers nothing to pace between at all.
-                        .or_else(|| actions.iter()
-                            .filter(|a| matches!(a.tile, MetaTile::Warp { .. }))
-                            .max_by_key(|a| a.route.len()))
+                        .cloned()
+                        // ⚠️ **When the floor offers nothing to pace between, wander — never a warp.**
+                        // The fallback here used to be "the farthest reachable warp", which on a floor
+                        // whose only sprites are item balls means *every* pacing decision is a door.
+                        // Measured on the gauntlet grind: **4435 map changes**, of which 1097 were the
+                        // Mansion's exit onto Cinnabar Island and 1103 the staircase to 2F — the
+                        // trainee walked out of the building and back in over two thousand times in
+                        // 1552 battles, and the arm above dutifully routed it back each time. Every one
+                        // of those is a screen fade and a map reload bought for nothing: the encounter
+                        // roll is on the *step*, so pacing on the spot finds battles at exactly the
+                        // same rate.
+                        //
+                        // `wander_action` is the existing answer and `CatchPokemon` and `SweepDex` have
+                        // both used it for as long as they have existed — it targets only
+                        // Empty/Grass/Water and never a warp or a connection, and `agent.rs` turns a
+                        // plain-floor destination straight into `PacingForEncounters` between two
+                        // neighbouring tiles. This arm was simply never pointed at it.
+                        .or_else(|| state.map.wander_action())
                     {
-                        Some(action.clone())
+                        Some(action)
                     } else {
                         // ⚠️ **The pacing branch above is for a *cave*, and letting a route into it
                         // is an infinite loop that generates nothing.** Encounters outdoors fire only
@@ -3296,7 +3971,22 @@ impl Policy for DeterministicPolicy {
                     } else if let Some(sprite) = state.map.sprites.iter().find(|s| !s.hidden && s.name == trainer.name) {
                         let pos = sprite.position;
                         let cur = state.map.player_position;
-                        match state.map.route_to_face_dir(pos, Some(PlayerFacingDirection::Up)) {
+                        // ⚠️ **Approach the side the trainer is actually looking at, not always from
+                        // below.** This was `PlayerFacingDirection::Up` — stand underneath — which is
+                        // right for every *gym* trainer, because they all face DOWN, and is why it was
+                        // never wrong until something outside a gym needed it. The Nugget Bridge is the
+                        // counter-example: its five trainers alternate sides of the bridge facing LEFT
+                        // and RIGHT across it (`data/maps/objects/Route24.asm`), so standing below one
+                        // is not in its line of sight, no battle starts, and the "already beaten" arm
+                        // below pops the step having fought nobody. The sprite carries its own facing,
+                        // so there is nothing to guess: face the opposite way to it.
+                        let approach = match sprite.facing {
+                            crate::pokemon::sprite::SpriteFacing::Down => PlayerFacingDirection::Up,
+                            crate::pokemon::sprite::SpriteFacing::Up => PlayerFacingDirection::Down,
+                            crate::pokemon::sprite::SpriteFacing::Left => PlayerFacingDirection::Right,
+                            crate::pokemon::sprite::SpriteFacing::Right => PlayerFacingDirection::Left,
+                        };
+                        match state.map.route_to_face_dir(pos, Some(approach)) {
                             // Standing in the trainer's LOS with no battle → it's beaten. Advance.
                             Some(route) if route.is_empty() => {
                                 self.gym_engage = None;
@@ -3333,6 +4023,25 @@ impl Policy for DeterministicPolicy {
                     // `Interact` already places the agent on the intended map, so matching the
                     // visible sprite here by name is both correct and robust.
                     if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Sprite(sprite.name)) {
+                        // ⚠️ **A heal is finished when the party is full, not when the conversation
+                        // lands — and this step popped on the latter.** `Interact` completes the
+                        // instant it issues the walk, so every `Interact(NURSE)` in the route was a
+                        // *request* to heal rather than a heal: the very next step ran while the
+                        // nurse was still talking, and whether the party actually came back full
+                        // depended on how long that next step happened to take. Caught by asserting
+                        // it on a fixture, which came out carrying **Water Gun on 6 of 25 PP** one
+                        // step after a Pokémon Centre. Bounded, because a nurse that never finishes
+                        // must hand the route back rather than hold it for ever.
+                        if sprite.name == "Nurse" && !party_is_fresh(state)
+                            && self.heal_waits < Self::MAX_HEAL_WAITS {
+                            self.heal_waits += 1;
+                            return Some(action.clone());
+                        }
+                        if self.heal_waits >= Self::MAX_HEAL_WAITS {
+                            println!("[policy] the nurse on {} never finished healing — carrying on",
+                                state.map.map);
+                        }
+                        self.heal_waits = 0;
                         self.queue.pop_front();
                         return Some(action.clone());
                     }
@@ -3548,6 +4257,7 @@ impl Policy for DeterministicPolicy {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to collect {} on {}, but no path there!", sprite, map);
+                            self.collect_item_waits = 0;
                             self.queue.pop_front();
                             continue;
                         }
@@ -3557,6 +4267,37 @@ impl Policy for DeterministicPolicy {
                         if present { self.collect_item_seen = true; }
                         if !present && self.collect_item_seen {
                             // The item was here and is now gone — picked up (or removed by a script). Done.
+                            self.collect_item_seen = false;
+                            self.collect_item_waits = 0;
+                            self.queue.pop_front();
+                            continue;
+                        }
+                        // ⚠️ **Bounded, because the completion test is "the sprite went away" and a
+                        // refused pickup never satisfies it.** Every item on the floor is a sprite:
+                        // walk up, press A, text box, back to the overworld — and the *only* difference
+                        // between a pickup that worked and one the game declined is whether the sprite
+                        // is still there. So a decline is invisible to this step and it re-issues the
+                        // walk for ever. Measured: a run stood at Silph Co 5F (20,16), **one tile from
+                        // the Card Key at (21,16)**, for 16,763 polls until the cycle budget died —
+                        // with no line in the log saying anything was wrong.
+                        //
+                        // ⚠️ **And the cause is almost always the bag, which is why the message says
+                        // so.** Gen 1's bag is 20 *entries* and a full one refuses every pickup in the
+                        // game silently (`agent::check_pending_pickup` is the other half of this, and
+                        // reports it per attempt). A route that adds an item without freeing a slot
+                        // breaks a pickup several legs later, which is not a connection anyone makes
+                        // from a stalled run. Handing back to the queue is the right give-up — the next
+                        // step walks on, and a missing key item fails loudly wherever it is needed.
+                        self.collect_item_waits += 1;
+                        if self.collect_item_waits >= Self::MAX_COLLECT_ITEM_WAITS {
+                            println!("[policy] gave up collecting {sprite} on {map} after {} polls{}",
+                                self.collect_item_waits,
+                                match state.bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS {
+                                    true => format!(" — the bag is full ({} entries), which refuses \
+                                        every pickup in the game", state.bag.len()),
+                                    false => String::new(),
+                                });
+                            self.collect_item_waits = 0;
                             self.collect_item_seen = false;
                             self.queue.pop_front();
                             continue;
@@ -3744,6 +4485,8 @@ impl Policy for DeterministicPolicy {
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
         let battle_state = state.battle.as_ref()?;
         let actions = battle_options(state)?;
+        // Where a black-out will be reported against — see `last_battle_map`.
+        self.last_battle_map = Some(state.map.map);
 
         // Inside Victory Road the low-PP / low-HP "flee to a Pokémon Center" detours must be SUPPRESSED —
         // fleeing out of the multi-floor puzzle to walk all the way back to Viridian abandons the solve and
@@ -3824,6 +4567,7 @@ impl Policy for DeterministicPolicy {
         // run from wild battles and queue a detour to the last visited Pokémon Center.
         if battle_state.battle_type == BattleType::Wild
             && self.heal_return.is_none()
+            && !self.heal_unreachable
             && !in_center_less_dungeon
             && all_damaging_moves_low_pp(&actions)
         {
@@ -4044,17 +4788,34 @@ impl Policy for DeterministicPolicy {
         // the starter, and it re-crosses the dungeon in successive, progressively-levelled passes
         // (the "just the starter" recovery loop). Skipped while grinding — there we deliberately fight
         // on and rely on black-out recovery so the lead keeps earning XP.
+        // ⚠️ **The threshold depends on whether the bag can answer, and the leave is worth taking
+        // even with nowhere to go.** At 15% the run was dying to the *next* hit: a lv7 Squirtle on
+        // Route 1 walked into a Pidgey at about a third of its HP, above the bar, and Gust finished
+        // it in one turn. With a potion in the bag the in-battle heal arm above is the cheaper answer
+        // and 15% is right; with an empty bag there is nothing else coming, so leave at a third.
+        // ⚠️ And the `last_pokemon_center` that used to gate this arm gated the wrong half — running
+        // is worth doing whether or not there is a Centre to walk to afterwards, and on the first
+        // errands out of Pallet there is not one yet.
+        let flee_below = match state.bag.iter().any(|i| matches!(i.id,
+            ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion
+            | ItemId::FullRestore) && i.quantity > 0) {
+            true => 0.15,
+            false => 0.34,
+        };
         if !grinding
             && !in_center_less_dungeon
             && battle_state.battle_type == BattleType::Wild
             && self.heal_return.is_none()
-            && battle_state.player.remaining_hp() < 0.15
+            && battle_state.player.remaining_hp() < flee_below
         {
-            if let Some(center) = self.last_pokemon_center {
-                println!("[policy] HP critical, no heal/switch — fleeing to {center} to heal");
-                self.heal_return = Some(center);
-                return Some(BattleAction::Run);
+            match self.last_pokemon_center {
+                Some(center) => {
+                    println!("[policy] HP critical, no heal/switch — fleeing to {center} to heal");
+                    self.heal_return = Some(center);
+                }
+                None => println!("[policy] HP critical and no Centre known yet — fleeing anyway"),
             }
+            return Some(BattleAction::Run);
         }
 
         // Elite-Four tactic: if the active mon can no longer hit the enemy hard (its best available move
@@ -4068,10 +4829,17 @@ impl Policy for DeterministicPolicy {
                 .max().unwrap_or(0) };
             let active_best = move_dmg(&battle_state.player);
             if (active_best * 3) < battle_state.enemy.stats.hp as u32 {
+                // ⚠️ **The level gate here was doing the damage gate's job badly, and it kept the one
+                // mon that could win out of the fight.** "Within eight levels of the active" is a
+                // proxy for "not a sacrificial weakling", and two lines below there is a direct test
+                // of exactly that — the bench mon must do at least 1.5× the active's damage *and*
+                // three-shot this enemy. A lv20 Hypno against Erika's Grass/Poison passes both
+                // comfortably (Psychic is 2× on Poison) and failed the proxy against a lv45
+                // Blastoise, so the run lost that gym with its answer sitting on the bench. Health is
+                // still required: a fainted or nearly-fainted body cannot cash the damage in.
                 let best_switch = actions.iter()
                     .filter(|a| matches!(a, BattleAction::SwitchPokemon { pokemon, .. }
-                        if pokemon.current_hp as u32 * 2 > pokemon.stats.hp as u32
-                        && pokemon.level + 8 >= battle_state.player.level))
+                        if pokemon.current_hp as u32 * 2 > pokemon.stats.hp as u32))
                     .filter_map(|a| match a {
                         BattleAction::SwitchPokemon { pokemon, .. } => Some((move_dmg(pokemon), a)),
                         _ => None,
@@ -4134,10 +4902,21 @@ impl Policy for DeterministicPolicy {
         // Last resort: a Fight move (Struggle if truly out of PP), else any non-item action such as a
         // switch to a team-mate or Run. Never fall through to a `UseItem`: the first bag entry is often
         // an unusable key item, and selecting it deadlocks on "This isn't the time to use that!".
-        actions.iter().find(|a| matches!(a, BattleAction::Fight { .. }))
+        let last_resort = actions.iter().find(|a| matches!(a, BattleAction::Fight { .. }))
             .or_else(|| actions.iter().find(|a| !matches!(a, BattleAction::UseItem { .. })))
             .or_else(|| actions.iter().find(|a| matches!(a, BattleAction::Fight { .. })))
-            .cloned()
+            .cloned();
+        if last_resort.is_none() {
+            // ⚠️ **A policy that answers `None` for ever is indistinguishable from one that is
+            // thinking, and that is exactly how it presents**: the agent sits in
+            // `BattleState::AwaitingPolicy` showing the main battle menu, the emulator runs, the
+            // watchdog never fires (it *is* being polled) and **nothing is printed**. Two
+            // `full_playthrough` runs ended that way, in silence, in Erika's gym. So the one path out
+            // of this function that answers nothing says so.
+            println!("[policy] no battle action to take against {} — options {:?}",
+                battle_state.enemy.species, actions);
+        }
+        last_resort
     }
 
     fn pick_nickname(&mut self, _species: PokemonSpecies) -> Option<Option<String>> {
@@ -4304,6 +5083,72 @@ impl Policy for DeterministicPolicy {
             self.queue.pop_front();
             return Some(FieldMove::ReorderParty { slot });
         }
+        if let Some(&PolicyStep::GrindUntilLevel { on_map, target, .. }) = self.queue.front() {
+            // ⚠️ **The trainee **leads** the grind rather than being switched into it, and that is
+            // worth two separate things.** `pick_battle_action`'s training block puts a bench trainee
+            // in on turn 1 of every battle, which costs the turn *and* halves the experience:
+            // `DivideExpDataByNumMonsGainingExp` splits a knockout between everything that took the
+            // field, so a lead that switches out has still participated and still takes its half. On
+            // the gauntlet grind that is the difference between one wild battle per level-step and
+            // two, plus a free enemy attack in each — and it is exactly what a run watching itself
+            // grind Articuno sees: every battle opens with a switch, and only the Venusaur leg (which
+            // is already slot 0) runs at full speed.
+            //
+            // A direct RAM reorder, so it costs no menus and no game time. It is not re-issued: the
+            // next poll resolves `target` to slot 0 and the guard below is false — the same
+            // "completion is visible in RAM" shape `UseStrength` and `UseFlash` have, rather than a
+            // latch that a restart would forget.
+            //
+            // ⚠️ **Only on the grind map and only while the trainee is standing.** A fainted trainee
+            // is about to send the queue off on the heal detour in `pick_overworld_action`, and
+            // promoting it there would put a fainted mon in front for the walk.
+            if state.map.map == on_map
+                && let Some(slot) = target.resolve(state)
+                && slot != 0
+                && state.pokemon.get(usize::from(slot)).is_some_and(|mon| mon.current_hp > 0)
+            {
+                println!("[policy] grind: leading with slot {slot} so it takes the whole battle and the whole XP");
+                return Some(FieldMove::ReorderParty { slot });
+            }
+            // ⚠️ **Cure the tick here, or pay for it as a four-warp round trip to a Pokémon Centre.**
+            // Poison and burn are the only things that damage a trainee *between* battles, and nothing
+            // in Gen 1 clears either outside a Centre — so an uncured status is a slow countdown to a
+            // faint, and the fainted-trainee detour below is what collects it. Measured before this
+            // arm existed: twelve trips across the gauntlet grind, **4.9% of the whole leg**, every one
+            // of them a Ponyta's burn or a Koffing's Smog rather than anything that happened in a
+            // battle — the trainee won the fight that preceded each one.
+            //
+            // Between battles rather than in one, because a Full Heal used in battle costs the turn and
+            // this costs only the bag menu. The completion test is the status itself clearing, which is
+            // RAM the next poll reads — same shape as the reorder above, so a use the game somehow
+            // declines cannot loop more than the driver's own escape allows.
+            if state.map.map == on_map
+                && let Some(slot) = target.resolve(state)
+                && let Some(mon) = state.pokemon.get(usize::from(slot))
+                && mon.current_hp > 0
+                && matches!(mon.status, crate::pokemon::status::PokemonStatus::Poisoned
+                                      | crate::pokemon::status::PokemonStatus::Burned)
+                // ⚠️ **On sight, and *not* on a low-HP threshold — a Full Heal restores no HP.** The
+                // first version waited until half health to save items, by analogy with the in-battle
+                // arm's 25%. That analogy is wrong: a potion gives HP back and a status cure does not,
+                // so curing at half leaves the trainee at half **for good** — nothing restores HP
+                // outside a battle or a Centre — and the next poisoning starts from there and finishes
+                // the job. Curing the moment the status lands is what keeps the HP, which is why the
+                // fixture run goes from twelve Centre trips to none: a trainee that one-shots this
+                // floor loses almost nothing to the battles themselves, and the tick is the whole of
+                // the damage.
+                && let Some(cure) = [ItemId::FullHeal, ItemId::Antidote].into_iter()
+                    .find(|&id| state.bag.iter().any(|i| i.id == id && i.quantity > 0))
+                // An Antidote is the cheap cure and only answers poison; a Full Heal answers both.
+                && (cure == ItemId::FullHeal
+                    || mon.status == crate::pokemon::status::PokemonStatus::Poisoned)
+            {
+                println!("[policy] grind: {:?} is {:?} — curing it with a {cure:?} rather than walking to a Centre",
+                    mon.species, mon.status);
+                return Some(FieldMove::UseBagItem { item: cure,
+                    target: crate::pokemon::postgame::items::UseTarget::Party { slot } });
+            }
+        }
         if let Some(&PolicyStep::UseFlash { slot }) = self.queue.front() {
             // **Workstream H.** Same shape as `UseStrength` below: re-issued each tick until the
             // effect shows in RAM, so an interruption costs a tick rather than the step.
@@ -4312,7 +5157,9 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
-            return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Flash) });
+            let (slot, move_index) = field_move_carrier(state, PokemonMoveName::Flash)
+                .unwrap_or((slot, field_move_index(state, slot, PokemonMoveName::Flash)));
+            return Some(FieldMove::UseFieldMove { slot, move_index });
         }
         if let Some(&PolicyStep::UseStrength { target }) = self.queue.front() {
             if state.strength_active {
@@ -4324,7 +5171,9 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] UseStrength: {target:?} is not in the party — waiting");
                 return None;
             };
-            return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Strength) });
+            let (slot, move_index) = field_move_carrier(state, PokemonMoveName::Strength)
+                .unwrap_or((slot, field_move_index(state, slot, PokemonMoveName::Strength)));
+            return Some(FieldMove::UseFieldMove { slot, move_index });
         }
         if let Some(&PolicyStep::SolveBoulders { switch }) = self.queue.front() {
             // Done once a boulder sits on the switch (the map script then opens the barrier).
@@ -4411,7 +5260,7 @@ impl Policy for DeterministicPolicy {
             }
             return Some(FieldMove::TossItem { item });
         }
-        if let Some(&PolicyStep::Dig { slot }) = self.queue.front() {
+        if let Some(&PolicyStep::Dig { target }) = self.queue.front() {
             // Done when Dig has warped us off this map. The map we started on is remembered on the first
             // tick, so a re-issue after an interruption still terminates.
             match self.dig_from_map {
@@ -4424,7 +5273,13 @@ impl Policy for DeterministicPolicy {
                 None => self.dig_from_map = Some(state.map.map),
                 _ => {}
             }
-            return Some(FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, PokemonMoveName::Dig) });
+            let Some(slot) = target.resolve(state) else {
+                println!("[policy] Dig: {target:?} is not in the party — waiting");
+                return None;
+            };
+            let (slot, move_index) = field_move_carrier(state, PokemonMoveName::Dig)
+                .unwrap_or((slot, field_move_index(state, slot, PokemonMoveName::Dig)));
+            return Some(FieldMove::UseFieldMove { slot, move_index });
         }
         if let Some(&PolicyStep::EvolveWithStone { stone, target }) = self.queue.front() {
             // "Evolved" = the species we started against is no longer at the target. Captured as a
@@ -4778,7 +5633,15 @@ mod heal_detour_tests {
         let mut fixture = TestFixture::new(
             include_bytes!("data/mt-moon.bin"), std::time::Duration::from_secs(1), vec![]);
         let state = fixture.game_state();
-        let centre = Map::MtMoonPokecenter;
+        // ⚠️ **Cinnabar, not the Mt Moon Centre this case was found on, and the change is a fix
+        // rather than a dodge.** The detour now falls back to the Centre's *town*
+        // (`Map::pokemon_center_town`) and `route_toward` takes a transition off the current map's
+        // own `actions()` before asking the graph — so from inside Mt Moon it can now walk *out*
+        // toward Route 4, which is exactly what the deployed run should have done. What still cannot
+        // be answered from a cave floor is a Centre on an island the run has never seen, and that is
+        // the shape this test is really about: an unroutable detour must hand the route back rather
+        // than hold it.
+        let centre = Map::CinnabarPokecenter;
         assert_ne!(state.map.map, centre, "the fixture must be somewhere the detour has to travel to");
 
         // The step is `enter` the map the player is already on, which pops on sight — so the queue
