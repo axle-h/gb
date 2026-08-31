@@ -202,3 +202,91 @@ fn can_get_the_super_rod_and_catch_a_tentacool() {
     fixture.run_until(|s| s.battle.is_none() && s.map.map == Map::PalletTown);
     fixture.save_state_named("src/pokemon/data/postgame-fishing.bin").unwrap();
 }
+
+/// **The fishing row in the action menu** — water within reach plus a rod in the bag, taken by a
+/// policy that knows nothing about fishing beyond picking the row.
+///
+/// That last part is the point. `PolicyStep::Fish` drives a cast from a *scripted* queue, which is no
+/// use to the model: `LlmPolicy` chooses from `MetaTileMap::actions`, so until there was a row there
+/// the whole mechanic was unreachable for a run that was not following a script. The row carries the
+/// best rod in the bag (`Rod::best_in_bag` — the earlier two are strictly worse, so there is nothing
+/// to choose between), and the hand-off happens in the agent rather than in any policy, so a random,
+/// scripted or model-driven run all fish the same way.
+///
+/// `postgame-fishing.bin` stands on the Pallet beach with all three rods, which is why the assertion
+/// below is `Rod::Super` rather than "a rod".
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
+    const FISHING: &[u8] = include_bytes!("../../data/postgame-fishing.bin");
+    const CASTS: u32 = 12;
+
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::world_graph::WorldGraph;
+
+    /// Take the fishing row whenever it is offered, up to `CASTS` times, and flee whatever bites.
+    struct FishTheRow { casts: u32 }
+    impl crate::pokemon::policy::Policy for FishTheRow {
+        fn name(&self) -> &'static str { "fish-the-row" }
+
+        fn pick_overworld_action(&mut self, state: &GameState, _: &WorldGraph) -> Option<OverworldAction> {
+            if self.casts >= CASTS { return None }
+            let action = state.map.actions().into_iter()
+                .find(|a| matches!(a.tile, MetaTile::Fish { .. }))?;
+            self.casts += 1;
+            Some(action)
+        }
+
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<BattleAction> {
+            Some(BattleAction::Run)
+        }
+    }
+
+    let mut fixture = TestFixture::with_policy(FISHING, Duration::from_mins(30),
+        Box::new(FishTheRow { casts: 0 }));
+
+    // The row is there before anything is driven, and it names the best rod rather than the first.
+    let offered = fixture.game_state().map.actions().into_iter()
+        .find(|a| matches!(a.tile, MetaTile::Fish { .. }))
+        .expect("Pallet's beach with three rods in the bag should offer a cast");
+    assert_eq!(offered.tile, MetaTile::Fish { rod: Rod::Super },
+        "the row should carry the best rod in the bag");
+    assert_eq!(offered.to_string(), "Fish with the Super Rod");
+
+    // ── The LLM path, which is the only reason this row exists ──
+    //
+    // `LlmPolicy` never sees an `OverworldAction`: it is sent `overworld_menu`, answers with an id,
+    // and `resolve_overworld` turns that back into an action by **string equality** on a freshly
+    // recomputed list. So the three things that can silently break a row for the model and for
+    // nothing else are that the menu drops it (`overworld_menu` withholds `MetaTile::Pc`), that the
+    // id does not round-trip, and that it has no description — a row the model cannot tell the
+    // purpose of is one it does not pick.
+    let id = crate::llm::tools::overworld_id(&fixture.game_state(), &offered);
+    let menu = crate::llm::tools::overworld_menu(&fixture.game_state(), None);
+    let row = menu.iter().find(|item| item.id == id)
+        .expect("the fishing row should survive into the menu the model is sent");
+    println!("the model is offered: `{id}` — {}", row.description);
+    assert!(row.description.contains("fish"), "the row should say what it is for: {}", row.description);
+    assert_eq!(crate::llm::tools::resolve_overworld(&fixture.game_state(), &id).as_ref(), Some(&offered),
+        "the id the model would quote back should re-resolve to the same action");
+
+    // Casting is the only thing this policy does, so any wild battle at all came out of the water.
+    let bites = std::cell::Cell::new(0u32);
+    let in_battle = std::cell::Cell::new(false);
+    let seen = std::cell::RefCell::new(Vec::new());
+    fixture.run_until(|s| {
+        let now = s.battle.is_some();
+        if now && !in_battle.get() {
+            bites.set(bites.get() + 1);
+            let enemy = &s.battle.as_ref().unwrap().enemy;
+            seen.borrow_mut().push((enemy.species, enemy.level));
+        }
+        in_battle.set(now);
+        bites.get() >= 2 && !now
+    });
+
+    println!("fished up {:?}", seen.borrow());
+    assert!(bites.get() >= 2, "the row should keep producing wild battles");
+    assert_eq!(fixture.game_state().map.map, Map::PalletTown, "fishing does not move the player");
+}

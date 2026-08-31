@@ -672,3 +672,36 @@ in `transcript.jsonl` too. ⚠️ **The SPA's copy is optional and must stay opt
 ⚠️ And `useEventStream`'s `signature` excludes it, for the reason it excludes `seq`: it differs on every event, so leaving
 it in would stop identical rows ever collapsing into a `×3`.
 
+
+## The fishing row in the action menu
+
+`MetaTile::Fish { rod }` is an action, never a tile: `meta_tiles` never holds one, `player_tile()`
+never equals one, and the two exhaustive matches over `MetaTile` that draw maps (`llm::map_image`'s
+tint table and `MetaTileMap`'s own `Display`) treat it as ordinary ground. What mints it is
+`actions()` section 6, on three conditions that are each a row the cartridge would otherwise refuse:
+
+- a rod in the bag (`MetaTileMap::best_rod`, set by `game_state()` from the live bag, exactly as
+  `can_surf` and `can_cut` are — the map builder has no bag access),
+- a tileset in `WaterTilesets` (`fishing::tileset_holds_water`), which `FishingInit` checks *before*
+  it looks at the tile in front, so a map that fails it answers every cast with "Not the time to use
+  that!",
+- water with a reachable `Empty` neighbour (`fishing::nearest_castable_water`, shared with
+  `PolicyStep::Fish`'s own `pick` so the row and the cast cannot disagree about which shore).
+
+⚠️ **The row's route ends facing the water and carries no `A`.** Pressing A at water does nothing; the
+cast is a bag chain. The hand-off is in `AgentState::OverworldMovement`'s **empty-route arm** — the
+same arm that would otherwise publish `OverworldActionCompleted` — which enters `AgentState::Fishing`
+instead. Putting it there rather than in a policy is what makes every policy fish: scripted, random
+and model-driven runs all take the row the same way.
+
+⚠️ **The rod is re-resolved from the live bag at the hand-off**, not taken from the row. A row is
+minted from a `GameState` and acted on a tick or more later, and `Rod::best_in_bag` is cheap.
+
+⚠️ **Always the best rod, and that is not a preference.** `ItemUseOldRod` hard-codes a lv5 Magikarp
+and the Good Rod's table is two lv10 mons, while the Super Rod reads the map's own group — there is no
+map and no goal on which an earlier rod catches something a later one cannot, so there is nothing for
+a policy to choose between and the row does not offer the choice.
+
+⚠️ **It is not a grind engine, whatever the bite rate suggests** — see the ⚠️ on
+`PolicyStep::gauntlet_grind_steps`, which carries the measurement. A cast is 8.46 s of cartridge time
+against a step's 16 frames, so 50% bites a cast still lands an encounter behind walking's 10/256.
