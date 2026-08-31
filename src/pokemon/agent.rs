@@ -2402,6 +2402,23 @@ CascadeBadge; not cutting".to_string(),
                                 api.press_button(btn);
                             }
                             None => {
+                                // ⚠️ **The empty route is where a fishing row turns into a cast.** The
+                                // walk to the shore ends facing the water, and from there the row's
+                                // whole point — START → ITEM → the rod → USE — is a bag chain no
+                                // route can express, so hand off to the driver rather than going
+                                // Idle. Every policy gets this: the row is in `actions()`, so a
+                                // scripted, random or model-driven run all fish the same way, with
+                                // the rod re-resolved from the live bag rather than the one the row
+                                // was minted with.
+                                if let MetaTile::Fish { .. } = destination
+                                    && let Some(rod) = crate::pokemon::postgame::fishing::Rod::best_in_bag(&game_state.bag)
+                                    && let Some(at) = crate::pokemon::postgame::fishing::nearest_castable_water(&game_state.map)
+                                {
+                                    api.release_all_buttons();
+                                    self.set_state(AgentState::Fishing(
+                                        crate::pokemon::postgame::fishing::FishState::new(rod, at)));
+                                    return Ok(());
+                                }
                                 new_events.push(AgentEvent::OverworldActionCompleted { destination });
                                 self.set_state(AgentState::Idle);
                             }

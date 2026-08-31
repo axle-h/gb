@@ -107,6 +107,9 @@ fn tint_for(tile: MetaTile) -> Option<Tint> {
         // and the tile they sit on reads as the wall they are drawn in. The arms exist so that
         // adding a variant is a compile error here rather than a silently untinted square.
         MetaTile::Pc | MetaTile::Switch { .. } => PC,
+        // Nor is `Fish`: it is a shore *action*, and the shore itself is ordinary ground already
+        // tinted by the water beside it.
+        MetaTile::Fish { .. } => return None,
         MetaTile::Empty | MetaTile::Obstacle | MetaTile::Sprite(_) => return None,
     })
 }

@@ -2442,15 +2442,34 @@ impl PolicyStep {
     /// contribution is the line "The #MON LEAGUE champion is the only person who is allowed in!",
     /// which is text and nothing else.
     ///
-    /// ⚠️ **It is gated by his body, and that is what actually stops this.** He stands at (4,12), one
-    /// tile below `warp_event 4, 11, CERULEAN_CAVE_1F`, on a ledge-ringed terrace whose only approach
-    /// to the door is through him. Probed from a walked-in, pre-Champion save standing on the terrace's
-    /// water at (19,1), the whole reachable set is three actions — the Route 4 connection, the Route 24
-    /// water crossing, and the man himself at 26 steps. **The cave warp is not in it at all.** So a
-    /// mid-run grind there is not a route problem to be solved; there is no route.
-    /// (`postgame::legendaries::mewtwo_steps` *does* get in, from a save that has been Champion for a
-    /// while — so he evidently moves once the game is finished. Nothing in this route is ever in that
-    /// state, and the Elite Four is precisely what the grind is for.)
+    /// ⚠️ **It is gated by his body, and the thing that moves him is the ceremony this grind is for.**
+    /// He stands at (4,12), one tile below `warp_event 4, 11, CERULEAN_CAVE_1F`, and the door's other
+    /// three neighbours are `Jump` ledges at (4,12) and (6,12) and wall above — one approach tile, with
+    /// a man on it. `scripts/HallOfFame.asm` sets `TOGGLE_CERULEAN_CAVE_GUY` and calls `HideObject`
+    /// partway through the Hall of Fame, and that is the **only** reference to that toggle in the ROM,
+    /// which is why `postgame::legendaries::mewtwo_steps` walks in and nothing before the credits can.
+    /// So the cave is not reachable at any point this route could use it.
+    ///
+    /// ⚠️ **The reason above is not the reason this comment used to give, and the old one was wrong in
+    /// a way that invites the trip.** It said the west half of Cerulean cannot be reached — probed from
+    /// the water at (19,1), where the reachable set is three actions and the cave warp is not among
+    /// them. But the *terrace* is in that set, 26 steps away: surf the y=5 channel west to the x=7
+    /// column and south to the strip — walked from `post-earth-badge.bin` (eight badges, Victory Road
+    /// not entered) to check, which ends standing one tile from the guard with the door still not in
+    /// `actions()`. So the next person to notice that the cave pays 1055-1264 a knockout has a ROM
+    /// citation to read rather than a routing puzzle to solve.
+    ///
+    /// ⚠️ **The Super Rod is the sixth rejection, and it is rejected on the clock rather than the
+    /// table.** Route 23 and all three Cerulean Cave floors are `super_rod.asm`'s `.Group9` — Slowbro,
+    /// Seaking, Kingler, Seadra, every one at level 23, which is **570 experience a knockout on
+    /// average** against Mansion 1F's 588. `ReadSuperRodData` bites on **half** of all casts on a
+    /// four-mon group, against 10/256 a step in the Mansion, and that ratio is what makes fishing look
+    /// like the answer. It is the wrong unit: a step is 16 frames and a cast is not. Measured over
+    /// thirty Super Rod casts with the battles subtracted, a cast is **8.46 s** of cartridge time —
+    /// the bag chain, `ItemUseText00`'s 80-frame pause and `FishingAnim`'s 110 — so two casts an
+    /// encounter is **16.9 s** against the Mansion's 25.6 steps at **6.8 s**. Fishing generates
+    /// encounters at two fifths of walking's rate to pay 3% less for each: about 29% slower end to
+    /// end.
     ///
     /// ⚠️ **The walk itself works and was not the obstacle**, which is worth knowing if anyone revisits
     /// this. Cinnabar → Cerulean as twenty-two explicit `enter` hops — Route 21 by Surf, Viridian,

@@ -49,6 +49,18 @@ pub enum MetaTile {
     /// Tall-grass tile (tile ID matches `wGrassTile` for the current tileset).
     /// Walkable; stepping on it can trigger a wild Pokémon encounter.
     Grass,
+    /// A **shore tile to fish from**: the player stands here, faces the water in front, and casts.
+    ///
+    /// ⚠️ **Synthesised like [`Self::Pc`] and [`Self::Switch`], not classified from the tileset.**
+    /// The tile itself is ordinary `Empty` ground; what makes it a row in the action menu is the
+    /// conjunction of three things `actions()` checks — water it can face, a tileset the ROM lists in
+    /// `WaterTilesets`, and a rod in the bag. So this variant is only ever an *action*, never
+    /// something `meta_tiles` holds, and `player_tile()` never equals it.
+    ///
+    /// ⚠️ **It carries the rod so the menu row can name it**, and the rod is always the best one in
+    /// the bag: the earlier two are strictly worse rather than differently useful (see
+    /// `fishing::Rod::best_in_bag`), so there is nothing here for a policy to choose between.
+    Fish { rod: crate::pokemon::postgame::fishing::Rod },
 }
 
 impl MetaTile {
@@ -126,6 +138,7 @@ impl Display for MetaTile {
             Self::Counter => write!(f, "a counter"),
             Self::CutTree => write!(f, "a cuttable tree"),
             Self::Pc => write!(f, "the PC"),
+            Self::Fish { rod } => write!(f, "the water's edge, to fish with the {}", rod.name()),
             Self::Switch { object, .. } => write!(f, "{object}"),
             Self::Grass => write!(f, "tall grass"),
         }

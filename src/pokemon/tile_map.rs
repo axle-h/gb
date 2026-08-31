@@ -53,6 +53,11 @@ pub struct MetaTileMap {
     /// `IsSurfingAllowed`'s *other* refusal — Seafoam's "current is much too fast" shore tiles — is
     /// modelled separately as [`Self::no_surf_mount`], because it is per-tile rather than per-map.
     pub can_surf: bool,
+    /// The best fishing rod in the bag, or `None` when there is not one. Set by `game_state()` after
+    /// construction for the same reason [`Self::can_surf`] is — the map builder has no bag access —
+    /// and read by [`Self::actions`], which offers a `MetaTile::Fish` row only when it is `Some` and
+    /// this map has water the player can face.
+    pub best_rod: Option<crate::pokemon::postgame::fishing::Rod>,
     /// True when the player can Cut **here**: the Cascade Badge and a party mon that knows Cut
     /// (`GameState::can_use_cut`). Set by `game_state()` after construction, for the same reason
     /// [`Self::can_surf`] is — the map builder has no party access.
@@ -240,6 +245,7 @@ impl MetaTileMap {
             }).collect(),
             meta_tiles,
             can_surf: false,
+            best_rod: None,
             can_cut: false,
             bill_cell_separator: false,
             strength_switches: strength_switch_table(map.metadata.map).iter()
@@ -867,6 +873,54 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
 
+        // 6. Fishing — stand on the shore, face the water, cast.
+        //
+        // ⚠️ **Three gates, and each one is a row the game would refuse.** A rod in the bag, because
+        // `FishingInit` needs the item; a tileset in `WaterTilesets`, because the ROM checks that
+        // before it looks at the tile in front and a map that fails it answers every cast with "Not
+        // the time to use that!"; and water with a reachable `Empty` neighbour, because a cast is
+        // made from land. That is the same rule the `CutTree` and `ConnectionWater` rows keep, for
+        // the reason the system prompt gives: an action the cartridge silently declines is worse
+        // than no action, because nothing about the refusal tells the policy to stop asking.
+        //
+        // ⚠️ **One row, not one per shore.** Every other section here emits the nearest of its kind
+        // and this is no different: which puddle is cast into changes nothing, since the fishing
+        // group is per *map*.
+        //
+        // The route ends facing the water and there is no `A`: pressing A at water does nothing, and
+        // the cast is a bag chain the `Fishing` driver owns. The agent picks that driver up when the
+        // walk arrives — see `AgentState::OverworldMovement`'s empty-route arm.
+        if let Some(rod) = self.best_rod
+            && crate::pokemon::postgame::fishing::tileset_holds_water(self.tileset)
+            && let Some(water) = crate::pokemon::postgame::fishing::nearest_castable_water(self)
+        {
+            let adj: [(PlayerFacingDirection, Point8); 4] = [
+                (PlayerFacingDirection::Down,  Point8 { x: water.x,                   y: water.y.saturating_sub(1) }),
+                (PlayerFacingDirection::Up,    Point8 { x: water.x,                   y: water.y + 1               }),
+                (PlayerFacingDirection::Right, Point8 { x: water.x.saturating_sub(1), y: water.y                   }),
+                (PlayerFacingDirection::Left,  Point8 { x: water.x + 1,               y: water.y                   }),
+            ];
+            if let Some((face_dir, dest)) = adj.into_iter()
+                .filter(|(_, p)| {
+                    (p.x as usize) < self.width && (p.y as usize) < self.height
+                    && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
+                    && best_dist_from(p).is_some()
+                })
+                .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
+            {
+                let (_, came_from) = best_dist_from(&dest).unwrap();
+                let mut route = reconstruct(dest, came_from);
+                let face_button: JoypadButton = face_dir.into();
+                if route.is_empty() {
+                    if face_dir != self.player_direction { route.push(face_button); }
+                } else if route.last() != Some(&face_button) {
+                    route.push(face_button);
+                }
+                actions.push(OverworldAction { map: self.map, origin: self.player_position,
+                    destination: dest, tile: MetaTile::Fish { rod }, route });
+            }
+        }
+
         // 5. PC tiles (hidden-object interactables): route to the tile below the PC, face up, press A.
         //    Mirrors the sprite-interaction routing (a PC is not a sprite, so it is keyed by fixed
         //    coordinate rather than found in the sprite list).
@@ -1168,6 +1222,8 @@ impl Display for MetaTileMap {
                     MetaTile::CutTree => write!(f, "t")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
+                    // Never in `meta_tiles` — a fishing spot is an action on ordinary ground.
+                    MetaTile::Fish { .. } => write!(f, "_")?,
                 };
             }
             writeln!(f)?;
@@ -1523,7 +1579,7 @@ mod boulder_solver_tests {
             tile_pair_collisions: vec![],
             tile_pair_collisions_water: vec![], sprites,
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
-            spinners: HashMap::new(), can_surf: false, can_cut: false, bill_cell_separator: false,
+            spinners: HashMap::new(), can_surf: false, best_rod: None, can_cut: false, bill_cell_separator: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
             hidden_items: vec![], has_grass_encounters: false,
             // A hand-built grid for the boulder solver; there is no ROM map behind it to draw.

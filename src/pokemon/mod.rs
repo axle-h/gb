@@ -432,6 +432,11 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         // walk whose only follow-up is a field move the game will refuse. See `MetaTileMap::can_cut`.
         let can_use_cut = badges.contains(Badge::CascadeBadge) && has_move(&pokemon, PokemonMoveName::Cut);
         map.can_cut = can_use_cut;
+        // The best rod in the bag, for the same reason and by the same rule: `actions()` must not
+        // offer a fishing row when there is nothing to cast with. Read here rather than in the map
+        // builder because that is where the bag is (`GameState::bag`, below).
+        let bag = mmu.read_bag();
+        map.best_rod = postgame::fishing::Rod::best_in_bag(&bag);
         // Bill's cell separator, while pressing it would do something. Both events live in the same
         // `wEventFlags` byte: EVENT_BILL_SAID_USE_CELL_SEPARATOR = 0x55E → byte 171 bit 6,
         // EVENT_USED_CELL_SEPARATOR_ON_BILL = 0x55B → byte 171 bit 3.
@@ -477,7 +482,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             safari: postgame::safari::read_state(mmu),
             map,
             battle: mmu.read_battle_state(),
-            bag: mmu.read_bag(),
+            bag,
             boxed_pokemon: postgame::pc_box::read_current_box(mmu),
             current_box: postgame::pc_box::current_box_num(mmu),
             has_pokedex: mmu.read_has_pokedex(),

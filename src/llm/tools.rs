@@ -2058,6 +2058,11 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
             HiddenObject::CellSeparator => "run the cell separator to turn Bill back into a person",
         }.to_string(),
         MetaTile::CutTree => "walk up to a tree that Cut can clear".to_string(),
+        // The row only exists when a rod is in the bag and this map has water to cast at, so what it
+        // needs to say is what fishing is *for* rather than that it is possible: a wild battle with
+        // something that lives in the water, without walking anywhere.
+        MetaTile::Fish { rod } => format!(
+            "fish at the water's edge with the {} to find wild water Pokemon", rod.name()),
         MetaTile::Sprite(name) => {
             let picture = state.map.sprites.iter().find(|s| s.name == name).map(|s| s.picture_id);
             match picture {

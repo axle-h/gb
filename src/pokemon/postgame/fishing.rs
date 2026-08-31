@@ -38,14 +38,32 @@ use crate::pokemon::tile::MetaTile;
 use crate::pokemon::tile_map::MetaTileMap;
 use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 
-/// The three rods, in the order they are obtained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The three rods, in the order they are obtained — which is also **worst to best**, so `Ord` is the
+/// ranking [`Rod::best_in_bag`] takes the maximum of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rod { Old, Good, Super }
 
 impl Rod {
     /// The bag item to use from the ITEM menu.
     pub fn item(self) -> ItemId {
         match self { Rod::Old => ItemId::OldRod, Rod::Good => ItemId::GoodRod, Rod::Super => ItemId::SuperRod }
+    }
+
+    /// What to call it in prose the model and the page read.
+    pub fn name(self) -> &'static str {
+        match self { Rod::Old => "Old Rod", Rod::Good => "Good Rod", Rod::Super => "Super Rod" }
+    }
+
+    /// The best rod the bag holds, or `None` for a bag with no rod in it.
+    ///
+    /// ⚠️ **Best rather than "a rod", and it is not a preference — the worse ones are strictly worse.**
+    /// `ItemUseOldRod` hard-codes a lv5 Magikarp (`lb bc, 5, MAGIKARP`) and the Good Rod's table is two
+    /// lv10 mons, while the Super Rod reads the map's own group. There is no map and no goal on which
+    /// an earlier rod catches something a later one cannot.
+    pub fn best_in_bag(bag: &crate::pokemon::bag::Bag) -> Option<Self> {
+        [Rod::Old, Rod::Good, Rod::Super].into_iter()
+            .filter(|r| bag.iter().any(|i| i.id == r.item() && i.quantity > 0))
+            .max()
     }
 }
 
@@ -92,6 +110,14 @@ const WALK_BIKE_SURF_SURFING: u8 = 2;
 /// Tilesets in `WaterTilesets` (`data/tilesets/water_tilesets.asm`). Outside these, `IsNextTileShoreOrWater`
 /// fails whatever is in front of the player and every cast answers "Not the time to use that!".
 const WATER_TILESETS: [u8; 9] = [0, 3, 5, 7, 13, 14, 17, 22, 23];
+
+/// Whether a cast on a map with this tileset can do anything at all — `IsNextTileShoreOrWater` is
+/// gated on `WaterTilesets` before it even looks at the tile in front, so outside these every cast
+/// answers "Not the time to use that!" no matter what the map looks like. Read by
+/// `MetaTileMap::actions`, which must not offer a row the game refuses (the `CutTree` rule).
+pub fn tileset_holds_water(tileset: crate::pokemon::map_header::TileSetId) -> bool {
+    WATER_TILESETS.contains(&(tileset as u8))
+}
 
 /// Live state of one cast. Carried in [`AgentState::Fishing`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,15 +211,23 @@ pub fn goal_met(state: &GameState, goal: FishGoal, casts: u32) -> bool {
 /// - **Water the player is already facing wins.** `route_to_face` returns an empty route in that case,
 ///   which sorts first, so a step re-issued between casts does not wander off to a different shore.
 pub fn pick(state: &GameState, rod: Rod) -> Option<FieldMove> {
-    let map = &state.map;
-    let at = (0..map.height as u8)
+    Some(FieldMove::Fish { rod, at: nearest_castable_water(&state.map)? })
+}
+
+/// The water tile a cast from here should be aimed at, by the rules in [`pick`]'s doc — or `None`
+/// when this map has no water the player can stand next to and face.
+///
+/// Split out of [`pick`] so `MetaTileMap::actions` can ask the same question: the fishing row it
+/// offers and the cast the driver then performs have to agree about which shore, or the row routes
+/// the player to one puddle and the driver casts at another.
+pub fn nearest_castable_water(map: &MetaTileMap) -> Option<Point8> {
+    (0..map.height as u8)
         .flat_map(|y| (0..map.width as u8).map(move |x| Point8 { x, y }))
         .filter(|&p| map.tile_at(p) == MetaTile::Water)
         .filter_map(|p| map.route_to_face(p).map(|route| (p, route)))
         .filter(|(_, route)| route_stays_on_land(map, route))
         .min_by_key(|(_, route)| route.len())
-        .map(|(p, _)| p)?;
-    Some(FieldMove::Fish { rod, at })
+        .map(|(p, _)| p)
 }
 
 /// Whether walking `route` from the player's position never steps onto water.
