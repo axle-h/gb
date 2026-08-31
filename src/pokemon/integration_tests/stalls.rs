@@ -116,6 +116,53 @@ fn a_key_item_used_in_battle_does_not_trap_the_bag() {
     assert_escapes("battle-key-item", include_bytes!("../data/stall-battle-key-item.bin"));
 }
 
+/// **`can_get_rainbow_badge`, Erika's Vileplume** — a party with no PP anywhere.
+///
+/// ⚠️ **The wedge is in the policy, not the agent, which is why this does not use
+/// [`assert_escapes`].** `RandomPolicy` leaves at once by reaching for a bag item;
+/// `DeterministicPolicy`'s last resort deliberately refuses to (the first bag entry is often a key
+/// item the game will not use — the closed loop two tests above). With `Fight` filtered out by
+/// `pp > 0`, `Run` absent because it is a trainer, and `SwitchPokemon` absent because everything else
+/// has fainted, the whole option list was bag items, so it answered `None` — which means "still
+/// thinking". The agent then sits in `BattleState::AwaitingPolicy` showing the main battle menu, the
+/// emulator runs, the watchdog never fires because it *is* being polled, and **nothing is printed**.
+/// Three runs died in that silence before `pick_battle_action` was made to say so.
+///
+/// The fix is in `battle_options`: all-zero PP is **Struggle**, which is a move, so the moves are
+/// offered anyway and the cartridge substitutes it.
+#[test]
+fn a_party_with_no_pp_anywhere_still_gets_an_answer() {
+    use crate::pokemon::policy::DeterministicPolicy;
+    let state = include_bytes!("../data/stall-no-pp-trainer-battle.bin");
+    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+    gb.load_state(state).expect("a committed stall fixture should load");
+    let mut cache = MapMetadataCache::default();
+    // An empty queue: `pick_battle_action` does not read it, and what is under test is the answer it
+    // gives when the active mon has nothing left, not the route it is on.
+    let mut agent = PokemonAgent::new(Box::new(DeterministicPolicy::new(1, [])));
+
+    // ⚠️ **Count *actions*, not silence, because the watchdog cannot see this one.**
+    // `since_last_policy_poll` is reset by `poll_policy` whatever the answer is, so a policy that is
+    // asked every tick and answers `None` every tick looks perfectly healthy to it — which is exactly
+    // why the deployed shape of this bug is a run that stops moving and reports nothing at all.
+    let budget = MachineCycles::from_duration(ESCAPE_BUDGET);
+    let mut emulated = MachineCycles::ZERO;
+    let mut actions = 0usize;
+    while emulated < budget {
+        let ran = gb.run(AGENT_RESOLUTION);
+        emulated += ran;
+        let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
+        agent.update(&mut api, ran).ok();
+        actions += agent.drain_events().iter()
+            .filter(|e| matches!(e, AgentEvent::BattleActionStarted { .. })).count();
+    }
+    assert!(actions > 0,
+        "the scripted policy took no battle action in {ESCAPE_BUDGET:?} of game time against a fight \
+         it cannot win and cannot leave — it is waiting at the menu for ever.\n  state: {}",
+        agent.state_debug());
+    println!("[stall] no-pp-trainer-battle: {actions} battle actions taken");
+}
+
 /// **`soak` seed 1, `postgame-pc-box`, 554 s in** — the Lift Key against a Bug Catcher's Weedle.
 ///
 /// The same refusal in a **trainer** battle, which is a different escape: there is no RUN, so the

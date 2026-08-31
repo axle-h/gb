@@ -341,7 +341,7 @@ impl PolicyStep {
     /// unlike Moltres it cannot lock a slow paralyser out of the fight.
     pub fn zapdos_steps() -> Vec<Self> {
         vec![
-            Self::Dig { slot: PARALYSER_SLOT },
+            Self::Dig { target: PartyRef::Slot(PARALYSER_SLOT) },
             Self::Fly { to: Map::CeruleanCity },
             Self::enter(Map::CeruleanTrashedHouse),   // main terrace front door
             Self::enter_at(Map::CeruleanCity, 27, 9), // back door → the Route-9 terrace

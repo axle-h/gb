@@ -34,9 +34,9 @@ why Pokémon Red comes out red-tinted here exactly as it does on real hardware.
 
 **The game.** The agent layer can play Pokémon Red from a fresh save all the way to the credits,
 because the emulator runs at roughly 50× real time with the agent on top of it: `full_playthrough`
-reaches all eight badges in about five minutes of wall clock, and `hall_of_fame_playthrough` carries
-the same run on through Victory Road and the Elite Four in about fifty — most of that difference
-being the 2306 wild battles it grinds to make the gauntlet a certainty rather than a coin flip.
+reaches all eight badges in about seven minutes of wall clock, and `hall_of_fame_playthrough` carries
+the same run on through Victory Road and the Elite Four in about twenty-six — most of that difference
+being the ~840 wild battles it grinds to make the gauntlet a certainty rather than a coin flip.
 
 **The LLM layer** drives that same agent over any OpenAI-compatible API. Its end-to-end tests run
 against a mock server — a whole playthrough's worth of turns, cancellation and compaction included —
@@ -341,10 +341,37 @@ The other policies are `RandomPolicy`, `ConsolePolicy` (stdin, for the desktop U
 and the same fresh save `full_playthrough` runs, played out on the page at 1× instead of as fast as
 the emulator will go. It needs no API key and spends nothing, and it is the only way to watch the
 game actually being *played well* rather than felt out. It plays the game **to the Hall of Fame** —
-all eight badges, a grind in the Pokémon Mansion that brings Venusaur, Articuno and Vaporeon to
-lv75, both Victory Road boulder puzzles and the Elite Four — and the finished run is then archived
+all eight badges, a grind in the Pokémon Mansion that brings Blastoise to lv85, both Victory Road
+boulder puzzles and the Elite Four — and the finished run is then archived
 and a new one started, exactly as a winning LLM run would be. When the queue does empty the policy
 simply stops answering and the run parks where it stands.
+
+It does it now without a single **black-out**, which was twelve a run when the starter was a
+Bulbasaur and seven on the first Squirtle route. None of the six changes that closed the gap is a
+bigger number in a step list: the run walks to a Pokémon Centre *before* the fight it would lose
+rather than after it, it stops treating "there is a Potion in the bag" as an answer when the Potion is
++20 and the deficit is a hundred, a heal is finished when the party is full rather than when the nurse
+starts talking, a charge move is priced at half its power because that is what it does per turn, the
+bench is judged on whether it can win the fight rather than on its level, and Lt. Surge — Electric,
+against a Water starter — is met with a Ground move the run has been carrying since Cerulean.
+
+The party is **one Squirtle and two Pokémon that never fight**. Blastoise does all of it, with Surf,
+Blizzard and Dig; the other two are there because it cannot carry every HM. An **Oddish** caught on
+Route 25 holds Cut — `wartortle.asm`'s machine list has SURF and STRENGTH and no CUT, where Ivysaur's
+has it, and the route needs Cut four times — and a **Machop** caught on Victory Road holds Strength,
+two tiles from the boulder it is for.
+
+⚠️ **Surf is the only HM on the starter, and that is a rule rather than an accident.** An HM is the one
+move `pick_move_to_forget` will never drop, so teaching one spends a permanent slot in the only
+Pokémon that attacks; Surf earns it by being a 95-power STAB attack that happens to be an HM, and
+Strength — 80-power Normal it would never choose — does not.
+
+⚠️ **And it is *one* fighter rather than three, which is faster because experience is cubic.** Taking
+three Pokémon to lv75 is about 1.4 M experience; taking one to lv85 is about 425 k, under a third, and
+it wins more comfortably — the Elite Four tops out at Lance's lv62 Dragonite and the rival's lv65, so
+a lead that far ahead one-shots almost everything instead of trading turns with it. The rule this
+replaced said three fighters or you lose the Champion's room; that was true of three at *seventy-five*,
+and height turned out to be the answer rather than depth of bench.
 
 ⚠️ The grind is most of a scripted run's length and it is not optional: the Elite Four at the levels
 the route otherwise arrives with is a coin flip, and losing it is terminal — a blackout inside the
@@ -683,8 +710,8 @@ a mock-server playthrough are all default-tier tests, and behind an opt-in featu
 ```shell
 cargo test --release                                              # ~7 s, the default tier
 cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
-cargo test --release --features full-playthrough full_playthrough # 8 badges, ~5 min
-cargo test --release --features hall-of-fame --bin gb -- hall_of_fame # to the credits, ~50 min
+cargo test --release --features full-playthrough full_playthrough # 8 badges, ~7 min
+cargo test --release --features hall-of-fame --bin gb -- hall_of_fame # to the credits, ~26 min
 ```
 
 Always `--release`: these tests emulate every frame and are unusably slow otherwise. The suite is

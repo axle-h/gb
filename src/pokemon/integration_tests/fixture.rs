@@ -111,6 +111,19 @@ impl TestFixture {
     /// `full_playthrough`, and §3 puts battle tactics out of scope on the grounds that in deployment
     /// they are the LLM's decisions. So the mainline chain keeps the stream it was cut against and
     /// the postgame chain — all 66 legs of it, cut after J — gets the 20 % .
+    /// Give one step longer than the default ten game-minutes before it counts as a stall.
+    ///
+    /// ⚠️ **For a step that is *slow*, never for one that is stuck**, and the difference is whether
+    /// the player is moving. `victory_road_1f_approach_steps` crosses the whole of Route 22's grass
+    /// in a single `EnterMap`, and every wild encounter aborts the walk and re-issues it from wherever
+    /// it stopped — measured, about fifteen battles and eleven game-minutes to cross, against a
+    /// detector that fires at ten. The mainline clears the same walk because its queue is moving
+    /// elsewhere; a leg seeded on top of it has nothing else to change.
+    pub fn with_stall_tolerance(mut self, tolerance: Duration) -> Self {
+        self.stall_threshold = MachineCycles::from_duration(tolerance);
+        self
+    }
+
     pub fn with_original_battle_timing(mut self) -> Self {
         self.options = GameOptions { battle_animations_on: true,
                                      ..crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS };
@@ -343,7 +356,7 @@ impl TestFixture {
 fn dump_fixture_states() {
     // Every fixture some leg reads, in chain order.
     const FIXTURES: &[(&str, &[u8])] = &[
-        ("post-cascade", include_bytes!("../data/post-cascade.bin")),
+        ("at-cerulean", include_bytes!("../data/at-cerulean.bin")),
         ("at-vermilion", include_bytes!("../data/at-vermilion.bin")),
         ("post-ss-anne", include_bytes!("../data/post-ss-anne.bin")),
         ("post-teach-cut", include_bytes!("../data/post-teach-cut.bin")),
@@ -364,10 +377,10 @@ fn dump_fixture_states() {
         ("post-marsh-badge", include_bytes!("../data/post-marsh-badge.bin")),
         ("at-cinnabar", include_bytes!("../data/at-cinnabar.bin")),
         ("post-secret-key", include_bytes!("../data/post-secret-key.bin")),
-        ("post-volcano-lone", include_bytes!("../data/post-volcano-lone.bin")),
-        ("at-mansion-blizzard", include_bytes!("../data/at-mansion-blizzard.bin")),
+        ("post-articuno", include_bytes!("../data/post-articuno.bin")),
         ("post-earth-badge", include_bytes!("../data/post-earth-badge.bin")),
         ("vr1f-strength", include_bytes!("../data/vr1f-strength.bin")),
+        ("vr2f-ladder", include_bytes!("../data/vr2f-ladder.bin")),
         ("at-indigo-articuno", include_bytes!("../data/at-indigo-articuno.bin")),
         ("post-champion", include_bytes!("../data/post-champion.bin")),
     ];

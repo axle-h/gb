@@ -55,20 +55,19 @@ fn probe_resume_playthrough() {
 }
 
 /// The full end-to-end playthrough — the single source of truth for how far the agent can play. From a
-/// fresh `RedsHouse2F` save it plays legitimately (button input only, starting from the **lone starter**)
-/// and earns **all 8 gym badges**: Boulder → Cascade → Thunder → Rainbow → (Silph Scope → Poké Flute →
-/// Snorlax) → Soul → (Safari Surf/Strength → Eevee→Vaporeon+Surf) → Silph Co (Card Key → rival → Giovanni
-/// → liberation) → Marsh → surf to Cinnabar → Pokémon Mansion Secret Key → Volcano → back to the Viridian
-/// Gym for **Earth** (Giovanni), with the **Seafoam Islands** detour for Articuno slotted in between
-/// Volcano and Earth.
+/// fresh `RedsHouse2F` save it plays legitimately (button input only, starting from a **Squirtle**) and
+/// earns **all 8 gym badges**: Boulder → (Nugget Bridge → Bill → ) Cascade → Thunder → Rainbow →
+/// (Silph Scope → Poké Flute → Snorlax) → Soul → (Safari Surf/Strength) → Silph Co (Card Key → rival →
+/// Giovanni → liberation) → Marsh → surf to Cinnabar → Pokémon Mansion Secret Key → Volcano → back to
+/// the Viridian Gym for **Earth** (Giovanni), with the **Seafoam Islands** detour for Articuno slotted
+/// in between Volcano and Earth.
 ///
-/// Nothing is caught before then: the run is carried by the starter and the free Celadon **Eevee**,
-/// evolved to **Vaporeon** (its Surf counters the Silph rival's Alakazam / Blaine's Fire / Giovanni's
-/// Ground, and ferries the party across Route 21), because a weak extra mon breaks the black-out
-/// recovery the early dungeons rely on. Seafoam then adds a **Slowpoke** HM-slave (Strength + Dig) and
-/// **Articuno**.
+/// It catches exactly two things on the way and neither of them fights: an **Oddish** on Route 25 to
+/// carry Cut, and a **Machop** on Victory Road to carry Strength. Blastoise does everything else, with
+/// Surf, Blizzard and Dig — Surf is the one HM on it, because Surf is a 95-power STAB attack that
+/// happens to be an HM.
 ///
-/// It emulates every frame, so even in `--release` it takes ~5 min of wall clock — hence its own
+/// It emulates every frame, so even in `--release` it takes ~7 min of wall clock — hence its own
 /// feature gate, separate from the leg chain:
 /// `cargo test --release --features full-playthrough full_playthrough`. The per-leg tests (each seeded
 /// from a saved fixture) cover the same ground quickly and in parallel.
@@ -82,8 +81,8 @@ fn probe_resume_playthrough() {
 /// ⚠️ **Its end point is Victory Road 2F, and that is a cost decision rather than a limitation.**
 /// The route `gb serve --policy deterministic` plays goes all the way to the Hall of Fame — see
 /// [`PolicyStep::complete_game_steps`] and `hall_of_fame_playthrough`, which is the same run carried
-/// through the gauntlet grind, both Victory Road puzzles and the Elite Four. That takes **~50 min**
-/// against this one's five, almost entirely the grind's 2306 wild battles, so it lives behind its own
+/// through the gauntlet grind, both Victory Road puzzles and the Elite Four. That takes **~26 min**
+/// against this one's seven, most of it the grind's ~840 wild battles, so it lives behind its own
 /// `hall-of-fame` feature and this stays the gate you run before pushing.
 ///
 /// ⚠️ **This doc comment has lied before, so keep it honest.** The test sat broken for a long time
@@ -134,19 +133,26 @@ fn full_playthrough() {
     assert!(state.badges.contains(Badge::VolcanoBadge), "should have the Volcano Badge");
     assert!(state.badges.contains(Badge::EarthBadge), "should have the Earth Badge (all 8 gym badges)");
 
-    // The starter and the one free Eevee (evolved to Vaporeon for Surf) carry the whole run — nothing
-    // is caught before Seafoam, because a weak extra mon blocks the black-out recovery that clears the
-    // early attrition dungeons. Seafoam then adds the two the Elite Four needs: a Slowpoke HM-slave
-    // (Strength for Victory Road, Dig for the way out of the islands) and Articuno.
-    assert!(state.pokemon.len() >= 4, "party should have the starter + Vaporeon + the Slowpoke slave + Articuno");
-    assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Vaporeon), "should have a Vaporeon");
-    assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Articuno),
-        "should have caught Articuno in the Seafoam Islands");
+    // ⚠️ **One fighter and two HM slaves, and the slaves are the *only* other members.** Measured at
+    // the end of a clean run: Blastoise 59, Gloom 21 (the Oddish evolves on the way), Machop 24, all
+    // eight badges and **no black-outs at all**. Anything else in the party is a regression — the
+    // whole point of `gauntlet_grind_steps` is that one mon taken further is cheaper than three.
+    assert_eq!(state.pokemon.len(), 3, "party should be the starter + the two HM slaves");
+    assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Blastoise),
+        "the starter should have reached Blastoise");
+    assert!(state.pokemon.iter().any(|p| matches!(p.species,
+        PokemonSpecies::Oddish | PokemonSpecies::Gloom)), "should have caught the Route 25 Cut carrier");
+    assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Machop),
+        "should have caught the Victory Road Strength slave");
 
-    // Post-Earth: Victory Road 1F — a Machop HM-slave caught and taught Strength, the boulder pushed
-    // onto the (17,13) switch and the ladder climbed to VR2F.
-    assert!(state.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| m.name == PokemonMoveName::Strength)),
-        "a party member should know Strength (the Seafoam Slowpoke, and the Victory Road Machop)");
+    // ⚠️ **Every HM this route needs, checked on the *party* rather than the bag**, because a carrier
+    // that cannot learn one is exactly the failure the starter swap introduced: Cut lives on the
+    // Oddish and Surf, Strength and Dig on Blastoise, and a step aimed at the wrong one waits for
+    // ever rather than failing.
+    for want in [PokemonMoveName::Cut, PokemonMoveName::Surf, PokemonMoveName::Strength] {
+        assert!(state.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| m.name == want)),
+            "a party member should know {want}");
+    }
     assert_eq!(state.map.map, Map::VictoryRoad2F, "should have solved VR1F and climbed to Victory Road 2F");
 
     fixture.save_state_named("src/pokemon/data/post-victory-road-1f.bin").unwrap();
@@ -155,20 +161,35 @@ fn full_playthrough() {
 /// **The whole game, to the Hall of Fame** — [`PolicyStep::complete_game_steps`], which is what
 /// `gb serve --policy deterministic` plays.
 ///
-/// ⚠️ **Its own `hall-of-fame` feature because it is ~50 minutes against `full_playthrough`'s five,
-/// and a gate that long is a gate nobody runs.** Almost all of the difference is
-/// `gauntlet_grind_steps`: 2306 wild battles in the Pokémon Mansion to bring Venusaur, Articuno and
-/// Vaporeon to lv75, measured at 2829 s on its own. Run this when the endgame changes — the grind,
-/// either Victory Road puzzle, or the Elite Four — and `full_playthrough` the rest of the time.
+/// ⚠️ **Its own `hall-of-fame` feature because it is ~26 minutes against `full_playthrough`'s seven,
+/// and a gate that long is a gate nobody runs.** Most of the difference is `gauntlet_grind_steps`:
+/// ~840 wild battles in the Pokémon Mansion to bring one Blastoise to lv85. Run this when the endgame
+/// changes — the grind, either Victory Road puzzle, or the Elite Four — and `full_playthrough` the
+/// rest of the time.
+///
+/// ⚠️ **It has been fifty minutes twice, and both times the cause was the grind rather than the
+/// route.** Once because a trainee was switched in rather than *leading*, which halves the payout and
+/// costs the turn; and once because it was grinding three Pokémon to lv75 (1.4 M experience) instead
+/// of one to lv85 (425 k). The whole argument is on `PolicyStep::gauntlet_grind_steps`.
 ///
 /// ⚠️ **`run_until`, not `step_until_exhausted`, and this is the one test allowed that.** The final
 /// step is the rival in the Champion's room, and beating him hands the agent to
 /// `drive_post_champion_cutscene`, which stops polling the policy — so the queue never empties and
-/// waiting on it would hang. The exception is kept honest by asserting afterwards that everything
-/// except that last battle popped, so "reached the Hall of Fame" cannot be satisfied by the agent
+/// waiting on it would hang. The exception is kept honest by asserting afterwards that all but the
+/// **last two** steps popped, so "reached the Hall of Fame" cannot be satisfied by the agent
 /// wandering into the credits on its own.
+///
+/// ⚠️ **Two rather than one, and the difference is a frame-timing race rather than a step that did
+/// not happen.** The bound was `<= 1` — the rival's own `BattleTrainer` — and that only held while
+/// the agent happened to get one overworld poll between arriving in the Champion's room and the
+/// rival challenging. He challenges *on entry*, as a script, so there is nothing to guarantee that
+/// poll, and the `enter(ChampionsRoom)` in front of him pops on the tick after the map changes or
+/// not at all. A run that took the room faster stopped getting it: the log shows Gary beaten, the
+/// Champion's script played and the Hall of Fame reached with both steps still queued. It is the
+/// same mechanism the paragraph above describes for the last step, one step earlier. Out of 516 the
+/// guard is unchanged in what it is for.
 #[test]
-#[cfg_attr(not(feature = "hall-of-fame"), ignore = "~50 min — run with --features hall-of-fame")]
+#[cfg_attr(not(feature = "hall-of-fame"), ignore = "~26 min — run with --features hall-of-fame")]
 fn hall_of_fame_playthrough() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/start-of-game-state.bin"),
@@ -179,7 +200,7 @@ fn hall_of_fame_playthrough() {
     let state = fixture.run_until(|state| state.map.map == Map::HallOfFame);
     let left = fixture.agent.policy_steps_remaining().expect("the scripted policy counts its queue");
     assert!(
-        left <= 1,
+        left <= 2,
         "{left} steps never ran — the run reached the Hall of Fame without playing the route",
     );
 
@@ -187,10 +208,11 @@ fn hall_of_fame_playthrough() {
         println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);
     }
     assert!(state.badges.contains(Badge::EarthBadge), "all eight badges");
-    // ⚠️ **Three fighters over the target, not two.** A seeded run at Venusaur 75 / Articuno 75 with
-    // the mainline's lv26 Vaporeon behind them still blacked out in the Champion's room; see
+    // ⚠️ **One fighter over the target, and it replaced "three fighters or you lose".** That rule
+    // was true of three mons at *seventy-five*, with a lv26, a lv30 and a lv24 behind them; height
+    // turned out to be the answer rather than depth of bench. See
     // `PolicyStep::gauntlet_grind_steps`.
-    for species in [PokemonSpecies::Venusaur, PokemonSpecies::Articuno, PokemonSpecies::Vaporeon] {
+    for species in [PokemonSpecies::Blastoise] {
         let mon = state.pokemon.iter().find(|p| p.species == species)
             .unwrap_or_else(|| panic!("the party should carry a {species:?}"));
         assert!(mon.level >= PolicyStep::GAUNTLET_LEVEL,

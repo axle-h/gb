@@ -113,17 +113,19 @@ fn can_get_volcano_badge() {
 
 /// The Seafoam Islands detour, off Cinnabar and back: Sokoban-push the B3F boulders into the two floor
 /// holes to kill the B4F current, fall through to B4F, and take **Articuno** with the Master Ball. Adds
-/// the two party members the Elite Four needs — a Slowpoke HM-slave (Strength for Victory Road, Dig for
-/// the way out) and the Ice sweeper itself.
+/// the Ice sweeper the Elite Four needs. (It used to add a Slowpoke HM-slave for Strength and Dig too;
+/// Blastoise carries both.)
 ///
-/// Seeded from `at-mansion-blizzard.bin` (TM14 Blizzard already in the bag from Mansion B1F) so the
-/// leg's `TeachMove` puts **Blizzard on Articuno** rather than skipping — that STAB is what makes
-/// Lance's room winnable.
+/// Seeded from `post-volcano-badge.bin`, which is where the mainline is when it takes this detour and
+/// already carries TM14 Blizzard out of Mansion B1F — so the leg's `TeachMove` puts **Blizzard on
+/// Articuno** rather than skipping, and that STAB is what makes Lance's room winnable. (It used to be
+/// a hand-cut `at-mansion-blizzard.bin`, which was a second root nothing produced and which pinned
+/// the old party.)
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_catch_articuno() {
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/at-mansion-blizzard.bin"),
+        include_bytes!("../data/post-volcano-badge.bin"),
         Duration::from_mins(60),
         PolicyStep::seafoam_articuno_steps(),
     );

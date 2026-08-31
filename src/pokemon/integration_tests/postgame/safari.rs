@@ -47,7 +47,7 @@ const KANGASKHAN: &[PokemonSpecies] = &[PokemonSpecies::Kangaskhan];
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_safari_centre_from_the_entrance() {
     let mut fixture = TestFixture::new(FLASH, Duration::from_mins(60), vec![
-        PolicyStep::Dig { slot: DIG_SLOT },
+        PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) },
         PolicyStep::Fly { to: Map::FuchsiaCity },
         PolicyStep::enter(Map::SafariZoneGate),
         PolicyStep::enter(Map::SafariZoneCenter),
@@ -91,7 +91,7 @@ fn probe_safari_centre_from_the_entrance() {
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_safari_areas() {
     let mut fixture = TestFixture::new(FLASH, Duration::from_mins(120), vec![
-        PolicyStep::Dig { slot: DIG_SLOT },
+        PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) },
         PolicyStep::Fly { to: Map::FuchsiaCity },
         PolicyStep::enter(Map::SafariZoneGate),
         PolicyStep::enter(Map::SafariZoneCenter),
@@ -135,7 +135,7 @@ fn probe_safari_areas() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_catch_a_safari_exclusive() {
-    let mut steps = vec![PolicyStep::Dig { slot: DIG_SLOT }];
+    let mut steps = vec![PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) }];
     steps.extend(PolicyStep::safari_hunt_steps(CHEAP_PAIR, 2));
     let mut fixture = TestFixture::new(FLASH, Duration::from_mins(90), steps);
 
@@ -216,7 +216,7 @@ fn can_sweep_the_safari_zone() {
     /// the wallet, `max_trips` and the test's cycle cap are three independent bounds on this leg.
     const MAX_TRIPS: u32 = 15;
 
-    let mut steps = vec![PolicyStep::Dig { slot: DIG_SLOT }];
+    let mut steps = vec![PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) }];
     steps.extend(PolicyStep::safari_sweep_steps(MAX_TRIPS));
     let mut fixture = TestFixture::new(FLASH, Duration::from_mins(1200), steps);
 
@@ -252,7 +252,7 @@ fn can_sweep_the_safari_zone() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn runs_the_step_budget_down_and_is_ejected() {
-    let mut steps = vec![PolicyStep::Dig { slot: DIG_SLOT }];
+    let mut steps = vec![PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) }];
     steps.extend(PolicyStep::safari_hunt_steps(KANGASKHAN, 1));
     let mut fixture = TestFixture::new(FLASH, Duration::from_mins(120), steps);
 

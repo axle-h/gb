@@ -24,20 +24,27 @@ fn can_clear_ss_anne() {
     fixture.save_state_named("src/pokemon/data/post-ss-anne.bin").unwrap();
 }
 
-/// Teach HM01 Cut to the starter via the bag (START → ITEM → HM01 → USE → choose Pokémon), from the
-/// post-S.S.-Anne save. The starter knows 4 moves, so the move-replace menu is exercised too.
+/// Teach HM01 Cut via the bag (START → ITEM → HM01 → USE → choose Pokémon), from the post-S.S.-Anne
+/// save.
+///
+/// ⚠️ **To the Oddish, not the starter, and that is the point of the test now.**
+/// `data/pokemon/base_stats/wartortle.asm` has no CUT, so a `Slot(0)` teach is *correctly* refused by
+/// `learnset::can_learn` and skipped — which looks exactly like the driver failing. The route catches
+/// an Oddish on Route 25 to hold Cut; this proves the teach lands on a mon that is not the lead and
+/// that `can_use_cut` (which asks the whole party) then goes true.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_teach_cut() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-ss-anne.bin"),
         Duration::from_mins(5),
-        vec![PolicyStep::TeachMove { item: ItemId::Hm01Cut, target: PartyRef::Slot(0) }],
+        vec![PolicyStep::TeachMove { item: ItemId::Hm01Cut,
+                                    target: PartyRef::Species(PokemonSpecies::Oddish) }],
     );
     fixture.step_until_exhausted();
     let s = fixture.game_state();
-    println!("party[0] moves: {:?}", s.pokemon.get(0).map(|p| p.moves));
-    assert!(s.can_use_cut, "starter should know Cut (can_use_cut true) after TeachMove");
+    for p in s.pokemon.iter() { println!("{} moves: {:?}", p.species, p.moves); }
+    assert!(s.can_use_cut, "the Cut carrier should know Cut (can_use_cut true) after TeachMove");
     // Snapshot with Cut taught (at Vermilion) for the next leg (cut the gym tree → trash cans).
     fixture.save_state_named("src/pokemon/data/post-teach-cut.bin").unwrap();
 }
@@ -92,15 +99,21 @@ fn can_get_thunder_badge() {
 }
 
 /// From the post-Thunder-Badge state (inside the Vermilion Gym), exit the gym, re-cut the enclosure
-/// tree (it regrew when the map reloaded), heal, and trek back to Cerulean City via the Underground
-/// Path (Route 6 → Route 5) — Saffron's Route 6 gate is guard-blocked, so the tunnel is the only way
-/// north. Snapshots `back-in-cerulean.bin` for the Rock Tunnel leg.
+/// tree (it regrew when the map reloaded), heal, **catch and grind the Route 11 Drowzee**, teach the
+/// starter Dig, and trek back to Cerulean City via the Underground Path (Route 6 → Route 5) —
+/// Saffron's Route 6 gate is guard-blocked, so the tunnel is the only way north. Snapshots
+/// `back-in-cerulean.bin` for the Rock Tunnel leg.
+///
+/// ⚠️ **Four hours of game time rather than thirty minutes, because this leg now contains a grind.**
+/// The Drowzee arrives at lv9-13 and is taken to **26**, where it becomes a Hypno; a grind's cost is
+/// measured in encounters rather than in steps, and the trainee is handed off to a tank on turn one
+/// of every one of them, so it earns the halved participation share.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_return_to_cerulean() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-thunder-badge.bin"),
-        Duration::from_mins(30),
+        Duration::from_mins(240),
         PolicyStep::back_to_cerulean_steps(),
     );
     fixture.step_until_exhausted();

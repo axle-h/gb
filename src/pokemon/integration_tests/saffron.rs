@@ -28,37 +28,59 @@ fn can_enter_saffron() {
     fixture.save_state_named("src/pokemon/data/at-saffron.bin").unwrap();
 }
 
-/// Fetch the free **Eevee** (Celadon Mansion roof house), buy a **Water Stone** (Dept Store 4F), evolve
-/// Eevee → **Vaporeon** and teach it **Surf**. The lone Grass starter cannot learn Surf, and Surf is
-/// what reaches Cinnabar — so this leg is what makes the back half of the game possible at all. Ends
-/// back in Saffron for Silph Co.
+/// The free Celadon **Eevee**, evolved to **Vaporeon** with a Water Stone.
 ///
-/// This was `#[ignore]`d for a long time on the theory that the fixture was stale and a regeneration
-/// would fix it. It would not have. `eevee_vaporeon_surf_steps` used to address the party by *slot* —
-/// evolve slot 1, teach Surf to slot 1 — assuming the gift Eevee appends right after the lone starter.
-/// `at-saffron.bin` still carries the early Route-1 Pidgey at slot 1, so the Water Stone evolved
-/// nothing and `TeachMove` spun forever on a Pidgey, which cannot learn Surf. But the Pidgey enters the
-/// chain at `post-cascade.bin`, a committed **root** no test produces, so re-deriving `at-saffron.bin`
-/// would have re-derived the Pidgey with it. The fix was [`PartyRef::Species`]: the leg now names the
-/// Eevee and the Vaporeon it becomes, and does not care what else is in the party or where.
+/// ⚠️ **The mainline stopped doing this and the test is kept for one mechanism it is the only cover
+/// for.** The route's starter is a Squirtle and Blastoise learns Surf itself, so the Eevee leg was
+/// deleted; `PolicyStep::EvolveWithStone` is used nowhere else in the suite, and neither is a gift
+/// Pokémon picked up off the floor of a building. So the steps live here, cut down to what they
+/// prove: no Route 7 gate crossings (they were the fragile half — asking for the far landing put the
+/// player two tiles from a door it could not reach and the step oscillated there for a whole
+/// budget), no HM teach (HM03 is not in the bag this early), and no fixture written for anything
+/// downstream.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_vaporeon() {
+    use crate::pokemon::map::MapSprite as MS;
+    use crate::geometry::Point8;
+    let steps = vec![
+        // Free Eevee from the Celadon Mansion roof house (BACK entrance (24,3)→1F(4,0); the front
+        // door is the dead-end condos). Climb the stairwell to the roof.
+        PolicyStep::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
+        PolicyStep::enter(Map::CeladonMansion2F),
+        PolicyStep::enter(Map::CeladonMansion3F),
+        PolicyStep::enter(Map::CeladonMansionRoof),
+        PolicyStep::enter(Map::CeladonMansionRoofHouse),
+        PolicyStep::CollectItem(MS::CELADONMANSION_ROOF_HOUSE_EEVEE_POKEBALL),
+        PolicyStep::enter(Map::CeladonMansionRoof),
+        PolicyStep::enter(Map::CeladonMansion3F),
+        PolicyStep::enter(Map::CeladonMansion2F),
+        PolicyStep::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
+        PolicyStep::enter(Map::CeladonCity),
+        // Dept Store 4F: buy a Water Stone.
+        PolicyStep::enter(Map::CeladonMart1F),
+        PolicyStep::enter(Map::CeladonMart2F),
+        PolicyStep::enter(Map::CeladonMart3F),
+        PolicyStep::enter(Map::CeladonMart4F),
+        PolicyStep::BuyFromMart { item: BagItem::new(ItemId::WaterStone, 1), map: Map::CeladonMart4F },
+        PolicyStep::enter(Map::CeladonMart1F),
+        PolicyStep::enter(Map::CeladonCity),
+        // ⚠️ By **species**: where the gift Eevee lands depends on how many members the party already
+        // has, which is exactly what a `Slot` target gets wrong.
+        PolicyStep::EvolveWithStone { stone: ItemId::WaterStone,
+                                      target: PartyRef::Species(PokemonSpecies::Eevee) },
+    ];
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/at-saffron.bin"),
+        include_bytes!("../data/at-celadon.bin"),
         Duration::from_mins(60),
-        PolicyStep::eevee_vaporeon_surf_steps(),
+        steps,
     );
     fixture.step_until_exhausted();
     let s = fixture.game_state();
     let vaporeon = s.pokemon.iter()
         .find(|p| p.species == PokemonSpecies::Vaporeon)
         .expect("Eevee should have evolved into Vaporeon with the Water Stone");
-    println!("ended on {} @ {} — Vaporeon lv{} {:?}", s.map.map, s.map.player_position,
-        vaporeon.level, vaporeon.moves);
-    assert!(s.can_use_surf, "Vaporeon should know Surf after TeachMove");
-    assert_eq!(s.map.map, Map::SaffronCity, "should end back in Saffron for Silph Co");
-    fixture.save_state_named("src/pokemon/data/vaporeon-ready.bin").unwrap();
+    println!("Vaporeon lv{} {:?}", vaporeon.level, vaporeon.moves);
 }
 
 /// Enter Silph Co, ride the elevator to 5F, thread the teleport-pad maze to the Card Key pocket, and
@@ -76,15 +98,15 @@ fn can_get_vaporeon() {
 /// → arrive standing on 5F(9,15), now adjacent to the pocket) — expressed directly as `enter()` steps,
 /// no new maze-routing machinery needed.
 ///
-/// Seeded from `vaporeon-ready.bin`, not `at-saffron.bin`: `complete_game_steps` fetches Vaporeon
-/// *before* Silph so its Surf can answer the 7F rival, and this leg used to start one step upstream of
-/// that — which is why `silph-card-key.bin` reached [`can_beat_silph_giovanni`] with no Vaporeon in it
-/// and left that test unwinnable. The leg chain now matches the mainline ordering.
+/// Seeded from `at-saffron.bin`, which is where the mainline is: there is no Eevee leg any more, so
+/// the chain runs straight from Saffron into Silph Co. (It used to come from `vaporeon-ready.bin`,
+/// because the route fetched Vaporeon first for its Surf against the 7F rival's Alakazam; Blastoise
+/// takes that fight on bulk.)
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_silph_card_key() {
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/vaporeon-ready.bin"),
+        include_bytes!("../data/at-saffron.bin"),
         Duration::from_mins(30),
         PolicyStep::silph_co_card_key_steps(),
     );
@@ -133,11 +155,15 @@ fn can_beat_silph_giovanni() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_marsh_badge() {
-    // `at-saffron-post-silph.bin`, not `post-silph-giovanni.bin`: the latter is snapshotted the moment
-    // Giovanni's after-battle script completes, with the player still on Silph 11F, so the gym leg has
-    // nowhere to start from. This one is the same run threaded back out to a liberated Saffron.
+    // ⚠️ **`post-silph-giovanni.bin`, and it used to be a hand-cut `at-saffron-post-silph.bin`.**
+    // That root existed because the Silph leg was snapshotted the moment Giovanni's after-battle
+    // script completed, with the player still on 11F and this leg nowhere to start from; the Silph
+    // leg now walks itself back out and asserts it is standing in a liberated Saffron, so the chain
+    // joins up and there is one less root carrying a party nothing produces. (It carried the old
+    // Venusaur/Vaporeon/Pidgey team, which is how a fully regenerated chain still handed the Seafoam
+    // leg a party with no Blastoise in it to use Strength.)
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/at-saffron-post-silph.bin"),
+        include_bytes!("../data/post-silph-giovanni.bin"),
         Duration::from_mins(30),
         PolicyStep::marsh_badge_steps(),
     );

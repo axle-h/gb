@@ -56,7 +56,60 @@ fn can_navigate_mt_moon() {
     assert_eq!(state.map.map, Map::CeruleanCity, "agent should have navigated to Cerulean City");
 }
 
-/// From a post-Cascade save state, do the full Bill → SS Ticket → Route 5 → Vermilion leg.
+/// **Rebuild the root of the committed fixture chain**, from a fresh save to Route 4 outside
+/// Cerulean: `at-cerulean.bin`.
+///
+/// ⚠️ **Every fixture in this repo descends from one state no test produced, and that is fine right
+/// up until the mainline party changes.** Swapping the starter changes all of them at once — a leg
+/// that teaches an HM to the starter, grinds a caught mon or leads with one resolves against a party
+/// the old root does not have, and simply waits for ever. So the root has a producer now.
+///
+/// Only under `regen-fixtures`, because it plays about a fifth of the game (~90 s) and asserts
+/// nothing the default tier's `can_navigate_to_pewter_city` and `can_navigate_mt_moon` do not.
+/// Regenerate the chain in order from here — see the `test-suite` skill.
+#[test]
+#[cfg(feature = "regen-fixtures")]
+fn regen_at_cerulean_fixture() {
+    let mut steps = PolicyStep::pallet_to_cerulean_steps();
+    steps.extend(PolicyStep::mt_moon_traversal());
+    // ⚠️ **Stop exactly where `game_steps` stops**, which is *inside* the Cerulean Pokémon Centre:
+    // `cerulean_to_vermilion_steps` opens with `enter(CeruleanCity)`, meaning "walk out of the
+    // building", and a fixture saved standing in the city instead makes that step look for a
+    // transition *to* the map it is already on — measured, it walked back out to Route 4 and stalled
+    // trying to reach Route 24 from there.
+    steps.extend([
+        PolicyStep::enter(Map::CeruleanPokecenter),
+        PolicyStep::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
+        PolicyStep::enter(Map::CeruleanCity),
+    ]);
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/start-of-game-state.bin"),
+        Duration::from_mins(240),
+        steps,
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("ended on {} @ {} — party {:?}", s.map.map, s.map.player_position,
+        s.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
+    assert_eq!(s.map.map, Map::CeruleanCity, "should end back out in Cerulean City");
+    // ⚠️ **Assert the *heal*, not just the walk.** `Interact` pops the moment the conversation lands,
+    // which is before the nurse has finished, so a fixture cut there carries the party the run walked
+    // in with. The first version of this root was saved with **Water Gun on 6 of 25 PP**, and the leg
+    // seeded from it lost the Cerulean rival ambush and blacked out to the Mt Moon Centre — from where
+    // a single-hop `EnterMap { Route24 }` cannot resolve and the whole chain stalled at 4 steps.
+    for mon in s.pokemon.iter() {
+        assert_eq!(mon.current_hp, mon.stats.hp, "{} should be healed", mon.species);
+        for mv in mon.moves.iter().flatten() {
+            assert_eq!(mv.pp, mv.name.metadata().pp, "{}'s {} should be at full PP", mon.species, mv.name);
+        }
+    }
+    assert!(s.badges.contains(Badge::BoulderBadge), "should be holding the Boulder Badge");
+    fixture.save_state_named("src/pokemon/data/at-cerulean.bin").unwrap();
+}
+
+/// From `at-cerulean.bin` (out of Mt Moon, Boulder Badge, no Cascade yet), the whole middle of
+/// the early game: Nugget Bridge → Bill (SS Ticket) → back → **Misty** → trashed-house bridge →
+/// the Route 25 Oddish → Route 5 → Vermilion.
 ///
 /// Route 5 is unreachable from the Cerulean Pokécenter terrace directly (one-way south ledges split
 /// the city; verified ROM-faithful). The real path is the **trashed-house bridge**, which only opens
@@ -71,7 +124,7 @@ fn can_reach_vermilion() {
     // Vermilion), so this test and the full playthrough stay in lockstep. It subsumes the SS Ticket
     // hand-off, which is why there is no separate test for it.
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/post-cascade.bin"),
+        include_bytes!("../data/at-cerulean.bin"),
         Duration::from_mins(40),
         PolicyStep::cerulean_to_vermilion_steps(),
     );
@@ -180,7 +233,7 @@ fn the_action_menu_alone_gets_the_ss_ticket_from_bill() {
 
     let row_before_talking = Arc::new(AtomicU8::new(UNSAMPLED));
     let mut fixture = TestFixture::with_policy(
-        include_bytes!("../data/post-cascade.bin"),
+        include_bytes!("../data/at-cerulean.bin"),
         Duration::from_mins(30),
         Box::new(MenuPressesTheSeparator {
             inner: DeterministicPolicy::new(42, steps),

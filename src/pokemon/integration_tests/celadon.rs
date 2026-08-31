@@ -46,12 +46,21 @@ fn can_reach_celadon() {
 }
 
 /// Cut into the Celadon Gym and beat Erika for the **Rainbow Badge**.
+///
+/// ⚠️ **Ninety minutes, because the garden is eight separate cuts before the fight even starts.**
+/// The gym's paths are real cuttable trees and `CutTree` clears one chokepoint at a time as the last
+/// one opens access to the next, with the junior trainers engaging by line of sight in between — so
+/// most of this leg's cost is over before Erika is reached.
+///
+/// This is also the fight the Route 11 Drowzee exists for: Blastoise's Water is resisted by all three
+/// of Erika's mons, and measured here it fell asleep to a Sleep Powder and fainted — after which
+/// **Confusion one-shot the Victreebel** and carried the room. Grass/Poison takes 2× from Psychic.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_rainbow_badge() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/at-celadon.bin"),
-        Duration::from_mins(45),
+        Duration::from_mins(90),
         PolicyStep::celadon_rainbow_steps(),
     );
     let s = fixture.run_until(|s| s.badges.contains(Badge::RainbowBadge));
@@ -63,13 +72,18 @@ fn can_get_rainbow_badge() {
 /// From Celadon City, reach the Rocket Hideout: heal, walk to the Game Corner, flip the poster switch
 /// (`FlipSwitch` + the `found_rocket_hideout` event), and descend to B1F.
 ///
-/// Started from the pre-gym Celadon state so the entrance mechanic is exercised on its own: the hideout
-/// needs Cut, not the Rainbow Badge, so this is valid before Erika.
+/// ⚠️ **Started from `post-rainbow-badge.bin`, and starting it before Erika instead was a hole in the
+/// whole chain.** The hideout needs Cut rather than the badge, so `at-celadon.bin` is a *valid* seed
+/// for this leg — and it is the seed everything downstream then inherited, so the badge was never
+/// picked up. Nothing noticed until the starter changed: **Strength's field use is gated on the
+/// Rainbow Badge**, and the Seafoam leg opened the party menu on a Blastoise that knows Strength and
+/// got STATS / SWITCH / CANCEL back, then drove it for the rest of its budget. Erika is one step and
+/// the leg above already proves her; a chain that skips a badge is a chain that is not the run.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_reach_rocket_hideout() {
     let mut fixture = TestFixture::new(
-        include_bytes!("../data/at-celadon.bin"),
+        include_bytes!("../data/post-rainbow-badge.bin"),
         Duration::from_mins(20),
         PolicyStep::rocket_hideout_entrance_steps(),
     );

@@ -28,6 +28,245 @@ it must not reset the clock it reads**, or the jam clears the instant it is noti
 run: `ordinary_play_stays_far_inside_the_stuck_timeout` measures the longest silence at ~6 s against the 300 s
 default.
 
+### Grinding: who leads, and where
+
+⚠️ **A grind's trainee must be the *lead*, not switched in — it is worth the turn and it is worth half the
+experience.** `pick_battle_action`'s training block puts a bench trainee in on turn one of every battle, which
+costs that turn *and* halves the payout: `DivideExpDataByNumMonsGainingExp` splits a knockout between everything
+that took the field, and a lead that switches out has still taken it. `pick_field_move` promotes the trainee with
+a direct RAM reorder instead, and the completion test is that `target.resolve` now says slot 0 — visible in RAM,
+like `UseStrength`, rather than a latch a restart would forget. ⚠️ The in-battle switch is still needed and must
+not be deleted: the **hand-off** to a tank on turn 1 is what stops a lv26 trainee fainting to a lv39 wild, and it
+keys on the trainee being active, which a lead already is.
+
+⚠️ **A grind *leaves its trainee leading*, and only the gauntlet one gets away with it.** The
+promotion above is a direct RAM reorder and nothing undoes it; `elite_four_steps` happens to re-lead
+the starter two steps later, so the endgame grind never showed the bug. A mid-game grind does: after
+the Route 11 Drowzee grind the run walked to Celadon with a **lv24 Drowzee at 9/69 HP and poisoned**
+leading every trainer battle in Rock Tunnel, the Pokémon Tower and Erika's gym, with the lv38
+Blastoise behind it only ever switched in by the "HP critical" arm. Every `GrindUntilLevel` on a
+bench mon needs a `MovePokemonToFront` after it.
+
+⚠️ **The trainee-fainted heal detour re-arms itself, so the detour's own give-up is not one.**
+`MAX_HEAL_ROUTE_WAIT` correctly abandons a heal it cannot route and sets `heal_unreachable` — and
+`GrindUntilLevel`'s arm then set `heal_return` again on the very next tick, because the trainee is
+still fainted and the step is still at the front. Measured on a Route 11 grind: **158 heal trips,
+none of which moved a tile**, until the budget ran out. It honours `heal_unreachable` now by handing
+the route back. ⚠️ **What made it unroutable is the incremental graph's *return* edge**: an
+`enter(Route11)` records the way out and nothing records the way back, so `route_toward` could not
+find Vermilion from one map away. Walking home and back once before the grind is the fix, and it is
+the same shape as the Nugget Bridge's double crossing.
+
+⚠️ **A catch leaves its catcher fainted, so a grind that follows one has to heal first.** The
+trainee is switched in at whatever level it was caught and takes hits while the balls are thrown, so
+`GrindUntilLevel` starts on a fainted mon and goes straight to the detour above.
+
+⚠️ **A grind paces with `wander_action`, never toward a warp — and the warp fallback cost 4435 map changes.**
+`GrindUntilLevel`'s cave/building branch walks to "the farthest reachable object", and on a floor whose only
+sprites are item balls (excluded, because walking onto one loops on a full bag) that used to fall through to *the
+farthest warp*. Measured on the gauntlet grind: 1097 walks out of the Pokémon Mansion onto Cinnabar Island and
+1103 up to 2F, in 1552 battles — the run left the building and came back over two thousand times, and the arm
+above routed it home each time. It buys nothing: the encounter roll is on the **step**, so pacing on the spot
+finds battles at the same rate. `MetaTileMap::wander_action` targets only Empty/Grass/Water, `agent.rs` turns a
+plain-floor destination straight into `PacingForEncounters`, and `CatchPokemon` and `SweepDex` had both been
+using it for years. Six map changes now, all of them the walk in.
+
+⚠️ **A grind that carries no medicine cannot heal, and the run reached its longest grind carrying none.**
+`pick_battle_action`'s "HP critical" arm works and simply had nothing to reach for: measured on
+`post-articuno.bin`, seventeen bag entries, ¥37,655, and not one potion or status cure — so the arm never fired
+**once in 1552 battles** and the trainee was ticked to death by burn and poison twelve times, each one a
+four-warp round trip to a Centre. The same gap, found separately, is what put Super Potions in
+`back_to_cerulean_steps`. ⚠️ **Cure on a threshold, not on sight**: curing every status application spent twenty
+Full Heals inside the first of three grinds, because a trainee that one-shots the floor is re-statused constantly
+and almost none of those episodes would have reached zero.
+
+⚠️ **And then check the *mainline* can pay for it, because this one cannot.** From the fixture the purchase lands
+twenty Full Heals and the trips go to zero; the run that earns its own way to the same shop arrives on about
+**¥2,000** against the fixture's ¥37,655, `agent::affordable` trims the order to **three**, and the trips come
+back (13 on `hall_of_fame_playthrough`). That is the fixture-versus-mainline hole the `test-suite` skill warns
+about, in its purest form — the leg test proved the mechanism, not the affordability. ⚠️ **The money is poor
+because a black-out halves it and the route has eleven before this point**, so the medicine that would prevent
+them is what they make unaffordable; the early game is upstream of the grind's economy.
+
+⚠️ **Argue about a grind site with `wild::tests::probe_grind_sites` and never from memory** — it ranks every
+encounter block in the ROM out of the cartridge's own tables. ⚠️ **Read experience per *knockout* first and per
+step second**: the measured grind is 1552 battles in 1229 s, which is ~40 s of cartridge time an encounter cycle,
+of which the 25.6 steps a 10/256 rate implies are under 7 s. Four fifths battle, one fifth walk — so a site with
+twice the payout wins even at half the rate. `poison_share` is the
+third column and it is a *travel* cost — Gen 1 ticks overworld poison at 1 HP per four steps and cures it only at
+a Centre, so a poisonous site sends the trainee home over and over (`grind_heal_trips` counts it).
+
+⚠️ **Cerulean Cave is the site the ranking points at and it cannot be used before the Elite Four — do not
+re-propose it.** It is not gated by a script: `wNumHoFTeams` is read by four things in the ROM and none is in
+Cerulean, and the man beside the door only *says* champions only. He gates it with his body, standing at (4,12)
+on the one approach to `warp_event 4, 11`; probed from a pre-Champion save on the terrace, the warp is not in the
+reachable set at all. The whole argument, and the twenty-two-hop walk that does work, is in
+`PolicyStep::gauntlet_grind_steps`.
+
+⚠️ **A `Goto` cannot cross Kanto from a leg test.** `route_toward` reads the incremental world graph, which lives
+on the agent and not in the save state, so a fixture builds an agent that has observed nothing and routes nowhere
+— measured, the step sat on one tile for a whole budget. Explicit `enter` hops read only the current map's
+`actions()`, which is why they work from a cold fixture and why a traversal written that way is testable at all.
+⚠️ And every gate house crossing must be `enter_at`: a gate warps to `LAST_MAP`, so a plain `enter` back onto the
+route is satisfied by the door just walked in through, and `enter_map_action` prefers the nearest.
+
+⚠️ **A black-out is reported against the last *battle* map, because the cartridge's sentence arrives late.** The
+"blacked out" text box is committed only when the reader flushes, several overworld decisions after the warp — so
+an overworld-map version prints the map the run has already walked back to (`lost on MtMoonB2F` for a black-out
+that warps to Route 4). A full playthrough has twelve. ⚠️ **They are not a levelling problem and five attempts to
+fix them all reduced the count and broke the run somewhere else** — the early route is tuned to one RNG stream
+rather than robust to it, so anything added before Vermilion re-rolls onto a different pre-existing fault (the
+Nugget Bridge, Route 6, a full bag at Silph Co, Erika's tree maze). The table of what each variant cost is on
+`PolicyStep::game_steps`, at the lone-starter comment; read it before trying a sixth. Two of them are worth
+fixing on their own account whatever happens to the route: ⚠️ **`CollectItem` has no give-up** — its completion
+is the sprite disappearing, so a refused pickup spins silently until the cycle budget dies (16,763 polls one tile
+from the Card Key) — and ⚠️ **the bag's 20-entry cap is load-bearing and invisible**, since a full bag refuses
+every pickup in the game without saying so.
+
+### Field moves
+
+⚠️ **A field move is answered by whoever in the party knows it, and *both* halves of that used to be
+assumed.** `CuttingTree` drove the party menu onto **slot 0** unconditionally — right only while the
+starter is the Cut carrier, and a permanent wedge the moment an HM slave is (the driver's only exit
+is the overworld coming back). `Surfing` hard-coded the **move index** to 0 — right only while the
+surfer knows exactly one field move, and a Blastoise carrying Surf, Strength and Dig lists three.
+`policy::field_move_carrier` is the one place that resolves both, first holder wins, and
+`UseStrength`, `Dig`, `UseFlash`, the Cut driver and the surf mount all go through it;
+`llm::tools::resolve_field_move` already did the same thing for the model's side. A `PolicyStep` that
+still names a `PartyRef` uses it only as the fallback when nobody knows the move at all, which is the
+case the refusal messages are for.
+
+⚠️ **A policy that answers `None` for ever is indistinguishable from one that is thinking, and the
+watchdog is blind to it by construction.** `since_last_policy_poll` is reset by `poll_policy`
+*whatever the answer is*, so a policy asked every tick and answering nothing every tick looks
+perfectly healthy: the agent sits in `BattleState::AwaitingPolicy` showing the main battle menu, the
+emulator runs, and **nothing is printed**. Three `full_playthrough` runs ended in that silence —
+twice on Erika's Victreebel, once on her Vileplume, one of them for **seven hundred minutes of game
+time** — and each looked like a hung process rather than a bug.
+
+The cause was `battle_options`: ⚠️ **every move at zero PP is Struggle, not "no move"**.
+`available_battle_moves` filters on `pp > 0`, and in a *trainer* battle there is no `Run` and a party
+with nothing else conscious offers no `SwitchPokemon`, so the whole option list was bag items — which
+`pick_battle_action`'s last resort deliberately refuses to touch (the first bag entry is often a key
+item the game will not use). The moves are offered anyway when the list would be empty, and the
+cartridge substitutes Struggle. Two changes, both needed: the fix, and the one path out of
+`pick_battle_action` that answers nothing now *says so* with the options attached — which is what
+found it.
+
+⚠️ **Its guard asserts on battle actions *taken*, not on silence**, for the same reason the watchdog
+missed it: `a_party_with_no_pp_anywhere_still_gets_an_answer` counts `BattleActionStarted` events, and
+a silence-based version passes on the very state that reproduces the bug.
+
+### One fighter, and what the party is for
+
+⚠️ **Three Pokémon at lv75 is 1.4 M experience; one at lv85 is 425 k, and the one wins more
+comfortably.** Experience is cubic, so the top of a single curve costs less than the middle of three —
+measured on the three-target grind, Hypno 26→75 was ~404 k, Articuno 50→75 ~610 k and the starter
+60→75 ~400 k, thirty minutes of `hall_of_fame_playthrough`. One starter to 85 is ~840 wild battles and
+the run finishes in **26 minutes against 50**. And it is *stronger*: the Elite Four tops out at
+Lance's lv62 Dragonite and the rival's lv65, so a lead that far ahead one-shots almost everything
+rather than trading turns with it.
+
+⚠️ **This replaced "three fighters or you lose the Champion's room", which was true of three at
+seventy-five.** The party behind those two leads was a lv26 Vaporeon, a lv30 Slowpoke and a lv24
+Machop, so the moment the second lead fell three fodder mons fainted in a row. Depth of bench was never
+the answer; height was.
+
+⚠️ **What that makes the binding constraint is PP, not power.** Five rooms is about twenty-six
+knockouts against Surf's 15, Blizzard's 5 and Dig's 10 — so the fighter's four slots are worth
+defending, which is the whole of the next rule.
+
+⚠️ **Surf is the only HM the fighter carries.** An HM is the one move `pick_move_to_forget` will never
+drop (`never_forgets_hm`), so teaching one spends a *permanent* slot in the only Pokémon that attacks.
+Surf earns it at 95-power STAB; Strength at 80-power Normal does not, and it went back onto a Victory
+Road Machop caught two tiles from the boulder it is for. Cut was never a choice — `wartortle.asm` has
+no CUT — so an Oddish carries that. Neither slave ever fights.
+
+⚠️ **A step list that drops a leg inherits that leg's *first* step.** Removing the Seafoam detour left
+`gauntlet_grind_steps` opening on a Pokémon Centre two warps from Blaine's gym, because
+`seafoam_articuno_steps` used to supply the `enter(CinnabarIsland)` that got out of it — and `EnterMap`
+is a deliberate single hop. The same shape hit `back_to_cerulean_steps` when the Route 11 catch went.
+
+⚠️ **Gen 1's bag holds 20 entries and the route runs on exactly that, so *every* pickup is somebody
+else's toss.** Three failures in one run, each silent: the Card Key refused (3000 polls one tile away,
+then the rest of Silph Co locked), TM14 Blizzard filling the slot the Rare Candy had just freed so the
+**Secret Key** was refused, and the Silph President's Master Ball refused — which surfaces two legs
+later as "no Pokéballs left" at Articuno. A TM is consumed when taught, so teaching it immediately is
+itself a toss.
+
+⚠️ **`Bag::best_pokeball` ranks by effectiveness, so a fallback spends the Master Ball.** A pinned
+`ball` only holds while that ball is in stock: the Seafoam Slowpoke's Great Balls failed to buy on an
+empty wallet, the catch fell back to "best", and the bird had nothing left to be caught with.
+
+### Black-outs, and how the route got to none
+
+⚠️ **A black-out is a walk to a Pokémon Centre with the money halved, and the route used to take
+twelve of them a run.** Every one measured had the same shape: the lead walks into a fight already
+worn from the last one, loses in a turn or two, and wakes in the Centre it should have walked to.
+Nothing was malfunctioning — `pick_battle_action`'s "heal below 25%" arm fires correctly and simply
+had nothing in the bag to reach for, and its flee-to-heal arm cannot fire in a *trainer* battle at
+all. So the decision moved out of the battle and into the overworld tick before it. **Twelve to
+zero**, in six changes, none of which is a bigger number in a step list:
+
+- ⚠️ **The heal detour is armed proactively** (`needs_a_centre` + the arm above `heal_return`'s
+  block). Three reasons to go, deliberately different: the lead is fainted; its attacks are spent
+  (**no Gen 1 mart sells Ether or Elixer** — `data/items/marts.asm` — so a Centre is the only PP in
+  the game before the S.S. Anne's floor items); or it is badly hurt and **the bag cannot fix it**.
+  ⚠️ That last test is "can the best thing in the bag cover what is missing", not "is there
+  medicine": a Potion is +20, which is a fifth of a lv21 Wartortle, and asking the weaker question
+  kept the detour quiet while the run black-ed out on Route 3 anyway.
+- ⚠️ **It is only allowed where the route can get back**, which is `Map::is_overworld` (towns and
+  Routes — discriminants at or below `Route25`) **or a step that re-derives its own route**
+  (`step_finds_its_own_way_back`: the grinds, the catches, `Goto`, `DefeatGymLeader`, `CutTree`).
+  Map alone was too narrow — Koga's gym is six trainers and an invisible-wall maze one warp from the
+  Fuchsia Centre, and the run black-ed out in it — and step alone would let a detour abandon a chain
+  of single-hop `EnterMap`s through Mt Moon or Silph Co, which cannot be resumed from a Centre.
+- ⚠️ **A heal is finished when the party is full, not when the conversation lands.** `Interact` pops
+  the instant it issues the walk, so every `Interact(NURSE)` in the route was a *request* to heal:
+  whether the party actually came back full depended on how long the next step happened to take.
+  Caught by asserting it on a fixture, which came out carrying **Water Gun on 6 of 25 PP** one step
+  after a Pokémon Centre. `party_is_fresh`, bounded by `MAX_HEAL_WAITS`.
+- ⚠️ **The wild-flee threshold depends on whether the bag can answer, and running is worth it even
+  with nowhere to go.** At a flat 15% the run was dying to the *next* hit; with an empty bag it now
+  leaves at a third. The `last_pokemon_center` that used to gate the arm gated the wrong half — on
+  the first errands out of Pallet there is no Centre yet, and fleeing is still better than fainting.
+- ⚠️ **A charge move is half the damage and a free hit for the opponent** (`damage_per_turn`).
+  `PokemonMoveEffect::Charge` — Skull Bash, Razor Wind, Solarbeam, Sky Attack and Dig — was ranked on
+  raw power, so a Blastoise holding Surf *and* Dig picked **Skull Bash** into a Poison type, was
+  badly poisoned mid-charge and fainted without landing it. Halving is enough on its own: Dig into
+  Poison is 2× before the halving and still wins.
+- ⚠️ **The "switch to a fresher attacker" arm had a level gate doing the damage gate's job badly.**
+  "Within eight levels of the active" is a proxy for "not a sacrificial weakling", and the two lines
+  below it already test exactly that — the bench mon must do 1.5× the active's damage *and* three-shot
+  this enemy. A lv20 Hypno passes both against Erika's Grass/Poison and failed the proxy against a
+  lv45 Blastoise, so the run lost that gym with its answer sitting on the bench.
+
+⚠️ **A grind goes home on empty, not on low, and the difference is nineteen minutes.** Out on the
+route a fifth of a tank is the right moment to turn back, because the next fight is a trainer who
+cannot be fled. Inside the gauntlet grind every wild *can* be fled and the trainee is handed off to a
+tank whenever one threatens it, so the same threshold cost **46 round trips** from the Pokémon Mansion
+to Cinnabar and back — `hall_of_fame_playthrough` went from 31 minutes to 51 on 5% more battles.
+`needs_a_centre` takes whether a grind is in front of the queue and uses "no damaging PP at all"
+there.
+
+⚠️ **And two of those are route facts rather than policy ones.** Pewter is the first mart on the
+route that sells a Potion at all, so the early game carried nothing until it; and **Lt. Surge is
+Electric into a Water starter**, which black-ed the run out twice in one gym until TM28 Dig moved from
+the Seafoam Islands to before that fight. Ground is 2× on Electric and Dig's first turn is spent
+underground.
+
+⚠️ **A grind belongs outdoors.** Four levels are cheaper per battle inside Mt Moon than on Route 3 —
+and a black-out on a cave floor warps the run to the Mt Moon Centre, whose traversal's next step is an
+`enter_at` *between two of its own floors*, a warp `route_toward` cannot find from outside. The run
+stalls there for good. Route 3 costs twice as many battles and every recovery works.
+
+⚠️ **A Pokémon Centre is a building, and routing to a building is harder than routing to its town.**
+`route_toward` now takes a transition off the current map's own `actions()` before asking the graph,
+and the heal detour falls back to `Map::pokemon_center_town` — because the incremental graph can fail
+to find a warp two hops away while the *connection* to the next town is sitting in `actions()`.
+Measured: "no route from Route3 to PewterPokecenter to heal", on a grind whose only problem was that
+it had walked east, after which the run fought on at zero PP until Struggle's recoil killed it.
+
 ### The scripted policy's detours, and what a new run forgets
 
 ⚠️ **Every branch of `DeterministicPolicy` that routes must be bounded, and the heal-return detour was

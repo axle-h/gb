@@ -29,12 +29,19 @@
 //!
 //! Steps that act on a particular **mon** — `TeachMove`, `EvolveWithStone`, `UseStrength` — take a
 //! [`crate::pokemon::policy::PartyRef`] and should name it by `Species`, not by `Slot`. A slot index is
-//! a guess about how many members the party happened to hold when the run reached that step, and the
-//! leg-chain fixtures do not carry the same party the mainline does: every snapshot from
-//! `post-cascade.bin` onward still has the early Route-1 Pidgey that `complete_game_steps` no longer
-//! catches. Three tests sat `#[ignore]`d on that for a long time, none of them naming it: two blamed a
-//! stale fixture and one blamed deep-bag menu scrolling. `Slot` is right only when the *position* is
-//! the point — `CuttingTree` always asks slot 0, so Cut goes to `Slot(0)`.
+//! a guess about how many members the party happened to hold when the run reached that step, and a
+//! fixture does not have to carry the same party the mainline does. Three tests sat `#[ignore]`d on
+//! that for a long time, none of them naming it: two blamed a stale fixture and one blamed deep-bag
+//! menu scrolling.
+//!
+//! ⚠️ **`Slot` is almost never right, and the one exception it used to have has gone.** "Cut always
+//! asks slot 0" was true only while the starter carried Cut; `policy::field_move_carrier` resolves
+//! the holder out of the live party now, so a field move needs no `PartyRef` at all.
+//!
+//! ⚠️ **The chain has a *root*, and swapping the starter invalidates all of it at once.**
+//! `at-cerulean.bin` is what everything below descends from, and `early_game::regen_at_cerulean_fixture`
+//! is what produces it — before that it was `post-cascade.bin`, which no test built, so a change to the
+//! mainline party left every downstream leg resolving against a party that no longer existed.
 
 use std::time::Duration;
 use crate::cycles::MachineCycles;

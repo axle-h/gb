@@ -22,14 +22,14 @@ profiling and it was not before.**
 # Default tier: unit tests + agent mechanics + stalls + two navigation smoke tests + web/host/llm. ~20 s, ~1345 tests.
 cargo test --release
 
-# Leg chain: one test per PolicyStep::*_steps() leg, seeded from a committed snapshot. ~155 tests, ~55 s.
+# Leg chain: one test per PolicyStep::*_steps() leg, seeded from a committed snapshot. ~167 tests, ~250 s.
 cargo test --release --features slow-tests --bin gb -- pokemon::integration_tests
 
 # The Safari dex sweep: ~171 s for ~190 min of game time, more than the whole leg chain combined, which is why it is
 # split out. ⚠️ `very-slow-tests` does not imply `slow-tests` and the module is behind that gate — pass both.
 cargo test --release --features slow-tests,very-slow-tests --bin gb -- can_sweep_the_safari_zone
 
-# The whole game from a fresh save, ~5 min.
+# The whole game to 8 badges from a fresh save, ~6 min. (The full run to the credits is ~50; see below.)
 cargo test --release --features full-playthrough full_playthrough
 
 # The stall hunt: 40 min of game time under RandomPolicy from each of 13 starting states, in parallel, ~60 s.
@@ -51,6 +51,23 @@ cargo test --release --features diagnostics --bin gb -- \
   llm::map_image::tests::probe_map_images --exact --ignored --nocapture
 cargo test --release --features diagnostics --bin gb -- \
   llm::prompt::tests::probe_turn_requests --exact --ignored --nocapture
+
+# ⚠️ Two more that answer a question rather than draw a picture, and both are ROM-only and instant.
+# probe_grind_sites ranks every encounter block in the game by experience per knockout and per step, with the
+# encounter rate, the level band and the Poison-type share beside each — which is what a `GrindUntilLevel` should be
+# pointed at, and the only honest way to argue about a grind site. Read exp/KO first and exp/step second: an
+# encounter cycle is ~40 s of cartridge time and under 7 s of that is the walk (1552 battles in 1229 s).
+# probe_stall_actions prints a save's map, money, party (levels, HP, status), **bag** and every reachable action.
+# It defaults to the last `target/test-artifacts/test_stall_state.bin` and takes any state through GB_PROBE_STATE,
+# which is what makes it the first thing to reach for on a stalled leg: it tells "the route is wrong" from "there
+# is no route". It proved Cerulean Cave's door is not in the reachable set at all, and it found a run standing one
+# tile from the Silph Co Card Key with a bag on exactly 20 entries — ⚠️ **Gen 1's cap, and a full bag refuses every
+# pickup in the game silently**, which is why the bag line is printed.
+cargo test --release --features diagnostics --bin gb -- \
+  pokemon::wild::tests::probe_grind_sites --exact --ignored --nocapture
+cargo test --release --features diagnostics --bin gb -- probe_stall_actions --ignored --nocapture
+GB_PROBE_STATE=src/pokemon/data/post-articuno.bin \
+  cargo test --release --features diagnostics --bin gb -- probe_stall_actions --ignored --nocapture
 
 # All the diagnostics and probes.
 cargo test --release --features diagnostics,slow-tests --bin gb -- probe_ --ignored --nocapture
@@ -251,6 +268,61 @@ claimed it played to all 8 badges. When it fails it reports how far it got (`com
 drops its artifacts; `playthrough::probe_resume_playthrough` replays from there in seconds instead of re-running the 20
 minutes up to the stall. **If you cannot make it pass, say so explicitly in the hand-off — do not leave a doc comment
 claiming it works.**
+
+### ⚠️ The chain has a root, and the mainline party is what invalidates it
+
+⚠️ **`at-cerulean.bin` is what every leg fixture descends from, and until 2026-08-30 it was
+`post-cascade.bin`, which no test produced.** That is fine right up until the mainline party changes:
+swapping the starter meant every downstream leg resolved an HM teach, a grind or a lead against a
+party the old root did not have, and a `PartyRef` that does not resolve **waits for ever** rather than
+failing. Nine leg tests went red at once. `early_game::regen_at_cerulean_fixture` produces the root now
+(Pallet → Brock → Mt Moon → the Cerulean Centre, ~90 s, `regen-fixtures` only), so the chain can be
+re-cut from the top.
+
+⚠️ **A fixture is cut where the mainline *stands*, not where it happens to be convenient.**
+`cerulean_to_vermilion_steps` opens with `enter(CeruleanCity)`, meaning "walk out of the Centre" — a
+root saved standing in the city instead makes that step hunt for a transition to the map it is already
+on, and it walked out to Route 4 and stalled trying to reach Route 24 from there.
+
+⚠️ **And it has to be cut where the party is *healed*, which is later than it looks.** `Interact` pops
+the instant it issues the walk, so `Interact(NURSE)` used to be a *request* to heal: the first cut of
+this root came out carrying **Water Gun on 6 of 25 PP**, and the leg seeded from it lost the Cerulean
+rival ambush. The policy now holds the step until the party is at full HP, full PP and unstatused
+(`party_is_fresh`, bounded by `MAX_HEAL_WAITS`) — which is a **frame-timing change**, so it re-rolls
+every RNG stream in the run and `full_playthrough` is the only thing that can price it.
+
+⚠️ **A leg that contains a grind needs a game-time budget sized to encounters, not to walking.** Two
+legs went over on the starter swap — `can_return_to_cerulean` (30 → 240 min, it now catches the Route
+11 Drowzee and grinds it to Hypno) and `can_get_rainbow_badge` (45 → 90, eight separate cuts before
+Erika is even reached).
+
+⚠️ **The chain had three more roots nothing produced, and each one pinned the old party.** Every one
+was found the same way — a leg resolving a `PartyRef` against a party that no longer existed, which
+*waits* rather than failing. `at-mansion-blizzard.bin` and `post-volcano-lone.bin` are gone
+(`can_catch_articuno` and `can_get_earth_badge` now read `post-volcano-badge.bin` and
+`post-articuno.bin`, which is the mainline's own order), and so is `at-saffron-post-silph.bin`: the
+Silph leg walks itself back out to a liberated Saffron now, so `can_get_marsh_badge` reads its output.
+
+⚠️ **And it skipped a badge for years.** `can_reach_rocket_hideout` was seeded from the *pre-gym*
+`at-celadon.bin` — valid on its own, since the hideout needs Cut rather than the badge, and it was the
+seed everything downstream inherited, so **the Rainbow Badge was never in the chain**. Nothing noticed
+until Strength moved onto the starter: Strength's field use is gated on that badge, and the Seafoam
+leg opened the party menu on a Blastoise that knows Strength and got STATS / SWITCH / CANCEL back.
+
+⚠️ **A fixture's name has to be where it is cut.** `vr1f-strength.bin` was read by two tests for what
+its name says — `mechanics::strength_switches_are_exposed` is a pure state read asserting VR1F's one
+switch is exposed on it — while the leg that writes it ran the climb as well and left it on VR2F. The
+approach and the climb are two tests and two fixtures (`vr1f-strength` and `vr2f-ladder`) now.
+⚠️ Same shape for `at-indigo.bin`, whose only other reader is `llm::map_image`'s fixture list — chosen
+for what each state makes *drawable*, and its entry is "a `Plateau` map whose strip tileset differs
+from its own", meaning the open-air plateau rather than the lobby standing on it.
+
+⚠️ **An `enter_at` that names the wrong landing only fails from a cold fixture.** Victory Road's
+return trip asked for VR2F at (22,16) and the exit is not reachable from where that puts the player —
+the mainline survived it because `EnterMap` falls back to re-routing over the *incremental* world
+graph, which by then knew the (27,7) landing. A leg test's fresh agent does not, so it stalled at
+eleven of fourteen steps. The `[policy]` line names the step; `probe_stall_actions` on the artifact
+names the warps actually in reach, which is what identified the right landing.
 
 ### ⚠️ Fixtures are committed inputs
 
