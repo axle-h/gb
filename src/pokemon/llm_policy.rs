@@ -440,6 +440,12 @@ impl LlmPolicy {
 
         match evaluation.outcome {
             ScriptOutcome::Action(action) => {
+                // The script decided this turn, so nobody was asked and nothing was published.
+                // ⚠️ **This count is the only trace a working script leaves**, which is why the
+                // overworld line is built on it: a scripted battle emits no request, no decision
+                // and no turn, so without a tally the model has no way of telling a script that
+                // is deciding three hundred battles from one that has never fired.
+                self.handles.live_script.decided_one();
                 report.decided(state, &action, evaluation.prints);
                 Some(action)
             }
@@ -730,8 +736,11 @@ impl Policy for LlmPolicy {
         if let Some(action) = self.advance_queue(state) {
             return Some(action);
         }
+        // Bound here rather than inline: `TurnContext` is `Copy` and borrows it.
+        let standing = self.handles.live_script.standing();
         let context = TurnContext::Overworld {
             script: self.handles.live_script.state(),
+            standing: &standing,
             guide: crate::llm::guide::status(state.badges, self.guide_chapter_read),
         };
         match self.advance(DecisionKind::Overworld, context)? {
@@ -990,7 +999,7 @@ impl Policy for LlmPolicy {
         // and a battle can start before then — so without this the first battles of the new game
         // are fought by the previous game's script. The worker re-arms from the *new* run's file
         // when it catches up, which is empty for a fresh run and correct for a resumed one.
-        self.handles.live_script.arm(None, ScriptState::Unedited);
+        self.handles.live_script.arm(None, ScriptState::Unedited, Default::default());
     }
 
     /// Collected by the agent at the top of its next tick, ahead of the state machine.
@@ -2985,7 +2994,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(calls(&[
-                ("set_battle_script", &serde_json::json!({ "script": source }).to_string()),
+                ("set_battle_script", &serde_json::json!({ "script": source, "purpose": "a test" }).to_string()),
                 ("choose_action", &walk),
             ]));
             for _ in 0..then {
@@ -3039,7 +3048,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(calls(&[
-                ("set_battle_script", &serde_json::json!({ "script": SCRIPT }).to_string()),
+                ("set_battle_script", &serde_json::json!({ "script": SCRIPT, "purpose": "a test" }).to_string()),
                 ("choose_action", &walk),
             ]));
             for _ in 0..3 {
@@ -3121,6 +3130,81 @@ mod tests {
 
         // ⚠️ And exactly once. A report left queued would be re-rendered into every turn after it.
         assert_eq!(situation.matches("### Battle report").count(), 1, "{situation}");
+    }
+
+    /// ⚠️ **Enforced in the parser, not merely required in the schema — the distinction this repo
+    /// has paid for twice.** `press_buttons`' `why` was required-in-schema and came back null on
+    /// **543 of 749** presses; `summary` was omitted wherever the parser let it through. A purpose
+    /// nobody wrote is precisely the hole this field exists to fill, so a script arriving without
+    /// one is refused and nothing is changed — which costs one tool step, once, against a script
+    /// that would otherwise decide every battle in the run with nothing saying what it was for.
+    #[test]
+    fn a_script_with_nothing_said_about_what_it_is_for_is_not_armed() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            replies.push_back(calls(&[
+                ("set_battle_script", &serde_json::json!({ "script": SCRIPT }).to_string()),
+                ("choose_action", &format!(r#"{{"id":"{id}"}}"#)),
+            ]));
+        }
+        // ⚠️ **Not the `arm` helper**, which asserts the script installed — this is the turn where
+        // it deliberately does not.
+        assert!(rig.pump_overworld(&mut policy).is_some(), "the turn still decides an action");
+
+        // ⚠️ `events_until`, never `try_iter` — the tool result is published by the worker thread
+        // while the action arrives on this one. The rig race the skill's fixture note is about.
+        let seen = rig.events_until(Duration::from_secs(5), |event| {
+            matches!(event, UiEventBody::ToolResult { name, .. } if name == "set_battle_script")
+        });
+        let answer = seen.iter().find_map(|event| match event {
+            UiEventBody::ToolResult { name, content, .. } if name == "set_battle_script" => Some(content.clone()),
+            _ => None,
+        }).expect("the tool answered");
+        assert!(answer.contains("needs a `purpose`"), "and says what is missing: {answer}");
+        assert!(answer.contains("nothing was changed"), "and that the script was not taken: {answer}");
+
+        // ⚠️ **The refusal has to leave the run on the default rather than half-armed.** A script
+        // stored but not armed would be invisible in both directions: the model would think it had
+        // installed one and the battles would go on costing a request each.
+        assert!(!policy.handles.live_script.state().eq(&ScriptState::Armed),
+                "a refused script is not deciding battles");
+    }
+
+    /// ⚠️ **The standing line is a constant unless it carries these two, and a constant is not
+    /// read.** "Your battle script is armed" is true on turn 5 and on turn 500, so it cannot tell a
+    /// script written for the fight in front of you from one written three towns back — which is
+    /// exactly what the 2026-09-01 run could not tell: a script opening `// Misty gym: Staryu then
+    /// Starmie.` was still choosing Slash in Pokémon Tower hours later, and the only way to find
+    /// that out was a whole round trip to `read_battle_script`.
+    ///
+    /// ⚠️ **The count has to make the trip between the threads to mean anything.** It is incremented
+    /// in `run_battle_script` on the emulator thread and read here out of a situation the worker
+    /// built, so a test that only checked `Live` would pass with the wiring cut. Asserting on the
+    /// rendered situation is what makes it end to end.
+    #[test]
+    fn an_armed_script_says_what_it_was_for_and_how_much_it_has_decided() {
+        let (mut rig, mut policy) = armed_with(SCRIPT, 1);
+
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("the script decides");
+        policy.on_event(&AgentEvent::BattleEnded);
+
+        rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
+        rig.pump_overworld(&mut policy).expect("the next overworld turn lands");
+        rig.wait_for_requests(2, Duration::from_secs(5));
+
+        let situation = rig.requests().last().expect("a second request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        // `armed_with` installs it with this purpose, the way `set_battle_script` makes the model.
+        assert!(situation.contains("You installed it for: \"a test\""),
+                "the standing line quotes the model's own words:\n{situation}");
+        assert!(situation.contains("1 battle turn since you installed it"),
+                "and counts what it has decided:\n{situation}");
+        // ⚠️ **Not "has not decided a battle turn yet"**, which is what a broken counter renders and
+        // is a sentence this test would otherwise pass on, since the purpose alone is still there.
+        assert!(!situation.contains("not decided a battle turn yet"), "{situation}");
     }
 
     /// ⚠️ **The report replaces the raw event stream rather than sitting beside it.** Every message

@@ -348,6 +348,33 @@ Four ⚠️s, and the first two are the ones that would silently undo it:
   is no such run now, and the page *wants* the first event: `default` is the live fact that this
   run's battles cost a request each.
 
+⚠️ **"A battle script is armed" is a constant, and a constant is not read — so the standing line
+carries a `ScriptStanding` (the model's stated `purpose`, and how many battle turns it has decided).**
+The armed line itself was added because a run could go ~80 overworld turns without being told a
+script existed; but it says the same words on turn 5 and turn 500, so it cannot tell a script written
+for the fight in front of you from one written three towns back. The 2026-09-01 run's script opened
+`// Misty gym: Staryu then Starmie.` and was still choosing Slash in Pokémon Tower hours later, and
+the only way to find that out was a whole round trip to `read_battle_script`. Five ⚠️s:
+
+- ⚠️ **`purpose` is enforced in `worker::apply_battle_script`, not merely required in the schema.**
+  That distinction has been paid for twice already (`why` null on 543 of 749 presses; `summary`
+  omitted wherever the parser allowed it). Asked for **only when a `script` is given** — going back
+  to the default is not a script and has nothing to be for.
+- ⚠️ **The tally is counted on the emulator thread and persisted by the worker**, through `Live`,
+  exactly as a disarm reason travels: the policy may not write the run directory. `run_one` drains it
+  into `record_decided` at the top of every turn, which no-ops when nothing moved. Without that a
+  restart tells a resumed run its script has never decided a turn — the opposite of the fact.
+- ⚠️ **Both are reset by `set`, never carried over.** A new script inheriting the old one's 340 reads
+  as the stale script it was written to replace.
+- ⚠️ **`MAX_PURPOSE` (200) is far tighter than `MAX_SOURCE`, because this rides on *every* overworld
+  turn** while the source is sent only when asked for. Truncated rather than refused — refusing would
+  throw away the script written with it.
+- ⚠️ **It cost `the_tool_array_stays_within_its_budget` a fight and the ceiling did not move.** The
+  first wording came in at 13208 against Overworld's 12750; the property description is down to "What
+  it is for. Required." because the tool array is on every request while the argument for the field
+  belongs in the standing line and the refusal, which are not. `read_battle_script` says the same two
+  facts from the same accessor, or the tool and the situation would be two accounts of one script.
+
 ⚠️ **The script filters `policy::battle_options`; it never invents an action.** A `Choice` is symbolic — a name or a slot —
 and `battle_script::resolve` matches it against the same list `RandomPolicy`, `DeterministicPolicy` and `tools::battle_menu`
 all use. Anything not on it is a **failure with a named reason**, never a dropped turn: the same rule `tools::classify`

@@ -157,6 +157,29 @@ found it.
 missed it: `a_party_with_no_pp_anywhere_still_gets_an_answer` counts `BattleActionStarted` events, and
 a silence-based version passes on the very state that reproduces the bug.
 
+⚠️ **And a battle can be answered every turn for ever, which is the same stall with the silence
+taken out.** A *ghost* battle — `IsGhostBattle`, and it is **every wild battle on Pokémon Tower
+1F-7F until the Silph Scope**, not merely the Marowak — executes no move at all: "too scared to
+move" one way, "Get out..." the other, no hit points either side, so it can never end. The deployed
+run of 2026-09-01 chose Slash against a Gastly every 3.3 s for as long as anyone watched. Nothing
+could see it: a **battle script** was answering on the emulator thread, so no request was made and
+the model was never asked, and the watchdog was quiet because the agent was reaching a decision
+point every tick. ⚠️ **So the guard cannot count actions *or* silence** — there were 35 actions in
+120 s of game time and no silence at all — it asserts the **battle ends**
+(`a_ghost_battle_is_left_rather_than_fought_for_ever`, on the deployed save state itself). ⚠️ **And
+it must not use `RandomPolicy`**, which draws `Run` out of a short list within a few turns and
+passes whether or not anything is understood.
+
+`battle::is_ghost_battle` is the predicate and `battle_options` returns `Run` **alone** on it —
+running is not the best option there, it is guaranteed, since `TryRunningFromBattle` jumps to
+`.canEscape` above the speed check. ⚠️ **Prose was not enough and `enemy_trapping` is not the
+precedent**: a wrap ends by itself in a few turns and items, switching and running all still work,
+so telling the model is right *there*; nothing about a ghost ends by itself, and a script never
+reads the prompt at all. ⚠️ **`DeterministicPolicy` gets the same early return even though the route
+holds the Scope long before the tower** — its flee arms are conditional on HP and PP, and the
+fall-through past them looks for a move to use, which a one-element list does not hold, so it would
+answer `None`, which means *still thinking*.
+
 ### One fighter, and what the party is for
 
 ⚠️ **Three Pokémon at lv75 is 1.4 M experience; one at lv85 is 425 k, and the one wins more

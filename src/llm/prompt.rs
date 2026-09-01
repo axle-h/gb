@@ -20,6 +20,7 @@
 
 use crate::llm::battle_script::ScriptState;
 use crate::llm::tools::{DecisionKind, MenuItem, terminal_names};
+use crate::pokemon::battle::is_ghost_battle;
 use crate::pokemon::GameState;
 use crate::pokemon::agent::AgentEvent;
 
@@ -288,6 +289,49 @@ Playing it well, and the clock you are playing against:
 
 /// The line that ends every turn request, and the reason the loop can rely on exactly one terminal
 /// call per turn. Regenerated per kind so it names only the tools that turn actually has.
+/// The standing line an overworld turn carries while a script is deciding its battles.
+///
+/// ⚠️ **The first paragraph is a constant and the second is the whole point.** What a model does
+/// with a sentence it has already read forty times is skip it, so the fixed half says what being
+/// armed *means* — that the battles going past are free, and that a battle report is the only
+/// account of them — and the variable half says which script, written for what, and how much it has
+/// done. That second half is what a run standing in Pokémon Tower needs in order to notice that the
+/// program choosing its moves opens `// Misty gym`.
+///
+/// ⚠️ **It states the facts and does not tell the model to go and look.** A line that nagged on
+/// every overworld turn would be read as noise within an hour, and the run that has a good script
+/// is the one the feature exists for: two deployed runs never called `set_battle_script` at all.
+/// The same argument keeps `GuideStatus::Current` silent.
+fn script_standing_line(standing: &crate::llm::battle_script::ScriptStanding) -> String {
+    let mut out = String::from(
+        "Your battle script is armed and is deciding your battle turns, so the battles going \
+         past are not being put to you and are costing you nothing. A battle report is the only \
+         account you get of what it chose. If one shows it losing a Pokémon, fleeing from \
+         something worth catching, or attacking with a move the enemy shrugs off, that is the \
+         script doing it and not the game: `read_battle_script` shows what it says and \
+         `set_battle_script` replaces it.",
+    );
+
+    // ⚠️ **Quoted, and in the model's own words.** It is text this run wrote about itself, so it
+    // is repeated rather than paraphrased: the whole value is recognising it.
+    if let Some(purpose) = standing.purpose.as_deref() {
+        out.push_str(&format!(" You installed it for: \"{purpose}\"."));
+    }
+    out.push_str(&match standing.decided {
+        0 => " It has not decided a battle turn yet.".to_string(),
+        1 => " It has decided 1 battle turn since you installed it.".to_string(),
+        n => format!(" It has decided {n} battle turns since you installed it."),
+    });
+    // ⚠️ **Said once, at the end, and as a question rather than an instruction.** A script is meant
+    // to outlive the fight it was written for; what this line is for is the one that outlived the
+    // whole route.
+    out.push_str(
+        " It will go on deciding every battle until you replace it, so if that is no longer the \
+         kind of fight you are in, this is the moment to say so.\n\n",
+    );
+    out
+}
+
 pub fn contract(kind: DecisionKind) -> String {
     format!(
         "End this turn by calling exactly one of: {}. Every one of them takes a `summary`: one or \
@@ -387,7 +431,17 @@ pub enum TurnContext<'a> {
     /// to it, and in the ~80 overworld turns that followed was never once told a script existed.
     /// The other two states are deliberately *not* repeated here — they are already said on every
     /// battle turn, and saying them twice is how a situation grows a paragraph nobody reads.
-    Overworld { script: ScriptState, guide: crate::llm::guide::GuideStatus },
+    ///
+    /// ⚠️ **`standing` is what stops the armed line being wallpaper.** The sentence below it is the
+    /// same on every turn of the run, so a model that has read it forty times learns nothing from
+    /// the forty-first and would have to spend a whole round trip on `read_battle_script` to find
+    /// out that the script deciding its battles was written for a gym leader three towns back. The
+    /// purpose and the tally are the parts that differ.
+    Overworld {
+        script: ScriptState,
+        standing: &'a crate::llm::battle_script::ScriptStanding,
+        guide: crate::llm::guide::GuideStatus,
+    },
     /// Whether a script is deciding battle turns, on a turn it did not decide. Only the policy
     /// knows: the file is the worker's and `GameState` has never heard of it.
     ///
@@ -427,16 +481,9 @@ pub fn situation(
         // `read_guide`'s nudge there (7d521e6).** Both of these are facts the model would otherwise
         // have to remember across tens of turns, and the one thing this repo has measured about
         // where a nudge lands is that the bottom of a system prompt is not it.
-        TurnContext::Overworld { script, guide } => {
+        TurnContext::Overworld { script, standing, guide } => {
             if script == ScriptState::Armed {
-                out.push_str(
-                    "Your battle script is armed and is deciding your battle turns, so the battles \
-                     going past are not being put to you and are costing you nothing. A battle \
-                     report is the only account you get of what it chose. If one shows it losing a \
-                     Pokémon, fleeing from something worth catching, or attacking with a move the \
-                     enemy shrugs off, that is the script doing it and not the game: \
-                     `read_battle_script` shows what it says and `set_battle_script` replaces it.\n\n",
-                );
+                out.push_str(&script_standing_line(standing));
             }
             // ⚠️ **Only the stale case is worth a line** — see `GuideStatus::Current`'s ⚠️ for why a
             // run that has never read one is silent here rather than nagged.
@@ -695,6 +742,17 @@ pub fn situation(
         out.push_str(&format!("{} battle\n", battle.battle_type));
         out.push_str(&side("Yours", &battle.player));
         out.push_str(&side("Enemy", &battle.enemy));
+        // ⚠️ **Say why the menu has one row, or it reads as the agent being broken.** The run is
+        // being told it may only flee a Gastly it is forty levels above, which is the shape of thing
+        // that has twice now had a model conclude the game was malfunctioning and file an issue
+        // instead of playing on (the locked gym door, the Route 22 guard). The cartridge does *not*
+        // say this one out loud: "too scared to move" names the symptom and never the Silph Scope,
+        // so unlike a guard who explains himself there is no quoted line below to do the work.
+        if is_ghost_battle(state.map.map, &state.bag, battle.battle_type) {
+            out.push_str("⚠️ This is a GHOST: no move, ball or switch does anything here until you \
+                          are carrying the Silph Scope (it is in the Rocket Hideout, under the Game \
+                          Corner in Celadon). Running always works. Nothing is broken.\n");
+        }
         if battle.enemy_trapping {
             // ⚠️ The menu still opens and every option still looks available, but any *move* chosen is
             // replaced with "cannot move" — a decider that does not know this loops until the wrap ends.
@@ -1205,7 +1263,7 @@ mod tests {
 
         let overworld = |script| situation(
             DecisionKind::Overworld, &state, &ApiSnapshot::default(), &[], &[],
-            TurnContext::Overworld { script, guide: crate::llm::guide::GuideStatus::Current }, &[],
+            TurnContext::Overworld { script, standing: &Default::default(), guide: crate::llm::guide::GuideStatus::Current }, &[],
         );
 
         let armed = overworld(ScriptState::Armed);
@@ -1244,7 +1302,7 @@ mod tests {
 
         let overworld = |guide| situation(
             DecisionKind::Overworld, &state, &ApiSnapshot::default(), &[], &[],
-            TurnContext::Overworld { script: ScriptState::Unedited, guide }, &[],
+            TurnContext::Overworld { script: ScriptState::Unedited, standing: &Default::default(), guide }, &[],
         );
 
         // Read while the player still had no badges, now holding at least the first: the chapter
