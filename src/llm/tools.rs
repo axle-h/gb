@@ -881,9 +881,11 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                      list. `then` chains up to {} more ids from this same menu, taken in order \
                      without asking you again; that is worth doing where each is still true after \
                      the one before, as in heal then leave. It stops at the first that will not \
-                     resolve or is stopped, and says where it got to. `resume_after_battle` takes \
-                     the action up again once a battle that interrupted it ends.",
+                     resolve or is stopped, and says where it got to. `resume_after_battle` is \
+                     true unless you say otherwise: a battle interrupting the action does not end \
+                     it, and it is taken up again after, up to {} times.",
                     MAX_CHAINED_ACTIONS - 1,
+                    crate::pokemon::llm_policy::MAX_BATTLE_RESUMES,
                 ),
                 json!({
                     "type": "object",
@@ -897,7 +899,7 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                         },
                         "resume_after_battle": {
                             "type": "boolean",
-                            "description": "Carry on after a battle interrupts.",
+                            "description": "Default true. False to be asked again instead.",
                         },
                     },
                     "required": ["id"],
@@ -1712,10 +1714,22 @@ fn chosen_actions(arguments: &Value, menu: &[String]) -> Result<Terminal, String
     Ok(Terminal::ChooseAction {
         id,
         then,
+        // ⚠️ **Defaults to `true`, and it used to default to `false`.** A battle interrupting a
+        // walk says nothing about the walk: the battle ends by itself, the world is where it was,
+        // and the walk was going to be re-issued word for word. Left opt-in, the deployed run of
+        // 2026-09-01 never once set it, so every wild encounter on a route cost a fresh overworld
+        // turn *and* dropped the model back into a situation whose action it had already chosen —
+        // which is where it loses track of what it was doing. The conservative direction is still
+        // available and is now the thing that has to be asked for.
+        //
+        // ⚠️ **This changes what an *omitted* field means, so it is the one place a default can be
+        // wrong in a way nothing else notices.** `MAX_BATTLE_RESUMES` and `drop_queue`'s rules are
+        // unchanged: only a *battle* is ever resumed through, a text box or a guard still ends the
+        // action, and the budget still runs out.
         resume_after_battle: arguments
             .get("resume_after_battle")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(true),
     })
 }
 
@@ -3300,7 +3314,12 @@ mod tests {
         };
         assert_eq!(id, "PalletTown:5,6:Warp");
         assert_eq!(then, ["PalletTown:3,3:Mom"]);
-        assert!(!resume_after_battle, "a battle ends the action unless the model says otherwise");
+        // ⚠️ **Omitted means `true`, and it used to mean `false`.** A battle interrupting a walk
+        // says nothing about the walk, and left opt-in the deployed run of 2026-09-01 never once
+        // asked for it — so every wild encounter bought a fresh overworld turn describing a
+        // situation whose action had already been chosen. The conservative direction is still there
+        // and is now the one that has to be named.
+        assert!(resume_after_battle, "a battle does not end the action unless the model says so");
 
         // ⚠️ The id is checked, not merely the count: a chained id from an earlier turn is exactly
         // the mistake `not_on_the_menu` exists for, and it must not be let through by being second.
@@ -3328,11 +3347,11 @@ mod tests {
         assert!(complaint.contains("list of further ids"), "{complaint}");
 
         let CallKind::Terminal(Terminal::ChooseAction { resume_after_battle, .. }) = chain(
-            r#"{"id":"PalletTown:5,6:Warp","resume_after_battle":true,"summary":"carry on"}"#,
+            r#"{"id":"PalletTown:5,6:Warp","resume_after_battle":false,"summary":"stop and think"}"#,
         ) else {
             panic!("the flag is legal on its own");
         };
-        assert!(resume_after_battle);
+        assert!(!resume_after_battle, "and `false` is what turns it off");
     }
 
     /// A terminal call from the other kind is answerable, not fatal — and the answer names the tool
