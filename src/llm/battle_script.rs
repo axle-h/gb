@@ -113,6 +113,16 @@ pub const MAX_SOURCE: usize = 6_000;
 /// is too long is still a purpose, and refusing the call would throw away the script with it.
 pub const MAX_PURPOSE: usize = 200;
 
+/// How much of a disarm reason rides on the overworld turn.
+///
+/// ⚠️ **[`MAX_PURPOSE`]'s argument, for the same reason: this is re-sent on every overworld turn
+/// for as long as the script stays broken.** The reasons this codebase writes are one sentence
+/// (the longest is `NO_ACTION` at 191 bytes), but `describe`'s fallback arm is rhai's own
+/// `Display` and is not ours to bound. Cut with an ellipsis rather than silently, because a
+/// truncated sentence about what went wrong reads as a complete one and is then acted on.
+/// `read_battle_script` still answers with the whole of it.
+pub const MAX_FAILURE: usize = 240;
+
 /// The fuel. Rhai counts operations and terminates when this is reached, which is the guard
 /// `catch_unwind` cannot provide: a panic can be caught, a loop cannot.
 ///
@@ -688,6 +698,18 @@ fn describe(failure: &EvalAltResult) -> String {
     }
 }
 
+/// A disarm reason, cut to [`MAX_FAILURE`] for the overworld turn that carries it every turn.
+///
+/// ⚠️ **With an ellipsis, unlike [`truncated`].** A print line that stops mid-word is obviously
+/// cut; a sentence saying what went wrong is not, and the model acts on it. `MAX_QUOTE`'s
+/// head-only truncation in `battle_report` is the same mistake already paid for once.
+fn standing_failure(why: &str) -> String {
+    match why.char_indices().nth(MAX_FAILURE) {
+        Some((at, _)) => format!("{}…", &why[..at]),
+        None => why.to_string(),
+    }
+}
+
 fn truncated(text: &str, limit: usize) -> String {
     match text.len() <= limit {
         true => text.to_string(),
@@ -808,10 +830,19 @@ impl BattleScript {
         self.saved.last_failure.as_deref()
     }
 
-    /// What the model said it wrote this script for, and how many battle turns it has decided
-    /// since. Empty for the default, which decides nothing and was written by nobody.
+    /// What the model said it wrote this script for, how many battle turns it has decided since,
+    /// and — if it has stopped — why. Empty for the default, which decides nothing and was written
+    /// by nobody.
     pub fn standing(&self) -> ScriptStanding {
-        ScriptStanding { purpose: self.saved.purpose.clone(), decided: self.saved.decided }
+        ScriptStanding {
+            purpose: self.saved.purpose.clone(),
+            decided: self.saved.decided,
+            // ⚠️ **Only while it is the *current* state.** `set` clears `last_failure`, so this is
+            // normally `None` on an armed script anyway — but a file written before that was true
+            // could carry one, and an armed script explaining why it is broken is the one reading
+            // of this line that is worse than no line at all.
+            failure: (!self.armed()).then(|| self.saved.last_failure.as_deref().map(standing_failure)).flatten(),
+        }
     }
 
     /// Write back the running count the policy has been keeping. ⚠️ **The policy cannot persist it
@@ -998,6 +1029,17 @@ pub struct ScriptStanding {
     pub purpose: Option<String>,
     /// Battle turns decided since this script was armed.
     pub decided: u32,
+    /// Why the script stopped deciding turns, capped at [`MAX_FAILURE`]. `Some` exactly while
+    /// [`ScriptState::Disarmed`] holds, and cleared by [`BattleScript::set`] along with the rest.
+    ///
+    /// ⚠️ **This is a second copy of the reason and it is not [`Live::take_failure`]'s.** That one
+    /// is a *message in transit*: the worker takes it once, at the top of the next turn, to write
+    /// it into the file, and it is gone. This one is a standing fact that lasts as long as the
+    /// broken script does, so it can be said on every overworld turn until the model fixes it —
+    /// which is the whole point, since the overworld turn is the only one carrying the tools that
+    /// can. Conflating the two gives the reason to exactly one turn: the battle turn that cannot
+    /// act on it.
+    pub failure: Option<String>,
 }
 
 /// The armed script, shared between the worker thread that writes it and the emulator thread that
@@ -1066,11 +1108,20 @@ impl Live {
     /// The policy found the script wanting. It stops deciding turns immediately — the source is
     /// dropped here rather than flagged, so nothing can consult it again before the worker has
     /// caught up — and `why` is left for the worker to persist.
+    ///
+    /// ⚠️ **The reason is written into the standing as well as into the outbox, and the two have
+    /// different lifetimes on purpose.** `failure` is taken by the worker one turn later and is
+    /// then gone; `standing.failure` has to outlive that, because the turn that can do something
+    /// about a broken script is the *overworld* turn and the failure happened in a battle. Without
+    /// this the first overworld turn after a disarm reads the file — which the worker has by then
+    /// written — and every path agrees, but only by going through a checkpoint the policy does not
+    /// control; setting it here means the very next turn has it whatever the worker got to.
     pub fn failed(&self, why: &str) {
         let mut inner = self.locked();
         inner.source = None;
         inner.state = ScriptState::Disarmed;
         inner.failure = Some(why.to_string());
+        inner.standing.failure = Some(standing_failure(why));
     }
 
     /// Taken by the worker at the top of a turn, once.
@@ -1621,7 +1672,7 @@ mod tests {
         // reads as a *fresh* script rather than an eight-hour-old one.
         assert_eq!(
             reopened.standing(),
-            ScriptStanding { purpose: Some("a test".into()), decided: 340 },
+            ScriptStanding { purpose: Some("a test".into()), decided: 340, failure: None },
             "the purpose and the tally survive the process that wrote them",
         );
 
@@ -1634,6 +1685,64 @@ mod tests {
         // edit, so what it was for and how far it got are exactly the context for editing it.
         assert_eq!(reopened.standing().purpose.as_deref(), Some("a test"));
         assert_eq!(reopened.standing().decided, 340);
+        // ⚠️ **And the reason comes back with them, because it rides on the overworld turn for as
+        // long as the script stays broken.** A restart that dropped it would leave the one turn
+        // that can fix a script telling the model only that it is broken, which is the state this
+        // whole line replaced.
+        assert_eq!(reopened.standing().failure.as_deref(), Some("it ran out of operations"));
+    }
+
+    /// ⚠️ **The disarm reason has two lifetimes and needs two carriers, which is the trap this
+    /// guards.** `Live::take_failure` is a message in transit — the worker takes it once, at the
+    /// top of the next turn, writes it to the file, and it is gone. But the turn that can *act* on
+    /// a broken script is the overworld turn, and the failure happened in a battle, so a reason
+    /// that lived only in the outbox would reach exactly one turn: the battle turn that cannot
+    /// call `set_battle_script`. `ScriptStanding::failure` is the copy that outlives the drain.
+    #[test]
+    fn a_disarm_reason_outlives_the_worker_taking_it() {
+        let live = Live::default();
+        live.arm(Some(ALWAYS_DECIDES.to_string()), ScriptState::Armed, ScriptStanding {
+            purpose: Some("a test".into()), decided: 12, failure: None,
+        });
+
+        live.failed("it named a move the Pokémon does not know");
+        assert_eq!(live.state(), ScriptState::Disarmed);
+        assert!(live.source().is_none(), "nothing may consult it again");
+
+        // The worker drains it once, to persist it.
+        assert_eq!(live.take_failure().as_deref(), Some("it named a move the Pokémon does not know"));
+        assert_eq!(live.take_failure(), None, "taken once, not once a turn");
+
+        // And every overworld turn after that still has it.
+        let standing = live.standing();
+        assert_eq!(standing.failure.as_deref(), Some("it named a move the Pokémon does not know"));
+        // ⚠️ **The purpose and the tally are kept rather than cleared.** They describe the script
+        // that is still on disk waiting to be edited, which is what the model is being asked to do.
+        assert_eq!(standing.purpose.as_deref(), Some("a test"));
+        assert_eq!(standing.decided, 12);
+
+        // Arming a replacement clears it, since it is a fact about the script it replaced.
+        live.arm(Some(ALWAYS_DECIDES.to_string()), ScriptState::Armed, ScriptStanding::default());
+        assert_eq!(live.standing().failure, None);
+    }
+
+    /// ⚠️ **Cut with an ellipsis, and only in the standing.** `MAX_FAILURE` exists because the
+    /// reason is re-sent on every overworld turn until the script is fixed; the ellipsis exists
+    /// because a sentence about what went wrong that stops mid-clause reads as a finished one and
+    /// gets acted on. `battle_report`'s `MAX_QUOTE` paid for that lesson head-first.
+    #[test]
+    fn a_long_disarm_reason_is_cut_for_the_turn_but_not_for_the_file() {
+        let scratch = Scratch::new("battle-script");
+        let mut script = BattleScript::open(Some(&scratch.0));
+        script.set(Some(ALWAYS_DECIDES), Some("a test"));
+        // `é` throughout: the game's own names are full of it and a byte slice here panics.
+        let long = "é".repeat(MAX_FAILURE * 2);
+        script.disarm(&long);
+
+        assert_eq!(script.last_failure(), Some(long.as_str()), "the file keeps the whole of it");
+        let cut = script.standing().failure.expect("the turn gets one");
+        assert_eq!(cut.chars().count(), MAX_FAILURE + 1, "cut to the cap plus the ellipsis");
+        assert!(cut.ends_with('…'), "and says that it was cut: {cut}");
     }
 
     /// ⚠️ **Unsetting goes back to [`DEFAULT`] rather than to nothing**, which is the whole of what

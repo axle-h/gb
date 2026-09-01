@@ -3293,8 +3293,12 @@ mod tests {
     #[test]
     fn a_battle_turn_on_the_default_script_says_so_and_names_the_tools_in_order() {
         let (mut rig, mut policy) = Rig::new(vec![]);
-        rig.endpoint.replies.lock().unwrap()
-            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+        let walk = format!(r#"{{"id":"{}"}}"#, rig.first_action_id());
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            replies.push_back(calls(&[("choose_action", &walk)]));
+        }
 
         rig.enter_battle();
         rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers it");
@@ -3302,14 +3306,29 @@ mod tests {
         let situation = rig.requests().last().expect("a battle request").messages.last()
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(situation.contains("still the default one"), "{situation}");
-        // ⚠️ **All three, in the order they have to be called.** `read_battle_script` leads because
-        // the default makes it answer with a file to edit rather than with "there is none", which is
-        // the whole of what this change bought; the docs are what make `set_battle_script`
-        // affordable, and a model sent straight at it writes a script from memory.
-        let read = situation.find("read_battle_script").unwrap_or_else(|| panic!("{situation}"));
-        let docs = situation.find("get_battle_script_docs").unwrap_or_else(|| panic!("{situation}"));
-        let set = situation.find("set_battle_script").unwrap_or_else(|| panic!("{situation}"));
-        assert!(read < docs && docs < set, "named in the order they are called: {situation}");
+        // ⚠️ **The battle turn states the cost and names no tool, because it carries none of them.**
+        // `tools::offers_battle_script` is `Overworld` only, so the three names here were an
+        // instruction this turn could not carry out — and a model told to do something on a *later*
+        // turn has nowhere to keep that: the thinking is dropped and only `summary` survives.
+        for tool in ["read_battle_script", "get_battle_script_docs", "set_battle_script"] {
+            assert!(!situation.contains(tool), "the battle turn does not name {tool}: {situation}");
+        }
+
+        // ⚠️ **All three, in the order they have to be called, on the turn that has them.**
+        // `read_battle_script` leads because the default makes it answer with a file to edit rather
+        // than with "there is none", which is the whole of what the default bought; the docs are
+        // what make `set_battle_script` affordable, and a model sent straight at it writes a script
+        // from memory.
+        rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
+        rig.pump_overworld(&mut policy).expect("the overworld turn lands");
+        rig.wait_for_requests(2, Duration::from_secs(5));
+        let overworld = rig.requests().last().expect("an overworld request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(overworld.contains("still the default one"), "{overworld}");
+        let read = overworld.find("read_battle_script").unwrap_or_else(|| panic!("{overworld}"));
+        let docs = overworld.find("get_battle_script_docs").unwrap_or_else(|| panic!("{overworld}"));
+        let set = overworld.find("set_battle_script").unwrap_or_else(|| panic!("{overworld}"));
+        assert!(read < docs && docs < set, "named in the order they are called: {overworld}");
     }
 
     /// ⚠️ **The half of the disarm that was silent, and the expensive half.** The failure is
@@ -3322,11 +3341,16 @@ mod tests {
                       if battle.best_move != () { battle.fight(battle.best_move); }\n\
                       battle.ask();";
         let (mut rig, mut policy) = armed_with(broken, 0);
+        // ⚠️ **Queued here rather than through `armed_with`'s `then`, because the endpoint answers
+        // in order.** Those replies go in ahead of the battle's and would be handed to the battle
+        // turns instead.
+        let walk = format!(r#"{{"id":"{}"}}"#, rig.first_action_id());
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             for _ in 0..2 {
                 replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
             }
+            replies.push_back(calls(&[("choose_action", &walk)]));
         }
         let before = rig.requests().len();
 
@@ -3350,9 +3374,36 @@ mod tests {
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(next.contains("no longer deciding your battle turns"),
                 "a run whose script broke has to keep being told: {next}");
-        assert!(next.contains("read_battle_script"), "and where to go and look: {next}");
+        // ⚠️ **The battle turn names no tool and quotes no reason, and both used to be here.** It
+        // cannot call `set_battle_script` — `tools::offers_battle_script` is `Overworld` only — so
+        // naming it was an instruction this turn could not carry out, and the reason was 240 bytes
+        // of every battle turn of a broken run for nothing. What it keeps is the one fact only it
+        // can state: that the request being spent on this turn is the optional one.
+        assert!(!next.contains("read_battle_script"),
+                "the battle turn does not name a tool it is not offered: {next}");
         assert!(!next.contains("Hydro Cannon"),
-                "but not the reason a second time - that is what `read_battle_script` is for: {next}");
+                "nor repeat the reason it cannot act on: {next}");
+
+        // ⚠️ **And the overworld turn is where all of it lands, because that is the turn holding
+        // the tools.** The deployed run of 2026-09-01 is what this half is for: disarmed at
+        // 22:06:33 UTC, it was told on 58 of 58 battle turns and 0 of 83 overworld turns, and
+        // called neither tool once in the 25 minutes before it was looked at. Being told on the
+        // turn that cannot act is indistinguishable from not being told.
+        policy.on_event(&AgentEvent::BattleEnded);
+        rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
+        rig.pump_overworld(&mut policy).expect("the overworld turn after the failure lands");
+        rig.wait_for_requests(before + 3, Duration::from_secs(5));
+        let overworld = rig.requests().last().expect("the overworld turn").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(overworld.contains("no longer deciding your battle turns"),
+                "the state is said where it can be acted on: {overworld}");
+        assert!(overworld.contains("Hydro Cannon"),
+                "with the reason, rather than a round trip away in `read_battle_script`: {overworld}");
+        assert!(overworld.contains("set_battle_script"),
+                "and the tool that arms a corrected one: {overworld}");
+        // ⚠️ **The claim that the tools are *here* is the load-bearing sentence.** Without it the
+        // model reads the same warning it has read on every battle turn and defers it again.
+        assert!(overworld.contains("this is a turn that can fix it"), "{overworld}");
     }
 
     /// `battle.ask()` is the granular half of the feature: the script keeps deciding, and hands
