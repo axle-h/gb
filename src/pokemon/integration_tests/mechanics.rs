@@ -2033,6 +2033,50 @@ fn a_pickup_that_works_reports_no_failure() {
     );
 }
 
+/// ⚠️ **The deployed run of 2026-09-01 was told a pickup it had just completed had failed.** The
+/// transcript is unambiguous: `📖 AI found MOON STONE!`, then 200 ms later — exactly
+/// `PICKUP_SETTLE_TICKS` — `✗ nothing was picked up: the Moon Stone is still lying there.` The
+/// model believed the second one over the first for one turn. `a_pickup_that_works_reports_no_failure`
+/// covers the same shape in Viridian Forest and passes, so whatever this is, it is not every pickup.
+#[test]
+fn the_mt_moon_moon_stone_is_not_reported_as_still_lying_there() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/mt-moon.bin"),
+        Duration::from_secs(600),
+        // ⚠️ **Re-issued rather than issued once.** `Interact` pops the moment it issues the walk,
+        // and this walk crosses the whole of Mt Moon: the first attempt is aborted by the Super
+        // Nerd's script and the next few by wild encounters, exactly as the deployed run's was
+        // (it asked three times). One entry would leave the run standing where it was stopped.
+        vec![PolicyStep::Interact(MapSprite::MTMOON1F_MOON_STONE); 30],
+    );
+
+    // ⚠️ **Not `step_until_exhausted`, and not for the reason the refusal test says.** `Interact`
+    // pops the instant it *issues* the walk, and this one is 98 steps across Mt Moon through wild
+    // encounters — so the queue is empty a tick in and the run would stop before the ball is
+    // reached. Step until the cartridge says it happened, then long enough for
+    // `PICKUP_SETTLE_TICKS` to come round several times over.
+    let mut events = Vec::new();
+    let mut settle = 0;
+    for _ in 0..200_000 {
+        fixture.step();
+        events.extend(fixture.agent.drain_events());
+        match events.iter().any(|e| format!("{e}").contains("MOON STONE")) {
+            true => settle += 1,
+            false => {}
+        }
+        if settle > 300 {
+            break;
+        }
+    }
+
+    let said = events.iter().map(|e| format!("{e}")).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("MOON STONE"), "the leg has to actually reach it or it proves nothing:\n{said}");
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::OverworldPickupFailed { .. })),
+        "the Moon Stone was picked up, so nothing failed:\n{said}",
+    );
+}
+
 /// ⚠️ **Whoever owns a menu has to own it from the moment it opens, and the mart did not.**
 ///
 /// `assert_pokemart_state` entered a `PokemartShopping` state only when the policy *answered* what

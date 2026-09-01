@@ -1713,7 +1713,15 @@ impl PokemonAgent {
         let Ok(state) = self.observe_state(api) else { return };
         self.pending_pickup = None;
         let MetaTile::Sprite(name) = target else { return };
-        if state.map.sprites.iter().any(|sprite| sprite.name == name) {
+        // ⚠️ **`hidden` is the whole answer, and leaving it out reported every successful pickup on
+        // a missable object as a failure.** `HideObject` at the end of the pickup script sets the
+        // object's bit in `wMissableObjectFlags`; the sprite stays in the map's own list, keeps its
+        // name and keeps its Poké Ball picture, and only `Sprite::hidden` moves — measured on the
+        // Mt Moon Moon Stone as `hidden=true picture=PokeBall on_screen=false`. So a name-only test
+        // answers "still there" for a ball that has just gone into the bag, which is what the
+        // deployed run of 2026-09-01 was told 200 ms after `AI found MOON STONE!`.
+        // `MetaTileMap::actions` has always filtered on the same flag; this is the second reader.
+        if state.map.sprites.iter().any(|sprite| sprite.name == name && !sprite.hidden) {
             self.event(AgentEvent::OverworldPickupFailed { target });
         }
     }
