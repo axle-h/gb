@@ -373,6 +373,21 @@ pub enum TurnContext<'a> {
     /// Carried rather than read from the state for the same reason the two above are — nothing but
     /// the agent knows it.
     Stuck { agent_state: &'a str, stuck_for: std::time::Duration },
+    /// The two standing facts an overworld turn carries: whether a battle script is deciding
+    /// battles the model is never asked about, and whether the walkthrough chapter has moved on
+    /// since it last read one. Only the policy knows either — the script file is the worker's and
+    /// `GameState` has never heard of it, and the last chapter read is a fact about the
+    /// conversation rather than about the game.
+    ///
+    /// ⚠️ **`ScriptState::Armed` is the one script state with no other carrier, which is the whole
+    /// reason this variant exists.** `Unedited` and `Disarmed` both render on `Battle` below and
+    /// both *have* battle turns to render on — that is what those states mean. A working armed
+    /// script produces **no battle turns at all**, so the line written for it was reachable only on
+    /// a Safari turn or a `battle.ask()`: the 2026-09-01 run armed one at 13:35, blacked out twice
+    /// to it, and in the ~80 overworld turns that followed was never once told a script existed.
+    /// The other two states are deliberately *not* repeated here — they are already said on every
+    /// battle turn, and saying them twice is how a situation grows a paragraph nobody reads.
+    Overworld { script: ScriptState, guide: crate::llm::guide::GuideStatus },
     /// Whether a script is deciding battle turns, on a turn it did not decide. Only the policy
     /// knows: the file is the worker's and `GameState` has never heard of it.
     ///
@@ -408,6 +423,34 @@ pub fn situation(
 
     match context {
         TurnContext::None => {}
+        // ⚠️ **At the top of the turn, above the situation, on the same evidence that put
+        // `read_guide`'s nudge there (7d521e6).** Both of these are facts the model would otherwise
+        // have to remember across tens of turns, and the one thing this repo has measured about
+        // where a nudge lands is that the bottom of a system prompt is not it.
+        TurnContext::Overworld { script, guide } => {
+            if script == ScriptState::Armed {
+                out.push_str(
+                    "Your battle script is armed and is deciding your battle turns, so the battles \
+                     going past are not being put to you and are costing you nothing. A battle \
+                     report is the only account you get of what it chose. If one shows it losing a \
+                     Pokémon, fleeing from something worth catching, or attacking with a move the \
+                     enemy shrugs off, that is the script doing it and not the game: \
+                     `read_battle_script` shows what it says and `set_battle_script` replaces it.\n\n",
+                );
+            }
+            // ⚠️ **Only the stale case is worth a line** — see `GuideStatus::Current`'s ⚠️ for why a
+            // run that has never read one is silent here rather than nagged.
+            if let crate::llm::guide::GuideStatus::Stale { index } = guide {
+                out.push_str(&format!(
+                    "⚠️ You have won a badge since you last read the walkthrough, and `read_guide` \
+                     now answers with a different chapter: {}, and what stands in the way of it. \
+                     What you read before is the stretch of the game you have already finished, so \
+                     anything you are still going on from it is out of date. Read it again on this \
+                     turn, before you decide where to go.\n\n",
+                    crate::llm::guide::chapter_goal(index),
+                ));
+            }
+        }
         TurnContext::Nickname(species) => out.push_str(&format!(
             // No article: a species name is one, and "a Eevee" / "a Omanyte" is what picking one
             // blind gets you in a sentence printed on every naming screen of the run.
@@ -985,6 +1028,23 @@ mod tests {
                 // its battle turns with no script at all, and this is the turn the probe is read to
                 // find out what that costs.
                 DecisionKind::Battle => TurnContext::Battle { script: ScriptState::Unedited },
+                // ⚠️ **Both overworld notes on at once, which is the dearest this turn gets rather
+                // than the likeliest.** The probe is read to price a turn and to see what is
+                // actually sent, so a context that renders neither line would hide them from the one
+                // tool that shows the prose — and would go on hiding them after somebody quietly
+                // changed the policy back to `TurnContext::None`. `Armed` is the standing state of
+                // any run that has written a script; `Stale` lasts from a badge until the next
+                // `read_guide`, so the two together are a real turn, just not a common one.
+                // ⚠️ **The index comes from the fixture's own badges rather than a constant.** A
+                // hardcoded one renders "go and read about the ThunderBadge" onto a turn whose
+                // header already lists the ThunderBadge as won, which is a probe teaching its
+                // reader something that cannot happen.
+                DecisionKind::Overworld => TurnContext::Overworld {
+                    script: ScriptState::Armed,
+                    guide: crate::llm::guide::GuideStatus::Stale {
+                        index: crate::llm::guide::chapter_index(state.badges),
+                    },
+                },
                 _ => TurnContext::None,
             };
             let menu = match kind {
@@ -1128,6 +1188,102 @@ mod tests {
     /// the other way: the deployed run, having found no way north out of Route 2, went round the
     /// same four maps for forty turns and filed three issue reports saying the game was broken. So
     /// the obstacle is named, with what it takes to pass it, and only while it is actually blocking.
+    #[test]
+    /// ⚠️ **`Armed` is the one script state that has no battle turn to be said on, so the overworld
+    /// turn is the only carrier it can have.** `Unedited` and `Disarmed` are both states in which
+    /// battles come back to the model — that is what they *mean* — and both are already said there.
+    /// A working armed script produces no battle turns at all, so before this the line written for
+    /// it reached the model only on a Safari turn or a `battle.ask()`. The 2026-09-01 run armed a
+    /// script that fought a Fire starter into Brock's Rock gym on Ember, blacked out to it twice,
+    /// and in the ~80 overworld turns that followed was never told a script existed.
+    #[test]
+    fn an_armed_battle_script_is_named_on_the_turn_that_can_do_something_about_it() {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/at-vermilion.bin")).expect("the fixture loads");
+        let state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("the fixture has a readable state");
+
+        let overworld = |script| situation(
+            DecisionKind::Overworld, &state, &ApiSnapshot::default(), &[], &[],
+            TurnContext::Overworld { script, guide: crate::llm::guide::GuideStatus::Current }, &[],
+        );
+
+        let armed = overworld(ScriptState::Armed);
+        assert!(armed.contains("battle script is armed"), "{armed}");
+        assert!(armed.contains("read_battle_script"), "and how to look at it: {armed}");
+        assert!(armed.contains("set_battle_script"), "and how to replace it: {armed}");
+        // ⚠️ **It has to say that a bad battle is the script's doing rather than the game's.** The
+        // report is the only account of a scripted battle, and a model that cannot connect a lost
+        // Pokémon to the program that lost it has no reason to open the program.
+        assert!(armed.contains("that is the script doing it"), "{armed}");
+
+        // ⚠️ **The other two are deliberately silent here.** They are said on every battle turn
+        // already, and a run in either state has battle turns to be told on; repeating them would be
+        // a paragraph on every overworld turn of the run saying what the last battle turn just said.
+        for quiet in [ScriptState::Unedited, ScriptState::Disarmed] {
+            let other = overworld(quiet);
+            assert!(!other.contains("battle script"), "{quiet:?} is said on the battle turn: {other}");
+        }
+    }
+
+    /// ⚠️ **A badge is the only thing that changes what `read_guide` answers, and nothing used to
+    /// say when it had.** `guide::chapter` is keyed on the first badge the player is missing, so
+    /// every read between two badges returns a word-for-word copy and a nudge to re-read would be
+    /// asking for the same bytes twice — but winning one swaps the chapter out in the same instant.
+    /// The 2026-09-01 run read the guide once on turn 1, won the Boulder Badge 39 minutes later,
+    /// and went on playing out of the chapter about how to beat Brock.
+    #[test]
+    fn a_badge_says_the_walkthrough_chapter_has_moved_on_under_the_model() {
+        use crate::llm::guide::{status, GuideStatus};
+        use crate::pokemon::badge::Badge;
+
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/at-vermilion.bin")).expect("the fixture loads");
+        let state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("the fixture has a readable state");
+
+        let overworld = |guide| situation(
+            DecisionKind::Overworld, &state, &ApiSnapshot::default(), &[], &[],
+            TurnContext::Overworld { script: ScriptState::Unedited, guide }, &[],
+        );
+
+        // Read while the player still had no badges, now holding at least the first: the chapter
+        // the model is working from is one it has already finished.
+        let stale = status(state.badges, Some(0));
+        assert!(matches!(stale, GuideStatus::Stale { .. }), "the fixture is past chapter 0: {stale:?}");
+        let rendered = overworld(stale);
+        assert!(rendered.contains("won a badge since you last read"), "{rendered}");
+        assert!(rendered.contains("read_guide"), "and the tool that fixes it: {rendered}");
+        // ⚠️ **It names the chapter's subject rather than saying "a different one".** "Go and read
+        // it" is a chore; "the chapter about winning the ThunderBadge" is a reason.
+        assert!(
+            rendered.contains(&crate::llm::guide::chapter_goal(crate::llm::guide::chapter_index(state.badges))),
+            "{rendered}",
+        );
+
+        // ⚠️ **Silent while the chapter is the one it read**, or the line is on every turn of the
+        // run and is the thing a model learns to skip. Silent when it has never read one, too:
+        // see `GuideStatus::Current`.
+        for quiet in [status(state.badges, Some(crate::llm::guide::chapter_index(state.badges))), status(state.badges, None)] {
+            let other = overworld(quiet);
+            assert!(!other.contains("walkthrough"), "{quiet:?}: {other}");
+        }
+
+        // ⚠️ **The nudge is an overworld thing.** There is nothing to be done about a chapter in the
+        // middle of a battle or on a naming screen, and those turns carry no `Overworld` context at
+        // all — which is the property being asserted, since a fifth kind added later would have to
+        // opt in rather than inherit it.
+        let elsewhere = situation(
+            DecisionKind::Battle, &state, &ApiSnapshot::default(), &[], &[],
+            TurnContext::Battle { script: ScriptState::Armed }, &[],
+        );
+        assert!(!elsewhere.contains("walkthrough"), "{elsewhere}");
+
+        // The Elite Four is chapter 8 and has no badge to name.
+        assert_eq!(crate::llm::guide::chapter_goal(8), "the Elite Four");
+        assert_eq!(crate::llm::guide::chapter_goal(1), format!("the {}", Badge::CascadeBadge));
+    }
+
     #[test]
     fn an_obstacle_the_party_cannot_pass_is_named_rather_than_silently_dropped() {
         let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);

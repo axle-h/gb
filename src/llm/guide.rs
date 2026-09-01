@@ -48,6 +48,50 @@ pub fn chapter(badges: Badge) -> &'static str {
     CHAPTERS[chapter_index(badges)]
 }
 
+/// What the model's last [`read_guide`] is worth on the turn being rendered.
+///
+/// ⚠️ **A badge is the only thing that changes the answer, which is what makes this cheap and what
+/// makes it worth saying at all.** [`chapter`] is keyed on the badges alone, so every read between
+/// two badges returns a word-for-word copy of the last one and a nudge to re-read would be asking
+/// the model to buy the same bytes twice. Winning one swaps the chapter out from under it in the
+/// same instant, and nothing in the turn had ever mentioned that: the deployed run of 2026-09-01
+/// read the guide once on turn 1, beat Brock 39 minutes later, and went on playing out of a chapter
+/// about how to beat Brock.
+///
+/// [`read_guide`]: crate::llm::tools::READ_GUIDE
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GuideStatus {
+    /// The chapter the model last read is the one [`chapter`] would hand it now, so re-reading buys
+    /// nothing. ⚠️ **A run that has never read one is this**, deliberately: the system prompt already
+    /// asks for it in the first few turns and the 2026-09-01 run did exactly that, so a standing
+    /// line on every turn of a run that has not would be noise on a case that is already covered —
+    /// and on a *resumed* run, whose conversation holds a chapter this cell knows nothing about, it
+    /// would be false as well. What is new here is only the stale case, which cannot be either.
+    #[default]
+    Current,
+    /// A badge has been won since the last read, so [`chapter`] now answers with a different one.
+    /// [`Badge::ORDER`]`[index]` is what the new chapter is about, or the Elite Four at 8.
+    Stale { index: usize },
+}
+
+/// Whether `last_read` — the [`chapter_index`] a `read_guide` was last answered from — still
+/// describes the stretch of the game `badges` says the player is in.
+pub fn status(badges: Badge, last_read: Option<usize>) -> GuideStatus {
+    let now = chapter_index(badges);
+    match last_read {
+        Some(read) if read != now => GuideStatus::Stale { index: now },
+        _ => GuideStatus::Current,
+    }
+}
+
+/// What the chapter at `index` is about, as a noun phrase for the nudge to name.
+pub fn chapter_goal(index: usize) -> String {
+    match Badge::ORDER.get(index) {
+        Some(badge) => format!("the {badge}"),
+        None => "the Elite Four".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +109,34 @@ mod tests {
         assert_eq!(out_of_order.bits().count_ones(), 2);
         assert_eq!(chapter_index(out_of_order), 1, "the missing Cascade Badge is what to go and get");
         assert!(chapter(out_of_order).contains("Misty"));
+    }
+
+    /// ⚠️ **A read goes stale on a badge and on nothing else**, which is what makes the nudge worth
+    /// the line: between two badges `chapter` returns the same bytes, so re-reading buys nothing.
+    #[test]
+    fn a_read_goes_stale_when_a_badge_moves_the_chapter_and_not_before() {
+        let one = Badge::BoulderBadge;
+        assert_eq!(status(one, Some(1)), GuideStatus::Current, "read after Brock, still before Misty");
+        assert_eq!(status(one, Some(0)), GuideStatus::Stale { index: 1 }, "read before Brock, Brock is beaten");
+
+        // ⚠️ **Never read is `Current`, not stale.** A resumed run's conversation holds a chapter
+        // this has never heard of, so the alternative is a line making a claim about a past it
+        // cannot see. See `GuideStatus::Current`.
+        assert_eq!(status(one, None), GuideStatus::Current);
+        assert_eq!(status(Badge::empty(), None), GuideStatus::Current);
+
+        // ⚠️ It follows `chapter_index`, so it inherits "the first badge missing" rather than a
+        // popcount: two badges out of order is still the Cascade chapter, and a read taken then is
+        // still current.
+        let out_of_order = Badge::BoulderBadge | Badge::ThunderBadge;
+        assert_eq!(status(out_of_order, Some(1)), GuideStatus::Current);
+
+        // Every chapter is nameable, the Elite Four included.
+        for index in 0..=8 {
+            assert!(!chapter_goal(index).is_empty(), "chapter {index}");
+        }
+        assert_eq!(chapter_goal(0), format!("the {}", Badge::BoulderBadge));
+        assert_eq!(chapter_goal(8), "the Elite Four");
     }
 
     /// ⚠️ A place name in the guide is a **key**: the model copies it into `read_route` or matches it

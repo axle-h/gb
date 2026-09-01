@@ -111,6 +111,18 @@ pub struct LlmPolicy {
     /// Kinds `buy_item`'s `then` queued for the current mart visit, drained by
     /// [`Policy::next_mart_purchase`]. Cleared whenever the model is asked a fresh mart turn.
     mart_queue: std::collections::VecDeque<BagItem>,
+    /// The [`guide::chapter_index`] the model's last `read_guide` was answered from, so an overworld
+    /// turn can tell it when a badge has moved the chapter on underneath it.
+    ///
+    /// ⚠️ **The policy owns this because the policy is what answers the tool** — `service_read` runs
+    /// here, on the emulator thread, against the state it already holds. Tracking it on the worker
+    /// would mean carrying the badges across the channel to compare against, which is a field on
+    /// `TurnRequest` bought for something this side can read for free.
+    ///
+    /// ⚠️ **`None` after a restart is silent rather than "unread", and that is the point of
+    /// [`guide::GuideStatus::Current`] being the default**: a resumed run's conversation holds a
+    /// chapter this cell has never heard of, so anything said about the past here would be a guess.
+    guide_chapter_read: Option<usize>,
     /// A report whose battle has ended, waiting for the game to be observed once more so it can be
     /// closed against something.
     ///
@@ -156,7 +168,7 @@ pub(crate) const PLAYER_NAME: &str = "AI";
 /// the *overworld*, and the overworld is where the answer to "half the party has fainted, go and
 /// heal instead" lives. Five is a long route's worth of trainers and wild encounters; past that, an
 /// action the model chose several minutes ago is no longer obviously the action it would choose now.
-const MAX_BATTLE_RESUMES: u8 = 5;
+pub(crate) const MAX_BATTLE_RESUMES: u8 = 5;
 
 /// What became of the overworld action the policy last handed to the agent.
 ///
@@ -249,6 +261,7 @@ impl LlmPolicy {
             finishing: None,
             reports: Vec::new(),
             mart_queue: std::collections::VecDeque::new(),
+            guide_chapter_read: None,
             last_battle_state: None,
         }
     }
@@ -691,9 +704,18 @@ impl Policy for LlmPolicy {
                 // against the same `state`, which is what guarantees `read_party` and `read_map` in
                 // one assistant message agree — and what makes the worker's single-step rollback
                 // sufficient, since a batch can never be half-answered.
-                true => ToolBatchResult::Answered(
-                    batch.calls.iter().map(|call| tools::service_read(call, state, api, graph)).collect(),
-                ),
+                true => {
+                    // ⚠️ **Recorded from the same `state` the answer was rendered from**, not from
+                    // whatever the game says a moment later: the whole value of the cell is that it
+                    // holds the chapter the model was actually handed, so it can be compared against
+                    // the chapter the badges ask for now.
+                    if batch.calls.iter().any(|call| call.function.name == tools::READ_GUIDE) {
+                        self.guide_chapter_read = Some(crate::llm::guide::chapter_index(state.badges));
+                    }
+                    ToolBatchResult::Answered(
+                        batch.calls.iter().map(|call| tools::service_read(call, state, api, graph)).collect(),
+                    )
+                }
                 // The tool is never executed. The worker rolls back one step and abandons the turn.
                 false => ToolBatchResult::Cancelled,
             };
@@ -708,7 +730,11 @@ impl Policy for LlmPolicy {
         if let Some(action) = self.advance_queue(state) {
             return Some(action);
         }
-        match self.advance(DecisionKind::Overworld, TurnContext::None)? {
+        let context = TurnContext::Overworld {
+            script: self.handles.live_script.state(),
+            guide: crate::llm::guide::status(state.badges, self.guide_chapter_read),
+        };
+        match self.advance(DecisionKind::Overworld, context)? {
             Terminal::ChooseAction { id, then, resume_after_battle } => {
                 // The queue is built even for a lone action with nothing chained and no resume: it
                 // is the record of what is being carried out, and `take_current` is then the one
@@ -955,6 +981,9 @@ impl Policy for LlmPolicy {
         self.reports.clear();
         // A queued order belongs to a mart in a game that no longer exists.
         self.mart_queue.clear();
+        // A new game holds no badges, so the chapter is chapter 0 again and whatever the model read
+        // about the old game's stretch is about a game that is over.
+        self.guide_chapter_read = None;
         self.last_battle_state = None;
         // ⚠️ **Disarmed here as well as in `Worker::apply_restart`, because the two happen at
         // different moments.** The worker only learns about a restart at the top of its next turn,
@@ -2513,6 +2542,49 @@ mod tests {
             requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text).collect();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("\"slot\":0"), "read_party: {}", results[0]);
+    }
+
+    /// ⚠️ **The wiring half of the guide nudge, which the prompt's own test cannot see.** That one
+    /// proves the prose renders from a `GuideStatus`; this proves the policy actually *produces*
+    /// one — that servicing `read_guide` records the chapter it was answered from, and that an
+    /// overworld turn carries the result into `situation`. Both links are the kind that rot
+    /// silently: a renamed tool constant or an `Overworld` turn quietly going back to
+    /// `TurnContext::None` would leave every assertion in `prompt` passing and the nudge dead.
+    #[test]
+    fn reading_the_guide_records_the_chapter_and_a_later_badge_says_so() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let decide = || calls(&[("choose_action", &format!(r#"{{"id":"{id}","summary":"on we go"}}"#))]);
+        for reply in [calls(&[("read_guide", "{}")]), decide()] {
+            rig.endpoint.replies.lock().unwrap().push_back(reply);
+        }
+
+        assert_eq!(policy.guide_chapter_read, None, "nothing read yet");
+        assert!(rig.pump_overworld(&mut policy).is_some(), "the turn lands");
+
+        // The fixture is Oak's lab: no badges, so chapter 0, the Boulder Badge.
+        assert_eq!(policy.guide_chapter_read, Some(0), "the read is recorded from the state it answered from");
+        let requests = rig.requests();
+        let chapter: Vec<&str> =
+            requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text).collect();
+        assert!(chapter[0].contains("Brock"), "chapter 0 really was served: {}", &chapter[0][..chapter[0].len().min(200)]);
+        // ⚠️ Nothing is said while the chapter it read is the chapter it is in.
+        assert!(!last_user_message(&requests[0]).contains("walkthrough"), "{}", last_user_message(&requests[0]));
+
+        // Now the cell and the game disagree, which is what winning a badge does to them. ⚠️ **The
+        // cell is moved rather than the save**: `wObtainedBadges` is a RAM write, which this repo
+        // keeps to a `debug_*` tier, and the badge is not what is under test here — the two wiring
+        // links are. That a *badge* is what pulls them apart is held honestly elsewhere, by
+        // `guide::status`'s own test and by `prompt`'s, which renders from a real mid-game fixture.
+        policy.guide_chapter_read = Some(4);
+        let before = rig.requests().len();
+        rig.endpoint.replies.lock().unwrap().push_back(decide());
+        assert!(rig.pump_overworld(&mut policy).is_some(), "and so does the next one");
+        let after = rig.requests();
+        assert!(after.len() > before, "a fresh turn went out");
+        let situation = last_user_message(&after[before]);
+        assert!(situation.contains("won a badge since you last read"), "{situation}");
+        assert!(situation.contains(&crate::llm::guide::chapter_goal(0)), "and names the chapter: {situation}");
     }
 
     /// The mart's stock is the menu, and it comes from the ROM through `ApiSnapshot` — nothing in
