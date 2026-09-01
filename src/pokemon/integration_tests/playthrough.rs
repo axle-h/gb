@@ -54,6 +54,209 @@ fn probe_resume_playthrough() {
     println!("resume ended: {} @ {} badges={:?}", s.map.map, s.map.player_position, s.badges);
 }
 
+/// Hunt the move-selection bug across the whole scripted run and drop a save state at each hit.
+///
+/// The agent confirms whatever row the cursor is on, so the move the cartridge executes is sometimes
+/// not the move the policy chose. `mechanics::the_move_the_agent_confirms_is_the_move_the_policy_asked_for`
+/// reproduces it from one fixture; this finds every occurrence on the mainline and writes the state
+/// **as it stood a few ticks before each bad confirm**, so each one becomes a fixture a fix can be
+/// tried against directly instead of by re-running seven minutes of game.
+///
+/// ⚠️ **The ring is what makes the artifact useful.** The mismatch is only *detectable* from the text
+/// box after the fact, by which time the press that caused it is long gone — so a state saved at the
+/// moment of detection reproduces nothing. States are kept from the ticks while a battle move list is
+/// on screen and the oldest is written out, which is before the cursor was driven.
+///
+/// ```text
+/// cargo test --release --features diagnostics,full-playthrough --bin gb -- \
+///   probe_move_mismatches --exact --ignored --nocapture
+/// ```
+#[test]
+#[cfg(all(feature = "diagnostics", feature = "full-playthrough"))]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_move_mismatches() {
+    use crate::pokemon::battle::BattleAction;
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/start-of-game-state.bin"),
+        Duration::from_mins(800),
+        PolicyStep::eight_badge_steps(),
+    );
+
+    let dir = std::path::Path::new("target/test-artifacts/move-mismatch");
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("artifact dir");
+
+    // Six ticks is 120 ms of game time: comfortably before the cursor was driven to the row that
+    // was confirmed, and short enough that the state still describes the same battle turn.
+    const RING: usize = 6;
+    let mut ring: std::collections::VecDeque<(Vec<u8>, String)> = std::collections::VecDeque::new();
+    let mut intent: Option<(String, u8, String)> = None;
+    let mut found = 0usize;
+    let mut matched = 0usize;
+
+    while !fixture.agent.policy_exhausted() {
+        // Snapshot only while a move list is up — a state is ~24 µs and 6.4 kB, which is affordable
+        // per battle turn and not per tick of a seven-hour run.
+        let on_move_list = {
+            let api = fixture.api();
+            use crate::pokemon::PokemonApiTrait;
+            matches!(api.menu_state().and_then(|m| m.battle_menu_state()),
+                     Some(crate::pokemon::menu::BattleMenuState::MoveList { .. }))
+        };
+        if on_move_list {
+            let where_ = {
+                let s = fixture.game_state();
+                format!("{:?} @ {} party {:?}", s.map.map, s.map.player_position,
+                        s.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>())
+            };
+            if let Ok(bytes) = fixture.gb.save_state() {
+                ring.push_back((bytes, where_));
+                while ring.len() > RING {
+                    ring.pop_front();
+                }
+            }
+        }
+
+        fixture.step();
+
+        for event in fixture.agent.drain_events() {
+            match &event {
+                AgentEvent::BattleActionStarted { actor, action: BattleAction::Fight { slot, battle_move }, .. } =>
+                    intent = Some((actor.to_string(), *slot, battle_move.name.to_string())),
+                AgentEvent::TextBox { message } => {
+                    let Some((actor, slot, wanted)) = intent.clone() else { continue };
+                    let Some(rest) = message.split(&format!("{actor} used ")).nth(1) else { continue };
+                    let Some(actual) = rest.split('!').next() else { continue };
+                    let normalise = |s: &str| s.to_lowercase().replace(['-', ' '], "");
+                    if normalise(actual) == "struggle" {
+                        intent = None;
+                        continue;
+                    }
+                    if normalise(actual) == normalise(&wanted) {
+                        matched += 1;
+                    } else if let Some((bytes, where_)) = ring.front() {
+                        found += 1;
+                        let stem = dir.join(format!("{found:02}-slot{slot}-{wanted}-got-{}", normalise(actual)));
+                        let _ = std::fs::write(stem.with_extension("bin"), bytes);
+                        let _ = std::fs::write(
+                            stem.with_extension("txt"),
+                            format!("wanted slot {slot} {wanted}, cartridge did {actual}\n{where_}\n"),
+                        );
+                        println!("MISMATCH #{found}: slot {slot} {wanted} -> {actual}  [{where_}]");
+                    }
+                    intent = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    println!("\n{matched} battle turns executed the chosen move, {found} did not");
+    println!("states written to {}", dir.display());
+}
+
+/// A policy that fights with one fixed move slot, for replaying a captured mismatch.
+#[cfg(feature = "diagnostics")]
+struct FixedSlot {
+    slot: u8,
+    asked: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+}
+
+#[cfg(feature = "diagnostics")]
+impl crate::pokemon::policy::Policy for FixedSlot {
+    fn name(&self) -> &'static str { "fixed-slot" }
+    fn pick_overworld_action(&mut self, _s: &GameState, _g: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction> { None }
+    fn pick_battle_action(&mut self, state: &GameState) -> Option<crate::pokemon::battle::BattleAction> {
+        use crate::pokemon::battle::BattleAction;
+        let options = crate::pokemon::policy::battle_options(state)?;
+        let chosen = options.iter()
+            .find(|o| matches!(o, BattleAction::Fight { slot, .. } if *slot == self.slot))
+            .or_else(|| options.iter().find(|o| matches!(o, BattleAction::Fight { .. })))?;
+        if let BattleAction::Fight { battle_move, .. } = chosen {
+            *self.asked.borrow_mut() = Some(battle_move.name.to_string());
+        }
+        Some(*chosen)
+    }
+}
+
+/// Replay every state [`probe_move_mismatches`] captured and report which still pick the wrong move.
+///
+/// ⚠️ **This is the regression harness a fix has to satisfy, and it is not a substitute for the
+/// run.** Each state is the same battle a few ticks before the bad confirm, so a fix can be tried
+/// against a dozen real sites in seconds instead of five minutes — but a save state carries the RNG
+/// registers, so this proves a fix works *from these points*, not that the run still reaches them.
+/// Always finish with a clean `full_playthrough`.
+///
+/// ```text
+/// cargo test --release --features diagnostics --bin gb -- \
+///   pokemon::integration_tests::playthrough::probe_replay_move_mismatches --exact --ignored --nocapture
+/// ```
+#[test]
+#[cfg(feature = "diagnostics")]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_replay_move_mismatches() {
+    let dir = std::path::Path::new("target/test-artifacts/move-mismatch");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        println!("no captured states — run probe_move_mismatches first");
+        return;
+    };
+    let mut states: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "bin"))
+        .collect();
+    states.sort();
+
+    // One state at a time when tracing: `GB_REPLAY_ONLY=02`.
+    let only = std::env::var("GB_REPLAY_ONLY").ok();
+    let mut wrong = 0usize;
+    let mut right = 0usize;
+    for path in &states {
+        if let Some(only) = &only {
+            if !path.file_name().unwrap().to_string_lossy().starts_with(only.as_str()) { continue }
+        }
+        // The filename carries what was asked for: NN-slotS-Wanted-got-actual.bin
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let Some(slot) = stem.split("-slot").nth(1).and_then(|r| r.as_bytes().first())
+            .and_then(|b| (*b as char).to_digit(10)) else { continue };
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let mut fixture = TestFixture::with_policy(
+            &std::fs::read(path).expect("state"),
+            Duration::from_secs(300),
+            Box::new(FixedSlot { slot: slot as u8, asked: std::rc::Rc::clone(&asked) }),
+        );
+
+        let mut verdict = None;
+        let mut intent: Option<(String, String)> = None;
+        'ticks: for _ in 0..3_000 {
+            fixture.step();
+            for event in fixture.agent.drain_events() {
+                match &event {
+                    AgentEvent::BattleActionStarted { actor, action: crate::pokemon::battle::BattleAction::Fight { battle_move, .. }, .. } =>
+                        intent = Some((actor.to_string(), battle_move.name.to_string())),
+                    AgentEvent::TextBox { message } => {
+                        let Some((actor, wanted)) = intent.clone() else { continue };
+                        let Some(rest) = message.split(&format!("{actor} used ")).nth(1) else { continue };
+                        let Some(actual) = rest.split('!').next() else { continue };
+                        let n = |s: &str| s.to_lowercase().replace(['-', ' '], "");
+                        if n(actual) == "struggle" { intent = None; continue }
+                        verdict = Some((wanted, actual.to_string(), n(actual) == n(&intent.clone().unwrap().1)));
+                        break 'ticks;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match verdict {
+            Some((wanted, actual, true)) => { right += 1; println!("  OK   {stem}: asked {wanted}, got {actual}") }
+            Some((wanted, actual, false)) => { wrong += 1; println!("  WRONG {stem}: asked {wanted}, got {actual}") }
+            None => println!("  ????  {stem}: no battle turn resolved in budget"),
+        }
+    }
+    println!("\n{} states: {right} correct, {wrong} still wrong", states.len());
+}
+
 /// The full end-to-end playthrough — the single source of truth for how far the agent can play. From a
 /// fresh `RedsHouse2F` save it plays legitimately (button input only, starting from a **Squirtle**) and
 /// earns **all 8 gym badges**: Boulder → (Nugget Bridge → Bill → ) Cascade → Thunder → Rainbow →
