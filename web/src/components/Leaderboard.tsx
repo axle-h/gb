@@ -77,32 +77,21 @@ function Table({ rows }: { rows: Completion[] }) {
           <tr>
             <th>#</th>
             <th>finished</th>
-            <th className="right">in game</th>
-            <th className="right">real</th>
-            <th className="right">turns</th>
-            <th className="right">tokens</th>
-            <th>decided by</th>
-            <th className="right">gb</th>
+            <th className="num">time</th>
+            <th className="agent">agent</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row, index) => (
             <tr key={`${row.archive}`}>
               <td className="dim">{index + 1}</td>
-              <td title={`run ${row.run_id}, archived as ${row.archive}`}>{day(row.completed_at)}</td>
-              <td className="right" title={row.playtime_maxed ? 'the game’s clock stopped at 255:59:59' : row.playtime}>
+              <td title={runDetail(row)}>{day(row.completed_at)}</td>
+              <td className="num" title={row.playtime_maxed ? 'the game’s clock stopped at 255:59:59' : row.playtime}>
                 {row.playtime_maxed ? '255:59:59+' : row.playtime}
               </td>
-              <td className="right" title={`${row.resumes} resume${row.resumes === 1 ? '' : 's'}`}>
-                {duration(row.wall_ms)}
+              <td className="agent" title={tokenDetail(row)}>
+                {agent(row)}
               </td>
-              <td className="right">{row.turns.toLocaleString()}</td>
-              <td className="right" title={tokenDetail(row)}>
-                {tokens(row.prompt_tokens + row.completion_tokens)}
-                {row.tokens_estimated ? '~' : ''}
-              </td>
-              <td title={`${row.badges} badges · ${row.pokedex_owned} caught`}>{row.model ?? row.policy}</td>
-              <td className="right dim">{row.app_version}</td>
             </tr>
           ))}
         </tbody>
@@ -111,27 +100,57 @@ function Table({ rows }: { rows: Completion[] }) {
   );
 }
 
-/** `2026-08-12T14:30:00Z` → `08-12`. The year is the same for everything on a ten-row board. */
-function day(iso: string): string {
-  return iso.slice(5, 10);
+/**
+ * Whoever decided the turns, and what that cost: `gpt-5.4-nano (1,204 turns, 1.5M tokens)`.
+ *
+ * ⚠️ The cost is *free text on the name* rather than two columns of its own, because a scripted run
+ * has neither — `turns` and `tokens` are both zero there, and two permanently empty cells on every
+ * row that did not pay an endpoint read as missing data rather than as a run that never spent
+ * anything. A model's name with nothing after it says the same thing about a model that has only
+ * just started.
+ */
+function agent(row: Completion): string {
+  const total = row.prompt_tokens + row.completion_tokens;
+  const cost = [
+    row.turns > 0 ? `${row.turns.toLocaleString()} turns` : null,
+    total > 0 ? `${tokens(total)}${row.tokens_estimated ? '~' : ''} tokens` : null,
+  ].filter(Boolean);
+  const name = row.model ?? row.policy;
+  return cost.length > 0 ? `${name} (${cost.join(', ')})` : name;
 }
 
-/** Wall clock as `6h12m`, or `12m` under an hour. A finished run is never seconds long. */
-function duration(ms: number): string {
-  const minutes = Math.round(ms / 60_000);
-  const hours = Math.floor(minutes / 60);
-  return hours > 0 ? `${hours}h${`${minutes % 60}`.padStart(2, '0')}m` : `${minutes}m`;
+/**
+ * The completion date in the **viewer's** locale rather than in the ledger's ISO.
+ *
+ * The ledger is UTC and the reader is not, so `08-12` was ambiguous by up to a day at either end and
+ * in an order half the world does not write dates in. `toLocaleDateString` with no options is the
+ * short form each browser already agrees with its own operating system about; the exact instant,
+ * with the time on it, is in the tooltip.
+ */
+function day(iso: string): string {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? iso : at.toLocaleDateString();
+}
+
+function runDetail(row: Completion): string {
+  const at = new Date(row.completed_at);
+  return [
+    Number.isNaN(at.getTime()) ? row.completed_at : at.toLocaleString(),
+    `run ${row.run_id}, archived as ${row.archive}`,
+    `${row.badges} badges · ${row.pokedex_owned} caught`,
+    `${row.resumes} resume${row.resumes === 1 ? '' : 's'} · gb ${row.app_version}`,
+  ].join('\n');
 }
 
 /** The same compaction the header's context gauge uses: 128 400 → `128k`. */
 function tokens(total: number): string {
-  if (total === 0) return '—';
   if (total < 10_000) return `${total}`;
   if (total < 1_000_000) return `${Math.round(total / 1000)}k`;
   return `${(total / 1_000_000).toFixed(1)}M`;
 }
 
 function tokenDetail(row: Completion): string {
+  if (row.prompt_tokens + row.completion_tokens === 0) return `decided by ${row.policy}, which asks no endpoint`;
   const source = row.tokens_estimated ? 'estimated — the endpoint reported no usage' : 'reported by the endpoint';
   return [
     `${row.prompt_tokens.toLocaleString()} prompt + ${row.completion_tokens.toLocaleString()} completion`,
