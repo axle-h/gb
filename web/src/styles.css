@@ -794,7 +794,7 @@ header .run.error {
 
 /* ── The Hall of Fame (the leaderboard) ─────────────────────────────────────────────────────────
    An overlay rather than a panel: the left column is the screen and the party, the right is the
-   log, and neither has room for eight columns of numbers a viewer looks at once an hour. */
+   log, and neither has room for a table a viewer looks at once an hour. */
 
 .entry.hall_of_fame .chip,
 .entry.hall_of_fame .body {
@@ -869,7 +869,7 @@ header .trophy:hover {
   /* `max-height` plus the scroller below, rather than letting the panel grow: a hundred rows would
      otherwise push the header off the top of the viewport, and the header holds the only close
      button. */
-  max-width: 900px;
+  max-width: 720px;
   max-height: 80vh;
   width: 100%;
   padding: 14px 16px;
@@ -934,13 +934,64 @@ header .trophy:hover {
 }
 
 /* Numbers line up on the right so two runs' times can be compared by eye, which is the whole
-   purpose of putting them in a table. */
-.leaderboard .right {
+   purpose of putting them in a table.
+
+   ⚠️ Not `.right`: that is the *page's* right-hand column, and it is `display: flex`. A `<td>` given
+   it becomes a flex container, its text becomes an anonymous flex item at `flex-start`, and
+   `text-align` stops doing anything at all — which is what the four numeric columns here used to do,
+   quietly, for as long as they existed. */
+.leaderboard .num {
+  padding-right: 16px;
   text-align: right;
 }
 
 .leaderboard tbody tr:hover {
   background: var(--bg);
+}
+
+/* On a phone the agent is wider than the panel — `anthropic/claude-sonnet-5 (258 turns, 9.6k tokens)`
+   is 50 characters — and a table that scrolls sideways hides it behind the very edge of the screen,
+   which is the one column a viewer opens this for. So a row stops being a row: the rank, the date
+   and the time keep their line, and the agent wraps underneath them. Nothing is dropped, because a
+   four-column board has nothing spare to drop. */
+@media (width < 640px) {
+  .leaderboard thead {
+    display: none;
+  }
+
+  .leaderboard table,
+  .leaderboard tbody {
+    display: block;
+  }
+
+  .leaderboard tbody tr {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: baseline;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .leaderboard tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .leaderboard td {
+    padding: 0 8px 0 0;
+  }
+
+  .leaderboard .num {
+    padding-right: 0;
+  }
+
+  /* Second line of the card, and the only cell allowed to wrap — a long model id would otherwise
+     widen the grid and put the sideways scrollbar back. */
+  .leaderboard .agent {
+    grid-column: 1 / -1;
+    padding: 2px 0 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* ── W6b: the model's plan ────────────────────────────────────────────────────────────────────── */
