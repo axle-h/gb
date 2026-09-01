@@ -398,17 +398,87 @@ const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
 /// the `HideObject` at the end of the script needs and far shorter than a decision.
 const PICKUP_SETTLE_TICKS: u16 = 10;
 
+/// What [`BattleState::Navigating`] lined up, carried into the confirm so the press that follows is
+/// issued **once** and then checked against the game's own record of what it selected.
+///
+/// ⚠️ **This is the wrong-move bug, and it was a press too many rather than a cursor read gone
+/// wrong.** The confirm arm used to `toggle_button(A)` on every tick of the
+/// [`CONFIRMING_TICKS`] window — fifteen presses — and presses still in flight from the *previous*
+/// turn's confirm landed in a list that had only just opened, so the move was chosen by a press
+/// belonging to a different menu. Traced on a captured mainline state: a leftover `A` on
+/// `MoveList{1}`, two more opening the list, then fifteen in the window, with `BUBBLE` committed
+/// long before the cursor reached slot 1 and was correctly observed there (`wCurrentMenuItem = 2`).
+///
+/// ⚠️ **It is usually invisible, which is why it survived.** The list opens on the move used last,
+/// so asking for the same slot twice running has the stray press confirm the right move by luck. It
+/// bites only when the chosen slot differs from the previous one: **18 of 781 battle turns** across
+/// `full_playthrough`, gym fights among them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Confirm {
+    /// The action being confirmed, so a cursor that turns out not to be where `Navigating` believed
+    /// can be handed straight back to it rather than wedging.
+    action: BattleAction,
+    /// The move slot the policy chose.
+    slot: u8,
+    /// Whether the single confirming press has been issued.
+    pressed: bool,
+    /// Ticks since it was issued, so a press the game never acted on can be retried rather than
+    /// hanging. See [`CONFIRM_ACK_TICKS`].
+    waited: u16,
+    /// `Navigating`'s elapsed tick budget, carried across so a confirm that hands back cannot reset
+    /// it. ⚠️ **Without this the two states ping-pong for ever**: the recovery below rebuilds
+    /// `Navigating` with `ticks: 0`, so `MAX_NAVIGATING_TICKS` never accumulates and the battle
+    /// never hands back to the policy.
+    navigating_ticks: u16,
+    /// How many presses have been issued. ⚠️ **A press can legitimately need repeating** — the list
+    /// is drawn before it takes input, so the first one can land in that gap and do nothing — but a
+    /// press is only ever repeated *after* `wPlayerMoveListIndex` has been checked and found
+    /// unchanged, which is what makes repeating safe here and unsafe in the old per-tick loop.
+    attempts: u8,
+}
+
+/// How long the confirm waits for the game to act on its one press before trying again.
+///
+/// ⚠️ **The agent observes 20 ms *after* its own press** — `gb.run(AGENT_RESOLUTION)` runs before
+/// `agent.step` — so "press until it looks right" over-presses by construction. The wait is what
+/// turns a press into an edge. It is a ceiling, not a delay: it ends the moment
+/// `wPlayerMoveListIndex` is written or the list closes, which is the next tick or two.
+///
+/// ⚠️ **Scoped to this one press.** [`AGENT_RESOLUTION`] is unchanged and the overworld pathfinding
+/// tuned against it is untouched; what changes is only whether a press is *repeated*.
+const CONFIRM_ACK_TICKS: u16 = 3;
+
+/// How many times the confirming press is repeated before giving up and backing out to the main
+/// menu. Each attempt is separated by [`CONFIRM_ACK_TICKS`] and by a fresh reading of
+/// `wPlayerMoveListIndex`, so this is bounded work with a check between every press rather than the
+/// per-tick mashing it replaces.
+const CONFIRM_ATTEMPTS: u8 = 12;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
-    WaitingForMenu { reader: PokemonTextReader, delay: DelayContext, backing_out: u16, confirming: u16 },
+    WaitingForMenu {
+        reader: PokemonTextReader,
+        delay: DelayContext,
+        backing_out: u16,
+        confirming: u16,
+        /// Set only by [`Self::confirming`], i.e. only when `Navigating` lined a move list up. Every
+        /// other way into this state leaves it `None` and confirms exactly as it always did.
+        confirm: Option<Confirm>,
+    },
 
     /// Battle menu is up but policy hasn't returned an action yet.
     AwaitingPolicy { delay: DelayContext },
 
     /// Navigating the menus. `ticks` bounds how long that may take — see the ⚠️ in the tick, which is
     /// the difference between "this decision is taking a while" and "the policy is never asked again".
-    Navigating { action: BattleAction, delay: DelayContext, ticks: u16 },
+    Navigating {
+        action: BattleAction,
+        delay: DelayContext,
+        ticks: u16,
+        /// Consecutive ticks the target menu has been observed. See the ⚠️ at the hand-off.
+        stable: u16,
+    },
 
     /// Dedicated driver for using **any** bag item in battle. The generic navigator can't handle the
     /// bag list — it walks menu *geometry*, and a bag list is a scrolling list of the player's own
@@ -437,6 +507,7 @@ impl Default for BattleState {
             delay: DelayContext::default(),
             backing_out: 0,
             confirming: 0,
+            confirm: None,
         }
     }
 }
@@ -456,6 +527,7 @@ impl BattleState {
             delay: DelayContext::default(),
             backing_out: BACKING_OUT_TICKS,
             confirming: 0,
+            confirm: None,
         }
     }
 
@@ -479,12 +551,19 @@ impl BattleState {
     /// legitimately fail to press anything (a refusal, a message box) — after the window the
     /// ordinary text test resumes and a genuinely returned main menu is handed to the policy as
     /// before, one window late.
-    fn confirming() -> Self {
+    fn confirming(action: BattleAction, navigating_ticks: u16) -> Self {
         Self::WaitingForMenu {
             reader: PokemonTextReader::message_box_only(),
             delay: DelayContext::default(),
             backing_out: 0,
             confirming: CONFIRMING_TICKS,
+            // ⚠️ Only a move list is confirmed by slot. Everything else keeps the old behaviour,
+            // including the item and party sub-menus, which have their own drivers and their own
+            // ⚠️s about what a leaked list means.
+            confirm: match action {
+                BattleAction::Fight { slot, .. } => Some(Confirm { action, slot, pressed: false, waited: 0, attempts: 0, navigating_ticks }),
+                _ => None,
+            },
         }
     }
 }
@@ -2584,7 +2663,7 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 match battle_state {
-                    BattleState::WaitingForMenu { reader, delay, backing_out, confirming } => {
+                    BattleState::WaitingForMenu { reader, delay, backing_out, confirming, confirm } => {
                         // ⚠️ **Hoisted above everything, because the A presses that defeat it do not
                         // come from the branch that detects the problem.** A move the game refuses —
                         // out of PP, or disabled — drops back to the move list, and getting out takes
@@ -2818,6 +2897,90 @@ CascadeBadge; not cutting".to_string(),
                                         // The geometry is stale and the game is talking: this is the
                                         // turn resolving, not a move list. See `reading_dialogue`.
                                         reader.update(api);
+                                    } else if let Some(mut pending) = *confirm {
+                                        let pending = &mut pending;
+                                        // ⚠️ **One press, then wait for the game's own record of it.**
+                                        // See `Confirm`. `wPlayerMoveListIndex` is what
+                                        // `MoveSelectionMenu` writes on the A press
+                                        // (`wCurrentMenuItem - 1`, `engine/battle/core.asm`), so it
+                                        // is the only witness that the press landed on the row that
+                                        // was chosen rather than on one a stray press had left the
+                                        // cursor on. Reading it is what turns "we pressed A at about
+                                        // the right time" into "the game selected slot N".
+                                        let committed = api.mmu()
+                                            .read_pointer(&crate::pokemon::symbols::pokered_symbols::wPlayerMoveListIndex);
+                                        match pending.pressed {
+                                            // ⚠️ **Issued, recorded, and therefore *finished* — the
+                                            // confirm has to get out of the way here.** Holding the
+                                            // arm after the move is committed means nothing presses
+                                            // A to advance the text the move produces, and the
+                                            // battle stops progressing: eight tests timed out on
+                                            // their cycle budget with the right move being used
+                                            // every turn. Clearing it drops back to the ordinary
+                                            // path on the next tick, which is what reads the turn
+                                            // out.
+                                            true if committed == pending.slot => {
+                                                *confirm = None;
+                                                api.release_all_buttons();
+                                            }
+                                            // Issued and not yet acted on. Waiting is the whole fix:
+                                            // the agent observes 20 ms behind its own press, so a
+                                            // second one here is what used to land in the next menu.
+                                            true if pending.waited < CONFIRM_ACK_TICKS => {
+                                                pending.waited += 1;
+                                                api.release_all_buttons();
+                                            }
+                                            // The press was not acted on. The list is drawn a few
+                                            // ticks before it takes input, so the first one can land
+                                            // in that gap and simply do nothing.
+                                            true if pending.attempts < CONFIRM_ATTEMPTS => {
+                                                pending.pressed = false;
+                                                pending.waited = 0;
+                                                api.release_all_buttons();
+                                            }
+                                            // ⚠️ **Out of attempts, and this is the assertion that
+                                            // catches a stray press *now*.** Before this the turn
+                                            // proceeded with whatever move the game had taken and the
+                                            // only evidence was the cartridge's own sentence. Back
+                                            // out to the main menu and let `Navigating` line it up
+                                            // again; `MAX_NAVIGATING_TICKS` bounds that and hands
+                                            // back to the policy if it cannot.
+                                            true => {
+                                                *backing_out = BACKING_OUT_TICKS;
+                                                api.toggle_button(JoypadButton::B);
+                                            }
+                                            // The press.
+                                            false if index == pending.slot => {
+                                                pending.pressed = true;
+                                                pending.waited = 0;
+                                                pending.attempts += 1;
+                                                api.toggle_button(JoypadButton::A);
+                                            }
+                                            // ⚠️ **The cursor is not where `Navigating` believed it
+                                            // was, so hand it back rather than confirm or stand
+                                            // still.** `MoveSelectionMenu` initialises
+                                            // `wCurrentMenuItem` to `wPlayerMoveListIndex + 1` — the
+                                            // move used last — and a hand-off taken while that write
+                                            // is in flight sees a value the menu is about to
+                                            // overwrite. Confirming there takes the wrong move;
+                                            // waiting there wedges the battle. `Navigating` owns
+                                            // cursor movement and is bounded by
+                                            // `MAX_NAVIGATING_TICKS`, so it re-drives from wherever
+                                            // the cursor really is and hands back to the policy if
+                                            // it cannot.
+                                            false => {
+                                                let (action, ticks) = (pending.action, pending.navigating_ticks);
+                                                api.release_all_buttons();
+                                                self.set_battle_state(BattleState::Navigating {
+                                                    action, delay: DelayContext::default(), ticks, stable: 0,
+                                                });
+                                                return Ok(());
+                                            }
+                                        }
+                                        // Write the record back unless the arm above cleared it.
+                                        if confirm.is_some() {
+                                            *confirm = Some(*pending);
+                                        }
                                     } else {
                                         api.toggle_button(JoypadButton::A);
                                     }
@@ -2906,12 +3069,12 @@ CascadeBadge; not cutting".to_string(),
                                     });
                                     return Ok(());
                                 }
-                                self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default(), ticks: 0 });
+                                self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default(), ticks: 0, stable: 0 });
                             }
                         }
                     }
 
-                    BattleState::Navigating { action, delay, ticks } => {
+                    BattleState::Navigating { action, delay, ticks, stable } => {
                         if delay.tick(delta_cycles) {
                             // ⚠️ **Nothing below this line polls the policy, so nothing below it may
                             // run forever.** `Navigating` drives menus on the decision the policy has
@@ -3009,6 +3172,30 @@ CascadeBadge; not cutting".to_string(),
                                     return Ok(());
                                 }
 
+                                // ⚠️ **A sub-menu is only believed once it has been seen twice, and
+                                // that is what stops the wrong move being taken.**
+                                // `MoveSelectionMenu` initialises `wCurrentMenuItem` to
+                                // `wPlayerMoveListIndex + 1` — the move used last — so for a tick
+                                // around the list opening the byte still holds whatever the previous
+                                // menu left there. Handing over on that transient lines the confirm
+                                // up on a row the menu is about to move off, and the press takes the
+                                // move the list actually opened on. Traced on a captured mainline
+                                // state: hand-off at `wCurrentMenuItem = 2` (slot 1, the target),
+                                // and one tick later the menu had written 3 (slot 2, the move used
+                                // last). Two consecutive observations outlive that write; a value
+                                // the game is settling on survives it.
+                                //
+                                // ⚠️ It is a *count of observations*, not a delay: the second tick is
+                                // the ordinary next one, so nothing waits when the menu is already
+                                // settled. `AGENT_RESOLUTION` is untouched.
+                                if menu_state == menu_target && *stable == 0 {
+                                    *stable = 1;
+                                    api.release_all_buttons();
+                                    return Ok(());
+                                }
+                                if menu_state != menu_target {
+                                    *stable = 0;
+                                }
                                 if menu_state == menu_target {
                                     // RUN is a terminal menu option (no sub-menu): press A here to
                                     // actually flee. Handing off to WaitingForMenu instead would bounce
@@ -3042,7 +3229,8 @@ CascadeBadge; not cutting".to_string(),
                                         // test would read the stale third and hand the turn back to
                                         // the policy with the move unconfirmed. See
                                         // [`BattleState::confirming`].
-                                        self.set_battle_state(BattleState::confirming());
+                                        let (chosen, elapsed) = (*action, *ticks);
+                                        self.set_battle_state(BattleState::confirming(chosen, elapsed));
                                     }
                                 } else {
                                     let resolved_target = if let Some(target_parent) = menu_target.parent() {
