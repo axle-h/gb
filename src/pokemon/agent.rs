@@ -920,6 +920,22 @@ pub struct PokemonAgent {
     /// starts and once per timeout after that rather than fifty times a second.
     stuck_reported_at: MachineCycles,
 
+    /// The slot the policy chose at the "Which move should be forgotten?" menu, held for as long as
+    /// that menu is on screen.
+    ///
+    /// ⚠️ **Without it the policy is asked again on every tick of the menu, and for `LlmPolicy` an
+    /// ask is a whole turn.** `drive_forget_menu` presses one button per tick — walk the cursor,
+    /// then confirm — and re-polled before each one, so a menu that takes several ticks to drive
+    /// spent several completions. The deployed run of 2026-09-01 was asked the same Growl-for-Rage
+    /// question as **turns 232, 233 and 234**, answered `slot 1` all three times, and paid a full
+    /// prefill of a ~30 k-token history for each. It is the same shape as `BattleState::Navigating`
+    /// holding its `action`: a decision already taken is being carried out, not asked for.
+    ///
+    /// ⚠️ **Cleared when the menu goes**, not when the answer is used — the answer is needed on
+    /// every tick until the menu closes, and a latch that outlived it would answer the *next*
+    /// level-up with the last one's slot.
+    forget_choice: Option<Option<usize>>,
+
     /// An item ball the agent has just walked up to and pressed A on, waiting for the overworld to
     /// come back so the map can be asked whether it is still there.
     ///
@@ -972,6 +988,7 @@ impl PokemonAgent {
             manual_input_held: 0,
             escaping_menus: false,
             menu_handover_ticks: 0,
+            forget_choice: None,
             pending_pickup: None,
             hall_of_fame_teams: None,
         }
@@ -1436,7 +1453,15 @@ impl PokemonAgent {
             .map(|p| p.moves.iter().flatten().copied().collect())
             .unwrap_or_default();
         match api.move_to_learn() {
-            Some(new_move) => match self.policy.pick_move_to_forget(which, &current_moves, new_move) {
+            // ⚠️ **Asked once per menu, then held.** See `forget_choice`.
+            Some(new_move) => match match self.forget_choice {
+                Some(held) => Some(held),
+                None => {
+                    let answer = self.policy.pick_move_to_forget(which, &current_moves, new_move);
+                    self.forget_choice = answer;
+                    answer
+                }
+            } {
                 None => {} // still deciding — wait
                 Some(Some(slot)) => {
                     let slot = slot as u8;
@@ -1909,6 +1934,8 @@ impl PokemonAgent {
                 self.drive_forget_menu(api, cursor)?;
                 return Ok(());
             }
+            // The menu has gone, so the answer it was for has been carried out. See `forget_choice`.
+            self.forget_choice = None;
         }
 
         self.assert_naming_screen(game_mode, api)?;

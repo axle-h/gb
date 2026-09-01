@@ -2077,6 +2077,231 @@ fn the_mt_moon_moon_stone_is_not_reported_as_still_lying_there() {
     );
 }
 
+/// A policy that fights with a nominated move slot each turn, recording what it asked for so the
+/// caller can line every request up against what the cartridge actually did.
+///
+/// ⚠️ **It alternates rather than repeating, and that is the whole reproduction.** The deployed
+/// mismatch only ever happened on slot 0 — 7 turns out of 184, every one of them `Scratch` asked
+/// for and `GROWL` executed — and a policy that asks for the same slot every turn leaves the cursor
+/// already sitting on it, which is the one case that cannot go wrong.
+use crate::pokemon::battle::BattleAction;
+
+struct AlternatingMoves {
+    asked: std::rc::Rc<std::cell::RefCell<Vec<crate::pokemon::move_name::PokemonMoveName>>>,
+    /// Every `pick_move_to_forget` call, so a menu that asks more than once is visible.
+    forget_calls: std::rc::Rc<std::cell::RefCell<Vec<crate::pokemon::move_name::PokemonMoveName>>>,
+    turn: usize,
+}
+
+impl crate::pokemon::policy::Policy for AlternatingMoves {
+    fn name(&self) -> &'static str { "alternating" }
+
+    fn pick_overworld_action(
+        &mut self,
+        state: &GameState,
+        _graph: &crate::pokemon::world_graph::WorldGraph,
+    ) -> Option<crate::pokemon::actions::OverworldAction> {
+        // Stand in the grass so wild battles keep arriving; each one is more turns to sample.
+        state.map.actions().into_iter().find(|action| matches!(action.tile, MetaTile::Grass))
+    }
+
+    fn pick_move_to_forget(
+        &mut self,
+        _slot: usize,
+        _moves: &[crate::pokemon::move_name::PokemonMove],
+        new_move: crate::pokemon::move_name::PokemonMoveName,
+    ) -> Option<Option<usize>> {
+        self.forget_calls.borrow_mut().push(new_move);
+        // Slot 1, which is the answer the deployed run gave three times over.
+        Some(Some(1))
+    }
+
+    fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+        let options = crate::pokemon::policy::battle_options(state)?;
+        let moves: Vec<&BattleAction> = options.iter()
+            .filter(|option| matches!(option, BattleAction::Fight { .. }))
+            .collect();
+        if moves.is_empty() {
+            return options.iter().find(|o| matches!(o, BattleAction::Run)).copied();
+        }
+        // Highest slot, then lowest, then highest: the longest cursor travel the moveset allows,
+        // and it ends every other turn on slot 0.
+        let chosen = match self.turn % 2 {
+            0 => moves[moves.len() - 1],
+            _ => moves[0],
+        };
+        self.turn += 1;
+        if let BattleAction::Fight { battle_move, .. } = chosen {
+            self.asked.borrow_mut().push(battle_move.name);
+        }
+        Some(*chosen)
+    }
+}
+
+/// ⚠️ **The agent confirmed whatever the cursor was sitting on, and for the move list nothing ever
+/// closed that.** `BattleState`'s own doc says it of the bag — "pressed A on whatever the cursor
+/// happened to be sitting on" — which is why `UsingItem` exists; the move list has the same hole.
+///
+/// The deployed run of 2026-09-01: **177 battle turns where the published intent matched what the
+/// cartridge did, and 7 where it did not — every one of them `Scratch` asked for, `GROWL`
+/// executed.** Slot 0 and no other, which is the signature of a cursor believed to be on the first
+/// row while it was really on the second.
+#[test]
+#[ignore = "KNOWN BUG, not yet fixed: the agent confirms whatever row the cursor is on. \
+            Reproduced here at 5 of 81 battle turns; deployed 2026-09-01 at 7 of 184, every one \
+            slot 0 asked for and slot 1 taken. The obvious guard — re-read the cursor before \
+            pressing A — does NOT work: in the confirm window the reported index is one below the \
+            requested slot on 602 of 617 firings, so it is not the same basis as the slot, and \
+            bouncing on it costs the scripted run the Route 3 grind and Erika (two blackouts, six \
+            badges, Viridian Gym locked at step 502/520). See the module note above."]
+fn the_move_the_agent_confirms_is_the_move_the_policy_asked_for() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/viridian-forest.bin"),
+        Duration::from_secs(1200),
+        Box::new(AlternatingMoves {
+            asked: std::rc::Rc::clone(&asked),
+            forget_calls: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            turn: 0,
+        }),
+    );
+
+    let mut events = Vec::new();
+    // 20 ms a tick against the fixture's own 1200 s game-time budget.
+    for _ in 0..55_000 {
+        fixture.step();
+        events.extend(fixture.agent.drain_events());
+    }
+
+    // Pair each published intent with the sentence the cartridge printed next.
+    //
+    // ⚠️ **Keyed on the actor's name, not on the first " used " in the box.** A battle line carries
+    // both sides — "Enemy METAPOD used HARDEN! Pidgey used GUST!" — so a parser that takes the first
+    // one reports every turn the enemy moved first as a mismatch. That mis-pairing is the difference
+    // between 32 of 83 and the real figure.
+    let mut intent: Option<(String, String)> = None;
+    let mut matched = 0usize;
+    let mut mismatched: Vec<(String, String)> = Vec::new();
+    for event in &events {
+        let line = format!("{event}");
+        match event {
+            AgentEvent::BattleActionStarted { actor, action: BattleAction::Fight { battle_move, .. }, .. } =>
+                intent = Some((actor.to_string(), battle_move.name.to_string())),
+            AgentEvent::TextBox { message } => {
+                let Some((actor, wanted)) = intent.clone() else { continue };
+                let Some(rest) = message.split(&format!("{actor} used ")).nth(1) else { continue };
+                let Some(actual) = rest.split('!').next() else { continue };
+                let normalise = |s: &str| s.to_lowercase().replace(['-', ' '], "");
+                // Struggle is the cartridge overriding the choice because nothing has PP left, which
+                // is the game working rather than the cursor being wrong.
+                if normalise(actual) != "struggle" {
+                    match normalise(actual) == normalise(&wanted) {
+                        true => matched += 1,
+                        false => mismatched.push((wanted, actual.to_string())),
+                    }
+                }
+                intent = None;
+            }
+            _ => {}
+        }
+        let _ = line;
+    }
+
+    eprintln!("sampled {matched} matched, {} mismatched", mismatched.len());
+    assert!(matched >= 20, "only {matched} battle turns were sampled, which proves nothing");
+    assert!(
+        mismatched.is_empty(),
+        "{} of {} turns executed a different move from the one chosen: {mismatched:?}",
+        mismatched.len(),
+        matched + mismatched.len(),
+    );
+}
+
+/// Counts `pick_move_to_forget` and otherwise plays the scripted route it wraps.
+struct CountingForget {
+    inner: crate::pokemon::policy::DeterministicPolicy,
+    calls: std::rc::Rc<std::cell::RefCell<usize>>,
+}
+
+impl crate::pokemon::policy::Policy for CountingForget {
+    fn name(&self) -> &'static str { "counting-forget" }
+    fn pick_overworld_action(&mut self, state: &GameState, graph: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction> { self.inner.pick_overworld_action(state, graph) }
+    fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+        self.inner.pick_battle_action(state)
+    }
+    fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
+        self.inner.pick_nickname(species)
+    }
+    fn pick_field_move(&mut self, state: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
+        self.inner.pick_field_move(state)
+    }
+    fn pick_move_to_forget(&mut self, slot: usize, moves: &[crate::pokemon::move_name::PokemonMove],
+                           new_move: crate::pokemon::move_name::PokemonMoveName) -> Option<Option<usize>> {
+        *self.calls.borrow_mut() += 1;
+        self.inner.pick_move_to_forget(slot, moves, new_move)
+    }
+    fn is_exhausted(&self) -> bool { self.inner.is_exhausted() }
+    fn steps_remaining(&self) -> Option<usize> { self.inner.steps_remaining() }
+    fn current_step_is_long_running(&self) -> bool { self.inner.current_step_is_long_running() }
+}
+
+/// ⚠️ **A menu is one question, and the forget menu was asking it once per tick.**
+///
+/// `drive_forget_menu` presses one button per tick — walk the cursor to the slot, then confirm — and
+/// re-polled the policy before each. For a scripted policy that is free; for `LlmPolicy` every poll
+/// with nothing pending starts a **whole turn**. The deployed run of 2026-09-01 was asked the same
+/// Growl-for-Rage question as turns **232, 233 and 234**, answered `slot 1` all three times, and
+/// paid a full prefill of a ~30 k-token history for each.
+///
+/// The count is what is asserted rather than the answer: the agent already navigated correctly, so
+/// nothing about the *game* was wrong, and a test on the outcome would have passed throughout.
+#[test]
+fn the_forget_menu_asks_the_policy_once_rather_than_once_a_tick() {
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+    // TM34 is in this fixture's bag and the Wartortle already knows four moves, so the teach opens
+    // the forget menu on the spot — no grinding for a level-up, and the same menu either way.
+    let policy = CountingForget {
+        inner: crate::pokemon::policy::DeterministicPolicy::new(42, vec![PolicyStep::TeachMove {
+            item: ItemId::Tm34Bide,
+            target: crate::pokemon::policy::PartyRef::Slot(0),
+        }]),
+        calls: std::rc::Rc::clone(&calls),
+    };
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/mt-moon.bin"),
+        Duration::from_secs(300),
+        Box::new(policy),
+    );
+
+    // ⚠️ **Counted off the screen, not off a text box.** A level-up learn says "is trying to
+    // learn"; the bag teach this drives says only "Which move should be forgotten?", which is
+    // printed with `done` and never arrives as its own box. `is_forget_move_prompt` is the same
+    // test the agent itself uses, so the two cannot disagree about when the menu is up.
+    let mut learns = 0usize;
+    let mut showing = false;
+    for _ in 0..12_000 {
+        fixture.step();
+        fixture.agent.drain_events();
+        let up = {
+            let api = fixture.api();
+            use crate::pokemon::PokemonApiTrait;
+            api.on_screen_text(true).map_or(false, |t| crate::pokemon::menu::is_forget_move_prompt(&t))
+        };
+        if up && !showing {
+            learns += 1;
+        }
+        showing = up;
+    }
+
+    eprintln!("forget menus: {learns}, policy asked: {}", calls.borrow());
+    assert!(learns > 0, "the teach never reached the forget menu, so this proves nothing");
+    assert_eq!(
+        *calls.borrow(), learns,
+        "the policy must be asked once per forget menu, not once per tick of driving it",
+    );
+}
+
 /// ⚠️ **Whoever owns a menu has to own it from the moment it opens, and the mart did not.**
 ///
 /// `assert_pokemart_state` entered a `PokemartShopping` state only when the policy *answered* what
