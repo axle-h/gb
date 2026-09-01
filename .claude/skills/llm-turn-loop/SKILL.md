@@ -423,9 +423,35 @@ battles.
 
 ⚠️ **The three tools are on `Overworld` and nowhere else, the battle turn they are about included.** With a working script
 there are no battle turns to carry them; when one has failed, that turn is for winning the battle in front of you and the
-failure is waiting in the next overworld situation regardless. It is also what kept `DecisionKind::Battle`'s array where it
-was — it had ~380 bytes of headroom. A call from the wrong kind is **named with the reason** rather than falling through to
-"there is no such tool", which is a lie the model cannot act on.
+failure is waiting in the next overworld situation regardless. A call from the wrong kind is **named with the reason** rather
+than falling through to "there is no such tool", which is a lie the model cannot act on. ⚠️ **Adding them to `Battle` was
+weighed on 2026-09-01 and measured down**: every one of the 2026-09-01 run's 58 post-disarm battle turns had an overworld
+turn within a **median of 16 s (p90 61, max 104)** and its longest unbroken run of battle turns was **8**, so reach was
+never the constraint; `set_battle_script` alone is 777 bytes but is useless without the other two (its own description says
+to read the docs first, and a fix starts by reading what broke), so the honest addition is **1426 bytes against Battle's
+measured 4926 and its 4950 ceiling**, on the most numerous kind of turn there is.
+
+⚠️ **Every script state is said on the overworld turn, because that is the only kind of turn carrying the tools that change
+one — and for a long time the warning and the fix were on different turns.** `Unedited` and `Disarmed` were rendered only
+under `TurnContext::Battle`, on the argument that those are the states that *have* battle turns to be told on. They are, and
+those are exactly the turns that can do nothing about it. The 2026-09-01 run is the measurement: disarmed at 22:06:33 UTC by
+the ghost-battle fix landing under a script written for the Misty gym, it was told on **58 of 58 battle turns and 0 of 83
+overworld turns**, called neither `read_battle_script` nor `set_battle_script` once in the 25 minutes that followed, and paid
+a full prefill for all 58. ⚠️ **Nothing bridges a turn boundary** — the thinking is dropped and only `summary` survives — so
+"do it on your next overworld turn" is an instruction with nowhere to live. Three ⚠️s in the fix:
+
+- ⚠️ **Both places, two registers.** `prompt::overworld_script_line` names the fix and claims the tools are on *this* turn
+  (that clause is load-bearing: without it the line is the one the model has already deferred on every battle turn);
+  `TurnContext::Battle` keeps only what solely it can say — that the request being spent *right now* is the optional one —
+  and names no tool it is not offered and quotes no reason it cannot act on.
+- ⚠️ **The disarm reason has two lifetimes and needs two carriers.** `Live::take_failure` is a message in transit: the
+  worker takes it once, at the top of the next turn, to persist it, and it is gone. `ScriptStanding::failure` is the copy
+  that lasts as long as the broken script, so every overworld turn can carry it — capped at `MAX_FAILURE` (240) for
+  `MAX_PURPOSE`'s reason, and cut **with an ellipsis**, because a sentence about what went wrong that stops mid-clause reads
+  as a finished one (`battle_report`'s `MAX_QUOTE` paid for that head-first). `BattleScript::standing()` reads it back from
+  the file, so a restart keeps it; `set` clears it with everything else.
+- ⚠️ **`standing()` withholds it while `armed()`.** A script that is deciding turns and also explaining why it is broken is
+  the one rendering of this line that is worse than no line at all.
 
 ⚠️ **The script is published to the page on change, and the dedupe is the load-bearing half.**
 `Worker::publish_battle_script` mirrors `publish_todo` — same three moments it can change (the model

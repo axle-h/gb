@@ -798,8 +798,29 @@ pub const BATTLE_SCRIPT_TOOL_NAMES: &[&str] =
 /// ⚠️ **Offered on `Overworld` and nowhere else, which is a scoping decision rather than an
 /// oversight.** With a working script there *are* no battle turns to carry them on; when one fails,
 /// the fallback battle turn is about winning the battle in front of you, not about writing code —
-/// and the failure is waiting in the next overworld situation either way. It also keeps
-/// `DecisionKind::Battle`'s array where it is, which had ~380 bytes of headroom.
+/// and the failure is waiting in the next overworld situation either way.
+///
+/// ⚠️ **Putting them on `Battle` as well was weighed on 2026-09-01 and measured down, and the
+/// measurement is the record of it.** The case for it is real — the battle turn is the one being
+/// charged, so it is where the model has most reason to care. Three things against, in weight
+/// order:
+///
+/// - **The next overworld turn is never far.** Over the 25 minutes of the 2026-09-01 run that
+///   followed its disarm, every one of its 58 battle turns had an overworld turn after it within a
+///   **median of 16 seconds, p90 61, max 104**, and the longest unbroken run of battle turns was
+///   **8**. Nothing waited long for a turn that could act.
+/// - **One of the three is not enough to be worth carrying.** `set_battle_script` alone is 777
+///   bytes, but its own description says to read `get_battle_script_docs` first, and *fixing* one
+///   starts by reading the script that broke — so the honest addition is all three at **1426
+///   bytes**, against `DecisionKind::Battle`'s measured 4926 and its 4950 ceiling. That is a
+///   ~1400-byte ceiling move on the most numerous kind of turn there is, paid on every Safari
+///   turn, gym leader and Elite Four turn, for a state that is meant to be transient.
+/// - **A battle turn is a bad place to spend a tool budget.** Reading 6 kB of docs, reading the
+///   script, writing a replacement and taking a validation table back is most of
+///   `GB_MAX_TOOL_STEPS`, with the game sitting on a battle menu that still has to be answered.
+///
+/// What was actually broken was never *reach* — it was that the warning and the tools were on
+/// different turns. `prompt::overworld_script_line` is where that was fixed.
 fn offers_battle_script(kind: DecisionKind) -> bool {
     kind == DecisionKind::Overworld
 }
@@ -3993,3 +4014,4 @@ mod tests {
         );
     }
 }
+

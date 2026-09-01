@@ -332,6 +332,76 @@ fn script_standing_line(standing: &crate::llm::battle_script::ScriptStanding) ->
     out
 }
 
+/// What the overworld turn says about the battle script, for every state it can be in.
+///
+/// ⚠️ **This exists because the warning and the tools that answer it used to be on different
+/// turns, and a model cannot carry a fact between two turns.** `offers_battle_script` puts
+/// `read_battle_script`, `get_battle_script_docs` and `set_battle_script` on `Overworld` and
+/// nowhere else — for good reasons that have not changed — while `Unedited` and `Disarmed` were
+/// said only under `TurnContext::Battle`, on the argument that those are the states that *have*
+/// battle turns to be told on. They are, and those are exactly the turns that cannot act. The
+/// deployed run of 2026-09-01 is the measurement: its script was disarmed at 22:06:33 UTC and in
+/// the 25 minutes that followed it was told on **58 of 58 battle turns and 0 of 83 overworld
+/// turns**, called neither `read_battle_script` nor `set_battle_script` once, and paid a full
+/// prefill for every one of those 58. Nothing bridges a turn boundary either: the thinking is
+/// dropped and only `summary` survives, and all 11 summaries in that window that contain the word
+/// "script" are about the Tower's scripted Channelers.
+///
+/// ⚠️ **The disarm reason is carried here rather than left in `read_battle_script`.** The old
+/// wording sent the model on a 6 kB round trip to find out what a sentence could have told it, on
+/// the one turn where it was already being asked to spend its call budget on writing code. It is
+/// `MAX_FAILURE`-capped for the same reason the purpose is capped: this rides on every overworld
+/// turn until the script is fixed.
+///
+/// ⚠️ **`Armed` still says something different in kind, and that is not an inconsistency.** The
+/// other two are a fault to be cleared and say so once each turn until they are; `Armed` is a
+/// standing fact with no call to action, which is `script_standing_line`'s whole ⚠️ — a line that
+/// nagged a working run every turn would be read as noise within the hour.
+fn overworld_script_line(
+    state: ScriptState,
+    standing: &crate::llm::battle_script::ScriptStanding,
+) -> String {
+    // Named once and shared, because the three tools being *on this turn* is the entire point of
+    // saying any of this here.
+    const HERE: &str = "Those three tools are offered on an overworld turn and on no other kind, \
+                        so this is a turn that can fix it.";
+    match state {
+        ScriptState::Armed => script_standing_line(standing),
+        ScriptState::Unedited => format!(
+            "⚠️ Your battle script is still the default one, which decides nothing and hands every \
+             battle straight back to you, so every battle you fight is costing you a request. \
+             `read_battle_script` shows you the file, `get_battle_script_docs` says what a script \
+             can do, and `set_battle_script` replaces it. {HERE}\n\n",
+        ),
+        ScriptState::Disarmed => format!(
+            "⚠️ Your battle script failed and is no longer deciding your battle turns, so they are \
+             costing you a request each again.{} The script itself was kept, because it is the \
+             thing to edit: `read_battle_script` shows it, `get_battle_script_docs` is the API it \
+             is written against, and `set_battle_script` arms a corrected one. {HERE}\n\n",
+            match standing.failure.as_deref() {
+                // ⚠️ **Quoted rather than paraphrased, for `script_standing_line`'s reason one
+                // state along.** It is the sentence the sandbox wrote about this script, and the
+                // model has to match it against a line of its own code.
+                //
+                // ⚠️ **Punctuated here rather than trusted to arrive punctuated.** `describe`
+                // ends a runtime error with "(at line 4, position 3)" and no full stop, while
+                // `NO_ACTION` ends with one, so a bare `{why}` runs either into the next sentence
+                // or doubles the stop. An ellipsis from `standing_failure` is already a terminator
+                // and takes neither.
+                Some(why) => match why.trim_end() {
+                    cut if cut.ends_with('…') => format!(" It stopped because: {cut}"),
+                    said => format!(" It stopped because: {}.", said.trim_end_matches('.')),
+                },
+                // A run resumed across the change that added the field, or one disarmed before it
+                // existed. Nothing is said rather than "the reason was not recorded": the very
+                // next sentence offers `read_battle_script`, which has it, so an apology here
+                // would be a line of the turn spent naming the same tool twice.
+                None => String::new(),
+            },
+        ),
+    }
+}
+
 pub fn contract(kind: DecisionKind) -> String {
     format!(
         "End this turn by calling exactly one of: {}. Every one of them takes a `summary`: one or \
@@ -423,14 +493,15 @@ pub enum TurnContext<'a> {
     /// `GameState` has never heard of it, and the last chapter read is a fact about the
     /// conversation rather than about the game.
     ///
-    /// ⚠️ **`ScriptState::Armed` is the one script state with no other carrier, which is the whole
-    /// reason this variant exists.** `Unedited` and `Disarmed` both render on `Battle` below and
-    /// both *have* battle turns to render on — that is what those states mean. A working armed
-    /// script produces **no battle turns at all**, so the line written for it was reachable only on
-    /// a Safari turn or a `battle.ask()`: the 2026-09-01 run armed one at 13:35, blacked out twice
-    /// to it, and in the ~80 overworld turns that followed was never once told a script existed.
-    /// The other two states are deliberately *not* repeated here — they are already said on every
-    /// battle turn, and saying them twice is how a situation grows a paragraph nobody reads.
+    /// ⚠️ **All three script states are said here, because this is the only kind of turn carrying
+    /// the tools that change any of them.** `Armed` has no other carrier at all — a working script
+    /// produces no battle turns, so its line was reachable only on a Safari turn or a
+    /// `battle.ask()`, and the 2026-09-01 run armed one at 13:35 and went ~80 overworld turns
+    /// without being told a script existed. `Unedited` and `Disarmed` do have battle turns to be
+    /// said on, and were said only there, which is the same hole facing the other way: see
+    /// `overworld_script_line`'s ⚠️ for the 58-of-58 against 0-of-83 that closed it. They are
+    /// therefore said in **both** places, in two different registers — the battle turn names the
+    /// cost it is charging, this one names the fix and offers it.
     ///
     /// ⚠️ **`standing` is what stops the armed line being wallpaper.** The sentence below it is the
     /// same on every turn of the run, so a model that has read it forty times learns nothing from
@@ -482,9 +553,7 @@ pub fn situation(
         // have to remember across tens of turns, and the one thing this repo has measured about
         // where a nudge lands is that the bottom of a system prompt is not it.
         TurnContext::Overworld { script, standing, guide } => {
-            if script == ScriptState::Armed {
-                out.push_str(&script_standing_line(standing));
-            }
+            out.push_str(&overworld_script_line(script, standing));
             // ⚠️ **Only the stale case is worth a line** — see `GuideStatus::Current`'s ⚠️ for why a
             // run that has never read one is silent here rather than nagged.
             if let crate::llm::guide::GuideStatus::Stale { index } = guide {
@@ -567,20 +636,21 @@ pub fn situation(
             ScriptState::Unedited => {
                 "⚠️ Your battle script is still the default one, which decides nothing and hands \
                  every battle straight back to you, so this turn costs a request exactly like \
-                 every other battle turn. On your next overworld turn: `read_battle_script` to \
-                 see it, `get_battle_script_docs` for what a script can do, then \
-                 `set_battle_script` to replace it, and the routine battles stop being asked at \
-                 all.\n\n"
+                 every other battle turn. Your next overworld turn carries the tools that change \
+                 that, and says so.\n\n"
             }
-            // The reason is deliberately not repeated here. It was reported in full by the note on
-            // the turn that failed, it is 6 kB away in `read_battle_script`, and a battle turn is
-            // not where a script gets fixed — the tools to fix it are offered in the overworld and
-            // nowhere else, this turn included.
+            // ⚠️ **Neither the reason nor the tool names are repeated here, and both used to be.**
+            // A battle turn is for winning the battle in front of you: it cannot call
+            // `set_battle_script` — `offers_battle_script` is `Overworld` only — so naming the
+            // tool here was an instruction the turn could not carry out, and quoting the reason
+            // was 240 bytes on every battle turn of a broken run to no end. Both are on the
+            // overworld turn now, in `overworld_script_line`, where they can be acted on. What is
+            // left is the one thing only this turn can say: that the request being spent right
+            // now is the optional one.
             ScriptState::Disarmed => {
-                "⚠️ Your battle script failed and is no longer deciding your battle turns, so they \
-                 are costing you a request each again: `read_battle_script` on your next \
-                 overworld turn to see it and the reason it stopped, then `set_battle_script` \
-                 to arm a fixed one.\n\n"
+                "⚠️ Your battle script failed and is no longer deciding your battle turns, so this \
+                 one is costing you a request again. Your next overworld turn carries the reason \
+                 it stopped and the tools to fix it.\n\n"
             }
             // Armed, consulted or not, and it did not answer — a Safari battle, which is never
             // scripted, or a turn the model itself asked to `wait` through. Without this the run
@@ -1238,24 +1308,18 @@ mod tests {
                 "an ordinary turn is not a plan");
     }
 
-    /// **What the map will not let you do is said once, in the turn.**
-    ///
-    /// An action whose only follow-up the game refuses is withheld from the menu
-    /// (`MetaTileMap::can_cut` / `can_surf`), which is what stops a cut with no Cut becoming sixty
-    /// seconds of A-mashing in a party menu. But withholding it *silently* is the same bug facing
-    /// the other way: the deployed run, having found no way north out of Route 2, went round the
-    /// same four maps for forty turns and filed three issue reports saying the game was broken. So
-    /// the obstacle is named, with what it takes to pass it, and only while it is actually blocking.
+    /// ⚠️ **Every script state is said on the overworld turn, because that is the only kind of turn
+    /// carrying the three tools that change one.** `Armed` has no other carrier at all: a working
+    /// script produces no battle turns, so its line reached the model only on a Safari turn or a
+    /// `battle.ask()`, and the 2026-09-01 run armed one that fought a Fire starter into Brock's
+    /// Rock gym on Ember, blacked out twice, and went ~80 overworld turns without being told a
+    /// script existed. `Unedited` and `Disarmed` were the same hole facing the other way — said on
+    /// every battle turn, where `tools::offers_battle_script` offers nothing to act with. The same
+    /// run, disarmed at 22:06:33 UTC on 2026-09-01: **58 of 58 battle turns carried the warning, 0
+    /// of 83 overworld turns did**, and neither `read_battle_script` nor `set_battle_script` was
+    /// called in the 25 minutes and 58 paid battle turns that followed.
     #[test]
-    /// ⚠️ **`Armed` is the one script state that has no battle turn to be said on, so the overworld
-    /// turn is the only carrier it can have.** `Unedited` and `Disarmed` are both states in which
-    /// battles come back to the model — that is what they *mean* — and both are already said there.
-    /// A working armed script produces no battle turns at all, so before this the line written for
-    /// it reached the model only on a Safari turn or a `battle.ask()`. The 2026-09-01 run armed a
-    /// script that fought a Fire starter into Brock's Rock gym on Ember, blacked out to it twice,
-    /// and in the ~80 overworld turns that followed was never told a script existed.
-    #[test]
-    fn an_armed_battle_script_is_named_on_the_turn_that_can_do_something_about_it() {
+    fn every_battle_script_state_is_said_on_the_turn_that_can_do_something_about_it() {
         let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
         gb.load_state(include_bytes!("../pokemon/data/at-vermilion.bin")).expect("the fixture loads");
         let state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
@@ -1275,13 +1339,39 @@ mod tests {
         // Pokémon to the program that lost it has no reason to open the program.
         assert!(armed.contains("that is the script doing it"), "{armed}");
 
-        // ⚠️ **The other two are deliberately silent here.** They are said on every battle turn
-        // already, and a run in either state has battle turns to be told on; repeating them would be
-        // a paragraph on every overworld turn of the run saying what the last battle turn just said.
-        for quiet in [ScriptState::Unedited, ScriptState::Disarmed] {
-            let other = overworld(quiet);
-            assert!(!other.contains("battle script"), "{quiet:?} is said on the battle turn: {other}");
+        // ⚠️ **The other two are said here too, and each has to claim the tools are on *this*
+        // turn.** Without that clause the line is the one the model has already read on every
+        // battle turn, and the thing it did with that line was defer it.
+        for faulted in [ScriptState::Unedited, ScriptState::Disarmed] {
+            let other = overworld(faulted);
+            assert!(other.contains("battle script"), "{faulted:?} is silent here: {other}");
+            assert!(other.contains("read_battle_script") && other.contains("set_battle_script"),
+                    "{faulted:?} names the tools it is offered: {other}");
+            assert!(other.contains("this is a turn that can fix it"), "{faulted:?}: {other}");
         }
+
+        // ⚠️ **A disarm reason is quoted here rather than left in `read_battle_script`.** It is the
+        // sentence the sandbox wrote about a line of the model's own code, and the alternative was
+        // a 6 kB round trip on the one turn already being asked to spend its budget writing code.
+        let reason = "`battle.fight` was given slot 3, which is not a move that can be used";
+        let standing = crate::llm::battle_script::ScriptStanding {
+            failure: Some(reason.to_string()), ..Default::default()
+        };
+        let with_reason = situation(
+            DecisionKind::Overworld, &state, &ApiSnapshot::default(), &[], &[],
+            TurnContext::Overworld {
+                script: ScriptState::Disarmed,
+                standing: &standing,
+                guide: crate::llm::guide::GuideStatus::Current,
+            },
+            &[],
+        );
+        assert!(with_reason.contains(reason), "{with_reason}");
+        // ⚠️ **And a run resumed from before the field existed says the fact without inventing a
+        // reason**, rather than rendering an empty "It stopped because: ".
+        let without = overworld(ScriptState::Disarmed);
+        assert!(!without.contains("stopped because"), "no reason, no clause: {without}");
+        assert!(without.contains("read_battle_script"), "and the tool that has it is still named: {without}");
     }
 
     /// ⚠️ **A badge is the only thing that changes what `read_guide` answers, and nothing used to
@@ -1342,6 +1432,14 @@ mod tests {
         assert_eq!(crate::llm::guide::chapter_goal(1), format!("the {}", Badge::CascadeBadge));
     }
 
+    /// **What the map will not let you do is said once, in the turn.**
+    ///
+    /// An action whose only follow-up the game refuses is withheld from the menu
+    /// (`MetaTileMap::can_cut` / `can_surf`), which is what stops a cut with no Cut becoming sixty
+    /// seconds of A-mashing in a party menu. But withholding it *silently* is the same bug facing
+    /// the other way: the deployed run, having found no way north out of Route 2, went round the
+    /// same four maps for forty turns and filed three issue reports saying the game was broken. So
+    /// the obstacle is named, with what it takes to pass it, and only while it is actually blocking.
     #[test]
     fn an_obstacle_the_party_cannot_pass_is_named_rather_than_silently_dropped() {
         let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
