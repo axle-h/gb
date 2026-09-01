@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter};
 use crate::mmu::MMU;
-use crate::pokemon::bag::BagItem;
+use crate::pokemon::bag::{Bag, BagItem};
+use crate::pokemon::item::ItemId;
+use crate::pokemon::map::Map;
 use crate::ram::ROM;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::pokemon::{PokemonStats, PokemonSummary, PokemonType};
@@ -10,6 +12,40 @@ use crate::pokemon::symbols::{pokered_symbols, DmgPointer, DmgPointerRead};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display)]
 pub enum BattleType { Wild, Trainer, Safari }
+
+/// Whether the cartridge will refuse to let *any* move execute this battle, because it is a
+/// **ghost** battle.
+///
+/// ⚠️ **It is not only the Marowak.** `IsGhostBattle` (`engine/battle/core.asm`) tests three things
+/// and the species is not one of them: a **wild** battle (`wIsInBattle == 1`), on Pokémon Tower
+/// 1F-7F, with no Silph Scope in the bag. So every Gastly, Haunter and Cubone in the tower is a
+/// ghost until the Scope is found in the Rocket Hideout.
+///
+/// ⚠️ **A ghost battle cannot be won, cannot be caught, and cannot end by itself.** The player's
+/// turn prints "… is too scared to move!" and the ghost's prints "GHOST: Get out...", so no move
+/// lands and neither side ever loses a hit point: nothing resolves it however many turns go by.
+/// `item_effects.asm` reads the same predicate to hard-code the can't-be-caught value, so a Poké
+/// Ball is refused too, and every party member is equally scared, so a switch buys nothing either.
+///
+/// ⚠️ **Running is the one exit, and it is guaranteed.** `TryRunningFromBattle` jumps straight to
+/// `.canEscape` on this predicate, *above* the speed check every other wild flee has to pass. So
+/// [`crate::pokemon::policy::battle_options`] offers `Run` and nothing else — the same rule the
+/// Safari menu and the HM field moves follow, that an action the game would refuse is not offered
+/// at all.
+///
+/// The alternative — offer the menu and describe the trap in prose — is what
+/// [`BattleState::enemy_trapping`] does, and it is right *there* because a wrap ends by itself in a
+/// few turns and items, switching and running all still work. Nothing about this one ends by
+/// itself. The deployed run of 2026-09-01 sat on Pokémon Tower 3F choosing Slash against a Gastly
+/// every 3.3 s, and could not have noticed: a battle script was answering on the emulator thread,
+/// so no request was made and the model was never asked, while the watchdog stayed quiet because
+/// the agent was reaching a decision point every tick. It is the silent stall the zero-PP arm of
+/// `battle_options` warns about, arrived at from the other side.
+pub fn is_ghost_battle(map: Map, bag: &Bag, battle_type: BattleType) -> bool {
+    battle_type == BattleType::Wild
+        && (Map::PokemonTower1F..=Map::PokemonTower7F).contains(&map)
+        && !bag.contains(&ItemId::SilphScope)
+}
 
 #[derive(Debug, Copy, Clone)]
 pub struct BattleState {
@@ -179,5 +215,39 @@ impl BattleStateReader for MMU {
             enemy_trapping: self.read_pointer(&pokered_symbols::wEnemyBattleStatus1) & (1 << 5) != 0,
             enemy_catch_rate: self.read_pointer(&pokered_symbols::wEnemyMonActualCatchRate),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bag_with(items: &[ItemId]) -> Bag {
+        Bag::new(items.iter().map(|&id| BagItem::new(id, 1)).collect())
+    }
+
+    /// Each of `IsGhostBattle`'s three conditions, one at a time, plus the boundary of the range it
+    /// checks. ⚠️ **The species is deliberately not among them**: reading this as "the Marowak" is
+    /// the mistake that let the deployed run fight a Gastly for as long as anyone watched.
+    #[test]
+    fn a_ghost_battle_is_a_wild_one_in_the_tower_without_the_scope() {
+        let empty = bag_with(&[]);
+        let scope = bag_with(&[ItemId::SilphScope]);
+
+        // Every floor the ROM's range covers, and a wild battle on each is a ghost.
+        for map in [Map::PokemonTower1F, Map::PokemonTower3F, Map::PokemonTower7F] {
+            assert!(is_ghost_battle(map, &empty, BattleType::Wild), "{map} without the Scope");
+            // ⚠️ The Scope is what ends it, and it ends it everywhere at once.
+            assert!(!is_ghost_battle(map, &scope, BattleType::Wild), "{map} carrying the Scope");
+        }
+
+        // ⚠️ **Trainer battles are excluded by `wIsInBattle == 1`.** The Channelers on these floors
+        // fight normally, so a gate that keyed on the map alone would have the run fleeing them.
+        assert!(!is_ghost_battle(Map::PokemonTower3F, &empty, BattleType::Trainer));
+
+        // ⚠️ **The two maps immediately either side of the range**, which is what a range check
+        // wants guarding: the tower is `0x8E..=0x94`, so these are `0x8D` and `0x95`.
+        assert!(!is_ghost_battle(Map::LavenderPokecenter, &empty, BattleType::Wild));
+        assert!(!is_ghost_battle(Map::MrFujisHouse, &empty, BattleType::Wild));
     }
 }

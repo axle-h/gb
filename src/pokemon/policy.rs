@@ -9,7 +9,7 @@ use crate::pokemon::actions::OverworldAction;
 use crate::geometry::Point8;
 use crate::pokemon::badge::Badge;
 use crate::pokemon::bag::BagItem;
-use crate::pokemon::battle::{BattleAction, BattleType};
+use crate::pokemon::battle::{is_ghost_battle, BattleAction, BattleType};
 use crate::pokemon::damage::{expected_damage, is_damaging_move, pick_best_move};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::data::PokemonNamePicker;
@@ -584,6 +584,15 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
             BattleAction::SafariRock,
             BattleAction::Run,
         ]);
+    }
+
+    // ⚠️ **A ghost battle offers `Run` and nothing else, because that is the only thing the
+    // cartridge will actually do.** No move executes, no ball catches and no switch helps, and
+    // unlike the wrap lock nothing about it ends by itself — see `battle::is_ghost_battle` for the
+    // three ROM sites and for the deployed run that spun on it. Running is not merely the best of
+    // the options here, it is guaranteed: `TryRunningFromBattle` skips the speed check entirely.
+    if is_ghost_battle(state.map.map, &state.bag, battle_state.battle_type) {
+        return Some(vec![BattleAction::Run]);
     }
 
     let mut opts = battle_state.player.available_battle_moves();
@@ -4522,6 +4531,20 @@ impl Policy for DeterministicPolicy {
             Map::VictoryRoad2F | Map::VictoryRoad3F
             | Map::SeafoamIslands1F | Map::SeafoamIslandsB1F | Map::SeafoamIslandsB2F
             | Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F);
+
+        // A ghost battle answers itself: `battle_options` has already narrowed the list to `Run`
+        // alone (see `battle::is_ghost_battle`), and this says so out loud rather than trusting the
+        // arms below to arrive at it. ⚠️ **The point is that none of them is guaranteed to.** They
+        // are conditional — the flee arms key on HP, on PP and on the step in front of the queue —
+        // and the fall-through past them looks for a move to use, which a one-element list does not
+        // hold. That path answers `None`, and `None` from a policy means *still thinking*: the
+        // agent would sit at the battle menu in silence with the emulator running, which is exactly
+        // the failure the zero-PP arm of `battle_options` was written to end. The route picks the
+        // Silph Scope up in the Rocket Hideout before it ever climbs the tower, so this should be
+        // unreachable in a scripted run — and it costs one line to make sure the day it is not.
+        if is_ghost_battle(state.map.map, &state.bag, battle_state.battle_type) {
+            return Some(BattleAction::Run);
+        }
 
         // Safari Zone. **Workstream E.** During a `SafariHunt` the encounter is the point, so the hunt
         // owns the choice (throw at anything still wanted, run from the rest — see

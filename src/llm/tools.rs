@@ -779,8 +779,16 @@ pub enum BattleScriptCall {
     Docs,
     /// `read_battle_script`: what is installed, and whether it is armed.
     Read,
-    /// `set_battle_script`: `None` unsets. Validated before it is armed.
-    Set(Option<String>),
+    /// `set_battle_script`: a `script` of `None` goes back to the default. Validated before it is
+    /// armed.
+    ///
+    /// ⚠️ **`purpose` is enforced in the parser, not merely required in the schema.** That
+    /// distinction has been paid for twice here — `press_buttons`' `why` came back null on 543 of
+    /// 749 presses and `summary` was omitted wherever the parser let it through — and a purpose
+    /// nobody wrote is exactly the gap this field exists to close. It is asked for only when a
+    /// script is actually being installed: going back to the default is not a script and has
+    /// nothing to be for.
+    Set { script: Option<String>, purpose: Option<String> },
 }
 
 /// The three, by name. Non-terminal, so they are named in the turn contract beside the reads.
@@ -819,6 +827,8 @@ pub fn battle_script_tools() -> Vec<ToolSpec> {
                 "properties": {
                     "script": { "type": "string",
                                 "description": "The script. Omit to go back to the default one." },
+                    "purpose": { "type": "string",
+                                 "description": "What it is for. Required." },
                 },
                 "additionalProperties": false,
             }),
@@ -833,9 +843,11 @@ fn classify_battle_script(name: &str, arguments: &Value) -> Option<CallKind> {
         // ⚠️ **`null` and an absent `script` mean the same thing and both have to work.** "Omit to
         // remove" is what the schema says, but a model that has just been told a script can be
         // removed writes `{"script": null}` at least as often.
-        "set_battle_script" => BattleScriptCall::Set(
-            arguments.get("script").and_then(Value::as_str).map(str::to_string),
-        ),
+        "set_battle_script" => BattleScriptCall::Set {
+            script: arguments.get("script").and_then(Value::as_str).map(str::to_string),
+            purpose: arguments.get("purpose").and_then(Value::as_str)
+                .map(str::trim).filter(|purpose| !purpose.is_empty()).map(str::to_string),
+        },
         _ => return None,
     };
     Some(CallKind::BattleScript(call))

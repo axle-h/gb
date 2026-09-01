@@ -337,3 +337,60 @@ fn probe_stall_artifacts() {
         println!("[probe] {name}: {verdict} — worst {worst:?} in {worst_state} — {where_it_is}");
     }
 }
+
+/// **The deployed run of 2026-09-01, checkpointed inside the jam** — a lv44 Charizard against a
+/// Gastly on Pokémon Tower 3F, with no Silph Scope in the bag.
+///
+/// `IsGhostBattle` is true for **every** wild battle on Pokémon Tower 1F-7F until the Scope is
+/// found, not merely for the Marowak, so no move executes: the player's turn prints "too scared to
+/// move", the ghost's prints "Get out...", and neither side ever loses a hit point. The run picked
+/// Slash every 3.3 s for as long as anyone watched, and nothing in the process could have noticed —
+/// a battle script was answering on the emulator thread, so no request was made and the model was
+/// never asked, while the watchdog stayed quiet because the agent was reaching a decision point
+/// every tick. See `battle::is_ghost_battle`.
+///
+/// ⚠️ **The assertion is that the battle *ends*, not that decisions keep coming, and that is the
+/// whole point of this case.** Every other test in this file can lean on the agent getting an answer
+/// out of the policy; here the answers never stopped. Counting `BattleActionStarted` the way
+/// `a_party_with_no_pp_anywhere_still_gets_an_answer` does would have passed on the deployed bug at
+/// one action per turn for ever, and so would `assert_escapes` — there is no silence to measure.
+///
+/// ⚠️ **`DeterministicPolicy`, not `RandomPolicy`.** A random policy draws `Run` out of a short
+/// option list within a few turns and passes whether or not the game is understood, which is a test
+/// that asserts nothing. The scripted one picks its best damaging move against a full-HP lead with
+/// full PP — its flee arms key on low HP and low PP and neither fires here — so before the fix it
+/// fights for the whole budget.
+#[test]
+fn a_ghost_battle_is_left_rather_than_fought_for_ever() {
+    use crate::pokemon::policy::DeterministicPolicy;
+    let state = include_bytes!("../data/stall-ghost-battle.bin");
+    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+    gb.load_state(state).expect("a committed stall fixture should load");
+    let mut cache = MapMetadataCache::default();
+    // An empty queue, as in the no-PP case: what is under test is the answer `pick_battle_action`
+    // gives to a fight that cannot be won, not the route it happens to be on.
+    let mut agent = PokemonAgent::new(Box::new(DeterministicPolicy::new(1, [])));
+
+    let budget = MachineCycles::from_duration(ESCAPE_BUDGET);
+    let mut emulated = MachineCycles::ZERO;
+    let mut left_at = None;
+    let mut turns = 0usize;
+    while emulated < budget {
+        let ran = gb.run(AGENT_RESOLUTION);
+        emulated += ran;
+        let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
+        agent.update(&mut api, ran).ok();
+        turns += agent.drain_events().iter()
+            .filter(|e| matches!(e, AgentEvent::BattleActionStarted { .. })).count();
+        if api.game_state().is_ok_and(|s| s.battle.is_none()) {
+            left_at = Some(emulated.to_duration());
+            break;
+        }
+    }
+
+    let left_at = left_at.unwrap_or_else(|| panic!(
+        "still in the ghost battle after {ESCAPE_BUDGET:?} of game time and {turns} battle actions \
+         — every one of them a move the cartridge refuses to execute.\n  state: {}",
+        agent.state_debug()));
+    println!("[stall] ghost-battle: out in {left_at:?} after {turns} battle actions");
+}
