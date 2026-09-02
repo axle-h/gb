@@ -244,7 +244,7 @@ pub struct Worker {
     /// needs the emulator.
     todo: TodoList,
     /// The model's battle script, and the cell the policy reads it through. Answered here for the
-    /// reason the plan is: validation runs the script six times over hand-built states and none of
+    /// reason the plan is: validation runs the script seven times over hand-built states and none of
     /// it touches the emulator. See [`crate::llm::battle_script`].
     battle_script: BattleScript,
     live_script: Arc<battle_script::Live>,

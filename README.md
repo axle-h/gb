@@ -169,7 +169,7 @@ nothing. Passing no `script` goes back to that default rather than to nothing at
 Three things keep it honest. Nothing about it is trusted: the sandbox has no file, process or network
 API at all, and the engine caps operations, wall-clock time, string and collection sizes and call
 depth, because the thing being run was written by a model and the thread it runs on owns the
-emulator. `set_battle_script` puts the script through six made-up battles before arming it and
+emulator. `set_battle_script` puts the script through seven made-up battles before arming it and
 answers with a table of what it chose in each, which is the only chance the model gets to notice that
 a rule it meant does something else. And a script that fails — crashes, runs too long, chooses
 nothing, or names a move the Pokémon does not know — is **disarmed on the first failure**, with that

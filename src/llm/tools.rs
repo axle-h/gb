@@ -772,7 +772,7 @@ pub fn todo_tools() -> Vec<ToolSpec> {
 // ── The battle script ────────────────────────────────────────────────────────────────────────────
 
 /// One tool call against the model's battle script, parsed. Answered on the **worker thread** —
-/// validation runs the script over six hand-built states and none of it needs the emulator.
+/// validation runs the script over seven hand-built states and none of it needs the emulator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BattleScriptCall {
     /// `get_battle_script_docs`: the API reference, verbatim.
@@ -841,7 +841,7 @@ pub fn battle_script_tools() -> Vec<ToolSpec> {
         ToolSpec::new(
             "set_battle_script",
             format!(
-                "Install a script that decides your battle turns for you, in Rhai. A turn it answers costs no request at all, so a routine wild encounter becomes free. It is run against six example battles before it is installed and you are told what it chose in each; if it later fails it is disarmed and that turn comes back to you with the reason. Omit `script` to go back to the default, which hands you every turn. At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
+                "Install a script that decides your battle turns for you, in Rhai. A turn it answers costs no request at all, so a routine wild encounter becomes free. It is run against seven example battles before it is installed and you are told what it chose in each; if it later fails it is disarmed and that turn comes back to you with the reason. Omit `script` to go back to the default, which hands you every turn. At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
             ),
             json!({
                 "type": "object",
