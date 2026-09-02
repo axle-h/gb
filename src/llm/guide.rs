@@ -10,6 +10,15 @@
 //! matters: a player holding Boulder and Thunder but not Cascade has two badges, and what they need
 //! to be told is how to get the Cascade Badge. A popcount would send them to Vermilion.
 //!
+//! ⚠️ **A chapter is chosen by the badges and the badges see only badges, so anything a chapter
+//! depends on that is *not* badge-gated has to be repeated in the chapter after it.** The Silph
+//! Scope is the case that proved it: chapter 3 collects it in the Rocket Hideout and chapter 4
+//! opens by telling you to bring it to the Pokémon Tower, but nothing makes you take the hideout
+//! before Erika, and a run that beat her first lost the only page that said where the Scope was.
+//! The deployed run of 2026-09-02 did exactly that, decided from the name that it must be in Silph
+//! Co, and spent fifty turns walking Lavender to Celadon and back looking for it. So chapter 4 now
+//! carries the hideout too, guarded by "if it is not in the bag".
+//!
 //! ⚠️ **Every backticked name in the prose is a [`Map`] variant** and nothing else is backticked.
 //! That is what makes the guide's place names the same strings as the turn's `Location:` line, the
 //! action menu's ids and `read_route`'s argument, so a model can copy one straight across.
