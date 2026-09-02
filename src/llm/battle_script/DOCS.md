@@ -50,6 +50,7 @@ One global, `battle`. Every field is a snapshot of this turn: reading it twice g
 battle.kind        // "wild" or "trainer"
 battle.turn        // 1 on the first turn of this battle, then 2, 3, ...
 battle.can_run     // false in a trainer battle. Check before battle.run()
+battle.ghost       // Pokemon Tower without the Silph Scope: only battle.run() works
 battle.trapped     // true if Wrap, Bind, Fire Spin or Clamp has hold of you
 battle.catch_rate  // the foe's live catch rate, 0-255. Higher is easier to catch
 
@@ -57,7 +58,7 @@ battle.me          // a Pokemon: the one that is out
 battle.foe         // a Pokemon: what you are fighting
 battle.party       // an array of Pokemon, in slot order, including battle.me
 battle.moves       // an array of Move: shorthand for battle.me.moves
-battle.best_move   // a Move, or () when nothing you know can damage the foe
+battle.best_move   // a Move, or () when nothing you know can damage the foe, ghosts included
 battle.bag         // an array of Item
 ```
 
@@ -95,7 +96,7 @@ Every element of any `moves` array, and `battle.best_move`.
 | `max_pp` | number | |
 | `damage` | number | expected HP it takes off **the foe in front of you right now**, 0 if it cannot damage it |
 | `effectiveness` | number | type multiplier against that foe: 0.0, 0.25, 0.5, 1.0, 2.0 or 4.0 |
-| `usable` | bool | has PP and is not Disabled. An unusable move cannot be chosen |
+| `usable` | bool | choosable this turn: has PP, not Disabled, not a ghost. An unusable move cannot be chosen |
 
 `damage` and `effectiveness` are worked out for you, so you never need a type chart. They are
 computed against the current foe for **every** Pokemon's moves, benched ones included, which is how
@@ -140,9 +141,9 @@ not accept — it is **disarmed** and that turn comes back to you with the reaso
 `read_battle_script` shows it to you, you fix it, and `set_battle_script` installs it again. It will
 never quietly keep failing.
 
-`set_battle_script` runs your script against six made-up battles before installing it and tells you
+`set_battle_script` runs your script against seven made-up battles before installing it and tells you
 what it chose in each. Read that table: it is your only chance to notice that a rule you meant does
-something else. It is **not a proof** — every one of the six is turn 1 of a made-up battle, so
+something else. It is **not a proof** — every one of the seven is turn 1 of a made-up battle, so
 anything depending on `battle.turn`, on a Pokemon you do not have yet, or on the bag holding
 something is only tested for real when it runs.
 
@@ -150,6 +151,8 @@ The mistakes that actually happen:
 
 - `battle.fight(battle.best_move)` with no guard. `best_move` is `()` whenever nothing you know can
   damage the foe, and passing `()` is an error. Check it first.
+- Fighting a ghost (Pokemon Tower, no Silph Scope). Only Run works there: `best_move` is `()`, no
+  move is `usable` and `battle.ghost` is true.
 - A `fn` that reaches for `battle`. See the language section.
 - Assuming an item is in the bag. Loop over `battle.bag` and act on what is there.
 

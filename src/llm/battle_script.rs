@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 use rhai::{Array, Dynamic, Engine, EvalAltResult, Map, Position};
 
 use crate::pokemon::GameState;
-use crate::pokemon::battle::{BattleAction, BattleType};
+use crate::pokemon::battle::{is_ghost_battle, BattleAction, BattleType};
 use crate::pokemon::damage::expected_damage;
 use crate::pokemon::pokemon::PokemonSummary;
 use crate::pokemon::policy::battle_options;
@@ -383,7 +383,15 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
 /// memory, in a file it is charged for storing and cannot test. Both are thin wrappers over
 /// `damage::expected_damage` and `PokemonType::attack_effectiveness`, which the deterministic
 /// policy has used since long before this existed.
-fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, me: &PokemonSummary, foe: &PokemonSummary, disabled: bool) -> Map {
+///
+/// ⚠️ **`usable` is decided by the caller, and the turn's option list is half of it.** It used to
+/// be `pp > 0 && !disabled` alone, which is what the move knows about itself and not what the game
+/// will allow: in a ghost battle every move has PP and none may be chosen, so a script that read
+/// `usable` and fought was disarmed with "Usable now: nothing". The PP half stays, because
+/// `battle_options` offers every move when *all* are empty — choosing one is Struggle — and a
+/// Tackle with no PP reported as usable at 40 damage is the same lie facing the other way. See
+/// [`facts`].
+fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, me: &PokemonSummary, turn: Turn, usable: bool) -> Map {
     let metadata = battle_move.name.metadata();
     let mut map = Map::new();
     map.insert("slot".into(), Dynamic::from(slot as i64));
@@ -396,15 +404,50 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
     map.insert("accuracy".into(), Dynamic::from(metadata.accuracy as i64));
     map.insert("pp".into(), Dynamic::from(battle_move.pp as i64));
     map.insert("max_pp".into(), Dynamic::from(metadata.pp as i64));
-    map.insert("damage".into(), Dynamic::from(expected_damage(me, battle_move.name, foe).unwrap_or(0) as i64));
-    map.insert("effectiveness".into(), Dynamic::from(crate::pokemon::damage::type_multiplier(battle_move.name, foe)));
-    map.insert("usable".into(), Dynamic::from(battle_move.pp > 0 && !disabled));
+    map.insert("damage".into(), Dynamic::from(turn.damage(me, battle_move.name) as i64));
+    map.insert("effectiveness".into(), Dynamic::from(match turn.ghost {
+        true => 0.0,
+        false => crate::pokemon::damage::type_multiplier(battle_move.name, turn.foe),
+    }));
+    map.insert("usable".into(), Dynamic::from(usable));
     map
 }
 
-/// One Pokémon, as the script sees it. `moves` is scored against `foe`, so a bench member's moves
+/// What this turn lets a move do, shared by every Pokémon the script reads.
+///
+/// ⚠️ **A ghost is the case this exists for, and it is the one `expected_damage` cannot see.**
+/// `battle::is_ghost_battle` is a fact about the map and the bag, not about either Pokémon: the
+/// Gastly in front of a Lv40 starter has ordinary stats and takes ordinary damage on paper, and the
+/// cartridge replaces every move with "too scared to move" regardless. So `damage` and
+/// `effectiveness` are zero for *everyone* — the bench included, or the docs' worked example
+/// would find a bench member whose moves "do damage" and switch to it, which `battle_options` does
+/// not offer either. The deployed run of 2026-09-01 was disarmed **thirty times** in Pokémon
+/// Tower on exactly this, every rewrite guarding on `best_move == ()` as the docs say to and the
+/// guard never firing, because `best_move` was Tackle at 40 damage against a ghost.
+#[derive(Clone, Copy)]
+struct Turn<'a> {
+    foe: &'a PokemonSummary,
+    ghost: bool,
+}
+
+impl Turn<'_> {
+    /// Expected damage against the foe, or 0 when nothing can damage it at all.
+    fn damage(&self, me: &PokemonSummary, battle_move: crate::pokemon::move_name::PokemonMoveName) -> u16 {
+        match self.ghost {
+            true => 0,
+            false => expected_damage(me, battle_move, self.foe).unwrap_or(0),
+        }
+    }
+}
+
+/// One Pokémon, as the script sees it. `moves` is scored against the foe, so a bench member's moves
 /// carry the damage they *would* do — which is what a coverage switch is decided on.
-fn pokemon_map(slot: usize, name: &str, mon: &PokemonSummary, foe: &PokemonSummary) -> Map {
+///
+/// `fight_slots` is the list of move slots the game offers as a `Fight` this turn — `Some` for the
+/// Pokémon that is out, whose moves are the only ones that can be chosen, and `None` for a bench
+/// member or the foe, where the ghost is the only thing the turn can say about a move nobody can
+/// pick right now. PP and Disable are checked on top either way: see [`move_map`].
+fn pokemon_map(slot: usize, name: &str, mon: &PokemonSummary, turn: Turn, fight_slots: Option<&[usize]>) -> Map {
     let mut map = Map::new();
     map.insert("slot".into(), Dynamic::from(slot as i64));
     map.insert("name".into(), Dynamic::from(name.to_string()));
@@ -431,8 +474,12 @@ fn pokemon_map(slot: usize, name: &str, mon: &PokemonSummary, foe: &PokemonSumma
         .enumerate()
         .filter_map(|(index, battle_move)| {
             let battle_move = battle_move.as_ref()?;
-            let disabled = mon.disabled_move_slot == Some(index as u8);
-            Some(Dynamic::from(move_map(index, battle_move, mon, foe, disabled)))
+            let offered = match fight_slots {
+                Some(slots) => slots.contains(&index),
+                None => !turn.ghost,
+            };
+            let usable = offered && battle_move.pp > 0 && mon.disabled_move_slot != Some(index as u8);
+            Some(Dynamic::from(move_map(index, battle_move, mon, turn, usable)))
         })
         .collect();
     map.insert("moves".into(), Dynamic::from(moves));
@@ -456,10 +503,27 @@ fn status_word(status: crate::pokemon::status::PokemonStatus) -> String {
 }
 
 /// Everything the script can read, built once per evaluation.
-fn facts(state: &GameState, turn: u32) -> Option<Map> {
+///
+/// ⚠️ **`options` is the list [`resolve`] will check the choice against, and everything here that
+/// says what *can* be done is derived from it rather than from the battle.** `can_run` was
+/// `battle_type == Wild`, `usable` was the move's PP, and `best_move` was the highest
+/// `expected_damage` with PP left — three separate readings of the rules, each right until
+/// `battle_options` narrowed the list for a reason none of them knew about. The ghost is that
+/// reason today (`[Run]` alone); the point of reading the list is that the next one flows through
+/// as well. The script filters `battle_options`; so does what it is shown.
+fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> {
     let battle = state.battle.as_ref()?;
     let me = &battle.player;
     let foe = &battle.enemy;
+    let ghost = is_ghost_battle(state.map.map, &state.bag, battle.battle_type);
+    let against_foe = Turn { foe, ghost };
+    let fight_slots: Vec<usize> = options
+        .iter()
+        .filter_map(|action| match action {
+            BattleAction::Fight { slot, .. } => Some(*slot as usize),
+            _ => None,
+        })
+        .collect();
 
     let mut map = Map::new();
     map.insert("kind".into(), Dynamic::from(match battle.battle_type {
@@ -469,7 +533,8 @@ fn facts(state: &GameState, turn: u32) -> Option<Map> {
     }
     .to_string()));
     map.insert("turn".into(), Dynamic::from(turn as i64));
-    map.insert("can_run".into(), Dynamic::from(battle.battle_type == BattleType::Wild));
+    map.insert("can_run".into(), Dynamic::from(options.contains(&BattleAction::Run)));
+    map.insert("ghost".into(), Dynamic::from(ghost));
     map.insert("trapped".into(), Dynamic::from(battle.enemy_trapping));
     map.insert("catch_rate".into(), Dynamic::from(battle.enemy_catch_rate as i64));
 
@@ -480,21 +545,24 @@ fn facts(state: &GameState, turn: u32) -> Option<Map> {
         .nth(active)
         .map(|mon| mon.nickname.to_default_string())
         .unwrap_or_else(|| me.species.to_string());
-    let me_map = pokemon_map(active, &my_name, me, foe);
+    let me_map = pokemon_map(active, &my_name, me, against_foe, Some(&fight_slots));
     let my_moves = me_map.get("moves").cloned().unwrap_or(Dynamic::UNIT);
     map.insert("me".into(), Dynamic::from(me_map));
     // The foe is scored against *itself* for `damage`, which is meaningless — but the field has to
     // exist or `battle.foe.moves[0].damage` is a hard error rather than a number to ignore. What
     // matters is that the moves and their PP are there: they are read out of `wEnemyMon`, so a
     // script can see what it is up against.
-    map.insert("foe".into(), Dynamic::from(pokemon_map(usize::MAX, &foe.species.to_string(), foe, me)));
+    map.insert("foe".into(), Dynamic::from(pokemon_map(usize::MAX, &foe.species.to_string(), foe, Turn { foe: me, ghost }, None)));
     map.insert("moves".into(), my_moves);
 
     let party: Array = state
         .pokemon
         .iter()
         .enumerate()
-        .map(|(slot, mon)| Dynamic::from(pokemon_map(slot, &mon.nickname.to_default_string(), &mon.summary(), foe)))
+        .map(|(slot, mon)| {
+            let fight_slots = (slot == active).then_some(fight_slots.as_slice());
+            Dynamic::from(pokemon_map(slot, &mon.nickname.to_default_string(), &mon.summary(), against_foe, fight_slots))
+        })
         .collect();
     map.insert("party".into(), Dynamic::from(party));
 
@@ -513,18 +581,20 @@ fn facts(state: &GameState, turn: u32) -> Option<Map> {
 
     // The highest-damage usable move, which is what most scripts want and none should have to write
     // twice. `()` when nothing can damage the foe at all — a real state, and one the script has to
-    // handle, since it is exactly when switching is the right answer.
+    // handle, since it is exactly when switching is the right answer — and `()` when the game
+    // offers no move to choose, which is the ghost. Same slots and same damage as `me.moves`, so
+    // `best_move == ()` and "no move in `battle.moves` is usable with damage > 0" are one fact.
     let best = me
         .moves
         .iter()
         .enumerate()
         .filter_map(|(index, battle_move)| {
             let battle_move = battle_move.as_ref()?;
-            if battle_move.pp == 0 || me.disabled_move_slot == Some(index as u8) {
+            if !fight_slots.contains(&index) || battle_move.pp == 0 || me.disabled_move_slot == Some(index as u8) {
                 return None;
             }
-            let damage = expected_damage(me, battle_move.name, foe)?;
-            (damage > 0).then(|| (damage, move_map(index, battle_move, me, foe, false)))
+            let damage = against_foe.damage(me, battle_move.name);
+            (damage > 0).then(|| (damage, move_map(index, battle_move, me, against_foe, true)))
         })
         .max_by_key(|(damage, _)| *damage);
     map.insert("best_move".into(), match best {
@@ -641,7 +711,7 @@ pub fn run(source: &str, state: &GameState, turn: u32) -> Evaluation {
     let Some(options) = battle_options(state) else {
         return Evaluation::failed("there is no battle to decide", Vec::new());
     };
-    let Some(facts) = facts(state, turn) else {
+    let Some(facts) = facts(state, turn, &options) else {
         return Evaluation::failed("there is no battle to decide", Vec::new());
     };
 
@@ -773,7 +843,7 @@ impl Default for Saved {
 }
 
 /// The script on disk, and the tool calls against it. Answered on the **worker thread**: validation
-/// runs the script six times and none of it needs the emulator.
+/// runs the script seven times and none of it needs the emulator.
 pub struct BattleScript {
     /// `None` for a run with no directory — the tests, and the in-process worker in `LlmPolicy`.
     path: Option<PathBuf>,
@@ -1149,7 +1219,7 @@ impl Live {
 /// out here is finding it out mid-battle, at the cost of a disarm and a turn.
 ///
 /// ⚠️ **The table that comes back is as valuable as the pass/fail.** It shows the model its own
-/// policy's behaviour on six turns it never has to describe, which is the only chance it gets to
+/// policy's behaviour on seven turns it never has to describe, which is the only chance it gets to
 /// notice that "run below 10%" reads `hp` where it meant `hp_frac` before a real battle does.
 ///
 /// ⚠️ **Every scenario is turn 1, and validation is therefore not a proof.** A script whose
@@ -1166,6 +1236,7 @@ const SCENARIOS: &[(&str, fn() -> GameState)] = &[
     ("last one standing", scenarios::last_mon),
     ("no damaging pp left", scenarios::out_of_pp),
     ("weakened wild, balls in the bag", scenarios::catchable_wild),
+    ("ghost in Pokemon Tower, no Silph Scope", scenarios::ghost),
 ];
 
 /// Compile and run a script through every scenario. `Ok` is the table the model is shown.
@@ -1204,13 +1275,14 @@ pub fn test_scenario() -> GameState {
     scenarios::healthy_wild()
 }
 
-/// The six turns [`SCENARIOS`] puts a script through, hand-built so validation needs no emulator
+/// The seven turns [`SCENARIOS`] puts a script through, hand-built so validation needs no emulator
 /// and can run on the worker thread while a turn is in flight.
 pub(crate) mod scenarios {
     use crate::pokemon::GameState;
     use crate::pokemon::bag::{Bag, BagItem};
     use crate::pokemon::battle::{BattleState, BattleType};
     use crate::pokemon::item::ItemId;
+    use crate::pokemon::map::Map;
     use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
     use crate::pokemon::pokemon::Pokemon;
     use crate::pokemon::species::PokemonSpecies;
@@ -1293,12 +1365,33 @@ pub(crate) mod scenarios {
         state(vec![at(starter(14), 0.08)], vec![], BattleType::Trainer, 0, rattata(13))
     }
 
-    /// Every move out of PP. `battle_options` offers no `Fight` row at all here, which is the case
-    /// a script written around `best_move` will walk into and has to survive.
+    /// Every move out of PP. `battle_options` offers every move here, because choosing any of them
+    /// is Struggle, but none is `usable` and `best_move` is `()` — the case a script written around
+    /// `best_move` will walk into and has to survive.
     pub fn out_of_pp() -> GameState {
         let mut lead = starter(14);
         lead.moves = lead.moves.map(|slot| slot.map(|battle_move| PokemonMove { pp: 0, ..battle_move }));
         state(vec![lead, bench(12)], vec![BagItem::new(ItemId::Potion, 1)], BattleType::Wild, 0, rattata(9))
+    }
+
+    /// A wild encounter in Pokémon Tower without the Silph Scope. `battle_options` offers `Run` and
+    /// nothing else — no move executes and no ball or switch does anything — so every move is
+    /// `usable: false` with `damage` 0 and `best_move` is `()`, whatever the level gap says.
+    ///
+    /// ⚠️ **This is the scenario the other six could not stand in for.** `out_of_pp` proves a
+    /// script survives `best_move == ()`, but a script that fights whatever has PP left passes it
+    /// and is disarmed by the first Gastly, which is what the deployed run of 2026-09-01 did thirty
+    /// times over. The map is what makes it a ghost, so it is the one scenario that sets one.
+    pub fn ghost() -> GameState {
+        let gastly = mon(
+            PokemonSpecies::Gastly,
+            "GASTLY",
+            22,
+            [PokemonMoveName::Lick, PokemonMoveName::ConfuseRay, PokemonMoveName::NightShade, PokemonMoveName::Hypnosis],
+        );
+        let mut state = state(vec![starter(30), bench(24)], vec![BagItem::new(ItemId::SuperPotion, 2)], BattleType::Wild, 0, gastly);
+        state.map.map = Map::PokemonTower3F;
+        state
     }
 
     pub fn catchable_wild() -> GameState {
@@ -1328,7 +1421,7 @@ mod tests {
     }
 
     /// The shortest script that reaches an action on **every** scenario, which is what arming
-    /// requires. `battle.run()` alone does not: two of the six are trainer battles.
+    /// requires. `battle.run()` alone does not: two of the seven are trainer battles.
     const ALWAYS_DECIDES: &str = "if battle.can_run { battle.run(); }\nbattle.ask();";
 
     /// ⚠️ `switch` is a statement keyword in rhai and reserved even in method position, which is
@@ -1408,7 +1501,7 @@ mod tests {
     /// out. So every field and every action is *parsed* here, mechanically, rather than trusted.
     #[test]
     fn every_name_the_docs_use_is_one_the_parser_accepts() {
-        let fields = ["kind", "turn", "can_run", "trapped", "catch_rate", "me", "foe", "party", "moves", "best_move", "bag"];
+        let fields = ["kind", "turn", "can_run", "ghost", "trapped", "catch_rate", "me", "foe", "party", "moves", "best_move", "bag"];
         for field in fields {
             let outcome = decide(&format!("let x = battle.{field}; battle.ask();"), &wild());
             assert_eq!(outcome, Outcome::Ask, "`battle.{field}` does not parse or does not exist");
@@ -1573,6 +1666,45 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run));
     }
 
+    /// ⚠️ **A ghost has to read as "nothing can be done" from every field, not only from the
+    /// options list `resolve` checks.** The deployed run of 2026-09-01 was disarmed thirty times in
+    /// Pokémon Tower by scripts guarding on `best_move == ()` exactly as the docs say to: the guard
+    /// never fired because `best_move` was computed from PP and `expected_damage`, neither of which
+    /// knows the cartridge will replace the move with "too scared to move". So `best_move` is `()`,
+    /// every move on every Pokémon is `usable: false` with `damage` 0, `battle.ghost` says why, and
+    /// `can_run` is still true. A script that reads any of them and fights or switches would have
+    /// been disarmed, so the assertion is that none of them lead anywhere but `Run`.
+    #[test]
+    fn a_ghost_leaves_best_move_unset_and_every_move_unusable() {
+        let state = scenarios::ghost();
+        let guard = "if battle.best_move == () { if battle.can_run { battle.run(); } battle.ask(); }\n\
+                     battle.fight(battle.best_move);";
+        assert_eq!(decide(guard, &state), Outcome::Action(BattleAction::Run), "the documented guard has to work on a ghost");
+
+        let every_field = "for mv in battle.moves { if mv.usable || mv.damage > 0 || mv.effectiveness > 0.0 { battle.fight(mv); } }\n\
+                           for mon in battle.party { for mv in mon.moves { if mv.usable || mv.damage > 0 { battle.switch_to(mon); } } }\n\
+                           if battle.ghost && battle.can_run { battle.run(); }\n\
+                           battle.ask();";
+        assert_eq!(decide(every_field, &state), Outcome::Action(BattleAction::Run), "no field may make a ghost look attackable");
+
+        // And the same starter against an ordinary wild Pokémon still has a `best_move` and
+        // `usable` moves, or the fix is "nothing is ever usable".
+        assert!(matches!(decide("battle.fight(battle.best_move);", &wild()), Outcome::Action(BattleAction::Fight { .. })));
+        assert_eq!(decide("if battle.ghost { battle.run(); } battle.ask();", &wild()), Outcome::Ask);
+    }
+
+    /// ⚠️ **`usable` is the options list, not the move's own PP.** Every other scenario lets a
+    /// script that fights whatever has PP left through, and the ghost is the first battle that
+    /// disarms it — which is why the ghost is a validation scenario rather than only a live fact.
+    #[test]
+    fn a_script_that_fights_whatever_has_pp_is_refused_by_the_ghost_scenario() {
+        let mut script = BattleScript::open(None);
+        let answer = script.set(Some("for mv in battle.moves { if mv.pp > 0 { battle.fight(mv); } }\nbattle.ask();"), Some("a test"));
+        assert!(!script.armed(), "it must not arm: {answer}");
+        assert!(answer.contains("ghost in Pokemon Tower"), "the answer names the scenario:\n{answer}");
+        assert!(answer.contains("Usable now: nothing"), "and says nothing could be used:\n{answer}");
+    }
+
     /// The sandbox has no way out. None of these are registered, and a model reaching for one gets
     /// a compile error rather than a file.
     #[test]
@@ -1592,7 +1724,7 @@ mod tests {
     // Validation and persistence
     // ---------------------------------------------------------------------------------------
 
-    /// The table is the feedback loop: it shows the model what its own rules do on six turns it
+    /// The table is the feedback loop: it shows the model what its own rules do on seven turns it
     /// never has to describe.
     #[test]
     fn validation_arms_a_good_script_and_shows_what_it_chose() {
@@ -1853,7 +1985,7 @@ mod tests {
     /// What `set_battle_script` actually answers with, printed rather than asserted.
     ///
     /// ⚠️ **The table is prose a model reads, and nothing but reading it catches prose.** It is the
-    /// only place the six scenarios' names, the column widths and the rendering of a `BattleAction`
+    /// only place the seven scenarios' names, the column widths and the rendering of a `BattleAction`
     /// meet, and every one of those reads perfectly well while saying the wrong thing. Same reason
     /// `prompt::probe_turn_requests` exists, and `#[ignore]`d on top of its feature gate for the
     /// same reason: it asserts nothing.
