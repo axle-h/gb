@@ -294,8 +294,19 @@ agent cannot know — that something was queued behind it, or that a resume budg
 that somebody knows Fly, and never checks the Thunder Badge.
 
 ⚠️ **Withholding a row silently is the same bug facing the other way**, which is why `prompt` gained a `Blocked here:`
-line. It fires only while the map holds a `CutTree` or `Water` the party cannot get past, and names what would clear it.
+line. It fires only while the map holds a `CutTree` the party cannot get past, and names what would clear it.
 Without it a model finds no way north out of Route 2, no reason why, and goes round the same four maps for forty turns.
+
+⚠️ **`Water` was the second obstacle on that line and is deliberately gone, because it named a wall that was almost
+never the wall.** A `CutTree` is a specific tile that is the way on; water is scenery on most outdoor maps, so the line
+fired on Route 9, Route 10, Cerulean, Vermilion and anywhere else with a pond or a coast, on turns where nothing about
+the water was in anybody's way. The 2026-09-02 deployed run is the measurement: **65 turns oscillating on the Rock
+Tunnel north entrance** with the B1F ladder at (27, 3) in the menu the whole time and never once taken, its own
+decision summaries blaming "water-block geometry", "the water-block trap" and "the wrong side of water" — the only
+sentence in the turn offering a reason for anything. ⚠️ **"Nothing in the menu below leads past it" is the clause that
+did the damage**: true of the water, and read as true of the turn. The removal is pinned by
+`an_obstacle_the_party_cannot_pass_is_named_rather_than_silently_dropped`, which asserts the fixture *has* unpassable
+water first — otherwise it passes the day the fixture loses its coast.
 
 ⚠️ **The naming screen used to talk the model out of the only thing it is for** — `set_nickname` said the default "is the
 ordinary answer", and across both deployed runs **all four** naming screens took it. ⚠️ **The name is written straight

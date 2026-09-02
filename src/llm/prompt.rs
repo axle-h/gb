@@ -693,14 +693,13 @@ pub fn situation(
     if let Some((at, tile)) = state.map.tile_in_front() {
         out.push_str(&format!("Facing: {tile} at ({}, {})\n", at.x, at.y));
     }
-    // ⚠️ **What the menu no longer offers still has to be explainable.** A cuttable tree and a
-    // stretch of water are the two things on a map that are impassable *for now* rather than for
-    // ever, and both are withheld from the action menu until the party can actually deal with them
-    // (`MetaTileMap::can_cut` / `can_surf`) — because an action whose only follow-up the game
-    // refuses is a menu loop, not a choice. Withholding it silently would leave a model staring at a
-    // map with no way out and no idea why, which is the other half of the same bug: it would go
-    // looking for a route that does not exist, or conclude the agent is broken. So the obstacle is
-    // named once, in a sentence, with what it takes to pass it.
+    // ⚠️ **What the menu no longer offers still has to be explainable.** A cuttable tree is
+    // impassable *for now* rather than for ever, and is withheld from the action menu until the
+    // party can actually deal with it (`MetaTileMap::can_cut`) — because an action whose only
+    // follow-up the game refuses is a menu loop, not a choice. Withholding it silently would leave a
+    // model staring at a map with no way out and no idea why, which is the other half of the same
+    // bug: it would go looking for a route that does not exist, or conclude the agent is broken. So
+    // the obstacle is named once, in a sentence, with what it takes to pass it.
     //
     // ⚠️ **Only on the turn that has an action menu.** It is a fact about that menu, and the other
     // five kinds do not have one — on a naming screen it is overworld trivia in the middle of a
@@ -716,12 +715,20 @@ pub fn situation(
         use crate::pokemon::item::ItemId;
         use crate::pokemon::learnset::can_learn;
         use crate::pokemon::tile::MetaTile;
-        let obstacles: [(bool, fn(&MetaTile) -> bool, &str, ItemId, &str, Badge); 2] = [
+        // ⚠️ **Water was the second entry here and is deliberately gone — it named an obstacle
+        // that was almost never the obstacle.** A `CutTree` is a specific tile that is *the way on*;
+        // water is scenery on most outdoor maps, so the line fired on Route 9, Route 10, Cerulean,
+        // Vermilion and nearly everywhere else with a pond or a coast in it, on turns where nothing
+        // about the water was in anybody's way. The 2026-09-02 deployed run is the measurement: 65
+        // turns oscillating on the Rock Tunnel north entrance, where the only thing it had not done
+        // was take the B1F ladder at (27, 3), and its own decision summaries blamed "water-block
+        // geometry", "the water-block trap" and "the wrong side of water" — the one sentence in the
+        // turn that offered a reason. ⚠️ **"Nothing in the menu below leads past it" is what did the
+        // damage**: true of the water and read as true of the turn. Cut keeps the line because the
+        // Route 2 failure it was written for is a tree that genuinely is the route.
+        let obstacles: [(bool, fn(&MetaTile) -> bool, &str, ItemId, &str, Badge); 1] = [
             (!state.can_use_cut, |tile| matches!(tile, MetaTile::CutTree), "Cuttable trees",
              ItemId::Hm01Cut, "Cut", Badge::CascadeBadge),
-            // `ConnectionWater` too: the sea at a map edge is the same wall as the pond inside it.
-            (!state.can_use_surf, |tile| matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_)),
-             "Water", ItemId::Hm03Surf, "Surf", Badge::SoulBadge),
         ];
         for (blocked, is_obstacle, noun, hm, name, badge) in obstacles {
             if !blocked || !state.map.meta_tiles.iter().any(is_obstacle) { continue; }
@@ -1440,6 +1447,10 @@ mod tests {
     /// the other way: the deployed run, having found no way north out of Route 2, went round the
     /// same four maps for forty turns and filed three issue reports saying the game was broken. So
     /// the obstacle is named, with what it takes to pass it, and only while it is actually blocking.
+    ///
+    /// ⚠️ **A cuttable tree is the only obstacle that earns the line, and water is the counterexample
+    /// rather than the other half of the pair.** Both halves are asserted here, because "name what
+    /// the party cannot pass" is the kind of rule that grows an entry back.
     #[test]
     fn an_obstacle_the_party_cannot_pass_is_named_rather_than_silently_dropped() {
         let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -1454,6 +1465,21 @@ mod tests {
         let blocked = rendered(DecisionKind::Overworld, &state);
         assert!(blocked.contains("Blocked here: Cuttable trees"), "{blocked}");
         assert!(blocked.contains("CascadeBadge"), "it has to say what would clear them: {blocked}");
+
+        // ⚠️ **Water is not one of these and must not come back.** It was the second obstacle for a
+        // while, and it named a wall that was almost never the wall: this fixture stands on a coast
+        // with no Surf, and nothing about that sea is stopping it going anywhere. The 2026-09-02
+        // deployed run read the line as the reason it could not get through Rock Tunnel — its own
+        // summaries say "water-block geometry" and "the wrong side of water" — and spent 65 turns
+        // going in and out of the entrance while the ladder it had never taken sat in the menu.
+        // ⚠️ **The precondition is asserted first**, or this passes the day the fixture stops having
+        // any water in it and proves nothing at all.
+        assert!(!state.can_use_surf, "the fixture reaches Vermilion before Surf");
+        assert!(state.map.meta_tiles.iter().any(|tile| matches!(
+                    tile, crate::pokemon::tile::MetaTile::Water
+                        | crate::pokemon::tile::MetaTile::ConnectionWater(_))),
+                "Vermilion is on the coast, so a water line would have fired here");
+        assert!(!blocked.contains("Blocked here: Water"), "water is scenery, not an errand: {blocked}");
 
         // ⚠️ **And only on the turn that has an action menu.** It is a fact about that menu; on a
         // battle turn or a naming screen it is overworld trivia in the middle of another question.
