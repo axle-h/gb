@@ -1150,6 +1150,20 @@ mod tests {
                 .map(|mon| mon.moves.iter().flatten().cloned().collect())
                 .unwrap_or_default();
 
+            // ⚠️ **A standing the armed line can actually say something with.** `Armed` renders
+            // the purpose and the tally and nothing else — `standing()` withholds a failure while a
+            // script is deciding turns — so an empty one would price the line at its cheapest and
+            // hide the two fields it exists for. `MAX_PURPOSE` is 200; this is a realistic one at
+            // about half that, which is what a model writes.
+            let standing = crate::llm::battle_script::ScriptStanding {
+                purpose: Some(
+                    "Fight with the best damaging move, switch out below a third HP, and hand back \
+                     any trainer battle so I can think about it."
+                        .to_string(),
+                ),
+                decided: 340,
+                failure: None,
+            };
             let context = match kind {
                 DecisionKind::Nickname => TurnContext::Nickname(PokemonSpecies::Eevee),
                 DecisionKind::ForgetMove => {
@@ -1176,6 +1190,7 @@ mod tests {
                 // reader something that cannot happen.
                 DecisionKind::Overworld => TurnContext::Overworld {
                     script: ScriptState::Armed,
+                    standing: &standing,
                     guide: crate::llm::guide::GuideStatus::Stale {
                         index: crate::llm::guide::chapter_index(state.badges),
                     },
