@@ -329,6 +329,38 @@ about. The absence of the file cannot tell the two apart, so `resuming_in` takes
 (`Origin::Fresh`) and **parks** otherwise — the same argument as the changed-route branch beside it, which
 was already right for exactly this reason.
 
+### Movement the game takes over
+
+⚠️ **`GameMode::Script` during a walk is two different things and `RunningScript` used to price both on a
+timer.** A **ledge jump** runs as a script for ~660 ms, which is what `DelayContext::long`'s 1000 ms rollback
+window is sized for: the script ends inside it, `restore_state_from_backup` puts `OverworldMovement` back and
+the walk carries on. An **arrow tile** runs as a script for **3.2 s to 13.9 s** (measured, Rocket Hideout B2F),
+so it breached the window every single time, dropped the backup and reported `reason: Script` — "the game took
+over" — while `MetaTileMap`'s BFS had deliberately routed *through* that tile, treating the step onto an arrow
+as an edge to the slide destination (`tile_map.rs`'s spinner arm). The planner and the executor disagreeing
+about one tile.
+
+- ⚠️ **The predicate is the cartridge's own, not the spinner table.** `wMovementFlags` bit 7 (`BIT_SPINNING`)
+  is set for exactly the slide, and its neighbour bit 6 is the ledge hop `postgame::fishing` already reads —
+  so the two cases the window could not tell apart are one byte apart in RAM. `MetaTileMap::spinners` says
+  which tiles slide and where to; this says whether one is sliding *now*, and neither is derived from the
+  other so they cannot drift. ⚠️ A position-against-the-table version would also have to be right about when
+  the coordinate updates mid-slide, and it is not: the first spinning tick reads the **arrow** and the last
+  reads the **destination**, with the tiles between them not in the table at all.
+- ⚠️ **The deadline is re-armed every tick rather than made bigger.** A longer window is a guess at the
+  longest slide in the game and is still a deadline; a spin ends when the cartridge says it ends.
+- ⚠️ **This was invisible to every tier, and the reason is why the guard asserts what it does.** Nothing hung:
+  each abort leaves the player at the arrow's destination and the next poll re-plans, so the run gets across
+  anyway — `DeterministicPolicy` re-answers instantly and for free, and `full_playthrough` and the Silph Scope
+  leg were both green throughout. `LlmPolicy` pays a full request per hop and is told its action *failed*.
+  Deployed 2026-09-02: **535 aborts of 678 walks on B2F, 423 of 646 on B3F, every one `Script`**, against
+  **one** apiece on B1F and B4F — the two hideout floors with no arrows.
+  `an_arrow_tile_carries_the_walk_rather_than_ending_it` therefore asserts the **abort count**, not arrival:
+  arrival was always true, which is the whole reason it survived. ⚠️ It also asserts it got to the lift, or a
+  route round the outside of the maze would pass on the broken build.
+- ⚠️ **`ViridianGym` is the third spinner map** (`spinner_table`), so the Earth Badge gym had the same defect
+  waiting behind the two hideout floors.
+
 ### Closed loops the agent walks into
 
 ⚠️ **Every Gen 1 PC menu is a closed loop under A-only input, and `ReadingTextBox` presses B when
