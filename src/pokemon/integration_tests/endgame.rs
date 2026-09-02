@@ -270,6 +270,24 @@ fn can_finish_from_victory_road() {
 /// stats recomputed, so these are ordinary Pokémon at that level rather than the max-IV specimens
 /// `Pokemon::maxed` would build.
 fn seed_gauntlet_levels(fixture: &mut TestFixture) {
+    // ⚠️ **The Elixer is seeded for the same reason the levels are, and it is not decoration.** The
+    // gauntlet is 26 Pokémon against the starter's 35 PP with no way to restore any of it once the
+    // first door closes, so the route now carries the Pokémon Tower 4F Elixer into the Champion's
+    // room — see `elite_four_steps`. This fixture was cut before that step existed and its bag has
+    // no Elixer, so without this the test proves the five rooms against a PP budget the mainline no
+    // longer has. Earning it is `hall_of_fame_playthrough`'s job, exactly as earning the levels is.
+    // ⚠️ **A slot has to come out first, because the bag is exactly full.** Measured on this
+    // fixture it is **20/20**, so a bare `debug_give_item` is an `Err` — or, worse, it lands and the
+    // twelve Full Restores bought at Indigo do not, which is the same test proving less while still
+    // passing. ⚠️ **TM06, and which TM matters**: the route spends TM24 on the Celadon roof and TM21
+    // at the Indigo mart, so a seed that took either would leave that step popping with nothing to
+    // do and the leg would quietly stop exercising a squeeze the mainline feels. This fixture
+    // predates both tosses and still carries all of them; none is ever taught, because the starter's
+    // four slots are Surf, Dig, Blizzard and Hydro Pump.
+    fixture.api().debug_take_item(crate::pokemon::item::ItemId::Tm06Toxic)
+        .expect("the fixture carries TM06 and never teaches it");
+    fixture.api().debug_give_item(crate::pokemon::item::ItemId::Elixer, 1)
+        .expect("the toss above freed a slot");
     let mut party = fixture.game_state().pokemon;
     for slot in 0..party.len() {
         let mon = party.get_mut(slot).expect("in range");

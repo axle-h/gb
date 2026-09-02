@@ -86,7 +86,27 @@ price.
   construction. `resuming_in` parks when the cursor file is missing on a mid-game save or the route
   has changed under it; neither can be told from "a new game" by the file's absence.
 - Gen 1's bag holds 20 entries and the route runs at the cap, so every pickup is somebody's toss,
-  silently. `Bag::best_pokeball` falls back to the Master Ball when a pinned ball runs out.
+  silently. `Bag::best_pokeball` falls back to the Master Ball when a pinned ball runs out. Adding
+  one permanent entry cost two tosses, and it saturated where nobody predicted: TM24 on the Celadon
+  Mart roof (a vending machine that sells nothing is a step with no completion, so `full_playthrough`
+  stalled at 385/521 rather than failing) and TM21 at the Indigo mart (four Revives had been buying
+  nothing for as long as anyone had looked). A toss placed beside the pickup it is for frees nothing
+  — put it where the bag binds.
+- A full bag and an empty wallet are indistinguishable from the policy: `mart_baseline` fires when a
+  visit moved neither counter, which is true of both, and it said "the wallet covers no more" over
+  ¥31,434. `state.bag.len()` tells them apart, and is only safe to read now that all fifty TMs are
+  named; an item already in the bag is exempt, because a stack grows without needing a slot.
+- The Elite Four is 26 Pokémon against the starter's 35 PP, and no mart in Kanto stocks an Ether or
+  an Elixer, so the Indigo Nurse is the last PP the run gets and the rooms cannot be left. The route
+  carries the Pokémon Tower 4F **Elixer** — an Elixer rather than either S.S. Anne Ether, because
+  only it restores all four moves, which is why `ItemUsePPRestore` skips the move menu for it. Spent
+  in Lance's room, not the Champion's: the rival's script starts the battle on entry, so a step after
+  `enter(ChampionsRoom)` is not reached until the fight is over. `items::blocked` applied Ether's
+  precondition to Elixer until 2026-09-02; `.useElixir` only fails when *no* move took any PP.
+- The Elite-Four switch tactic's `move_dmg` had no `pp > 0` filter while the two arms around it do,
+  which is a livelock rather than a mis-rank: a 0-PP Surf scored 122, so the run ping-ponged between
+  the starter and a lv24 Machop every turn until the party was wiped. Two arms over one decision must
+  share a damage model.
 
 ## Prose the model and the page read
 

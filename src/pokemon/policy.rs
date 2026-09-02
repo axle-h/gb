@@ -1600,6 +1600,14 @@ impl PolicyStep {
             Self::enter(Map::PokemonTower2F),
             Self::enter(Map::PokemonTower3F),
             Self::enter(Map::PokemonTower4F),
+            // ⚠️ **The only PP in Kanto the route can reach before the Elite Four.** No mart in the
+            // game stocks an Ether or an Elixer (`data/items/marts.asm`), so the Indigo Nurse is the
+            // last PP the gauntlet gets and there is no leaving it once it starts. Four PP items lie
+            // on the floor and only this one is both on the route and an *Elixer*: it restores all
+            // four moves at once and so skips the move-selection menu the Ethers need
+            // (`item_effects.asm:.useElixir`). The other three are two Ethers on the S.S. Anne and a
+            // Max Elixer in Cerulean Cave, which does not open until the game is already won.
+            Self::CollectItem(MapSprite::POKEMONTOWER4F_ELIXER),
             Self::enter(Map::PokemonTower5F),
             Self::enter(Map::PokemonTower6F),
             // The Rare Candy ball at (6,8) blocks the *only* chokepoint into the 6F sub-region that
@@ -1773,6 +1781,14 @@ impl PolicyStep {
             Self::enter(Map::CeladonMart4F),
             Self::enter(Map::CeladonMart5F),
             Self::enter(Map::CeladonMartRoof),
+            // ⚠️ **A slot first, and this is where the bag first binds.** Measured on the roof: 20
+            // entries, Gen 1's cap, so the drink has nowhere to land — and a vending machine that
+            // sells you nothing is a step with no completion, which stalls the run at 385/521 rather
+            // than failing. It only binds here since the Pokémon Tower Elixer joined the route
+            // (`pokemon_tower_steps`); before that the roof was one short and nothing noticed.
+            // TM24 is Surge's, never taught, and the first entry the route can spare — the starter's
+            // four slots are Surf, Dig, Blizzard and Hydro Pump.
+            Self::TossItem { item: ItemId::Tm24Thunderbolt },
             Self::UseVendingMachine { at: Point8 { x: 10, y: 1 }, drink: ItemId::FreshWater },
             // Back down and out to Celadon, then east through the Route-7 gate into Saffron.
             Self::enter(Map::CeladonMart5F),
@@ -2602,6 +2618,19 @@ impl PolicyStep {
             // `silph_co_card_key_steps` ordering ¥18,000 of Hyper Potions on ¥7,838 and buying zero
             // every run). So this stays an ask rather than a budget: a rich party gets twelve, and
             // the mainline gets as many as it can pay for.
+            // ⚠️ **A slot first, or the second order buys nothing and says the wrong reason.**
+            // Measured here: the bag arrives at **20/20**, Gen 1's cap, so the twelve Full Restores
+            // took the last entry and the four Revives bought none — over ¥31,434, with the mart
+            // stocking them. Nothing said so, because a full bag and an empty wallet look identical
+            // from the policy (neither counter moves); that line now tells them apart, and this is
+            // the errand it names. TM24 is Surge's, carried since Vermilion and never taught — the
+            // starter's four slots are Surf, Dig, Blizzard and Hydro Pump, and an HM is the one move
+            // `pick_move_to_forget` will never drop. ⚠️ **TM21 rather than TM24, which the Celadon
+            // roof already spends** — the bag binds twice on this route and each squeeze needs its own
+            // entry. ⚠️ **And here rather than beside the Elixer it makes room for**: at Pokémon Tower
+            // 4F the bag still has space and neither TM is in it yet, so a toss there is a step that
+            // pops having done nothing.
+            Self::TossItem { item: ItemId::Tm21MegaDrain },
             Self::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 12), map: Map::IndigoPlateauLobby },
             Self::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
             Self::Interact(MapSprite::INDIGOPLATEAULOBBY_NURSE),   // revive + restore all PP
@@ -2618,6 +2647,21 @@ impl PolicyStep {
             // is 2× on Dragon and on Flying, so Dragonite takes 4× from the mon already out.)
             Self::enter(Map::LancesRoom),
             Self::BattleTrainer { trainer: MapSprite::LANCESROOM_LANCE },
+            // ⚠️ **The gauntlet is 26 Pokémon against 35 PP, and this is the whole of the margin.**
+            // Surf 15, Dig 10, Blizzard 5, Hydro Pump 5 is a shade over one cast each, so a run of
+            // Hydro Pump misses (80% accurate, and redundant with Surf) is enough to arrive at the
+            // Champion with three of the four moves empty. Measured: it did, and the last usable move
+            // was Dig — Ground, which is **0× on the rival's Gyarados** — so the run had nothing to
+            // hit it with and lost the game there. The Elixer is +10 on every slot, taken at the
+            // latest possible moment so none of it is wasted on a move that still has PP.
+            //
+            // ⚠️ **In Lance's room, not the Champion's, because there is no turn in the Champion's.**
+            // Walking through that door *is* the fight: the rival's script fires on entry, prints his
+            // speech and starts the battle with no overworld tick in between, so a step placed after
+            // `enter(ChampionsRoom)` is never reached until the battle is over — measured, and after
+            // a loss that means it is reached in the Pokémon Centre. Lance's room after Lance is the
+            // last moment the player is standing still with the bag available.
+            Self::use_pp_restore(ItemId::Elixer, 0, 0),
             Self::enter(Map::ChampionsRoom),
             Self::BattleTrainer { trainer: MapSprite::CHAMPIONSROOM_RIVAL },
         ]
@@ -4368,9 +4412,30 @@ impl Policy for DeterministicPolicy {
                         // covers and no more, so once it covers none the next visit is identical to
                         // this one — and the retry loop below would spend three more of them before
                         // announcing a failure that had already happened. See `mart_baseline`.
+                        //
+                        // ⚠️ **Except when it is the *bag* talking, which looks identical from here
+                        // and is not the same errand at all.** A bag at Gen 1's 20-entry cap answers
+                        // "You can't carry any more items." and hands over nothing, moving neither
+                        // counter — so this line spent a run reporting an empty wallet over
+                        // **¥31,434** with four Revives at ¥1,500 on the counter, and the gauntlet
+                        // that followed lost for want of them. Sending the reader at the wallet is
+                        // the `Blocked here:` mistake again: the fact was right and the errand named
+                        // was the wrong one.
+                        //
+                        // ⚠️ **`state.bag.len()` is the test now and it was not always safe to be.**
+                        // `Bag`'s reader drops ids `ItemId` cannot name, and until all fifty TMs were
+                        // named a full bag could read as short as fourteen; what it drops now is ids
+                        // the game never hands out. ⚠️ **An item already in the bag is exempt**,
+                        // because a stack grows without needing a slot, so a full bag does not block
+                        // it and the wallet really is the answer.
+                        let bag_full = state.bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS
+                            && !state.bag.iter().any(|i| i.id == item.id);
                         println!(
-                            "[policy] bought {} of {} from {} — the wallet covers no more",
+                            "[policy] bought {} of {} from {} — {}",
                             held, item, map,
+                            if bag_full { format!("the bag is full at {} entries, and ¥{} was not the problem",
+                                                  state.bag.len(), state.money) }
+                            else { "the wallet covers no more".to_string() },
                         );
                         self.mart_attempts = 0;
                         self.mart_baseline = None;
@@ -4866,7 +4931,16 @@ impl Policy for DeterministicPolicy {
         // enemy, switch to it. This pools both mons' strong PP + super-effective coverage across the fight
         // instead of chipping to a slow non-finish. Guarded to a big damage jump (≥1.5×) so it never thrashes.
         if battle_state.battle_type == BattleType::Trainer {
+            // ⚠️ **`pp > 0`, and leaving it out was a livelock rather than a mis-rank.** The sibling
+            // arm below ("no damaging move available") filters on PP and `pick_best_move` only ever
+            // sees moves `battle_options` already filtered, so without it this one arm rates a mon by
+            // a move it cannot use — and the two then disagree about the same Pokémon for ever.
+            // Measured in the Champion's room: Blastoise with Surf at **0 PP** scored 122, so
+            // "no damaging move available" switched out to a lv24 Machop and "out of strong moves
+            // (dmg 9) — switching to a fresher attacker (dmg 122)" switched straight back, every
+            // turn, handing Gyarados a free hit each time until the party was wiped.
             let move_dmg = |mon: &crate::pokemon::pokemon::PokemonSummary| -> u32 { mon.moves.iter().flatten()
+                .filter(|m| m.pp > 0)
                 .filter_map(|m| expected_damage(mon, m.name, &battle_state.enemy).map(|d| d as u32))
                 .max().unwrap_or(0) };
             let active_best = move_dmg(&battle_state.player);
