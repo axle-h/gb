@@ -68,6 +68,29 @@ const MANUAL_INPUT_HOLD_TICKS: u8 = 2;
 /// run of identical buttons would be delivered once.
 pub const MANUAL_INPUT_TICKS_PER_PRESS: u8 = MANUAL_INPUT_HOLD_TICKS + 1;
 
+/// `wMovementFlags` bit 7 — set for exactly as long as an **arrow tile** is sliding the player, and
+/// cleared the moment they come to rest (`engine/overworld/movement.asm:62`,
+/// `home/overworld.asm:270`).
+///
+/// ⚠️ **The neighbouring bit is the ledge hop** (`BIT_LEDGE_OR_FISHING`, 6 — see
+/// `postgame::fishing`), which is the case `RunningScript`'s rollback window was sized for. The
+/// cartridge tells the two apart in one byte, so nothing here has to guess from a duration.
+const BIT_SPINNING: u8 = 1 << 7;
+
+/// True while an arrow tile is carrying the player.
+///
+/// ⚠️ **Read from the cartridge rather than from `MetaTileMap::spinners`, though both were
+/// available.** The table is decoded from the ROM's movement RLE and says which tiles slide and
+/// where to; this says whether one is sliding *now*, which is the question, and it cannot drift
+/// from the table because neither is derived from the other. Matching a position against the table
+/// would also have to be right about *when* the coordinate updates mid-slide, and it does not:
+/// measured, the position at the first spinning tick is the arrow itself and at the last is the
+/// destination, with the tiles between them not in the table at all.
+fn player_is_spinning(api: &PokemonApi) -> bool {
+    api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wMovementFlags)
+        & BIT_SPINNING != 0
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OverworldActionAbortedReason {
     Unknown,
@@ -2096,6 +2119,26 @@ impl PokemonAgent {
                 }
             }
             AgentState::RunningScript { rollback_deadline: ref mut rollback_delay } => {
+                // ⚠️ **An arrow tile is the walk, not a script that ended it, and this is the one
+                // line that says so.** `MetaTileMap`'s BFS routes *through* a spinner deliberately,
+                // treating the step onto it as an edge to wherever the slide deposits the player —
+                // so the slide is the route being carried out. This arm saw it as `GameMode::Script`
+                // and priced it against a window sized for a **ledge jump** (~660 ms, hence
+                // `DelayContext::long`'s 1000), and a slide is 3.2 s to 13.9 s measured on Rocket
+                // Hideout B2F. Every crossing therefore breached the deadline, dropped the backup
+                // and reported "the game took over" — the planner and the executor disagreeing about
+                // the same tile. Deployed, that was **535 of 678 walks on B2F and 423 of 646 on
+                // B3F**, against 1 abort each on the two floors with no arrows; the run got across
+                // only because each abort left it somewhere new and the next poll re-planned.
+                //
+                // ⚠️ **Re-armed every tick rather than given a bigger number.** A longer window is a
+                // guess about the longest slide in the game, and it would still be a *deadline* — the
+                // point is that a spin has no deadline, it ends when the cartridge says it ends. That
+                // drops through to the `restore_state_from_backup` arm in `assert_script_state`,
+                // which is the ledge jump's path and already the right one.
+                if player_is_spinning(api) {
+                    *rollback_delay = DelayContext::long();
+                }
                 if rollback_delay.is_exhausted() {
                     // script already breached rollback deadline, start mashing the A button
                     api.toggle_button(JoypadButton::A);

@@ -41,6 +41,60 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
     assert!(battle_in_grass, "agent should have successfully navigated into the grass and triggered a battle (if we got here, the ledge jump did not cause a Script abort)")
 }
 
+/// **An arrow tile is the walk being carried out, not a script that ended it.**
+///
+/// The sibling above is the *transient* half of the same mechanism: a ledge jump runs in
+/// `GameMode::Script` for ~660 ms, so `RunningScript` holds a 1000 ms rollback window and restores
+/// the walk when the script ends inside it. A spin tile is the other half and it does not fit —
+/// measured on Rocket Hideout B2F, the six slides between the B3F stairs and the lift run **3.2 s to
+/// 13.9 s**. Every one therefore breached the window, dropped the backup and reported "the game took
+/// over", while `MetaTileMap`'s BFS had deliberately routed *through* that very tile
+/// (`tile_map.rs`'s spinner arm treats stepping onto an arrow as an edge to the slide destination).
+/// The planner and the executor disagreeing about one tile.
+///
+/// The deployed run of 2026-09-02 is the measurement: **535 aborts of 678 walks on B2F and 423 of
+/// 646 on B3F, every one `reason: Script`**, against **one** apiece on B1F and B4F, which are the
+/// two hideout floors with no arrows on them. It got across anyway — each abort leaves the player at
+/// the arrow's destination and the next poll re-plans — so nothing hung and no watchdog fired. That
+/// is why no tier caught it: `DeterministicPolicy` re-answers instantly and for free, so
+/// `full_playthrough` and the Silph Scope leg are green. For `LlmPolicy` each hop is a full request
+/// against the whole history, reported to the model as its action having *failed*.
+///
+/// ⚠️ **The assertion is the abort count, not arrival.** Arrival was always true — that is the whole
+/// reason this survived — so a test that only checked the destination passes on the bug.
+#[test]
+fn an_arrow_tile_carries_the_walk_rather_than_ending_it() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/at-rocket-hideout.bin"),
+        Duration::from_secs(240),
+        vec![
+            PolicyStep::enter(Map::RocketHideoutB2F),
+            PolicyStep::enter(Map::RocketHideoutElevator),
+        ],
+    );
+
+    let mut script_aborts: Vec<String> = Vec::new();
+    while !fixture.agent.policy_exhausted() {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::OverworldActionAborted {
+                reason: OverworldActionAbortedReason::Script, at, ..
+            } = &event {
+                script_aborts.push(format!("{at:?}"));
+            }
+        }
+    }
+
+    let state = fixture.game_state();
+    // ⚠️ **The precondition, or this proves nothing.** A route that never touches an arrow tile
+    // produces no aborts on the broken build either, and B2F's maze is exactly the sort of thing a
+    // re-timed RNG stream can send a walk round the outside of.
+    assert_eq!(state.map.map, Map::RocketHideoutElevator,
+               "should have crossed B2F to the lift, which is only reachable over the arrows");
+    assert!(script_aborts.is_empty(),
+            "a spin tile is the walk, not a script that ended it — aborted at {script_aborts:?}");
+}
+
 /// ⚠️ **A text box in answer to an A press is the interaction landing, not a failure.**
 ///
 /// The route to a sprite ends by facing it and pressing A, and it is re-derived every tick — so once
