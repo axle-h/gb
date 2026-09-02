@@ -107,6 +107,29 @@ impl<'a> PokemonApi<'a> {
         Ok(())
     }
 
+    /// Remove `item` from the bag entirely, closing the gap behind it.
+    ///
+    /// The counterpart to [`Self::debug_give_item`], and it exists for the same reason: a fixture cut
+    /// before a route step was written has the bag that route no longer produces. ⚠️ **Gen 1's bag is
+    /// twenty *entries*, so seeding one in usually means taking one out** — a `debug_give_item` onto a
+    /// full bag is an `Err`, and a seed that quietly displaces a purchase is worse than one that fails.
+    pub fn debug_take_item(&mut self, item: ItemId) -> Result<(), String> {
+        let count = self.mmu().read_pointer(&pokered_symbols::wNumBagItems) as usize;
+        let base = pokered_symbols::wBagItems.address;
+        let Some(i) = (0..count).find(|&i| self.mmu().read(base + i as u16 * 2) == item as u8) else {
+            return Err(format!("{item:?} is not in the bag"));
+        };
+        for j in i..count - 1 {
+            let (id, qty) = (self.mmu().read(base + (j as u16 + 1) * 2),
+                             self.mmu().read(base + (j as u16 + 1) * 2 + 1));
+            self.mmu_mut().write(base + j as u16 * 2, id);
+            self.mmu_mut().write(base + j as u16 * 2 + 1, qty);
+        }
+        self.mmu_mut().write(base + (count as u16 - 1) * 2, 0xFF);
+        self.mmu_mut().write(pokered_symbols::wNumBagItems.address, count as u8 - 1);
+        Ok(())
+    }
+
     /// Mark `species` as owned **and** seen in the Pokédex. Used to seed the 10/30/50 gates the
     /// Oak's-aide items sit behind (workstream H) without playing through the catching first.
     pub fn debug_set_dex_owned(&mut self, species: PokemonSpecies) {

@@ -201,7 +201,7 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
             _ => None,
         },
         // `.useEther` — the chosen move must actually be missing PP.
-        ItemId::Ether | ItemId::MaxEther | ItemId::Elixer | ItemId::MaxElixer => {
+        ItemId::Ether | ItemId::MaxEther => {
             let UseTarget::Move { move_index, .. } = target else {
                 return Some("a PP restore needs a move target".into());
             };
@@ -211,6 +211,22 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
                     Some(format!("{:?} is already at full PP ({}/{})", mv.name, move_pp(mv), max_pp(mv))),
                 _ => None,
             }
+        }
+        // ⚠️ **An Elixer's precondition is the *mon*, not the move, and applying Ether's here
+        // refused perfectly good uses.** `.useElixir` decrements the item id, loops all four slots
+        // and only reaches `ItemUseNoEffect` when **none** of them took any PP
+        // (`item_effects.asm:.elixirLoop`) — it never reads `wCurrentMenuItem` as a choice, which is
+        // why it skips the move menu at all. So an Elixer named against a move that happens to be
+        // full was declined here while the cartridge would have restored the other three. The
+        // `move_index` still rides along because `use_pp_restore` builds one target for both
+        // families and the menu it names simply never appears.
+        ItemId::Elixer | ItemId::MaxElixer => {
+            let Some(mon) = mon else {
+                return Some("a PP restore needs a party target".into());
+            };
+            mon.moves.iter().flatten().any(|mv| move_pp(mv) < max_pp(mv))
+                .then_some(())
+                .map_or(Some(format!("every move on slot {:?} is already at full PP", target.slot())), |()| None)
         }
         // `.usePPUp` — three is the cap, and a fourth prints `PPMaxedOutText` and keeps the item.
         ItemId::PpUp => {
