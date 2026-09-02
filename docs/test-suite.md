@@ -24,8 +24,14 @@ cargo test --release --features full-playthrough full_playthrough
 # The same run carried on to the credits, ~26 min.
 cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
 
-# The stall hunt: 40 min of game time under RandomPolicy from each of 14 starting states, in parallel.
+# The stall hunt: 40 min of game time under RandomPolicy from each of 26 starting states, in
+# parallel. ~39 s each, about 5.5 min of wall clock on 16 threads.
 cargo test --release --features soak-tests --bin gb -- soak --nocapture
+
+# Re-cut the twelve soak starting states that are taken off the mainline. Plays the eight-badge
+# route once (~5.5 min) and writes src/pokemon/data/soak-*.bin.
+cargo test --release --features full-playthrough,regen-fixtures --bin gb -- \
+  pokemon::integration_tests::playthrough::regen_soak_checkpoints --exact --nocapture
 
 # One test with output. The file module is part of the path.
 cargo test --release --bin gb -- pokemon::integration_tests::mechanics::test_debouncing --exact --nocapture
@@ -98,6 +104,9 @@ make it pass, say so in the hand-off.
   inside the previous building, not in the street) and where the party is healed:
   `Interact(NURSE)` used to pop before the heal landed, and a root came out with Water Gun on 6 of
   25 PP.
+- `soak-*.bin` are **not** part of the chain: nothing reads one as the input to a route, so the
+  rules above about cutting where the mainline stands and where the party is healed do not apply to
+  them. They are re-cut wholesale by `regen_soak_checkpoints`, never by hand.
 - A fixture's name says where it is cut; a leg that walks further than its name is two tests and
   two fixtures (`vr1f-strength`, `vr2f-ladder`). Some retired roots (`post-cascade`,
   `at-mansion-blizzard`, `post-volcano-lone`, `at-saffron-post-silph`) are still on disk but no
@@ -113,6 +122,16 @@ make it pass, say so in the hand-off.
   the same value the deployed watchdog reads. A random walker diffuses rather than explores, so the
   budget buys starting points, and a state earns its place by what it makes reachable (a bicycle,
   a Safari counter, a bag with a TM), not by badges.
+- It walks under `RandomPolicy::exploring`, not `seeded`: the last `EXPLORE_MEMORY` overworld action
+  ids are kept and each repeat multiplies that action's weight by `EXPLORE_DECAY`. It forbids
+  nothing (floors exist whose only exit is the one just used) and it leaves the battle draw uniform
+  (the argument is on `exploring`); it is still fully seeded. `--policy random` is untouched.
+- Half the starting states are **checkpoints cut off the mainline**, listed as
+  `playthrough::SOAK_CHECKPOINTS` and written by `regen_soak_checkpoints` — the route already walks
+  through Mt Moon, an unlit Rock Tunnel, Silph Co and the Cinnabar quiz, so a copy taken on the way
+  past costs no hand-cut fixture. Each carries an `expect_map` asserted on the way in, and the
+  regeneration fails naming any checkpoint whose map the route no longer crosses. The other half are
+  hand-cut, and are the states a fuzzer cannot reach on its own in forty minutes.
 - It forces the cartridge's deployment options (medium text, animations on, battle style SHIFT) by
   writing them, because every fixture past the fresh save carries fast text, and SHIFT's
   "change POKéMON?" prompt is a screen no other test ever sees.

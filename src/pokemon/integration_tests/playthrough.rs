@@ -2,6 +2,120 @@
 
 use super::*;
 
+/// Where along the eight-badge route [`super::soak`] turns its fuzzer loose, and the map each of
+/// those save states is cut on.
+///
+/// ⚠️ **These are seeds for a fuzzer, not links in the fixture chain.** Nothing reads one as the
+/// *input* to a route the way `at-cerulean.bin` feeds the leg tests, so the rules on
+/// [`TestFixture::save_state_named`] about cutting where the mainline stands and where the party is
+/// healed do not apply: a capture taken mid-dungeon, mid-errand and half-poisoned is a better
+/// starting point for a random walker than a tidy one, because it is a state a deployed run can
+/// really be in.
+///
+/// ⚠️ **The map is the whole specification, and [`regen_soak_checkpoints`] is what honours it.** A
+/// checkpoint is the first moment the scripted run has stood on that map for
+/// [`CHECKPOINT_SETTLE_TICKS`], so adding one is a line here and a 7-minute regeneration — no
+/// fixture is cut by hand, and none of them can drift away from the route, because they are the
+/// route. `soak`'s own `expect_map` re-asserts each one on the way in, so a stale capture fails
+/// where it is used rather than silently fuzzing somewhere else.
+///
+/// ⚠️ **Chosen for what a fuzzer can reach from them, exactly as [`super::soak::STATES`] is** — a
+/// dark cave, a quiz gym, a warp maze, a step counter — and deliberately *not* for the maps the
+/// curated states already cover. This list and the hand-cut states are two halves of one budget:
+/// these buy the ground the route crosses for nothing, and the curated ones buy the ground it never
+/// does (a bicycle, a full PC box, a ledge pocket a real run got stuck in).
+pub(super) const SOAK_CHECKPOINTS: &[(&str, Map)] = &[
+    ("soak-mt-moon", Map::MtMoonB2F),
+    ("soak-ss-anne", Map::SSAnne1F),
+    ("soak-rock-tunnel", Map::RockTunnel1F),
+    ("soak-pokemon-tower", Map::PokemonTower5F),
+    ("soak-route12-snorlax", Map::Route12),
+    ("soak-safari-zone", Map::SafariZoneCenter),
+    ("soak-silph-co", Map::SilphCo3F),
+    ("soak-saffron-gym", Map::SaffronGym),
+    ("soak-pokemon-mansion", Map::PokemonMansionB1F),
+    ("soak-cinnabar-gym", Map::CinnabarGym),
+    ("soak-viridian-gym", Map::ViridianGym),
+    ("soak-route23", Map::Route23),
+];
+
+/// How long the run has to have been standing on a checkpoint's map before the state is taken —
+/// 50 ticks of [`AGENT_RESOLUTION`], one second of game time.
+///
+/// ⚠️ **Not the first tick the map id changes.** A warp lands with the map header read and the rest
+/// of the world still being built: the connection strips, the sprite slots and the tile map arrive
+/// over the following frames, and a state cut in that window loads into an agent that reads a map
+/// half of which is the previous one. A second is far longer than that takes and far shorter than
+/// the run spends anywhere it is worth starting a fuzzer from.
+const CHECKPOINT_SETTLE_TICKS: u32 = 50;
+
+/// Re-cut every [`SOAK_CHECKPOINTS`] state by playing the eight-badge route once.
+///
+/// ⚠️ **A test of its own rather than a hook inside [`full_playthrough`], and that is deliberate.**
+/// `full_playthrough` is the gate everything else is measured against; it reads the game state once
+/// per tick only when it has to, and it already rewrites one committed fixture under
+/// `regen-fixtures`. Hanging a dozen more writes off it would mean the run that proves the route
+/// still works is also the run that quietly replaces a dozen inputs, and any per-tick cost added
+/// here would be paid by the seven-minute gate rather than by the regeneration nobody runs weekly.
+///
+/// ```text
+/// cargo test --release --features full-playthrough,regen-fixtures --bin gb -- \
+///   regen_soak_checkpoints --exact --nocapture
+/// ```
+///
+/// It prints every distinct map the route visited, in order, which is the list to pick a new
+/// checkpoint from — and it **fails** naming any declared checkpoint the run never stood on, so a
+/// map that drops off the route cannot leave a stale `.bin` behind pretending to still be on it.
+#[test]
+#[cfg(all(feature = "full-playthrough", feature = "regen-fixtures"))]
+fn regen_soak_checkpoints() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/start-of-game-state.bin"),
+        Duration::from_mins(800),
+        PolicyStep::eight_badge_steps(),
+    );
+
+    let mut written: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut visited: Vec<Map> = Vec::new();
+    let mut standing_on: Option<(Map, u32)> = None;
+
+    while !fixture.agent.policy_exhausted() {
+        fixture.step();
+        let Ok(state) = fixture.try_game_state() else { continue };
+        let map = state.map.map;
+
+        standing_on = match standing_on {
+            Some((was, ticks)) if was == map => Some((map, ticks + 1)),
+            _ => {
+                if visited.last() != Some(&map) { visited.push(map); }
+                Some((map, 0))
+            }
+        };
+        let Some((_, ticks)) = standing_on else { continue };
+        if ticks != CHECKPOINT_SETTLE_TICKS { continue }
+
+        for (name, want) in SOAK_CHECKPOINTS {
+            if *want != map || written.contains(name) { continue }
+            let path = format!("src/pokemon/data/{name}.bin");
+            fixture.gb.save_state_to_file(&path).expect("write a soak checkpoint");
+            written.insert(name);
+            println!("[checkpoint] {name} — {map} at {} ({:?} of game time, party {:?})",
+                     state.map.player_position, fixture.total_cycles.to_duration(),
+                     state.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
+        }
+    }
+
+    println!("\n[checkpoint] maps visited, in order:");
+    for map in &visited { println!("    {map}"); }
+
+    let missed: Vec<&str> = SOAK_CHECKPOINTS.iter()
+        .map(|(name, _)| *name).filter(|name| !written.contains(name)).collect();
+    assert!(missed.is_empty(),
+            "the route never stood on the map(s) these checkpoints name: {missed:?} — pick \
+             replacements from the visited list above, or drop them from SOAK_CHECKPOINTS");
+    println!("[checkpoint] re-cut {} soak fixtures", written.len());
+}
+
 /// Resume [`full_playthrough`] from the save state a stalled run drops in `target/test-artifacts/`,
 /// with the steps it had left still queued — so a stall 270 steps in can be re-tested in seconds
 /// instead of re-running the whole 20 minutes up to it.

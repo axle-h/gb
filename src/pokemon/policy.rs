@@ -289,12 +289,125 @@ pub struct RandomPolicy {
     /// so rather than drawing from `rng` because that method takes `&self`: the name is chosen
     /// without disturbing the sequence the run is played from.
     seed: Option<u64>,
+    /// The ids of the last [`EXPLORE_MEMORY`] overworld actions taken, oldest first. Empty and never
+    /// written unless [`RandomPolicy::exploring`] built this, so a plain `RandomPolicy` allocates
+    /// nothing and picks exactly as uniformly as it always did.
+    recent: VecDeque<String>,
+    /// Whether [`Self::recent`] is kept and consulted. See [`RandomPolicy::exploring`].
+    explore: bool,
 }
+
+/// How many overworld choices back [`RandomPolicy::exploring`] remembers.
+///
+/// A window rather than a lifetime tally, and that is the whole reason this stays a fuzzer rather
+/// than becoming a route planner. A tally would drive the count of every action the walker has ever
+/// taken to the floor and eventually make the map uniform again from below; a window lets an action
+/// come back at full weight once the walker has been away long enough for it to fall out, which is
+/// exactly what re-crossing an old region after exploring a new one should cost. Sized above the
+/// number of actions a busy map offers (a dozen or so), so a walker that has taken every exit on the
+/// map it is standing on has still not forgotten the first one.
+const EXPLORE_MEMORY: usize = 24;
+
+/// What one occurrence in [`RandomPolicy::recent`] multiplies an action's weight by.
+///
+/// ⚠️ **Compounding per occurrence, and never zero.** The pathology this is aimed at is not a single
+/// repeat but a two-action ping-pong — take the east exit, arrive, take the west exit, arrive, and
+/// the walker has spent an hour in two maps. One occurrence at 0.35 barely discourages anything;
+/// twelve, which is what a ping-pong looks like inside the window, is 3e-6 and the walker leaves.
+/// ⚠️ It must stay a *weight* rather than an exclusion, because Red has maps whose only exit is the
+/// one that was just used — a boulder puzzle floor, a rest house, the inside of a gym — and a rule
+/// that forbade the recent action would strand the walker in them for the rest of the run.
+///
+/// ⚠️ **Weights are relative to the menu they are on, so a menu whose every option is equally worn is
+/// uniform again.** That is not the ping-pong case above — the two halves of a ping-pong are actions
+/// on two *different* maps, each competing with that map's own untouched exits, which is exactly why
+/// the walker leaves. It is the case of a map that offers nothing but the two doors, where there is
+/// genuinely nothing to prefer. `random_policy_tests::a_walker_covers_a_hub_faster_than_a_uniform_one`
+/// is where that is written down and measured.
+const EXPLORE_DECAY: f64 = 0.35;
 
 impl RandomPolicy {
     /// A policy whose choices are fixed by `seed` — the same seed always plays the same game.
     pub fn seeded(seed: u64) -> Self {
-        Self { rng: Some(StdRng::seed_from_u64(seed)), seed: Some(seed) }
+        Self { rng: Some(StdRng::seed_from_u64(seed)), seed: Some(seed), ..Self::default() }
+    }
+
+    /// [`Self::seeded`], but biased **away from what it has just done** on the overworld.
+    ///
+    /// ⚠️ **A uniform random walker does not explore, it diffuses**, and that is measured rather than
+    /// argued: `integration_tests::soak`'s module docs record five hours from Pallet Town spent
+    /// almost entirely in Pallet Town, Route 1 and the bedroom it started in. The cause is that a
+    /// uniform draw is a random walk over the map graph, and a random walk's expected distance from
+    /// its origin grows as the *square root* of the steps — so the tenth minute covers a third of the
+    /// ground the first one did, and the hundredth covers a tenth.
+    ///
+    /// So the draw is weighted instead: every action carries an id, the last [`EXPLORE_MEMORY`] ids
+    /// chosen are kept, and an action's weight is [`EXPLORE_DECAY`] to the power of how many times it
+    /// appears in that window. Nothing is forbidden and nothing is planned — this is still a fuzzer
+    /// with no idea what any action does — but a walker that has just come through a door is now
+    /// unlikely to turn round and go back through it, which is the single move the diffusion is made
+    /// of.
+    ///
+    /// ⚠️ **The overworld only.** Battle options get the uniform draw they always had. A recency
+    /// penalty there would push the walker off `Fight` and onto `Run`, `Item` and `Switch` at a rate
+    /// no player ever produces, which does not explore the agent's state machine so much as lose
+    /// every battle and black out — and the states this walker is turned loose from are chosen for
+    /// what is reachable *from* them, which a black-out warp throws away.
+    ///
+    /// ⚠️ **Still fully seeded.** The weighting reads only `self.recent` and draws only from
+    /// `self.rng`, so a given seed still plays a given game, which is what lets `soak` pin one.
+    pub fn exploring(seed: u64) -> Self {
+        Self { explore: true, ..Self::seeded(seed) }
+    }
+
+    /// The key an action is remembered by: the same shape as the id the model chooses from
+    /// (`PalletTown:5,6:Warp`), built here rather than borrowed from `llm::tools::overworld_id`
+    /// because that module is behind the `llm` feature and this one is not.
+    ///
+    /// ⚠️ **The map has to be in it.** Coordinates repeat across maps, so without the prefix a warp
+    /// at (5, 6) in Oak's lab and one at (5, 6) in Pallet Town would share a weight and suppress each
+    /// other — and those two are precisely the pair a walker bounces between.
+    fn action_key(action: &OverworldAction) -> String {
+        format!("{}:{},{}:{}", action.map, action.destination.x, action.destination.y,
+                action.tile.id_kind())
+    }
+
+    /// `EXPLORE_DECAY ^ (times this action appears in the window)`.
+    fn novelty_weight(&self, action: &OverworldAction) -> f64 {
+        let key = Self::action_key(action);
+        let seen = self.recent.iter().filter(|k| **k == key).count();
+        EXPLORE_DECAY.powi(seen as i32)
+    }
+
+    /// Draw one of `actions` with probability proportional to `weights`.
+    ///
+    /// Hand-rolled rather than `rand`'s `WeightedIndex` so that the degenerate cases are ours to
+    /// choose: an empty list is `None`, and a total that is zero or not finite falls back to a
+    /// uniform draw rather than panicking on the emulator thread.
+    fn choose_weighted(rng: &mut StdRng, actions: Vec<OverworldAction>, weights: &[f64])
+        -> Option<OverworldAction> {
+        let total: f64 = weights.iter().sum();
+        if !total.is_finite() || total <= 0.0 {
+            return actions.into_iter().choose(rng);
+        }
+        let mut draw = rand::Rng::random_range(rng, 0.0..total);
+        for (action, weight) in actions.into_iter().zip(weights) {
+            draw -= weight;
+            if draw <= 0.0 {
+                return Some(action);
+            }
+        }
+        // Floating-point slack only: the loop above consumes the whole total in all but the last
+        // ulp. Falling out of it means the last row was the answer, and it has already been moved.
+        None
+    }
+
+    /// Record what was chosen, evicting the oldest once the window is full.
+    fn remember(&mut self, action: &OverworldAction) {
+        self.recent.push_back(Self::action_key(action));
+        while self.recent.len() > EXPLORE_MEMORY {
+            self.recent.pop_front();
+        }
     }
 }
 
@@ -323,12 +436,29 @@ impl Policy for RandomPolicy {
         Some(RANDOM_NAMES[index].to_string())
     }
 
+    /// Uniform over whatever the map offers — unless [`RandomPolicy::exploring`] built this, in
+    /// which case the draw is weighted away from the actions most recently taken.
+    ///
+    /// ⚠️ **`remember` runs on what was *chosen*, not on what the agent then managed to do.** A walk
+    /// that is refused, interrupted or abandoned still counts, and it has to: being stopped is how
+    /// this game says almost everything, and an action that is going to be refused every time is
+    /// exactly the one worth trying something else instead of.
     fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         let actions = state.map.actions();
-        match &mut self.rng {
-            Some(rng) => actions.into_iter().choose(rng),
-            None => actions.into_iter().choose(&mut rand::rng()),
+        // Weighed before `self.rng` is borrowed mutably, because `novelty_weight` reads `self`.
+        let weights: Option<Vec<f64>> =
+            self.explore.then(|| actions.iter().map(|a| self.novelty_weight(a)).collect());
+        let chosen = match (&mut self.rng, weights) {
+            (Some(rng), Some(weights)) => Self::choose_weighted(rng, actions, &weights),
+            (Some(rng), None) => actions.into_iter().choose(rng),
+            (None, _) => actions.into_iter().choose(&mut rand::rng()),
+        };
+        if self.explore {
+            if let Some(action) = &chosen {
+                self.remember(action);
+            }
         }
+        chosen
     }
 
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
@@ -5975,5 +6105,125 @@ mod scripted_progress_tests {
             scripted_progress::fingerprint(&PolicyStep::complete_game_steps()),
             scripted_progress::fingerprint(&route()),
         );
+    }
+}
+
+#[cfg(test)]
+mod random_policy_tests {
+    use super::*;
+
+    /// A warp on `map` leading to `to`, which is all [`RandomPolicy::action_key`] reads.
+    fn warp(map: Map, to: Map, x: u8, y: u8) -> OverworldAction {
+        OverworldAction {
+            map,
+            origin: Point8 { x: 0, y: 0 },
+            destination: Point8 { x, y },
+            tile: MetaTile::Warp { to_map: to, to_position: Point8 { x: 0, y: 0 } },
+            route: vec![],
+        }
+    }
+
+    /// Two warps at the same coordinates on different maps must not share a weight — the bug this
+    /// guards is a walker bouncing between Oak's lab and Pallet Town suppressing itself in both.
+    #[test]
+    fn the_key_of_an_action_names_its_map() {
+        let a = warp(Map::PalletTown, Map::OaksLab, 5, 6);
+        let b = warp(Map::OaksLab, Map::PalletTown, 5, 6);
+        assert_ne!(RandomPolicy::action_key(&a), RandomPolicy::action_key(&b));
+    }
+
+    /// Each repeat inside the window multiplies the weight, and an action that was never taken keeps
+    /// its full one. Compounding is the point: a single repeat is not what a diffusing walk is made
+    /// of, a dozen is.
+    #[test]
+    fn each_repeat_compounds_the_penalty() {
+        let taken = warp(Map::PalletTown, Map::OaksLab, 5, 6);
+        let fresh = warp(Map::PalletTown, Map::Route1, 9, 0);
+        let mut policy = RandomPolicy::exploring(1);
+        assert_eq!(policy.novelty_weight(&taken), 1.0, "nothing has been taken yet");
+        for expected in [EXPLORE_DECAY, EXPLORE_DECAY.powi(2), EXPLORE_DECAY.powi(3)] {
+            policy.remember(&taken);
+            assert!((policy.novelty_weight(&taken) - expected).abs() < 1e-12);
+        }
+        assert_eq!(policy.novelty_weight(&fresh), 1.0, "an untaken action is never penalised");
+    }
+
+    /// ⚠️ **A window, not a tally.** An action that has fallen out the far end is as good as new,
+    /// which is what lets a walker come back to a region it explored an hour ago instead of being
+    /// pushed away from everywhere it has ever been.
+    #[test]
+    fn the_window_forgets() {
+        let first = warp(Map::PalletTown, Map::OaksLab, 5, 6);
+        let mut policy = RandomPolicy::exploring(1);
+        policy.remember(&first);
+        assert_eq!(policy.novelty_weight(&first), EXPLORE_DECAY);
+        for i in 0..EXPLORE_MEMORY {
+            policy.remember(&warp(Map::Route1, Map::ViridianCity, i as u8, 0));
+        }
+        assert_eq!(policy.recent.len(), EXPLORE_MEMORY, "the window is bounded");
+        assert_eq!(policy.novelty_weight(&first), 1.0, "the first choice has aged out");
+    }
+
+    /// The behaviour the whole thing is for, measured against the uniform draw it replaces.
+    ///
+    /// A hub map with four exits, each of which comes straight back to it, is the shape a diffusing
+    /// walk is made of. Uniform, taking all four takes 8.3 picks on average (coupon collector);
+    /// weighted, it takes 5.3, because an exit just used is the one least likely to be used
+    /// next. Both end up using all four equally often — the difference is *when*, and forty minutes
+    /// is not long enough for "eventually" to be worth anything.
+    ///
+    /// ⚠️ **The weighting is relative, so a menu whose every option is equally worn is uniform
+    /// again**, and that is on purpose rather than a hole: when everything on offer has been done
+    /// the same number of times there is nothing to prefer, and the alternative — an absolute
+    /// penalty — would drive a long run's whole map to the floor and end up uniform anyway, from
+    /// below. It also means short repeats survive; the claim here is a distribution, not a rule.
+    #[test]
+    fn a_walker_covers_a_hub_faster_than_a_uniform_one() {
+        let exits: Vec<OverworldAction> = [Map::ViridianCity, Map::PalletTown, Map::OaksLab, Map::Route2]
+            .iter().enumerate().map(|(i, to)| warp(Map::Route1, *to, i as u8, 0)).collect();
+
+        // Picks until all four exits have been taken at least once, averaged over 400 attempts.
+        let mut cover = |explore: bool| -> f64 {
+            let mut total = 0usize;
+            for seed in 0..400u64 {
+                let mut policy = if explore { RandomPolicy::exploring(seed) }
+                                 else { RandomPolicy::seeded(seed) };
+                let mut seen = std::collections::BTreeSet::new();
+                let mut picks = 0usize;
+                while seen.len() < exits.len() {
+                    let weights: Vec<f64> = exits.iter().map(|a| policy.novelty_weight(a)).collect();
+                    let rng = policy.rng.as_mut().expect("seeded");
+                    let chosen = if explore {
+                        RandomPolicy::choose_weighted(rng, exits.clone(), &weights)
+                    } else {
+                        exits.clone().into_iter().choose(rng)
+                    }.expect("a non-empty menu");
+                    if explore { policy.remember(&chosen) }
+                    seen.insert(RandomPolicy::action_key(&chosen));
+                    picks += 1;
+                }
+                total += picks;
+            }
+            total as f64 / 400.0
+        };
+
+        let (weighted, uniform) = (cover(true), cover(false));
+        println!("picks to take all four exits: weighted {weighted:.2}, uniform {uniform:.2}");
+        assert!(uniform > 7.5, "the uniform baseline should be near 8.3, was {uniform:.2}");
+        assert!(weighted < uniform * 0.7,
+                "weighted covered the hub in {weighted:.2} picks against uniform's {uniform:.2} — \
+                 the recency bias is not doing anything");
+    }
+
+    /// An empty menu is `None` rather than a panic, and a menu whose every option has been worn down
+    /// to a weight the `f64` cannot represent still answers with one of them.
+    #[test]
+    fn a_degenerate_menu_still_answers() {
+        let mut policy = RandomPolicy::exploring(1);
+        let rng = policy.rng.as_mut().expect("seeded");
+        assert!(RandomPolicy::choose_weighted(rng, vec![], &[]).is_none());
+        let menu = vec![warp(Map::Route1, Map::ViridianCity, 9, 0)];
+        assert!(RandomPolicy::choose_weighted(rng, menu, &[0.0]).is_some(),
+                "a total of zero falls back to a uniform draw rather than answering nothing");
     }
 }
