@@ -1,4 +1,4 @@
-//! The stall hunt: random play from a dozen points in the game, watching for the agent to stop
+//! The stall hunt: random play from two dozen points in the game, watching for the agent to stop
 //! asking the policy anything.
 //!
 //! Behind the `soak-tests` feature, and **gated as a module rather than with `#[ignore]`** — the
@@ -33,9 +33,31 @@
 //!
 //! So the budget is spent the other way round: **[`SOAK_GAME_TIME`] of game time each, from every
 //! entry in [`STATES`]**. Same fuzzer, same detector, one test per starting point, and libtest runs
-//! them in parallel — the tier costs *less* wall clock than the single five-hour test did while
-//! covering a dozen regions of the game instead of one. Each state is a save the leg chain already
-//! commits, so this costs no new fixtures.
+//! them in parallel — the tier costs about the same wall clock as the single five-hour test did
+//! while covering two dozen regions of the game instead of one.
+//!
+//! # Where the starting points come from
+//!
+//! Two places, and the split is a budget rather than a taxonomy. A dozen of them are **hand-cut**:
+//! saves the leg chain already commits, plus one lifted off a deployed pod, kept because a fuzzer
+//! cannot reach what they hold inside forty minutes — a bicycle, a full PC box, every field move
+//! learnt. The other dozen are **checkpoints**, cut off the mainline by
+//! [`playthrough::regen_soak_checkpoints`](super::playthrough::regen_soak_checkpoints): the route
+//! already walks through Mt Moon, an unlit Rock Tunnel, Silph Co, the Safari Zone, the Mansion
+//! switches and the Cinnabar quiz, so a copy taken on the way past costs one run of a test that has
+//! to be run anyway and no fixture-cutting at all. They carry an `expect_map` and the regeneration
+//! fails on a map the route no longer crosses, so neither half can rot quietly.
+//!
+//! # ⚠️ The walker is biased away from what it has just done
+//!
+//! Breadth over depth is also applied *within* a soak, because the diffusion above is not only a
+//! property of long runs: a uniform walker's distance from where it started grows as the square root
+//! of its steps, so the last ten minutes of a forty-minute soak were largely re-crossing the first
+//! ten. [`RandomPolicy::exploring`] keeps the ids of the last two dozen overworld actions it chose
+//! and weights the draw down for each repeat, which is enough to stop the two-action ping-pong the
+//! diffusion is mostly made of (through the door, back through the door) without forbidding
+//! anything — Red has floors whose only exit is the one just used. The battle draw is untouched;
+//! the argument for that is on `exploring` too.
 //!
 //! # ⚠️ The options are forced to the *cartridge's* defaults, not the harness's
 //!
@@ -65,14 +87,16 @@
 use super::*;
 use crate::pokemon::options::{BattleStyle, GameOptions, TextSpeed};
 use crate::pokemon::policy::RandomPolicy;
+use super::playthrough::SOAK_CHECKPOINTS;
 
 /// How much **game time** one soak covers, per starting state.
 ///
-/// Random play measures at ~73× realtime (2026-08-11, Ryzen 9 7900X), so this is about 35 s of wall
-/// clock each — and they run in parallel, so the whole tier is under a minute. Sized by what a random
-/// walker actually adds per minute rather than by what the machine can afford: the deployed run makes
-/// it plain that the *n*th minute from one starting point is worth far less than the first minute
-/// from a new one, so the budget buys starting points.
+/// Random play measures at ~62× realtime, so this is about 39 s of wall clock each (2026-09-02,
+/// 16 threads); libtest runs them together and the tier as a whole lands at about 5.5 min, which is
+/// memory bandwidth rather than cores — 26 emulators and 26 world graphs do not fit in a cache
+/// between them. Sized by what a random walker actually adds per minute rather than by what the
+/// machine can afford: the deployed run makes it plain that the *n*th minute from one starting point
+/// is worth far less than the first minute from a new one, so the budget buys starting points.
 ///
 /// Override with `GB_SOAK_MINUTES` to go deeper from a state that looks interesting.
 const SOAK_GAME_TIME: Duration = Duration::from_secs(40 * 60);
@@ -114,6 +138,15 @@ struct SoakState {
     /// What this state puts within reach that the others do not — the reason it is in the list.
     /// Printed on every run, so the log says what was actually covered.
     covers: &'static str,
+    /// Where the capture is supposed to have been taken, asserted on the way in.
+    ///
+    /// ⚠️ **Only the checkpoints carry one, and that is what makes them safe to regenerate.** A
+    /// hand-cut fixture is where somebody put it; a checkpoint is wherever the route happened to be
+    /// when [`regen_soak_checkpoints`](super::playthrough::regen_soak_checkpoints) last ran, and a
+    /// route that stops crossing that map would otherwise leave a stale `.bin` fuzzing somewhere
+    /// nobody chose. The regen fails on a checkpoint it could not reach; this fails on one whose
+    /// bytes were never replaced.
+    expect_map: Option<Map>,
 }
 
 /// Where the fuzzer starts, chosen for **what is reachable from each**, not for progression.
@@ -127,72 +160,172 @@ const STATES: &[SoakState] = &[
         name: "start-of-game",
         state: crate::pokemon::data::START_OF_GAME,
         covers: "a fresh save: no party, no bag, Oak's script, and the item PC eight tiles away",
+        expect_map: None,
     },
     SoakState {
         name: "viridian-forest",
         state: include_bytes!("../data/viridian-forest.bin"),
         covers: "the rarest grass in the game (8/256) — where the pacing budget was found",
+        expect_map: None,
     },
     SoakState {
         name: "route3-ledge-pocket",
         state: include_bytes!("../data/route3-ledge-pocket.bin"),
         covers: "a map border sealed by one-way ledges: the only way on is five tiles west of the \
                  only way the player can see",
+        expect_map: None,
     },
     SoakState {
         name: "at-vermilion",
         state: include_bytes!("../data/at-vermilion.bin"),
         covers: "a port city: gym, mart, Pokémon Centre PC, the S.S. Anne gangway",
+        expect_map: None,
     },
     SoakState {
         name: "at-lavender",
         state: include_bytes!("../data/at-lavender.bin"),
         covers: "Pokémon Tower with no Silph Scope — the ghosts that cannot be fought",
+        expect_map: None,
     },
     SoakState {
         name: "at-celadon",
         state: include_bytes!("../data/at-celadon.bin"),
         covers: "the department store's nested buy/sell menus and the Game Corner",
+        expect_map: None,
     },
     SoakState {
         name: "at-rocket-hideout",
         state: include_bytes!("../data/at-rocket-hideout.bin"),
         covers: "spin tiles and a lift — the map the player does not steer",
+        expect_map: None,
     },
     SoakState {
         name: "at-saffron",
         state: include_bytes!("../data/at-saffron.bin"),
         covers: "Silph Co's teleport pads and the gym's warp maze",
+        expect_map: None,
     },
     SoakState {
         name: "at-cinnabar",
         state: include_bytes!("../data/at-cinnabar.bin"),
         covers: "surf, the mansion's switches, and the lab's fossil trades",
+        expect_map: None,
     },
     SoakState {
         name: "post-safari",
         state: include_bytes!("../data/post-safari.bin"),
         covers: "the Safari Zone: a step counter, ROCK/BAIT, and no fighting",
+        expect_map: None,
     },
     SoakState {
         name: "vr1f-strength",
         state: include_bytes!("../data/vr1f-strength.bin"),
         covers: "Victory Road's boulder switches — a map that needs a field move to leave",
+        expect_map: None,
     },
     SoakState {
         name: "postgame-pc-box",
         state: include_bytes!("../data/postgame-pc-box.bin"),
         covers: "a PC with mons in the box: withdraw, deposit and release all reachable",
+        expect_map: None,
     },
     SoakState {
         name: "postgame-fly-bike",
         state: include_bytes!("../data/postgame-fly-bike.bin"),
         covers: "a bicycle and Fly — the whole map open, and Cycling Road's forced scroll",
+        expect_map: None,
     },
     SoakState {
         name: "postgame-aides",
         state: include_bytes!("../data/postgame-aides.bin"),
         covers: "the chain head: a full bag, a full party, and every field move learnt",
+        expect_map: None,
+    },
+
+    // ── Checkpoints cut off the mainline by `playthrough::regen_soak_checkpoints` ────────────────
+    //
+    // ⚠️ **Everything above is hand-cut and everything below is not, and the difference is which
+    // half of the map each half buys.** The states above exist because a fuzzer cannot get to them
+    // on its own inside forty minutes — a bicycle, a full PC box, a ledge pocket a deployed run
+    // really got stuck in — and each one cost somebody a fixture. The states below are the route
+    // itself: `full_playthrough` already walks past every one of them, so taking a copy on the way
+    // through costs one run of a test that has to be run anyway and no hand-cutting at all. See
+    // `SOAK_CHECKPOINTS`, which is where the list of them lives and what regenerates them.
+    SoakState {
+        name: "soak-mt-moon",
+        state: include_bytes!("../data/soak-mt-moon.bin"),
+        covers: "a cave with no map of itself: the fossil pair, a Rocket that has to be beaten to pass, and \
+                 ladders in three directions",
+        expect_map: Some(Map::MtMoonB2F),
+    },
+    SoakState {
+        name: "soak-ss-anne",
+        state: include_bytes!("../data/soak-ss-anne.bin"),
+        covers: "a ship of identical cabin doors, on a map that stops existing once the route leaves it",
+        expect_map: Some(Map::SSAnne1F),
+    },
+    SoakState {
+        name: "soak-rock-tunnel",
+        state: include_bytes!("../data/soak-rock-tunnel.bin"),
+        covers: "an unlit cave: the route crosses it with no Flash, so the walker cannot see the tile it is \
+                 choosing",
+        expect_map: Some(Map::RockTunnel1F),
+    },
+    SoakState {
+        name: "soak-pokemon-tower",
+        state: include_bytes!("../data/soak-pokemon-tower.bin"),
+        covers: "the tower with the Silph Scope: Channelers that battle, and the ghosts that no longer refuse",
+        expect_map: Some(Map::PokemonTower5F),
+    },
+    SoakState {
+        name: "soak-route12-snorlax",
+        state: include_bytes!("../data/soak-route12-snorlax.bin"),
+        covers: "a road blocked by a sleeping Snorlax, with a fishing rod in the bag and water on both sides",
+        expect_map: Some(Map::Route12),
+    },
+    SoakState {
+        name: "soak-safari-zone",
+        state: include_bytes!("../data/soak-safari-zone.bin"),
+        covers: "inside the Safari Zone rather than after it: the step counter running, ROCK/BAIT, and no \
+                 fighting",
+        expect_map: Some(Map::SafariZoneCenter),
+    },
+    SoakState {
+        name: "soak-silph-co",
+        state: include_bytes!("../data/soak-silph-co.bin"),
+        covers: "Silph Co mid-errand: teleport pads, a lift, and doors that need a Card Key the walker has not \
+                 got yet",
+        expect_map: Some(Map::SilphCo3F),
+    },
+    SoakState {
+        name: "soak-saffron-gym",
+        state: include_bytes!("../data/soak-saffron-gym.bin"),
+        covers: "the warp maze: every door leads somewhere in the same room and none of them is the way out",
+        expect_map: Some(Map::SaffronGym),
+    },
+    SoakState {
+        name: "soak-pokemon-mansion",
+        state: include_bytes!("../data/soak-pokemon-mansion.bin"),
+        covers: "the switches, four floors of them, each opening a wall somewhere the walker cannot see",
+        expect_map: Some(Map::PokemonMansionB1F),
+    },
+    SoakState {
+        name: "soak-cinnabar-gym",
+        state: include_bytes!("../data/soak-cinnabar-gym.bin"),
+        covers: "the quiz doors: a yes/no question per gate, and a trainer battle for every wrong answer",
+        expect_map: Some(Map::CinnabarGym),
+    },
+    SoakState {
+        name: "soak-viridian-gym",
+        state: include_bytes!("../data/soak-viridian-gym.bin"),
+        covers: "spin tiles and a warp puzzle, with all seven other badges in hand",
+        expect_map: Some(Map::ViridianGym),
+    },
+    SoakState {
+        name: "soak-route23",
+        state: include_bytes!("../data/soak-route23.bin"),
+        covers: "the badge-checking gates on the way to Victory Road, and the water beside them",
+        expect_map: Some(Map::Route23),
     },
 ];
 
@@ -238,7 +371,27 @@ fn soak(state: &SoakState) {
     // nothing a random walker can do reloads them short of a soft reset, and a soak that re-applied
     // them every tick would be papering over exactly the kind of state change it exists to notice.
     PokemonApi::with_cache(&mut gb, &mut cache).debug_set_options(&DEPLOYMENT_OPTIONS);
-    let mut agent = PokemonAgent::new(Box::new(RandomPolicy::seeded(seed)));
+    // ⚠️ **A checkpoint says where it was cut, and it is checked here rather than at the capture.**
+    // The capture cannot be wrong about the map — it is what selects the moment — but the *file* can
+    // be: a route that stops crossing PokemonTower5F leaves last year's bytes on disk, and a soak
+    // that then fuzzes somewhere nobody chose still passes and still says it covered the tower. This
+    // is the seam where the two halves have to agree, so it is where the disagreement is reported.
+    if let Some(want) = state.expect_map {
+        let on = PokemonApi::with_cache(&mut gb, &mut cache).game_state().map(|s| s.map.map);
+        assert_eq!(on.ok(), Some(want),
+                   "the `{}` checkpoint is not on {want} any more — re-cut it with \
+                    `cargo test --release --features full-playthrough,regen-fixtures --bin gb -- \
+                    pokemon::integration_tests::playthrough::regen_soak_checkpoints --exact`",
+                   state.name);
+    }
+    // ⚠️ **`exploring`, not `seeded`** — the recency-weighted draw, whose argument is on
+    // `RandomPolicy::exploring`. The short version is that this tier's own module docs record five
+    // hours from Pallet Town spent almost entirely in Pallet Town: a uniform walker's distance from
+    // where it started grows as the square root of its steps, so the second half of every soak was
+    // re-crossing the first half. Weighting the draw away from the last two dozen actions taken
+    // costs nothing, forbids nothing, stays exactly as seeded, and spends the same forty minutes
+    // further out.
+    let mut agent = PokemonAgent::new(Box::new(RandomPolicy::exploring(seed)));
 
     let target = MachineCycles::from_duration(game_time);
     let mut emulated = MachineCycles::ZERO;
@@ -442,6 +595,97 @@ fn random_play_with_a_bike_and_fly_never_goes_quiet() {
 #[test]
 fn random_play_in_the_postgame_never_goes_quiet() {
     soak(state("postgame-aides"));
+}
+
+/// Mt Moon: three floors of unlit cave, the fossil pair, and a Rocket in the way out.
+#[test]
+fn random_play_in_mt_moon_never_goes_quiet() {
+    soak(state("soak-mt-moon"));
+}
+
+/// The S.S. Anne: two dozen identical cabin doors, and a ship that sails once the route is done with it.
+#[test]
+fn random_play_on_the_ss_anne_never_goes_quiet() {
+    soak(state("soak-ss-anne"));
+}
+
+/// Rock Tunnel with no Flash — the walker chooses tiles it cannot see.
+#[test]
+fn random_play_in_rock_tunnel_never_goes_quiet() {
+    soak(state("soak-rock-tunnel"));
+}
+
+/// Pokémon Tower *with* the Silph Scope, which is the other half of `at-lavender`: the ghosts fight back.
+#[test]
+fn random_play_in_pokemon_tower_never_goes_quiet() {
+    soak(state("soak-pokemon-tower"));
+}
+
+/// Route 12: a road a sleeping Snorlax blocks, with a rod in the bag and water on both sides.
+#[test]
+fn random_play_at_the_snorlax_never_goes_quiet() {
+    soak(state("soak-route12-snorlax"));
+}
+
+/// Inside the Safari Zone with the step counter running, rather than `post-safari`'s view from afterwards.
+#[test]
+fn random_play_inside_the_safari_zone_never_goes_quiet() {
+    soak(state("soak-safari-zone"));
+}
+
+/// Silph Co mid-errand: teleport pads, a lift, and locked doors.
+#[test]
+fn random_play_inside_silph_co_never_goes_quiet() {
+    soak(state("soak-silph-co"));
+}
+
+/// The Saffron Gym warp maze — every door is a warp and none of them is out.
+#[test]
+fn random_play_in_the_saffron_gym_never_goes_quiet() {
+    soak(state("soak-saffron-gym"));
+}
+
+/// The Pokémon Mansion switches: walls that open somewhere the walker cannot see.
+#[test]
+fn random_play_in_the_pokemon_mansion_never_goes_quiet() {
+    soak(state("soak-pokemon-mansion"));
+}
+
+/// The Cinnabar Gym quiz: a yes/no gate per door and a battle for each wrong answer.
+#[test]
+fn random_play_in_the_cinnabar_gym_never_goes_quiet() {
+    soak(state("soak-cinnabar-gym"));
+}
+
+/// The Viridian Gym: spin tiles and warps, with seven badges already in hand.
+#[test]
+fn random_play_in_the_viridian_gym_never_goes_quiet() {
+    soak(state("soak-viridian-gym"));
+}
+
+/// Route 23's badge-checking gates, the last thing between the route and Victory Road.
+#[test]
+fn random_play_at_the_victory_road_gates_never_goes_quiet() {
+    soak(state("soak-route23"));
+}
+
+/// Every entry in [`SOAK_CHECKPOINTS`] is a soak state, cut on the map that list names.
+///
+/// The two lists cannot be one: the capture side needs `(name, Map)` in a module that is compiled
+/// whatever features are on, and this side needs an `include_bytes!` per entry, which no const can
+/// generate. So they are joined here instead — adding a checkpoint and forgetting to turn it loose
+/// leaves a `.bin` in the repository that nothing reads, which is exactly the kind of thing that is
+/// only ever noticed a year later.
+#[test]
+fn every_checkpoint_is_a_soak_state() {
+    for (name, map) in SOAK_CHECKPOINTS {
+        let found = STATES.iter().find(|s| s.name == *name)
+            .unwrap_or_else(|| panic!("`{name}` is captured by regen_soak_checkpoints but no soak \
+                                       state reads it — add one beside the others"));
+        assert_eq!(found.expect_map, Some(*map),
+                   "`{name}` is captured on {map} and its soak state expects {:?}",
+                   found.expect_map);
+    }
 }
 
 /// Every state in [`STATES`] is named by exactly one test, and every name resolves.

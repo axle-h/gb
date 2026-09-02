@@ -58,6 +58,18 @@ shop is a different RNG line). Each has a hand-rolled-policy test, since `Determ
 would skip the thing under test, and each is a frame-timing change that only `full_playthrough` can
 price.
 
+## The random policy
+
+- `RandomPolicy::exploring` is the fuzzer `integration_tests::soak` drives: the ids of the last
+  `EXPLORE_MEMORY` overworld actions are kept and each repeat multiplies that action's weight by
+  `EXPLORE_DECAY`, because a uniform walker's distance from where it started grows as the square
+  root of its steps and five hours from Pallet Town measured as five hours *of* Pallet Town. It is a
+  weight rather than an exclusion (floors exist whose only exit is the one just used), it is
+  recorded on what was chosen rather than on what the agent managed to do, and it leaves the battle
+  draw uniform — a recency penalty there pushes a walker onto `Run` and `Item` until it blacks out,
+  and a black-out warp throws away everything the starting state was chosen for. `--policy random`
+  is the plain `RandomPolicy` and is unchanged.
+
 ## The scripted policy
 
 - The party is one Squirtle that does all the fighting, an Oddish for Cut and a Machop for Strength.
