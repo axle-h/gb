@@ -8,12 +8,13 @@ Route: Fly to `ViridianCity` > `ViridianGym`.
    **It opens exactly when you hold the other seven badges**, which you now do, so if
    the door still refuses you then one of the earlier gyms is unbeaten. It does not
    depend on anything else you have done.
-2. Inside are spin tiles, which slide you in the direction they point until something
-   stops you. Work up the room fighting the Trainers as you meet them.
+2. Inside are arrow tiles, which slide you in the direction they point until something
+   stops you. **You do not have to work the maze out.** The routes behind the action
+   menu already know where every slide ends, so pick who you want to reach and the walk
+   takes the arrows into account: a slide is your walk being carried out, not a failure.
+   Work up the room fighting the Trainers as you meet them.
 3. One Blackbelt steps forward to challenge you and stands in the way of Giovanni.
-   Beat him, then go back to the entrance and hug the east wall: the spin tiles along
-   it carry you to a stop tile behind where he was standing, and Giovanni is west of
-   there. **Do not leave the gym to heal after that fight**, because he returns to his
+   Beat him, and **do not leave the gym to heal afterwards**, because he returns to his
    old position and closes the way again.
 4. Giovanni has Rhyhorn 45, Dugtrio 42, Nidoqueen 44, Nidoking 45 and Rhydon 50. They
    are all Ground, most of them also Rock or Poison. Water, Grass and Ice moves all hit

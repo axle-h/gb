@@ -39,6 +39,10 @@ in these chapters that is a number was read out of the disassembly:
 | The starter Poké Balls being inert before that | `OaksLabSelectedPokeBallScript` — `EVENT_OAK_ASKED_TO_CHOOSE_MON`, else `_OaksLabThoseArePokeBallsText` |
 | The boy turning you back from Route 3 | `scripts/PewterCity.asm` — `EVENT_BEAT_BROCK` + `PewterCityPlayerLeavingEastCoords` |
 | The Saffron gate guards wanting a drink | `scripts/Route7Gate.asm` — `BIT_GAVE_SAFFRON_GUARDS_DRINK`, `RemoveGuardDrink` |
+| The Lift Key needing a *second* talk to Rocket 3 | `scripts/RocketHideoutB4F.asm` — `RocketHideoutB4FRocket3AfterBattleText` sets `EVENT_ROCKET_DROPPED_LIFT_KEY` and `ShowObject`s the ball |
+| Giovanni's door opening on both B4F Rockets | `RocketHideoutB4FDoorCallbackScript` — `EVENT_BEAT_ROCKET_HIDEOUT_4_TRAINER_0` and `_1` |
+| The B1F lift door staying shut | `RocketHideoutB1FDoorCallbackScript` — `EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_4` |
+| The lift stopping at B1F, B2F and B4F only | `RocketHideoutElevatorFloors` |
 
 A second oracle is worth naming, because it caught more than the disassembly did on its own:
 **`PolicyStep::*_steps()` in `src/pokemon/policy.rs`**, the scripted route `full_playthrough` uses to
@@ -53,6 +57,14 @@ sweep of it against these chapters turned up five things no chapter had said:
   the long way round, Centre → East → North → West, because the Centre's own west exit is across
   unsurfable water;
 - the Silph Co. Card Key is in a pocket that can only be *arrived* in, off the 5F↔9F teleport pair.
+
+⚠️ **A chapter cannot see a gate that is not a badge, so one has to be repeated.** `chapter_index`
+reads `wObtainedBadges` and nothing else, and the Silph Scope is not badge-gated: the Rocket Hideout
+is chapter 3's and the Pokémon Tower is chapter 4's, but nothing in the cartridge makes you take the
+hideout before Erika. The deployed run of 2026-09-02 beat her first, lost the only page that said
+where the Scope was, guessed Silph Co from the name, and spent fifty turns walking between Lavender
+and Celadon. Chapter 4 now opens with the hideout, guarded by "if it is not in the bag" — the same
+duplication is owed to anything else a chapter assumes was picked up in the one before it.
 
 ⚠️ `BIT_STRENGTH_ACTIVE` is the same shape and is already a ⚠️ in `CLAUDE.md`: Strength is armed once
 per map and cleared by every map change, so a boulder push on a floor you have just walked on to does
