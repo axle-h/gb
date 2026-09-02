@@ -8,6 +8,7 @@ import { Screen, describeRemaining } from './components/Screen';
 import { SoundButton } from './components/SoundButton';
 import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
+import { useWakeLock } from './useWakeLock';
 
 /**
  * The phone's tabs: the log, the trainer card and party, the model's plan, and the program deciding
@@ -17,6 +18,10 @@ type PaneTab = 'log' | 'status' | 'plan' | 'script';
 
 export function App() {
   const { status, entries, connection, usage, run, plan, battleScript, speed } = useEventStream();
+  // A phone watching a livestream is an idle phone as far as the phone is concerned, and it dims and
+  // then locks. Nothing else on the page notices, so this holds the screen on while it is visible.
+  // No-op on a desk, on an insecure origin, and while the tab is in the background: see the hook.
+  useWakeLock();
   // Which pane a phone is showing. From 640px up the stylesheet hides the tab bar and ignores the
   // tab classes, so this state is inert on a desk. The log is the default because it is the thing
   // the page is for.
