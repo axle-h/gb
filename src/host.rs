@@ -843,17 +843,24 @@ impl EmulatorHost {
                 self.booted = true;
                 self.published.set_status(RunStatus::Playing);
             }
-            ran = self.gb.run(min_cycles);
+            // ⚠️ **`agent.run`, not `gb.run` and one `agent.update`.** This loop paces itself on
+            // wall clock, so `min_cycles` is however long the last iteration took — a checkpoint
+            // write, a descheduled thread, a busy node — up to `MAX_CATCHUP`. Handing all of it to
+            // one tick made the agent's decision rate the *host's loop rate*, which is how the
+            // deployed run of 2026-09-03 came to walk past the same corner on Route 12 for three
+            // 60-second walks running. The agent is ticked every `AGENT_RESOLUTION` of emulated
+            // time instead; see `PokemonAgent::run`.
+            let result;
+            (ran, result) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
             self.emulated += ran;
             self.ahead_by_cycles += ran - min_cycles;
 
-            let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
             // ⚠️ **On change, not on every failure.** `agent.update` answers `Err("Not in game")`
             // for as long as the game is unreadable, which after the Hall of Fame credits — pokered
             // ends them with `jp Init`, clearing WRAM — is *for ever*. Publishing each one would put
             // fifty notices a second into the transcript and every open browser. See
             // `last_agent_failure`.
-            match self.agent.update(&mut api, ran) {
+            match result {
                 Ok(()) => self.last_agent_failure = None,
                 Err(failure) => {
                     if self.last_agent_failure.as_deref() != Some(failure.as_str()) {

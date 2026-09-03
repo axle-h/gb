@@ -22,6 +22,16 @@ below is a comment on the function or constant it names; this is the index of th
   battle in Pokémon Tower (`battle::is_ghost_battle`; `battle_options` returns `Run` alone, for
   every policy including the scripted one). Their guards assert on actions taken or on the battle
   ending, never on silence.
+- **One agent tick is 20 ms of *game* time, and every driver of a live emulator goes through
+  `PokemonAgent::run` to get that.** `update` coalesces rather than catching up — hand it 250 ms and
+  it runs the state machine once, 230 ms late — so `host.rs` and `sdl/render.rs`, which both pace on
+  wall clock, used to make the agent's decision rate their own loop rate. A held direction keeps
+  walking, so the agent has one step (267 ms) to notice a corner and turn; `host::MAX_CATCHUP` is
+  250 ms. A deployed run oscillated across Route 12's one-wide corridor at (11, 63) until
+  `MAX_MOVEMENT_SILENCE` gave up, three walks running, and filed a bug saying Route 11 was
+  unreachable. ⚠️ **No test could see it**: `TestFixture::step` is `gb.run(AGENT_RESOLUTION)` and one
+  `update` in lockstep, which is the one cadence at which it does not exist —
+  `mechanics::a_corner_is_turned_at_a_coarse_host_tick` drives `TestFixture::step_coarse` instead.
 - `MAX_MOVEMENT_SILENCE` (60 s) aborts a walk that never arrives, and reports it as
   `OverworldActionAbortedReason::DidNotArrive`, **never** as `NoRoute`. The two are opposite
   diagnoses: `NoRoute` says choose something else, `DidNotArrive` says the route was there and the

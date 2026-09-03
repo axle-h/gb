@@ -154,6 +154,12 @@ make it pass, say so in the hand-off.
   `stalls::probe_stall_artifacts` (`GB_STALL_DIR`) is the bulk form. A jam that lived in the
   agent's own state does not survive the trip, so watch a new case go red before committing it.
   Artifacts are named per state and per seed.
+- ⚠️ **`soak` cannot see anything about the agent's tick *rate*, and neither can any other test
+  here.** Every one of them drives `TestFixture::step` — `gb.run(AGENT_RESOLUTION)` then one
+  `agent.update` — so the agent is always handed exactly one tick's worth of emulated time. Both
+  real drivers hand it however long their last loop iteration took, and the defect of 2026-09-03
+  lived entirely in that gap. `TestFixture::step_coarse` is the way to test at a driver's cadence;
+  `mechanics::a_corner_is_turned_at_a_coarse_host_tick` is the first case.
 - Nearly everything it finds is a closed loop under A. The rules that cover the class are on their
   constants in `agent.rs` and summarised in [pokemon-agent](pokemon-agent.md). Each is a
   frame-timing change, so `full_playthrough` is the only thing that can price one.

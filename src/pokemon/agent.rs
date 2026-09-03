@@ -2026,6 +2026,54 @@ impl PokemonAgent {
         }
     }
 
+    /// Advance `gb` by at least `min_cycles`, **ticking the state machine every
+    /// [`AGENT_RESOLUTION`]** rather than once for the lot. Returns what was actually emulated and
+    /// the last tick's result.
+    ///
+    /// ⚠️ **Every driver of a live emulator must come through here.** [`Self::update`] coalesces:
+    /// hand it 250 ms and it runs the state machine *once*, having already missed 230 ms of the
+    /// game. That is fine for the tests, which call `gb.run(AGENT_RESOLUTION)` and `update` in
+    /// lockstep, and it was wrong everywhere else — `host.rs` and `render.rs` both paced themselves
+    /// on wall clock, ran `gb.run(min_cycles)` for however long the last loop iteration took, and
+    /// gave the agent one tick for it. So the agent's real decision rate in a deployment was the
+    /// host's loop rate, and a descheduled thread, a checkpoint write or a busy node silently
+    /// lowered it; `MAX_CATCHUP` (250 ms) is the cap, and a walking step is 267 ms.
+    ///
+    /// What that costs is turns. A held direction keeps walking — pokered starts another step
+    /// whenever the pad is still down at the end of one — so the agent has one step's width to
+    /// notice it has arrived at the corner and press the other way. Miss it and the player
+    /// overshoots, the route recomputes from a tile one further on, and the walk oscillates about
+    /// the turn until [`MAX_MOVEMENT_SILENCE`] gives up. The deployed run of 2026-09-03 did exactly
+    /// that on Route 12's one-wide corridor west at (11, 63): three walks abandoned after 60 s each,
+    /// then an issue report saying the connection to Route 11 was unreachable. It is reproduced by
+    /// `mechanics::a_corner_is_turned_at_a_coarse_host_tick`, which paced (11, 62) ↔ (11, 64) for the
+    /// whole of its budget at a 250 ms tick and now reaches Route 11 in the same 4.5 s of game time
+    /// at every tick it is asked for.
+    ///
+    /// Slicing is free: `gb.run` is a `while cycles < min` loop over whole instructions, so twelve
+    /// calls of 20 ms cost what one of 250 ms costs. In the ordinary case the host is a millisecond
+    /// ahead of the clock and this runs its body once.
+    pub fn run(&mut self, gb: &mut crate::game_boy::GameBoy,
+               cache: &mut crate::pokemon::map_metadata::MapMetadataCache,
+               min_cycles: MachineCycles) -> (MachineCycles, Result<(), String>) {
+        let mut ran = MachineCycles::ZERO;
+        let mut owed = min_cycles;
+        let mut result = Ok(());
+        while owed > MachineCycles::ZERO {
+            // `gb.run` finishes the instruction it is in, so this returns *at least* the slice and
+            // `owed` can only reach zero by having emulated the whole of `min_cycles`.
+            let slice = gb.run(owed.min(AGENT_RESOLUTION));
+            ran += slice;
+            owed = owed.saturating_sub(slice);
+            let mut api = PokemonApi::with_cache(gb, cache);
+            // The *last* tick's result, which is what a single-tick call has always reported. Both
+            // callers publish on change, so an intermediate failure that has cleared by the end of
+            // the batch is one nobody needed to hear about.
+            result = self.update(&mut api, slice);
+        }
+        (ran, result)
+    }
+
     pub fn update(&mut self, api: &mut PokemonApi, delta_cycles: MachineCycles) -> Result<(), String> {
         // ── Throttled decision-making ─────────────────────────────────────────────
         self.cycles += delta_cycles;
