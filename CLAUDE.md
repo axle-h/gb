@@ -12,8 +12,12 @@ indexed below. **They are not loaded automatically.** Read the one for the area 
 touch, before touching it. Each is a list of rules, and each rule points at the comment in the code
 that carries the full argument, so the code stays the source of truth and the doc stays short.
 
-The only surviving design doc is `docs/llm-web-playthrough-plan.md` (W0–W9, all done). Where a
-comment attributes a number to "Phase C" or "Phase D", that is history, not a file you can open.
+Two docs below are plans rather than rule-indexes. `docs/llm-web-playthrough-plan.md` (W0–W9, all
+done) is the design one; where a comment attributes a number to "Phase C" or "Phase D", that is
+history, not a file you can open. `docs/deployed-run-defects.md` is the open one: what the deployed
+run of 2026-09-02 walked into, six root causes and nine work items, of which **W8 is done and the
+other eight are not started**. Read it before touching routing, map connections, `use_field_move`
+targets or the plan tools — every item carries the save state or the fixture that reproduces it.
 
 ## Rules of the road
 

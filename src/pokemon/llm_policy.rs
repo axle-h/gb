@@ -1911,6 +1911,71 @@ mod tests {
         }
     }
 
+    /// **A plan call the list refused is answered once; a repeat of it inside the turn is not run
+    /// again.**
+    ///
+    /// ⚠️ **This is a real turn from the deployed run of 2026-09-03, shrunk.** Turn 1280 sent
+    /// **thirty-five** `todo_set`/`todo_complete` calls against `id: 5` — a number its plan had not
+    /// held for hours — and every one was answered "There is no TODO 5. The list is in the turn you
+    /// were just sent", which points a model that has just misread the list back at the list. The
+    /// turn ended only when `GB_MAX_TOOL_STEPS` ran out. That cap does not bound this on its own:
+    /// **a step may carry any number of parallel calls**, which is how 16 steps became 35 calls, so
+    /// the guard has to count calls rather than lean on the step budget. The same shape
+    /// `press_buttons` had before it was withdrawn — a call that fails cheaply and identically will
+    /// be repeated until something else stops it.
+    ///
+    /// Two things are asserted, and the second is the one that would rot: the repeat is answered
+    /// *differently*, and the plan is untouched by any of it.
+    #[test]
+    fn a_refused_plan_call_repeated_in_one_turn_is_not_serviced_twice() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        rig.push(vec![
+            // One real item, so the refusal has ids to name.
+            calls(&[("todo_set", r#"{"text":"deliver the parcel to Oak"}"#), ("choose_action", &choose)]),
+            // A read step that does nothing but hammer an id the list has never held, in the two
+            // spellings the deployed run used, twice each and in one message.
+            calls(&[
+                ("todo_set", r#"{"id":5,"text":""}"#),
+                ("todo_set", r#"{"id":5,"text":""}"#),
+                ("todo_complete", r#"{"id":5}"#),
+                ("todo_complete", r#"{"id":5}"#),
+            ]),
+            calls(&[("choose_action", &choose)]),
+        ]);
+        assert!(rig.pump_overworld(&mut policy).is_some(), "turn 1 decides");
+        assert!(rig.pump_overworld(&mut policy).is_some(), "turn 2 decides after its read step");
+
+        // The tool results of the read step are in the request that followed it.
+        let requests = rig.requests();
+        let answers: Vec<String> = requests.last().expect("a third request")
+            .messages.iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(Message::text)
+            .filter(|text| text.contains("TODO 5") || text.contains("that exact call"))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(answers.len(), 4, "every call still gets a result: {answers:?}");
+        for first in [&answers[0], &answers[2]] {
+            assert!(first.contains("There is no TODO 5"), "{first}");
+            assert!(first.contains("holds 1"), "the first refusal names the ids: {first}");
+        }
+        for repeat in [&answers[1], &answers[3]] {
+            assert!(repeat.contains("already made that exact call this turn"), "{repeat}");
+        }
+
+        // ⚠️ And none of it may have reached the list. The branch this replaced appended on a stale
+        // id, so a turn like this one used to *add* items — two of the five in that run's plan, one
+        // of them the literal word `Delete`.
+        let plan = requests.last().expect("a third request").messages.iter()
+            .rposition(|m| crate::llm::prompt::is_plan(m))
+            .map(|at| requests.last().unwrap().messages[at].text().unwrap_or_default().to_string())
+            .expect("a plan is carried");
+        assert!(plan.contains("deliver the parcel to Oak"), "{plan}");
+        assert_eq!(plan.matches("- [").count(), 1, "the plan grew under a turn that only failed: {plan}");
+    }
+
     /// **The periodic refresh is an overworld thing, and an edit is not.**
     ///
     /// A refresh buys the model a fresh look at a list it has not touched, and there is nothing to

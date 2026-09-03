@@ -63,12 +63,35 @@ impl From<&TodoItem> for crate::web::published::TodoView {
 /// the emulator, so unlike a read it costs no round trip through `service_tools`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TodoCall {
-    /// `todo_set`, one call for the three edits: no `id` appends a new item, an `id` with text
-    /// rewrites that item (and reopens it, because new text is a new intent), an `id` with no text
-    /// deletes it. One shape instead of add-then-delete pairs, so revising the plan is never more
-    /// expensive than writing it was.
+    /// The three edits: no `id` appends a new item, an `id` with text rewrites that item (and
+    /// reopens it, because new text is a new intent), an `id` with no text deletes it. One shape
+    /// instead of add-then-delete pairs, so revising the plan is never more expensive than writing
+    /// it was.
+    ///
+    /// ⚠️ **Two tool names reach the delete arm and only one of them is advertised.** `todo_delete`
+    /// is the word the catalogue offers; `todo_set` with an `id` and no `text` is the overload it
+    /// replaced, kept because a resumed run imitating its own history writes that shape. See
+    /// `tools::TODO_TOOL_NAMES` for the turn the missing word cost.
     Set { id: Option<u32>, text: Option<String> },
     Complete { id: u32 },
+}
+
+/// What one [`TodoCall`] did: the sentence the model is shown, and whether the list acted on it.
+pub struct TodoAnswer {
+    pub text: String,
+    /// True when nothing changed — a number that is not on the list, an item with no text, a plan
+    /// with no room. See [`TodoList::apply_reporting`].
+    pub refused: bool,
+}
+
+impl TodoAnswer {
+    fn done(text: impl Into<String>) -> Self {
+        Self { text: text.into(), refused: false }
+    }
+
+    fn refused(text: impl Into<String>) -> Self {
+        Self { text: text.into(), refused: true }
+    }
 }
 
 pub struct TodoList {
@@ -107,6 +130,17 @@ impl TodoList {
 
     /// Service one call, returning the sentence the model is shown as the tool result.
     pub fn apply(&mut self, call: TodoCall) -> String {
+        self.apply_reporting(call).text
+    }
+
+    /// [`Self::apply`], plus whether the list did anything about it.
+    ///
+    /// ⚠️ **`refused` exists so the *caller* can stop a repeat, which no answer can do by itself.**
+    /// Every refusal here is cheap, deterministic and identical on the second attempt, so a model
+    /// that misreads one has no reason not to send it again — and one turn of the deployed run of
+    /// 2026-09-03 sent thirty-five. Better wording narrows that (see [`Self::where_to_put_it`]) but
+    /// cannot close it; the worker's per-turn guard does. See `Worker::apply_todo`.
+    pub fn apply_reporting(&mut self, call: TodoCall) -> TodoAnswer {
         match call {
             TodoCall::Set { id, text } => self.set(id, text.as_deref()),
             TodoCall::Complete { id } => self.complete(id),
@@ -118,33 +152,76 @@ impl TodoList {
         &self.items
     }
 
-    fn set(&mut self, id: Option<u32>, text: Option<&str>) -> String {
+    fn set(&mut self, id: Option<u32>, text: Option<&str>) -> TodoAnswer {
         let text = text.map(|text| truncated(text.trim(), MAX_TEXT)).filter(|text| !text.is_empty());
         match (id, text) {
             (None, Some(text)) => self.add(&text),
-            (None, None) => {
-                "An empty TODO is not a TODO. Give `todo_set` some `text`, or an `id` to delete."
-                    .to_string()
-            }
+            (None, None) => TodoAnswer::refused(
+                "An empty TODO is not a TODO. Give `todo_set` some `text`, or call `todo_delete` \
+                 with an `id`.",
+            ),
             (Some(id), Some(text)) => match self.items.iter_mut().find(|item| item.id == id) {
                 Some(item) => {
                     item.text = text.clone();
                     item.done = false;
                     self.persist();
-                    format!("TODO {id} is now: {text}")
+                    TodoAnswer::done(format!("TODO {id} is now: {text}"))
                 }
-                // Forgiving on purpose: the id is stale — deleted earlier, or misremembered across
-                // a compaction — but the text is still a plan. Keep it, and say what happened.
-                None => format!("There was no TODO {id}, so this went on the end. {}", self.add(&text)),
+                // ⚠️ **This used to append, "forgiving on purpose", and the forgiveness is what
+                // wrecked a live plan.** The argument was that a stale id still carries a real
+                // intent, so keeping the text beats spending a round trip. What it could not tell
+                // apart is a model using `text` as a *command word*: the deployed run of
+                // 2026-09-03 sent `{"id": 5, "text": "Delete"}` and was answered "There was no TODO
+                // 5, so this went on the end. Added TODO 12: Delete". Two of the five items in that
+                // run's plan — the cap is five — existed only because of this branch, one of them
+                // the literal word `Delete` and one a byte-for-byte duplicate of another. With none
+                // of them done, `add` then refused everything as full, and the plan is the only
+                // thing that survives a compaction.
+                //
+                // Refusing costs the round trip the old branch was avoiding, and buys back the two
+                // things it could not give: the model is told which ids actually exist, so the next
+                // call lands, and a plan cannot be filled with items nobody asked for.
+                None => TodoAnswer::refused(format!(
+                    "There is no TODO {id}, so nothing was changed. {}", self.where_to_put_it())),
             },
             (Some(id), None) => match self.items.iter().position(|item| item.id == id) {
                 Some(position) => {
                     let item = self.items.remove(position);
                     self.persist();
-                    format!("Removed TODO {id}: {}", item.text)
+                    TodoAnswer::done(format!("Removed TODO {id}: {}", item.text))
                 }
-                None => format!("There is no TODO {id}. The list is in the turn you were just sent."),
+                None => TodoAnswer::refused(
+                    format!("There is no TODO {id}. {}", self.where_to_put_it())),
             },
+        }
+    }
+
+    /// The half of every "there is no TODO n" that tells the model what to do about it.
+    ///
+    /// ⚠️ **It names the ids, and the sentence it replaces did not.** That one read "The list is in
+    /// the turn you were just sent", which points a model that has just mis-read the list back at
+    /// the list, with nothing new in its hands — so the cheapest next move is to try again, and
+    /// that is what one turn of the deployed run did thirty-five times. The same shape `press_buttons`
+    /// had before it was withdrawn: **a call that fails cheaply and identically will be repeated
+    /// until something else stops it.** An answer has to move the model on within itself.
+    fn where_to_put_it(&self) -> String {
+        match self.numbers() {
+            None => "Your plan is empty — `todo_set` with no `id` starts it.".to_string(),
+            Some(ids) => format!(
+                "Your plan holds {ids}. Use one of those numbers, or call `todo_set` with no `id` \
+                 to put this on the end as a new item."
+            ),
+        }
+    }
+
+    /// The ids the list actually holds, for an answer that has to name them. `None` when there are
+    /// none, because "your plan holds " with nothing after it reads as a bug in the tool.
+    fn numbers(&self) -> Option<String> {
+        match self.items.is_empty() {
+            true => None,
+            false => Some(
+                self.items.iter().map(|item| item.id.to_string()).collect::<Vec<_>>().join(", "),
+            ),
         }
     }
 
@@ -164,42 +241,62 @@ impl TodoList {
         dropped
     }
 
-    fn add(&mut self, text: &str) -> String {
+    fn add(&mut self, text: &str) -> TodoAnswer {
         let text = truncated(text.trim(), MAX_TEXT);
         if text.is_empty() {
-            return "An empty TODO is not a TODO.".to_string();
+            return TodoAnswer::refused("An empty TODO is not a TODO.");
         }
         // Dropping the oldest *done* item is what makes room, since the cap counts them: a plan
         // whose finished half is squeezing out the live half is the failure this exists to prevent.
+        //
+        // ⚠️ **What went is named in the answer, because an id that vanishes silently is an id the
+        // model goes on calling.** TODO 5 of the deployed run of 2026-09-03 was real, completed, and
+        // evicted here several hundred turns before the model spent a turn trying to delete it. The
+        // model is reading this string at the moment the eviction happens, which is the only place
+        // the news is both true and cheap: `render` would have to carry it forward, and the plan
+        // message is only re-emitted when it changes.
+        let mut evicted = None;
         if self.items.len() >= MAX_ITEMS {
             if let Some(position) = self.items.iter().position(|item| item.done) {
-                self.items.remove(position);
+                let item = self.items.remove(position);
+                evicted = Some(format!(
+                    " TODO {} was finished and has been dropped to make room: {}",
+                    item.id, item.text,
+                ));
             } else {
-                return format!(
+                // ⚠️ **The ids, but not `where_to_put_it`'s escape clause.** That one ends "or call
+                // `todo_set` with no `id` to put this on the end as a new item", which is the call
+                // that has just been refused for having nowhere to go. An answer that suggests
+                // retrying the failure is the loop this whole change is about.
+                return TodoAnswer::refused(format!(
                     "Your plan is full: {MAX_ITEMS} items, and none of them are done. It is meant \
                      to be short. Finish one with `todo_complete`, or drop the one you no longer \
-                     mean to do with `todo_set` (its `id`, no `text`), then add this."
-                );
+                     mean to do with `todo_delete`, then add this. It holds {}.",
+                    self.numbers().unwrap_or_else(|| "nothing".to_string()),
+                ));
             }
         }
         let id = self.next_id;
         self.next_id += 1;
         self.items.push(TodoItem { id, text: text.clone(), done: false });
         self.persist();
-        format!("Added TODO {id}: {text}")
+        TodoAnswer::done(format!("Added TODO {id}: {text}{}", evicted.unwrap_or_default()))
     }
 
-    fn complete(&mut self, id: u32) -> String {
+    fn complete(&mut self, id: u32) -> TodoAnswer {
+        if !self.items.iter().any(|item| item.id == id) {
+            return TodoAnswer::refused(format!("There is no TODO {id}. {}", self.where_to_put_it()));
+        }
         let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
-            return format!("There is no TODO {id}. The list is in the turn you were just sent.");
+            unreachable!("just checked")
         };
         if item.done {
-            return format!("TODO {id} was already done.");
+            return TodoAnswer::done(format!("TODO {id} was already done."));
         }
         item.done = true;
         let text = item.text.clone();
         self.persist();
-        format!("Done: {text}")
+        TodoAnswer::done(format!("Done: {text}"))
     }
 
     /// The block that goes into a turn as a message of its own (§10).
@@ -330,6 +427,9 @@ mod tests {
         }
         let full = todo.apply(add("one more"));
         assert!(full.contains("full"), "{full}");
+        assert!(full.contains("It holds 1, 2, 3, 4, 5"), "a refusal names the ids: {full}");
+        // ⚠️ And it must not end by suggesting the very call it just refused — see `add`.
+        assert!(!full.contains("no `id` to put this on the end"), "{full}");
 
         // Completing one makes room, and it is the completed one that is dropped.
         todo.apply(TodoCall::Complete { id: 1 });
@@ -346,9 +446,10 @@ mod tests {
         assert_eq!(todo.items()[0].text.chars().count(), MAX_TEXT / 2);
     }
 
-    /// `todo_set` is one tool doing three jobs: append without an `id`, rewrite with one, delete
-    /// with an `id` and no text. The plan is meant to be *rewritten* — an item that turned out
-    /// wrong is replaced, not completed — so none of the three may cost more than one call.
+    /// `todo_set` is one tool doing two jobs — append without an `id`, rewrite with one — and the
+    /// delete arm behind it is what `todo_delete` reaches. The plan is meant to be *rewritten* — an
+    /// item that turned out wrong is replaced, not completed — so none of the three may cost more
+    /// than one call.
     #[test]
     fn set_rewrites_and_deletes_as_well_as_adding() {
         let mut todo = TodoList::open(None);
@@ -361,20 +462,70 @@ mod tests {
         assert!(answer.contains("TODO 1 is now"), "{answer}");
         assert!(todo.render().contains("- [ ] 1 — rematch Brock with Mankey"), "{}", todo.render());
 
-        // An `id` with no text deletes.
+        // An `id` with no text deletes — the arm `todo_delete` parses to.
         let answer = todo.apply(TodoCall::Set { id: Some(2), text: None });
         assert!(answer.contains("Removed TODO 2"), "{answer}");
         assert!(!todo.render().contains("Route 4"));
-
-        // A stale `id` with text keeps the text rather than wasting the round trip — appended, and
-        // the answer says both halves.
-        let answer = todo.apply(TodoCall::Set { id: Some(2), text: Some("buy potions".into()) });
-        assert!(answer.contains("no TODO 2") && answer.contains("Added TODO 3"), "{answer}");
 
         // Deleting nothing and writing nothing both answer rather than fail.
         assert!(todo.apply(TodoCall::Set { id: Some(99), text: None }).contains("no TODO 99"));
         assert!(todo.apply(TodoCall::Set { id: None, text: Some("  ".into()) }).contains("not a TODO"));
         assert!(todo.apply(TodoCall::Set { id: None, text: None }).contains("not a TODO"));
+    }
+
+    /// ⚠️ **A number that is not on the list changes nothing, and the answer says which numbers
+    /// are.** Both halves are the deployed run of 2026-09-03, and they are one bug seen twice.
+    ///
+    /// This branch used to append, on the argument that a stale id still carries a real intent. It
+    /// cannot tell that apart from a model using `text` as a command word: `{"id": 5, "text":
+    /// "Delete"}` was answered "There was no TODO 5, so this went on the end. Added TODO 12:
+    /// Delete", and that run's five-item plan ended up holding the literal word `Delete`, a
+    /// byte-for-byte duplicate of another item, and no free room.
+    ///
+    /// And the refusal it did give — "The list is in the turn you were just sent" — hands back
+    /// nothing, so the cheapest next move is to send the same call again. That turn sent it
+    /// thirty-five times. Naming the ids is what makes the *next* call land; `Worker::apply_todo`
+    /// is what makes the same call twice not free.
+    #[test]
+    fn an_id_that_is_not_on_the_list_changes_nothing_and_the_answer_names_the_ones_that_are() {
+        let mut todo = TodoList::open(None);
+        todo.apply(add("beat Brock"));
+        todo.apply(add("buy potions"));
+
+        for call in [
+            TodoCall::Set { id: Some(5), text: Some("Delete".into()) },
+            TodoCall::Set { id: Some(5), text: None },
+            TodoCall::Complete { id: 5 },
+        ] {
+            let answer = todo.apply_reporting(call.clone());
+            assert!(answer.refused, "{call:?} should be refused: {}", answer.text);
+            assert!(answer.text.contains("no TODO 5"), "{}", answer.text);
+            assert!(answer.text.contains("holds 1, 2"), "it has to name the ids: {}", answer.text);
+        }
+        assert_eq!(todo.items().len(), 2, "a stale id must not add anything: {:?}", todo.items());
+        assert!(!todo.render().contains("Delete"), "{}", todo.render());
+
+        // With nothing to name it says so rather than printing an empty list.
+        let mut empty = TodoList::open(None);
+        assert!(empty.apply(TodoCall::Complete { id: 1 }).contains("plan is empty"));
+    }
+
+    /// ⚠️ **An id that vanishes is an id the model goes on calling**, so the eviction is named in
+    /// the answer of the call that caused it. TODO 5 of the deployed run of 2026-09-03 was real,
+    /// completed, and squeezed out here several hundred turns before the model spent a whole turn
+    /// trying to delete it.
+    #[test]
+    fn the_item_squeezed_out_to_make_room_is_named() {
+        let mut todo = TodoList::open(None);
+        for n in 0..MAX_ITEMS {
+            todo.apply(add(format!("thing {n}")));
+        }
+        todo.apply(TodoCall::Complete { id: 1 });
+
+        let answer = todo.apply(add("the new thing"));
+        assert!(answer.starts_with("Added TODO"), "{answer}");
+        assert!(answer.contains("TODO 1 was finished and has been dropped"), "{answer}");
+        assert!(answer.contains("thing 0"), "it names what went, not only its number: {answer}");
     }
 
     /// ⚠️ The model's copy is not the UI's. A run that finishes fifty things must not carry fifty
