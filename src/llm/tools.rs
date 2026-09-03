@@ -135,7 +135,17 @@ pub enum Terminal {
         /// only ever a battle — see the policy for why no other interruption may resume.
         resume_after_battle: bool,
     },
-    ChooseBattleAction { id: String },
+    /// One battle action, and whether the rest of this battle belongs to the model.
+    ///
+    /// ⚠️ **`take_over` is scoped to the battle and cannot be scoped to the run.** A script that is
+    /// wrong for the fight in front of you is usually right for the three hundred wild encounters
+    /// after it, and the tool that turns one off for good is `set_battle_script`, on the overworld
+    /// turn, where a replacement can be written and validated. The measured hazard is that a
+    /// disarm reached for mid-battle never gets undone: the run of 2026-09-01 was told about its
+    /// disarmed script on 58 of 58 battle turns and called neither `read_battle_script` nor
+    /// `set_battle_script` once. So this expires by itself, and every battle after it is scripted
+    /// again.
+    ChooseBattleAction { id: String, take_over: bool },
     /// Something the agent does *without* walking: cut a tree, teach an HM, push a boulder. Stashed
     /// by the policy and handed to the agent at the next `pick_field_move`, which is the tick after.
     UseFieldMove(FieldMoveRequest),
@@ -945,10 +955,16 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
             tools.push(ToolSpec::new(
                 "choose_battle_action",
                 "ENDS THE TURN. Take one of the actions listed in the turn's battle menu. `id` is the \
-                 id from that menu, copied exactly.",
+                 id from that menu, copied exactly. `take_over` takes the rest of *this* battle away \
+                 from your battle script, so a switch or a plan of your own is not replaced on the \
+                 next turn; the script decides battles again as soon as this one ends.",
                 json!({
                     "type": "object",
-                    "properties": { "id": { "type": "string", "description": "An id from the battle menu." } },
+                    "properties": {
+                        "id": { "type": "string", "description": "An id from the battle menu." },
+                        "take_over": { "type": "boolean",
+                                       "description": "Decide the rest of this battle yourself." },
+                    },
                     "required": ["id"],
                     "additionalProperties": false,
                 }),
@@ -1552,7 +1568,13 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
         },
         "choose_battle_action" if kind == DecisionKind::Battle => match string_argument(&arguments, "id") {
             Ok(id) => match not_on_the_menu(&id, menu) {
-                None => CallKind::Terminal(Terminal::ChooseBattleAction { id }),
+                // An absent `take_over` is `false`, and so is one sent as anything but a boolean.
+                // The flag only ever *stops* a script deciding, so the safe reading of a
+                // malformed one is the one that leaves the run playing as it was.
+                None => CallKind::Terminal(Terminal::ChooseBattleAction {
+                    id,
+                    take_over: arguments.get("take_over").and_then(Value::as_bool).unwrap_or(false),
+                }),
                 Some(complaint) => CallKind::Rejected(complaint),
             },
             Err(complaint) => CallKind::Rejected(complaint),
@@ -2808,8 +2830,36 @@ mod tests {
             // ⚠️ **The other five did not move, because they did not drift.** 4926/3685/4425/3879/
             // 5635 are byte-for-byte the figures recorded above, and none of this reaches them:
             // `read_pc` is Overworld-only and `use_field_move` is a terminal only Overworld offers.
+            // ⚠️ **Battle moved 4950 → 5250 on 2026-09-03, for `choose_battle_action`'s
+            // `take_over`, and it is the fourth entry here whose spend is measured in something
+            // other than bytes: it is measured in whether the model can finish a thought.**
+            // Re-measured across all six: 12 746, 5215, 3685, 4425, 3879, 5635 — so the addition
+            // is **289 bytes**, all of it on `Battle`, split between the property itself and the
+            // sentence saying that the takeover ends with the battle rather than with the run.
+            //
+            // What forced it: `battle.ask()` hands back one *turn*, and a script asks on a
+            // condition that is almost always a property of the *battle* — this foe is a trainer,
+            // this one is above my level. So the script asks on turn 1, the model switches to the
+            // Pokémon it wants, the script runs again on turn 2 and switches straight back, and
+            // the model spends the fight it most wanted to think about being overruled by its own
+            // program with no way to say stop: the three script tools are `Overworld`-only for the
+            // reasons on `offers_battle_script`, which have not changed, and the only thing a
+            // battle turn could otherwise reach for is a disarm that lasts the rest of the run.
+            //
+            // ⚠️ **The arithmetic is the one `offers_battle_script` refused, run the other way.**
+            // Putting the three tools on `Battle` was ~1400 bytes on every battle turn to make a
+            // transient state fixable; this is 289 to make it fixable in the only way a battle turn
+            // needs, and it *saves* requests rather than spending them — the run it was written for
+            // answered the same gym battle turn twice over because its first answer did not
+            // survive to the second turn.
+            //
+            // ⚠️ **The other five did not move, because they did not drift.** 3685/4425/3879/5635
+            // are byte-for-byte the figures recorded above and none of this reaches them;
+            // `Overworld`'s 12 746 is `read_guide` and the PC verbs growing under the ceiling that
+            // was already set for them, which is the ratchet working rather than something this
+            // change spent.
             (DecisionKind::Overworld, 12_750),
-            (DecisionKind::Battle, 4_950),
+            (DecisionKind::Battle, 5_250),
             (DecisionKind::Nickname, 3_750),
             (DecisionKind::MartPurchase, 4_500),
             (DecisionKind::ForgetMove, 3_950),
@@ -3137,6 +3187,27 @@ mod tests {
                 matches!(classify(kind, &call(name, arguments), &[]), CallKind::Terminal(_)),
                 "{name} with a summary is fine",
             );
+        }
+    }
+
+    /// ⚠️ **`take_over` defaults to off in both directions that matter**: absent, and present as
+    /// something that is not a boolean. The flag only ever *stops* a script deciding, so the safe
+    /// reading of a malformed one is the one that leaves the run playing exactly as it was — the
+    /// opposite of `press_buttons`' `why`, where the safe reading of an omission was a refusal.
+    #[test]
+    fn take_over_is_off_unless_it_is_actually_asked_for() {
+        let id = r#""fight:Tackle""#;
+        for (arguments, expected) in [
+            (format!(r#"{{"id":{id}}}"#), false),
+            (format!(r#"{{"id":{id},"take_over":false}}"#), false),
+            (format!(r#"{{"id":{id},"take_over":"yes"}}"#), false),
+            (format!(r#"{{"id":{id},"take_over":true}}"#), true),
+        ] {
+            let classified = classify(DecisionKind::Battle, &call("choose_battle_action", &arguments), &[]);
+            let CallKind::Terminal(Terminal::ChooseBattleAction { take_over, .. }) = classified else {
+                panic!("{arguments} is a battle action");
+            };
+            assert_eq!(take_over, expected, "for {arguments}");
         }
     }
 

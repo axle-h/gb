@@ -132,6 +132,23 @@ pub struct LlmPolicy {
     /// one-shot KO as the foe standing at full HP. Held here instead until the next observation,
     /// where the party carries our real HP.
     finishing: Option<BattleReport>,
+    /// The model has taken this battle away from its script, with `choose_battle_action`'s
+    /// `take_over`. Every remaining turn of it is put to the model as though the script had asked.
+    ///
+    /// ⚠️ **This exists because `battle.ask()` hands back one *turn* and the model needs a
+    /// *fight*.** A script that asks does so on a condition that is usually a property of the
+    /// battle rather than of the turn — this foe is a gym leader, this is a trainer — so it asks on
+    /// turn 1, the model switches to the Pokémon it wants, and on turn 2 the script runs again and
+    /// switches straight back. That loop cost a deployed run the battles it most wanted to think
+    /// about, and nothing inside a battle turn could break it: the script tools are on the
+    /// overworld turn and the only thing that could stop the script from here was disarming it for
+    /// the rest of the run. See [`crate::llm::tools::Terminal::ChooseBattleAction`].
+    ///
+    /// ⚠️ **Cleared by `BattleEnded`** — and by [`Self::restart`], which clears everything about a
+    /// game that no longer exists — which is what makes it per-battle rather than a disarm under
+    /// another name. A run that has taken over one fight is scripted again for the next wild
+    /// encounter without having to remember anything.
+    taken_over: bool,
     /// The most recent state that still had a battle in it, for closing the last turn of a report.
     ///
     /// ⚠️ **`self.state` is not good enough and the turn it gets wrong is the interesting one.**
@@ -155,6 +172,26 @@ fn script_note(headline: &str, prints: &[String]) -> String {
             prints.iter().map(|line| format!("  {line}\n")).collect::<String>(),
         ),
     }
+}
+
+/// The note a turn of a battle the model has taken over carries.
+///
+/// ⚠️ **Said on every turn of the takeover rather than once, and it is the state line rather than
+/// an instruction.** With no note at all the turn falls through to
+/// `TurnContext::Battle { script: Armed }`, whose sentence says a script is deciding battle turns —
+/// true of the run and false of this battle, on every turn of the one fight where the difference
+/// is the whole point. What it costs is a line on a turn already carrying a battle menu; what it
+/// buys is that the model is never wondering why its script has gone quiet, and knows the quiet
+/// ends with the battle.
+fn taken_over_note(account: Option<String>) -> String {
+    let mut note = String::from(
+        "You took this battle over, so your battle script is deciding none of its turns. It is \
+         still armed and goes back to deciding them as soon as this battle ends.",
+    );
+    if let Some(account) = account {
+        note.push_str(&format!("\n\n{account}"));
+    }
+    note
 }
 
 /// What every LLM-played run calls its trainer. See [`Policy::player_name`] below for why this is a
@@ -262,6 +299,7 @@ impl LlmPolicy {
             reports: Vec::new(),
             mart_queue: std::collections::VecDeque::new(),
             guide_chapter_read: None,
+            taken_over: false,
             last_battle_state: None,
         }
     }
@@ -435,6 +473,17 @@ impl LlmPolicy {
             Some(report) => report,
             None => self.battle_report.insert(BattleReport::open(state, self.events.len())?),
         };
+
+        // ⚠️ **After the report is opened and through `handed_back`, not as a fifth early return.**
+        // A taken-over turn is a turn the model answers, which is exactly what a `battle.ask()`
+        // turn is, so it is counted as one — returning above this would leave the report counting
+        // a twenty-turn gym battle as the two turns the script happened to decide first.
+        if self.taken_over {
+            let account = report.handed_back(state);
+            self.note = Some(taken_over_note(account));
+            return None;
+        }
+
         let turn = report.decisions() as u32 + 1;
         let evaluation = battle_script::run(&source, state, turn);
 
@@ -452,14 +501,34 @@ impl LlmPolicy {
             // The script wants this one answered properly. It stays armed; the turn falls through to
             // the ordinary path, and anything it printed rides on the situation as its argument.
             ScriptOutcome::Ask => {
-                report.handed_back(state);
-                self.note = Some(script_note("Your battle script handed this turn to you.", &evaluation.prints));
+                let account = report.handed_back(state);
+                let mut note =
+                    script_note("Your battle script handed this turn to you.", &evaluation.prints);
+                // ⚠️ **The offer rides on the account rather than on every ask**, because it is the
+                // account that earns it: a script that hands back the first turn of every battle
+                // has taken nothing away and does not need answering, while one that has been
+                // deciding turns in between is the one whose next decision will replace whatever
+                // is chosen here. Said on every ask instead, it would be a sentence the model
+                // reads past by the fortieth battle — `script_standing_line`'s ⚠️, one turn kind
+                // along.
+                if let Some(account) = account {
+                    note.push_str(&format!(
+                        "\n\n{account}\nIt is still armed, so it decides the turns after this one \
+                         too, including any it does not hand back. If the rest of this battle should \
+                         be yours, pass `take_over` to `choose_battle_action`; it goes back to \
+                         deciding at the next battle.",
+                    ));
+                }
+                self.note = Some(note);
                 None
             }
             ScriptOutcome::Failed(why) => {
-                report.handed_back(state);
+                // The account goes in here as well: what the script did before it broke is the
+                // half of the story the failure itself does not tell, and `take_over` is not
+                // offered because a disarmed script has already stopped deciding anything.
+                let account = report.handed_back(state);
                 self.handles.live_script.failed(&why);
-                self.note = Some(script_note(
+                let mut note = script_note(
                     &format!(
                         "**Your battle script failed and is no longer deciding your battle turns.** \
                          {why}\n\nAnswer this turn yourself. When you are next in the overworld, \
@@ -467,7 +536,11 @@ impl LlmPolicy {
                          leave it off and keep answering battles as you always have.",
                     ),
                     &evaluation.prints,
-                ));
+                );
+                if let Some(account) = account {
+                    note.push_str(&format!("\n\n{account}"));
+                }
+                self.note = Some(note);
                 None
             }
         }
@@ -807,8 +880,15 @@ impl Policy for LlmPolicy {
             false => TurnContext::Battle { script: self.handles.live_script.state() },
         };
         match self.advance(DecisionKind::Battle, context)? {
-            Terminal::ChooseBattleAction { id } => match tools::resolve_battle(state, &id) {
-                Some(action) => Some(action),
+            Terminal::ChooseBattleAction { id, take_over } => match tools::resolve_battle(state, &id) {
+                Some(action) => {
+                    // ⚠️ **Set only where the action resolved.** The arm below is a rejection: the
+                    // model is about to be asked the same turn again and has not taken anything
+                    // over yet, and latching the flag on a turn that did not happen would hand it
+                    // the battle on the strength of an id the game had already moved past.
+                    self.taken_over |= take_over;
+                    Some(action)
+                }
                 None => {
                     self.reject(format!(
                         "`{id}` is no longer a legal battle action — the battle moved on while you \
@@ -987,6 +1067,7 @@ impl Policy for LlmPolicy {
         // The game is a different game now, so a battle half-written up is about nothing.
         self.battle_report = None;
         self.finishing = None;
+        self.taken_over = false;
         self.reports.clear();
         // A queued order belongs to a mart in a game that no longer exists.
         self.mart_queue.clear();
@@ -1032,7 +1113,12 @@ impl Policy for LlmPolicy {
                     report.said(message);
                 }
             }
-            AgentEvent::BattleEnded => self.finishing = self.battle_report.take(),
+            // ⚠️ **The one place `taken_over` is cleared**, which is what keeps it a decision
+            // about one fight. See the field.
+            AgentEvent::BattleEnded => {
+                self.finishing = self.battle_report.take();
+                self.taken_over = false;
+            }
             _ => {}
         }
 
@@ -3264,6 +3350,104 @@ mod tests {
 
         // ⚠️ And it stays disarmed: the next battle turn is the model's too, not a second failure.
         assert!(policy.handles.live_script.source().is_none(), "one strike disarms for the run");
+    }
+
+    /// ⚠️ **The loop this was written for, end to end.** A script asks on the turn it cannot
+    /// decide, the model answers it, and the script decides the *next* turn and replaces that
+    /// answer — because `battle.ask()` hands back a turn and the condition it asked on is a
+    /// property of the whole battle. The deployed run of 2026-09-03 spent the fights it most wanted
+    /// to think about switching to a Pokémon and being switched back by its own program, with the
+    /// three script tools an overworld turn away. `take_over` is the turn-level answer.
+    #[test]
+    fn a_battle_the_model_takes_over_is_not_decided_by_the_script_again() {
+        // ⚠️ **`SCRIPT` with one line in front of it**, so that turn 2 deciding is a fact this
+        // file already proves — see `a_scripted_battle_is_fought_without_a_single_request`. A
+        // bespoke script here could pass this test by failing to decide anything at all.
+        let asks_first = "if battle.turn == 1 { battle.ask(); }\n\
+                          if battle.best_move != () { battle.fight(battle.best_move); }\n\
+                          if battle.can_run { battle.run(); }\n\
+                          battle.ask();";
+        let (mut rig, mut policy) = armed_with(asks_first, 0);
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run","take_over":true}"#)]));
+            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+        }
+        let before = rig.requests().len();
+
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers turn 1");
+        rig.wait_for_requests(before + 1, Duration::from_secs(5));
+
+        // ⚠️ **The assertion is the request, not the action.** Turn 2 is one the script decides in
+        // every other test in this file; here it has to come back to the model, and a turn that
+        // came back without costing a request would mean nothing was asked at all.
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers turn 2 too");
+        rig.wait_for_requests(before + 2, Duration::from_secs(5));
+
+        let situation = rig.requests().last().expect("a second battle request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(situation.contains("You took this battle over"), "{situation}");
+        assert!(situation.contains("as soon as this battle ends"), "and that it expires: {situation}");
+
+        // ⚠️ **Still armed, which is what makes this not a disarm under another name.** The tool
+        // that turns a script off for the run is `set_battle_script`, on the turn that can write a
+        // replacement.
+        assert!(policy.handles.live_script.source().is_some(), "the script survives the takeover");
+        assert_eq!(policy.handles.live_script.state(), ScriptState::Armed, "and stays armed");
+
+        // And the takeover ends with the battle: the next one is scripted from turn 2 again, with
+        // nothing the model had to remember to do.
+        policy.on_event(&AgentEvent::BattleEnded);
+        rig.endpoint.replies.lock().unwrap()
+            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("turn 1 of the next battle asks");
+        rig.wait_for_requests(before + 3, Duration::from_secs(5));
+        let spent = rig.requests().len();
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("and turn 2 is the script's");
+        assert_eq!(rig.requests().len(), spent, "which cost no request at all");
+    }
+
+    /// The other half of the same failure: the model could not see what the script had done to the
+    /// battle it was being asked about. Without this the turn after a replaced decision looks like
+    /// the decision was never taken.
+    #[test]
+    fn an_ask_says_what_the_script_did_since_the_model_last_chose() {
+        let asks_on_odd_turns = "if battle.turn % 2 == 1 { battle.ask(); }\n\
+                                 if battle.best_move != () { battle.fight(battle.best_move); }\n\
+                                 battle.ask();";
+        let (mut rig, mut policy) = armed_with(asks_on_odd_turns, 0);
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            for _ in 0..2 {
+                replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            }
+        }
+        let before = rig.requests().len();
+
+        rig.enter_battle();
+        // Turn 1 asks. ⚠️ Nothing has happened yet, so nothing is accounted for — the account is
+        // what the model *missed*, not a transcript it already has.
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers turn 1");
+        rig.wait_for_requests(before + 1, Duration::from_secs(5));
+        let first = rig.requests().last().expect("the first battle request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(!first.contains("while you were not being asked"), "nothing to report yet: {first}");
+
+        // Turn 2 is the script's, and turn 3 comes back to the model — carrying turn 2.
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("turn 2 is the script's");
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers turn 3");
+        rig.wait_for_requests(before + 2, Duration::from_secs(5));
+
+        let situation = rig.requests().last().expect("the second battle request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(situation.contains("while you were not being asked"), "{situation}");
+        assert!(situation.contains("2. "), "with the turn numbered as the report numbers it: {situation}");
+        // ⚠️ **And the way out is named on the turn that can take it.** The account is only half an
+        // answer: a model that can see the script overruling it and cannot stop it is the run this
+        // was written for.
+        assert!(situation.contains("take_over"), "and how to stop it: {situation}");
     }
 
     /// ⚠️ **A reset disarms immediately, not at the worker's next turn.** `POST /api/new-run`

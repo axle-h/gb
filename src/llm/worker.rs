@@ -1309,7 +1309,13 @@ fn describe(decision: &Terminal) -> String {
             }
             line
         }
-        Terminal::ChooseBattleAction { id } => format!("choose_battle_action {id}"),
+        // On the line for the same reason the chain is: a turn that also stops the run's battle
+        // script deciding the rest of this fight is not the same decision as one that does not,
+        // and a scripted battle is otherwise invisible from outside.
+        Terminal::ChooseBattleAction { id, take_over } => match take_over {
+            true => format!("choose_battle_action {id} (taking over this battle)"),
+            false => format!("choose_battle_action {id}"),
+        },
         Terminal::UseFieldMove(request) => format!("use_field_move {request:?}"),
         Terminal::PressButtons { buttons } => format!(
             "press_buttons {}",

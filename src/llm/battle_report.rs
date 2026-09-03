@@ -16,6 +16,13 @@
 //! and closed by whatever comes after it: the next decision, or the end of the battle. That is why
 //! [`BattleReport::finish`] takes a final state rather than being a plain `render`.
 //!
+//! ⚠️ **A battle in flight has an account of its own, and it is not this one.** The report lands
+//! after the battle, which is the right moment for a fight nobody was asked about and the wrong one
+//! for a fight the model is in the middle of: a script that decides turn 2 and asks again on turn 3
+//! leaves the model looking at a battle where its own turn-1 decision has been replaced by
+//! something it cannot see. [`BattleReport::handed_back`] returns the turns since the model last
+//! chose, in the same lines, for the situation to carry.
+//!
 //! ⚠️ **The report is rendered into the situation rather than appended as a message of its own.**
 //! The plan is a message because it is re-read every turn and wants the prefix cache
 //! ([`crate::llm::worker::Worker::sync_plan`]); a battle report is read once, by the turn straight
@@ -97,6 +104,16 @@ pub struct BattleReport {
     /// Turns the script handed back with `battle.ask()`, which cost a request and are worth
     /// counting separately from the ones that did not.
     asked: u32,
+    /// How many closed turns the model has already been shown, so a hand-back can account for the
+    /// ones it has not.
+    ///
+    /// ⚠️ **The model does not otherwise learn what the script did in a battle it is still
+    /// fighting.** The report is rendered once, when the battle ends, so a script that asks on turn
+    /// 1, decides turns 2 and 3 and asks again on turn 4 shows the model a turn 4 in which its own
+    /// turn-1 decision has silently been replaced and nothing says by what. That is how a run comes
+    /// to switch to a Pokémon, have the script switch straight back, and switch again: from inside
+    /// the turn the switch simply did not happen. See [`Self::handed_back`].
+    told: usize,
     /// Which party slot was out when the battle opened, so the closing line can find our Pokémon in
     /// the party once `wBattleMon` is gone.
     my_slot: usize,
@@ -134,6 +151,7 @@ impl BattleReport {
             closed: Vec::new(),
             open: None,
             asked: 0,
+            told: 0,
             my_slot: battle.active_party_slot as usize,
             ending: None,
             blacked_out: false,
@@ -154,11 +172,35 @@ impl BattleReport {
         });
     }
 
-    /// The script handed this turn back — `battle.ask()`, or a failure. The model is about to be
-    /// asked, so the turn itself needs no line here; only the count does.
-    pub fn handed_back(&mut self, state: &GameState) {
+    /// The script handed this turn back — `battle.ask()`, a failure, or a battle the model has
+    /// taken over. The model is about to be asked, so the turn itself needs no line here; only the
+    /// count does.
+    ///
+    /// Returns **what the script did since the model last chose**, in the report's own lines, or
+    /// `None` when it has done nothing — the first turn of a battle, and every turn of one that is
+    /// being handed back every time. See [`Self::told`] for why the account is needed at all.
+    ///
+    /// ⚠️ **Only the turns it has not already been shown.** The account is folded into a situation
+    /// that lands in an append-only history, so re-sending the whole battle on every hand-back
+    /// would pay for the same lines once per ask, and the model would have to work out which of
+    /// them were new. The mark moves here rather than at render time because this is the call that
+    /// means "the model is about to see it".
+    #[must_use]
+    pub fn handed_back(&mut self, state: &GameState) -> Option<String> {
         self.close_in_battle(state);
         self.asked += 1;
+        let since = std::mem::replace(&mut self.told, self.closed.len());
+        if since >= self.closed.len() {
+            return None;
+        }
+        Some(format!(
+            "Your battle script took {} while you were not being asked:\n{}",
+            match self.closed.len() - since {
+                1 => "the turn before this one".to_string(),
+                turns => format!("these {turns} turns"),
+            },
+            self.turns_from(since),
+        ))
     }
 
     /// Something the game said. Attributed to the turn that is open, or to the last one closed when
@@ -247,6 +289,47 @@ impl BattleReport {
         self.close(me.as_ref(), foe.as_ref());
     }
 
+    /// The closed turns from `from` on, as the lines the model reads them in.
+    ///
+    /// ⚠️ **One renderer, used by the finished report and by the mid-battle account
+    /// [`Self::handed_back`] gives.** They are the same fact at two moments, and a model that read
+    /// one phrasing while the battle was going and another once it ended would have two
+    /// vocabularies to reconcile for no reason — the argument [`intent`] is shared for.
+    ///
+    /// First few and last few. ⚠️ The middle is where a long battle repeats itself; the ends are
+    /// where the script's plan and its consequences are.
+    fn turns_from(&self, from: usize) -> String {
+        let mut out = String::with_capacity(256);
+        let shown: Vec<usize> = match self.closed.len() - from > MAX_TURNS_SHOWN {
+            false => (from..self.closed.len()).collect(),
+            true => {
+                let head = MAX_TURNS_SHOWN / 2;
+                let tail = self.closed.len() - (MAX_TURNS_SHOWN - head);
+                (from..from + head).chain(tail..self.closed.len()).collect()
+            }
+        };
+        let mut last = None;
+        for index in shown {
+            if last.is_some_and(|last| index > last + 1) {
+                out.push_str(&format!("… {} more turns like these\n", index - last.unwrap() - 1));
+            }
+            last = Some(index);
+            let (turn, my_delta, foe_delta) = &self.closed[index];
+            out.push_str(&format!("{}. {}", turn.number, turn.intent));
+            for delta in [foe_delta, my_delta].into_iter().flatten() {
+                out.push_str(&format!(". {delta}"));
+            }
+            out.push_str(".\n");
+            for line in &turn.said {
+                out.push_str(&format!("   \"{line}\"\n"));
+            }
+            for line in &turn.prints {
+                out.push_str(&format!("   your script said: {line}\n"));
+            }
+        }
+        out
+    }
+
     fn render(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push_str("### Battle report\n\n");
@@ -274,35 +357,7 @@ impl BattleReport {
             },
         ));
 
-        // First few and last few. ⚠️ The middle is where a long battle repeats itself; the ends are
-        // where the script's plan and its consequences are.
-        let shown: Vec<usize> = match self.closed.len() > MAX_TURNS_SHOWN {
-            false => (0..self.closed.len()).collect(),
-            true => {
-                let head = MAX_TURNS_SHOWN / 2;
-                let tail = self.closed.len() - (MAX_TURNS_SHOWN - head);
-                (0..head).chain(tail..self.closed.len()).collect()
-            }
-        };
-        let mut last = None;
-        for index in shown {
-            if last.is_some_and(|last| index > last + 1) {
-                out.push_str(&format!("… {} more turns like these\n", index - last.unwrap() - 1));
-            }
-            last = Some(index);
-            let (turn, my_delta, foe_delta) = &self.closed[index];
-            out.push_str(&format!("{}. {}", turn.number, turn.intent));
-            for delta in [foe_delta, my_delta].into_iter().flatten() {
-                out.push_str(&format!(". {delta}"));
-            }
-            out.push_str(".\n");
-            for line in &turn.said {
-                out.push_str(&format!("   \"{line}\"\n"));
-            }
-            for line in &turn.prints {
-                out.push_str(&format!("   your script said: {line}\n"));
-            }
-        }
+        out.push_str(&self.turns_from(0));
 
         // How it stood at the end. ⚠️ **Not "you won"** — see `ending`: a faint, a capture and a
         // successful run are indistinguishable from here, and a report that guessed would be wrong
@@ -705,6 +760,47 @@ mod tests {
         assert!(rendered.contains('…'), "with the middle elided: {rendered}");
     }
 
+    /// ⚠️ **The failure this exists for, in one test.** The model chooses on the turn the script
+    /// hands back; the script then decides the next turn and undoes it; the model is asked again
+    /// and, without this account, sees a battle in which its own decision simply did not happen.
+    #[test]
+    fn a_hand_back_says_what_the_script_did_since_the_model_last_chose() {
+        let start = state();
+        let mut report = BattleReport::open(&start, 0).unwrap();
+
+        // Turn 1 is handed back. Nothing has happened yet, so there is nothing to account for.
+        assert_eq!(report.handed_back(&start), None, "the first hand-back has no history behind it");
+
+        // The model chose, and then the script took turn 2 for itself.
+        report.decided(&hurt(state(), 30, 18), &ember(), Vec::new());
+        report.said("Enemy RATTATA fainted!");
+
+        let account = report.handed_back(&hurt(state(), 30, 0)).expect("turn 2 is unaccounted for");
+        assert!(account.contains("used Ember"), "what it chose: {account}");
+        assert!(account.contains("18 → 0"), "and what that did: {account}");
+        assert!(account.contains("Enemy RATTATA fainted!"), "and what the game said: {account}");
+
+        // ⚠️ **Not a second time.** The account lands in an append-only history, so a hand-back
+        // that re-sent the whole battle would bill the same lines once per ask and leave the model
+        // working out which of them were new.
+        assert_eq!(report.handed_back(&start), None, "already shown, so nothing is repeated");
+    }
+
+    /// The mid-battle account and the finished report are the same sentences, which is why one
+    /// renderer draws both.
+    #[test]
+    fn the_account_and_the_report_describe_a_turn_the_same_way() {
+        let start = state();
+        let mut report = BattleReport::open(&start, 0).unwrap();
+        report.decided(&start, &ember(), Vec::new());
+        let account = report.handed_back(&hurt(state(), 30, 7)).expect("one turn to account for");
+        let line = account.lines().find(|line| line.starts_with("1. ")).expect("the turn's line");
+        assert!(
+            report.finish(Some(&start)).contains(line),
+            "the finished report carries the same line: {line:?}",
+        );
+    }
+
     /// `battle.ask()` and a disarm both land here, and both are worth counting apart: they are the
     /// turns the model *did* pay for.
     #[test]
@@ -712,7 +808,7 @@ mod tests {
         let start = state();
         let mut report = BattleReport::open(&start, 0).unwrap();
         report.decided(&start, &ember(), Vec::new());
-        report.handed_back(&start);
+        let _ = report.handed_back(&start);
         report.decided(&start, &ember(), Vec::new());
         let rendered = report.finish(Some(&start));
         assert!(rendered.contains("3 turns, 1 of them answered by you"), "{rendered}");
@@ -726,7 +822,7 @@ mod tests {
         let mut report = BattleReport::open(&start, 0).unwrap();
         report.decided(&start, &ember(), Vec::new());
         report.said("Enemy RATTATA fainted!");
-        report.handed_back(&start);
+        let _ = report.handed_back(&start);
         report.said("SPARKY gained 56 EXP. Points!");
         let rendered = report.finish(Some(&start));
         assert!(rendered.contains("fainted"), "{rendered}");
