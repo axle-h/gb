@@ -104,6 +104,17 @@ make it pass, say so in the hand-off.
   inside the previous building, not in the street) and where the party is healed:
   `Interact(NURSE)` used to pop before the heal landed, and a root came out with Water Gun on 6 of
   25 PP.
+- `split-cerulean.bin`, `split-celadon.bin` and `pocket-route14.bin` are not part of the chain
+  either. They are `issues/turn-<id>/state.gbst` lifted straight out of the deployed run of
+  2026-09-02, cut where the model was actually standing, and the property they carry is *which
+  terrace* — so a fixture re-cut a tile away is testing a different map. `llm::tools::tests` and
+  `llm::prompt::tests` read them.
+- ⚠️ **`postgame-hidden-item.bin` was deleted on 2026-09-03** along with the H4 leg that produced it
+  (hidden-item collection is gone from the crate — see
+  [deployed-run-defects](deployed-run-defects.md) W10). The three H5 legs that read it now root on
+  `postgame-itemfinder.bin`, its predecessor. A fixture whose producing leg is removed has to be
+  re-pointed or deleted, never left in the list: `every_committed_fixture_decodes` would still load
+  it and nothing would say it had stopped being reachable.
 - `soak-*.bin` are **not** part of the chain: nothing reads one as the input to a route, so the
   rules above about cutting where the mainline stands and where the party is healed do not apply to
   them. They are re-cut wholesale by `regen_soak_checkpoints`, never by hand.

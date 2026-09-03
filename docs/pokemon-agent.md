@@ -22,6 +22,16 @@ below is a comment on the function or constant it names; this is the index of th
   battle in Pokémon Tower (`battle::is_ghost_battle`; `battle_options` returns `Run` alone, for
   every policy including the scripted one). Their guards assert on actions taken or on the battle
   ending, never on silence.
+- `MAX_MOVEMENT_SILENCE` (60 s) aborts a walk that never arrives, and reports it as
+  `OverworldActionAbortedReason::DidNotArrive`, **never** as `NoRoute`. The two are opposite
+  diagnoses: `NoRoute` says choose something else, `DidNotArrive` says the route was there and the
+  walk did not finish it. Reporting the bound as `NoRoute` sent a deployed run hunting a pathfinder
+  bug while standing two tiles from the warp it wanted.
+- **The route is re-derived from `actions()` every tick and only `route[0]` is ever pressed**, so no
+  recipe may depend on its own tail (the comment is on `AgentState::OverworldMovement`'s re-derive).
+  A two-step plan only completes if the next recomputation independently picks step two first;
+  walking is memoryless so it usually does, and the step-off/step-back a warp used to emit was the
+  case where it did not.
 - `GameMode::Script` during a walk is either a ledge hop (~660 ms, inside `DelayContext::long`'s
   rollback window) or an arrow-tile slide (up to 14 s). `wMovementFlags` bit 7 (`BIT_SPINNING`)
   says which, and the deadline is re-armed every tick while it is set. The guard asserts the abort
@@ -65,6 +75,29 @@ contextual refusals); a mart open while the policy is still thinking
 shop is a different RNG line). Each has a hand-rolled-policy test, since `DeterministicPolicy`
 would skip the thing under test, and each is a frame-timing change that only `full_playthrough` can
 price.
+
+## What the map layer will and will not offer
+
+- **A warp entry is not a door.** `MetaTileMap::warp_trigger` is a transcription of
+  `home/overworld.asm`: a tile in the tileset's `warp_tile_ids` fires on the step onto it
+  (`StepOn`), anything else needs `ExtraWarpCheck` — a warp carpet in front for the way you face
+  (`TileSetId::warp_carpet_tile_ids`) or the map edge facing out — **and a direction held**
+  (`HoldDirection`). Route 8's east gate has two entries and one of them, raw `$2C` at (9, 9), is a
+  door the cartridge will not open from any approach. `actions()` gives a dud row up only when
+  another warp to the same map is known to work, and standing on a `HoldDirection` entry emits a
+  **one-button** route rather than a step off and back.
+- ⚠️ `WarpTrigger::Unknown` exists because `_GetTileAndCoordsInFrontOfPlayer` reads the *screen*,
+  so a tile on the map edge faces the border block, which `raw_tile_ids` does not hold. Three real
+  doors sit there (the S.S. Anne gangway, Rock Tunnel's north mouth, Cerulean's badge house, whose
+  SHIP tileset sends a house down the tile-in-front arm). Nothing is claimed about those.
+- `MetaTileMap::crossings(to_map)` groups a border strip into the **runs** that are actually
+  different decisions, with `reachable` per run; `unreachable_connection_targets` is the neighbour
+  maps whose every crossing is unwalkable from where the player stands, skipping water-only ones
+  because that is the Surf gate rather than a fence. `boundary_blockers` names what the reachable
+  region ends on, walls excluded because walls are true everywhere.
+- `actions()` still emits **one** crossing per adjacent map, the nearest, because emitting one per
+  edge perturbs `route_toward` and the scripted run's timing. The others are named in the row's own
+  prose and resolved by `tools::resolve_overworld`'s `connection_action` fallback.
 
 ## The random policy
 
@@ -144,6 +177,13 @@ price.
   `OverworldInteractionCompleted` exists because a route to a sprite is `[A]` for ever once
   adjacent. Facing means what the game means, over a counter (`interaction_in_front` hops;
   `tile_in_front` must not).
+- `AgentState::CheckingTrashCan` had three callers and now has two — the gym-bin puzzle and the
+  Mansion/Rocket switches, both progression gates. Hidden-item collection and the `interact` tool
+  that shared the driver are gone (2026-09-03); see [llm-turn-loop](llm-turn-loop.md). Its
+  unreachable-target message names the tile it was actually aimed at, which it did not while
+  `interact` existed: it read "Can't reach trash can at (23, 30)" wherever the model pointed it, and
+  three of a deployed run's ten Cerulean issue reports quote that line as proof the map model is
+  broken. There is no gym in Cerulean.
 - `check_pending_pickup` reports `OverworldPickupFailed` when the ball sprite is still there after
   the overworld returns, which is how a full bag refuses every pickup: armed on the interaction,
   answered later, latch cleared either way, keyed on `PictureId::PokeBall`.

@@ -394,3 +394,51 @@ fn a_ghost_battle_is_left_rather_than_fought_for_ever() {
         agent.state_debug()));
     println!("[stall] ghost-battle: out in {left_at:?} after {turns} battle actions");
 }
+
+/// **W5 — the Route 8 gate doorstep, and it is a stall rather than a wasted turn.**
+///
+/// Leaving the gate's east door puts the player on Route 8 at (9, 9), which is itself a warp entry
+/// back into the gate. Going straight back in never worked: the agent walked left and right on the
+/// spot until the 60 s movement bound gave up, reported it as "there is no route to the warp to
+/// Route8Gate", and the deployed run of 2026-09-02 read that as a pathfinder bug and filed an issue.
+///
+/// ⚠️ **Both halves of the answer are in `home/overworld.asm` and neither is about routing.** A
+/// warp entry whose own tile is not in the tileset's warp list only fires under `ExtraWarpCheck`,
+/// which on an overworld map needs a **warp carpet tile in front of the player and a direction
+/// held**. Route 8's two east entries are raw $2C at (9, 9) and $39 at (9, 10); west of (9, 10) is
+/// $4B, which is in the facing-left carpet list, and west of (9, 9) is $17, which is in no list at
+/// all. So (9, 9) is a door the cartridge will not open from Route 8 by any approach, and the row
+/// for it is now dropped in favour of the one beside it; and the way in is one held button rather
+/// than the step-off/step-back the agent used to emit, which is a two-step route the agent re-derives
+/// and re-heads every tick.
+///
+/// The four steps are the deployed sequence: in, out, and straight back in again.
+#[test]
+fn the_route_8_gate_can_be_re_entered_from_its_own_doorstep() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/at-lavender.bin"),
+        Duration::from_secs(600),
+        vec![
+            PolicyStep::enter(Map::Route8),
+            PolicyStep::enter(Map::Route8Gate),
+            PolicyStep::enter(Map::Route8),
+            PolicyStep::enter(Map::Route8Gate),
+        ],
+    );
+    fixture.try_run_until(|state| state.map.map == Map::Route8Gate).expect("into the gate");
+    // ⚠️ **Wait for the landing square, not merely for the map.** `try_run_until` returns on the
+    // first frame the predicate holds, and during a warp the map id changes a few frames before
+    // `wXCoord`/`wYCoord` settle, so a bare map test reads a coordinate that is on neither side of
+    // the gate. Route 8's four entries into it are the only squares this can end on.
+    let out = fixture.try_run_until(|state| state.map.map == Map::Route8 && matches!(
+        (state.map.player_position.x, state.map.player_position.y), (2 | 9, 9 | 10)))
+        .expect("out of the gate again");
+    // And assert *which* door, or the test passes on a run that left by the west one and never
+    // stood on the square this is about.
+    assert_eq!(out.map.player_position.x, 9,
+               "the east door puts the player on the entry the cartridge will not open");
+
+    fixture.try_run_until(|state| state.map.map == Map::Route8Gate)
+        .expect("and straight back in from the doorstep, which is what never used to happen");
+}
+

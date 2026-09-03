@@ -567,7 +567,7 @@ impl PolicyStep {
     /// the item by the north connection strip, so "it looks close" is not an argument.
     ///
     /// ⚠️ **And this item can never be collected**, which is what makes it a *stable* test rather than
-    /// a one-shot: `probe_town_hidden_item_reachability` shows it walled inside a fence block with no
+    /// a one-shot: the town-reachability probe (deleted with hidden items) showed it walled inside a fence block with no
     /// adjacent standable tile, so `wObtainedHiddenItemsFlags` bit 51 stays clear for ever. Cerulean's
     /// hidden Rare Candy is the same shape. Viridian's Potion and Celadon's PP Up are the reachable
     /// ones.
@@ -599,16 +599,22 @@ impl PolicyStep {
     /// 1-indexed move menu — but they are observed differently: an Ether raises the PP in bits 0–5,
     /// a PP Up raises the **count in bits 6–7** and leaves the PP alone.
     ///
-    /// ⚠️ The Ether is **debug-seeded** and that is not laziness: no mart in Kanto stocks one
+    /// ⚠️ **Both items are debug-seeded, and neither is laziness.** No mart in Kanto stocks an Ether
     /// (`data/items/marts.asm`), and every Ether/Elixer lying on the floor is behind a trek this leg
     /// would otherwise be about — Route 9's is across the Cerulean bridge, Route 25's is past the
     /// Nugget Bridge, Route 10's is in the *southern* section beyond Rock Tunnel, and Tower 5F needs
-    /// the Silph Scope back out of the PC. The PP Up next door is collected for real.
+    /// the Silph Scope back out of the PC.
+    ///
+    /// ⚠️ **The PP Up used to be dug out of Celadon and is now seeded too** (2026-09-03). Every PP Up
+    /// in the game is a hidden item, and hidden-item collection is gone from this codebase — see
+    /// [`crate::pokemon::postgame::aides`] for why. What this leg is *about* is the shared ROM
+    /// routine behind an Ether and a PP Up (`ItemUsePPUp` falls through into `ItemUsePPRestore`) and
+    /// the two different observables it produces, and none of that changes with where the item came
+    /// from. The `Fly` stays: this leg's output fixture is rooted in Celadon.
     pub fn pp_restore_steps(ether: ItemId, slot: u8, ether_move: u8, pp_up_move: u8) -> Vec<Self> {
         vec![
             Self::use_pp_restore(ether, slot, ether_move),
             Self::Fly { to: Map::CeladonCity },
-            Self::SearchHiddenItem { map: Map::CeladonCity, item: ItemId::PpUp },
             Self::use_pp_restore(ItemId::PpUp, slot, pp_up_move),
         ]
     }

@@ -168,8 +168,13 @@ fn can_restore_pp_and_raise_it() {
     let mut fixture = TestFixture::new(FINDER, Duration::from_mins(120),
         PolicyStep::pp_restore_steps(ItemId::Ether, 0, SOLARBEAM_SLOT, RAZOR_LEAF_SLOT));
     // ⚠️ Debug tier, deliberately — see `PolicyStep::pp_restore_steps`: nothing in Kanto sells an
-    // Ether and every one on the floor is behind a trek this leg is not about. The **PP Up** below is
-    // collected for real, so the pick-up half is not seeded away.
+    // Ether and every one on the floor is behind a trek this leg is not about.
+    //
+    // ⚠️ **The PP Up is seeded too, since 2026-09-03.** It used to be dug out of Celadon, and every
+    // PP Up in the game is a hidden item — hidden-item collection is gone from the crate, so there
+    // is nowhere left to get one. What this leg tests is unchanged: `ItemUsePPUp` falls through into
+    // `ItemUsePPRestore`, so one ROM routine produces two different observables, and neither of them
+    // cares where the item came from.
     fixture.api().debug_give_item(ItemId::Ether, 1).expect("bag should have a free row for the Ether");
 
     let before = fixture.game_state();
@@ -187,7 +192,14 @@ fn can_restore_pp_and_raise_it() {
         items::max_pp(now));
     assert!(items::move_pp(now) > items::move_pp(&solarbeam), "the Ether should have restored PP");
 
-    // ── the PP Up, dug out of Celadon ────────────────────────────────────────────────────────────
+    // ── the PP Up ────────────────────────────────────────────────────────────────────────────────
+    // ⚠️ **Seeded here rather than up with the Ether, because the bag is at its 20-slot cap**, and
+    // waited for rather than assumed. H3's output leaves exactly one free row; the Ether takes it
+    // and only gives it back when the *item* is consumed, which is a few ticks after the PP moves —
+    // so seeding on the PP assertion above still finds a full bag. This is the order the leg ran in
+    // when the PP Up was dug out of Celadon, which is why the cap never showed up before.
+    fixture.run_until(|s| items::bag_quantity(s, ItemId::Ether) == 0);
+    fixture.api().debug_give_item(ItemId::PpUp, 1).expect("the spent Ether should have freed a row");
     let state = fixture.run_leg(|s| s.pokemon[0].moves[RAZOR_LEAF_SLOT as usize].as_ref()
         .is_some_and(|m| items::pp_ups(m) > 0));
     let leaf = state.pokemon[0].moves[RAZOR_LEAF_SLOT as usize].as_ref().unwrap();
@@ -408,59 +420,11 @@ fn probe_itemfinder_range() {
         for _ in 0..60 { fixture.step(); }
         let state = fixture.game_state();
         let here = state.map.player_position;
-        println!("== approach {approach:?}: at {here} on {} — hidden items {:?}",
-            state.map.map, state.map.hidden_items);
-        for (pos, item) in &state.map.hidden_items {
-            // ⚠️ Both sides must be in the **same** space. `HiddenItemNear` compares raw coordinates,
-            // but `MetaTileMap` offsets *both* the player and the item by the connection strip, so
-            // comparing them to each other is exact and comparing one of each is one row out.
-            let dy = pos.y as i16 - here.y as i16;
-            let dx = pos.x as i16 - here.x as i16;
-            println!("   {item:?} at {pos} — dx {dx} dy {dy}  in range: {}",
-                (-5..=5).contains(&dx) && (-5..=4).contains(&dy));
-        }
+        // ⚠️ **The item list this used to print is gone with the decoder** (2026-09-03). What is
+        // left is the position, which is the half that actually varies: the Itemfinder answers on
+        // `HiddenItemNear`'s ±5 x, +5/−4 y box around the player, so where the approach leaves you
+        // is the whole question. Run `press_the_itemfinder_steps` to see which text it prints.
+        println!("== approach {approach:?}: at {here} on {}", state.map.map);
     }
 }
 
-/// Diagnostic for **I7** — is a town's hidden item on a tile the agent can stand next to?
-///
-/// `SearchHiddenItem` routes to a tile *adjacent* to the item and presses A, so an item walled into a
-/// fenced-off patch is unreachable — and the failure is a stall ("Can't reach trash can at …"), not
-/// an error. Dumps the neighbourhood of every hidden item on a town map.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_town_hidden_item_reachability() {
-    for (fly, town) in [(Map::VermilionCity, Map::VermilionCity), (Map::ViridianCity, Map::ViridianCity),
-                        (Map::CeruleanCity, Map::CeruleanCity), (Map::CeladonCity, Map::CeladonCity),
-                        (Map::CeruleanCity, Map::Route9), (Map::CeruleanCity, Map::Route25),
-                        (Map::LavenderTown, Map::Route10), (Map::FuchsiaCity, Map::Route13)] {
-        let mut steps = vec![PolicyStep::Fly { to: fly }];
-        if fly != town { steps.push(PolicyStep::goto(town)); }
-        let mut fixture = TestFixture::new(MEDICINE, Duration::from_mins(60), steps);
-        // A town the walk cannot reach is a finding — report it and keep sweeping the rest.
-        if fixture.try_run_until(|s| s.map.map == town).is_none() {
-            println!("== {town} NOT REACHED — Fly/goto never arrived");
-            continue;
-        }
-        for _ in 0..60 { fixture.step(); }
-        let state = fixture.game_state();
-        println!("== {town} @ {} — hidden {:?}", state.map.player_position, state.map.hidden_items);
-        for (pos, item) in state.map.hidden_items.clone() {
-            let route = state.map.route_to_face_dir(pos, None);
-            println!("   {item:?} at {pos}: route {:?}", route.as_ref().map(|r| r.len()));
-            for y in pos.y.saturating_sub(3)..(pos.y + 4).min(state.map.height as u8) {
-                let row: String = (pos.x.saturating_sub(6)..(pos.x + 7).min(state.map.width as u8))
-                    .map(|x| if (Point8 { x, y }) == pos { '*' } else {
-                        match state.map.tile_at_checked(Point8 { x, y }) {
-                            Some(MetaTile::Obstacle) => '#', Some(MetaTile::Empty) => '.',
-                            Some(MetaTile::Warp { .. }) => 'W', Some(MetaTile::Connection { .. }) => 'C',
-                            Some(MetaTile::Jump(_)) => 'J', Some(MetaTile::Sprite(_)) => 'S',
-                            Some(MetaTile::Grass) => 'g', Some(MetaTile::Water) => '~',
-                            Some(MetaTile::CutTree) => 'T', _ => '?',
-                        }}).collect();
-                println!("     y{y:>2} {row}");
-            }
-        }
-    }
-}

@@ -864,11 +864,16 @@ pub enum PolicyStep {
     // the real drivers wanted, not the plan's drafts.
     /// **B** — Fly to `to`. ⚠️ The town map is a bespoke screen, not a `HandleMenuInput` list.
     Fly { to: Map },
-    /// **H** — collect the hidden `item` on `map`. Routes itself, like `Fish`. The tile comes from
-    /// [`crate::pokemon::tile_map::MetaTileMap::hidden_items`] rather than the caller, because the
-    /// ROM's coordinates need the map's connection-strip offset applied first. Driver:
-    /// [`crate::pokemon::postgame::aides`]; build with [`Self::hidden_item_steps`].
-    SearchHiddenItem { map: Map, item: ItemId },
+    // ⚠️ **There was a `SearchHiddenItem { map, item }` here, and hidden-item collection is gone
+    // from this codebase entirely** (2026-09-03). Every hidden item in the ROM is loot — Rare
+    // Candies, Nuggets, PP Ups, Elixers, two Moon Stones, and no key item, HM or TM among the
+    // 212 hidden events — so nothing is gated behind one. What it cost was the LLM tool that shared
+    // its driver: `use_field_move interact` let the model press A at an arbitrary square, and a
+    // deployed run spent 85 minutes doing exactly that across three Silph Co floors. The tool went,
+    // and this went with it rather than being left as a step nothing builds.
+    //
+    // `FieldMove::CheckTrashCan` stays, because the gym bins, the Mansion statues and the Game
+    // Corner poster are the same mechanic and are all hard progression gates.
     /// **H** — use **HM05 Flash** from the party menu with the mon in `slot`, lighting a dark cave.
     /// Completes when `wMapPalOffset` reaches 0, which is what "lit" means to the ROM; pops
     /// immediately on an already-lit map, so it is safe to leave in a step list.
@@ -1084,7 +1089,9 @@ pub enum FieldMove {
     ///
     /// Named for the Vermilion Gym cans it was written for, but it is the generic **face a tile and
     /// interact** move, and three unrelated steps ride it: `SolveTrashCans`, `FlipSwitch` (Mansion
-    /// statues, the Rocket Hideout poster) and `SearchHiddenItem`. They share it because the ROM does:
+    /// statues, the Rocket Hideout poster). ⚠️ It had a third caller, hidden-item collection, and
+    /// that is gone; the name is the gym cans because they are what is left. They shared it because
+    /// the ROM does:
     /// all three are `hidden_event`s, dispatched by `CheckForHiddenEvent` when A is pressed and the
     /// tile in front of the player matches.
     CheckTrashCan { target: crate::geometry::Point8, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
@@ -1134,9 +1141,6 @@ pub enum FieldMove {
     /// **I** — use bag `item` on `target` from the overworld. Driven by
     /// [`crate::pokemon::postgame::items`].
     UseBagItem { item: ItemId, target: crate::pokemon::postgame::items::UseTarget },
-    // (**H** reserved a `SearchHiddenItem` field move here. It is gone: a hidden item is collected by
-    // facing its tile and pressing A, which is exactly `CheckTrashCan` — see
-    // [`crate::pokemon::postgame::aides`].)
     // ────────────────────────────────────────────────────────────────────────────────────────────
     /// Primitive Strength push: shove the boulder at `boulder` one tile in `dir` (Strength must be armed).
     /// The agent routes behind the boulder and double-presses; it completes as soon as the boulder leaves
@@ -3232,10 +3236,6 @@ pub struct DeterministicPolicy {
     /// began. The step completes once the flag differs — i.e. the single global switch has toggled
     /// exactly once — so each `FlipSwitch` is one deterministic flip (not an oscillating retry loop).
     mansion_flip_baseline: Option<bool>,
-    /// How many of the wanted item the bag held when the current `SearchHiddenItem` step began, so
-    /// the pick-up is detected as an *increase*. Same shape, and the same reason, as
-    /// [`Self::mansion_flip_baseline`].
-    hidden_item_baseline: Option<u8>,
     /// Visible-boulder count captured when the current `DropBoulderInHole` step began. The step completes
     /// once the count drops (a boulder was pushed onto the hole and fell to the floor below), so exactly
     /// one boulder is dropped rather than every boulder that can reach the hole.
@@ -3474,7 +3474,6 @@ impl DeterministicPolicy {
             collect_item_waits: 0,
             catch_wander_stuck: 0,
             mansion_flip_baseline: None,
-            hidden_item_baseline: None,
             boulder_drop_baseline: None,
             evolve_baseline: None,
             gym_beaten: HashSet::new(),
@@ -4318,21 +4317,6 @@ impl Policy for DeterministicPolicy {
                 // one: move your variant out of this list into its own one-line arm delegating to
                 // your own module. That is a one-line edit to this file, which is the whole point.
                 PolicyStep::UseFlash { .. } => None, // on the map — `pick_field_move` drives the menu
-                PolicyStep::SearchHiddenItem { map, .. } => {
-                    // **Workstream H.** Routing only, like `Fish`; `pick_field_move` owns the walk to
-                    // the tile and the A press once we are standing on `map`.
-                    if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &actions, map);
-                        if action.is_none() {
-                            println!("[policy] want the hidden item on {map}, but no path there!");
-                            self.queue.pop_front();
-                            continue;
-                        }
-                        action
-                    } else {
-                        None
-                    }
-                }
                 PolicyStep::Fish { map, .. } => {
                     // Routing only, like `UseItemPc` below: once we are standing on `map`,
                     // `pick_field_move` picks the water tile and hands each cast to the driver.
@@ -5596,25 +5580,6 @@ impl Policy for DeterministicPolicy {
                     return None;
                 }
                 return Some(FieldMove::CheckTrashCan { target: at, facing: None });
-            }
-        }
-        if let Some(&PolicyStep::SearchHiddenItem { map, item }) = self.queue.front() {
-            // **Workstream H.** Baseline the bag *now*, before the first A press, so "collected" is
-            // "the count went up" rather than "the item is present" — the bag may already hold a
-            // stack of the same thing.
-            if state.map.map == map {
-                use crate::pokemon::postgame::aides;
-                let baseline = *self.hidden_item_baseline
-                    .get_or_insert_with(|| aides::bag_quantity(state, item));
-                match aides::pick(state, item, baseline) {
-                    Some(field_move) => return Some(field_move),
-                    None => {
-                        println!("[policy] SearchHiddenItem: {item:?} collected on {map} — done");
-                        self.hidden_item_baseline = None;
-                        self.queue.pop_front();
-                        return None;
-                    }
-                }
             }
         }
         if let Some(&PolicyStep::UseElevator { panel, floor }) = self.queue.front() {

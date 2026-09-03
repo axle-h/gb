@@ -124,6 +124,38 @@ fn blackout_in_flight(api: &PokemonApi) -> bool {
         == crate::pokemon::battle::LOST_BATTLE
 }
 
+/// ⚠️ **A walk that never arrives is silence, and silence is what the watchdog reads.**
+/// The route is re-derived every tick, so a destination that stays reachable-looking but
+/// is never reached — an NPC parked on the only approach tile, a route that re-plans
+/// into the same blocked step — presses buttons for ever without the policy being asked
+/// anything. `soak` found it in Oak's Lab: 300 s of game time walking at a sprite.
+///
+/// ⚠️ **Measured as silence rather than as ticks in this state, because something else
+/// resets the state.** This was a `state_ticks` counter on the agent, and
+/// `OverworldMovement` was believed to be the one state where that works, since it does
+/// not rebuild itself. It has a second way of being torn down: anything that *interrupts*
+/// it. Seafoam Islands B4F is the case — the water current takes the player every few
+/// seconds, the agent passes through `RunningScript` and back, and each pass hands the
+/// walk a fresh 90 s. `soak` found it swimming into the same current for the rest of the
+/// run, 119 s of silence and counting. `cycles_since_poll` is cleared by exactly one
+/// thing: the policy being asked something, which is what this bound exists to force.
+///
+/// 60 s of game time is 200 tile steps — further than any single map is wide — and a
+/// fifth of the watchdog. It is lower than the 90 s of ticks it replaces for a reason
+/// beyond taste: `stalls` fails a case that takes 90 s to escape, so a bound at 90 s
+/// could not be regression-tested by the tier built to regression-test it. An
+/// interrupted walk is *more* generous than it was, not less: a battle in the middle
+/// polls, which resets the clock. Giving up aborts the action, which returns to the
+/// policy for a new one.
+///
+/// ⚠️ **Reported as [`OverworldActionAbortedReason::DidNotArrive`], never as `NoRoute`.** The two
+/// are opposite diagnoses and the model acts on them differently: `NoRoute` says the action is gone
+/// from `actions()` and something else should be chosen, while this says the route was there and the
+/// walk simply never got to the end of it. Reporting the bound as `NoRoute` sent the deployed run of
+/// 2026-09-02 hunting a pathfinder bug that did not exist — it read "there is no route to the warp
+/// to Route8Gate" while standing two tiles from that warp, and filed an issue about it.
+const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OverworldActionAbortedReason {
     Unknown,
@@ -134,6 +166,9 @@ pub enum OverworldActionAbortedReason {
     WrongMap(Map),
     NoAdjacentGrass,
     NoRoute(MetaTile),
+    /// The walk ran for [`MAX_MOVEMENT_SILENCE`] and never arrived. Not a routing failure: the
+    /// route existed on every tick, it just never ended.
+    DidNotArrive,
 }
 
 impl Display for OverworldActionAbortedReason {
@@ -167,6 +202,16 @@ impl Display for OverworldActionAbortedReason {
             Self::WrongMap(map) => write!(f, "it ended up on {map}"),
             Self::NoAdjacentGrass => write!(f, "there is no grass to step into"),
             Self::NoRoute(tile) => write!(f, "there is no route to {tile}"),
+            // ⚠️ **Says what it is, and says the walk is what failed.** This shared `NoRoute`'s
+            // sentence until 2026-09-03, and "there is no route to the warp to Route8Gate" is a
+            // claim about the pathfinder that was false every time it was printed: the route was
+            // found, re-derived on every tick, and walked for a solid minute of game time. A model
+            // told the pathfinder is broken goes looking for the bug rather than for another way
+            // round, which is what the run did for nine of these. The coordinate the event prints
+            // beside it is where the walk got to, which is the other half of the answer.
+            Self::DidNotArrive => write!(
+                f, "the walk was given up after {} seconds of game time without getting there",
+                MAX_MOVEMENT_SILENCE.as_secs()),
         }
     }
 }
@@ -2457,34 +2502,11 @@ CascadeBadge; not cutting".to_string(),
                 }
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
-                // ⚠️ **A walk that never arrives is silence, and silence is what the watchdog reads.**
-                // The route is re-derived every tick, so a destination that stays reachable-looking but
-                // is never reached — an NPC parked on the only approach tile, a route that re-plans
-                // into the same blocked step — presses buttons for ever without the policy being asked
-                // anything. `soak` found it in Oak's Lab: 300 s of game time walking at a sprite.
-                //
-                // ⚠️ **Measured as silence rather than as ticks in this state, because something else
-                // resets the state.** This was a `state_ticks` counter on the agent, and
-                // `OverworldMovement` was believed to be the one state where that works, since it does
-                // not rebuild itself. It has a second way of being torn down: anything that *interrupts*
-                // it. Seafoam Islands B4F is the case — the water current takes the player every few
-                // seconds, the agent passes through `RunningScript` and back, and each pass hands the
-                // walk a fresh 90 s. `soak` found it swimming into the same current for the rest of the
-                // run, 119 s of silence and counting. `cycles_since_poll` is cleared by exactly one
-                // thing: the policy being asked something, which is what this bound exists to force.
-                //
-                // 60 s of game time is 200 tile steps — further than any single map is wide — and a
-                // fifth of the watchdog. It is lower than the 90 s of ticks it replaces for a reason
-                // beyond taste: `stalls` fails a case that takes 90 s to escape, so a bound at 90 s
-                // could not be regression-tested by the tier built to regression-test it. An
-                // interrupted walk is *more* generous than it was, not less: a battle in the middle
-                // polls, which resets the clock. Giving up aborts the action, which returns to the
-                // policy for a new one.
-                const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
+                // The 60 s bound, and why it is silence rather than ticks: `MAX_MOVEMENT_SILENCE`.
                 if self.cycles_since_poll.to_duration() >= MAX_MOVEMENT_SILENCE {
                     api.release_all_buttons();
                     let at = self.player_at(api);
-                    self.abort_overworld(destination, OverworldActionAbortedReason::NoRoute(destination), at);
+                    self.abort_overworld(destination, OverworldActionAbortedReason::DidNotArrive, at);
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -2581,6 +2603,18 @@ CascadeBadge; not cutting".to_string(),
                         self.set_state(AgentState::Idle);
                     }
                 } else {
+                    // ⚠️ **The route is recomputed every tick and only ever its head is pressed, so
+                    // no recipe here may depend on its own tail.** `actions()` is asked again from
+                    // wherever the player now stands, `route[0]` is pressed, and the rest is thrown
+                    // away; a two-step plan therefore only completes if step two is what the *next*
+                    // recomputation independently decides to do first. That is usually true, because
+                    // walking is memoryless. It was false for a warp entry the player was already
+                    // standing on: `actions()` emitted step-off then step-back, and the tick after
+                    // the step-off recomputed step-off again from the neighbour, so the pair
+                    // oscillated until `MAX_MOVEMENT_SILENCE` gave up. The fix was to make that case
+                    // a one-button route (`MetaTileMap::warp_trigger`) rather than to remember the
+                    // tail, and the property is worth stating because the next such recipe will look
+                    // just as reasonable.
                     let action = game_state.map.actions().into_iter()
                         .find(|a| a.tile == destination)
                         // A specific connection landing isn't in `actions()` (only the nearest crossing
@@ -4191,8 +4225,26 @@ CascadeBadge; not cutting".to_string(),
                         self.set_state(AgentState::CheckingTrashCan { target, checked, press: true, facing });
                     }
                     _ => {
-                        // No reachable tile adjacent to the can — abort so we don't spin forever.
-                        self.event(AgentEvent::TextBox { message: format!("Can't reach trash can at {target}") });
+                        // No reachable tile adjacent to the target — abort so we don't spin forever.
+                        //
+                        // ⚠️ **W6 — this state had three callers and the message only ever knew
+                        // about one.** `FieldMoveRequest::Interact` mapped onto
+                        // `FieldMove::CheckTrashCan`, so a model that aimed `interact` at a hidden
+                        // item, a statue or a door was told "Can't reach trash can at (23, 30)"
+                        // wherever it was standing. Three of the ten issue reports the deployed run
+                        // of 2026-09-02 filed in Cerulean City quote that line as proof the map
+                        // model is broken, and Cerulean has no gym and no bin.
+                        //
+                        // ⚠️ **W10 then removed that caller**, so what is left is the gym-bin puzzle
+                        // and the Mansion/Rocket switches, both of which do aim at a real object.
+                        // The message stays specific anyway: the scripted policy can still reach
+                        // here with a statue behind a gate that has not opened, and "trash can" on
+                        // the Mansion B1F is the same lie in a quieter place.
+                        let what = gs.map.tile_at_checked(target)
+                            .map(|tile| format!("{tile}"))
+                            .unwrap_or_else(|| "a square that is not on this map".to_string());
+                        self.event(AgentEvent::TextBox {
+                            message: format!("Could not get next to {what} at {target} to face it") });
                         api.release_all_buttons();
                         self.set_state(AgentState::Idle);
                     }
@@ -4752,6 +4804,32 @@ mod tests {
             format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass }),
             "→ heading for tall grass",
         );
+    }
+
+    /// **W4.** A walk given up on the 60 s bound and a walk whose action vanished are two different
+    /// diagnoses, and the model acts on them differently — so they may not share a sentence.
+    ///
+    /// The deployed run of 2026-09-02 was told "there is no route to the warp to Route8Gate" while
+    /// standing on the gate's own doorstep, oscillating between two tiles with a perfectly good
+    /// route in hand, and went looking for a pathfinder bug. What it needed to read was that the
+    /// walk had been abandoned, and where.
+    #[test]
+    fn a_walk_that_never_arrived_does_not_claim_there_was_no_route() {
+        let warp = MetaTile::Warp { to_map: Map::Route8Gate, to_position: Point8 { x: 5, y: 3 } };
+        let gave_up = AgentEvent::OverworldActionAborted {
+            destination: warp,
+            reason: OverworldActionAbortedReason::DidNotArrive,
+            at: Some(Point8 { x: 10, y: 9 }),
+        };
+        let said = format!("{gave_up}");
+        assert_eq!(
+            said,
+            "✗ gave up on the warp to Route8Gate at (10, 9): \
+             the walk was given up after 60 seconds of game time without getting there",
+        );
+        assert!(!said.contains("no route"), "the route was there on every tick: {said}");
+        // The house rule: this string reaches the model through `AgentEvent`'s `Display`.
+        assert!(!said.contains('—'), "no em dashes in what the agent generates: {said}");
     }
 
     /// ⚠️ **A walk that does not say where it is going is the commonest line in the log and the

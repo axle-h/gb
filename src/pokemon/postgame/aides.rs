@@ -5,17 +5,23 @@
 //! (`Route11Gate2F`), Exp.All at 50 (`Route15Gate2F`). Check the gate with `probe_coverage` before
 //! travelling — don't guess.
 //!
-//! Sub-steps: H1 Flash · H2 teach Flash and prove it · H3 Itemfinder · H4 hidden items ·
-//! H5 Exp.All, then `postgame-aides.bin`.
+//! Sub-steps: H1 Flash · H2 teach Flash and prove it · H3 Itemfinder · H5 Exp.All, then
+//! `postgame-aides.bin`.
 //!
-//! # Hidden items (H4)
+//! # H4 is gone, and so is hidden-item collection (2026-09-03)
 //!
-//! §6-H4 called for a `PolicyStep::SearchHiddenItem { at }` and an `AgentState` to drive it. Neither
-//! is needed: a hidden item is picked up by **standing next to it and pressing A**, which is the
-//! `CheckTrashCan` field move the gym cans and the Mansion/Rocket switches already share. So the
-//! reserved `FieldMove::SearchHiddenItem` and `AgentState::SearchingHiddenItem` seams are **gone** —
-//! same conclusion `postgame::trades` reached about `TradePokemon`. What is left is data, and this
-//! module reads it out of the ROM rather than transcribing it: see [`hidden_items`].
+//! H4 collected Route 11's hidden Escape Rope, and this module read the whole hidden-item table out
+//! of the ROM to do it. All of that is removed. The reason is not that it did not work — it worked,
+//! and `hidden_items_match_the_rom_coord_table` pinned it against `HiddenItemCoords` — but that the
+//! only *other* caller of the mechanic was the `use_field_move interact` tool, which let a model
+//! press A at any square it liked. A deployed run spent 85 minutes doing that across three Silph Co
+//! floors, having decided it was a way to walk. Nothing in the game is gated behind a hidden item:
+//! all 212 hidden events yield loot, and not one yields a key item, an HM or a TM. So the tool went,
+//! and the rest went with it rather than being left as a step nothing builds.
+//!
+//! The Itemfinder (H3) stays. It is a bag item with a text-box effect and `press_the_itemfinder_steps`
+//! proves it works by standing where it answers *yes* — which needs a hidden item to *exist*, not to
+//! be collectable.
 
 use crate::geometry::Point8;
 use crate::pokemon::item::ItemId;
@@ -25,119 +31,6 @@ use crate::pokemon::policy::{FieldMove, PartyRef, PolicyStep};
 use crate::pokemon::roms;
 use crate::pokemon::symbols::{pokered_symbols, DmgBank, DmgPointer};
 use crate::pokemon::GameState;
-
-/// One row of the ROM's hidden-item table: an item lying on a tile with nothing to show for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HiddenItem {
-    /// **Raw** map coordinates, exactly as `HiddenItemCoords` stores them — with no connection-strip
-    /// offset applied. Outdoor maps are widened by the strip of each neighbour they touch, so on
-    /// Route 11 (a `WEST | EAST` map) every raw x is one short of the tile the agent walks on. The
-    /// offset is applied in exactly one place, [`crate::pokemon::tile_map::MetaTileMap::new`], which
-    /// is where the other raw-coordinate tables (Strength switches, floor holes) are corrected too.
-    pub at: Point8,
-    pub item: ItemId,
-    /// Bit index into `wObtainedHiddenItemsFlags` — this row's position in `HiddenItemCoords`, which
-    /// is how `FindHiddenItemOrCoinsIndex` addresses it.
-    pub flag: u8,
-}
-
-/// Every hidden item on `map`, decoded from the ROM.
-///
-/// Two tables have to be crossed, because neither is complete on its own.
-/// `data/events/hidden_events.asm` holds the **item id** but mixes hidden items in with bookshelves,
-/// PCs, gym statues and the Safari Zone's own scripts — the discriminator is the object's routine
-/// pointer being `HiddenItems`. `data/events/hidden_item_coords.asm` holds only map/x/y, but its
-/// **row order is the flag numbering**, which is the only way to ask "has this one been taken?".
-///
-/// Derived rather than transcribed for the reason `world_graph` builds itself from ROM headers: 55
-/// rows of hand-copied coordinates is 55 chances to be silently one off, and a wrong coordinate here
-/// does not error — the agent walks to a tile, presses A, and nothing at all happens.
-pub fn hidden_items(map: Map) -> Vec<HiddenItem> {
-    /// `hidden_event` is `db y, db x, db arg` then `dba` (bank + address) of its routine.
-    const ENTRY: usize = 6;
-
-    let Some(index) = rom_at(&pokered_symbols::HiddenEventMaps).iter()
-        .take_while(|&&b| b != 0xFF)
-        .position(|&b| b == map as u8)
-    else { return Vec::new() };
-
-    let pointers = &pokered_symbols::HiddenEventPointers;
-    let DmgBank::ROM { bank } = pointers.bank else { panic!("HiddenEventPointers is not in ROM") };
-    let table = rom_at(pointers);
-    let list = rom_bank_at(bank, u16::from_le_bytes([table[index * 2], table[index * 2 + 1]]));
-
-    let items_routine = &pokered_symbols::HiddenItems;
-    let DmgBank::ROM { bank: routine_bank } = items_routine.bank else { panic!("HiddenItems is not in ROM") };
-
-    let mut found = Vec::new();
-    let mut i = 0;
-    while list[i] != 0xFF {
-        let (y, x, arg) = (list[i], list[i + 1], list[i + 2]);
-        let is_hidden_item = list[i + 3] == routine_bank
-            && u16::from_le_bytes([list[i + 4], list[i + 5]]) == items_routine.address;
-        if is_hidden_item {
-            let item = ItemId::from_repr(arg)
-                .unwrap_or_else(|| panic!("hidden item ${arg:02x} on {map} is not a known ItemId"));
-            let at = Point8 { x, y };
-            found.push(HiddenItem { at, item, flag: hidden_item_flag(map, at) });
-        }
-        i += ENTRY;
-    }
-    found
-}
-
-/// This row's index in `HiddenItemCoords` (`db map, y, x`), which is its bit in
-/// `wObtainedHiddenItemsFlags`.
-fn hidden_item_flag(map: Map, at: Point8) -> u8 {
-    let coords = rom_at(&pokered_symbols::HiddenItemCoords);
-    let mut i = 0;
-    while coords[i] != 0xFF {
-        if coords[i] == map as u8 && coords[i + 1] == at.y && coords[i + 2] == at.x {
-            return (i / 3) as u8;
-        }
-        i += 3;
-    }
-    panic!("{map} {at} is a HiddenItems object with no HiddenItemCoords row");
-}
-
-/// The ROM from `ptr` onward. Banked pointers address `$4000..$7FFF` through the window.
-fn rom_at(ptr: &DmgPointer) -> &'static [u8] {
-    let DmgBank::ROM { bank } = ptr.bank else { panic!("{ptr:?} is not in ROM") };
-    rom_bank_at(bank, ptr.address)
-}
-
-fn rom_bank_at(bank: u8, address: u16) -> &'static [u8] {
-    let offset = if bank == 0 { address as usize }
-                 else { bank as usize * 0x4000 + (address as usize - 0x4000) };
-    &roms::POKERED[offset..]
-}
-
-/// **H4** — the field move that collects the hidden `item` on the current map.
-///
-/// `baseline` is how many of `item` the bag held when the step began: the completion test is that it
-/// went **up**, not that the item is present, because the bag may already hold a stack of the same
-/// thing (Route 11's hidden item is an Escape Rope, and the PC has one). Returns `None` when the pick
-/// up has landed, which is the caller's signal to pop the step.
-///
-/// ⚠️ **A full bag reads as success.** `FoundHiddenItemText` prints "found ESCAPE ROPE!", fails
-/// `GiveItem`, prints "you have no room" and leaves the flag *unset* — so a full bag here is an
-/// endless retry, not a wrong answer. That is deliberate: it stalls the leg loudly instead of walking
-/// on with nothing.
-pub fn pick(state: &GameState, item: ItemId, baseline: u8) -> Option<FieldMove> {
-    if bag_quantity(state, item) > baseline {
-        return None;
-    }
-    let (target, _) = state.map.hidden_items.iter().copied()
-        .find(|&(_, found)| found == item)?;
-    // `facing: None` — the ROM only asks that the tile in front of the player match, so any reachable
-    // side will do, and `route_to_face_dir` then takes the nearest one.
-    Some(FieldMove::CheckTrashCan { target, facing: None::<PlayerFacingDirection> })
-}
-
-/// How many of `item` the bag holds. Zero for an item that is not in it.
-pub fn bag_quantity(state: &GameState, item: ItemId) -> u8 {
-    state.bag.iter().find(|i| i.id == item).map_or(0, |i| i.quantity)
-}
 
 // ── H5: the dex sweep ────────────────────────────────────────────────────────────────────────────
 //
@@ -225,8 +118,8 @@ impl PolicyStep {
     ///
     /// `shed` is what goes into PC item storage on the way past — the bag is 20/20 on E's output, and
     /// `OaksAideScript` refuses a full bag with one text box and a normal-looking goodbye. Two slots,
-    /// not one, so [`Self::hidden_item_steps`] can pick something up afterwards without another
-    /// detour to a PC.
+    /// not one, because H4 used to pick something up afterwards without another detour to a PC; H4
+    /// is gone and H5 inherits both slots, which is what `dex_sweep_outfit_steps` sheds into.
     ///
     /// The gate is a building sitting *in* Route 11 rather than between two maps: its west doors are
     /// Route 11 (49,8)/(49,9) and its east doors (58,8)/(58,9), both on the same route, so the whole
@@ -249,20 +142,6 @@ impl PolicyStep {
             Self::enter_at(Map::Route11, 50, 8),
         ]);
         s
-    }
-
-    /// **H4** — collect the hidden `item` on `map`.
-    ///
-    /// The step routes itself, so this is only a `goto` away from being one line; it exists to carry
-    /// the two facts a caller needs. First, **a free bag slot** — see [`super::aides::pick`], where a
-    /// full bag is an endless retry rather than a silent skip. Second, `item` picks *which* hidden
-    /// item when a map has several, and five of the maps do (Route 17 has five).
-    ///
-    /// Route 11's is an **Escape Rope** at raw (48,5), one tile west of the wall the gate building
-    /// stands against — so [`Self::itemfinder_steps`] ends two dozen steps away from it and H3's
-    /// output is the natural entry fixture.
-    pub fn hidden_item_steps(map: Map, item: ItemId) -> Vec<Self> {
-        vec![Self::SearchHiddenItem { map, item }]
     }
 
     /// **H5** — the sweep's shopping trip: a bag slot, a hundred balls, and an empty box.
@@ -438,52 +317,9 @@ impl PolicyStep {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pin [`hidden_items`] against `HiddenItemCoords` — the ROM's *own* index of hidden items, and
-    /// the one this decoder does not read to find them (it walks the per-map `HiddenObjects` lists
-    /// and filters on the routine pointer). The two are built from different tables in different
-    /// banks, so agreeing on all 55 rows is a real cross-check rather than a tautology.
-    #[test]
-    fn hidden_items_match_the_rom_coord_table() {
-        let coords = rom_at(&pokered_symbols::HiddenItemCoords);
-        let mut rows = 0;
-        let mut i = 0;
-        while coords[i] != 0xFF {
-            let (map_id, at) = (coords[i], Point8 { x: coords[i + 2], y: coords[i + 1] });
-            let flag = (i / 3) as u8;
-            i += 3;
-            rows += 1;
-            // Every row is a map `Map` models, including `UNUSED_MAP_6F` — the cut floor still has
-            // its coords row, its hidden object and therefore its flag.
-            let map = Map::from_repr(map_id).unwrap_or_else(|| panic!("no Map for id ${map_id:02x}"));
-            let found = hidden_items(map);
-            let entry = found.iter().find(|h| h.at == at)
-                .unwrap_or_else(|| panic!("{map} {at} (flag {flag}) is in HiddenItemCoords but not in \
-                    its HiddenObjects list — decoded {found:?}"));
-            assert_eq!(entry.flag, flag, "flag index for {map} {at}");
-        }
-        assert_eq!(rows, 54, "HiddenItemCoords should have 54 rows");
-    }
-
-    /// …and the other direction: nothing the decoder finds is missing from the coords table. A
-    /// `HiddenItems` object with no coords row would have **no flag**, so it could be collected over
-    /// and over (`FindHiddenItemOrCoinsIndex` falls off the end of the list and returns a junk index).
-    #[test]
-    fn every_decoded_hidden_item_has_a_flag() {
-        use strum::IntoEnumIterator;
-        // `hidden_item_flag` panics on an object with no coords row, so reaching 54 at all is the
-        // assertion; the count is here so a ROM change cannot quietly drop rows instead.
-        let total: usize = Map::iter().map(|m| hidden_items(m).len()).sum();
-        assert_eq!(total, 54);
-    }
-
-    /// The one this workstream actually collects, spelled out: H4's target is Route 11's Escape Rope.
-    #[test]
-    fn route11_has_one_hidden_escape_rope() {
-        assert_eq!(hidden_items(Map::Route11),
-            vec![HiddenItem { at: Point8 { x: 48, y: 5 }, item: ItemId::EscapeRope, flag: 36 }]);
-    }
-}
+// ⚠️ **The three tests that were here went with the decoder they pinned.**
+// `hidden_items_match_the_rom_coord_table`, `every_decoded_hidden_item_has_a_flag` and
+// `route11_has_one_hidden_escape_rope` cross-checked `HiddenObjects` against `HiddenItemCoords` on
+// all 54 rows, and there is nothing left for them to check: no code in this crate reads either
+// table any more. They are named here so a future reader looking for the cross-check knows it
+// existed and why it does not.

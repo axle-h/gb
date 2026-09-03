@@ -460,9 +460,9 @@ fn probe_coverage() {
         ("postgame-flash", include_bytes!("../data/postgame-flash.bin")),
         // Workstream E, rooted on H's output — the four-area sweep that takes the dex past H3's gate.
         ("postgame-safari", include_bytes!("../data/postgame-safari.bin")),
-        // …and H again, resumed on E's output: the Itemfinder at 30 owned, then a hidden item.
+        // …and H again, resumed on E's output: the Itemfinder at 30 owned. (H4 collected a hidden
+        // item here and is gone, along with `postgame-hidden-item.bin`; H5 roots on this instead.)
         ("postgame-itemfinder", include_bytes!("../data/postgame-itemfinder.bin")),
-        ("postgame-hidden-item", include_bytes!("../data/postgame-hidden-item.bin")),
         // H5's sweep chain.
         ("postgame-sweep-vermilion", include_bytes!("../data/postgame-sweep-vermilion.bin")),
         ("postgame-sweep-viridian", include_bytes!("../data/postgame-sweep-viridian.bin")),
@@ -471,7 +471,7 @@ fn probe_coverage() {
         // Workstream K, rooted on H's output.
         ("postgame-seel", include_bytes!("../data/postgame-seel.bin")),
         // Workstream I's chain, also rooted on H's output: medicine → the Itemfinder and a Repel →
-        // an Ether and the hidden PP Up → the stat items and a Poké Doll.
+        // an Ether and a PP Up → the stat items and a Poké Doll.
         ("postgame-medicine", include_bytes!("../data/postgame-medicine.bin")),
         ("postgame-finder", include_bytes!("../data/postgame-finder.bin")),
         ("postgame-ether", include_bytes!("../data/postgame-ether.bin")),

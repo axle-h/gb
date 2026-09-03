@@ -259,19 +259,30 @@ pub enum FieldMoveRequest {
     PushBoulder { boulder: Point8, direction: JoypadButton },
     /// Rearrange the party so `slot` leads. Instant — the agent writes it straight to RAM.
     ReorderParty { slot: u8 },
-    /// Face a tile and press A. Every "hidden object" in the game is this.
-    ///
-    /// ⚠️ **The ones a playthrough needs are in the action menu now** — `MetaTile::Switch`, the bins
-    /// and the drink machines and the statues and the poster — so what is left for this is the
-    /// hidden *items*, which are invisible by construction and cannot be offered as a row without
-    /// giving them away. It stays the escape hatch for a hidden object the table has not got.
-    Interact { target: Point8, facing: Option<PlayerFacingDirection> },
+    // ⚠️ **There was an `Interact { target, facing }` here: face any tile and press A.** It is gone,
+    // and with it the model's ability to hunt hidden items at all. Every "hidden object" a
+    // playthrough needs is an action-menu row (`MetaTile::Switch` — the gym bins, the drink
+    // machines, the Mansion statues, the Game Corner poster, Bill's cell separator), so what was
+    // left for this tool was the hidden *items*, and the whole of that table is loot: 212 hidden
+    // events in `data/events/hidden_events.asm`, of which the item-bearing ones are Rare Candies,
+    // Nuggets, PP Ups, Elixers, two Moon Stones — and **no key item, no HM and no TM**. Nothing in
+    // the game is gated behind one.
+    //
+    // What it cost was the largest single stall of the deployed run of 2026-09-03: ~50 calls over 85
+    // minutes across three Silph Co floors, each one walking to a square, pressing A at nothing, and
+    // hitting `DRIVER_ESCAPE_SILENCE` 60 s later with "got no answer from the game" — which reads as
+    // a malfunction rather than as "there is nothing there". Worse, the model had decided it was a
+    // *movement* primitive: its own issue report says "Expected: step to (8,2)" and concludes that
+    // walking is broken on that floor, when `interact` never moved anybody anywhere. No refusal text
+    // would have unlearned that, and a tool that cannot be aimed correctly and buys only loot is not
+    // worth a schema line.
+    //
     /// Move a Pokémon between the party and the open PC box, or open a different box.
     ///
-    /// ⚠️ **The agent walks to the PC itself**, from `pc_locations_for` — so unlike `Interact` this
-    /// is not "press the thing at these coordinates" and needs no menu row. That is the whole
-    /// difference between a PC and the hidden objects beside it: one press is the entire interaction
-    /// for a statue, and for a PC the press is only the way in.
+    /// ⚠️ **The agent walks to the PC itself**, from `pc_locations_for` — so this is not "press the
+    /// thing at these coordinates" and needs no menu row. That is the whole difference between a PC
+    /// and the hidden objects beside it: one press is the entire interaction for a statue, and for a
+    /// PC the press is only the way in.
     UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp },
     /// Move items between the bag and PC item storage. Same walk, different menu.
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8 },
@@ -450,7 +461,72 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
                 return Err(refusal);
             }
-            FieldMove::UseFieldItem { item, target: *target }
+            // ⚠️ **W6 — a `target` with nothing on it was accepted in silence, and the two
+            // coordinate conventions in one turn are why it was aimed there.** An action id's
+            // coordinate is the tile the player *stands on*; `use_item`'s `target` is the tile the
+            // *thing* is on. Nothing said so. On Route 16 the menu row read
+            // `Route16:27,10:Snorlax` and the Snorlax was at (26, 10), so the deployed run of
+            // 2026-09-02 played the Poké Flute at (27, 10) three times from two different squares,
+            // was answered "Accepted. The agent is carrying it out now" every time, and nothing at
+            // all happened. It recovered by calling `read_map`, which gave it (26, 10), and then it
+            // worked first time. The agent had the right position throughout.
+            //
+            // ⚠️ **No em dashes**, the rule `item_use::field_use_refusal` beside this one carries:
+            // a refusal from here is shown on the page as well as sent to the model.
+            //
+            // ⚠️ **Open ground is the test, not "is it a sprite".** The Card Key is used on a door,
+            // which is an `Obstacle` tile with no sprite on it, so a check that demanded a sprite
+            // would refuse the one other thing this arm exists for. What is never a target is a
+            // square you could stand on.
+            let at = *target;
+            let nothing_there = |noun: &str| -> String {
+                // The recovery `read_map` handed the run, without the round trip: whatever *is*
+                // beside the square it aimed at.
+                let beside = [
+                    at.y.checked_sub(1).map(|y| Point8 { x: at.x, y }),
+                    at.y.checked_add(1).map(|y| Point8 { x: at.x, y }),
+                    at.x.checked_sub(1).map(|x| Point8 { x, y: at.y }),
+                    at.x.checked_add(1).map(|x| Point8 { x, y: at.y }),
+                ].into_iter().flatten().find_map(|next| match state.map.tile_at_checked(next) {
+                    Some(crate::pokemon::tile::MetaTile::Sprite(name)) => Some((name, next)),
+                    _ => None,
+                });
+                format!(
+                    "There is nothing at ({}, {}) to use the {item} on: that square is {noun}. \
+                        `target` is the square the *thing* is standing on, which is not the square an \
+                        action id names: an id's coordinate is where the player stands to reach it.{}",
+                    at.x, at.y,
+                    match beside {
+                        Some((name, next)) => format!(
+                            " What is next to it is {name}, at ({}, {}). `read_map` gives the exact \
+                                position of everything on this map.", next.x, next.y),
+                        None => " `read_map` gives the exact position of everything on this map."
+                            .to_string(),
+                    },
+                )
+            };
+            use crate::pokemon::tile::MetaTile;
+            match state.map.tile_at_checked(at) {
+                None => return Err(format!(
+                    "({}, {}) is not a square on {}, which is {} wide and {} high.",
+                    at.x, at.y, state.map.map, state.map.width, state.map.height)),
+                Some(MetaTile::Empty) => return Err(nothing_there("open ground")),
+                Some(MetaTile::Grass) => return Err(nothing_there("tall grass")),
+                Some(MetaTile::Water) => return Err(nothing_there("water")),
+                Some(_) => {}
+            }
+            // Facing it is the precondition the cartridge checks: every one of these items reads the
+            // tile in front of the player. A target on the far side of a wall is `PushBoulder`'s
+            // refusal one item along.
+            if state.map.route_to_face(at).is_none() {
+                return Err(format!(
+                    "The player cannot get next to ({}, {}) to face it, and every one of these items \
+                        acts on the square in front of the player. Whatever is there has to be reached \
+                        first: the action menu is the list of what can be.",
+                    at.x, at.y,
+                ));
+            }
+            FieldMove::UseFieldItem { item, target: at }
         }
         FieldMoveRequest::TossItem { item } => FieldMove::TossItem { item: held(*item)? },
         FieldMoveRequest::PushBoulder { boulder, direction } => {
@@ -470,9 +546,6 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             FieldMove::PushBoulder { boulder: *boulder, dir: *direction }
         }
         FieldMoveRequest::ReorderParty { slot } => FieldMove::ReorderParty { slot: party_slot(*slot)? },
-        FieldMoveRequest::Interact { target, facing } => {
-            FieldMove::CheckTrashCan { target: *target, facing: *facing }
-        }
         FieldMoveRequest::UsePcBox { op } => {
             let pc = the_pc_here(state)?;
             // ⚠️ **`blocked_by` is the game's own refusals, asked before a button is pressed.**
@@ -1246,8 +1319,6 @@ fn use_field_move_spec() -> ToolSpec {
              - `push_boulder` — shove the boulder at `target` one tile in `direction`. Strength must \
              be armed first.\n\
              - `reorder_party` — make the Pokémon in `slot` the party leader.\n\
-             - `interact` — stand next to `target`, face it and press A. For a hidden item; the \
-             bins, drink machines, statues and the poster are rows in the action menu.\n\
              - `pc_pokemon` — at a PC: `op` is `deposit` (party `slot` → box), `withdraw` or \
              `release` (a `box_slot`), or `change_box` (`box`, 1-12, which also saves the game). \
              Only the open box can be read; `read_pc` shows it.\n\
@@ -1283,12 +1354,6 @@ fn use_field_move_spec() -> ToolSpec {
                     "type": "string", "enum": ["up", "down", "left", "right"],
                     "description": "For `push_boulder`: which way to shove it.",
                 },
-                "facing": {
-                    "type": "string",
-                    "enum": ["up", "down", "left", "right"],
-                    "description": "For `interact`: approach so the player ends up facing this way. \
-                                    Rarely needed; the Pokémon Mansion switches want `up`.",
-                },
                 "op": {
                     "type": "string",
                     "enum": ["deposit", "withdraw", "release", "change_box"],
@@ -1308,7 +1373,7 @@ fn field_move_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = PARTY_MOVES.iter().map(|(name, _, _)| *name).collect();
     names.extend([
         "cut", "fly", "teach", "evolve", "use_item", "toss_item", "push_boulder", "reorder_party",
-        "interact", "pc_pokemon", "pc_items", "elevator",
+        "pc_pokemon", "pc_items", "elevator",
     ]);
     names
 }
@@ -1943,15 +2008,6 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
             })
         }
         "reorder_party" => Ok(FieldMoveRequest::ReorderParty { slot: slot()? }),
-        "interact" => Ok(FieldMoveRequest::Interact {
-            target: target()?,
-            facing: match arguments.get("facing").and_then(Value::as_str) {
-                None => None,
-                Some(facing) => Some(facing_by_name(facing).ok_or_else(|| {
-                    format!("`{facing}` is not a direction: up, down, left or right.")
-                })?),
-            },
-        }),
         other => Err(format!(
             "`{other}` is not one of the field moves. They are: {}.",
             field_move_names().join(", "),
@@ -2088,8 +2144,39 @@ fn route_answer(call: &ToolCall, state: &GameState, graph: &WorldGraph) -> Value
         });
     };
 
-    match observe::route(graph, state.map.map, to) {
-        Some(hops) => json!({ "from": format!("{}", state.map.map), "to": format!("{to}"), "route": hops }),
+    match observe::route_from(graph, &state.map, to) {
+        Some(hops) => {
+            let mut answer = json!({
+                "from": format!("{}", state.map.map), "to": format!("{to}"), "route": hops });
+            // ⚠️ **W1 — the route is right and the first step of it may still be unwalkable, and
+            // saying so is the whole of this.** See `observe::route_from` for the 65 turns that
+            // bought this paragraph. The warning is on the answer rather than only in the hop's
+            // `reachable_from_here` flag because a bare `false` beside a coordinate is not an
+            // instruction: the run needed to be told that the way between two parts of one map is
+            // usually a door, which is a thing no read it could make would have told it.
+            if let Some(unreachable) = hops.get(1).filter(|hop| hop.reachable_from_here == Some(false)) {
+                let blockers = state.map.boundary_blockers();
+                answer["warning"] = json!(format!(
+                    "This route is correct and you cannot start it from where you are standing. It \
+                     leaves {} by `{}`, and that square is not reachable on foot from here{}. The \
+                     route graph is built from the game's own map headers, which say which maps \
+                     touch each other, not which parts of a map touch each other; {} is split, and \
+                     you are on the wrong part of it. What joins two parts of one map is usually a \
+                     door: take a warp you can reach and look for a back exit, or leave by an edge \
+                     you can reach and come back onto {} by a different one. The action menu is the \
+                     list of what you can actually get to.",
+                    state.map.map,
+                    unreachable.via.as_deref().unwrap_or("that connection"),
+                    match blockers.split_first() {
+                        Some((first, _)) => format!(" — what your side of it ends on is {first}"),
+                        None => String::new(),
+                    },
+                    state.map.map,
+                    state.map.map,
+                ));
+            }
+            answer
+        }
         None => json!({
             "to": format!("{to}"),
             "reachable": false,
@@ -2156,20 +2243,62 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
             let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
             format!("take the warp to {to_map}, arriving at ({}, {})", to_position.x + dx, to_position.y + dy)
         }
-        MetaTile::Connection { to_map, .. } => format!("walk into {to_map}"),
+        // ⚠️ **W2 — the row says how many other ways in there are, because the menu holds one.**
+        // `actions()` emits the nearest reachable crossing per adjacent map and nothing else, which
+        // is the right trade for the hot path (see its comment) and leaves the model unable to know
+        // the others exist at all. Route 14's east edge has seven openings and the deployed run of
+        // 2026-09-02 was shown one of them twice, landing both times in the same six-tile pocket.
+        // The ids listed here resolve through `resolve_overworld`'s `connection_action` fallback,
+        // so what the row offers is a row that can be chosen.
+        //
+        // ⚠️ **Reachable ones only, and never the row's own.** An id for a crossing on a terrace the
+        // player cannot get to is one `connection_action` declines to route to, which is the exact
+        // failure W1 exists to stop `read_route` committing.
+        MetaTile::Connection { to_map, .. } => {
+            let others: Vec<String> = state.map.crossings(to_map).into_iter()
+                .filter(|crossing| crossing.reachable && crossing.at != action.destination)
+                // Minted through `overworld_id` rather than formatted here, so an id in a row's
+                // prose and an id the resolver accepts cannot drift apart.
+                .map(|crossing| overworld_id(state, &OverworldAction {
+                    map: state.map.map,
+                    origin: state.map.player_position,
+                    destination: crossing.at,
+                    tile: MetaTile::Connection { to_map, to_position: crossing.to_position },
+                    route: vec![],
+                }))
+                .collect();
+            match others.is_empty() {
+                true => format!("walk into {to_map}"),
+                false => format!(
+                    "walk into {to_map}. This map has {} other opening{} into {to_map}, and each \
+                     one lands you somewhere different on it: {}",
+                    others.len(),
+                    if others.len() == 1 { "" } else { "s" },
+                    others.join(", "),
+                ),
+            }
+        }
         MetaTile::ConnectionWater(to_map) => format!("surf into {to_map}"),
         MetaTile::Grass => "walk into tall grass to find wild Pokémon".to_string(),
         MetaTile::Pc => "use the PC".to_string(),
         // One press of A each; what it does is the cartridge's business. The verb has to carry the
         // *point* rather than the mechanism, because these are the rows a model has no prior idea
         // exist — a bin it is told to search gets searched, a bin it is told it can press does not.
-        MetaTile::Switch { object, .. } => match object {
-            HiddenObject::TrashCan => "search this bin for one of the gym's two switches",
-            HiddenObject::VendingMachine => "buy the cheapest drink from this machine",
-            HiddenObject::Poster => "look behind the poster",
-            HiddenObject::Statue => "press this statue's switch",
-            HiddenObject::CellSeparator => "run the cell separator to turn Bill back into a person",
-        }.to_string(),
+        MetaTile::Switch { object, ordinal } => {
+            let verb = match object {
+                HiddenObject::TrashCan => "search this bin for one of the gym's two switches",
+                HiddenObject::VendingMachine => "buy the cheapest drink from this machine",
+                HiddenObject::Poster => "look behind the poster",
+                HiddenObject::Statue => "press this statue's switch",
+                HiddenObject::CellSeparator => "run the cell separator to turn Bill back into a person",
+            };
+            match crate::pokemon::tile_map::hidden_objects_for(state.map.map)
+                .get(ordinal as usize - 1) {
+                Some(site) => format!("{verb} (you stand at ({}, {}); it is at ({}, {}))",
+                                      action.destination.x, action.destination.y, site.at.x, site.at.y),
+                None => verb.to_string(),
+            }
+        }
         MetaTile::CutTree => "walk up to a tree that Cut can clear".to_string(),
         // The row only exists when a rod is in the bag and this map has water to cast at, so what it
         // needs to say is what fishing is *for* rather than that it is possible: a wild battle with
@@ -2177,13 +2306,27 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
         MetaTile::Fish { rod } => format!(
             "fish at the water's edge with the {} to find wild water Pokemon", rod.name()),
         MetaTile::Sprite(name) => {
-            let picture = state.map.sprites.iter().find(|s| s.name == name).map(|s| s.picture_id);
-            match picture {
+            let sprite = state.map.sprites.iter().find(|s| s.name == name);
+            // ⚠️ **W6 — both coordinates, for the rows whose target is asked of the model.** An id
+            // names the square the player *stands on*; `use_field_move`'s `target` and
+            // `push_boulder`'s want the square the thing is *on*, and they are never the same
+            // square. `Route16:27,10:Snorlax` with the Snorlax on (26, 10) cost the deployed run of
+            // 2026-09-02 three turns of playing the Poké Flute at empty ground. Only the rows that
+            // lead to a coordinate being asked for carry it: a person you talk to is approached by
+            // the agent and nothing needs the number, and a row that says two coordinates for no
+            // reason is a row that has to be read twice.
+            let stand_and_target = |verb: &str| match sprite {
+                Some(sprite) => format!(
+                    "{verb} (you stand at ({}, {}); it is at ({}, {}), which is the `target`)",
+                    action.destination.x, action.destination.y, sprite.position.x, sprite.position.y),
+                None => verb.to_string(),
+            };
+            match sprite.map(|s| s.picture_id) {
                 Some(PictureId::PokeBall) => format!("pick up the {}", name.trim_end_matches(|c: char| c.is_ascii_digit()).trim()),
-                Some(PictureId::Boulder) => "walk up to a boulder that Strength can push".to_string(),
+                Some(PictureId::Boulder) => stand_and_target("walk up to a boulder that Strength can push"),
                 Some(PictureId::Fossil | PictureId::OldAmber | PictureId::UnusedOldAmber) => format!("examine the {name}"),
                 Some(PictureId::Paper | PictureId::Pokedex | PictureId::Clipboard) => format!("read the {name}"),
-                Some(PictureId::Snorlax) => "walk up to the sleeping Snorlax blocking the way".to_string(),
+                Some(PictureId::Snorlax) => stand_and_target("walk up to the sleeping Snorlax blocking the way"),
                 _ => format!("talk to {name}"),
             }
         }
@@ -2232,22 +2375,100 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
     // `id_kind`, not `kind`: two people can share the tile an action approaches them from, and
     // "Sprite" == "Sprite" leaves that pair to `sort_by_key`'s stability over a `HashSet` walk.
     actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.id_kind()));
+    // ⚠️ **W7 — two doors of one building are two different places and the rows did not say so.**
+    // A gate house has four warp tiles, all of them `LAST_MAP` in
+    // `data/maps/objects/Route7Gate.asm`, so every one resolves to the same map and the menu showed
+    // `take the warp to Route7, arriving at (18, 9)` three times over. The agent's resolution is
+    // *correct* — Route 7's own object file puts the gate's warps at x=11 and x=18, either side of
+    // the building, and Saffron is a connection on past it — but nothing told the model which side
+    // of the gate each door was on, and the deployed run of 2026-09-02 filed a bug saying the warp
+    // to Saffron was missing.
+    //
+    // Only where a destination is offered more than once: on the ordinary building whose double-wide
+    // front door is two warp tiles landing on one square, the side is noise.
+    let mut repeated: std::collections::HashMap<crate::pokemon::map::Map, usize> =
+        std::collections::HashMap::new();
+    for action in &actions {
+        if let MetaTile::Warp { to_map, .. } = action.tile {
+            *repeated.entry(to_map).or_default() += 1;
+        }
+    }
     actions
         .iter()
         .map(|action| MenuItem {
             id: overworld_id(state, action),
-            description: match way_back(action) {
-                true => format!("{}; the way you came in", overworld_description(state, action)),
-                false => overworld_description(state, action),
+            description: {
+                let mut description = overworld_description(state, action);
+                if let MetaTile::Warp { to_map, .. } = action.tile
+                    && repeated.get(&to_map).copied().unwrap_or(0) > 1
+                    && let Some(side) = door_side(&state.map, action.destination) {
+                    description.push_str(&format!("; this one is on the {side} side of the map"));
+                }
+                if way_back(action) {
+                    description.push_str("; the way you came in");
+                }
+                description
             },
         })
         .collect()
 }
 
+/// Which side of the map a door is on, as the word a person would use.
+///
+/// ⚠️ **Relative to the map, on whichever axis the door is further off centre.** A gate house is six
+/// tiles wide with its doors at x=0 and x=5, so the x axis separates them and the y axis does not; a
+/// building with a door top and bottom is the other way round. Picking the axis by deviation rather
+/// than fixing on one is what makes the same rule fit both without a table.
+fn door_side(map: &crate::pokemon::tile_map::MetaTileMap, at: Point8) -> Option<&'static str> {
+    let dx = at.x as f32 - (map.width.saturating_sub(1)) as f32 / 2.0;
+    let dy = at.y as f32 - (map.height.saturating_sub(1)) as f32 / 2.0;
+    match dx.abs() >= dy.abs() {
+        true if dx < 0.0 => Some("west"),
+        true if dx > 0.0 => Some("east"),
+        false if dy < 0.0 => Some("north"),
+        false if dy > 0.0 => Some("south"),
+        // Dead centre on the deciding axis: there is no side to name, and inventing one would be
+        // worse than the repetition this is fixing.
+        _ => None,
+    }
+}
+
 /// Match an id against a **freshly recomputed** action list. `None` means the action is gone, which
 /// is a thing the model is told rather than a thing that crashes.
+///
+/// ⚠️ **W2 — with one fallback, for the one row the menu deliberately does not hold.** `actions()`
+/// emits the *nearest* reachable crossing per adjacent map, on the argument (its own comment) that
+/// emitting one per edge perturbs `route_toward` and the scripted run's timing. That is still true.
+/// What was not true is the consequence: `connection_action(to_map, to_position)` has existed for a
+/// specific landing all along and `PolicyStep::enter_at` uses it, but every id arriving from the
+/// model was matched by string equality against `actions()`, so the model alone could not ask for
+/// one. It had no way to say "same map, different door".
+///
+/// Route 13 → Route 14 is what that costs. Route 14's east edge is open at rows 0, 1, 2, 4, 6, 8 and
+/// 10; row 6 is a six-tile pocket whose only way west is through a trainer's body, and rows 4 and 8
+/// are the road. The deployed run of 2026-09-02 crossed into the pocket, walked back to Route 13,
+/// crossed again on the only row either menu offered, and landed in the pocket a second time. Its
+/// own report called it "menu starvation", which is an accurate description of a two-row menu.
+///
+/// So an id naming a `Connection` tile that `actions()` did not mint is resolved against the map
+/// directly. The id is re-minted from the tile rather than parsed out of the string, so this and
+/// [`overworld_id`] cannot drift apart, and the agent already re-derives such a walk every tick
+/// (`AgentState::OverworldMovement`'s `connection_action` arm), so nothing downstream changes.
 pub fn resolve_overworld(state: &GameState, id: &str) -> Option<OverworldAction> {
-    state.map.actions().into_iter().find(|action| overworld_id(state, action) == id)
+    use crate::pokemon::tile::MetaTile;
+    if let Some(action) = state.map.actions().into_iter().find(|action| overworld_id(state, action) == id) {
+        return Some(action);
+    }
+    let map = &state.map;
+    map.meta_tiles.iter().enumerate().find_map(|(index, tile)| {
+        let MetaTile::Connection { to_map, to_position } = *tile else { return None };
+        let at = Point8 { x: (index % map.width) as u8, y: (index / map.width) as u8 };
+        // Minted exactly as the menu would have minted it, through a throwaway action whose route
+        // is not the one that will be walked — `connection_action` computes that.
+        let candidate = OverworldAction {
+            map: map.map, origin: map.player_position, destination: at, tile: *tile, route: vec![] };
+        (overworld_id(state, &candidate) == id).then(|| map.connection_action(to_map, to_position))?
+    })
 }
 
 /// The id of one battle action. Keyed on what the action *is* rather than where it sat: a bag slot
@@ -2455,6 +2676,164 @@ mod tests {
         gb.load_state(include_bytes!("../pokemon/data/oaks-lab-just-got-squirtle.bin"))
             .expect("the committed fixture loads");
         { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }.expect("the fixture has a readable state")
+    }
+
+    /// The three maps a deployed run got fenced in on, as the emulator had them at the moment the
+    /// turn was put to the model: `issues/turn-<id>/state.gbst` out of `run-20260902-215720`.
+    ///
+    /// ⚠️ **Cut where the run was standing, not where a route would put it.** The whole property
+    /// under test is a fact about which terrace the player is on, so a fixture taken a tile earlier
+    /// or later is testing a different map.
+    fn state_from(fixture: &[u8]) -> GameState {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(fixture).expect("the committed fixture loads");
+        { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("the fixture has a readable state")
+    }
+
+    /// **W1 — `read_route` must not name a tile the player cannot reach, and if it does it has to
+    /// say so.**
+    ///
+    /// Cerulean City is split into terraces. The ways down are a Cut tree at (20, 29) and a corridor
+    /// reachable only through `CeruleanTrashedHouse`'s back door, so a player on the upper terrace
+    /// cannot walk to the Route 5 border strip at all. `WorldGraph` does not know that: it joins
+    /// maps by ROM map header and keys its nodes on the section that was observed, so once the lower
+    /// terrace has been walked, `shortest_path` will route out of it whatever terrace the player is
+    /// on now. The deployed run of 2026-09-02 asked 65 times, was answered `Connection at (23, 37)`,
+    /// `(13, 37)`, `(20, 37)` and filed ten issue reports.
+    ///
+    /// ⚠️ **The graph is built the way the run built it** — the lower terrace observed from a
+    /// standing position on the lower terrace, the upper one from where the run actually was. That
+    /// is what makes this the deployed bug rather than a mock of it: `observe` records the *live*
+    /// reachable set of wherever the player is, and the two sections legitimately disagree.
+    #[test]
+    fn a_route_off_a_terrace_the_player_is_not_on_says_it_cannot_be_started() {
+        let state = state_from(include_bytes!("../pokemon/data/split-cerulean.bin"));
+        assert_eq!(state.map.map, Map::CeruleanCity);
+
+        let mut graph = WorldGraph::new();
+        // The lower terrace, as the run saw it several hundred turns earlier.
+        let mut lower = state.map.clone();
+        lower.player_position = Point8 { x: 17, y: 36 };
+        graph.observe(Map::CeruleanCity, lower.player_position, &lower);
+        // …and where the run is standing now.
+        graph.observe(Map::CeruleanCity, state.map.player_position, &state.map);
+
+        let answer = route_answer(&call(READ_ROUTE, r#"{"to":"Route5"}"#), &state, &graph);
+        let hops = answer["route"].as_array().expect("a route, because one exists");
+        assert!(hops.len() >= 2, "Cerulean then Route 5: {answer}");
+
+        // ⚠️ The route is still answered. It is the correct answer to "which way is Route 5" and
+        // withholding it would be a second lie; what was missing is that it cannot be *started*.
+        assert_eq!(hops[1]["reachable_from_here"], json!(false), "{answer}");
+        let warning = answer["warning"].as_str().expect("a warning beside it");
+        assert!(warning.contains("cannot start it from where you are standing"), "{warning}");
+        // The half that was missing every single time: the way between two parts of one map is a
+        // door. `CeruleanTrashedHouse` sat in this run's own action menu for forty turns.
+        assert!(warning.contains("door"), "it has to name the way round: {warning}");
+        assert!(warning.contains("map headers"), "and why the route disagrees with the menu: {warning}");
+
+        // The reachable crossing is not flagged, or the flag says nothing.
+        let route4 = route_answer(&call(READ_ROUTE, r#"{"to":"Route4"}"#), &state, &graph);
+        assert!(route4.get("warning").is_none(), "Route 4 is walkable from here: {route4}");
+    }
+
+    /// The same property from the other end, on all three maps: whatever the route graph says, a
+    /// destination with no reachable crossing is one the action menu offers no row for, and the two
+    /// must not be left to disagree in silence.
+    ///
+    /// Route 14's is a *pocket* rather than a terrace — six tiles whose only way west is through a
+    /// trainer's body — and it is the case that proves the check is about where the player is
+    /// standing rather than about the map.
+    #[test]
+    fn a_fenced_in_map_names_the_neighbours_it_cannot_reach() {
+        use crate::pokemon::tile::MetaTile;
+        for (fixture, map, cut_off) in [
+            (&include_bytes!("../pokemon/data/split-cerulean.bin")[..], Map::CeruleanCity,
+             vec![Map::Route5, Map::Route9]),
+            (&include_bytes!("../pokemon/data/split-celadon.bin")[..], Map::CeladonCity,
+             vec![Map::Route16, Map::Route7]),
+            (&include_bytes!("../pokemon/data/pocket-route14.bin")[..], Map::Route14,
+             vec![Map::Route15]),
+        ] {
+            let state = state_from(fixture);
+            assert_eq!(state.map.map, map);
+            let mut expected = cut_off.clone();
+            expected.sort_by_key(|m| format!("{m}"));
+            assert_eq!(state.map.unreachable_connection_targets(), expected, "on {map}");
+
+            for to in expected {
+                // Every crossing into it exists and none of them can be walked to.
+                let crossings = state.map.crossings(to);
+                assert!(!crossings.is_empty(), "{map} does border {to}");
+                assert!(crossings.iter().all(|c| !c.reachable), "{map} -> {to}: {crossings:?}");
+                // …and the menu agrees, by construction rather than by two functions matching.
+                assert!(!state.map.actions().iter().any(|action| matches!(
+                    action.tile, MetaTile::Connection { to_map, .. } if to_map == to)),
+                    "the menu must not offer a crossing into {to} on {map}");
+            }
+        }
+    }
+
+    /// **W2 — the model can ask for a crossing the menu did not offer.**
+    ///
+    /// `actions()` emits the nearest reachable crossing per adjacent map, so on Route 14 — whose
+    /// east edge is open at seven rows — the model was shown one row into Route 13 and had no way to
+    /// name any of the others. It crossed, came back, and landed in the same six-tile pocket.
+    ///
+    /// ⚠️ **The player is moved out of the pocket, and that is the point rather than a shortcut.**
+    /// The committed fixture is the run standing *in* the pocket, where only one crossing is
+    /// reachable and there is correctly nothing to choose between; the property under test is what
+    /// happens on the road, where several are. `MetaTileMap` is plain data over the emulator's map
+    /// and the BFS is rooted at `player_position`, so setting it is the same question asked from a
+    /// different square.
+    #[test]
+    fn a_crossing_the_menu_did_not_offer_can_still_be_chosen() {
+        use crate::pokemon::tile::MetaTile;
+        let mut state = state_from(include_bytes!("../pokemon/data/pocket-route14.bin"));
+        state.map.player_position = Point8 { x: 10, y: 4 };
+
+        let reachable: Vec<_> = state.map.crossings(Map::Route13).into_iter()
+            .filter(|crossing| crossing.reachable).collect();
+        assert!(reachable.len() > 1, "the road has several openings east: {reachable:?}");
+
+        let menu = overworld_menu(&state, None);
+        let offered: Vec<&MenuItem> = menu.iter()
+            .filter(|row| row.id.ends_with(":Connection")).collect();
+        // Still one row per adjacent map: this map borders Route 13 and Route 15.
+        assert_eq!(offered.len(), 2, "one row per neighbour, not one per tile: {offered:?}");
+        let offered: Vec<&MenuItem> = offered.into_iter()
+            .filter(|row| row.description.contains(&format!("{}", Map::Route13))).collect();
+        assert_eq!(offered.len(), 1, "{offered:?}");
+        assert!(offered[0].description.contains("2 other openings"),
+                "and it says the others are there: {}", offered[0].description);
+
+        for crossing in reachable {
+            let id = overworld_id(&state, &OverworldAction {
+                map: state.map.map, origin: state.map.player_position, destination: crossing.at,
+                tile: MetaTile::Connection { to_map: Map::Route13, to_position: crossing.to_position },
+                route: vec![],
+            });
+            // Named in the row unless it *is* the row, and choosable either way. Before W2 every id
+            // but the row's own resolved to `None` and the turn was answered "that action is gone".
+            if id != offered[0].id {
+                assert!(offered[0].description.contains(&id), "{} omits {id}", offered[0].description);
+            }
+            let resolved = resolve_overworld(&state, &id).unwrap_or_else(|| panic!("{id} resolves"));
+            assert_eq!(resolved.destination, crossing.at);
+            assert!(!resolved.route.is_empty(), "{id} comes with a walk to it");
+        }
+
+        // ⚠️ An unreachable crossing is still refused. W1 exists to stop the model being sent at
+        // one, and a fallback that routed to anything named would put it straight back.
+        let pocket = state.map.crossings(Map::Route13).into_iter()
+            .find(|crossing| !crossing.reachable).expect("the pocket rows are not reachable from the road");
+        let id = overworld_id(&state, &OverworldAction {
+            map: state.map.map, origin: state.map.player_position, destination: pocket.at,
+            tile: MetaTile::Connection { to_map: Map::Route13, to_position: pocket.to_position },
+            route: vec![],
+        });
+        assert!(resolve_overworld(&state, &id).is_none(), "{id} cannot be walked to");
     }
 
     /// ⚠️ **Every one of these is refused inside the turn, which is the whole point of resolving
@@ -2867,7 +3246,9 @@ mod tests {
             // ⚠️ **Three additions were paid for out of the same change rather than added to it.**
             // The `interact` line lost the clause listing the gym bins and the Mansion switches,
             // because both are rows in the action menu now (`MetaTile::Switch`) and a schema that
-            // still pointed at coordinates would be teaching the harder way round; `map`'s
+            // still pointed at coordinates would be teaching the harder way round — and on
+            // 2026-09-03 the whole line went, along with the `facing` property that only it used;
+            // `map`'s
             // description is shared with `elevator` rather than duplicated; and the four new
             // properties carry one sentence each rather than restating what `op` means per verb.
             //
@@ -2919,7 +3300,13 @@ mod tests {
             //
             // ⚠️ **Some of that 324 is paid back**, because the same change removed `"maximum":
             // MAX_ITEMS` from two `id` schemas — a bound that was not merely surplus but wrong.
-            (DecisionKind::Overworld, 13_075),
+            //
+            // ⚠️ **Overworld came back down 370 bytes on 2026-09-03**, 13 070 → 12 700, when
+            // `use_field_move`'s `interact` verb and the `facing` property that only it used were
+            // removed. That is the largest single reclaim this budget has seen, and it is not why
+            // the tool went — see `FieldMoveRequest`'s note — but it is worth writing down that the
+            // one verb nothing needed was also the most expensive line in the catalogue.
+            (DecisionKind::Overworld, 12_775),
             (DecisionKind::Battle, 5_575),
             (DecisionKind::Nickname, 4_075),
             (DecisionKind::MartPurchase, 4_825),
@@ -3720,13 +4107,6 @@ mod tests {
             request(r#"{"move":"push_boulder","target":{"x":4,"y":5},"direction":"left"}"#),
             FieldMoveRequest::PushBoulder { boulder: Point8 { x: 4, y: 5 }, direction: JoypadButton::Left },
         );
-        assert_eq!(
-            request(r#"{"move":"interact","target":{"x":1,"y":2},"facing":"up"}"#),
-            FieldMoveRequest::Interact {
-                target: Point8 { x: 1, y: 2 },
-                facing: Some(PlayerFacingDirection::Up),
-            },
-        );
         assert_eq!(request(r#"{"move":"reorder_party","slot":3}"#), FieldMoveRequest::ReorderParty { slot: 3 });
 
         // Every one of these is answerable — the model is told what is missing and can try again in
@@ -3739,6 +4119,10 @@ mod tests {
             (r#"{"move":"use_item","item":"PokeFlute"}"#, "needs a `target`"),
             (r#"{"move":"push_boulder","target":{"x":1,"y":1},"direction":"north"}"#, "is not a direction"),
             (r#"{"move":"reorder_party","slot":9}"#, "no party slot 9"),
+            // ⚠️ **`interact` is gone and has to stay gone.** A resumed run replays its own history,
+            // so a model that used it before a deploy will try it again; it is refused by name like
+            // any other misspelling rather than silently doing something else.
+            (r#"{"move":"interact","target":{"x":1,"y":2}}"#, "not one of the field moves"),
             ("{}", "`move` is required"),
         ] {
             let CallKind::Rejected(complaint) = parse(arguments) else {
@@ -3944,7 +4328,11 @@ mod tests {
             state.bag.push(BagItem { id: item, quantity: 1 }).expect("the fixture's bag has room");
             state
         };
-        let at = Point8 { x: 5, y: 6 };
+        // ⚠️ **A square with something on it, since W6.** This was (5, 6), which is bare floor in
+        // Oak's lab — and a `use_item` aimed at bare floor is now the refusal the test below is
+        // about, which would have made this one pass for the wrong reason. (8, 4) is the rival,
+        // standing beside the player.
+        let at = Point8 { x: 8, y: 4 };
         let complaint = |state: &GameState, item: ItemId| {
             match resolve_field_move(state, &FieldMoveRequest::UseItem { item, target: at }) {
                 Err(complaint) => complaint,
@@ -3980,6 +4368,73 @@ mod tests {
         // `held` check runs first, so "you do not have one" beats "it would not work".
         let empty = complaint(&fixture_state(), ItemId::HelixFossil);
         assert!(empty.contains("no HelixFossil in the bag"), "{empty}");
+    }
+
+    /// **W7 — which side of the map a repeated door is on.**
+    ///
+    /// A gate house is six tiles wide with its doors at x=0 and x=5, so the x axis separates them
+    /// and the y axis does not; a building with a door top and bottom is the other way round.
+    /// Picking the axis by deviation rather than fixing on one is what makes the same rule fit both,
+    /// and the dead-centre case has to answer nothing rather than invent a side.
+    #[test]
+    fn a_repeated_door_is_named_by_the_side_of_the_map_it_is_on() {
+        let mut map = state_from(include_bytes!("../pokemon/data/split-cerulean.bin")).map;
+        map.width = 6;
+        map.height = 8;
+        assert_eq!(door_side(&map, Point8 { x: 0, y: 3 }), Some("west"));
+        assert_eq!(door_side(&map, Point8 { x: 5, y: 4 }), Some("east"));
+        // Level on x, so the y axis decides.
+        map.width = 8;
+        assert_eq!(door_side(&map, Point8 { x: 3, y: 0 }), Some("north"));
+        assert_eq!(door_side(&map, Point8 { x: 4, y: 7 }), Some("south"));
+        // Dead centre on the axis that would have decided: no side to name.
+        map.width = 7;
+        map.height = 7;
+        assert_eq!(door_side(&map, Point8 { x: 3, y: 3 }), None);
+    }
+
+    /// **W6 — a field item aimed at nothing is refused, and told what is beside it.**
+    ///
+    /// Two coordinate conventions meet on this turn and nothing said so: an action id's coordinate
+    /// is the tile the player stands on, `use_item`'s `target` is the tile the thing is on. The
+    /// deployed run of 2026-09-02 read `Route16:27,10:Snorlax`, played the Poké Flute at (27, 10)
+    /// three times from two different squares, and was answered "Accepted. The agent is carrying it
+    /// out now" on every one of them while nothing happened at all. It recovered only by spending a
+    /// `read_map`, which said the Snorlax was at (26, 10).
+    #[test]
+    fn a_field_item_aimed_at_open_ground_is_refused_and_says_what_is_beside_it() {
+        let mut state = fixture_state();
+        state.bag.push(BagItem { id: ItemId::PokeFlute, quantity: 1 }).expect("room in the bag");
+        let flute = |target| resolve_field_move(&state, &FieldMoveRequest::UseItem {
+            item: ItemId::PokeFlute, target });
+
+        // Oak's lab: the rival stands on (8, 4) and (7, 5) is bare floor beneath the player.
+        let empty = flute(Point8 { x: 7, y: 5 }).expect_err("open ground is not a target");
+        assert!(empty.contains("nothing at (7, 5)"), "{empty}");
+        assert!(empty.contains("open ground"), "it says what the square is: {empty}");
+        // The half that cost three turns: which convention is which.
+        assert!(empty.contains("square the *thing* is standing on"), "{empty}");
+        assert!(empty.contains("where the player stands"), "{empty}");
+        // …and the recovery `read_map` sold the run, for free: what is actually next door.
+        let beside = flute(Point8 { x: 7, y: 4 }).expect_err("the player's own square is not one either");
+        assert!(beside.contains("Rival, at (8, 4)"), "it names what is beside the miss: {beside}");
+
+        // A square that is not on the map at all is its own sentence rather than a silent accept.
+        let off = flute(Point8 { x: 40, y: 40 }).expect_err("off the map");
+        assert!(off.contains("not a square on"), "{off}");
+
+        // ⚠️ **No em dashes**, the rule `item_use::field_use_refusal` next door carries and tests:
+        // a refusal from this function is shown on the page as well as sent to the model.
+        for refusal in [&empty, &beside, &off] {
+            assert!(!refusal.contains('—'), "no em dashes in what the agent writes: {refusal}");
+        }
+
+        // ⚠️ **And the thing itself still resolves.** A gate that refused the one use the scripted
+        // route makes would strand Snorlax on Route 12 for ever.
+        assert_eq!(
+            flute(Point8 { x: 8, y: 4 }),
+            Ok(FieldMove::UseFieldItem { item: ItemId::PokeFlute, target: Point8 { x: 8, y: 4 } }),
+        );
     }
 
     /// **The HM gate, and why it is worth a test of its own.**
