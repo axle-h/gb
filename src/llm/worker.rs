@@ -251,6 +251,9 @@ pub struct Worker {
     /// What the page was last told the plan is, so [`Self::publish_todo`] can be called from every
     /// moment it might have changed without publishing the same list twice.
     published_plan: Option<Vec<TodoView>>,
+    /// Plan calls this turn that the list refused, so an identical one is answered rather than run
+    /// again. Cleared at the top of [`Self::decide`]. See [`Self::apply_todo`].
+    refused_todo: Vec<crate::llm::todo::TodoCall>,
     /// The same, for the battle script: `(source, armed, last_failure)` as the page last saw it.
     /// `is_default` is not in here because it is a pure function of the source.
     /// See [`Self::publish_battle_script`] for why the dedupe matters more here than for the plan.
@@ -318,6 +321,7 @@ pub fn channels(
         battle_script,
         live_script: Arc::clone(&live_script),
         published_plan: None,
+        refused_todo: Vec::new(),
         // ⚠️ **`None`, and it used to be a seed of the empty script.** That seed existed to keep a
         // pointless `source: null` off the wire on the first turn of every run that would never
         // write a script — the state every run started in. There is no such state now:
@@ -638,10 +642,33 @@ impl Worker {
 
     /// One TODO call, applied and published. The UI gets the whole list — a viewer reads it as what
     /// the run is trying to do — while [`TodoList::render`] gives the model the shorter version.
+    ///
+    /// ⚠️ **A plan call the list refused is answered once, and a repeat of it inside the same turn
+    /// is answered without being run again.** Every refusal is cheap, deterministic and identical
+    /// the second time, which is the property that makes a model loop on one: turn 1280 of the
+    /// deployed run of 2026-09-03 sent **thirty-five** `todo_set`/`todo_complete` calls against
+    /// `id: 5` — a number its plan had not held for hours — and stopped only when
+    /// `GB_MAX_TOOL_STEPS` ran out. (16 steps became 35 calls because a step may carry any number
+    /// of parallel calls, so that cap does not bound this.) The same shape as `press_buttons`
+    /// before it was withdrawn, and the same answer: refuse the second one *differently*, so that
+    /// repeating is not a way to spend the turn.
+    ///
+    /// It is per turn rather than per run because the plan changes: an id that is not there now may
+    /// be there in ten turns, and the model must be free to ask again once it is.
     fn apply_todo(&mut self, call: crate::llm::todo::TodoCall) -> String {
-        let answer = self.todo.apply(call);
+        if self.refused_todo.contains(&call) {
+            return "You already made that exact call this turn and it was refused; nothing has \
+                    changed since. Your plan is the `## Your plan` message nearest the end of this \
+                    conversation — use a number it actually lists, or leave the plan alone and \
+                    finish the turn."
+                .to_string();
+        }
+        let answer = self.todo.apply_reporting(call.clone());
+        if answer.refused {
+            self.refused_todo.push(call);
+        }
         self.publish_todo();
-        answer
+        answer.text
     }
 
     /// Tell the page, if there is anything new to tell it.
@@ -760,6 +787,9 @@ impl Worker {
     fn decide(&mut self, id: u64, kind: DecisionKind, menu: &[String]) -> Option<(Terminal, Option<String>)> {
         let specs = tools::for_kind(kind);
         let mut nudged = false;
+        // Per turn: see `apply_todo`. Cleared here rather than at the end so a turn abandoned
+        // mid-flight (cancellation, a failed request) cannot leave a stale refusal behind.
+        self.refused_todo.clear();
 
         for step in 0..self.config.max_tool_steps {
             if self.is_stale(id) {

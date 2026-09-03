@@ -726,14 +726,24 @@ fn reads_for(kind: DecisionKind) -> impl Iterator<Item = &'static ReadTool> {
 
 // ── W6b: the plan (§10) ──────────────────────────────────────────────────────────────────────────
 
-/// The two TODO tools, by name. Non-terminal like the reads, and named in the turn contract for the
-/// same reason: a model that thinks `todo_set` ended its turn stops playing.
+/// The three TODO tools, by name. Non-terminal like the reads, and named in the turn contract for
+/// the same reason: a model that thinks `todo_set` ended its turn stops playing.
 ///
-/// ⚠️ **There were four.** `memory_write` and `memory_read` sat beside these, doing the same job in
-/// a different shape — see [`crate::llm::todo`]'s module docs for why one mechanism beat two. And
-/// `todo_set` used to be `todo_add`, which could only append: revising a plan was a delete the
-/// catalogue did not offer plus an add, so wrong items were completed — or kept — instead.
-pub const TODO_TOOL_NAMES: &[&str] = &["todo_set", "todo_complete"];
+/// ⚠️ **There were four, then two, and delete having no name of its own cost a whole turn.** It was
+/// spelled "`todo_set` with an `id` and no `text`", which is an overload of the setter rather than
+/// a word, and nothing in the catalogue said it out loud except the plan-is-full refusal. The
+/// deployed run of 2026-09-03 reached for it four different ways in a single turn —
+/// `{"id":5,"text":"Delete"}`, `{"id":5,"text":""}`, `{"id":5}` and `todo_complete{"id":5}` — and
+/// the first of those *added an item whose text was the word `Delete`*. Naming it costs 324 bytes
+/// of schema on every kind, measured and argued at the tool-array ceiling. The overload still works
+/// (it is what `todo_add`-era history contains, and `classify_todo` parses both names onto the same
+/// `TodoCall`), it is simply no longer the only way in.
+///
+/// ⚠️ **`memory_write` and `memory_read` sat beside these** doing the same job in a different shape
+/// — see [`crate::llm::todo`]'s module docs for why one mechanism beat two. And `todo_set` used to
+/// be `todo_add`, which could only append: revising a plan was a delete the catalogue did not offer
+/// plus an add, so wrong items were completed — or kept — instead.
+pub const TODO_TOOL_NAMES: &[&str] = &["todo_set", "todo_complete", "todo_delete"];
 
 /// Their specs. A function rather than a const because a JSON Schema is not a `const` expression.
 pub fn todo_tools() -> Vec<ToolSpec> {
@@ -741,12 +751,11 @@ pub fn todo_tools() -> Vec<ToolSpec> {
         ToolSpec::new(
             "todo_set",
             format!(
-                "Add, rewrite or delete one item on your plan: no `id` adds one on the end, an \
-                 `id` rewrites that item where it is, an `id` with no `text` deletes it. The order \
-                 is kept. Room for {MAX_TODO_ITEMS}, finished ones included. This is the only thing \
-                 you write that outlives the conversation, so give the reason with the intent: \
-                 `come back to Route 12 with the Poké Flute, the Snorlax blocks the path south`. At \
-                 most {MAX_TODO_TEXT} characters."
+                "Add or rewrite one item on your plan: no `id` adds one on the end, an `id` \
+                 rewrites that one where it is. The order is kept. Room for {MAX_TODO_ITEMS}, \
+                 finished ones included. This is the only thing you write that outlives the \
+                 conversation, so give the reason with the intent: `come back to Route 12 with the \
+                 Poké Flute, the Snorlax blocks the path south`. At most {MAX_TODO_TEXT} characters."
             ),
             json!({
                 "type": "object",
@@ -754,13 +763,29 @@ pub fn todo_tools() -> Vec<ToolSpec> {
                     // ⚠️ **The cap is in the schema as well as in the prose, and it was not.**
                     // `TodoList` truncates at `MAX_TEXT` on the way in, so an over-long item was
                     // silently cut mid-sentence — the exact schema-says-one-thing-parser-does-another
-                    // shape that left 543 of 749 `why`s null. `maximum` on `id` is the same fix:
-                    // the list can never hold more than `MAX_ITEMS`, so an edit past it was a round
-                    // trip spent finding that out.
-                    "id": { "type": "integer", "minimum": 1, "maximum": MAX_TODO_ITEMS,
-                            "description": "An existing item's number, to replace or delete it. Omit to add." },
+                    // shape that left 543 of 749 `why`s null.
+                    //
+                    // ⚠️ **`id` had a `maximum` of `MAX_ITEMS` and that was flatly wrong**, because
+                    // it confused how many items the list holds with what they are *called*. An id
+                    // comes from `next_id`, a counter that only ever goes up and never reuses a
+                    // number, so a plan revised a dozen times holds ids 10-14 while the cap is 5.
+                    // The schema was therefore telling the model that every id it could see was out
+                    // of range. The deployed run of 2026-09-03 spent a whole turn on it: 35
+                    // consecutive `todo_set`/`todo_complete` calls against `id: 5` — the largest
+                    // number the schema allowed — for a list holding 10, 11, 12, 13 and 14, each
+                    // answered "there is no TODO 5". There is no upper bound to state here; the
+                    // list itself is the authority on which ids exist, and `todo.rs` now names them
+                    // in the refusal.
+                    "id": { "type": "integer", "minimum": 1,
+                            "description": "An item's number, as shown in your plan. Omit to add a new one." },
+                    // ⚠️ **Not `required`, though the description reads as though it were.** The
+                    // parser treats a missing `text` as the old delete overload and services it,
+                    // exactly as it still services `todo_add`: a resumed run imitating its own
+                    // history must get what it meant rather than a lecture. Declaring it required
+                    // while the parser quietly did something else is the shape this file has paid
+                    // for twice already.
                     "text": { "type": "string", "maxLength": MAX_TODO_TEXT,
-                              "description": "What to do, and why. Omit to delete `id`." },
+                              "description": "What to do, and why." },
                 },
                 "additionalProperties": false,
             }),
@@ -770,8 +795,20 @@ pub fn todo_tools() -> Vec<ToolSpec> {
             "Mark one item on your plan done, by the number shown beside it.",
             json!({
                 "type": "object",
-                "properties": { "id": { "type": "integer", "minimum": 1, "maximum": MAX_TODO_ITEMS,
-                                        "description": "The item's number." } },
+                "properties": { "id": { "type": "integer", "minimum": 1,
+                                        "description": "The item's number, as shown in your plan." } },
+                "required": ["id"],
+                "additionalProperties": false,
+            }),
+        ),
+        ToolSpec::new(
+            "todo_delete",
+            "Drop one item off your plan for good, by its number — something you no longer mean to \
+             do. `todo_complete` is for one you have done.",
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "integer", "minimum": 1,
+                                        "description": "The item's number, as shown in your plan." } },
                 "required": ["id"],
                 "additionalProperties": false,
             }),
@@ -896,6 +933,13 @@ fn classify_todo(name: &str, arguments: &Value) -> Option<CallKind> {
         "todo_complete" => match arguments.get("id").and_then(Value::as_u64) {
             Some(id) => TodoCall::Complete { id: id.min(u64::from(u32::MAX)) as u32 },
             None => return Some(CallKind::Rejected("`todo_complete` needs the item's `id`.".to_string())),
+        },
+        // The named delete. It is the `todo_set`-with-no-text overload under a word the model can
+        // find, so it lands on the same `TodoList` branch and needs no variant of its own — see
+        // `TODO_TOOL_NAMES` for the turn that was spent looking for that word.
+        "todo_delete" => match arguments.get("id").and_then(Value::as_u64) {
+            Some(id) => TodoCall::Set { id: Some(id.min(u64::from(u32::MAX)) as u32), text: None },
+            None => return Some(CallKind::Rejected("`todo_delete` needs the item's `id`.".to_string())),
         },
         _ => return None,
     };
@@ -2858,12 +2902,29 @@ mod tests {
             // `Overworld`'s 12 746 is `read_guide` and the PC verbs growing under the ceiling that
             // was already set for them, which is the ratchet working rather than something this
             // change spent.
-            (DecisionKind::Overworld, 12_750),
-            (DecisionKind::Battle, 5_250),
-            (DecisionKind::Nickname, 3_750),
-            (DecisionKind::MartPurchase, 4_500),
-            (DecisionKind::ForgetMove, 3_950),
-            (DecisionKind::Stuck, 5_700),
+            //
+            // ── 2026-09-03: `todo_delete`, +324 bytes on **every** kind ──
+            // Re-measured: 13 070, 5539, 4009, 4749, 4203, 5959. The delta is uniform because the
+            // plan tools are the one group offered on all six, and every ceiling moved by it with
+            // the slack each already had left intact.
+            //
+            // What it bought, and it is the same trade `todo_set` itself made at 238 bytes: delete
+            // had no name. It was spelled "`todo_set` with an `id` and no `text`", and the only
+            // place the catalogue said so out loud was the plan-is-full refusal. Turn 1280 of the
+            // deployed run of 2026-09-03 reached for it four ways in one turn and then sent the
+            // same failing call thirty-five times — a whole turn, and roughly 56 k prompt tokens,
+            // against 324 bytes of schema. Two thirds of the addition is the tool; the rest is
+            // `id`'s description on all three tools now saying the number comes off the plan rather
+            // than being invented, which is the other half of the same failure.
+            //
+            // ⚠️ **Some of that 324 is paid back**, because the same change removed `"maximum":
+            // MAX_ITEMS` from two `id` schemas — a bound that was not merely surplus but wrong.
+            (DecisionKind::Overworld, 13_075),
+            (DecisionKind::Battle, 5_575),
+            (DecisionKind::Nickname, 4_075),
+            (DecisionKind::MartPurchase, 4_825),
+            (DecisionKind::ForgetMove, 4_275),
+            (DecisionKind::Stuck, 6_025),
         ] {
             let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
             assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
@@ -3368,7 +3429,7 @@ mod tests {
         // back to every kind has to be a deliberate edit to this line: naming a Pokémon used to
         // arrive with all eight reads and four note tools — fourteen entries to answer with a word.
         assert_eq!(names(DecisionKind::Nickname), ["read_party", SCREENSHOT, "todo_set", "todo_complete",
-                                                   "set_nickname", "wait"]);
+                                                   "todo_delete", "set_nickname", "wait"]);
 
         // ⚠️ A read that exists but is not offered *here* is told which turn it belongs to. Falling
         // through to "there is no tool called `read_map`" would be a lie the model cannot act on.

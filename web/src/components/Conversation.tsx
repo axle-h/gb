@@ -297,8 +297,12 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
     case 'todo_set': {
       const item = text('text');
       if (item) return args.id === undefined ? `Planned: ${item}` : `Revised plan item ${args.id}: ${item}`;
+      // No text and an id is the delete overload `todo_delete` replaced. Still reachable, and every
+      // transcript written before that tool existed is full of it.
       return args.id === undefined ? 'Added to the plan' : `Dropped plan item ${args.id}`;
     }
+    case 'todo_delete':
+      return args.id === undefined ? 'Dropped a plan item' : `Dropped plan item ${args.id}`;
     case 'todo_complete':
       return args.id === undefined ? 'Ticked something off' : `Ticked off plan item ${args.id}`;
     case 'get_battle_script_docs':
