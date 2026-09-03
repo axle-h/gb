@@ -772,6 +772,130 @@ pub fn situation(
                  Nothing in the menu below leads past it, and retrying will not change that.\n",
             ));
         }
+
+        // **W9 — Vermilion Gym: 87 turns, the largest single sink in the deployed run of
+        // 2026-09-02, and not one issue report was filed about it.** The model swept all fifteen
+        // bins by hand at one request each, and the puzzle reset twice under it.
+        //
+        // ⚠️ **Neither half of this is the puzzle's answer.** `GameState::trash_cans` carries
+        // `first_target` and `second_target`, read out of `wFirstLockTrashCanIndex` and
+        // `wSecondLockTrashCanIndex`, and handing those over would walk the gym in two requests. It
+        // is deliberately not done: they are state no player can see, and a run that is given them
+        // has not solved anything. What is said here is the *mechanism*, which a player learns by
+        // playing, and it is checked against `engine/events/hidden_events/vermilion_gym_trash.asm`
+        // rather than remembered: `.trySecondLock`'s failure arm is
+        // `ResetEvent EVENT_1ST_LOCK_OPENED` followed by `Random / and $e / ld
+        // [wFirstLockTrashCanIndex], a`, so a wrong second guess does not merely lose the second
+        // switch, it moves the first one too.
+        //
+        // ⚠️ **`then` is said here rather than left to the tool schema.** The schema has carried
+        // "chains up to 3 more ids" throughout, and the run chained none of these: this repo's one
+        // measurement about where a nudge lands is that the top of the turn works and the bottom of
+        // the system prompt does not (`read_guide`, 7d521e6). Fifteen bins at four a request is four
+        // requests instead of fifteen.
+        if crate::pokemon::tile_map::hidden_objects_for(state.map.map).iter()
+            .any(|site| site.object == crate::pokemon::tile::HiddenObject::TrashCan) {
+            out.push_str(&format!(
+                "The bins in this gym are a two-switch puzzle: one bin hides the first switch, and \
+                    opening it puts the second in another bin. Two things are worth knowing before you \
+                    start. Checking the wrong bin for the *second* switch resets both locks and moves \
+                    the first switch somewhere new, so every bin you had eliminated goes back into the \
+                    pool and a careful sweep can undo itself. And `choose_action` takes {} more ids in \
+                    `then`, all carried out without asking you again, so a sweep is {} bins per request \
+                    rather than one.\n",
+                crate::llm::tools::MAX_CHAINED_ACTIONS - 1,
+                crate::llm::tools::MAX_CHAINED_ACTIONS,
+            ));
+        }
+
+        // **W7.** ⚠️ **Every door on this map comes out on the same map, and the model read that as
+        // a missing warp.** A gate house's four warp tiles are all `LAST_MAP`
+        // (`data/maps/objects/Route7Gate.asm`), so the menu offers three near-identical
+        // `Warp → Route7` rows; the agent is right, because Route 7's own object file has the gate's
+        // warps at x=11 and x=18 on either side of the building and Saffron is a *connection* on
+        // past it. The deployed run of 2026-09-02 filed a bug saying the Saffron warp was missing.
+        // The rows now carry which side of the building each door is on (`tools::door_side`); this
+        // is the fact no row can carry, which is that there is nothing else here to look for.
+        //
+        // ⚠️ **Distinct landings, not distinct warp tiles.** Nearly every building in the game has a
+        // double-wide front door — two warp tiles onto one square — and `warp_targets` is a set of
+        // `(map, landing)`, so it already collapses those to one entry. What is left is a map whose
+        // ways out genuinely go to several different places on one other map, which is a gate house
+        // and a cave floor with two ladders down, and the sentence is true of both.
+        let doors: std::collections::HashSet<crate::pokemon::map::Map> =
+            state.map.warp_targets.iter().map(|(to_map, _)| *to_map).collect();
+        if state.map.warp_targets.len() > 1 && doors.len() == 1 {
+            let to_map = doors.into_iter().next().expect("one");
+            out.push_str(&format!(
+                "Every way off this map leads back to {to_map}, at {} different places on it, so \
+                    which one you take decides where you come out and they are not interchangeable — \
+                    each row below says where it lands. Nothing beyond {to_map} can be reached through \
+                    a door from here; to get anywhere further you leave onto {to_map} and go on from \
+                    there.\n",
+                state.map.warp_targets.len(),
+            ));
+        }
+
+        // **W3.** ⚠️ **A map's header connectivity is not its walkable connectivity, and until this
+        // line nothing in the turn said so.** `WorldGraph` joins maps by ROM map header, so
+        // `read_route` names the tile to leave by; `MetaTileMap::actions()` asks whether the player
+        // can walk to that tile, so it mints no row. Both are right and they disagree, and a model
+        // handed the disagreement with no explanation concludes the agent is broken. The deployed
+        // run of 2026-09-02 spent **65 turns and ten issue reports** in Cerulean City doing exactly
+        // that: it is a city split into terraces, the ways down are a Cut tree it could not use and
+        // a corridor reachable only through the trashed house's back door, and `read_route(Route5)`
+        // kept answering with a connection tile two terraces away. `CeruleanTrashedHouse` sat in its
+        // own action menu for forty of those turns.
+        //
+        // ⚠️ **Named destinations, not a tile count on its own.** "You can reach 574 squares" is
+        // true of a healthy map too; what is only ever true of a fenced-in one is that a *named
+        // neighbour* has no way into it from here. That is the trigger, and it is why this cannot
+        // become the `Blocked here: Water` line that fired on every coastline in Kanto:
+        // `unreachable_connection_targets` skips a map joined only by a water seam, because that is
+        // the Surf gate rather than a fence.
+        let cut_off = state.map.unreachable_connection_targets();
+        if !cut_off.is_empty() {
+            // `reachable_tiles` is the BFS's key set, which records the *walls* it declined to
+            // expand through as well as the floor, so the obstacles come back out — see its ⚠️.
+            let reachable = state.map.reachable_tiles().iter()
+                .filter(|at| !matches!(state.map.tile_at(**at), MetaTile::Obstacle))
+                .count();
+            let names: Vec<String> = cut_off.iter().map(|map| format!("{map}")).collect();
+            out.push_str(&format!(
+                "Fenced in: {reachable} squares of {} can be reached from where you are standing, \
+                    and {} on a part of this map that is cut off from here. Walking that way cannot \
+                    work, the action menu below will never offer those crossings, and `read_route` \
+                    will still name them, because the route graph is built from the game's map \
+                    headers and does not know which terrace you are standing on.\n",
+                state.map.map,
+                match names.split_last() {
+                    Some((last, [])) => format!("the way into {last} is not one of them: it is"),
+                    Some((last, rest)) => format!(
+                        "the ways into {} and {last} are not among them: they are", rest.join(", ")),
+                    None => String::new(),
+                },
+            ));
+            // ⚠️ **The half that was missing every single time.** Every report the run filed asked
+            // for a walking route, because a walking route is the only thing it had been shown; the
+            // answer in Cerulean, in Celadon and on Rock Tunnel 1F was a *warp*. A door is not
+            // scenery in this game, it is an edge of the map graph, and the model has to be told
+            // that before it will spend a turn on one.
+            let doors: Vec<&str> = menu.iter()
+                .filter(|row| row.id.ends_with(":Warp"))
+                .map(|row| row.id.as_str())
+                .collect();
+            out.push_str(&match doors.is_empty() {
+                true => "The way on is an edge you can reach, then back onto this map by a \
+                    different one: a map is entered where you cross into it, so coming in by \
+                    another edge puts you somewhere else on it.\n".to_string(),
+                false => format!(
+                    "What usually joins two parts of one map is a door rather than a street, so try \
+                        the warps you *can* reach — {} — and look for a back exit; failing that, leave \
+                        by an edge you can reach and come back onto this map by a different one.\n",
+                    doors.join(", "),
+                ),
+            });
+        }
     }
     let badges: Vec<String> = state.badges.iter_names().map(|(name, _)| name.to_string()).collect();
     out.push_str(&format!(
@@ -1412,6 +1536,148 @@ mod tests {
     /// say when it had.** `guide::chapter` is keyed on the first badge the player is missing, so
     /// every read between two badges returns a word-for-word copy and a nudge to re-read would be
     /// asking for the same bytes twice — but winning one swaps the chapter out in the same instant.
+    /// A committed save state as a `GameState`, for the fixtures cut out of the deployed run.
+    fn state_from(fixture: &[u8]) -> GameState {
+        let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(fixture).expect("the committed fixture loads");
+        { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("the fixture has a readable state")
+    }
+
+    fn overworld_turn(state: &GameState, menu: &[MenuItem]) -> String {
+        situation(DecisionKind::Overworld, state, &ApiSnapshot::default(), &[], menu,
+                  TurnContext::None, &[])
+    }
+
+    /// **W3 — say when the player is fenced in.**
+    ///
+    /// Cerulean City is terraced and the deployed run of 2026-09-02 stood on the wrong terrace for
+    /// 65 turns, filing ten issue reports, while `read_route` kept naming a Route 5 connection tile
+    /// it could not walk to. Nothing in the turn said the two halves of the city are not joined by
+    /// a street, and nothing said the joins that do exist are doors: `CeruleanTrashedHouse` was in
+    /// its own action menu for forty of those turns.
+    #[test]
+    fn a_map_the_player_is_fenced_in_on_says_so_and_says_which_way_out() {
+        let state = state_from(include_bytes!("../pokemon/data/split-cerulean.bin"));
+        let menu = crate::llm::tools::overworld_menu(&state, None);
+        let turn = overworld_turn(&state, &menu);
+
+        assert!(turn.contains("Fenced in:"), "{turn}");
+        // Named destinations, because a tile count on its own is true of a healthy map too.
+        assert!(turn.contains("Route5") && turn.contains("Route9"), "{turn}");
+        // ⚠️ **And why `read_route` will go on disagreeing**, which is the sentence that stops the
+        // model concluding the agent is broken and filing a report about it.
+        assert!(turn.contains("map headers"), "{turn}");
+        // ⚠️ The half that was missing every single time: the way between two parts of one map is a
+        // door, and here is one you can reach.
+        assert!(turn.contains("warps you *can* reach"), "{turn}");
+        assert!(turn.contains("CeruleanCity:28,12:Warp"), "the trashed house is the answer: {turn}");
+
+        // Silent where nothing is fenced off. Rock Tunnel 1F has no map connections at all and its
+        // south exit genuinely is the B1F ladder, so the agent is right and there is nothing to say.
+        let cave = state_from(include_bytes!("../pokemon/data/soak-rock-tunnel.bin"));
+        assert_eq!(cave.map.map, crate::pokemon::map::Map::RockTunnel1F);
+        assert!(!overworld_turn(&cave, &[]).contains("Fenced in:"), "nothing is fenced off here");
+
+        // ⚠️ **Only on the turn with an action menu**, like `Blocked here` beside it: on a naming
+        // screen it is overworld trivia in the middle of a question about a word.
+        for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::Stuck] {
+            let other = situation(elsewhere, &state, &ApiSnapshot::default(), &[], &menu,
+                                  TurnContext::None, &[]);
+            assert!(!other.contains("Fenced in:"), "{elsewhere:?}: {other}");
+        }
+    }
+
+    /// **W7 — a map whose every door comes out on one other map says so.**
+    ///
+    /// A gate house's four warp tiles are all `LAST_MAP` (`data/maps/objects/Route7Gate.asm`), so
+    /// every one resolves to the same map and the menu is three near-identical `Warp → Route7` rows.
+    /// The agent is right: Route 7's own object file puts the gate's warps at x=11 and x=18, either
+    /// side of the building, and Saffron is a *connection* on past it. The deployed run of
+    /// 2026-09-02 filed a bug saying the Saffron warp was missing.
+    ///
+    /// ⚠️ **Distinct landings, not distinct warp tiles.** Nearly every building in Kanto has a
+    /// double-wide front door, and `warp_targets` is a set of `(map, landing)`, so it collapses
+    /// those to one entry by itself. The negative half of this test is that case.
+    #[test]
+    fn a_map_whose_every_door_comes_out_in_one_place_says_which_door_is_which() {
+        use crate::pokemon::map::Map;
+        let base = state_from(include_bytes!("../pokemon/data/at-vermilion.bin"));
+
+        // A gate: several landings, all on one map.
+        let mut gate = base.clone();
+        gate.map.warp_targets = [
+            (Map::Route7, crate::geometry::Point8 { x: 11, y: 10 }),
+            (Map::Route7, crate::geometry::Point8 { x: 18, y: 9 }),
+        ].into_iter().collect();
+        let turn = overworld_turn(&gate, &[]);
+        assert!(turn.contains("Every way off this map leads back to Route7"), "{turn}");
+        assert!(turn.contains("2 different places"), "{turn}");
+        // The fact no row can carry: there is nothing else here to look for.
+        assert!(turn.contains("Nothing beyond Route7 can be reached through a door from here"), "{turn}");
+
+        // A double-wide front door is two warp tiles onto one square, and is not this.
+        let mut house = base.clone();
+        house.map.warp_targets = [(Map::Route7, crate::geometry::Point8 { x: 11, y: 10 })]
+            .into_iter().collect();
+        assert!(!overworld_turn(&house, &[]).contains("Every way off this map"));
+
+        // Nor is a map whose doors go to different places.
+        let mut crossroads = base.clone();
+        crossroads.map.warp_targets = [
+            (Map::Route7, crate::geometry::Point8 { x: 11, y: 10 }),
+            (Map::Route8, crate::geometry::Point8 { x: 1, y: 9 }),
+        ].into_iter().collect();
+        assert!(!overworld_turn(&crossroads, &[]).contains("Every way off this map"));
+    }
+
+    /// **W9 — the Vermilion Gym bins, said without giving the puzzle away.**
+    ///
+    /// 87 turns and two resets in the deployed run of 2026-09-02, swept one bin per request, and no
+    /// issue report filed about any of it. Both facts the line carries are mechanism rather than
+    /// state: the failure arm of `engine/events/hidden_events/vermilion_gym_trash.asm` is
+    /// `ResetEvent EVENT_1ST_LOCK_OPENED` followed by a fresh `Random` into
+    /// `wFirstLockTrashCanIndex`, and `then` has been in the tool schema all along and was used for
+    /// none of the fifteen.
+    ///
+    /// ⚠️ **No fixture stands in this gym, so the map is set on one that does not.** Everything the
+    /// line reads is `hidden_objects_for(map)`, a transcribed table keyed on the map, and the point
+    /// of the second half of this test is precisely that it reads nothing else.
+    #[test]
+    fn the_gym_bins_say_what_a_sweep_costs_without_saying_where_the_switches_are() {
+        use crate::pokemon::map::Map;
+        let mut state = state_from(include_bytes!("../pokemon/data/at-vermilion.bin"));
+        state.map.map = Map::VermilionGym;
+        assert!(crate::pokemon::tile_map::hidden_objects_for(Map::VermilionGym).iter()
+                    .any(|site| site.object == crate::pokemon::tile::HiddenObject::TrashCan),
+                "the bins are what the line keys on");
+        let turn = overworld_turn(&state, &[]);
+
+        assert!(turn.contains("resets both locks"), "{turn}");
+        assert!(turn.contains("moves the first switch"), "the eliminations go back in the pool: {turn}");
+        assert!(turn.contains("`then`"), "and what a sweep can cost instead: {turn}");
+
+        // ⚠️ **The property that keeps this honest, and it is the whole reason it is a test rather
+        // than a comment.** `GameState::trash_cans` carries `first_target` and `second_target`, read
+        // straight out of `wFirstLockTrashCanIndex` and `wSecondLockTrashCanIndex`, and handing them
+        // over would walk the gym in two requests. It is state no player can see, so the turn must
+        // read exactly the same whatever it says. If this ever has to be relaxed, that is a decision
+        // for a person, not a refactor.
+        let mut solved = state.clone();
+        solved.trash_cans = Some(crate::pokemon::TrashCanPuzzle {
+            first_target: crate::geometry::Point8 { x: 1, y: 7 },
+            second_target: crate::geometry::Point8 { x: 9, y: 9 },
+            first_opened: true,
+            second_opened: false,
+        });
+        assert_eq!(overworld_turn(&solved, &[]), turn,
+                   "the turn changed with the puzzle's hidden state");
+
+        // Silent everywhere else: there are bins in exactly one gym.
+        let elsewhere = state_from(include_bytes!("../pokemon/data/split-cerulean.bin"));
+        assert!(!overworld_turn(&elsewhere, &[]).contains("resets both locks"));
+    }
+
     /// The 2026-09-01 run read the guide once on turn 1, won the Boulder Badge 39 minutes later,
     /// and went on playing out of the chapter about how to beat Brock.
     #[test]

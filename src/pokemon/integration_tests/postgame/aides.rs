@@ -74,7 +74,7 @@ const SAFARI: &[u8] = include_bytes!("../../data/postgame-safari.bin");
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_itemfinder() {
     /// Two vitamins: the least useful things in a 20/20 bag whose party is already at level 71+.
-    /// Two rather than one so [`can_collect_a_hidden_item`] inherits a free slot.
+    /// Two rather than one because H4 used to inherit a free slot; H5 inherits both now.
     const SHED: &[ItemId] = &[ItemId::Calcium, ItemId::Carbos];
 
     let mut fixture = TestFixture::new(SAFARI, Duration::from_mins(60),
@@ -98,43 +98,19 @@ fn can_get_the_itemfinder() {
 }
 
 /// H3's output: Route 11 at (50,8), just outside the gate's west door, Itemfinder in the bag and one
-/// free slot left over for what H4 picks up.
+/// free bag slot. Also H5's entry, since H4 was removed — see below.
 const ITEMFINDER: &[u8] = include_bytes!("../../data/postgame-itemfinder.bin");
 
-/// **Task H4** — collect a hidden item: Route 11's **Escape Rope**, lying on a tile that looks like
-/// nothing at all.
-///
-/// Two things §6-H4 assumed turned out not to hold, both recorded in §11. The mechanic needed **no
-/// new driver** — a hidden item is collected by facing its tile and pressing A, which is
-/// `FieldMove::CheckTrashCan` — and the **Itemfinder is not a prerequisite**: it only reports whether
-/// something is nearby, so this leg would pass without H3. H3 still comes first because it is what
-/// leaves the bag with a free slot, and a full bag here is the one failure that does not look like
-/// one (see [`crate::pokemon::postgame::aides::pick`]).
-#[test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
-fn can_collect_a_hidden_item() {
-    let mut fixture = TestFixture::new(ITEMFINDER, Duration::from_mins(30),
-        PolicyStep::hidden_item_steps(Map::Route11, ItemId::EscapeRope));
-
-    let before = fixture.game_state();
-    assert!(before.bag.iter().any(|i| i.id == ItemId::Itemfinder), "H3's output should carry it");
-    assert!(!before.bag.iter().any(|i| i.id == ItemId::EscapeRope), "already holding one");
-    // The tile is *discovered*, not passed in: `HiddenItemCoords` says raw (48,5), and Route 11 is a
-    // `WEST | EAST` map whose west connection strip shifts every raw x by one. Getting that wrong is
-    // silent — the agent walks somewhere plausible, presses A and nothing happens.
-    assert_eq!(before.map.hidden_items, vec![(Point8 { x: 49, y: 5 }, ItemId::EscapeRope)],
-        "Route 11's hidden item, offset for the connection strip");
-
-    let state = fixture.run_leg(|s| s.bag.iter().any(|i| i.id == ItemId::EscapeRope));
-    assert_eq!(state.map.map, Map::Route11, "the leg ends outdoors so the next Fly is allowed");
-    println!("hidden Escape Rope collected at {} · named bag items {}",
-        state.map.player_position, state.bag.iter().count());
-
-    fixture.save_state_named("src/pokemon/data/postgame-hidden-item.bin").unwrap();
-}
-
-/// H4's output, and H5's entry: Route 11, dex 31 owned, bag full again.
-const HIDDEN_ITEM: &[u8] = include_bytes!("../../data/postgame-hidden-item.bin");
+// ⚠️ **`can_collect_a_hidden_item` was here, and H4 is gone** (2026-09-03). It collected Route 11's
+// hidden Escape Rope, and it worked; what removed it is that hidden-item collection is gone from the
+// crate entirely, because the only other caller of the mechanic was the `use_field_move interact`
+// tool and a deployed run spent 85 minutes pressing A at empty squares with it. Nothing in the game
+// is gated behind a hidden item. See `crate::pokemon::postgame::aides`' module docs.
+//
+// ⚠️ **H5 now roots on H3's output instead**, and `postgame-hidden-item.bin` is deleted. The two
+// fixtures differ by one Escape Rope in the bag and a few tiles of Route 11, and H3's is the more
+// generous of the two: it ends with a **free bag slot** where H4's ended full, and
+// `dex_sweep_outfit_steps` opens by shedding for exactly that room.
 
 /// The share floor every H5 leg sweeps at: chase a map's fat slots, take anything rarer that happens
 /// to turn up, and move on. See [`PolicyStep::dex_sweep_steps`]'s reasoning.
@@ -157,11 +133,11 @@ fn can_sweep_the_vermilion_grounds() {
 
     let mut steps = PolicyStep::dex_sweep_outfit_steps(SHED, 99, BOX);
     steps.extend(PolicyStep::dex_sweep_vermilion_steps(MIN_SHARE));
-    let mut fixture = TestFixture::new(HIDDEN_ITEM, Duration::from_mins(300), steps);
+    let mut fixture = TestFixture::new(ITEMFINDER, Duration::from_mins(300), steps);
 
     let before = fixture.game_state();
     let owned_before = before.pokedex_owned.species().len();
-    assert_eq!(owned_before, 31, "H4's output");
+    assert_eq!(owned_before, 31, "H3's output");
 
     let stocked = fixture.run_until(|s| s.bag.iter().any(|i| i.id == ItemId::PokeBall && i.quantity > 50));
     println!("stocked: {} Poké Balls, ¥{}, box {}",
@@ -374,9 +350,9 @@ fn probe_timeout_artifact() {
 #[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
 fn probe_sweep_pacing() {
-    let mut fixture = TestFixture::new(HIDDEN_ITEM, Duration::from_mins(60), vec![
+    let mut fixture = TestFixture::new(ITEMFINDER, Duration::from_mins(60), vec![
         // Enter from Vermilion, the way the real leg does — the west end of the route, not the gate
-        // end H4 leaves the agent on.
+        // end H3 leaves the agent on.
         PolicyStep::Fly { to: Map::VermilionCity },
         PolicyStep::goto(Map::Route11),
         PolicyStep::SweepDex { on_map: Map::Route11, min_share: MIN_SHARE, ball: None },
@@ -407,7 +383,7 @@ fn probe_dex_sweep_candidates() {
     use std::collections::{HashMap, HashSet};
     use strum::IntoEnumIterator;
 
-    let mut fixture = TestFixture::new(HIDDEN_ITEM, Duration::from_mins(1), vec![]);
+    let mut fixture = TestFixture::new(ITEMFINDER, Duration::from_mins(1), vec![]);
     let state = fixture.game_state();
     let owned: HashSet<PokemonSpecies> = state.pokedex_owned.species().into_iter().collect();
     println!("owned {} — need {} more for Exp.All", owned.len(), 50usize.saturating_sub(owned.len()));
@@ -452,17 +428,18 @@ fn probe_dex_sweep_candidates() {
     }
 }
 
-/// Diagnostic for **H3/H4** — the east end of Route 11: the gate the Itemfinder aide is upstairs in,
-/// and the hidden Escape Rope at (48,5) that H4 collects.
+/// Diagnostic for **H3** — the east end of Route 11, where the gate the Itemfinder aide is upstairs
+/// in stands.
 ///
-/// Both facts this prints are ones the ROM gives coordinates for but not *reachability*:
-/// `Route11_Object` puts the gate's west doors at (49,8)/(49,9) and `HiddenItemCoords` puts the item
-/// at x=48, y=5, and the question is whether the walk from Vermilion reaches either — Route 11 has
-/// ten trainers on it, and a trainer standing in the corridor is an obstacle in the block map.
+/// The fact this prints is one the ROM gives coordinates for but not *reachability*: `Route11_Object`
+/// puts the gate's west doors at (49,8)/(49,9), and the question is whether the walk from Vermilion
+/// gets to them — Route 11 has ten trainers on it, and a trainer standing in the corridor is an
+/// obstacle in the block map. (It also covered H4's hidden Escape Rope at (48,5) until hidden-item
+/// collection was removed on 2026-09-03.)
 #[test]
 #[cfg(feature = "diagnostics")]
 #[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_route11_hidden_item() {
+fn probe_route11_gate_approach() {
     let mut fixture = TestFixture::new(SAFARI, Duration::from_mins(60), vec![
         PolicyStep::Fly { to: Map::VermilionCity },
         PolicyStep::goto(Map::Route11),

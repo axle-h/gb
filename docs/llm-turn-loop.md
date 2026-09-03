@@ -43,12 +43,44 @@ lives in the code.
   no menus). `read_route`'s `None` means "not walked there yet", never "unreachable". The plan is
   the only notes mechanism; `memory_*` is gone and `run::files::MEMORIES` survives for old
   archives.
+- ⚠️ **`read_route` answers out of the map-header graph and the action menu answers out of walkable
+  connectivity, and they disagree.** `observe::route_from` flags the second hop's leaving tile
+  against `reachable_tiles()` and `route_answer` turns a `false` into a `warning` that says the
+  route cannot be *started*, what the terrace ends on, and that the join between two parts of one
+  map is usually a door. Cerulean City cost a deployed run 65 turns and ten issue reports; the
+  answer was in its own action menu the whole time.
 - A menu row is `` `{map}:{x},{y}:{kind}` — {verb phrase} `` (`take the warp to PalletTown,
   arriving at (12, 12)`, `talk to Mom`), the verb from the sprite's `PictureId`, no step count. The
   map prefix is not redundancy: `resolve_overworld` re-mints ids against the current map and an
   answer can land after a warp. `tools::not_on_the_menu` rejects an id not in the turn's own menu
   inside the turn (an empty menu checks nothing; `resolve_overworld` stays the authority for what
   changed since).
+- ⚠️ **`use_field_move` has no `interact`, and the agent cannot collect hidden items at all**
+  (2026-09-03). It let the model press A at any square it named, and its only remaining job was
+  hidden items, since every hidden *object* a playthrough needs is a `MetaTile::Switch` row. All 212
+  hidden events in `data/events/hidden_events.asm` yield loot and not one yields a key item, an HM or
+  a TM, so nothing is gated behind one. It cost a deployed run 85 minutes across three Silph Co
+  floors — and its own issue report shows it had decided `interact` was a way to *walk*, which no
+  refusal text would have unlearned. `PolicyStep::SearchHiddenItem`, `aides::hidden_items` and
+  `MetaTileMap::hidden_items` went with it; `FieldMove::CheckTrashCan` stays, because the gym bins,
+  the Mansion statues and the Game Corner poster are the same mechanic and are progression gates.
+  Removing the verb and the `facing` property only it used gave the Overworld tool array **370
+  bytes** back, its largest single reclaim.
+- **A row that leads to a coordinate being asked for names both squares.** An id's coordinate is
+  where the *player stands*; `use_field_move`'s `target` and `push_boulder`'s are where the *thing
+  is*. `Route16:27,10:Snorlax` with the Snorlax on (26, 10) had a run play the Poké Flute at open
+  ground three times, each answered "Accepted". `resolve_field_move` now refuses a `use_item` whose
+  target is `Empty`/`Grass`/`Water` or off the map, or that cannot be faced, and names what is
+  beside it. Only those rows carry both coordinates: a person the agent walks to needs no number.
+- **`resolve_overworld` falls back to `connection_action`** for an id naming a `Connection` tile
+  `actions()` did not mint, and a connection row lists the other reachable landing groups by id
+  (`MetaTileMap::crossings`). Without it the model could not say "same map, different door", and one
+  run crossed into Route 14's six-tile pocket twice running. The id is re-minted from the tile
+  through `overworld_id`, never parsed, so the row's prose and the resolver cannot drift.
+- **Several warps to one map are told apart by which side of the building they are on**
+  (`tools::door_side`, only where a destination repeats, since a double-wide front door is two tiles
+  onto one square). A gate house's warps are all `LAST_MAP`, so its menu was three identical
+  `Warp → Route7` rows and a run filed a bug about a missing Saffron warp.
 - An action the game would refuse is not offered. `MetaTileMap::can_cut`/`can_surf` keep `CutTree`
   rows and water crossings out of `actions()` (on the map, so scripted policies are held to it),
   `tools::hm_available` refuses the call against `HM_BADGES` with separate complaints for "nobody
@@ -56,6 +88,17 @@ lives in the code.
   still coming. `prompt`'s `Blocked here:` line names what would clear a `CutTree` and nothing
   else: naming water fired on every coast and one run spent 65 turns blaming it.
   `fly_bike::blocked_by` still does not check the Thunder Badge.
+- Three more lines on the overworld turn, each with its own narrow trigger, each silent otherwise.
+  `Fenced in:` fires on `unreachable_connection_targets` being non-empty and names the neighbours,
+  why `read_route` will go on disagreeing, and the reachable warps. The gate line fires when
+  `warp_targets` holds several landings on one map and says nothing beyond it is behind a door here.
+  The bin line fires on a map with `HiddenObject::TrashCan` and says a wrong second guess re-rolls
+  the first switch and that `then` chains four bins per request. ⚠️ **The bin line reads
+  `hidden_objects_for(map)` and nothing else.** `GameState::trash_cans` holds both switch positions
+  and handing them over would walk the gym in two requests;
+  `the_gym_bins_say_what_a_sweep_costs_without_saying_where_the_switches_are` asserts the turn is
+  byte-identical whatever the puzzle state says, so relaxing it is a decision rather than a
+  refactor.
 - `read_bag` names all fifty TMs. `Bag` drops ids `ItemId` cannot name, and the count is the
   dangerous half at a 20-slot cap.
 - `choose_action`'s `then` (up to `MAX_CHAINED_ACTIONS`, 4) is checked against the same menu.

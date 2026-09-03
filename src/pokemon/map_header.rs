@@ -73,6 +73,42 @@ impl TileSetId {
         }
     }
 
+    /// The tiles that make `ExtraWarpCheck`'s "function 2" pass, per direction faced.
+    ///
+    /// ⚠️ **Not the same table as [`Self::warp_tile_ids`], and the difference is the whole of W5.**
+    /// That one answers "does standing here warp me" (`IsPlayerStandingOnDoorTileOrWarpTile`,
+    /// `data/tilesets/warp_tile_ids.asm`) and is keyed on the tileset. This one is
+    /// `data/tilesets/warp_carpet_tile_ids.asm`, is keyed on the direction the player faces rather
+    /// than on the tileset at all, and answers the *other* question `home/overworld.asm` asks: when
+    /// standing on a warp entry whose own tile is not a door, the cartridge warps only if the tile
+    /// **in front** is one of these and a direction is being held.
+    ///
+    /// Route 8's east gate doorstep is why this is transcribed. Its two warp entries are raw tiles
+    /// $2C at (9, 9) and $39 at (9, 10); neither is in the overworld's `[$1B, $58]`, so both need
+    /// this check. From (9, 10) the tile west is $4B, which is in the facing-left list, so holding
+    /// Left goes in. From (9, 9) the tile west is $17 and no other direction matches either, so that
+    /// entry cannot be triggered from Route 8 at all, by any approach. A deployed run spent 60 s of
+    /// game time a tile away from a gate it could see, shuffling left and right.
+    pub fn warp_carpet_tile_ids(facing: crate::pokemon::map_metadata::PlayerFacingDirection) -> &'static [u8] {
+        use crate::pokemon::map_metadata::PlayerFacingDirection as Facing;
+        match facing {
+            Facing::Down  => &[0x01, 0x12, 0x17, 0x3D, 0x04, 0x18, 0x33],
+            Facing::Up    => &[0x01, 0x5C],
+            Facing::Left  => &[0x1A, 0x4B],
+            Facing::Right => &[0x0F, 0x4E],
+        }
+    }
+
+    /// Whether `ExtraWarpCheck` dispatches to `IsWarpTileInFrontOfPlayer` ("function 2") rather than
+    /// `IsPlayerFacingEdgeOfMap` ("function 1") on this tileset.
+    ///
+    /// ⚠️ **Four maps override the tileset and are checked first**, so this is not the whole
+    /// dispatch: see `MetaTileMap::warp_trigger`, which carries them. Transcribed from
+    /// `ExtraWarpCheck` in `home/overworld.asm`.
+    pub fn warp_check_reads_the_tile_in_front(&self) -> bool {
+        matches!(self, Self::Overworld | Self::Ship | Self::ShipPort | Self::Plateau)
+    }
+
     pub fn cut_tree_tile_id(&self) -> Option<u8> {
         match self {  
             Self::Overworld => Some(Self::OVERWORLD_CUT_TREE),

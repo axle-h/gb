@@ -418,6 +418,13 @@ view! {
     pub struct RouteHopView {
         pub map: String,
         pub via: Option<String>,
+        /// Whether `via`'s tile can actually be walked to from where the player is standing right
+        /// now. Only ever set on the second hop, which is the only one that is a fact about the map
+        /// under the player's feet; `None` everywhere else, and absent from the JSON.
+        ///
+        /// ⚠️ **This is the field that stops the route lying.** See [`route_from`].
+        #[cfg_attr(feature = "web", serde(skip_serializing_if = "Option::is_none"))]
+        pub reachable_from_here: Option<bool>,
     }
 }
 
@@ -440,9 +447,48 @@ pub fn route(graph: &WorldGraph, from: Map, to: Map) -> Option<Vec<RouteHopView>
             .map(|step| RouteHopView {
                 map: format!("{}", step.map),
                 via: step.via.zip(step.via_at).map(|(kind, at)| format!("{kind:?} at ({}, {})", at.x, at.y)),
+                reachable_from_here: None,
             })
             .collect(),
     )
+}
+
+/// [`route`], with the one thing the graph cannot know added: whether the player can get to the
+/// tile it is telling them to leave by.
+///
+/// ⚠️ **A map's header connectivity is not its walkable connectivity, and the gap between them cost
+/// a deployed run 65 turns and ten issue reports in one city.** [`WorldGraph`] joins maps by ROM map
+/// header and keys its nodes on the section the player was in when it observed them, so
+/// `shortest_path` will happily route out of a section the player is not currently standing in.
+/// Cerulean City is split into terraces joined only by a Cut tree and by the back door of the
+/// trashed house; the run stood on the upper terrace and was told, over and over, to leave by a
+/// connection tile on the lower one. `MetaTileMap::actions()` does ask whether a tile can be reached,
+/// so it minted no row for that crossing, and the model was handed two answers that disagreed with
+/// no way to tell which was which. It concluded the agent was broken and asked for a developer.
+///
+/// So the route is still answered — it is the right answer to "which way is Route 5", and the maps
+/// in it are correct — but the first hop now says whether it can be started, and
+/// [`crate::llm::tools`] turns a `false` into the sentence about doors that nothing ever said.
+pub fn route_from(graph: &WorldGraph, map: &crate::pokemon::tile_map::MetaTileMap, to: Map)
+    -> Option<Vec<RouteHopView>> {
+    // ⚠️ **One search, not two.** The obvious shape is `route()` for the prose and a second
+    // `shortest_path` for the coordinate to test, and the two can disagree: `bfs_nodes` breaks ties
+    // by walking a `HashMap`, so a graph holding two equally short ways out can answer differently
+    // on consecutive calls — and the flag would then be about a hop the model was never shown.
+    let steps = graph.shortest_path(map.map, to)?;
+    let reachable = (steps.len() > 1).then(|| map.reachable_tiles());
+    Some(steps.into_iter().enumerate().map(|(index, step)| RouteHopView {
+        map: format!("{}", step.map),
+        via: step.via.zip(step.via_at).map(|(kind, at)| format!("{kind:?} at ({}, {})", at.x, at.y)),
+        // Hop 0 is the map being stood on and carries no `via`; hop 1 names the tile to leave it by,
+        // which is the only coordinate in the whole route on ground the player is standing on. Every
+        // later hop is on a map they have not reached yet, where "reachable from here" has no
+        // meaning and a `false` would read as a claim that the route is impossible.
+        reachable_from_here: match (index, step.via_at, reachable.as_ref()) {
+            (1, Some(at), Some(reachable)) => Some(reachable.contains(&at)),
+            _ => None,
+        },
+    }).collect())
 }
 
 // ── Battle ───────────────────────────────────────────────────────────────────────────────────────

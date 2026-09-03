@@ -90,12 +90,11 @@ pub struct MetaTileMap {
     /// Land tiles the player may not mount Surf from (Seafoam B4F's (7,11) — "The current is much too
     /// fast!"). One-way: stepping ashore onto them is still allowed. See [`no_surf_mount_table`].
     pub no_surf_mount: HashSet<Point8>,
-    /// Hidden items on this map and what each one is: tiles that look like nothing and hand over an
-    /// item when faced and pressed A. Nothing on screen marks them, so like [`Self::strength_switches`]
-    /// this is exposed so a policy can *discover* them rather than hardcode coordinates. Decoded from
-    /// the ROM by [`crate::pokemon::postgame::aides::hidden_items`]; positions are corrected for the
-    /// connection strip here, where the raw tables all are. Empty for most maps.
-    pub hidden_items: Vec<(Point8, crate::pokemon::item::ItemId)>,
+    // ⚠️ **There was a `hidden_items` here**, decoded from the ROM's own two tables and corrected
+    // for the connection strip. It is gone with the rest of hidden-item collection (2026-09-03): the
+    // policy step that read it went, and so did the `interact` tool that shared its driver. See
+    // `crate::pokemon::postgame::aides`' module docs for why. Nothing in the game is behind a hidden
+    // item, so no route lost anything.
     /// Whether standing in this map's tall grass can produce a wild encounter at all —
     /// `wGrassRate != 0`. See [`CurrentMap::grass_encounter_rate`] for why this is not the same
     /// question as whether the map *has* grass tiles.
@@ -196,6 +195,62 @@ fn spinner_table(map: Map) -> &'static [(u8, u8, u8, u8)] {
 }
 
 
+/// How the cartridge can be made to take a warp entry the player is standing on. See
+/// [`MetaTileMap::warp_trigger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarpTrigger {
+    /// The tile is a door or a warp tile in its own right: arriving on it warps, no button needed.
+    StepOn,
+    /// It warps only while this direction is held, either as the last step of the walk onto it or as
+    /// a bump into the wall from on top of it.
+    HoldDirection(JoypadButton),
+    /// Nothing triggers it from this side. The warp entry exists so that *leaving* the far map lands
+    /// the player here; it is not a way in.
+    Impossible,
+    /// The check depends on a tile this model does not hold, so nothing is claimed either way.
+    ///
+    /// ⚠️ **`_GetTileAndCoordsInFrontOfPlayer` reads the on-screen tilemap, not the map.** A player
+    /// on the edge of a map facing out is looking at the **border block**, which is a real tile with
+    /// a real id and is drawn from the map header's border byte rather than from the block map. So
+    /// an entry on row 0 or on the last column cannot be proved dead from `raw_tile_ids` alone, and
+    /// several real doors sit exactly there: the S.S. Anne's gangway to Vermilion Dock at (26, 0),
+    /// Rock Tunnel 1F's north mouth, and the front door of Cerulean's badge house, whose SHIP
+    /// tileset sends it down the tile-in-front arm that a house would not have taken. Calling those
+    /// impossible would have taken the only door out of each of them.
+    Unknown,
+}
+
+/// One way off this map into an adjacent one: a **run of touching edge tiles**, not a tile.
+///
+/// ⚠️ **The group is the unit because the tiles are not choices.** A map's border strip into its
+/// neighbour can be dozens of tiles wide, and stepping onto any tile of one run lands the player in
+/// the same place, so listing them individually would be forty rows of one decision. What *is* a
+/// decision is which run. Route 14's east edge is open at rows 0, 1, 2, 4, 6, 8 and 10; row 6 is a
+/// six-tile pocket whose only way west is through a trainer's body, and rows 4 and 8 are the road.
+/// The deployed run of 2026-09-02 crossed into that pocket, walked back to Route 13, crossed again
+/// and landed in it a second time, because the nearest crossing was the only one anything offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crossing {
+    /// The tile to leave by, in this map's action-id coordinates. The reachable member of the run
+    /// nearest the player when there is one, so the id names a square that can actually be walked to.
+    pub at: Point8,
+    /// Where it lands on the far map, in that map's raw coordinates. Paired with `at` because
+    /// [`MetaTileMap::connection_action`] is keyed on it, and two runs into the same map differ only
+    /// here.
+    pub to_position: Point8,
+    /// Whether any tile of the run can be walked to from where the player is standing.
+    ///
+    /// ⚠️ **This is the field the whole type exists for.** `connection_targets` is header
+    /// connectivity: it says Cerulean touches Route 5, which is true and was not the question. The
+    /// question is whether the player, standing on the terrace they are standing on, can get to the
+    /// edge that leads there, and for 65 turns of the deployed run the answer was no while every
+    /// read said yes.
+    pub reachable: bool,
+    /// How many tiles the run holds. Only used to keep the wider run first when two are otherwise
+    /// equal, on the reasoning that a one-tile gap in a wall is more often a pocket than a road.
+    pub tiles: usize,
+}
+
 impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
         let dimensions = map.metadata.dimensions();
@@ -256,10 +311,6 @@ impl MetaTileMap {
                 .collect(),
             no_surf_mount: no_surf_mount_table(map.metadata.map).iter()
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
-                .collect(),
-            hidden_items: crate::pokemon::postgame::aides::hidden_items(map.metadata.map).into_iter()
-                .map(|h| (Point8 { x: h.at.x + dimensions.west_extra as u8,
-                                   y: h.at.y + dimensions.north_extra as u8 }, h.item))
                 .collect(),
             // Already `Arc`'d and cached in `MapMetadataCache`, so this is a refcount bump.
             metadata: Some(std::sync::Arc::clone(&map.metadata)),
@@ -751,24 +802,70 @@ impl MetaTileMap {
 
         let mut actions = vec![];
 
+        // ⚠️ **W5 — a warp entry the cartridge will not open is worse than no row.** See
+        // [`Self::warp_trigger`]: Route 8's east gate has two entries and only one of them is a way
+        // in. The dud is dropped **only when another warp on this map leads to the same place**, and
+        // that guard is not caution for its own sake: `warp_trigger` is a transcription of
+        // `home/overworld.asm` and a false negative in it would take away the only door out of
+        // somewhere and strand the run for good. With the guard the worst a mistake can cost is a
+        // row that was already useless.
+        // ⚠️ **Counted over warps that can actually be *opened*, not over warps that exist.** The
+        // first draft counted entries, and Cerulean's badge house has two: a front door and a back
+        // door. Both looked impossible (its SHIP tileset sends a house down the tile-in-front arm,
+        // and both are on the map's edge where this model cannot see the tile in front), so each one
+        // was dropped because the other existed and the house had no exit at all. A warp is only
+        // ever given up in favour of one that is known to work.
+        let ways_to: HashMap<Map, usize> = self.meta_tiles.iter().enumerate()
+            .filter_map(|(index, tile)| match tile {
+                MetaTile::Warp { to_map, .. } => {
+                    let at = Point8 { x: (index % self.width) as u8, y: (index / self.width) as u8 };
+                    matches!(self.warp_trigger(at),
+                             WarpTrigger::StepOn | WarpTrigger::HoldDirection(_)).then_some(*to_map)
+                }
+                _ => None,
+            })
+            .fold(HashMap::new(), |mut counts, to_map| {
+                *counts.entry(to_map).or_default() += 1;
+                counts
+            });
         for (warp_to_map, warp_to_pos) in &self.warp_targets {
             let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Warp { to_map, to_position } if to_map == warp_to_map && to_position == warp_to_pos)) else { continue };
+            let trigger = self.warp_trigger(dest);
+            if trigger == WarpTrigger::Impossible
+                && ways_to.get(warp_to_map).copied().unwrap_or(0) > 0 { continue }
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
 
-            let enter_dir = if dest.x == 0 { JoypadButton::Left }
-            else if dest.x == (self.width - 1) as u8 { JoypadButton::Right }
-            else if dest.y == 0 { JoypadButton::Up }
-            else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
-            else { *route.last().unwrap_or(&JoypadButton::Up) };
+            let enter_dir = match trigger {
+                // The cartridge has told us which way to face; nothing else will do, and the map
+                // edge is a worse guess than the answer.
+                WarpTrigger::HoldDirection(dir) => dir,
+                _ => if dest.x == 0 { JoypadButton::Left }
+                else if dest.x == (self.width - 1) as u8 { JoypadButton::Right }
+                else if dest.y == 0 { JoypadButton::Up }
+                else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
+                else { *route.last().unwrap_or(&JoypadButton::Up) },
+            };
 
             if route.is_empty() {
-                // Already standing on the warp tile: a warp fires on the step ONTO it, not while
-                // standing still, so step off to a genuinely walkable neighbour then step back on.
-                // Use a real Empty neighbour (defaulting Down can walk into a wall and jam).
-                let step_off = self.walkable_neighbor_dir(dest).unwrap_or_else(|| opposite_dir(enter_dir));
-                route.push(step_off);
-                route.push(opposite_dir(step_off));
+                match trigger {
+                    // ⚠️ **One held button, not a step off and a step back.** Standing on the entry
+                    // with `BIT_STANDING_ON_WARP` already set, walking into the wall in front is a
+                    // *collision* on a warp tile, which `home/overworld.asm` sends straight to
+                    // `ExtraWarpCheck` and `CheckWarpsCollision`. It needs no room to step into, and
+                    // it survives the route being re-derived every tick — which the step-off dance
+                    // did not, because each tick recomputed a two-step route and only ever pressed
+                    // its head. That is the shuffle a deployed run did for 60 s at the Route 8 gate.
+                    WarpTrigger::HoldDirection(dir) => route.push(dir),
+                    // A door tile warps on the step onto it and needs no direction, so step off to a
+                    // genuinely walkable neighbour and step back. A real `Empty` neighbour, because
+                    // defaulting to Down can walk into a wall and jam.
+                    WarpTrigger::StepOn | WarpTrigger::Impossible | WarpTrigger::Unknown => {
+                        let step_off = self.walkable_neighbor_dir(dest).unwrap_or_else(|| opposite_dir(enter_dir));
+                        route.push(step_off);
+                        route.push(opposite_dir(step_off));
+                    }
+                }
             } else {
                 route.push(enter_dir);
             }
@@ -1040,6 +1137,195 @@ impl MetaTileMap {
 
         actions.sort();
         actions
+    }
+
+    /// What it takes to make the warp entry at `at` actually fire, as the cartridge decides it.
+    ///
+    /// ⚠️ **W5 — a warp entry is not the same thing as a door, and the difference stalled a
+    /// deployed run for a minute of game time at a gate it was standing on.** `home/overworld.asm`
+    /// only warps a player already on a warp entry if one of two things holds:
+    /// `IsPlayerStandingOnDoorTileOrWarpTile`, which is the tile's own id against the tileset's list
+    /// ([`TileSetId::warp_tile_ids`]) and fires with no button at all; or `ExtraWarpCheck`, which
+    /// needs a direction held *and* either the tile in front to be a warp carpet
+    /// ([`TileSetId::warp_carpet_tile_ids`], "function 2") or the player to be at the edge of the
+    /// map facing out ("function 1"). Route 8's two east-gate entries are $2C at (9, 9) and $39 at
+    /// (9, 10); neither is a door tile, the tile west of (9, 10) is a carpet and the tile west of
+    /// (9, 9) is not, so one of the two doors on that gate is a door the game will not open.
+    ///
+    /// ⚠️ **This is a *sufficient* condition for the trigger, not for arriving.** It says nothing
+    /// about whether the player can walk to `at`; that is the BFS's job.
+    pub fn warp_trigger(&self, at: Point8) -> WarpTrigger {
+        let Some(&here) = self.raw_tile_ids.get(at.x as usize + at.y as usize * self.width) else {
+            return WarpTrigger::Impossible;
+        };
+        if self.tileset.warp_tile_ids().contains(&here) {
+            return WarpTrigger::StepOn;
+        }
+        // `ExtraWarpCheck`'s dispatch, in its own order: SS Anne 3F takes function 1 whatever its
+        // tileset says, four named maps take function 2 whatever theirs says, and only then does the
+        // tileset decide.
+        let reads_the_tile_in_front = match self.map {
+            Map::SSAnne3F => false,
+            Map::RocketHideoutB1F | Map::RocketHideoutB2F | Map::RocketHideoutB4F
+            | Map::RockTunnel1F => true,
+            _ => self.tileset.warp_check_reads_the_tile_in_front(),
+        };
+        if !reads_the_tile_in_front {
+            // `IsPlayerFacingEdgeOfMap`: at the edge, facing out. Every map this arm covers is an
+            // interior, which has no connection strips, so the padded grid and the raw one agree.
+            let out = if at.y == 0 { Some(PlayerFacingDirection::Up) }
+                else if at.y as usize == self.height.saturating_sub(1) { Some(PlayerFacingDirection::Down) }
+                else if at.x == 0 { Some(PlayerFacingDirection::Left) }
+                else if at.x as usize == self.width.saturating_sub(1) { Some(PlayerFacingDirection::Right) }
+                else { None };
+            return match out {
+                Some(facing) => WarpTrigger::HoldDirection(facing.into()),
+                None => WarpTrigger::Impossible,
+            };
+        }
+        // `IsWarpTileInFrontOfPlayer`: the tile in front, against the list for the way you face.
+        let mut looks_off_the_map = false;
+        for (facing, dx, dy) in [
+            (PlayerFacingDirection::Up,    0i32, -1i32),
+            (PlayerFacingDirection::Down,  0,  1),
+            (PlayerFacingDirection::Left, -1,  0),
+            (PlayerFacingDirection::Right, 1,  0),
+        ] {
+            let (x, y) = (at.x as i32 + dx, at.y as i32 + dy);
+            if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
+                looks_off_the_map = true;
+                continue;
+            }
+            let front = self.raw_tile_ids[x as usize + y as usize * self.width];
+            if crate::pokemon::map_header::TileSetId::warp_carpet_tile_ids(facing).contains(&front) {
+                return WarpTrigger::HoldDirection(facing.into());
+            }
+        }
+        match looks_off_the_map {
+            true => WarpTrigger::Unknown,
+            false => WarpTrigger::Impossible,
+        }
+    }
+
+    /// Every distinct way off this map into `to_map`, one [`Crossing`] per run of touching edge
+    /// tiles, nearest-reachable first and then in reading order.
+    ///
+    /// ⚠️ **Land crossings only.** A `ConnectionWater` seam has no `to_position` to disambiguate on
+    /// (the game decides where the player surfaces), it is offered by
+    /// [`Self::water_connection_action`] instead, and without Surf it is scenery rather than a way
+    /// out. Counting one here would report a shore as a crossing the player cannot reach, which is
+    /// the false alarm the `Blocked here: Water` line was deleted for.
+    pub fn crossings(&self, to_map: Map) -> Vec<Crossing> {
+        use std::collections::{HashSet, VecDeque};
+        let (dist, _) = self.bfs_from_player();
+        let at = |i: usize| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
+        let landing = |p: Point8| match self.meta_tiles[p.x as usize + p.y as usize * self.width] {
+            MetaTile::Connection { to_map: m, to_position } if m == to_map => Some(to_position),
+            _ => None,
+        };
+        let all: HashSet<Point8> = self.meta_tiles.iter().enumerate()
+            .filter(|(_, t)| matches!(t, MetaTile::Connection { to_map: m, .. } if *m == to_map))
+            .map(|(i, _)| at(i))
+            .collect();
+
+        let mut seen: HashSet<Point8> = HashSet::new();
+        let mut crossings = vec![];
+        // Flood one run at a time over 4-neighbours, so a wall between two stretches of the same
+        // border strip splits them and a diagonal notch does not.
+        for &start in &all {
+            if !seen.insert(start) { continue }
+            let mut run = vec![start];
+            let mut queue = VecDeque::from([start]);
+            while let Some(p) = queue.pop_front() {
+                for next in [
+                    p.y.checked_sub(1).map(|y| Point8 { x: p.x, y }),
+                    (p.y as usize + 1 < self.height).then(|| Point8 { x: p.x, y: p.y + 1 }),
+                    p.x.checked_sub(1).map(|x| Point8 { x, y: p.y }),
+                    (p.x as usize + 1 < self.width).then(|| Point8 { x: p.x + 1, y: p.y }),
+                ].into_iter().flatten() {
+                    if all.contains(&next) && seen.insert(next) {
+                        run.push(next);
+                        queue.push_back(next);
+                    }
+                }
+            }
+            // The tile that names the run: the reachable one nearest the player if the run can be
+            // reached at all, otherwise the first in reading order. Naming an unreachable member of
+            // a reachable run would mint an id `connection_action` then declines to route to.
+            let named = run.iter().copied()
+                .filter(|p| dist.contains_key(p))
+                .min_by_key(|p| (dist[p], p.y, p.x))
+                .or_else(|| run.iter().copied().min_by_key(|p| (p.y, p.x)));
+            let Some(named) = named else { continue };
+            let Some(to_position) = landing(named) else { continue };
+            crossings.push(Crossing {
+                at: named,
+                to_position,
+                reachable: run.iter().any(|p| dist.contains_key(p)),
+                tiles: run.len(),
+            });
+        }
+        crossings.sort_by_key(|c| (
+            !c.reachable,
+            dist.get(&c.at).copied().unwrap_or(u32::MAX),
+            std::cmp::Reverse(c.tiles),
+            c.at.y,
+            c.at.x,
+        ));
+        crossings
+    }
+
+    /// What the region the player can walk in **ends on**: the kinds of impassable tile that touch
+    /// it, commonest first, as noun phrases fit to drop into a sentence.
+    ///
+    /// ⚠️ **Read off the BFS's own key set, which is why it costs nothing.** `reachable_tiles` is
+    /// deliberately the set of squares the search *touched*, walls included — a route has to be
+    /// allowed to end at a door, a counter, a tree or a person — so the impassable members of it are
+    /// exactly the wall of the room, already computed. See that method's ⚠️.
+    ///
+    /// ⚠️ **Plain walls are not reported.** Every region in the game is bounded by scenery, so
+    /// "walls" is true everywhere and answers nothing; what the model can act on is the boundary it
+    /// might get *through* — a tree that Cut clears, a ledge that only goes one way, water that
+    /// needs Surf, somebody standing in the gap.
+    pub fn boundary_blockers(&self) -> Vec<&'static str> {
+        let mut counts: Vec<(&'static str, usize)> = vec![];
+        for at in self.reachable_tiles() {
+            let noun = match self.tile_at(at) {
+                MetaTile::CutTree => "trees that Cut clears",
+                MetaTile::Water | MetaTile::ConnectionWater(_) => "water that needs Surf",
+                MetaTile::Jump(_) => "ledges, which only go one way",
+                MetaTile::Sprite(_) => "people and objects standing in the gap",
+                MetaTile::Counter => "counters, which are talked over rather than walked round",
+                _ => continue,
+            };
+            match counts.iter_mut().find(|(n, _)| *n == noun) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((noun, 1)),
+            }
+        }
+        counts.sort_by_key(|(noun, count)| (std::cmp::Reverse(*count), *noun));
+        counts.into_iter().map(|(noun, _)| noun).collect()
+    }
+
+    /// The adjacent maps this map's header joins it to that the player **cannot walk to the edge
+    /// of** from where they are standing.
+    ///
+    /// ⚠️ **The gap this closes is between two different graphs.** `WorldGraph` joins maps by ROM
+    /// map header and `read_route` answers out of it, so it named the tile to leave Cerulean by for
+    /// 65 turns while `actions()` — which does ask whether the tile can be walked to — minted no row
+    /// for it. Neither was wrong on its own terms and the model was given no way to tell them apart.
+    /// This is that difference, said out loud.
+    pub fn unreachable_connection_targets(&self) -> Vec<Map> {
+        let mut maps: Vec<Map> = self.connection_targets.iter().copied()
+            .filter(|to_map| {
+                let crossings = self.crossings(*to_map);
+                // A map joined only by water is not "fenced off": it is the Surf gate, which the
+                // turn says elsewhere and which is true of every coastline in Kanto.
+                !crossings.is_empty() && !crossings.iter().any(|c| c.reachable)
+            })
+            .collect();
+        maps.sort_by_key(|map| format!("{map}"));
+        maps
     }
 
     /// Build the action that crosses a connection to `to_map` landing at raw `to_position`, if that
@@ -1581,7 +1867,7 @@ mod boulder_solver_tests {
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
             spinners: HashMap::new(), can_surf: false, best_rod: None, can_cut: false, bill_cell_separator: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
-            hidden_items: vec![], has_grass_encounters: false,
+            has_grass_encounters: false,
             // A hand-built grid for the boulder solver; there is no ROM map behind it to draw.
             metadata: None,
         }, switch)
