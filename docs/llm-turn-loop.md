@@ -108,6 +108,24 @@ narrates, and `reports` is a queue cleared by the turn that carried it. A blacko
 `is_blackout` on the cartridge's own sentence (`wBattleResult` is zeroed before anything here runs),
 quoted with `QUOTE_TAIL` so the ending survives, and its arm sits above the in-battle arm.
 
+`handed_back` returns the turns the script took since the model last chose, rendered by the same
+`turns_from` the finished report uses, and `told` is what stops them being sent twice. Without it a
+model asked mid-battle sees a fight in which its own last decision was silently replaced.
+
+## Taking a battle over
+
+- `choose_battle_action`'s `take_over` stops the script deciding **the rest of this battle** and
+  nothing more. `LlmPolicy::taken_over` is set only where the action resolved, is cleared by
+  `AgentEvent::BattleEnded` and by `restart`, and is checked after the report is opened so a
+  taken-over turn is counted through `handed_back` exactly as a `battle.ask()` turn is.
+- ⚠️ **It cannot be scoped to the run, and the tool's ⚠️ has the measurement**: a disarm reached for
+  mid-battle is one nothing brings back. `set_battle_script` on the overworld turn stays the way to
+  turn a script off for good.
+- The offer rides on the ask note only when the script has actually taken turns in between
+  (`llm_policy.rs`'s `ScriptOutcome::Ask` arm), for `script_standing_line`'s reason: a sentence on
+  every ask is one a model reads past. `DecisionKind::Battle`'s tool ceiling moved 4950 → 5250 for
+  the 289 bytes.
+
 ## The plan and the prompt
 
 - `MAX_ITEMS` is 5 and done items count. `add` evicts the oldest done item and refuses when none

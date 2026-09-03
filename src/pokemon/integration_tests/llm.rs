@@ -528,7 +528,7 @@ fn probe_scripted_battles() {
                 // this is the strategy the game is finished with.
                 Outcome::Ask => {
                     println!("  [script] asked for help on turn {}", self.turns);
-                    report.handed_back(state);
+                    let _ = report.handed_back(state);
                     self.inner.pick_battle_action(state)
                 }
                 Outcome::Failed(why) => panic!("the bundled strategy failed mid-battle: {why}"),

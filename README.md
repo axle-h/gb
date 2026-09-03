@@ -156,6 +156,20 @@ still be thought about while the Rattatas are not. Whatever the script chooses i
 the same `battle_options` list every other policy chooses from, so it can never take an action the
 game would not have offered.
 
+⚠️ **One turn was not enough, because a script asks about a *battle*.** The condition it hands back
+on is almost always a property of the fight rather than of the turn — this one is a trainer, this one
+is above my level — so it asks on turn 1, the model switches to the Pokémon it wants, and on turn 2
+the script runs again and switches straight back. A deployed run spent the fights it most wanted to
+think about being overruled by its own program, and nothing inside a battle turn could stop it: the
+three script tools are on the overworld turn, and the only other lever was disarming for the rest of
+the run — which is the wrong trade, since a script that is wrong for a gym leader is usually right
+for the three hundred wild encounters after it. So `choose_battle_action` takes a **`take_over`**:
+the rest of *this* battle is the model's, and the script is deciding again at the next one, with
+nothing to remember. It is also told what it missed. A script that decides turns in between now hands
+back the account of them — what it chose, what that did, what the game said — because otherwise the
+model is looking at a battle in which its own last decision simply did not happen, which is a good
+way to make it decide the game is broken.
+
 Every run starts with a script already installed, and it is one that calls `battle.ask()` and nothing
 else: it decides no turns and hands every battle straight back, so a run that never touches it plays
 exactly as it did before there was a default. The point is that there is a file to edit rather than

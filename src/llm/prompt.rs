@@ -521,6 +521,11 @@ pub enum TurnContext<'a> {
     /// to this whole situation, and that note is both more specific and more useful than a state
     /// line — so the two are alternatives rather than a pair, and the caller picks. Repeating it
     /// would be the same fact twice on the turn that is already the expensive one.
+    ///
+    /// ⚠️ **A battle the model has taken over is the case that makes the note *mandatory* rather
+    /// than merely better.** `LlmPolicy::taken_over` suspends the script for one fight, so `Armed`
+    /// here would tell the model a script was deciding its battle turns on every turn of the one
+    /// battle where that is false. See `llm_policy::taken_over_note`.
     Battle { script: ScriptState },
 }
 
