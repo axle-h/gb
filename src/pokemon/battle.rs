@@ -124,6 +124,24 @@ impl Display for BattleAction {
     }
 }
 
+/// `wIsInBattle` when the player has just **lost**: not a battle, and not yet the overworld either.
+///
+/// ⚠️ **It is written by the overworld loop, not by the battle engine, and that is why it is a
+/// window rather than an instant.** `home/overworld.asm:355-359` — `.allPokemonFainted` — stores
+/// `$ff` here and only then calls `HandleBlackOut`, which fades the screen, halves the money, heals
+/// the party and warps the player to the Pokémon Centre they last accepted a heal at. So for the
+/// whole of that sequence the byte reads `$ff`, the party is still down, the money is still whole
+/// and `wCurMap` is still the map the fight happened on.
+///
+/// Everything that asks "is there a battle" has to answer **no** here — the fight is over — and
+/// everything that asks "may I put a decision to the policy" has to answer **no** as well, because
+/// the map it would describe is about to stop existing. The two callers are [`read_battle_state`]
+/// below and [`crate::pokemon::agent::blackout_in_flight`].
+///
+/// (`ResetStatusAndHalveMoneyOnBlackout` clears it back to 0 three instructions in
+/// (`engine/events/black_out.asm:3-6`), so nothing has to time this out.)
+pub const LOST_BATTLE: u8 = 0xff;
+
 pub trait BattleStateReader {
     fn read_battle_state(&self) -> Option<BattleState>;
 }
@@ -131,7 +149,11 @@ pub trait BattleStateReader {
 impl BattleStateReader for MMU {
     fn read_battle_state(&self) -> Option<BattleState> {
         let is_in_battle = self.read_pointer(&pokered_symbols::wIsInBattle);
-        if is_in_battle == 0 {
+        // ⚠️ [`LOST_BATTLE`] is a battle that has **ended**, and reading it as one put a live
+        // `### Battle` block — the fainted Pokémon still "out", the enemy still on its last HP —
+        // into the overworld turn the model was asked after a blackout. `read_game_mode` has always
+        // treated `$ff` as not-a-battle (its `_` arm); this is the same byte and now the same answer.
+        if is_in_battle == 0 || is_in_battle == LOST_BATTLE {
             return None;
         }
         // wBattleType: 0 = normal, 1 = old-man tutorial, 2 = Safari Zone. Safari overrides the
