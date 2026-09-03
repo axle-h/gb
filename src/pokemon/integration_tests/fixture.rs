@@ -220,6 +220,23 @@ impl TestFixture {
         println!("saved failure artifacts: {}, {}", state.display(), shot.display());
     }
 
+    /// One iteration of a **host** loop that is `min_cycles` behind the clock, rather than one agent
+    /// tick.
+    ///
+    /// [`Self::step`] is the harness's own pacing — `gb.run(AGENT_RESOLUTION)` and one
+    /// `agent.update` in lockstep — and it is the reason the resolution defect of 2026-09-03 could
+    /// not be seen from any test, `soak` included: no test had ever handed the agent more than one
+    /// tick's worth of emulated time, and both real drivers (`host.rs`, `sdl/render.rs`) do it on
+    /// every iteration. This routes through [`PokemonAgent::run`] exactly as they do, so a test can
+    /// pick the tick a loaded server would have achieved and watch the agent play at it.
+    pub fn step_coarse(&mut self, min_cycles: MachineCycles) {
+        PokemonApi::with_cache(&mut self.gb, &mut self.map_cache).debug_set_options(&self.options);
+        let (ran, _) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
+        self.total_cycles += ran;
+        assert!(self.total_cycles < self.max_cycles,
+            "exceeded max cycles ({:?} game time){}", self.max_cycles, self.progress_note());
+    }
+
     pub fn step_until_exhausted(&mut self) {
         while !self.agent.policy_exhausted() {
             self.step();

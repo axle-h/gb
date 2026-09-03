@@ -2590,3 +2590,53 @@ fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
              inside `ResetStatusAndHalveMoneyOnBlackout` had not run. All of them: {:?}",
             log.overworld);
 }
+
+/// **The agent's tick is 20 ms of *game* time, not one turn of whatever loop is driving it.**
+///
+/// `host.rs` and `sdl/render.rs` both pace themselves on wall clock: they work out how far behind
+/// the clock they are, run the emulator that far, and then tick the agent. Until 2026-09-03 they
+/// ticked it *once* for the lot, and [`PokemonAgent::update`] coalesces rather than catching up — so
+/// the agent's real decision rate was the driver's loop rate. A checkpoint write, a descheduled
+/// thread or a busy node lowered it silently, up to `host::MAX_CATCHUP` (250 ms), against a game
+/// still running at full speed.
+///
+/// What it costs is corners. A held direction keeps walking — pokered starts another step whenever
+/// the pad is still down at the end of one — so the agent has one step (267 ms) to notice it has
+/// arrived and press the other way. Miss it and the player overshoots, the route recomputes from a
+/// tile one further on, and the walk oscillates about the turn until `MAX_MOVEMENT_SILENCE` gives
+/// up 60 seconds later.
+///
+/// Route 12's west corridor is where the deployed run found it. Row 63 is one tile high between two
+/// walls, and the north-south road crosses it at x=11, so the walk must stop dead on (11, 63) and
+/// turn west. At a 250 ms tick the player instead paced (11, 62) ↔ (11, 64) for ever; the run
+/// abandoned three walks at 60 s each and filed an issue saying Route 11 was unreachable.
+///
+/// ⚠️ **No test could see it, and that is the more useful half of this one.** Every test in this
+/// module drives [`TestFixture::step`], which is `gb.run(AGENT_RESOLUTION)` and one `agent.update`
+/// in lockstep — the one cadence at which the defect does not exist. `soak` hunts jams for hours
+/// through the same harness and would never have found this in any number of them. So this test
+/// drives [`TestFixture::step_coarse`] instead, at the worst tick the host permits itself.
+#[test]
+fn a_corner_is_turned_at_a_coarse_host_tick() {
+    // 250 ms is `host::MAX_CATCHUP`: the most emulated time one host iteration will ever hand the
+    // agent, and therefore the coarsest tick a deployment can reach. 60 ms is an ordinarily bad one
+    // — it overshoots this corner once and recovers, which is the shape that shows up in a
+    // transcript as a walk that took twice as long as it should have.
+    for tick_ms in [20u64, 60, 250] {
+        let mut fixture = TestFixture::new(
+            include_bytes!("../data/post-snorlax.bin"),
+            Duration::from_secs(120),
+            vec![PolicyStep::EnterMap { to_map: Map::Route11, to_position: None }],
+        );
+        let tick = MachineCycles::from_duration(Duration::from_millis(tick_ms));
+        let mut arrived = false;
+        // The budget is the fixture's own (120 s of game time); the walk is thirteen tiles and takes
+        // about four. A run that oscillates instead burns the lot and this loop ends on the assert
+        // inside `step_coarse`.
+        while !arrived {
+            fixture.step_coarse(tick);
+            arrived = fixture.game_state().map.map == Map::Route11;
+        }
+        println!("{tick_ms} ms tick: reached Route11 in {:?} of game time", fixture.total_cycles.to_duration());
+    }
+}

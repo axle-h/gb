@@ -239,18 +239,25 @@ pub fn render() -> Result<(), String> {
             }
         }
 
-        let mut actual_cycles = MachineCycles::ZERO;
         if min_cycles > MachineCycles::ZERO {
-            actual_cycles =  gb.run(min_cycles);
+            let actual_cycles;
+            if agent_running {
+                // ⚠️ **`agent.run`, not `gb.run` and one `update`** — one agent tick per
+                // `AGENT_RESOLUTION` of emulated time rather than one per rendered frame. This loop
+                // is paced at 60 Hz and F-key fast-forward multiplies what a frame is worth, so at
+                // 5× `min_cycles` is ~83 ms and the agent would be deciding at 12 Hz against a game
+                // running at full speed — which walks the player straight past every corner. See
+                // `PokemonAgent::run`.
+                let result;
+                (actual_cycles, result) = pokemon_agent.run(&mut gb, &mut map_cache, min_cycles);
+                if let Err(agent_error) = result {
+                    println!("agent failed: {:?}", agent_error);
+                }
+            } else {
+                actual_cycles = gb.run(min_cycles);
+            }
             cycle_count += actual_cycles;
             ahead_by_cycles += actual_cycles - min_cycles;
-        }
-
-        if agent_running {
-            let mut api = PokemonApi::with_cache(&mut gb, &mut map_cache);
-            if let Err(agent_error) = pokemon_agent.update(&mut api, actual_cycles) {
-                println!("agent failed: {:?}", agent_error);
-            }
         }
 
         // Samples are ready as soon as they are synthesised, so there is no chunk to wait for —
