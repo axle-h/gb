@@ -93,6 +93,23 @@ pub const RESUMED_NOTE: &str =
      Nothing is broken and there is nothing to undo. Read the situation below and carry on from \
      where the game actually is.";
 
+/// What the first turn after `POST /api/clear` opens on.
+///
+/// ⚠️ **The same job as [`RESUMED_NOTE`] and a harder one.** A resume shows a model its own
+/// conversation and warns that the last minute of it may be ahead of the game; a clear shows it a
+/// run that is hours old with nothing above it at all. Without a line saying so, the situation
+/// itself is the only evidence, and "a party of five, six badges, and no memory of earning any of
+/// them" reads exactly like the broken game a model files a bug about. So it is told plainly that
+/// the erasure was deliberate, that the game is sound, and what to do first — which is to look,
+/// because the plan that would normally say what it was doing is gone too.
+pub const CLEARED_NOTE: &str =
+    "Your conversation and your plan were deliberately cleared by whoever runs this program. \
+     The game itself was not touched and is exactly where you left it, possibly hours into a run \
+     you can no longer remember any of. Nothing is broken, nothing was lost from the game, and \
+     there is nothing to undo or repeat. Your battle script was not touched either, and the turn \
+     below says what it is doing. Work out where you are from the situation below, use `read_map` \
+     if you need to, and write yourself a fresh plan before you go far.";
+
 /// Whether this is a message [`plan_message`] produced.
 ///
 /// ⚠️ **A plan is not a turn boundary** — see [`compaction::is_turn_start`]. It sits immediately

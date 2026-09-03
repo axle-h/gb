@@ -431,7 +431,7 @@ an append-only `ledger.jsonl` of one line each. See below.
 ## The web UI
 
 `web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed` and served by
-the same process that runs the emulator. Eleven read-only endpoints and two that are not:
+the same process that runs the emulator. Eleven read-only endpoints and three that are not:
 
 | | |
 |---|---|
@@ -448,6 +448,7 @@ the same process that runs the emulator. Eleven read-only endpoints and two that
 | `/version` | which build is running: crate version, build date, branch, short commit |
 | `/reset-game` | start the game over, in place — HTTP Basic, off unless `GB_ADMIN_TOKEN` is set |
 | `POST /api/new-run` | the same thing for a script, with an `X-GB-Token` header |
+| `POST /api/clear` | keep the run, wipe what the model remembers of it — same header |
 
 The screen is streamed as block deltas rather than as images because it is a 160×144 screen that
 mostly does not change; the decoder is a TypeScript port of the encoder, in `web/src/video.ts`.
@@ -564,6 +565,37 @@ server is on the public internet and an endpoint that resets the game should not
 whoever scans for it. Nothing is deleted: the old directory is a complete run and can be resumed by
 pointing a process back at it.
 
+### Clearing the conversation without losing the run
+
+The opposite trade, for the run that has talked itself into a corner:
+
+```shell
+curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://your-host/api/clear
+# → {"run_id":"run-20260811-142233","cleared":"the conversation and the plan; …","when":"at the model's next turn"}
+```
+
+The game, the save, the run directory, the transcript and the battle script all carry on untouched.
+What goes is what the *model* remembers: the conversation starts again from the system prompt, and
+`todo.json` is deleted, because the plan is the one thing written to outlive a conversation and a
+plan composed by the conversation being deleted is the same corner in a file. `conversation.jsonl`
+keeps every message it ever held, with a `cleared` line where the cut was.
+
+It exists because a conversation only ever grows at the end. A model that has convinced itself the
+game is broken reads that conclusion back on every request until a compaction happens to drop it,
+and the only cure was `POST /api/new-run` — which throws eight hours of playthrough away to fix a
+model's mood. Same admin token, same 404 when it is unset, and a run played by anything other than
+a model answers "this run is not being played by a model" rather than pretending to have done
+something.
+
+⚠️ It lands at the model's **next turn** rather than at the moment it answers. A run directory has
+one writer and it is the worker thread, so the emulator cannot delete those files itself; the turn
+in flight is cancelled to make the next one start now. On a run parked on a spent quota, nothing
+happens until the quota reopens.
+
+The first turn after a clear opens on a line telling the model the erasure was deliberate, that the
+game is sound, and to look around and write a fresh plan before it goes far — because a model shown
+six badges and no memory of earning any of them is a model about to decide something is very wrong.
+
 For a hot-reload loop, run `gb serve` on :8080 and `pnpm run dev` in `web/`, which proxies `/api` to
 it. `GB_WEB_DEV=1` reads `web/dist` from disk instead of the embedded copy, which skips the cargo
 rebuild after an SPA build.
@@ -591,7 +623,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_AUDIO_BITRATE` | the Opus stream's target, bits/s (`24000`); `0` turns sound off entirely |
 | `GB_HARDWARE` | which Game Boy the cartridge runs on: `dmg` (default) or `cgb` |
 | `GB_RESTORE_HISTORY` | resume a run's conversation as well as its save (`1`); `0` starts the conversation over |
-| `GB_ADMIN_TOKEN` | enables `/reset-game` and `POST /api/new-run`; unset means both 404 |
+| `GB_ADMIN_TOKEN` | enables `/reset-game`, `POST /api/new-run` and `POST /api/clear`; unset means all three 404 |
 
 ## Deployment
 

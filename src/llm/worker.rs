@@ -129,29 +129,42 @@ pub struct TurnHandles {
     /// Bumped by the policy when the decision kind changes; read by the worker at its two cancel
     /// points. The policy owns the writes, which is why there is no lock.
     pub generation: Arc<AtomicU64>,
-    /// **`POST /api/new-run`** — a pending "the game restarted" notice. See [`Restart`].
-    pub restart: Restarts,
+    /// **`POST /api/new-run` and `POST /api/clear`** — a pending "start again" notice. See
+    /// [`Reset`].
+    pub reset: Resets,
     /// The armed battle script, which the policy runs on its own thread rather than asking for.
     /// See [`crate::llm::battle_script::Live`].
     pub live_script: Arc<battle_script::Live>,
 }
 
-/// The game has been restarted underneath a live worker, so the conversation is now about a game
-/// that no longer exists and has to start again.
+/// The conversation has to start again, and there are exactly two reasons it ever does.
 ///
 /// ⚠️ **A shared cell rather than a channel, because the worker cannot select.** It blocks on
 /// `turns.recv()`, so a second `Receiver` would need a `select` that `std::sync::mpsc` does not
 /// have. This is consumed at the top of [`Worker::run_one`] instead, which is reached promptly
 /// because the policy bumps the generation on its way past — cancelling whatever was in flight.
-#[derive(Debug, Clone, Default)]
-pub struct Restart {
-    /// The **new** run directory, which is where the model's plan now lives. `None` keeps it in
-    /// memory only, as the tests do.
+#[derive(Debug, Clone)]
+pub struct Reset {
+    /// The run directory the conversation now belongs to: the **new** one after a restart, and the
+    /// **same** one after a clear. `None` keeps everything in memory, as the tests do.
     pub run_dir: Option<PathBuf>,
+    pub kind: ResetKind,
 }
 
-/// The cell a [`Restart`] waits in. Written by the policy, taken by the worker.
-pub type Restarts = Arc<Mutex<Option<Restart>>>;
+/// Why [`Worker::apply_reset`] is happening, which decides what survives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetKind {
+    /// `POST /api/new-run`: the game is a different game, so the plan and the battle script are
+    /// re-read from the new run directory and everything about the old one goes.
+    NewGame,
+    /// `POST /api/clear`: the same game, played by a model that no longer remembers any of it. The
+    /// plan is **deleted** rather than re-read — it is the one thing that would otherwise survive —
+    /// and the battle script is left exactly as it is.
+    Cleared,
+}
+
+/// The cell a [`Reset`] waits in. Written by the policy, taken by the worker.
+pub type Resets = Arc<Mutex<Option<Reset>>>;
 
 impl TurnHandles {
     /// Abandon whatever is in flight and claim the next turn id.
@@ -263,8 +276,9 @@ pub struct Worker {
     turns_since_plan: u32,
     /// **W6** — tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
     accounting: Accounting,
-    /// **`POST /api/new-run`** — taken at the top of every turn. See [`Restart`].
-    restart: Restarts,
+    /// **`POST /api/new-run` and `POST /api/clear`** — taken at the top of every turn. See
+    /// [`Reset`].
+    reset: Resets,
     /// Where the `press_buttons` records go — see [`crate::llm::incident`].
     ///
     /// ⚠️ **`CurrentRun` rather than a `PathBuf`, and `None` rather than a default.** The cell
@@ -289,7 +303,7 @@ pub fn channels(
     let (call_tx, call_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
-    let restart: Restarts = Arc::new(Mutex::new(None));
+    let reset: Resets = Arc::new(Mutex::new(None));
     // ⚠️ **Armed from the file at construction, not on the first `set_battle_script`.** A resumed
     // run's script is on disk and the model has no reason to send it again, so a cell that started
     // empty would fight the rest of the run one paid turn at a time and nothing would say why.
@@ -332,7 +346,7 @@ pub fn channels(
         published_script: None,
         turns_since_plan,
         accounting,
-        restart: Arc::clone(&restart),
+        reset: Arc::clone(&reset),
         run: None,
     };
     let handles = TurnHandles {
@@ -341,7 +355,7 @@ pub fn channels(
         tool_calls: call_rx,
         tool_results: result_tx,
         generation,
-        restart,
+        reset,
         live_script,
     };
     (worker, handles)
@@ -420,26 +434,46 @@ impl Worker {
         }
     }
 
-    /// Start the conversation again, about the game that is playing now.
+    /// Start the conversation again — about the game that is playing now, or about the same game
+    /// this model can no longer remember.
     ///
-    /// The three things thrown away are the three that are about the old game: the history, the
-    /// plan read out of the old run directory, and the token accounting that was measuring that
-    /// history. Everything else — the endpoint, the config, the retry policy, the channels — belongs
-    /// to the *process*, and rebuilding any of it would mean rebuilding this thread.
-    fn apply_restart(&mut self, restart: Restart) {
-        self.todo = TodoList::open(restart.run_dir.as_deref());
+    /// Three things go in both cases, and they are the three that are about the conversation rather
+    /// than about the process: the history, the plan, and the token accounting that was measuring
+    /// that history. Everything else — the endpoint, the config, the retry policy, the channels —
+    /// belongs to the *process*, and rebuilding any of it would mean rebuilding this thread.
+    ///
+    /// ⚠️ **The two kinds differ in exactly two lines, and both are about a file rather than about
+    /// memory.** A new game *re-reads* the plan and the battle script out of the directory it has
+    /// been given, because that directory is a different one and may already hold both (a resumed
+    /// run's does). A clear *deletes* the plan out of the directory it is already in, because
+    /// re-reading it there would put back the one thing the request was made to remove — and leaves
+    /// the battle script completely alone, because a script is a program the operator can read on
+    /// the page, not a memory of a conversation. Getting either backwards is silent: the run plays
+    /// on, holding notes it was told to forget.
+    fn apply_reset(&mut self, reset: Reset) {
+        let dir = reset.run_dir.as_deref();
+        self.todo = match reset.kind {
+            ResetKind::NewGame => TodoList::open(dir),
+            ResetKind::Cleared => TodoList::cleared(dir),
+        };
         self.publish_todo();
-        // ⚠️ **Reopened against the new directory, and the cell re-armed from what it finds.**
-        // Without this a `POST /api/new-run` leaves the *old* game's script deciding the new game's
-        // battles, and `set_battle_script` writing into a run that has been set aside.
-        self.battle_script = BattleScript::open(restart.run_dir.as_deref());
-        self.live_script.arm(self.battle_script.live_source(), self.battle_script.state(), self.battle_script.standing());
-        self.publish_battle_script();
-        // ⚠️ **`fresh`, never `open`.** The two differ in exactly one way and it is the whole point
-        // of having both: `open` would read the new run directory back, and this is the one call
-        // site where reading is wrong. Today `RunDir::open`'s fresh path always mints an empty
-        // directory, so both would behave the same by luck rather than by construction.
-        self.history = History::fresh(restart.run_dir.as_deref());
+        if reset.kind == ResetKind::NewGame {
+            // ⚠️ **Reopened against the new directory, and the cell re-armed from what it finds.**
+            // Without this a `POST /api/new-run` leaves the *old* game's script deciding the new
+            // game's battles, and `set_battle_script` writing into a run that has been set aside.
+            self.battle_script = BattleScript::open(dir);
+            self.live_script.arm(self.battle_script.live_source(), self.battle_script.state(), self.battle_script.standing());
+            self.publish_battle_script();
+        }
+        // ⚠️ **`fresh`/`cleared`, never `open`.** They differ from `open` in exactly one way and it
+        // is the whole point of having them: `open` would read the run directory back, and these are
+        // the call sites where reading is wrong. Today `RunDir::open`'s fresh path always mints an
+        // empty directory, so `NewGame` would behave the same by luck rather than by construction —
+        // and `Cleared` would not, since its directory is the one that has just been playing.
+        self.history = match reset.kind {
+            ResetKind::NewGame => History::fresh(dir),
+            ResetKind::Cleared => History::cleared(dir),
+        };
         // The history the counter was measured against is gone, and `sync_plan` finds no plan in the
         // fresh one, so it appends immediately — leaving a stale count would make the *next* refresh
         // fall due at the wrong time.
@@ -447,8 +481,10 @@ impl Worker {
         self.accounting = Accounting::new(self.config.context_limit);
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
-            message: "the game restarted; the conversation starts again from the system prompt"
-                .to_string(),
+            message: match reset.kind {
+                ResetKind::NewGame => "the game restarted; the conversation starts again from the system prompt".to_string(),
+                ResetKind::Cleared => "the conversation and the plan were cleared; this turn starts again from the system prompt".to_string(),
+            },
         });
     }
 
@@ -458,8 +494,8 @@ impl Worker {
         // next turn is chosen, and after a restart the old history describes a game that no longer
         // exists — a party, a map and a TODO list belonging to a run that has been checkpointed and
         // set aside.
-        if let Some(restart) = self.restart.lock().ok().and_then(|mut cell| cell.take()) {
-            self.apply_restart(restart);
+        if let Some(reset) = self.reset.lock().ok().and_then(|mut cell| cell.take()) {
+            self.apply_reset(reset);
         }
         // ⚠️ **The policy disarms in memory and this is what makes it durable.** The emulator thread
         // cannot write the run directory — one writer per run, the rule `transcript` and `history`

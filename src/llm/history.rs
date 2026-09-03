@@ -153,6 +153,18 @@ fn one() -> f64 {
     1.0
 }
 
+/// Which of the three constructors is running, since they share [`History::start`].
+///
+/// ⚠️ **Only [`Start::Open`] may read the directory back.** The other two are the call sites where
+/// reading is the bug: `Fresh` would hand a new run the dead game's memory, and `Cleared` would put
+/// back the very conversation the operator asked to be rid of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    Open,
+    Fresh,
+    Cleared,
+}
+
 impl History {
     /// Open the conversation in a run directory, restoring it when there is one to restore.
     ///
@@ -160,7 +172,7 @@ impl History {
     /// line on stderr, exactly as `TodoList::open` treats a broken `todo.json`: losing the
     /// conversation is bad, and refusing to play because of it is worse.
     pub fn open(run_dir: Option<&Path>) -> Self {
-        Self::start(run_dir, true)
+        Self::start(run_dir, Start::Open)
     }
 
     /// The conversation for a run that is *starting*, which is never the one on disk.
@@ -172,12 +184,25 @@ impl History {
     /// It writes its empty state out immediately, so there is no window in which a `history.json`
     /// in a run directory describes some other run.
     pub fn fresh(run_dir: Option<&Path>) -> Self {
-        Self::start(run_dir, false)
+        Self::start(run_dir, Start::Fresh)
     }
 
-    fn start(run_dir: Option<&Path>, restore: bool) -> Self {
+    /// **`POST /api/clear`** — the conversation for a run that is *carrying on*, played by a model
+    /// that has just been made to forget it.
+    ///
+    /// [`Self::fresh`] with two differences, and both are because the game is still there. The log
+    /// gets a `cleared` line, so reading `conversation.jsonl` back shows where the memory was cut
+    /// rather than a conversation that inexplicably starts over halfway down. And the history ends
+    /// on a note saying so, for the reason [`prompt::RESUMED_NOTE`] exists: a model whose first turn
+    /// shows a party of five and eight hours on the clock, with nothing above it, is a model about
+    /// to decide something is badly wrong.
+    pub fn cleared(run_dir: Option<&Path>) -> Self {
+        Self::start(run_dir, Start::Cleared)
+    }
+
+    fn start(run_dir: Option<&Path>, mode: Start) -> Self {
         let dir = run_dir.map(Path::to_path_buf);
-        let restored = match restore && crate::llm::config::restore_history() {
+        let restored = match mode == Start::Open && crate::llm::config::restore_history() {
             true => dir.as_deref().and_then(read_saved),
             false => None,
         };
@@ -233,6 +258,16 @@ impl History {
             // fresh by every process, and a message that changes near the front of the history
             // would throw away the cached prefill of everything after it.
             history.messages.push(Message::user(prompt::RESUMED_NOTE));
+        }
+
+        if mode == Start::Cleared {
+            history.append_line(&serde_json::json!({
+                "kind": "cleared",
+                "at": crate::web::published::now_ms(),
+            }));
+            // Appended after the watermark for the reason the resume note is: it is a real message
+            // the model reads, and it belongs in the record of what the model was sent.
+            history.messages.push(Message::user(prompt::CLEARED_NOTE));
         }
 
         // Puts the resume note in the log now rather than at the end of the first turn, so a process
@@ -757,6 +792,40 @@ mod tests {
         assert!(
             !std::fs::read_to_string(scratch.0.join(files::HISTORY)).unwrap().contains("the old game"),
             "and it wrote its empty state out, so no window exists where the file describes another run"
+        );
+    }
+
+    /// The same for `POST /api/clear`, where the trap is sharper: a clear's directory is the one
+    /// that has been playing all along, so `open` would put the whole conversation straight back.
+    /// The note at the tail is the other half — it is what stops a model waking up eight hours into
+    /// a run with no memory of it and concluding the game is broken.
+    #[test]
+    fn a_cleared_conversation_is_replaced_and_says_so_in_the_history_and_the_log() {
+        let scratch = Scratch::new("history-cleared");
+        let mut first = History::open(Some(&scratch.0));
+        first.push(Message::user("### Turn 1\nsomething the model would rather forget"));
+        first.checkpoint(1, 1.0, 0);
+        drop(first);
+
+        let cleared = History::cleared(Some(&scratch.0));
+        assert!(cleared.restored().is_none(), "a clear restores nothing, whatever the file holds");
+        assert_eq!(cleared.len(), 2, "the system prompt and the note, and nothing else");
+        assert_eq!(cleared.last().expect("a tail").text(), Some(prompt::CLEARED_NOTE));
+        assert!(compaction::is_turn_start(cleared.last().unwrap()), "a legal cut point, like the resume note");
+        assert!(
+            !std::fs::read_to_string(scratch.0.join(files::HISTORY)).unwrap().contains("rather forget"),
+            "and the file a restart would resume on was replaced too",
+        );
+
+        // ⚠️ The append-only log keeps what the live history dropped — the whole reason there are two
+        // files — and says where the cut was, or it reads as a conversation that inexplicably
+        // starts over halfway down.
+        let logged = std::fs::read_to_string(scratch.0.join(files::CONVERSATION)).expect("a log");
+        assert!(logged.contains("rather forget"), "the log lost what the clear took out of the history");
+        assert!(
+            logged.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .any(|l| l["kind"] == "cleared"),
+            "and nothing in it says the memory was cut here",
         );
     }
 

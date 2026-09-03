@@ -100,9 +100,9 @@ pub struct HostConfig {
     /// what every test wants and what `gb serve` never is.
     pub run: Option<Arc<CurrentRun>>,
     pub checkpoint_interval: Duration,
-    /// `POST /api/new-run`'s mailbox. `None` — the default, and every test — means the endpoint has
+    /// The admin endpoints' mailbox. `None` — the default, and every test — means they have
     /// nothing to talk to and the emulator never checks.
-    pub new_runs: Option<Arc<NewRunRequests>>,
+    pub control: Option<Arc<ControlRequests>>,
     /// Which Game Boy the cartridge runs on, from `GB_HARDWARE`. **[`Model::Dmg`] by default.**
     ///
     /// [`Model::Cgb`] puts Pokémon Red in compatibility mode, where the boot ROM's title-derived
@@ -131,46 +131,85 @@ pub struct HostConfig {
     pub fresh_game: bool,
 }
 
+/// What the HTTP layer is allowed to ask the emulator thread for.
+///
+/// ⚠️ **A closed enum of two, and it is meant to stay one.** The mailbox below used to carry no
+/// data at all, on the argument that a channel with nothing in it cannot grow into a general
+/// control channel by accident. Adding `POST /api/clear` is the deliberate edit that comment asked
+/// for, and the shape it takes keeps the property: a variant here is a whole request rather than a
+/// parameter, so every command the server can send is one line of this enum and is answered by the
+/// `match` in [`EmulatorHost::tick`]. Nothing carries a payload; nothing is composable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlRequest {
+    /// `POST /api/new-run` and `/reset-game`: checkpoint this run and start the game again in a
+    /// directory of its own. See [`EmulatorHost::start_new_run`].
+    NewRun,
+    /// `POST /api/clear`: keep the game exactly where it is and throw the *model's* memory of it
+    /// away — the conversation and the plan. See [`EmulatorHost::clear_conversation`].
+    ClearConversation,
+}
+
+impl ControlRequest {
+    /// How the refusal below names whatever is already outstanding.
+    fn describe(self) -> &'static str {
+        match self {
+            Self::NewRun => "a new run is already being started",
+            Self::ClearConversation => "the conversation is already being cleared",
+        }
+    }
+}
+
+/// Where the answer goes: the run id the emulator acted on, or why it could not.
+type Answer = tokio::sync::oneshot::Sender<Result<String, String>>;
+
 /// ⚠️ **The one channel from the HTTP layer back into the emulator thread**, and deliberately the
 /// narrowest one that will do the job.
 ///
 /// `src/web/mod.rs` was built so that it could reach [`Published`] and nothing else, which made
-/// "the server cannot affect the run" a structural fact rather than a promise. `POST /api/new-run`
-/// gives that up on purpose, so it gives up as little as possible: this carries **no data inwards**
-/// — only the fact that someone asked — and it is answered by the emulator thread at a point of its
-/// own choosing, between instructions, never by the request handler. There is nothing here to grow
-/// into a general command channel without a deliberate edit.
+/// "the server cannot affect the run" a structural fact rather than a promise. The two admin
+/// endpoints give that up on purpose, so they give up as little as possible: this carries only a
+/// [`ControlRequest`] — one of a closed set, with no payload — and it is answered by the emulator
+/// thread at a point of its own choosing, between instructions, never by the request handler.
 ///
-/// The reply travels back on a `oneshot` so the handler can return the new run's id, which is the
-/// only thing a caller actually needs.
+/// The reply travels back on a `oneshot` ([`Answer`]) so the handler can return the run id it acted
+/// on, which is the only thing a caller actually needs.
 #[derive(Default)]
-pub struct NewRunRequests {
-    pending: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>,
+pub struct ControlRequests {
+    pending: std::sync::Mutex<Option<(ControlRequest, Answer)>>,
 }
 
-impl NewRunRequests {
-    /// Ask for a fresh run. The receiver resolves with the new run's id once the emulator has acted.
+impl ControlRequests {
+    /// Ask for something. The receiver resolves with the run id once the emulator has acted.
     ///
     /// Refuses while one is already outstanding rather than replacing it: two resets a few
     /// milliseconds apart would otherwise leave the first caller's channel dropped and
-    /// indistinguishable from an emulator that had died.
+    /// indistinguishable from an emulator that had died. ⚠️ **One mailbox for both commands, so a
+    /// clear outstanding refuses a reset too.** They are answered on the same tick and the second
+    /// would land within milliseconds of the first; making them independent would mean deciding
+    /// what "clear the conversation of the run that is about to be replaced" means, which is a
+    /// question with no useful answer.
     ///
     /// ⚠️ **"Outstanding" means a caller is still listening.** A request whose handler has given up
     /// waiting — the emulator thread died, so nothing will ever `take()` it — leaves a sender whose
     /// receiver is dropped, and treating *that* as outstanding would wedge the endpoint permanently
     /// on the one failure it most needs to stay usable through.
-    pub fn request(&self) -> Result<tokio::sync::oneshot::Receiver<Result<String, String>>, String> {
-        let mut pending = self.pending.lock().expect("new-run mailbox poisoned");
-        if pending.as_ref().is_some_and(|sender| !sender.is_closed()) {
-            return Err("a new run is already being started".to_string());
+    pub fn request(
+        &self,
+        what: ControlRequest,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<String, String>>, String> {
+        let mut pending = self.pending.lock().expect("control mailbox poisoned");
+        if let Some((outstanding, sender)) = pending.as_ref()
+            && !sender.is_closed()
+        {
+            return Err(outstanding.describe().to_string());
         }
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        *pending = Some(sender);
+        *pending = Some((what, sender));
         Ok(receiver)
     }
 
-    fn take(&self) -> Option<tokio::sync::oneshot::Sender<Result<String, String>>> {
-        self.pending.lock().expect("new-run mailbox poisoned").take()
+    fn take(&self) -> Option<(ControlRequest, Answer)> {
+        self.pending.lock().expect("control mailbox poisoned").take()
     }
 }
 
@@ -196,7 +235,7 @@ impl Default for HostConfig {
             status_keepalive: Duration::from_secs(2),
             run: None,
             checkpoint_interval: Duration::from_secs(60),
-            new_runs: None,
+            control: None,
             // Every test loads a fixture of a game already in progress, so the default is the one
             // that leaves the trainer's name alone.
             fresh_game: false,
@@ -771,6 +810,46 @@ impl EmulatorHost {
         Ok(run_id)
     }
 
+    /// **Throw away the model's memory of this run and leave the run itself alone.**
+    ///
+    /// The counterpart to [`Self::start_new_run`], and the opposite trade: that one replaces the
+    /// game and everything written about it, this one replaces only what was written. The game, the
+    /// save state, the run directory, the transcript and the battle script all carry on untouched;
+    /// the conversation starts again from the system prompt and the plan is deleted.
+    ///
+    /// It exists for the run that has talked itself into a corner. A conversation is append-only by
+    /// construction (`docs/llm-turn-loop.md`: after the system prompt the history only ever grows at
+    /// the end), so a model that has convinced itself the game is broken reads that conclusion back
+    /// on every request until a compaction happens to drop it, and the only cure was `POST
+    /// /api/new-run` — which throws away the playthrough as well. The plan goes with it because the
+    /// plan is the one thing that would otherwise survive, and a plan written by the conversation
+    /// being deleted is the same corner in a file.
+    ///
+    /// ⚠️ **This is a request rather than an act, and it lands at the model's next turn.** The run
+    /// directory has one writer and it is the worker thread — `history.json` and `todo.json` are
+    /// its files, and the emulator thread deleting one from under it would race the checkpoint at
+    /// the end of every turn. So the policy is told here and the files change over there, at the
+    /// top of the next `Worker::run_one`. The turn in flight is cancelled to make that prompt: see
+    /// `LlmPolicy::clear_conversation`.
+    ///
+    /// ⚠️ **The battle script is deliberately kept.** It is a program rather than a memory, it is
+    /// visible on the page and editable by hand, and a run whose conversation has gone wrong is
+    /// usually one whose script is quietly deciding three hundred battles perfectly well.
+    fn clear_conversation(&mut self) -> Result<String, String> {
+        let run = self.config.run.as_ref().map(|current| current.get());
+        self.agent.clear_conversation(run.as_ref().map(|run| run.path()))?;
+        let run_id = run.map(|run| run.run_id()).unwrap_or_default();
+        self.published.publish_event(UiEventBody::Notice {
+            level: "info",
+            message: "the model's conversation and plan were cleared. It starts again from the \
+                      system prompt at its next turn; the game, the run and the battle script are \
+                      untouched"
+                .to_string(),
+        });
+        println!("gb serve — cleared the conversation and the plan for {run_id}");
+        Ok(run_id)
+    }
+
     /// One iteration of the loop. Returns whether any emulation happened, which is the loop's cue
     /// that it is behind and should come straight back rather than sleep.
     ///
@@ -782,8 +861,12 @@ impl EmulatorHost {
         // agent is between decisions and no borrow of `gb` is outstanding. A `Mutex::try_lock`-free
         // `take()` on an empty mailbox is a lock and a `None`, which is why this can sit on the hot
         // path unconditionally.
-        if let Some(sender) = self.config.new_runs.as_ref().and_then(|mailbox| mailbox.take()) {
-            let _ = sender.send(self.start_new_run());
+        if let Some((what, sender)) = self.config.control.as_ref().and_then(|mailbox| mailbox.take()) {
+            let answer = match what {
+                ControlRequest::NewRun => self.start_new_run(),
+                ControlRequest::ClearConversation => self.clear_conversation(),
+            };
+            let _ = sender.send(answer);
         }
         // **The end of the game**, answered here for the reason above and not where the event is
         // found: filing a run swaps the run directory out from under the transcript thread, and the
@@ -1750,11 +1833,11 @@ mod tests {
 
         let published = Published::new();
         let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
-        let new_runs = Arc::new(NewRunRequests::default());
+        let control = Arc::new(ControlRequests::default());
         let first = current.get();
         let mut host = host_with(Arc::clone(&published), |config| {
             config.run = Some(Arc::clone(&current));
-            config.new_runs = Some(Arc::clone(&new_runs));
+            config.control = Some(Arc::clone(&control));
             // Longer than this test runs, so no *periodic* checkpoint can fire and the state file
             // below can only have been written by the swap.
             config.checkpoint_interval = Duration::from_secs(3600);
@@ -1774,7 +1857,7 @@ mod tests {
         assert!(!first.path().join("state.gbst").exists(), "a periodic checkpoint fired after all");
 
         // Ask exactly as the handler does, then give the emulator the one tick it needs.
-        let receiver = new_runs.request().expect("the mailbox is empty");
+        let receiver = control.request(ControlRequest::NewRun).expect("the mailbox is empty");
         host.tick();
         let run_id = receiver.blocking_recv().expect("the emulator answered").expect("a new run");
 
@@ -1904,16 +1987,91 @@ mod tests {
         let _ = transcript.join();
     }
 
+    /// **`POST /api/clear`'s half of the same seam.** It is answered on the same tick, by the same
+    /// mailbox, and the assertion is everything it must *not* do: the run directory is the one it
+    /// was, the game is still where it had walked to, and no checkpoint was taken.
+    ///
+    /// ⚠️ **It is played here by a `RandomPolicy`, which is the second half of the test.** No model
+    /// is deciding anything, so there is no conversation to clear, and the endpoint has to say so
+    /// rather than answer 200 to a request that did nothing at all. The default
+    /// [`Policy::clear_conversation`] is what makes that true for every policy that is not
+    /// `LlmPolicy`; `llm_policy::tests::a_clear_throws_the_conversation_and_the_plan_away_and_plays_on`
+    /// is the same seam with a model on the other end of it.
+    #[test]
+    fn a_clear_leaves_the_run_and_the_game_exactly_where_they_were() {
+        use crate::pokemon::PokemonApiTrait;
+        use crate::run::{Origin, RunDir};
+
+        let scratch = crate::run::tests::Scratch::new("host-clear");
+        let validate = |bytes: &[u8]| GameBoy::dmg(crate::pokemon::roms::POKERED).load_state(bytes).is_ok();
+        let (run, origin, _) = RunDir::open(&scratch.0, false, "random", &validate).expect("a fresh run");
+        assert_eq!(origin, Origin::Fresh);
+
+        let published = Published::new();
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let control = Arc::new(ControlRequests::default());
+        let before = current.get();
+        let mut host = host_with(Arc::clone(&published), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.control = Some(Arc::clone(&control));
+            config.checkpoint_interval = Duration::from_secs(3600);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while host.emulated.to_duration() < Duration::from_secs(8) && Instant::now() < deadline {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(host.emulated.to_duration() >= Duration::from_secs(8), "the host barely ran");
+        let played = {
+            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            api.game_state().expect("a readable state")
+        };
+
+        let receiver = control.request(ControlRequest::ClearConversation).expect("the mailbox is empty");
+        host.tick();
+        let answer = receiver.blocking_recv().expect("the emulator answered");
+        let refusal = answer.expect_err("a run nothing is thinking about has no conversation to clear");
+        assert!(refusal.contains("not being played by a model"), "{refusal}");
+
+        assert_eq!(current.get().run_id(), before.run_id(), "a clear must not swap the run directory");
+        assert!(!before.path().join("state.gbst").exists(), "a clear must not checkpoint, let alone reset");
+        let after = {
+            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            api.game_state().expect("a readable state")
+        };
+        assert_eq!(after.map.map, played.map.map, "the game was restarted rather than left alone");
+        // …and the emulator is still running, on the same clock rather than one zeroed by a swap.
+        let emulated = host.emulated;
+        host.tick();
+        assert!(host.emulated >= emulated, "the clock went backwards, so something reset it");
+    }
+
     /// The mailbox refuses a second request only while someone is still listening for the first —
     /// otherwise a handler that gave up would wedge the endpoint for the life of the process.
+    ///
+    /// ⚠️ **And it refuses across commands, not only within one.** Both are answered on the same
+    /// tick, so a clear outstanding must hold off a reset as well; the refusal names whichever one
+    /// is actually in the way, because "one of the two admin endpoints is busy" is not a message an
+    /// operator can act on.
     #[test]
-    fn the_new_run_mailbox_refuses_a_concurrent_request_but_not_an_abandoned_one() {
-        let mailbox = NewRunRequests::default();
+    fn the_control_mailbox_refuses_a_concurrent_request_but_not_an_abandoned_one() {
+        let mailbox = ControlRequests::default();
 
-        let receiver = mailbox.request().expect("the first is accepted");
-        assert!(mailbox.request().is_err(), "a second request while the first is outstanding");
+        let receiver = mailbox.request(ControlRequest::NewRun).expect("the first is accepted");
+        assert!(mailbox.request(ControlRequest::NewRun).is_err(), "a second while the first is outstanding");
+        let refusal = mailbox.request(ControlRequest::ClearConversation).expect_err("nor a clear");
+        assert!(refusal.contains("new run"), "the refusal names the wrong command: {refusal}");
 
         drop(receiver);
-        assert!(mailbox.request().is_ok(), "an abandoned request must not block the next one");
+        // ⚠️ Bound rather than `is_ok()`: a `Receiver` dropped on the spot is an abandoned request,
+        // which is exactly the case the line above proves does *not* hold the mailbox.
+        let receiver = mailbox
+            .request(ControlRequest::ClearConversation)
+            .expect("an abandoned request must not block the next one");
+        // …and the other way round, so neither command is the privileged one.
+        let refusal = mailbox.request(ControlRequest::NewRun).expect_err("the clear is outstanding");
+        assert!(refusal.contains("conversation"), "the refusal names the wrong command: {refusal}");
+        drop(receiver);
     }
 }

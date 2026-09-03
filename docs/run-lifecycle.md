@@ -1,14 +1,16 @@
-# Run lifecycle: a new run in place, and the end of the game
+# Run lifecycle: a new run in place, a cleared conversation, and the end of the game
 
-Read before touching `src/run/`, `host.rs`'s new-run and completion seams, `/reset-game` or
-`POST /api/new-run`.
+Read before touching `src/run/`, `host.rs`'s new-run, clear and completion seams, `/reset-game`,
+`POST /api/new-run` or `POST /api/clear`.
 
 ## Starting a new run
 
-- `GET /reset-game` and `POST /api/new-run` are the only channel from HTTP back into the emulator.
-  `host::NewRunRequests` carries only the fact that someone asked, and it is answered at the top
-  of `EmulatorHost::tick`, where nothing is half-done.
-- Both are off unless `GB_ADMIN_TOKEN` is set and 404 (not 403) when it is not, because the server
+- `GET /reset-game`, `POST /api/new-run` and `POST /api/clear` are the only channel from HTTP back
+  into the emulator. `host::ControlRequests` carries one `host::ControlRequest` — a closed enum of
+  two, with no payload — and it is answered at the top of `EmulatorHost::tick`, where nothing is
+  half-done. One mailbox for both commands, so either outstanding refuses the other; the refusal
+  names which.
+- All three are off unless `GB_ADMIN_TOKEN` is set and 404 (not 403) when it is not, because the server
   is public and should not advertise a reset endpoint. Blank counts as unset. When set,
   `/reset-game` answers an unauthenticated GET with a Basic challenge so the browser collects the
   password and the SPA holds no token; the username is ignored and the password is everything after
@@ -27,12 +29,36 @@ Read before touching `src/run/`, `host.rs`'s new-run and completion seams, `/res
   `run::CurrentRun` per write: the checkpointer, the transcript thread (per event, or a captured
   path appends the new run's events to the old file), `/api/history`, `/api/healthz`. The one
   deliberate exception is `llm::history`, which captures its directory so a turn in flight when the
-  swap lands is filed with the old game; `Worker::apply_restart` therefore uses `History::fresh`,
+  swap lands is filed with the old game; `Worker::apply_reset` therefore uses `History::fresh`,
   never `History::open`, and reopens `TodoList` and `BattleScript` from the new directory.
 - Three traps on the swap, each with a test: checkpoint the outgoing run first (up to a minute lives
   only in memory); `VideoEncoder::restart`, not `default` (deltas diff against `last_sent`, but
   `seq` must survive or a live viewer discards the whole new run); clear `last_status`, or
   send-on-change suppresses the heartbeat that says the run changed.
+
+## Clearing the conversation
+
+- `POST /api/clear` is the *opposite* trade to a new run: the run, the save, the transcript and the
+  battle script all carry on, and what goes is what the model remembers — the conversation and the
+  plan. It is for the run that has talked itself into a corner, where the only cure used to be
+  throwing the playthrough away with it. `EmulatorHost::clear_conversation` has the argument.
+- ⚠️ **It is a request, not an act.** A run directory has one writer and it is the worker thread, so
+  `history.json` and `todo.json` change at the top of the next `Worker::run_one`, not on the tick
+  that answered. The endpoint's body says so. `LlmPolicy::clear_conversation` bumps the generation
+  to make that next turn start now — for promptness, not for correctness; unlike a restart, a stale
+  answer here is about a game that is still there.
+- The two kinds share `Worker::apply_reset` and differ in two lines, both about files. `NewGame`
+  *re-reads* the plan and the battle script from the directory it is given; `Cleared` *deletes* the
+  plan from the directory it is already in (`TodoList::cleared`) and leaves the script alone. Get
+  either backwards and the run plays on holding notes it was told to forget.
+- `History::cleared`, never `open`: the clear's directory is the one that has been playing, so
+  `open` would put the whole conversation straight back. It writes a `cleared` line into
+  `conversation.jsonl` — the log keeps every message, as always — and ends the fresh history on
+  `prompt::CLEARED_NOTE`, which is `RESUMED_NOTE`'s job on a harder case: a model shown six badges
+  and no memory of earning any of them is a model about to file a bug.
+- `Policy::clear_conversation` defaults to an **error**, not a no-op, so a run played by anything
+  but `LlmPolicy` answers "this run is not being played by a model" instead of 200 to a request
+  that did nothing.
 
 ## The end of the game
 

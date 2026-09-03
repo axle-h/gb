@@ -20,11 +20,17 @@ lives in the code.
   never fire again.
 - The checkpoint sits between `decide` returning and `outcomes.send`: durability before visibility,
   since a winning action has the archiver copy the directory on the next tick. The run directory is
-  captured, not re-read per write, and `apply_restart` uses `History::fresh`.
+  captured, not re-read per write, and `apply_reset` uses `History::fresh` or `History::cleared`.
 - `Accounting::resumed` carries the calibration, not the totals (those are rebased by
   `RunDir::checkpoint`). The stored system prompt is compared, never restored; a change logs a
   `warn` and one `system_prompt_changed` line. `prompt::RESUMED_NOTE` tells the model once that the
   save is behind the conversation; `GB_RESTORE_HISTORY=0` starts the conversation over.
+- `POST /api/clear` starts it over on a live process instead: `Worker::apply_reset` with
+  `ResetKind::Cleared` replaces the history (`History::cleared`), **deletes** `todo.json`
+  (`TodoList::cleared`) and resets the accounting, at the top of the next turn because the worker
+  thread is the run directory's only writer. `prompt::CLEARED_NOTE` is `RESUMED_NOTE`'s harder
+  twin: it says the erasure was deliberate, so a model looking at a run it cannot remember does not
+  conclude the game is broken. See `docs/run-lifecycle.md`.
 
 ## The tools
 

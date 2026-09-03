@@ -1226,6 +1226,16 @@ impl PokemonAgent {
         self.hall_of_fame_teams = None;
     }
 
+    /// **`POST /api/clear`** — pass the request straight through to the policy.
+    ///
+    /// ⚠️ **Nothing on the agent is touched, and that is the whole point.** [`Self::restart`] above
+    /// clears every field because the game underneath them is gone; here it is the same game on the
+    /// same tile, so the world graph, the cut tiles and a walk half-finished are all still true. The
+    /// only thing that has changed is what the *model* remembers, and the model is the policy's.
+    pub fn clear_conversation(&mut self, run_dir: Option<&std::path::Path>) -> Result<(), String> {
+        self.policy.clear_conversation(run_dir)
+    }
+
     /// Queue raw button presses, one per agent tick, pre-empting the state machine.
     ///
     /// The escape hatch for a policy that needs to press a button the agent has no action for.
