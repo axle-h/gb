@@ -54,6 +54,12 @@ applies; this is the index.
 - Labels are drawn last and `layout_labels` reserves the player's cell first. A connection is
   labelled once per edge; a warp merges only with its neighbours, never on destination alone (two
   doors into Mt Moon B1F are two doors).
+- ⚠️ **A label for somewhere with no route to it is greyed and carries a `no route` line.** Labels
+  are drawn *after* `draw_unreachable`, so before this the doors on the far side of a ledge were
+  painted exactly like the one under the player's feet and the picture contradicted the turn's
+  `Fenced in:` line. Judged **per cell**, not per destination: Cerulean's trashed house has a front
+  door on one terrace and a back door on the other.
+  `a_label_for_somewhere_out_of_reach_is_greyed_and_says_so`.
 - `MetaTileMap::reachable_tiles` means "routable to", not "standable on": the BFS records walls and
   counters as terminals so a route can end at them. The renderer subtracts obstacles and unsurfable
   water itself. `a_wall_is_dimmed_even_though_the_agent_can_route_to_it`.

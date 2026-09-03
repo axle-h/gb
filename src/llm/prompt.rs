@@ -836,66 +836,24 @@ pub fn situation(
             ));
         }
 
-        // **W3.** ⚠️ **A map's header connectivity is not its walkable connectivity, and until this
-        // line nothing in the turn said so.** `WorldGraph` joins maps by ROM map header, so
-        // `read_route` names the tile to leave by; `MetaTileMap::actions()` asks whether the player
-        // can walk to that tile, so it mints no row. Both are right and they disagree, and a model
-        // handed the disagreement with no explanation concludes the agent is broken. The deployed
-        // run of 2026-09-02 spent **65 turns and ten issue reports** in Cerulean City doing exactly
-        // that: it is a city split into terraces, the ways down are a Cut tree it could not use and
-        // a corridor reachable only through the trashed house's back door, and `read_route(Route5)`
-        // kept answering with a connection tile two terraces away. `CeruleanTrashedHouse` sat in its
-        // own action menu for forty of those turns.
+        // ⚠️ **There was a `Fenced in:` line here, and it is gone on purpose.** It fired on
+        // `MetaTileMap::unreachable_connection_targets` and spent three sentences saying that part
+        // of this map is cut off, which neighbours are on the far side, and to try the doors it
+        // could reach. Every one of those facts is now carried at the point the model meets it:
+        // the crossing has no row in the action menu below (`actions()` asks whether a tile can be
+        // walked to, which is the whole reason the line existed), `read_map`'s picture greys the
+        // label on a warp or an edge there is no route to and writes `no route` on it (see
+        // `map_image`'s `LABEL_INK_OUT_OF_REACH`), and `read_route` hangs the explanation on the
+        // hop that cannot be started rather than broadcasting it (`tools::route_answer`'s
+        // `warning`, which names the door and the map headers).
         //
-        // ⚠️ **Named destinations, not a tile count on its own.** "You can reach 574 squares" is
-        // true of a healthy map too; what is only ever true of a fenced-in one is that a *named
-        // neighbour* has no way into it from here. That is the trigger, and it is why this cannot
-        // become the `Blocked here: Water` line that fired on every coastline in Kanto:
-        // `unreachable_connection_targets` skips a map joined only by a water seam, because that is
-        // the Surf gate rather than a fence.
-        let cut_off = state.map.unreachable_connection_targets();
-        if !cut_off.is_empty() {
-            // `reachable_tiles` is the BFS's key set, which records the *walls* it declined to
-            // expand through as well as the floor, so the obstacles come back out — see its ⚠️.
-            let reachable = state.map.reachable_tiles().iter()
-                .filter(|at| !matches!(state.map.tile_at(**at), MetaTile::Obstacle))
-                .count();
-            let names: Vec<String> = cut_off.iter().map(|map| format!("{map}")).collect();
-            out.push_str(&format!(
-                "Fenced in: {reachable} squares of {} can be reached from where you are standing, \
-                    and {} on a part of this map that is cut off from here. Walking that way cannot \
-                    work, the action menu below will never offer those crossings, and `read_route` \
-                    will still name them, because the route graph is built from the game's map \
-                    headers and does not know which terrace you are standing on.\n",
-                state.map.map,
-                match names.split_last() {
-                    Some((last, [])) => format!("the way into {last} is not one of them: it is"),
-                    Some((last, rest)) => format!(
-                        "the ways into {} and {last} are not among them: they are", rest.join(", ")),
-                    None => String::new(),
-                },
-            ));
-            // ⚠️ **The half that was missing every single time.** Every report the run filed asked
-            // for a walking route, because a walking route is the only thing it had been shown; the
-            // answer in Cerulean, in Celadon and on Rock Tunnel 1F was a *warp*. A door is not
-            // scenery in this game, it is an edge of the map graph, and the model has to be told
-            // that before it will spend a turn on one.
-            let doors: Vec<&str> = menu.iter()
-                .filter(|row| row.id.ends_with(":Warp"))
-                .map(|row| row.id.as_str())
-                .collect();
-            out.push_str(&match doors.is_empty() {
-                true => "The way on is an edge you can reach, then back onto this map by a \
-                    different one: a map is entered where you cross into it, so coming in by \
-                    another edge puts you somewhere else on it.\n".to_string(),
-                false => format!(
-                    "What usually joins two parts of one map is a door rather than a street, so try \
-                        the warps you *can* reach — {} — and look for a back exit; failing that, leave \
-                        by an edge you can reach and come back onto this map by a different one.\n",
-                    doors.join(", "),
-                ),
-            });
-        }
+        // ⚠️ **Restoring it needs a reason that is not "the model was confused".** It was written
+        // for the deployed run of 2026-09-02, which spent 65 turns fenced in on a Cerulean terrace;
+        // the run of 2026-09-03 read the line, disbelieved it, and filed a bug — because the
+        // picture beside it was labelling the unreachable doors in the same white as the reachable
+        // one. The picture was the thing that was wrong. A turn that states a conclusion the model
+        // can already draw from the menu in front of it is prose it has to reconcile rather than
+        // information, and this one was reconciled by deciding the agent was broken.
     }
     let badges: Vec<String> = state.badges.iter_names().map(|(name, _)| name.to_string()).collect();
     out.push_str(&format!(
@@ -1547,45 +1505,6 @@ mod tests {
     fn overworld_turn(state: &GameState, menu: &[MenuItem]) -> String {
         situation(DecisionKind::Overworld, state, &ApiSnapshot::default(), &[], menu,
                   TurnContext::None, &[])
-    }
-
-    /// **W3 — say when the player is fenced in.**
-    ///
-    /// Cerulean City is terraced and the deployed run of 2026-09-02 stood on the wrong terrace for
-    /// 65 turns, filing ten issue reports, while `read_route` kept naming a Route 5 connection tile
-    /// it could not walk to. Nothing in the turn said the two halves of the city are not joined by
-    /// a street, and nothing said the joins that do exist are doors: `CeruleanTrashedHouse` was in
-    /// its own action menu for forty of those turns.
-    #[test]
-    fn a_map_the_player_is_fenced_in_on_says_so_and_says_which_way_out() {
-        let state = state_from(include_bytes!("../pokemon/data/split-cerulean.bin"));
-        let menu = crate::llm::tools::overworld_menu(&state, None);
-        let turn = overworld_turn(&state, &menu);
-
-        assert!(turn.contains("Fenced in:"), "{turn}");
-        // Named destinations, because a tile count on its own is true of a healthy map too.
-        assert!(turn.contains("Route5") && turn.contains("Route9"), "{turn}");
-        // ⚠️ **And why `read_route` will go on disagreeing**, which is the sentence that stops the
-        // model concluding the agent is broken and filing a report about it.
-        assert!(turn.contains("map headers"), "{turn}");
-        // ⚠️ The half that was missing every single time: the way between two parts of one map is a
-        // door, and here is one you can reach.
-        assert!(turn.contains("warps you *can* reach"), "{turn}");
-        assert!(turn.contains("CeruleanCity:28,12:Warp"), "the trashed house is the answer: {turn}");
-
-        // Silent where nothing is fenced off. Rock Tunnel 1F has no map connections at all and its
-        // south exit genuinely is the B1F ladder, so the agent is right and there is nothing to say.
-        let cave = state_from(include_bytes!("../pokemon/data/soak-rock-tunnel.bin"));
-        assert_eq!(cave.map.map, crate::pokemon::map::Map::RockTunnel1F);
-        assert!(!overworld_turn(&cave, &[]).contains("Fenced in:"), "nothing is fenced off here");
-
-        // ⚠️ **Only on the turn with an action menu**, like `Blocked here` beside it: on a naming
-        // screen it is overworld trivia in the middle of a question about a word.
-        for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::Stuck] {
-            let other = situation(elsewhere, &state, &ApiSnapshot::default(), &[], &menu,
-                                  TurnContext::None, &[]);
-            assert!(!other.contains("Fenced in:"), "{elsewhere:?}: {other}");
-        }
     }
 
     /// **W7 — a map whose every door comes out on one other map says so.**

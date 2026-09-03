@@ -1263,6 +1263,49 @@ fn map_view_lists_only_the_people_the_menu_offers() {
     assert!(someone_out_of_reach, "no fixture has anyone out of reach, so the filter is untested");
 }
 
+/// The same property for doors, which had it only for people.
+///
+/// `read_map`'s warp list is the second half of what the deployed run of 2026-09-03 read: it was
+/// fenced into the eastern pocket of Route 4 by the route's one-way ledges, and the JSON listed the
+/// three Mt Moon doors at the far end with nothing to say they could not be opened, exactly as the
+/// picture labelled them. The list is right to carry them — a door out of reach is still where you
+/// come out if you get to it, which is the thing a plan is made of — so it flags rather than
+/// filters, the same call `read_route` makes for a hop it cannot start.
+///
+/// ⚠️ **One direction only, and deliberately.** A warp the menu offers must be flagged reachable,
+/// or the two views contradict each other; the converse is allowed, because `actions()` also drops
+/// a warp entry the cartridge would refuse to open when another door leads to the same place (see
+/// `MetaTileMap::warp_trigger`), and that is a row missing for a reason this flag does not know.
+#[test]
+fn map_view_flags_every_warp_the_menu_cannot_offer() {
+    use crate::pokemon::observe;
+    use crate::pokemon::tile::MetaTile;
+    let mut something_out_of_reach = false;
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data")).expect("the fixture directory") {
+        let path = entry.expect("a directory entry").path();
+        if path.extension().is_none_or(|e| e != "bin") { continue; }
+        let snapshot = std::fs::read(&path).expect("a readable fixture");
+        let mut fixture = TestFixture::new(&snapshot, Duration::from_secs(10), vec![]);
+        let Ok(state) = fixture.try_game_state() else { continue };
+        let view = observe::map_view(&state);
+        // Keyed on the warp's own tile, which is what the flag is about and what the picture's
+        // label is drawn over — not on where it lands.
+        let reachable: std::collections::BTreeSet<(u8, u8)> = view.warps.iter()
+            .filter(|w| w.reachable_from_here)
+            .map(|w| (w.at.x, w.at.y))
+            .collect();
+        for action in state.map.actions() {
+            if !matches!(action.tile, MetaTile::Warp { .. }) { continue }
+            let at = (action.destination.x, action.destination.y);
+            assert!(reachable.contains(&at),
+                    "{}: the menu offers the warp at {at:?} and `read_map` says there is no route to it",
+                    path.display());
+        }
+        if view.warps.iter().any(|w| !w.reachable_from_here) { something_out_of_reach = true; }
+    }
+    assert!(something_out_of_reach, "no fixture has a door out of reach, so the flag is untested");
+}
+
 /// The badge strip the web UI draws, against a snapshot that has actually earned some.
 ///
 /// `observation_views_describe_the_snapshot` checks the shape on a fixture with **no** badges, which

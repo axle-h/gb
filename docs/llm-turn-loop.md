@@ -88,9 +88,8 @@ lives in the code.
   still coming. `prompt`'s `Blocked here:` line names what would clear a `CutTree` and nothing
   else: naming water fired on every coast and one run spent 65 turns blaming it.
   `fly_bike::blocked_by` still does not check the Thunder Badge.
-- Three more lines on the overworld turn, each with its own narrow trigger, each silent otherwise.
-  `Fenced in:` fires on `unreachable_connection_targets` being non-empty and names the neighbours,
-  why `read_route` will go on disagreeing, and the reachable warps. The gate line fires when
+- Two more lines on the overworld turn, each with its own narrow trigger, each silent otherwise.
+  The gate line fires when
   `warp_targets` holds several landings on one map and says nothing beyond it is behind a door here.
   The bin line fires on a map with `HiddenObject::TrashCan` and says a wrong second guess re-rolls
   the first switch and that `then` chains four bins per request. ⚠️ **The bin line reads

@@ -1307,27 +1307,6 @@ impl MetaTileMap {
         counts.into_iter().map(|(noun, _)| noun).collect()
     }
 
-    /// The adjacent maps this map's header joins it to that the player **cannot walk to the edge
-    /// of** from where they are standing.
-    ///
-    /// ⚠️ **The gap this closes is between two different graphs.** `WorldGraph` joins maps by ROM
-    /// map header and `read_route` answers out of it, so it named the tile to leave Cerulean by for
-    /// 65 turns while `actions()` — which does ask whether the tile can be walked to — minted no row
-    /// for it. Neither was wrong on its own terms and the model was given no way to tell them apart.
-    /// This is that difference, said out loud.
-    pub fn unreachable_connection_targets(&self) -> Vec<Map> {
-        let mut maps: Vec<Map> = self.connection_targets.iter().copied()
-            .filter(|to_map| {
-                let crossings = self.crossings(*to_map);
-                // A map joined only by water is not "fenced off": it is the Surf gate, which the
-                // turn says elsewhere and which is true of every coastline in Kanto.
-                !crossings.is_empty() && !crossings.iter().any(|c| c.reachable)
-            })
-            .collect();
-        maps.sort_by_key(|map| format!("{map}"));
-        maps
-    }
-
     /// Build the action that crosses a connection to `to_map` landing at raw `to_position`, if that
     /// specific connection tile is reachable. Kept out of `actions()` (which emits only the nearest
     /// crossing per adjacent map) so `EnterMap { to_position }` can target a particular landing — e.g.
