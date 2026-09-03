@@ -146,6 +146,36 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write_player_pokemon_party(party)
     }
 
+    /// Knock the whole party out, active battle Pokémon included — i.e. make the next thing the
+    /// cartridge checks a **black-out**.
+    ///
+    /// Called mid-battle this ends the fight: `MainInBattleLoop`'s `.checkAnyPartyAlive`
+    /// (`engine/battle/core.asm:158-162`) and `HandlePlayerMonFainted` (`:703-706`) both run
+    /// `AnyPartyAlive` and jump to `HandlePlayerBlackOut` when it answers no, so the loss arrives
+    /// through the game's own path — the fade, the halved money, the heal and the warp to the last
+    /// Pokémon Centre all happen exactly as they would have.
+    ///
+    /// ⚠️ **`wBattleMonHP` is the second write and it is not optional.** The battle's copy of the
+    /// active Pokémon is a *separate* struct from its party entry, and the faint checks that run
+    /// most often are on the copy — zero only the party and the fight simply carries on with a
+    /// Pokémon the party says is dead. Harmless outside a battle, where the copy is stale anyway.
+    ///
+    /// The debug tier, so: fixtures, seeding and diagnostics only. Losing a battle *legitimately*
+    /// is not something a test can arrange — it needs the enemy to roll enough damage.
+    pub fn debug_faint_party(&mut self) {
+        let base = pokered_symbols::wPartyMons.address;
+        for index in 0..crate::pokemon::encoding::PokemonBlockAddresses::PARTY_MAX {
+            // Offset 1 of the party struct is the big-endian current HP — see
+            // `PokemonEncoding::read_pokemon`, which reads it from exactly here.
+            let hp = base + index * crate::pokemon::encoding::PokemonBlockAddresses::POKEMON_BLOCK_SIZE + 1;
+            self.mmu_mut().write(hp, 0);
+            self.mmu_mut().write(hp + 1, 0);
+        }
+        let battle_hp = pokered_symbols::wBattleMonHP.address;
+        self.mmu_mut().write(battle_hp, 0);
+        self.mmu_mut().write(battle_hp + 1, 0);
+    }
+
     /// **Workstream J1** — force the OPTION menu's settings by writing `wOptions` directly.
     ///
     /// §3 of the plan rules the OPTION *menu driver* out of scope — the options are worth setting and

@@ -31,6 +31,14 @@ below is a comment on the function or constant it names; this is the index of th
   `BattleState::confirming` is the window after `Navigating` in which geometry is believed over
   text; without it a battle turn was decided twice, one paid request each.
 - Which text reader to use is a fact about the game (`wIsInBattle`), not about `AgentState`.
+- `wIsInBattle` has a **third** value: `$ff`, the loss sentinel `home/overworld.asm:355-359`
+  writes before `HandleBlackOut` (`battle::LOST_BATTLE`). It means the battle is over and the
+  player has not been moved yet, so nothing may read it as a battle (`read_battle_state`) and
+  no decision may be put to the policy while it is set (`agent::blackout_in_flight`, which
+  re-arms `AwaitingOverworldAction`'s delay). Without both, a black-out turn described the map
+  the fight was on, a party on 0 HP and a battle that had ended; 31 of one deployed run's 38
+  black-outs spent a request on it. The poison black-out is deliberately not covered — see the
+  ⚠️ on `blackout_in_flight` for why waiting on `wOutOfBattleBlackout` deadlocks.
 
 ## Closed loops under A
 

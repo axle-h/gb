@@ -2474,3 +2474,119 @@ fn shop_with_a_policy_that_never_answers(money: u32) -> (u32, usize, Vec<(ItemId
     let after = state.bag.iter().map(|i| (i.id, i.quantity)).collect();
     (state.money, refusals, before, after)
 }
+
+/// **A black-out ends the battle a second or two before it moves the player, and the agent must not
+/// ask the model what to do in the gap.**
+///
+/// The battle engine returns the moment the party is down, so `wIsInBattle` leaves its wild/trainer
+/// value, `assert_battle_state` correctly says the battle is over and the agent drops to `Idle` —
+/// while `HandleBlackOut` is still fading the screen, halving the money, healing the party and
+/// warping the player to the Pokémon Centre they last accepted a heal at. `AwaitingOverworldAction`
+/// then counted down its ordinary second and asked, describing a world that had already gone.
+///
+/// The deployed run of 2026-09-02 is the measurement. Turn 57 was put to the model as
+/// `ViridianForest at (26, 19)`, a party at `0/25` and `0/21` HP, ¥1960, a live `### Battle` block
+/// naming the Weedle that had just won, and the nine Viridian Forest actions. It read the blackout
+/// out of the text and answered well — take the south gate out of the forest — and the id was
+/// rejected on arrival ("`ViridianForest:17,47:Warp` is an id for `ViridianForest` and you are in
+/// `ViridianCity`"), because ids are minted for the map you are standing on. **31 of the previous
+/// run's 38 blackouts spent a whole request that way**, and the Cerulean Gym stretch is a loop of
+/// them.
+///
+/// ⚠️ **Two independent halves, so both are asserted.** [`crate::pokemon::battle::LOST_BATTLE`] is
+/// why the overworld turn carried a battle at all — `$ff` is the *loss* sentinel and
+/// `read_battle_state` was reading it as a battle in progress — and
+/// [`crate::pokemon::agent::blackout_in_flight`] is why it carried the wrong map. Fixing only the
+/// first leaves the model routing from a forest it is not in.
+///
+/// ⚠️ **The assertion is on the *first* overworld decision after the loss, not on where the run ends
+/// up.** The second decision was always right: the agent re-polls, and by then the warp has landed.
+/// A test that waited for the player to reach the Centre passes on the bug.
+#[test]
+fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::policy::Policy;
+    use crate::pokemon::world_graph::WorldGraph;
+    use std::sync::{Arc, Mutex};
+
+    /// Every overworld decision the policy was offered: the map it was told it was on, whether it
+    /// was handed a battle, and the party's total HP.
+    #[derive(Default)]
+    struct Log {
+        overworld: Vec<(Map, bool, u16)>,
+        /// The map the *cartridge* says the player is on at the same instant, which is the same
+        /// thing said by something the fix does not touch.
+        battles_fought: usize,
+    }
+
+    /// Fights with whatever it has and never walks anywhere, so the only overworld decisions in the
+    /// log are the ones the agent volunteered.
+    struct Probe { log: Arc<Mutex<Log>> }
+
+    impl Policy for Probe {
+        fn name(&self) -> &'static str { "blackout-probe" }
+
+        fn pick_overworld_action(&mut self, state: &GameState, _: &WorldGraph) -> Option<OverworldAction> {
+            let hp: u16 = state.pokemon.iter().map(|mon| mon.current_hp).sum();
+            self.log.lock().expect("the log is never poisoned")
+                .overworld.push((state.map.map, state.battle.is_some(), hp));
+            None
+        }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            self.log.lock().expect("the log is never poisoned").battles_fought += 1;
+            state.battle.as_ref().and_then(|b| b.player.moves[0])
+                .map(|battle_move| BattleAction::Fight { slot: 0, battle_move })
+        }
+    }
+
+    let log = Arc::new(Mutex::new(Log::default()));
+    let mut fixture = TestFixture::with_policy(
+        BATTLE_STATE, Duration::from_secs(180), Box::new(Probe { log: Arc::clone(&log) }));
+
+    // Where the fight is happening, read before it is lost — after the warp the cartridge answers
+    // with the Centre's town instead, which is the whole point.
+    let battlefield = fixture.game_state().map.map;
+
+    // Let the battle get going, then take the party out from under it. See `debug_faint_party` for
+    // why losing on purpose cannot be arranged with button input.
+    for _ in 0..60 { fixture.step(); }
+    fixture.api().debug_faint_party();
+
+    let mut blacked_out = false;
+    while fixture.total_cycles < fixture.max_cycles {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::TextBox { message } = &event {
+                if crate::llm::battle_report::is_blackout(message) { blacked_out = true; }
+            }
+        }
+        // Two overworld decisions past the loss is enough: the first is the one that used to be
+        // wrong and the second is the one that always worked.
+        if blacked_out && log.lock().expect("the log is never poisoned").overworld.len() >= 2 {
+            break;
+        }
+    }
+
+    let log = log.lock().expect("the log is never poisoned");
+    // ⚠️ The preconditions, or this proves nothing: a run that never fought and never lost has no
+    // gap to ask in, and would pass on the broken build.
+    assert!(log.battles_fought > 0, "the probe never reached a battle decision, so nothing was lost");
+    assert!(blacked_out, "the party was knocked out but the cartridge never said the player blacked out");
+
+    let first = *log.overworld.first()
+        .expect("the agent should ask for an overworld action once the black-out warp has landed");
+    let (map, had_battle, hp) = first;
+    assert_ne!(map, battlefield,
+               "the first overworld decision after a black-out was put on {battlefield:?}, the map \
+                the fight was on — the warp had not run yet. All of them: {:?}", log.overworld);
+    assert!(!had_battle,
+            "the first overworld decision after a black-out carried a live battle; `wIsInBattle` \
+             was the {:#04x} loss sentinel and was read as a fight in progress. All of them: {:?}",
+            crate::pokemon::battle::LOST_BATTLE, log.overworld);
+    assert!(hp > 0,
+            "the first overworld decision after a black-out showed a party on {hp} HP — the heal \
+             inside `ResetStatusAndHalveMoneyOnBlackout` had not run. All of them: {:?}",
+            log.overworld);
+}

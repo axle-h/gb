@@ -91,6 +91,39 @@ fn player_is_spinning(api: &PokemonApi) -> bool {
         & BIT_SPINNING != 0
 }
 
+/// True from the moment the player's last Pokémon faints until the black-out warp has put them
+/// outside a Pokémon Centre. See [`crate::pokemon::battle::LOST_BATTLE`] for the byte.
+///
+/// ⚠️ **A blackout ends the battle a second or two before it moves the player, and the agent used
+/// to ask the model what to do in that gap.** The battle engine returns as soon as the party is
+/// down, so `wIsInBattle` leaves its wild/trainer value and [`Self::assert_battle_state`] correctly
+/// reports the battle over and drops to `Idle`; `AwaitingOverworldAction` then counts down
+/// [`DelayContext::long`] and polls. Meanwhile `HandleBlackOut` is still fading the screen. The
+/// decision that came out of that gap described a world that no longer existed by the time it was
+/// answered — deployed on 2026-09-02, the model was shown `ViridianForest at (26, 19)`, a party at
+/// `0/25` and `0/21` HP, ¥1960, and the nine Viridian Forest actions, while the game was busy
+/// putting it outside the Viridian Pokémon Centre with a full party and ¥980. It read the blackout
+/// out of the text and answered sensibly — take the south gate out of the forest — and the id was
+/// rejected on arrival, because ids are minted for the map you are standing on. **31 of the
+/// previous run's 38 blackouts spent a whole request that way**, and the Cerulean Gym stretch is a
+/// loop of them.
+///
+/// ⚠️ **Nothing here is a timeout and nothing needs one.** `$ff` is written and cleared inside a
+/// single `HandleBlackOut` call chain that takes no player input, so waiting on it cannot wedge;
+/// the [`MAX_BLACKOUT_WAIT_TICKS`] bound below exists for the same reason every other wait in this
+/// file has one, not because a path is known that would reach it.
+///
+/// ⚠️ **The poison black-out is deliberately *not* covered.** `wOutOfBattleBlackout`
+/// (`engine/events/poison.asm:112`) says the same thing for a party finished off by poison in the
+/// field, but it is only rewritten on a **step** — so it stays `$ff` from the warp until the player
+/// walks again, and an agent that waits on it waits for a step it is the one refusing to take.
+/// That path is also far less exposed: the player is mid-`OverworldMovement`, and the walk aborts
+/// on the map change, which is evidence the new map has already loaded.
+fn blackout_in_flight(api: &PokemonApi) -> bool {
+    api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wIsInBattle)
+        == crate::pokemon::battle::LOST_BATTLE
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OverworldActionAbortedReason {
     Unknown,
@@ -420,6 +453,16 @@ const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
 /// there. See [`PokemonAgent::pending_pickup`] — 10 ticks is 200 ms of game time, far longer than
 /// the `HideObject` at the end of the script needs and far shorter than a decision.
 const PICKUP_SETTLE_TICKS: u16 = 10;
+
+/// How long [`PokemonAgent::blackout_ticks`] will hold an overworld decision back while
+/// [`blackout_in_flight`] says the black-out warp has not landed — 1500 ticks, 30 s of game time.
+///
+/// ⚠️ **A ceiling on a wait that ends by itself, not a tuned duration.** The measured window is a
+/// fade, a money halving, a party heal and a map load — a couple of seconds — and the byte it waits
+/// on is cleared by the cartridge with no input from anyone. Thirty seconds is far past anything
+/// `HandleBlackOut` can take and still well inside `GB_STUCK_TIMEOUT_SECS` (300), so if this ever
+/// does trip, the run asks the question late rather than not at all and the watchdog stays quiet.
+const MAX_BLACKOUT_WAIT_TICKS: u16 = 1500;
 
 /// What [`BattleState::Navigating`] lined up, carried into the confirm so the press that follows is
 /// issued **once** and then checked against the game's own record of what it selected.
@@ -1053,6 +1096,11 @@ pub struct PokemonAgent {
     /// the game.
     pending_pickup: Option<(MetaTile, u16)>,
 
+    /// Overworld ticks spent so far waiting out a black-out warp — see [`blackout_in_flight`] for
+    /// what is being waited for and [`MAX_BLACKOUT_WAIT_TICKS`] for the ceiling. Reset by
+    /// [`Self::poll_policy`], i.e. by the agent reaching the decision point this defers.
+    blackout_ticks: u16,
+
     // ── The end of the game ──────────────────────────────────────────────────────────────────────
     /// `wNumHoFTeams` as of the last tick, and `None` until the first one — see
     /// [`Self::check_hall_of_fame`], where the whole of the edge trigger lives.
@@ -1092,6 +1140,7 @@ impl PokemonAgent {
             menu_handover_ticks: 0,
             forget_choice: None,
             pending_pickup: None,
+            blackout_ticks: 0,
             hall_of_fame_teams: None,
         }
     }
@@ -1125,6 +1174,7 @@ impl PokemonAgent {
         self.manual_input_held = 0;
         self.cycles_since_poll = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
+        self.blackout_ticks = 0;
         // Back to `None`, not to `Some(0)`: the next tick re-seeds from whatever the freshly loaded
         // cartridge says. `POST /api/new-run` loads the start-of-game state, so that is 0 — but a
         // future caller that restarts from something else must not be told it has just won.
@@ -1205,6 +1255,9 @@ impl PokemonAgent {
         // Reaching a decision point is what "out of the menus" means — see the ⚠️ in `ReadingTextBox`.
         self.escaping_menus = false;
         self.stuck_reported_at = MachineCycles::ZERO;
+        // Cleared here rather than where the wait ends, for the same reason `escaping_menus` is:
+        // the counter measures a deferral, and a decision point is what ends one.
+        self.blackout_ticks = 0;
         self.policy.service_tools(game_state, api, &self.world_graph);
     }
 
@@ -2165,7 +2218,26 @@ impl PokemonAgent {
                 }
             }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
-                if delay.tick(delta_cycles) {
+                // ⚠️ **A black-out warp that has not landed yet is not a world to ask about.** See
+                // [`blackout_in_flight`] for the whole argument and for what the model was sent
+                // when this was missing. Re-arming the delay rather than skipping one poll is what
+                // buys the settle: the wait ends where the cartridge clears the byte, and the
+                // ordinary [`DelayContext::long`] then runs from *there*, giving the new map the
+                // same second every other warp landing gets before anything reads it.
+                //
+                // ⚠️ Skipped with a flag rather than an early `return`, which would jump over the
+                // `new_events` drain at the bottom of this function — the mistake the ⚠️ on the
+                // battle reader's flush is about. Re-arming alone is *nearly* enough (a 1000 ms
+                // delay does not fire on a 20 ms tick) but not quite: `update` coalesces every whole
+                // [`AGENT_RESOLUTION`] it has been given, so one call after a long host stall can
+                // carry more than a second and tick straight through.
+                let warping = blackout_in_flight(api) && self.blackout_ticks < MAX_BLACKOUT_WAIT_TICKS;
+                if warping {
+                    self.blackout_ticks += 1;
+                    api.release_all_buttons();
+                    *delay = DelayContext::long();
+                }
+                if !warping && delay.tick(delta_cycles) {
                     let game_state = self.observe_state(api)?;
                     self.poll_policy(&game_state, api);
                     // Incrementally build the world graph: every time we settle in the overworld,
