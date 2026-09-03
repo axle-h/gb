@@ -87,6 +87,20 @@ const DARK: Tint = ([0x04, 0x08, 0x18], 96);
 const PLAYER_INK: [u8; 4] = [0xFF, 0x28, 0x28, 0xFF];
 const LABEL_PLATE: [u8; 4] = [0x0A, 0x0C, 0x12, 0xE6];
 const LABEL_INK: [u8; 4] = [0xF4, 0xF7, 0xFB, 0xFF];
+/// A label naming somewhere the player cannot get to from where they are standing.
+///
+/// ⚠️ **A label is the brightest thing on the picture and used to be painted the same whether or
+/// not there was a way to it.** The dim wash [`draw_unreachable`] lays over out-of-reach ground is
+/// the whole point of the render, and the labels were drawn *after* it, in white on a near-opaque
+/// plate — so on a map split by a ledge the three doors on the far side read exactly like the one
+/// door on this side. The deployed run of 2026-09-03 walked onto Route 4 from Cerulean, into the
+/// 117-square pocket the route's one-way ledges leave you in, read "Mt Moon Pokecenter (11, 5)" off
+/// the far end of the picture and filed a bug saying the action menu had lost it.
+const LABEL_PLATE_OUT_OF_REACH: [u8; 4] = [0x0A, 0x0C, 0x12, 0xB4];
+const LABEL_INK_OUT_OF_REACH: [u8; 4] = [0x7C, 0x84, 0x94, 0xFF];
+/// The last line of an out-of-reach label. Said in words as well as in colour, because a dimmed
+/// plate is a thing a model has to *notice* and a line of text is a thing it has to read.
+const NO_ROUTE: &str = "no route";
 const RULER_INK: [u8; 4] = [0x9A, 0xA4, 0xB4, 0xFF];
 const GUTTER: [u8; 4] = [0x12, 0x14, 0x1A, 0xFF];
 const GRID_LINE: Tint = ([0x00, 0x00, 0x00], 28);
@@ -302,6 +316,9 @@ struct Label {
     /// Bounding box of the cells this names, in meta-tiles: `(x0, y0, x1, y1)` inclusive.
     cells: (usize, usize, usize, usize),
     text: Vec<String>,
+    /// Whether *any* cell this label names can be routed to from where the player is standing.
+    /// See [`LABEL_INK_OUT_OF_REACH`].
+    reachable: bool,
 }
 
 /// A placed label, in pixels.
@@ -398,7 +415,11 @@ fn layout_labels(map: &MetaTileMap, canvas: (usize, usize)) -> Vec<(Label, Place
 /// can be genuinely different doors landing in different rooms (Mt Moon B1F), so merging those on
 /// destination alone would collapse two real choices into one label pointing between them.
 fn collect_labels(map: &MetaTileMap) -> Vec<Label> {
-    let mut groups: Vec<(Map, bool, usize, usize, usize, usize)> = Vec::new();
+    // ⚠️ **Per cell, not per bounding box.** A connection groups across a whole map edge, and the
+    // box that ends up round it covers plenty of cells that are not part of the group — testing the
+    // box would call an edge reachable because some unrelated square inside it is.
+    let routable = map.reachable_tiles();
+    let mut groups: Vec<(Map, bool, usize, usize, usize, usize, bool)> = Vec::new();
     for (index, &tile) in map.meta_tiles.iter().enumerate() {
         let (to_map, is_edge) = match tile {
             MetaTile::Warp { to_map, .. } => (to_map, false),
@@ -407,19 +428,24 @@ fn collect_labels(map: &MetaTileMap) -> Vec<Label> {
             _ => continue,
         };
         let (x, y) = (index % map.width, index / map.width);
-        match groups.iter_mut().find(|(m, edge, x0, y0, x1, y1)| {
+        // A water crossing needs Surf before it is a way anywhere, exactly as it does in
+        // `MetaTileMap::actions()` — being able to walk to the shore is not being able to cross.
+        let here = routable.contains(&Point8 { x: x as u8, y: y as u8 })
+            && (map.can_surf || !matches!(tile, MetaTile::ConnectionWater(_)));
+        match groups.iter_mut().find(|(m, edge, x0, y0, x1, y1, _)| {
             *m == to_map
                 && *edge == is_edge
                 // A door is one or two cells, so a warp joins only a box it touches.
                 && (is_edge || (x + 1 >= *x0 && x <= *x1 + 1 && y + 1 >= *y0 && y <= *y1 + 1))
         }) {
-            Some((_, _, x0, y0, x1, y1)) => {
+            Some((_, _, x0, y0, x1, y1, reachable)) => {
                 *x0 = (*x0).min(x);
                 *y0 = (*y0).min(y);
                 *x1 = (*x1).max(x);
                 *y1 = (*y1).max(y);
+                *reachable |= here;
             }
-            None => groups.push((to_map, is_edge, x, y, x, y)),
+            None => groups.push((to_map, is_edge, x, y, x, y, here)),
         }
     }
     // A warp's label carries its coordinate, because the menu row it has to be matched to is keyed
@@ -427,12 +453,15 @@ fn collect_labels(map: &MetaTileMap) -> Vec<Label> {
     // that cannot read them off the ruler (the deployed one could not) cannot tell which row is
     // which. A map edge is named by where it leads; every cell of it is one row.
     groups.into_iter()
-        .map(|(to_map, is_edge, x0, y0, x1, y1)| {
+        .map(|(to_map, is_edge, x0, y0, x1, y1, reachable)| {
             let mut text = wrap(&format!("{to_map}"));
             if !is_edge {
                 text.push(format!("({x0},{y0})"));
             }
-            Label { cells: (x0, y0, x1, y1), text }
+            if !reachable {
+                text.push(NO_ROUTE.to_string());
+            }
+            Label { cells: (x0, y0, x1, y1), text, reachable }
         })
         .collect()
 }
@@ -472,14 +501,18 @@ fn label_size(label: &Label) -> (i64, i64) {
 fn draw_labels(canvas: &mut RgbaImage, map: &MetaTileMap) {
     let size = (canvas.width() as usize, canvas.height() as usize);
     for (label, placed) in layout_labels(map, size) {
+        let (plate, ink) = match label.reachable {
+            true => (LABEL_PLATE, LABEL_INK),
+            false => (LABEL_PLATE_OUT_OF_REACH, LABEL_INK_OUT_OF_REACH),
+        };
         for y in placed.y..placed.y + placed.h {
             for x in placed.x..placed.x + placed.w {
-                set(canvas, x, y, LABEL_PLATE);
+                set(canvas, x, y, plate);
             }
         }
         for (row, line) in label.text.iter().enumerate() {
             draw_text(canvas, line, placed.x as usize + 2, placed.y as usize + 2 + row * TILE_PX,
-                      LABEL_INK, None);
+                      ink, None);
         }
     }
 }
@@ -635,7 +668,10 @@ pub fn caption(map: &MetaTileMap, is_dark: bool) -> String {
          (x, y) is drawn at pixel ({} + 16x, {} + 16y), and the numbers along the top and left edges \
          are those coordinates. Green is tall grass, blue is water, magenta is a warp labelled with \
          where it leads and its own (x,y), orange is a ledge with an arrow for the only way it can \
-         be jumped, and anything you cannot walk to from where you are standing is dimmed.{dark}",
+         be jumped, and anything you cannot walk to from where you are standing is dimmed. A label \
+         greyed out and marked `{NO_ROUTE}` names somewhere there is no way to from where you are \
+         standing, however walkable the ground between you and it looks: a one-way ledge or a \
+         terrace is still a wall.{dark}",
         map.map, map.width, map.height, RULER_LEFT, RULER_TOP,
     )
 }
@@ -762,6 +798,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **A label for somewhere there is no way to is greyed out and says `no route`.**
+    ///
+    /// A label is the brightest thing on the picture and is drawn *after* the dim wash, so before
+    /// this a door on the far side of a ledge was painted exactly like the door under the player's
+    /// feet — which made the picture contradict, in the model's own words, the "Fenced in" line in
+    /// the turn beside it. The deployed run of 2026-09-03 walked onto Route 4 from Cerulean, landed
+    /// in the 117-square pocket the route's one-way ledges leave you in, read "Mt Moon Pokecenter
+    /// (11, 5)" off the far end of the picture and filed a bug saying the menu had dropped it.
+    ///
+    /// ⚠️ **The load-bearing case is the *pair*.** Cerulean's trashed house has a front door on the
+    /// upper terrace and a back door on the lower one, and they are the whole reason this is judged
+    /// per cell rather than per destination: a check that asked "can I get to CeruleanTrashedHouse"
+    /// would light both, and the one the run needed is the one it could actually open.
+    #[test]
+    fn a_label_for_somewhere_out_of_reach_is_greyed_and_says_so() {
+        let mut fixture = TestFixture::new(
+            &include_bytes!("../pokemon/data/split-cerulean.bin")[..], Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
+        let labels = collect_labels(&state.map);
+        let at = |x: usize, y: usize| labels.iter().find(|l| l.cells.0 == x && l.cells.1 == y)
+            .unwrap_or_else(|| panic!("no label at ({x}, {y}): {labels:?}"));
+
+        // The trashed house, both ways in. The player is on the lower terrace.
+        assert!(!at(28, 10).reachable, "the front door is on the terrace above: {:?}", at(28, 10));
+        assert!(at(28, 12).reachable, "the back door is the one that works: {:?}", at(28, 12));
+        // Said in words as well as in ink, because a dimmed plate is a thing a model has to notice.
+        assert!(at(28, 10).text.contains(&NO_ROUTE.to_string()), "{:?}", at(28, 10));
+        assert!(!at(28, 12).text.contains(&NO_ROUTE.to_string()), "{:?}", at(28, 12));
+
+        // And a map edge, which groups differently and must reach the same answer: Route 4 is off
+        // this terrace, Route 5 is two terraces down.
+        assert!(labels.iter().any(|l| l.text[0] == "Route4" && l.reachable), "{labels:?}");
+        assert!(labels.iter().any(|l| l.text[0] == "Route5" && !l.reachable), "{labels:?}");
+
+        // ⚠️ **The ink, not just the flag.** The plate is painted from `label.reachable`, and a
+        // picture that carried the word and kept the white would still read as "you can go there".
+        let size = (RULER_LEFT + state.map.width * CELL_PX, RULER_TOP + state.map.height * CELL_PX);
+        let canvas = render(&state.map).expect("a fixture is a real map");
+        let mut checked = 0;
+        for (label, placed) in layout_labels(&state.map, size) {
+            if label.reachable { continue }
+            checked += 1;
+            for y in placed.y..placed.y + placed.h {
+                for x in placed.x..placed.x + placed.w {
+                    assert_ne!(canvas.get_pixel(x as u32, y as u32).0, LABEL_INK,
+                               "{:?} is drawn in the reachable ink at ({x}, {y})", label.text);
+                }
+            }
+        }
+        assert!(checked > 0, "no out-of-reach label was placed, so the ink is untested");
     }
 
     /// A warp's plate names its own coordinate, so it can be matched to a menu row keyed on nothing

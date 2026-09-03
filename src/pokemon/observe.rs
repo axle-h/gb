@@ -301,6 +301,14 @@ view! {
         pub at: Point,
         pub to_map: String,
         pub to_position: Point,
+        /// Whether `at` can be walked to from where the player is standing right now.
+        ///
+        /// ⚠️ **A door on the far side of a ledge is still a door, so this flags rather than
+        /// filters** — the same call `read_route` makes for a hop it cannot start. The list of
+        /// people above *is* filtered, and the difference is not inconsistency: a person the agent
+        /// cannot route to is someone the model can do nothing at all with, while a warp it cannot
+        /// reach is where it comes out if it gets there, which is the thing it is planning around.
+        pub reachable_from_here: bool,
     }
 }
 
@@ -383,12 +391,15 @@ pub fn map_view(state: &GameState) -> MapView {
 /// as the world having changed.
 fn warps(state: &GameState) -> Vec<WarpView> {
     let map = &state.map;
+    let routable = map.reachable_tiles();
     let mut warps: Vec<WarpView> = map.meta_tiles.iter().enumerate().filter_map(|(i, tile)| {
         let crate::pokemon::tile::MetaTile::Warp { to_map, to_position } = tile else { return None };
+        let at = Point8 { x: (i % map.width) as u8, y: (i / map.width) as u8 };
         Some(WarpView {
-            at: Point { x: (i % map.width) as u8, y: (i / map.width) as u8 },
+            at: at.into(),
             to_map: format!("{to_map}"),
             to_position: (*to_position).into(),
+            reachable_from_here: routable.contains(&at),
         })
     }).collect();
     warps.sort_by_key(|w| (w.at.y, w.at.x));

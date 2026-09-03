@@ -2739,8 +2739,13 @@ mod tests {
     }
 
     /// The same property from the other end, on all three maps: whatever the route graph says, a
-    /// destination with no reachable crossing is one the action menu offers no row for, and the two
-    /// must not be left to disagree in silence.
+    /// destination with no reachable crossing is one the action menu offers no row for.
+    ///
+    /// ⚠️ **The menu is now the *only* thing that says so on the turn**, since the `Fenced in:`
+    /// line came out of `prompt::situation` — see the tombstone there. So this is asserted both
+    /// ways: every neighbour whose crossings are all unwalkable is missing from the menu, and
+    /// nothing else is. A row wrongly dropped is a neighbour the model is given no way to reach and
+    /// no longer any prose to explain it with.
     ///
     /// Route 14's is a *pocket* rather than a terrace — six tiles whose only way west is through a
     /// trainer's body — and it is the case that proves the check is about where the player is
@@ -2760,17 +2765,26 @@ mod tests {
             assert_eq!(state.map.map, map);
             let mut expected = cut_off.clone();
             expected.sort_by_key(|m| format!("{m}"));
-            assert_eq!(state.map.unreachable_connection_targets(), expected, "on {map}");
+
+            let offered: Vec<Map> = state.map.actions().iter().filter_map(|action| match action.tile {
+                MetaTile::Connection { to_map, .. } => Some(to_map),
+                _ => None,
+            }).collect();
+            // ⚠️ **A neighbour joined only by a water seam is not fenced off**, it is the Surf gate,
+            // which is true of every coastline in Kanto — and it is excluded here by construction
+            // rather than by a special case, because `crossings` matches `MetaTile::Connection` and
+            // a water edge is `ConnectionWater`.
+            let mut missing: Vec<Map> = state.map.connection_targets.iter().copied()
+                .filter(|to| !offered.contains(to) && !state.map.crossings(*to).is_empty())
+                .collect();
+            missing.sort_by_key(|m| format!("{m}"));
+            assert_eq!(missing, expected, "on {map}: the menu's silences must be exactly the fences");
 
             for to in expected {
                 // Every crossing into it exists and none of them can be walked to.
                 let crossings = state.map.crossings(to);
                 assert!(!crossings.is_empty(), "{map} does border {to}");
                 assert!(crossings.iter().all(|c| !c.reachable), "{map} -> {to}: {crossings:?}");
-                // …and the menu agrees, by construction rather than by two functions matching.
-                assert!(!state.map.actions().iter().any(|action| matches!(
-                    action.tile, MetaTile::Connection { to_map, .. } if to_map == to)),
-                    "the menu must not offer a crossing into {to} on {map}");
             }
         }
     }

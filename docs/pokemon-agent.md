@@ -101,13 +101,24 @@ price.
   doors sit there (the S.S. Anne gangway, Rock Tunnel's north mouth, Cerulean's badge house, whose
   SHIP tileset sends a house down the tile-in-front arm). Nothing is claimed about those.
 - `MetaTileMap::crossings(to_map)` groups a border strip into the **runs** that are actually
-  different decisions, with `reachable` per run; `unreachable_connection_targets` is the neighbour
-  maps whose every crossing is unwalkable from where the player stands, skipping water-only ones
-  because that is the Surf gate rather than a fence. `boundary_blockers` names what the reachable
+  different decisions, with `reachable` per run. `boundary_blockers` names what the reachable
   region ends on, walls excluded because walls are true everywhere.
+- ⚠️ **A neighbour the player cannot reach the edge of is said by the menu having no row for it,
+  and by nothing else.** There was an `unreachable_connection_targets` and a `Fenced in:` line in
+  the turn built on it; both are gone (the tombstone is in `prompt::situation`), so
+  `tools::a_fenced_in_map_names_the_neighbours_it_cannot_reach` now asserts the menu's silences are
+  *exactly* the fences, in both directions. A crossing wrongly dropped from `actions()` is no longer
+  a row the model can miss, it is the whole answer.
 - `actions()` still emits **one** crossing per adjacent map, the nearest, because emitting one per
   edge perturbs `route_toward` and the scripted run's timing. The others are named in the row's own
   prose and resolved by `tools::resolve_overworld`'s `connection_action` fallback.
+- ⚠️ **`observe::map_view` filters people by reachability and *flags* warps.** Different answers on
+  purpose: a person out of reach is someone nothing can be done with, a door out of reach is still
+  where you come out if you get there. `WarpView::reachable_from_here` is the same call
+  `read_route` makes for a hop it cannot start, and the picture's label is painted from it.
+  `map_view_lists_only_the_people_the_menu_offers` and
+  `map_view_flags_every_warp_the_menu_cannot_offer` hold the two views together across every
+  committed fixture.
 
 ## The random policy
 

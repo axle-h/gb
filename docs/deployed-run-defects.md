@@ -264,22 +264,32 @@ the failure W1 exists to stop.
 Test: `tools::a_crossing_the_menu_did_not_offer_can_still_be_chosen`, on the Route 14 fixture with
 the player moved out of the pocket and onto the road, where several openings are reachable at once.
 
-### W3 — Say when the player is fenced in — **done 2026-09-03**
-*Covers Cerulean, Celadon and Route 14 in one line of turn text.*
+### W3 — Say when the player is fenced in — **shipped and then withdrawn, 2026-09-03**
+*Superseded by the map picture. The turn says nothing; the menu and the picture do.*
 
-`MetaTileMap::unreachable_connection_targets` is the trigger and it is a *named neighbour* rather
-than a tile count, because a tile count is true of a healthy map too. Water-only neighbours are
-skipped: that is the Surf gate, and it is the mistake the `Blocked here: Water` line was deleted
-for. The line says how much of the map is reachable, which neighbours are not, that `read_route`
-will still name them and why, and then — the half that was missing every single time — that the way
-between two parts of one map is a door, listing the warps that *can* be reached. In Cerulean that
-list opens with `CeruleanCity:10,12:Warp` and `CeruleanCity:28,12:Warp`, the second of which is the
-trashed house.
+The line shipped, and the next deployed run read it, disbelieved it and filed a bug — on Route 4,
+whose one-way ledges leave a player entering from Cerulean in a 117-square pocket with the three Mt
+Moon doors on the far side. It was right about all of it. What was wrong was the picture beside it:
+`read_map` labels every warp and every map edge, and it labelled the unreachable ones in the same
+white on the same plate as the one door the run could actually open, on top of ground it had itself
+dimmed. The model believed the picture.
 
-Rock Tunnel 1F is silent, correctly: it has no map connections and its south exit genuinely is the
-B1F ladder, so the agent was right there all along.
+So the fix moved to where the lie was. `map_image` greys a label whose cells cannot be routed to and
+writes `no route` on it, judged per cell — Cerulean's trashed house shows a bright back door and a
+grey front door — and `observe::map_view` carries `WarpView::reachable_from_here` beside it.
+`unreachable_connection_targets` had no other caller and is deleted.
 
-Test: `prompt::a_map_the_player_is_fenced_in_on_says_so_and_says_which_way_out`.
+What is left of the argument: a fenced-in map is now said by the crossing having **no row in the
+action menu** and by the picture greying its label, and the explanation of why `read_route` goes on
+naming it is hung on the hop that cannot be started (`tools::route_answer`'s `warning`, W1) rather
+than broadcast on every turn. A turn that states a conclusion the model can already draw from the
+menu in front of it is prose to be reconciled rather than information — and this one was reconciled
+by deciding the agent was broken.
+
+Tests: `map_image::a_label_for_somewhere_out_of_reach_is_greyed_and_says_so`,
+`mechanics::map_view_flags_every_warp_the_menu_cannot_offer`, and
+`tools::a_fenced_in_map_names_the_neighbours_it_cannot_reach`, which now asserts the menu's silences
+are exactly the fences in both directions.
 
 ### W4 — Stop lying about why a walk ended — **done 2026-09-03**
 
