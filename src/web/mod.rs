@@ -1,21 +1,28 @@
 //! **W1.2 / W2** — the HTTP server.
 //!
-//! Read-only endpoints, and **one** that is not. Viewer controls are still out of scope by decision
-//! (§1.1 of `docs/llm-web-playthrough-plan.md`) — nothing here can press a button, choose a move or
-//! steer the run — and for everything except `POST /api/new-run` that remains structural rather than
-//! editorial: this module can reach [`published::Published`] and nothing else.
+//! Read-only endpoints, and **three** that are not. Viewer controls are still out of scope by
+//! decision (§1.1 of `docs/llm-web-playthrough-plan.md`) — nothing here can press a button, choose a
+//! move or steer the run — and for everything except the admin routes that remains structural rather
+//! than editorial: this module can reach [`published::Published`] and nothing else.
 //!
-//! ⚠️ **Starting the game over is the exception, and it is the only one.** It reaches the emulator
-//! through [`crate::host::NewRunRequests`], which carries no data inwards and is answered by the
-//! emulator thread between instructions. It is **off unless `GB_ADMIN_TOKEN` is set** — without it
-//! both routes that offer it 404 exactly as if they had never been registered — because the
-//! deployment this exists for serves the public internet and starting the game over is not
-//! something a passer-by should be able to do.
+//! ⚠️ **The admin routes are the exception, and they are the only one.** They reach the emulator
+//! through [`crate::host::ControlRequests`], which carries a [`crate::host::ControlRequest`] — one
+//! of a closed set of two, with no payload — and is answered by the emulator thread between
+//! instructions. They are **off unless `GB_ADMIN_TOKEN` is set** — without it every route that
+//! offers one 404s exactly as if it had never been registered — because the deployment this exists
+//! for serves the public internet and neither starting the game over nor wiping the model's memory
+//! is something a passer-by should be able to do.
 //!
-//! There are two doors onto it and they differ only in how they ask for the token. `/reset-game` is
-//! the one a person uses: it answers an unauthenticated GET with `WWW-Authenticate: Basic`, so the
-//! *browser* collects the password in its own dialog and the page needs no token-handling code at
-//! all. `POST /api/new-run` is the one a script uses, and keeps its `X-GB-Token` header.
+//! Two of the three start the game over and differ only in how they ask for the token. `/reset-game`
+//! is the one a person uses: it answers an unauthenticated GET with `WWW-Authenticate: Basic`, so
+//! the *browser* collects the password in its own dialog and the page needs no token-handling code
+//! at all. `POST /api/new-run` is the one a script uses, and keeps its `X-GB-Token` header.
+//!
+//! The third is `POST /api/clear`, which is the opposite trade: it keeps the run and throws away
+//! what the *model* remembers of it — the conversation and the plan. It is script-only, because it
+//! is not a thing anybody needs from a browser address bar and every door onto the emulator is one
+//! more thing to get wrong. See [`crate::host::EmulatorHost::clear_conversation`] for what it does
+//! and does not touch.
 //!
 //! ```text
 //! GET  /                            the SPA (`web/dist`, embedded — see `assets.rs`)
@@ -33,6 +40,7 @@
 //! GET  /api/history?since=          W7 — the transcript from a sequence number, for a fresh page
 //! GET  /api/leaderboard?limit=      the runs that have finished the game, fastest first
 //! POST /api/new-run                 the same reset, for a script; `X-GB-Token`
+//! POST /api/clear                   throw away the model's conversation and plan; `X-GB-Token`
 //! ```
 
 pub mod assets;
@@ -63,7 +71,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use crate::cli::ServePolicy;
 use crate::game_boy::GameBoy;
-use crate::host::{EmulatorHost, HostConfig, NewRunRequests};
+use crate::host::{ControlRequest, ControlRequests, EmulatorHost, HostConfig};
 use crate::model::Model;
 use crate::pokemon::policy::RandomPolicy;
 use crate::run::{CurrentRun, Origin, RunDir, transcript};
@@ -85,13 +93,13 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// seed would be a playthrough nothing has ever proved.
 const SCRIPTED_SEED: u64 = 42;
 
-/// The header `POST /api/new-run` reads its token from.
+/// The header the two JSON admin routes read their token from.
 const ADMIN_TOKEN_HEADER: &str = "x-gb-token";
 
 /// How long the handler waits for the emulator thread to act. It answers at the top of its next
 /// tick, which is a millisecond away — so reaching this at all means the thread is gone, and the
 /// only useful thing left to do is say so rather than hold the connection open.
-const NEW_RUN_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct AppState {
@@ -100,9 +108,9 @@ struct AppState {
     /// **W7** — the run directory, read through rather than copied out, because `POST /api/new-run`
     /// can change it under a live server. `/api/history` and `/api/healthz` both ask it per request.
     run: Arc<CurrentRun>,
-    /// The seam into the emulator thread. See [`NewRunRequests`].
-    new_runs: Arc<NewRunRequests>,
-    /// `GB_ADMIN_TOKEN`. `None` — the default — makes `POST /api/new-run` 404.
+    /// The seam into the emulator thread. See [`ControlRequests`].
+    control: Arc<ControlRequests>,
+    /// `GB_ADMIN_TOKEN`. `None` — the default — makes every admin route 404.
     admin_token: Option<String>,
     /// The header every `/api/audio` connection opens with, or `None` when audio is off.
     ///
@@ -272,7 +280,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         ServePolicy::Llm => unreachable!("rejected above"),
     };
 
-    let new_runs = Arc::new(NewRunRequests::default());
+    let control = Arc::new(ControlRequests::default());
     let admin_token = admin_token();
     let audio_bitrate = audio_bitrate(std::env::var("GB_AUDIO_BITRATE").ok().as_deref())?;
     let emulator = EmulatorHost::spawn(
@@ -281,7 +289,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         Arc::clone(&published),
         HostConfig {
             run: Some(Arc::clone(&current)),
-            new_runs: Some(Arc::clone(&new_runs)),
+            control: Some(Arc::clone(&control)),
             status_interval: status_interval()?,
             model: hardware_model(std::env::var("GB_HARDWARE").ok().as_deref())?,
             audio_bitrate,
@@ -294,17 +302,17 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     )?;
 
     println!(
-        "gb serve — starting a new run (/reset-game, POST /api/new-run) is {}",
+        "gb serve — the admin routes (/reset-game, POST /api/new-run, POST /api/clear) are {}",
         match admin_token {
             Some(_) => "enabled (GB_ADMIN_TOKEN is set)",
-            None => "off — set GB_ADMIN_TOKEN to enable it",
+            None => "off — set GB_ADMIN_TOKEN to enable them",
         },
     );
     let result = serve_http(
         port,
         Arc::clone(&published),
         current,
-        new_runs,
+        control,
         admin_token,
         audio_bitrate.map(|_| audio::header()),
     );
@@ -387,7 +395,7 @@ fn serve_http(
     port: u16,
     published: Arc<Published>,
     run: Arc<CurrentRun>,
-    new_runs: Arc<NewRunRequests>,
+    control: Arc<ControlRequests>,
     admin_token: Option<String>,
     audio: Option<[u8; audio::HEADER_LEN]>,
 ) -> Result<(), String> {
@@ -398,11 +406,11 @@ fn serve_http(
 
     let result = runtime.block_on(async move {
         let state =
-            AppState { published, started: Instant::now(), run, new_runs, admin_token, audio };
+            AppState { published, started: Instant::now(), run, control, admin_token, audio };
         let app = routes().with_state(state);
 
-        // 0.0.0.0: the container publishes the port. Every endpoint is read-only except
-        // `POST /api/new-run`, which is off unless `GB_ADMIN_TOKEN` is set and needs it when it is.
+        // 0.0.0.0: the container publishes the port. Every endpoint is read-only except the three
+        // admin routes, which are off unless `GB_ADMIN_TOKEN` is set and need it when it is.
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
             .await
             .map_err(|e| format!("could not bind port {port}: {e}"))?;
@@ -461,6 +469,7 @@ fn routes() -> Router<AppState> {
         .route("/api/pokemon/{dex}/front.png", get(sprites::front_pic))
         .route("/api/tool-image/{seq}/image.png", get(tool_image))
         .route("/api/new-run", post(new_run))
+        .route("/api/clear", post(clear))
         .route("/reset-game", get(reset_game))
         .route("/favicon.png", get(sprites::favicon))
         .route("/favicon.ico", get(sprites::favicon))
@@ -548,20 +557,29 @@ fn basic_password(headers: &HeaderMap) -> Option<String> {
     decoded.split_once(':').map(|(_, password)| password.to_string())
 }
 
-/// **Start the game over, in place**, and answer with the id of the run that just began.
+/// **Put one [`ControlRequest`] to the emulator thread** and wait for the run id it answers with.
 ///
-/// The whole reason [`NewRunRequests`] exists. What it is *not* is a general control channel: it
-/// carries no data inwards, and the emulator thread decides when to act on it.
+/// The whole reason [`ControlRequests`] exists. What it is *not* is a general control channel: the
+/// commands are a closed enum with no payload, and the emulator thread decides when to act on them.
 ///
-/// The old run is not deleted, or even stopped in any sense that loses anything: the emulator
-/// checkpoints it before swapping, so it is left complete on the volume and can be resumed by
-/// pointing a process back at it.
-async fn start_new_run(state: &AppState) -> Result<String, (StatusCode, String)> {
-    let receiver = state.new_runs.request().map_err(|failure| (StatusCode::CONFLICT, failure))?;
-    match tokio::time::timeout(NEW_RUN_TIMEOUT, receiver).await {
+/// Nothing either command does deletes anything of the game. A new run checkpoints the old one
+/// before swapping, so it is left complete on the volume and can be resumed by pointing a process
+/// back at it; a clear leaves the run playing and takes only the model's own notes, and
+/// `conversation.jsonl` keeps every message it ever held.
+/// `refused` is what the emulator's own "no" means for this command, which is not the same thing
+/// twice: a new run fails on the server's disk (500), while a clear's likeliest failure by far is
+/// that nothing is thinking about this run at all (409), which is the caller asking for something
+/// this server is not doing rather than a fault.
+async fn ask(
+    state: &AppState,
+    what: ControlRequest,
+    refused: StatusCode,
+) -> Result<String, (StatusCode, String)> {
+    let receiver = state.control.request(what).map_err(|failure| (StatusCode::CONFLICT, failure))?;
+    match tokio::time::timeout(CONTROL_TIMEOUT, receiver).await {
         Ok(Ok(Ok(run_id))) => Ok(run_id),
-        // The emulator tried and could not — a full disk, most likely. Its message is the useful one.
-        Ok(Ok(Err(failure))) => Err((StatusCode::INTERNAL_SERVER_ERROR, failure)),
+        // The emulator tried and could not. Its message is the useful one.
+        Ok(Ok(Err(failure))) => Err((refused, failure)),
         // The sender was dropped, or never taken: either way the emulator thread is not running, and
         // `Obituary` will have said so on `/api/events` already.
         Ok(Err(_)) | Err(_) => Err((
@@ -571,32 +589,69 @@ async fn start_new_run(state: &AppState) -> Result<String, (StatusCode, String)>
     }
 }
 
-/// `POST /api/new-run` — [`start_new_run`] for a script, gated on the `X-GB-Token` header.
+/// The `X-GB-Token` gate both JSON admin routes share: `Some(refusal)` to answer with, or `None` to
+/// carry on.
+///
+/// ⚠️ **One function rather than a copy in each, because the 404 is the load-bearing half.** An
+/// endpoint that resets the game answering 403 tells a scanner it is there; the second such endpoint,
+/// written from memory beside the first, is exactly where that becomes a 403.
+fn admin_gate(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    let Some(expected) = state.admin_token.as_deref() else {
+        return Some((StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "this server has no GB_ADMIN_TOKEN set, so the admin endpoints are disabled",
+        }))).into_response());
+    };
+    let offered = headers.get(ADMIN_TOKEN_HEADER).and_then(|value| value.to_str().ok()).unwrap_or_default();
+    if !tokens_match(offered, expected) {
+        return Some((StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": format!("a matching {ADMIN_TOKEN_HEADER} header is required"),
+        }))).into_response());
+    }
+    None
+}
+
+/// `POST /api/new-run` — [`ask`] for a script, gated on the `X-GB-Token` header.
 ///
 /// ⚠️ **404, not 403, when `GB_ADMIN_TOKEN` is unset.** The route is registered unconditionally
 /// because the router is built before the token is a question, so "off" has to be a response — and
 /// it should be the response a route that does not exist would give, rather than one advertising a
 /// reset endpoint to anyone who scans for it.
 async fn new_run(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some(expected) = state.admin_token.as_deref() else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "this server has no GB_ADMIN_TOKEN set, so starting a new run is disabled",
-        }))).into_response();
-    };
-    let offered = headers.get(ADMIN_TOKEN_HEADER).and_then(|value| value.to_str().ok()).unwrap_or_default();
-    if !tokens_match(offered, expected) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": format!("a matching {ADMIN_TOKEN_HEADER} header is required"),
-        }))).into_response();
+    if let Some(refusal) = admin_gate(&state, &headers) {
+        return refusal;
     }
-
-    match start_new_run(&state).await {
+    match ask(&state, ControlRequest::NewRun, StatusCode::INTERNAL_SERVER_ERROR).await {
         Ok(run_id) => (StatusCode::OK, Json(serde_json::json!({ "run_id": run_id }))).into_response(),
         Err((status, error)) => (status, Json(serde_json::json!({ "error": error }))).into_response(),
     }
 }
 
-/// `GET /reset-game` — [`start_new_run`] for a person, gated on **HTTP Basic**, so the browser
+/// `POST /api/clear` — throw away the model's conversation and its plan, and keep playing.
+///
+/// Gated exactly as [`new_run`] is, down to the 404 when `GB_ADMIN_TOKEN` is unset, and for the same
+/// reasons — the two share [`admin_gate`] so they cannot drift apart. It is the more dangerous of
+/// the two to leave open, if anything: a reset is loud and obvious from the page, while a cleared
+/// conversation looks from outside like a model that has simply started playing badly.
+///
+/// ⚠️ **It answers once the emulator has accepted it, not once the files are gone.** The run
+/// directory has one writer and it is the worker thread, so the deletion happens at the top of the
+/// model's next turn — seconds away while a run is playing, and not until the quota reopens on one
+/// that is parked. The body says so rather than implying the work is already finished.
+async fn clear(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(refusal) = admin_gate(&state, &headers) {
+        return refusal;
+    }
+    match ask(&state, ControlRequest::ClearConversation, StatusCode::CONFLICT).await {
+        Ok(run_id) => (StatusCode::OK, Json(serde_json::json!({
+            "run_id": run_id,
+            "cleared": "the conversation and the plan; the game, the run and the battle script are untouched",
+            "when": "at the model's next turn",
+        }))).into_response(),
+        Err((status, error)) => (status, Json(serde_json::json!({ "error": error }))).into_response(),
+    }
+}
+
+/// `GET /reset-game` — [`ask`] for a person, gated on **HTTP Basic**, so the browser
 /// collects the password in its own dialog and the SPA needs no token-handling code at all. That is
 /// the whole reason it exists: the page used to carry a button, a `confirm`, a `prompt` and a
 /// `sessionStorage` key to do what `WWW-Authenticate` does natively.
@@ -626,7 +681,7 @@ async fn reset_game(State(state): State<AppState>, headers: HeaderMap) -> Respon
             .into_response();
     }
 
-    let (status, body) = match start_new_run(&state).await {
+    let (status, body) = match ask(&state, ControlRequest::NewRun, StatusCode::INTERNAL_SERVER_ERROR).await {
         Ok(run_id) => (
             StatusCode::OK,
             reset_page(

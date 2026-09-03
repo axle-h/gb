@@ -128,6 +128,32 @@ impl TodoList {
         list
     }
 
+    /// **`POST /api/clear`** — an empty list, and `todo.json` deleted with it.
+    ///
+    /// ⚠️ **Deleted rather than emptied, and it is the one call that removes the file.** The plan is
+    /// the only thing the model writes that outlives a conversation (see this module's header), so
+    /// "start again from the system prompt" means nothing at all if the list is still sitting there
+    /// waiting to be rendered into the first turn. An empty `todo.json` would do the same job today;
+    /// deleting it says what happened to anybody reading the directory afterwards, and leaves the
+    /// run in the state a brand new one is in.
+    ///
+    /// ⚠️ **On the worker thread, like every other write to these files.** A run directory has one
+    /// writer, and the emulator thread unlinking a file the worker rewrites at the end of every turn
+    /// is exactly the race that rule exists to prevent. A failure is reported and otherwise ignored:
+    /// the list in memory is empty either way, so the worst case is a stale file that the next
+    /// `todo_set` overwrites, and refusing to play over it would be far worse.
+    pub fn cleared(run_dir: Option<&Path>) -> Self {
+        let path = run_dir.map(|dir| dir.join(files::TODO));
+        if let Some(path) = path.as_deref() {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("could not delete {}: {e}", path.display()),
+            }
+        }
+        Self { path, items: Vec::new(), next_id: 1 }
+    }
+
     /// Service one call, returning the sentence the model is shown as the tool result.
     pub fn apply(&mut self, call: TodoCall) -> String {
         self.apply_reporting(call).text
@@ -610,6 +636,29 @@ mod tests {
         // And it was written back, so the next process does not have to trim it again.
         let reopened = TodoList::open(Some(&scratch.0));
         assert_eq!(reopened.items().len(), MAX_ITEMS);
+    }
+
+    /// ⚠️ **`POST /api/clear` deletes the file, and an empty list in memory is not enough.** The
+    /// plan is the one thing a model writes that outlives its conversation, so a clear that only
+    /// forgot it in memory would hand the whole thing back at the next process start.
+    #[test]
+    fn a_cleared_list_takes_the_file_with_it() {
+        let scratch = crate::run::tests::Scratch::new("todo-cleared");
+        let mut todo = TodoList::open(Some(&scratch.0));
+        todo.apply(add("deliver the parcel to Oak"));
+        let path = scratch.0.join(crate::run::files::TODO);
+        assert!(path.is_file(), "the precondition: there is a plan on disk to delete");
+
+        let cleared = TodoList::cleared(Some(&scratch.0));
+        assert!(cleared.items().is_empty(), "the list in memory kept the old plan");
+        assert!(!path.is_file(), "{} outlived the clear", path.display());
+        // Ids start again, so the first item of the next plan is 1 rather than 2.
+        assert!(TodoList::open(Some(&scratch.0)).render().contains("(empty"), "and the next process sees none");
+
+        // Clearing a run that never wrote a plan is not an error, and there is no file left behind.
+        let empty = crate::run::tests::Scratch::new("todo-cleared-empty");
+        assert!(TodoList::cleared(Some(&empty.0)).items().is_empty());
+        assert!(TodoList::cleared(None).items().is_empty(), "…nor is one without a directory at all");
     }
 
     /// With no run directory the tools still work — they simply keep nothing. That is what the

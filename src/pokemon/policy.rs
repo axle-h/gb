@@ -224,6 +224,22 @@ pub trait Policy {
     /// nothing at all.
     fn restart(&mut self, _run_dir: Option<&std::path::Path>) {}
 
+    /// **`POST /api/clear`** — the game carries on, but throw away whatever this policy remembers
+    /// *about* it: for `LlmPolicy`, the conversation and the model's plan.
+    ///
+    /// `run_dir` is the run that is playing, which has not changed — this is the whole difference
+    /// from [`Self::restart`], and it is why the two cannot be one method with a flag: a restart
+    /// discards state because the game underneath it is gone, and this discards state that is
+    /// perfectly consistent with a game that is still there.
+    ///
+    /// Default: an error saying there was nothing to clear, which is the truthful answer for every
+    /// policy that keeps no conversation. ⚠️ **An error rather than a no-op**, so the endpoint can
+    /// say "this run is not being played by a model" instead of answering 200 to a request that did
+    /// nothing at all.
+    fn clear_conversation(&mut self, _run_dir: Option<&std::path::Path>) -> Result<(), String> {
+        Err("this run is not being played by a model, so there is no conversation to clear".to_string())
+    }
+
     /// **W5** — raw button presses the policy wants delivered, collected by the agent at the top of
     /// its next tick and handed to
     /// [`queue_manual_input`](crate::pokemon::agent::PokemonAgent::queue_manual_input).

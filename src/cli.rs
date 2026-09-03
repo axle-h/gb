@@ -67,10 +67,12 @@ ENVIRONMENT (any policy):
                                 and short commit that GET /version serves and `gb serve` prints
                                 on the way up. Unset outside an image, and reported as null
                                 rather than guessed at
-    GB_ADMIN_TOKEN              Enables POST /api/new-run, which starts the game over in a
-                                fresh run directory without restarting the process. Callers
-                                send it as the X-GB-Token header. Unset — the default — and
-                                the endpoint 404s
+    GB_ADMIN_TOKEN              Enables the two admin endpoints, both of which take it as the
+                                X-GB-Token header. POST /api/new-run starts the game over in a
+                                fresh run directory without restarting the process; POST
+                                /api/clear keeps the run and throws away what the model
+                                remembers of it, the conversation and the plan. Unset — the
+                                default — and both 404
 ";
 
 /// What the process was asked to do.

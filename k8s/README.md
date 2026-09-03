@@ -52,8 +52,21 @@ curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://gb.ax-h.com/api/new-run
 ```
 
 No rollout, no downtime, nothing to remember to undo — the current run is checkpointed and left
-complete on the volume, and the page follows the new one on its own. ⚠️ Both 404 while
-`GB_ADMIN_TOKEN` is unset *or blank*, which is the shape a placeholder Secret takes.
+complete on the volume, and the page follows the new one on its own. ⚠️ Those two and the clear
+below all 404 while `GB_ADMIN_TOKEN` is unset *or blank*, which is the shape a placeholder Secret
+takes.
+
+To keep the playthrough and clear only what the model remembers of it — its conversation and its
+plan — the same token again:
+
+```shell
+curl -X POST -H "X-GB-Token: $GB_ADMIN_TOKEN" https://gb.ax-h.com/api/clear
+```
+
+That is the one to reach for when a run is walking into the same wall and filing bug reports about
+it: the badges, the party and the clock all stay, and the model starts the next turn with a clean
+conversation and no plan. It takes effect on that next turn, so a run parked on a spent quota is
+cleared when the quota reopens.
 
 ⚠️ **The volume now grows on its own, because a run that finishes the game files itself.** The win is
 archived to `/runs/hall-of-fame/<date>-<run-id>/` — save state, SRAM, the model's notes and the whole

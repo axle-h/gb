@@ -1045,12 +1045,13 @@ impl Policy for LlmPolicy {
     /// makes the outcome already on the wire safe: a stale `TurnOutcome` reaching a later poll no
     /// longer matches any pending id, so it is dropped instead of being applied to the new game.
     /// The worker is told separately — its history and the model's notes are its own to replace, and
-    /// it does so at the top of its next turn (see [`Restart`](crate::llm::worker::Restart)).
+    /// it does so at the top of its next turn (see [`Reset`](crate::llm::worker::Reset)).
     fn restart(&mut self, run_dir: Option<&std::path::Path>) {
         self.handles.next_generation();
-        if let Ok(mut cell) = self.handles.restart.lock() {
-            *cell = Some(crate::llm::worker::Restart {
+        if let Ok(mut cell) = self.handles.reset.lock() {
+            *cell = Some(crate::llm::worker::Reset {
                 run_dir: run_dir.map(|path| path.to_path_buf()),
+                kind: crate::llm::worker::ResetKind::NewGame,
             });
         }
         self.pending = None;
@@ -1081,6 +1082,52 @@ impl Policy for LlmPolicy {
         // are fought by the previous game's script. The worker re-arms from the *new* run's file
         // when it catches up, which is empty for a fresh run and correct for a resumed one.
         self.handles.live_script.arm(None, ScriptState::Unedited, Default::default());
+    }
+
+    /// **`POST /api/clear`** — the model forgets the run; the run carries on.
+    ///
+    /// The mirror image of [`Self::restart`] above, and almost none of it applies. Everything that
+    /// method throws away is state *about the game* — a walk in progress, a battle half written up,
+    /// a queued mart order — and every one of those is still true here, because the game has not
+    /// moved. What goes is what the worker holds: the conversation and the plan, replaced at the top
+    /// of its next turn.
+    ///
+    /// ⚠️ **The turn in flight is cancelled, and it is not for correctness.** A stale answer would
+    /// be perfectly applicable — it is about this game, this tile, this battle — so unlike a restart
+    /// nothing is unsafe about letting it land. It is cancelled because the reset lands at the *top*
+    /// of the next turn, and an operator who clears a run that is parked, mid-chain or waiting on a
+    /// slow endpoint would otherwise watch `todo.json` sit there for minutes with the endpoint
+    /// having already answered. The generation bump makes the next turn start now. It costs at most
+    /// one completion, on a deliberate operator action taken once a run.
+    ///
+    /// ⚠️ **A pending restart is never overwritten.** Both are answered on the emulator thread, so
+    /// the only way to be here with a `NewGame` still in the cell is a clear arriving in the few
+    /// ticks before the worker has looked — and a new game already gives a fresh conversation and an
+    /// empty plan, against a run directory this call knows nothing about. Downgrading it would leave
+    /// the *old* game's battle script armed for the new game, which is the one thing
+    /// `Worker::apply_reset` re-reads and this does not.
+    fn clear_conversation(&mut self, run_dir: Option<&std::path::Path>) -> Result<(), String> {
+        let mut cell = self
+            .handles
+            .reset
+            .lock()
+            .map_err(|_| "the reset channel is poisoned, so the conversation cannot be cleared".to_string())?;
+        if matches!(cell.as_ref(), Some(pending) if pending.kind == crate::llm::worker::ResetKind::NewGame) {
+            return Ok(());
+        }
+        *cell = Some(crate::llm::worker::Reset {
+            run_dir: run_dir.map(|path| path.to_path_buf()),
+            kind: crate::llm::worker::ResetKind::Cleared,
+        });
+        drop(cell);
+
+        self.handles.next_generation();
+        // The in-flight turn is now stale, and the wait it may have asked for was an answer to a
+        // question the model no longer remembers being asked. Everything else this policy holds is
+        // about the game and survives.
+        self.pending = None;
+        self.waiting = None;
+        Ok(())
     }
 
     /// Collected by the agent at the top of its next tick, ahead of the state machine.
@@ -1654,6 +1701,87 @@ mod tests {
             requests[1].messages.len(), messages_in_first_turn,
             "the second turn carried the old game's history: {:?}",
             requests[1].messages.iter().map(|m| m.role).collect::<Vec<_>>(),
+        );
+    }
+
+    /// **`POST /api/clear`, end to end through the real worker.** A run builds a conversation and a
+    /// plan, is cleared, and plays on: the next request opens on a bare system prompt again, the
+    /// plan file is gone, and the game was never touched.
+    ///
+    /// The three assertions are the three ways this is wrong in different directions. **The message
+    /// count** proves the history was replaced rather than compacted or carried on — the same proof
+    /// `a_restart_starts_the_conversation_again` leans on, plus the one extra message that is the
+    /// note. **`todo.json`** is the half a `History::fresh` alone would miss, and it is the half
+    /// that matters: the plan is the one thing written to outlive a conversation, so a clear that
+    /// left it behind would put the model straight back into whatever it had talked itself into.
+    /// And **the note** is what stops the fresh turn reading as a broken game.
+    #[test]
+    fn a_clear_throws_the_conversation_and_the_plan_away_and_plays_on() {
+        let scratch = crate::run::tests::Scratch::new("llm-clear");
+        let (mut rig, mut policy) = Rig::with_config_in(vec![], Some(&scratch.0), |_| {});
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        let said = "I am heading north out of Pallet Town to look for Oak.";
+        rig.push(vec![
+            saying_calls(said, &[("todo_set", r#"{"text":"deliver the parcel to Oak"}"#), ("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+        ]);
+        assert!(rig.pump_overworld(&mut policy).is_some(), "turn 1 decides");
+        let first_turn_messages = rig.requests()[0].messages.len();
+        assert!(rig.pump_overworld(&mut policy).is_some(), "turn 2 decides");
+        let plan = scratch.0.join(crate::run::files::TODO);
+        assert!(plan.is_file(), "the precondition: the model wrote a plan down");
+        assert!(
+            rig.requests()[1].messages.len() > first_turn_messages,
+            "the precondition: turn 2 really is carrying turn 1's conversation",
+        );
+
+        // Exactly what the emulator thread does on the clear tick, through `PokemonAgent`.
+        policy.clear_conversation(Some(scratch.0.as_path())).expect("a model is playing");
+
+        assert!(rig.pump_overworld(&mut policy).is_some(), "the run plays on after the clear");
+        rig.wait_for_requests(3, Duration::from_secs(5));
+        let requests = rig.requests();
+        let last = requests.last().expect("a third request");
+        assert!(
+            !last.messages.iter().any(|m| m.text().is_some_and(|t| t.contains(said))),
+            "the cleared turn is still carrying what the model said before it",
+        );
+        assert_eq!(
+            last.messages.len(), first_turn_messages + 1,
+            "a cleared turn is a first turn plus the note: {:?}",
+            last.messages.iter().map(|m| m.role).collect::<Vec<_>>(),
+        );
+        assert!(
+            last.messages.iter().any(|m| m.text() == Some(crate::llm::prompt::CLEARED_NOTE)),
+            "and the model is told the erasure was deliberate",
+        );
+        history_is_well_formed(last);
+        assert!(!plan.is_file(), "todo.json outlived the clear, which is the whole thing it must not do");
+
+        drop(policy);
+        drop(rig);
+    }
+
+    /// ⚠️ **A clear must not downgrade a `POST /api/new-run` that has not been picked up yet.** Both
+    /// are answered on the emulator thread, so the window is a few ticks wide — and losing the race
+    /// would leave the *new* game being fought by the *old* game's battle script, since re-reading
+    /// it from the new directory is the one thing a restart does and a clear deliberately does not.
+    #[test]
+    fn a_clear_leaves_a_restart_that_has_not_landed_yet_alone() {
+        // ⚠️ `_rig` rather than `drop(rig)` at the end: the worker blocks on `turns.recv()`, so the
+        // rig's join has to come after the policy's `Sender` has gone. Reverse declaration order
+        // does that by itself; dropping the rig by hand while the policy is alive hangs the suite.
+        let (_rig, mut policy) = Rig::new(vec![]);
+        policy.restart(None);
+        policy.clear_conversation(None).expect("a model is playing");
+
+        let pending = policy.handles.reset.lock().expect("the cell").clone();
+        assert_eq!(
+            pending.expect("a reset is still pending").kind,
+            crate::llm::worker::ResetKind::NewGame,
+            "the clear overwrote the restart",
         );
     }
 
