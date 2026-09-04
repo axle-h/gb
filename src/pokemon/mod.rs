@@ -432,6 +432,12 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         // walk whose only follow-up is a field move the game will refuse. See `MetaTileMap::can_cut`.
         let can_use_cut = badges.contains(Badge::CascadeBadge) && has_move(&pokemon, PokemonMoveName::Cut);
         map.can_cut = can_use_cut;
+        // The same pair for Strength (`.strength` in `engine/menus/start_sub_menus.asm` checks the
+        // RainbowBadge), and for the same reason: `actions()` must not offer a boulder push the
+        // cartridge would answer with silence. See `MetaTileMap::can_strength`, and note that this
+        // is *not* `strength_active` below — that one is whether it has been armed on this map, and
+        // the push driver arms it itself.
+        map.can_strength = badges.contains(Badge::RainbowBadge) && has_move(&pokemon, PokemonMoveName::Strength);
         // The best rod in the bag, for the same reason and by the same rule: `actions()` must not
         // offer a fishing row when there is nothing to cast with. Read here rather than in the map
         // builder because that is where the bag is (`GameState::bag`, below).

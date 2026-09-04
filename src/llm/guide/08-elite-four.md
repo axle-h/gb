@@ -11,11 +11,13 @@ Route: `ViridianCity` > `Route22` > `Route23` > `VictoryRoad1F` > `VictoryRoad2F
    badges and refuses you without the right one. You have all eight, so all of them
    let you by. Part of the route is water, so you need Surf to get up it.
 3. Victory Road is three floors of boulder puzzles. Each floor has a switch in the
-   ground held down by a boulder: **use Strength, push a boulder on to the switch, and
-   a barrier somewhere else on that floor opens**. Nothing here works without Strength.
-   ⚠️ **Strength is armed once per map and cleared by every map change**, so use the
-   field move again on each floor before pushing; a push before that does nothing at all.
-   Moltres is on 2F if you want it.
+   ground held down by a boulder: **push a boulder on to the switch and a barrier
+   somewhere else on that floor opens**. Nothing here works without Strength, and with it
+   every push the game would allow is a row in the action menu — one per boulder per
+   direction, arming Strength for you. A push the game refuses is not offered at all, so
+   a boulder with no rows cannot be moved from where it stands; leaving the floor and
+   coming back puts every boulder on it back where it started. Moltres is on 2F if you
+   want it.
 4. `IndigoPlateauLobby` has a Pokémon Center, a mart and a PC. **Heal, buy and save
    here**, because going down the stairs starts five battles in a row with no chance to
    shop and no Pokémon Center between them. Losing sends you back to the lobby and you

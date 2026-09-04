@@ -236,10 +236,21 @@ impl CallKind {
 /// on the path to the Hall of Fame. Anything genuinely unreachable is what `press_buttons` is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldMoveRequest {
-    /// Cut the tree the player is **currently facing** — so this is the second half of a pair: walk
-    /// to the tree with `choose_action`, then cut it.
-    Cut,
-    /// A field move used from the party menu: Strength, Flash, Dig, Teleport, Softboiled. `slot` is
+    // ⚠️ **There was a `Cut` here, and a `PushBoulder { boulder, direction }`, and both are gone
+    // (2026-09-04).** Each was the *second half* of a pair whose first half was a walk: cut the tree
+    // you are facing, shove the boulder you are standing beside. A pair is two paid requests for one
+    // decision, and worse, the first half is a menu row that looks finished — a deployed run walked
+    // up to trees and boulders and then spent its next turn on something else. `MetaTile::CutTree`
+    // and `MetaTile::Boulder` are now whole actions: the walk ends by cutting or pushing, the way a
+    // fishing row ends by casting. `strength` went with them, because arming it was never a decision
+    // either (see `AgentState::PushingBoulder`, which arms it itself).
+    //
+    // ⚠️ **Do not restore either as a tool without restoring what made them necessary.** Cut needs
+    // the player to be facing the tree and a push needs them to be on the one square it can be
+    // shoved from, so a tool taking a target is a walk with a field move on the end of it, which is
+    // exactly what the menu row already is. What that leaves for a tool is aiming at something the
+    // menu does not offer — and the menu only withholds a cut or a push the cartridge would refuse.
+    /// A field move used from the party menu: Flash, Dig, Teleport, Softboiled. `slot` is
     /// optional — without it, the first party member that knows the move is used.
     ///
     /// Surf is deliberately not here: the agent mounts it by itself the moment a route steps onto
@@ -255,8 +266,6 @@ pub enum FieldMoveRequest {
     UseItem { item: ItemId, target: Point8 },
     /// Throw an item away to free one of the bag's 20 slots.
     TossItem { item: ItemId },
-    /// Shove a boulder one tile. Strength must already be armed (use it from the party menu first).
-    PushBoulder { boulder: Point8, direction: JoypadButton },
     /// Rearrange the party so `slot` leads. Instant — the agent writes it straight to RAM.
     ReorderParty { slot: u8 },
     // ⚠️ **There was an `Interact { target, facing }` here: face any tile and press A.** It is gone,
@@ -382,22 +391,6 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
     };
 
     Ok(match request {
-        FieldMoveRequest::Cut => {
-            hm_available(state, PokemonMoveName::Cut)?;
-            // The driver cuts whatever is in front of the player, so a player facing anything else
-            // walks into a menu it cannot use and comes back out having achieved nothing.
-            match state.map.tile_in_front() {
-                Some((_, crate::pokemon::tile::MetaTile::CutTree)) => FieldMove::CutTree,
-                _ => {
-                    return Err(
-                        "Cut works on the tree the player is facing, and there is not one there. \
-                         Use `choose_action` on a `:CutTree` entry in the action menu first — that \
-                         walks up to a tree and faces it — then call `use_field_move` with `cut`."
-                            .to_string(),
-                    );
-                }
-            }
-        }
         FieldMoveRequest::PartyMove { name, slot } => {
             hm_available(state, *name)?;
             let slot = match slot {
@@ -529,31 +522,6 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             FieldMove::UseFieldItem { item, target: at }
         }
         FieldMoveRequest::TossItem { item } => FieldMove::TossItem { item: held(*item)? },
-        FieldMoveRequest::PushBoulder { boulder, direction } => {
-            // Strength is not *used* on a boulder, it is armed once per map from the party menu and
-            // then every push works — `BIT_STRENGTH_ACTIVE`, cleared on every map change. A push
-            // before it is armed moves nothing and reports nothing, so the model retries the same
-            // shove until something else stops it. Say which half is missing.
-            hm_available(state, PokemonMoveName::Strength)?;
-            if !state.strength_active {
-                return Err(
-                    "Strength is not armed on this map, so a boulder will not move. Use \
-                     `use_field_move` with `strength` first — it has to be done again after every \
-                     map change — then push."
-                        .to_string(),
-                );
-            }
-            // ⚠️ **And whether the shove itself would do anything, which is a refusal with no
-            // message behind it.** `TryPushingBoulder` falls into `ResetBoulderPushFlags` and
-            // returns on a blocked destination — no text, no animation — so the agent holds the
-            // direction until `DRIVER_ESCAPE_SILENCE` and reports "got no answer from the game for
-            // 60s", which reads as a broken emulator. The deployed run of 2026-09-02 filed five
-            // issue reports about one boulder on VictoryRoad1F whose north neighbour is a staircase.
-            if let Some(refusal) = state.map.boulder_push_refusal(*boulder, *direction) {
-                return Err(refusal);
-            }
-            FieldMove::PushBoulder { boulder: *boulder, dir: *direction }
-        }
         FieldMoveRequest::ReorderParty { slot } => FieldMove::ReorderParty { slot: party_slot(*slot)? },
         FieldMoveRequest::UsePcBox { op } => {
             let pc = the_pc_here(state)?;
@@ -633,8 +601,12 @@ fn knows(state: &GameState, slot: u8, name: PokemonMoveName) -> bool {
 
 /// The moves `use_field_move` accepts under [`FieldMoveRequest::PartyMove`], with what each one is
 /// for. Also the tool description's own list, so the two cannot drift.
+/// ⚠️ **`strength` is deliberately not here.** Out of battle it does one thing — set
+/// `BIT_STRENGTH_ACTIVE` so boulders move — and that flag is cleared by every map change, so
+/// offering it as a call of its own is asking the model to remember bookkeeping whose only symptom
+/// when forgotten is a shove that does nothing and says nothing. `AgentState::PushingBoulder` arms
+/// it, and the boulder rows in the action menu are what a push is chosen from.
 const PARTY_MOVES: &[(&str, PokemonMoveName, &str)] = &[
-    ("strength", PokemonMoveName::Strength, "arm Strength so boulders can be pushed"),
     ("flash", PokemonMoveName::Flash, "light a dark map (Rock Tunnel)"),
     ("dig", PokemonMoveName::Dig, "warp straight out of a cave or dungeon"),
     ("teleport", PokemonMoveName::Teleport, "warp back to the last Pokémon Center"),
@@ -1315,7 +1287,6 @@ fn use_field_move_spec() -> ToolSpec {
         format!(
             "ENDS THE TURN. Do something that is not walking. `move` picks which, and decides which \
              of the other arguments are needed:\n\
-             - `cut` — cut down the tree the player is **facing**. Walk to a `:CutTree` action first.\n\
              - {}. Each takes an optional `slot`; without one the first Pokémon that knows the move \
              is used.\n\
              - `fly` — fly to `map`, which must be a town you have already visited with a Pokémon \
@@ -1325,8 +1296,6 @@ fn use_field_move_spec() -> ToolSpec {
              - `use_item` — face `target` and use bag `item` on it (the Poké Flute on Snorlax, the \
              Card Key on a door).\n\
              - `toss_item` — throw `item` away to free a bag slot. The bag holds only 20 kinds.\n\
-             - `push_boulder` — shove the boulder at `target` one tile in `direction`. Strength must \
-             be armed first.\n\
              - `reorder_party` — make the Pokémon in `slot` the party leader.\n\
              - `pc_pokemon` — at a PC: `op` is `deposit` (party `slot` → box), `withdraw` or \
              `release` (a `box_slot`), or `change_box` (`box`, 1-12, which also saves the game). \
@@ -1335,10 +1304,13 @@ fn use_field_move_spec() -> ToolSpec {
              between the bag and PC storage. The bag holds only 20 kinds.\n\
              - `elevator` — inside a lift, ride it to `map`. The three lifts are in the Rocket \
              Hideout, Celadon Mart and Silph Co.\n\
-             Surf is not here — the agent mounts it by itself as soon as a route crosses water.\n\
-             `cut`, `fly`, `strength` and `flash` each need a Pokémon taught that HM *and* a \
-             particular badge; until you have both the game refuses them, and retrying will not \
-             change it.",
+             Cutting a tree, pushing a boulder and mounting Surf are not here: each of the three is \
+             a walk with one legal ending, so the walk does it. A `:CutTree` row cuts the tree it \
+             walks up to, a `:PushBoulder…` row arms Strength if it needs to and shoves the boulder, \
+             and any route that crosses water mounts Surf on its own. All three rows are withheld \
+             while the game would refuse them, and the turn says so in a line above the menu.\n\
+             `fly` and `flash` each need a Pokémon taught that HM *and* a particular badge; until \
+             you have both the game refuses them, and retrying will not change it.",
             party_moves.join("\n- "),
         ),
         json!({
@@ -1359,10 +1331,6 @@ fn use_field_move_spec() -> ToolSpec {
                     "additionalProperties": false,
                     "description": "A tile on the current map, in the coordinates `read_map` uses.",
                 },
-                "direction": {
-                    "type": "string", "enum": ["up", "down", "left", "right"],
-                    "description": "For `push_boulder`: which way to shove it.",
-                },
                 "op": {
                     "type": "string",
                     "enum": ["deposit", "withdraw", "release", "change_box"],
@@ -1381,7 +1349,7 @@ fn use_field_move_spec() -> ToolSpec {
 fn field_move_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = PARTY_MOVES.iter().map(|(name, _, _)| *name).collect();
     names.extend([
-        "cut", "fly", "teach", "evolve", "use_item", "toss_item", "push_boulder", "reorder_party",
+        "fly", "teach", "evolve", "use_item", "toss_item", "reorder_party",
         "pc_pokemon", "pc_items", "elevator",
     ]);
     names
@@ -1945,7 +1913,6 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
     }
 
     match which.as_str() {
-        "cut" => Ok(FieldMoveRequest::Cut),
         "fly" => {
             let name = string_argument(arguments, "map")?;
             map_by_name(&name)
@@ -2004,17 +1971,6 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
             map_by_name(&name)
                 .map(|to| FieldMoveRequest::UseElevator { to })
                 .ok_or_else(|| format!("`{name}` is not a map. The lift's own panel lists the floors it serves."))
-        }
-        "push_boulder" => {
-            let direction = string_argument(arguments, "direction")?;
-            Ok(FieldMoveRequest::PushBoulder {
-                boulder: target()?,
-                direction: button_by_name(&direction)
-                    .filter(|button| {
-                        matches!(button, JoypadButton::Up | JoypadButton::Down | JoypadButton::Left | JoypadButton::Right)
-                    })
-                    .ok_or_else(|| format!("`{direction}` is not a direction: up, down, left or right."))?,
-            })
         }
         "reorder_party" => Ok(FieldMoveRequest::ReorderParty { slot: slot()? }),
         other => Err(format!(
@@ -2308,7 +2264,22 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
                 None => verb.to_string(),
             }
         }
-        MetaTile::CutTree => "walk up to a tree that Cut can clear".to_string(),
+        // ⚠️ **The verb is the whole action, because the row is.** It used to read "walk up to a
+        // tree that Cut can clear", which was accurate and was read as a step in a plan: the walk
+        // happened, and the `use_field_move cut` that had to follow it often did not. Choosing this
+        // now cuts the tree.
+        MetaTile::Cut { at } => format!("cut down the tree at ({}, {})", at.x, at.y),
+        // Both coordinates, for the reason the sprite rows below carry them: the square the player
+        // stands on and the square the thing is on are never the same square, and a Sokoban puzzle
+        // is reasoned about in the boulder's coordinates.
+        MetaTile::Boulder { at, push } => format!(
+            "push the boulder at ({}, {}) one tile {} (you stand at ({}, {}))",
+            at.x, at.y,
+            match push {
+                JoypadButton::Up => "up", JoypadButton::Down => "down",
+                JoypadButton::Left => "left", _ => "right",
+            },
+            action.destination.x, action.destination.y),
         // The row only exists when a rod is in the bag and this map has water to cast at, so what it
         // needs to say is what fishing is *for* rather than that it is possible: a wild battle with
         // something that lives in the water, without walking anywhere.
@@ -2332,7 +2303,6 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
             };
             match sprite.map(|s| s.picture_id) {
                 Some(PictureId::PokeBall) => format!("pick up the {}", name.trim_end_matches(|c: char| c.is_ascii_digit()).trim()),
-                Some(PictureId::Boulder) => stand_and_target("walk up to a boulder that Strength can push"),
                 Some(PictureId::Fossil | PictureId::OldAmber | PictureId::UnusedOldAmber) => format!("examine the {name}"),
                 Some(PictureId::Paper | PictureId::Pokedex | PictureId::Clipboard) => format!("read the {name}"),
                 Some(PictureId::Snorlax) => stand_and_target("walk up to the sleeping Snorlax blocking the way"),
@@ -2380,7 +2350,20 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
     //
     // `MetaTile::Pc` stays in `actions()` for the scripted policies, which drive the boxes through
     // `FieldMove` directly.
+    //
+    // ⚠️ **A boulder's own sprite row goes for the same reason, and it is the stronger case.**
+    // Walking up to a boulder and pressing A does nothing at all — there is no text behind a
+    // `SPRITE_BOULDER` — so the row was a walk with no continuation, described as "walk up to a
+    // boulder that Strength can push" and offering no way to push it. What replaces it is one row
+    // per shove the cartridge would actually make (`MetaTile::Boulder`), which is the decision a
+    // player has; the boulders themselves are named in the turn's own line above the menu, and in
+    // `read_map`'s picture and its `people` list, so nothing is hidden by dropping this.
+    //
+    // ⚠️ Both filters are here rather than in `actions()`, which the scripted policies read.
     actions.retain(|action| !matches!(action.tile, MetaTile::Pc));
+    actions.retain(|action| !matches!(action.tile, MetaTile::Sprite(name)
+        if state.map.sprites.iter().any(|s| s.name == name
+            && s.picture_id == crate::pokemon::sprite::PictureId::Boulder)));
     // `id_kind`, not `kind`: two people can share the tile an action approaches them from, and
     // "Sprite" == "Sprite" leaves that pair to `sort_by_key`'s stability over a `HashSet` walk.
     actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.id_kind()));
@@ -4107,10 +4090,9 @@ mod tests {
             _ => panic!("{arguments} did not end the turn"),
         };
 
-        assert_eq!(request(r#"{"move":"cut"}"#), FieldMoveRequest::Cut);
         assert_eq!(
-            request(r#"{"move":"strength"}"#),
-            FieldMoveRequest::PartyMove { name: PokemonMoveName::Strength, slot: None },
+            request(r#"{"move":"flash"}"#),
+            FieldMoveRequest::PartyMove { name: PokemonMoveName::Flash, slot: None },
             "an omitted slot means 'whoever knows it', not slot 0",
         );
         assert_eq!(
@@ -4126,10 +4108,6 @@ mod tests {
             request(r#"{"move":"use_item","item":"PokeFlute","target":{"x":12,"y":9}}"#),
             FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Point8 { x: 12, y: 9 } },
         );
-        assert_eq!(
-            request(r#"{"move":"push_boulder","target":{"x":4,"y":5},"direction":"left"}"#),
-            FieldMoveRequest::PushBoulder { boulder: Point8 { x: 4, y: 5 }, direction: JoypadButton::Left },
-        );
         assert_eq!(request(r#"{"move":"reorder_party","slot":3}"#), FieldMoveRequest::ReorderParty { slot: 3 });
 
         // Every one of these is answerable — the model is told what is missing and can try again in
@@ -4140,7 +4118,13 @@ mod tests {
             (r#"{"move":"teach","item":"Hm03Surf"}"#, "needs a `slot`"),
             (r#"{"move":"toss_item","item":"Sandwich"}"#, "is not an item"),
             (r#"{"move":"use_item","item":"PokeFlute"}"#, "needs a `target`"),
-            (r#"{"move":"push_boulder","target":{"x":1,"y":1},"direction":"north"}"#, "is not a direction"),
+            // ⚠️ **`cut`, `push_boulder` and `strength` are gone and have to stay gone**, for the
+            // reason `interact` below does: a resumed run replays its own history, and a model that
+            // called one before the deploy will call it again. Each is refused by name, and the
+            // list it is refused against names what replaced them.
+            (r#"{"move":"cut"}"#, "not one of the field moves"),
+            (r#"{"move":"push_boulder","target":{"x":1,"y":1},"direction":"left"}"#, "not one of the field moves"),
+            (r#"{"move":"strength"}"#, "not one of the field moves"),
             (r#"{"move":"reorder_party","slot":9}"#, "no party slot 9"),
             // ⚠️ **`interact` is gone and has to stay gone.** A resumed run replays its own history,
             // so a model that used it before a deploy will try it again; it is refused by name like
@@ -4246,18 +4230,7 @@ mod tests {
         assert!(complaint(FieldMoveRequest::ReorderParty { slot: 3 }).contains("no party member in slot 3"));
         assert!(complaint(FieldMoveRequest::TossItem { item: ItemId::Hm01Cut }).contains("no Hm01Cut in the bag"));
 
-        // The tile check is the one `cut` exists for, and it only becomes reachable once the HM gate
-        // above it is satisfied — so it is asserted on a state that *can* cut.
-        let mut able = fixture_state();
-        able.badges |= crate::pokemon::badge::Badge::CascadeBadge;
-        able.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
-            Some(PokemonMove::with_max_pp(PokemonMoveName::Cut));
-        match resolve_field_move(&able, &FieldMoveRequest::Cut) {
-            Err(complaint) => assert!(complaint.contains("facing"), "cut must check the tile in front: {complaint}"),
-            Ok(resolved) => panic!("nothing in Oak's lab is a tree, but cut resolved to {resolved:?}"),
-        }
-
-        // …and the one that needs nothing but its own HM resolves as itself.
+        // The one that needs nothing but its own HM resolves as itself.
         let mut flier = fixture_state();
         flier.badges |= crate::pokemon::badge::Badge::ThunderBadge;
         flier.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
@@ -4478,72 +4451,91 @@ mod tests {
             Ok(resolved) => panic!("{request:?} should not have resolved to {resolved:?}"),
         };
 
-        // Neither the move nor the badge — the deployed run's exact position on Route 2.
-        let both = complaint(&none, FieldMoveRequest::Cut);
-        assert!(both.contains("no Pokémon in the party knows it"), "{both}");
-        assert!(both.contains("CascadeBadge"), "{both}");
+        // Every HM this tool can still name. ⚠️ **Cut and Strength are not among them any more**
+        // and their gate has not gone with them: it moved to where the *action* is, in
+        // `MetaTileMap::{can_cut, can_strength}`, which is asserted by
+        // `a_cut_or_a_push_the_game_would_refuse_is_never_a_row` below. That is a stronger place for
+        // it — a refusal is a wasted turn, a missing row is not a turn at all — and it is why this
+        // loop skips them rather than having lost them.
+        for (name, badge) in HM_BADGES {
+            let request = match name {
+                PokemonMoveName::Cut | PokemonMoveName::Strength | PokemonMoveName::Surf => continue,
+                PokemonMoveName::Fly => FieldMoveRequest::Fly { to: Map::PalletTown },
+                other => FieldMoveRequest::PartyMove { name: *other, slot: None },
+            };
+            let complaint = complaint(&none, request);
+            assert!(complaint.contains(&badge.to_string()), "{name} must name the {badge} it needs");
+            assert!(complaint.contains("no Pokémon in the party knows it"), "{complaint}");
+        }
 
         // The move but not the badge: the gym is the thing to go and do.
         let mut taught = fixture_state();
         taught.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
-            Some(PokemonMove::with_max_pp(PokemonMoveName::Cut));
-        let unbadged = complaint(&taught, FieldMoveRequest::Cut);
-        assert!(unbadged.contains("CascadeBadge"), "{unbadged}");
+            Some(PokemonMove::with_max_pp(PokemonMoveName::Flash));
+        let unbadged = complaint(&taught, FieldMoveRequest::PartyMove {
+            name: PokemonMoveName::Flash, slot: None });
+        assert!(unbadged.contains("BoulderBadge"), "{unbadged}");
         assert!(!unbadged.contains("knows"), "the move is known; only the badge is missing: {unbadged}");
 
         // The badge but not the move: the HM is the thing to go and find.
         let mut badged = fixture_state();
-        badged.badges |= crate::pokemon::badge::Badge::CascadeBadge;
-        let untaught = complaint(&badged, FieldMoveRequest::Cut);
+        badged.badges |= crate::pokemon::badge::Badge::BoulderBadge;
+        let untaught = complaint(&badged, FieldMoveRequest::PartyMove {
+            name: PokemonMoveName::Flash, slot: None });
         assert!(untaught.contains("HM"), "{untaught}");
-        assert!(!untaught.contains("CascadeBadge"), "the badge is held: {untaught}");
+        assert!(!untaught.contains("BoulderBadge"), "the badge is held: {untaught}");
+    }
 
-        // Every HM the game gates, not just the one that broke.
-        for (name, badge) in HM_BADGES {
-            let request = match name {
-                PokemonMoveName::Cut => FieldMoveRequest::Cut,
-                PokemonMoveName::Fly => FieldMoveRequest::Fly { to: Map::PalletTown },
-                other => FieldMoveRequest::PartyMove { name: *other, slot: None },
-            };
-            assert!(
-                complaint(&none, request).contains(&badge.to_string()),
-                "{name} must name the {badge} it needs",
-            );
+    /// **A cut or a push the game would refuse is not a refusal any more, it is a row that is not
+    /// there** — and the two rows that are there do the whole job.
+    ///
+    /// ⚠️ **This is where the `cut` and `push_boulder` tools went (2026-09-04).** Both were the
+    /// second half of a pair: walk to the tree, then cut it; arm Strength, then shove. A pair costs
+    /// two paid requests for one decision and, worse, its first half is a menu row that looks
+    /// finished — and the deployed run that prompted this was offered `push_boulder` **left** on a
+    /// boulder whose right-hand neighbour was solid rock. There was nowhere to stand, so the shove
+    /// was never attempted and nothing said so.
+    ///
+    /// Three properties, all of them about the menu rather than about a complaint:
+    ///
+    /// * every boulder row names a push `boulder_push_refusal` would allow, so the sealed boulder
+    ///   the deployed run created at (5, 14) has no row in any direction;
+    /// * a party that cannot use Strength gets no boulder rows at all, which is the case the turn's
+    ///   own line has to explain (`prompt::situation`);
+    /// * the boulders themselves are no longer offered as people to walk up to and press A at.
+    #[test]
+    fn a_cut_or_a_push_the_game_would_refuse_is_never_a_row() {
+        use crate::pokemon::tile::MetaTile;
+        // VictoryRoad1F, one push after the deployed run sealed its own boulder in the alcove:
+        // Strength armed, a staircase north of the boulder, and the tile it would have to be pushed
+        // back from walled off by the boulder itself.
+        let mut stuck = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
+        assert!(stuck.map.can_strength, "the deployed party can use Strength");
+        assert!(stuck.map.boulders().contains(&Point8 { x: 5, y: 14 }), "the sealed boulder is there");
+
+        for action in stuck.map.actions() {
+            let MetaTile::Boulder { at, push } = action.tile else { continue };
+            assert_eq!(stuck.map.boulder_push_refusal(at, push), None,
+                "the menu offered a push the cartridge would refuse: {}", overworld_id(&stuck, &action));
+            assert_ne!(at, Point8 { x: 5, y: 14 },
+                "the sealed boulder cannot be pushed any way at all, so it has no rows");
         }
+        // And a row for a push that *is* legal, or this proves nothing about the filter.
+        assert!(stuck.map.actions().iter().any(|a| matches!(a.tile, MetaTile::Boulder { .. })),
+            "VictoryRoad1F's other boulders can still be pushed");
 
-        // A boulder needs Strength *armed*, which is a third thing again: the move, the badge, and
-        // then a trip through the party menu on this map. A push before that moves nothing at all.
-        let mut strong = fixture_state();
-        strong.badges |= crate::pokemon::badge::Badge::RainbowBadge;
-        strong.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
-            Some(PokemonMove::with_max_pp(PokemonMoveName::Strength));
-        assert!(!strong.strength_active, "the fixture has not armed Strength");
-        let unarmed = complaint(&strong, FieldMoveRequest::PushBoulder {
-            boulder: Point8 { x: 1, y: 1 },
-            direction: JoypadButton::Up,
-        });
-        assert!(unarmed.contains("not armed"), "{unarmed}");
+        // A boulder is not somebody to talk to. The sprite rows stay in `actions()` for the scripted
+        // policies; what the model is shown is the pushes.
+        let menu = overworld_menu(&stuck, None);
+        assert!(menu.iter().all(|item| !item.id.contains("Boulder") || item.id.contains("PushBoulder")),
+            "a boulder's own sprite row is withheld: {menu:?}");
+        assert!(menu.iter().any(|item| item.id.contains("PushBoulder")), "{menu:?}");
 
-        // ⚠️ **And armed is still not enough.** pokered refuses a push onto a staircase by tile id
-        // (`CheckForCollisionWhenPushingBoulder`) and says nothing at all about it, so the agent used
-        // to hold the direction for `DRIVER_ESCAPE_SILENCE` and report a malfunction. This is the
-        // state the deployed run of 2026-09-02 was in when it filed the fifth of five issue reports
-        // about the boulder at (5, 14) on VictoryRoad1F: Strength armed, standing on the push tile,
-        // and a staircase one square north of the boulder.
-        let stuck = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
-        assert!(stuck.strength_active, "the deployed state has Strength armed");
-        let stairs = complaint(&stuck, FieldMoveRequest::PushBoulder {
-            boulder: Point8 { x: 5, y: 14 },
-            direction: JoypadButton::Up,
-        });
-        assert!(stairs.contains("stairs"), "{stairs}");
-        // The push it *had* just made, back the way it came, is refused for the honest second reason
-        // rather than being offered as a way out that is not one.
-        let back = complaint(&stuck, FieldMoveRequest::PushBoulder {
-            boulder: Point8 { x: 5, y: 14 },
-            direction: JoypadButton::Down,
-        });
-        assert!(back.contains("cannot get to"), "{back}");
+        // Without the move or the badge there is nothing to choose, which is the whole of what the
+        // turn's boulder line then has to explain.
+        stuck.map.can_strength = false;
+        assert!(!stuck.map.actions().iter().any(|a| matches!(a.tile, MetaTile::Boulder { .. })),
+            "no Strength, no boulder rows");
     }
 
     /// **The naming screen asks for a name, and takes only names the cartridge can write.**
@@ -4589,9 +4581,12 @@ mod tests {
 
     /// **A tree nobody can cut is not an action.**
     ///
-    /// A `:CutTree` row is a walk that ends *facing* a tree and nothing else — the cut itself is a
-    /// separate `use_field_move` — so offered without Cut it is a menu entry whose only follow-up
-    /// the game refuses. The deployed run took it eleven times on Route 2 with no badges at all.
+    /// A `:CutTree` row is a walk that ends by *cutting the tree* (`AgentState::OverworldMovement`'s
+    /// empty-route arm), so offered without Cut it is a menu entry that opens a party menu with no
+    /// CUT row in it and never comes back — sixty seconds ended by `DRIVER_ESCAPE_SILENCE`. The
+    /// deployed run took it eleven times on Route 2 with no badges at all. ⚠️ **It was worse when
+    /// the cut was a separate `use_field_move`**, which is why that tool is gone: the row completed
+    /// looking like success, and the follow-up that would have failed was often never made.
     ///
     /// ⚠️ **The gate is on the map rather than in the menu builder** (`MetaTileMap::can_cut`, set by
     /// `game_state()` alongside `can_surf`), so the scripted policy is held to it too: its own
@@ -4616,6 +4611,20 @@ mod tests {
 
         state.map.can_cut = true;
         assert!(cut_rows(&state) > 0, "and it is one with Cut — or this test would pass by accident");
+
+        // ⚠️ **Every row names its own tree, and the id still ends in `CutTree`.** The row carries
+        // `MetaTile::Cut { at }` rather than the terrain tile every other row used to share, because
+        // `OverworldMovement` re-derives its target by tile equality and a shared tile sent the walk
+        // to whichever tree sorted first — a row that named a tree could cut a different one. The id
+        // is unchanged on purpose: a resumed run quotes `Route9:5,9:CutTree` out of its own history.
+        let trees: std::collections::BTreeSet<String> = overworld_menu(&state, None).into_iter()
+            .filter(|item| item.id.ends_with(":CutTree"))
+            .map(|item| item.description)
+            .collect();
+        assert_eq!(trees.len(), cut_rows(&state), "two rows must not describe the same tree: {trees:?}");
+        for description in &trees {
+            assert!(description.starts_with("cut down the tree at ("), "{description}");
+        }
     }
 
     /// ⚠️ The party menu lists a mon's field moves in **its own move-slot order**, so the index of
@@ -4624,22 +4633,22 @@ mod tests {
     #[test]
     fn a_party_field_moves_index_is_computed_from_the_moves_it_knows() {
         let mut state = fixture_state();
-        // The HM gate sits above the index arithmetic, so this mon has to be able to use Strength
+        // The HM gate sits above the index arithmetic, so this mon has to be able to use Flash
         // at all before the index is the thing under test.
-        state.badges |= crate::pokemon::badge::Badge::RainbowBadge;
+        state.badges |= crate::pokemon::badge::Badge::BoulderBadge;
         state.pokemon.get_mut(0).expect("the fixture has a starter").moves = [
             Some(PokemonMove::with_max_pp(PokemonMoveName::Tackle)),
             Some(PokemonMove::with_max_pp(PokemonMoveName::Cut)),
-            Some(PokemonMove::with_max_pp(PokemonMoveName::Strength)),
+            Some(PokemonMove::with_max_pp(PokemonMoveName::Flash)),
             None,
         ];
 
         assert_eq!(
             resolve_field_move(&state, &FieldMoveRequest::PartyMove {
-                name: PokemonMoveName::Strength,
+                name: PokemonMoveName::Flash,
                 slot: None,
             }),
-            // Cut is a field move and sits in an earlier move slot, so Strength is the *second* row
+            // Cut is a field move and sits in an earlier move slot, so Flash is the *second* row
             // of the field-move box — not the third, and not the first.
             Ok(FieldMove::UseFieldMove { slot: 0, move_index: 1 }),
         );

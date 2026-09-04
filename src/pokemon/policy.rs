@@ -4094,7 +4094,7 @@ impl Policy for DeterministicPolicy {
                         // back to this step with the way open.
                         match Self::route_toward(world_graph, &actions, leader.map()) {
                             Some(action) => { self.gym_route_stuck = 0; Some(action) }
-                            None if actions.iter().any(|a| a.tile == MetaTile::CutTree) => {
+                            None if actions.iter().any(|a| matches!(a.tile, MetaTile::Cut { .. })) => {
                                 println!("[policy] no route to {} — cutting the regrown trees on {}",
                                     leader.map(), state.map.map);
                                 self.gym_route_stuck = 0;
@@ -4123,7 +4123,7 @@ impl Policy for DeterministicPolicy {
                         // If the player loses and blacks out, the step remains and the agent
                         // navigates back to try again.
                         Some(a.clone())
-                    } else if actions.iter().any(|a| a.tile == MetaTile::CutTree) {
+                    } else if actions.iter().any(|a| matches!(a.tile, MetaTile::Cut { .. })) {
                         // The leader is walled off behind cuttable trees. Celadon's gym is a garden maze
                         // of them, and they all regrow when the map reloads — which is exactly what a
                         // black-out on a failed attempt does, leaving the run inside a gym it can no
@@ -4648,7 +4648,7 @@ impl Policy for DeterministicPolicy {
                         None
                     } else {
                         // Route to face a reachable tree; once none remain, the trees are cut — done.
-                        match actions.iter().find(|a| a.tile == MetaTile::CutTree).cloned() {
+                        match actions.iter().find(|a| matches!(a.tile, MetaTile::Cut { .. })).cloned() {
                             Some(action) => Some(action),
                             None => { self.queue.pop_front(); continue; }
                         }

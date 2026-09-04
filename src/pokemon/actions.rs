@@ -41,6 +41,8 @@ impl Display for OverworldAction {
             MetaTile::Grass         => write!(f, "Walk in grass"),
             MetaTile::Pc            => write!(f, "Use the PC"),
             MetaTile::CutTree       => write!(f, "Cut the tree"),
+            MetaTile::Cut { at }    => write!(f, "Cut the tree at {at}"),
+            MetaTile::Boulder { at, push } => write!(f, "Push the boulder at {at} {push:?}"),
             MetaTile::Fish { rod }  => write!(f, "Fish with the {}", rod.name()),
             other                   => write!(f, "{other}"),
         }
