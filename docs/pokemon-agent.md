@@ -159,6 +159,29 @@ price.
   the refusal says so: Gen 1 re-reads a map's objects on every `LoadMapData`, so walking out and back
   undoes every push on the floor (`endgame::leaving_a_map_puts_its_boulders_back`). Saying only the
   first half is how a model decides the game is broken.
+- ⚠️ **"Can the player get to the push tile" is two questions, and asking only the second one shipped
+  the same silent stall a second time.** `reachable_tiles` is not the set of squares the player can
+  *stand on* — its own doc says so — so a wall touching floor is in it, and a boulder with rock on
+  one side had the push from that side accepted: nothing to attempt, nothing on screen, sixty
+  seconds. The stand tile must be `Empty`/`Grass`/`Warp` as well as reachable. Reported from a
+  deployed run on 2026-09-04, and true of three of the four boulders in the committed fixtures,
+  every one of them a **left** push with rock to the east.
+- ⚠️ **A cut tree and a boulder push finish their own action**, in `OverworldMovement`'s empty-route
+  arm beside the fishing row (2026-09-04). Both walks end facing a thing with exactly one legal
+  continuation, so ending there made the continuation a second decision — a paid request for the
+  model, a step to forget for anything scripted — and the row completed looking like success.
+  `MetaTile::Boulder { at, push }` and `MetaTile::Cut { at }` are synthesised actions like
+  `MetaTile::Fish`, one row per shove `boulder_push_refusal` allows and one per reachable tree, gated
+  on `MetaTileMap::can_strength` and `can_cut`. `AgentState::PushingBoulder` arms
+  `BIT_STRENGTH_ACTIVE` itself through `UsingFieldMove`'s new `resume`, which is why there is no
+  arming decision anywhere any more; it also emits `OverworldActionCompleted`, because a scripted
+  push was otherwise invisible.
+- ⚠️ **`MetaTile::Cut { at }` is a separate variant from the terrain `MetaTile::CutTree`, and the
+  split is what lets a row name its tree.** `OverworldMovement` re-derives its target every tick by
+  `a.tile == destination`, so while every cut row shared one anonymous tile that match found
+  whichever sorted first — a row saying "cut down the tree at (5, 8)" could walk to a different one,
+  and the walk was unstable when the nearest square beside a tree changed on approach. ⚠️ **`id_kind`
+  still answers `CutTree`**: an id is a key a resumed run quotes back out of its own conversation.
 - ⚠️ **`observe::map_view` filters people by reachability and *flags* warps.** Different answers on
   purpose: a person out of reach is someone nothing can be done with, a door out of reach is still
   where you come out if you get there. `WarpView::reachable_from_here` is the same call

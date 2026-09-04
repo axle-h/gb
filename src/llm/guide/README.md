@@ -66,10 +66,14 @@ where the Scope was, guessed Silph Co from the name, and spent fifty turns walki
 and Celadon. Chapter 4 now opens with the hideout, guarded by "if it is not in the bag" — the same
 duplication is owed to anything else a chapter assumes was picked up in the one before it.
 
-⚠️ `BIT_STRENGTH_ACTIVE` is the same shape and is already a ⚠️ in `CLAUDE.md`: Strength is armed once
-per map and cleared by every map change, so a boulder push on a floor you have just walked on to does
-nothing. Chapters 6 and 8 say so, because `tools::hm_available` refuses the call and the model would
-otherwise have no idea why.
+⚠️ `BIT_STRENGTH_ACTIVE` **used to be the same shape and is deliberately no longer said.** Strength
+is armed once per map and cleared by every map change, so a boulder push on a floor just walked on to
+does nothing at all — and chapters 6 and 8 spent a paragraph each telling the model to arm it again.
+They no longer do, because the model no longer arms it: a push is one action-menu row
+(`MetaTile::Boulder`) and `AgentState::PushingBoulder` opens the party menu itself. A chapter that
+tells the model to do something the tool catalogue has no call for is worse than one that says
+nothing, so what those chapters carry now is what is *true of the menu* — one row per legal push, and
+none at all for a shove the cartridge would refuse.
 
 ⚠️ **That table is what has been checked, not a claim about every sentence.** The prose around those
 numbers — which building a person stands in, roughly where an item lies, what a puzzle amounts to —

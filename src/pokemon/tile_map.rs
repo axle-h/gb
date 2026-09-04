@@ -70,6 +70,20 @@ pub struct MetaTileMap {
     /// reasonably concluded the game was broken. An action nobody can carry out is worse than a
     /// missing one, so it is not offered.
     pub can_cut: bool,
+    /// True when the player can use **Strength** here: the Rainbow Badge and a party mon that knows
+    /// it. Set by `game_state()` after construction, for the same reason [`Self::can_cut`] is.
+    ///
+    /// ⚠️ **It gates the boulder rows `actions()` emits, and it is the same argument `can_cut`
+    /// carries one obstacle along.** A push row is a walk to the square beside a boulder followed by
+    /// a shove; without the move or the badge the shove moves nothing and says nothing
+    /// (`TryPushingBoulder` returns on the very first `bit BIT_STRENGTH_ACTIVE`), so the row is an
+    /// invitation into a silent sixty-second stall. What the turn says instead is that the boulders
+    /// are there and which half is missing — see `prompt::situation`.
+    ///
+    /// ⚠️ **Not the same question as `GameState::strength_active`**, which is whether Strength has
+    /// been armed from the party menu *on this map* and is cleared by every map change. That one is
+    /// the driver's business: `AgentState::PushingBoulder` arms it itself.
+    pub can_strength: bool,
     /// Is Bill waiting inside his own machine?
     ///
     /// ⚠️ **The one hidden object in the table that is gated, and the gate is the whole point.**
@@ -314,6 +328,7 @@ impl MetaTileMap {
             can_surf: false,
             best_rod: None,
             can_cut: false,
+            can_strength: false,
             bill_cell_separator: false,
             strength_switches: strength_switch_table(map.metadata.map).iter()
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
@@ -516,6 +531,59 @@ impl MetaTileMap {
         None
     }
 
+    /// Every boulder actually standing on this map, in reading order.
+    ///
+    /// ⚠️ **Visible ones only.** A hidden boulder (Victory Road 2F keeps one until a 3F boulder
+    /// falls through a hole onto it) is not physically there, so naming it in the turn would point
+    /// the model at a square with nothing on it — the same rule `solve_boulder_push` filters on.
+    pub fn boulders(&self) -> Vec<Point8> {
+        let mut found: Vec<Point8> = self.sprites.iter()
+            .filter(|s| s.name.starts_with("Boulder") && !s.hidden)
+            .map(|s| s.position).collect();
+        found.sort_by_key(|p| (p.y, p.x));
+        found
+    }
+
+    /// Every one-tile shove on this map the cartridge would actually carry out, as
+    /// `(boulder, direction, the square it is pushed from)`.
+    ///
+    /// ⚠️ **This is `actions()`'s boulder section and it must stay one flood fill.** Nine boulders
+    /// on a Victory Road floor is thirty-six questions, each of which wants to know whether the
+    /// square it would be pushed from can be walked to; `boulder_push_refusal_inner` therefore takes
+    /// the reachable set rather than computing one, and this is where it is computed once. The same
+    /// lesson `nearest_castable_water` cost a whole deployed run of stutter — see its ⚠️.
+    pub fn boulder_pushes(&self) -> Vec<(Point8, JoypadButton, Point8)> {
+        self.boulder_pushes_within(&self.reachable_tiles())
+    }
+
+    /// [`Self::boulder_pushes`] against a reachable set already computed, which is what `actions()`
+    /// calls: it has run `bfs_from_player` at the top of itself and a second flood fill per tick is
+    /// the cost `nearest_castable_water` learned about the hard way.
+    pub fn boulder_pushes_within(&self, reach: &std::collections::HashSet<Point8>)
+        -> Vec<(Point8, JoypadButton, Point8)> {
+        let mut pushes = vec![];
+        for boulder in self.boulders() {
+            for dir in [JoypadButton::Up, JoypadButton::Down, JoypadButton::Left, JoypadButton::Right] {
+                if self.boulder_push_refusal_inner(boulder, dir, reach).is_some() { continue }
+                let Some(stand) = self.step(boulder, opposite_dir(dir)) else { continue };
+                pushes.push((boulder, dir, stand));
+            }
+        }
+        pushes
+    }
+
+    /// One square in `d` from `p`, or `None` off the map.
+    fn step(&self, p: Point8, d: JoypadButton) -> Option<Point8> {
+        let (dx, dy): (i32, i32) = match d {
+            JoypadButton::Up => (0, -1), JoypadButton::Down => (0, 1),
+            JoypadButton::Left => (-1, 0), JoypadButton::Right => (1, 0),
+            _ => return None,
+        };
+        let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
+        (x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height)
+            .then(|| Point8 { x: x as u8, y: y as u8 })
+    }
+
     /// Why the cartridge would refuse to shove the boulder at `boulder` one tile in `dir`, in a
     /// sentence the model can act on — or `None` if it would move.
     ///
@@ -578,22 +646,12 @@ impl MetaTileMap {
     /// clause can ask the same question of the other three without recursing into its own prose.
     fn boulder_push_refusal_inner(&self, boulder: Point8, dir: JoypadButton,
         reach: &std::collections::HashSet<Point8>) -> Option<String> {
-        let step = |p: Point8, d: JoypadButton| -> Option<Point8> {
-            let (dx, dy): (i32, i32) = match d {
-                JoypadButton::Up => (0, -1), JoypadButton::Down => (0, 1),
-                JoypadButton::Left => (-1, 0), JoypadButton::Right => (1, 0),
-                _ => return None,
-            };
-            let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
-            (x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height)
-                .then(|| Point8 { x: x as u8, y: y as u8 })
-        };
-        let Some(dest) = step(boulder, dir) else {
+        let Some(dest) = self.step(boulder, dir) else {
             return Some(format!("the edge of {} is there", self.map));
         };
         // The tile the player has to stand on to shove it, one square the other way. If that is off
         // the map there is nowhere to push from and the shove can never happen.
-        let Some(stand) = step(boulder, opposite_dir(dir)) else {
+        let Some(stand) = self.step(boulder, opposite_dir(dir)) else {
             return Some(format!("there is nowhere to stand on the far side, at the edge of {}", self.map));
         };
         match self.tile_at(dest) {
@@ -614,6 +672,27 @@ impl MetaTileMap {
         // a boulder that is merely awkward and one that is *stuck*, which on a Strength puzzle is
         // the whole answer: on VictoryRoad1F a boulder shoved north into the alcove at (5, 14) seals
         // the only way to the tile it would have to be pushed back from.
+        //
+        // ⚠️ **Two questions, and asking only the second one let the bug straight through.**
+        // [`Self::reachable_tiles`] is the key set of `bfs_from_player`, which records every
+        // *neighbour* of an open square and declines only to expand the ones that cannot be walked
+        // through — its own doc comment says so — because a route has to be allowed to end at a
+        // door, a counter or a person. So a wall touching floor is in it, and `reach.contains` alone
+        // says yes to standing inside the wall. A deployed run was offered, and accepted, a push
+        // left on a boulder whose right-hand neighbour was solid rock: there was nowhere to stand,
+        // the shove was never attempted, and the silence was the sixty seconds this whole function
+        // exists to avoid. The tile has to be one the player can *occupy* first, which is the same
+        // `floor` predicate `solve_boulder_push` uses (a coordinate warp is floor: VR1F's entrance
+        // warps are plain cave floor and a boulder is legitimately pushed past them).
+        match self.tile_at(stand) {
+            MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. } => {}
+            MetaTile::Sprite(who) => return Some(format!(
+                "{who} is standing at ({}, {}), which is the only square this can be pushed from",
+                stand.x, stand.y)),
+            other => return Some(format!(
+                "({}, {}) is {other}, so there is nowhere to stand to push from that side",
+                stand.x, stand.y)),
+        }
         if stand != self.player_position && !reach.contains(&stand) {
             return Some(format!(
                 "you cannot get to ({}, {}) to push from there", stand.x, stand.y));
@@ -1325,8 +1404,11 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Switch { object: site.object, ordinal }, route });
         }
 
-        // 6. Cut trees: route to a walkable tile adjacent to a CutTree and face it (no A — the cut is
-        //    triggered via the field-move menu once facing). One action per reachable-adjacent tree.
+        // 6. Cut trees: route to a walkable tile adjacent to a CutTree and face it (no A), and let
+        //    `AgentState::CuttingTree` do the cut — the row is the whole thing, exactly as a boulder
+        //    row and a fishing row are. One action per reachable-adjacent tree, and each carries the
+        //    tree it is about (`MetaTile::Cut { at }`) rather than sharing one anonymous tile: see
+        //    the ⚠️ on that variant for what the shared one cost.
         //
         //    ⚠️ **Only when Cut can actually be used** — see [`Self::can_cut`]. The action ends facing
         //    a tree and nothing else, so without the move and the badge it is an invitation into a
@@ -1362,7 +1444,50 @@ impl MetaTileMap {
             } else if route.last() != Some(&face_button) {
                 route.push(face_button);
             }
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::CutTree, route });
+            actions.push(OverworldAction { map: self.map, origin: self.player_position,
+                destination: dest, tile: MetaTile::Cut { at: tree }, route });
+        }
+
+        // 7. Boulder pushes: route to the square a boulder can be shoved from, face it, and let
+        //    `AgentState::PushingBoulder` do the rest — including arming Strength, which is why
+        //    there is no separate row and no separate tool call for that.
+        //
+        //    ⚠️ **Only pushes the cartridge would actually carry out**, which is the whole of
+        //    [`Self::boulder_push_refusal`] asked of all four directions at once. A refused shove is
+        //    refused in *silence*, so a row for one is sixty seconds of holding a direction at a
+        //    boulder that will never move; that is the stall the deployed run of 2026-09-02 filed
+        //    five issue reports about, and offering the refusals as menu rows would be the same bug
+        //    with a nicer interface. The rows that survive are the decisions a player actually has.
+        //
+        //    ⚠️ **And only when Strength can be used at all** — see [`Self::can_strength`], the same
+        //    rule the cut trees above keep.
+        //
+        //    ⚠️ **One flood fill for every boulder on the floor.** `boulder_pushes` computes the
+        //    reachable set once and asks all four directions of every boulder against it; this runs
+        //    on every 20 ms agent tick, and Victory Road 2F has three boulders.
+        //
+        //    The sprite scan comes first because the set below is a copy of the whole reachable
+        //    region, and past the Rainbow Badge `can_strength` is true on every map in the game
+        //    while boulders are on five of them.
+        if self.can_strength && self.sprites.iter().any(|s| !s.hidden && s.name.starts_with("Boulder")) {
+            let reach: std::collections::HashSet<Point8> = full_dist.keys().copied().collect();
+            for (boulder, push, stand) in self.boulder_pushes_within(&reach) {
+                let Some((_, came_from)) = best_dist_from(&stand) else { continue };
+                let mut route = reconstruct(stand, came_from);
+                // Facing is not optional: `TryPushingBoulder` reads
+                // `wSpritePlayerStateData1FacingDirection` and the push needs the direction held
+                // twice, so the route ends turned toward the boulder exactly as a cut tree's does.
+                // The driver re-derives all of this every tick anyway — this is what the *menu* row
+                // promises, not what carries it out.
+                if route.is_empty() {
+                    let facing: JoypadButton = self.player_direction.into();
+                    if facing != push { route.push(push); }
+                } else if route.last() != Some(&push) {
+                    route.push(push);
+                }
+                actions.push(OverworldAction { map: self.map, origin: self.player_position,
+                    destination: stand, tile: MetaTile::Boulder { at: boulder, push }, route });
+            }
         }
 
         actions.sort();
@@ -1746,6 +1871,9 @@ impl Display for MetaTileMap {
                     MetaTile::Counter => write!(f, "=")?,
                     MetaTile::Switch { .. } => write!(f, "s")?,
                     MetaTile::CutTree => write!(f, "t")?,
+                    // Never in `meta_tiles` either — a push and a cut are actions on the ordinary
+                    // floor beside the thing they are about, which is drawn as itself.
+                    MetaTile::Boulder { .. } | MetaTile::Cut { .. } => write!(f, "_")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
                     // Never in `meta_tiles` — a fishing spot is an action on ordinary ground.
@@ -2115,7 +2243,8 @@ mod boulder_solver_tests {
             tile_pair_collisions: vec![],
             tile_pair_collisions_water: vec![], sprites,
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
-            spinners: HashMap::new(), can_surf: false, best_rod: None, can_cut: false, bill_cell_separator: false,
+            spinners: HashMap::new(), can_surf: false, best_rod: None, can_cut: false,
+            can_strength: false, bill_cell_separator: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
             has_grass_encounters: false,
             // A hand-built grid for the boulder solver; there is no ROM map behind it to draw.

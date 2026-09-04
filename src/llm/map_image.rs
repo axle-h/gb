@@ -121,6 +121,9 @@ fn tint_for(tile: MetaTile) -> Option<Tint> {
         // and the tile they sit on reads as the wall they are drawn in. The arms exist so that
         // adding a variant is a compile error here rather than a silently untinted square.
         MetaTile::Pc | MetaTile::Switch { .. } => PC,
+        // Nor is `Boulder` or `Cut`: both are *actions* on the ordinary floor beside the thing they
+        // are about, and the tree and the boulder are drawn as the terrain and the sprite they are.
+        MetaTile::Boulder { .. } | MetaTile::Cut { .. } => return None,
         // Nor is `Fish`: it is a shore *action*, and the shore itself is ordinary ground already
         // tinted by the water beside it.
         MetaTile::Fish { .. } => return None,

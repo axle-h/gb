@@ -288,10 +288,21 @@ where it was. The agent has no exit condition for that, so it mashes A for sixty
 up. A deployed run walked into it eleven times on one tree in Route 2 with no badges at all, filed
 two issue reports saying the game was broken, and spent the rest of its life going round four maps
 looking for a way past. So cuttable trees are kept out of the action menu until Cut can actually be
-used, water crossings until Surf can, and `use_field_move` refuses the call itself and says which
-half is missing. What the turn does say — once, while it is true — is that the trees are there and
-what it would take to clear them, because a model that is simply shown no way forward starts
-inventing reasons why.
+used, boulder pushes until Strength can, water crossings until Surf can, and `use_field_move`
+refuses the call itself and says which half is missing. What the turn does say — once, while it is
+true — is that the trees and the boulders are there, where they are, and what it would take to move
+them, because a model that is simply shown no way forward starts inventing reasons why.
+
+The other half of that is that when the terrain *can* be dealt with, dealing with it is **one**
+decision rather than two. A cut used to be a menu row that walked up to a tree and a `use_field_move`
+that cut it; a push used to be a `use_field_move` that armed Strength and another that shoved. Both
+are pairs whose first half is a walk with exactly one legal ending, so both were two paid requests
+for one decision — and worse, the first half completes looking like success, so a run that walked up
+to a tree and then thought about something else left the tree standing. Now `cut down the tree at
+(5, 8)` and `push the boulder at (5, 15) one tile down` are rows in the action menu that do the whole
+thing, `BIT_STRENGTH_ACTIVE` included. There is one row per shove the cartridge would actually
+make — a boulder that cannot move any more simply has none, and the turn says that leaving the floor
+and coming back puts every boulder on it back where it started.
 
 What the game *does* refuse it refuses out loud, and that had the opposite problem: a word. Guards,
 locked doors and scripted scenes stop the player where they stand and put a message on screen, so the

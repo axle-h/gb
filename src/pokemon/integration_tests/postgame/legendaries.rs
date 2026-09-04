@@ -45,8 +45,8 @@ fn dump_map(fixture: &mut TestFixture, x0: u8, x1: u8, y0: u8, y1: u8) {
                 Some(MetaTile::Counter) => 'n',
                 Some(MetaTile::Pc) => 'P',
                 Some(MetaTile::Switch { .. }) => 's',
-                // Never in `meta_tiles` — a fishing spot is an action, not a tile.
-                Some(MetaTile::Fish { .. }) => '.',
+                // Never in `meta_tiles` — a fishing spot and a boulder push are actions, not tiles.
+                Some(MetaTile::Fish { .. } | MetaTile::Boulder { .. } | MetaTile::Cut { .. }) => '.',
                 None => ' ',
             })
             .collect();

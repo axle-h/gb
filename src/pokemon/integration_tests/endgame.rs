@@ -437,6 +437,35 @@ fn a_boulder_that_cannot_move_is_refused_rather_than_shoved_at() {
         .expect("VictoryRoad1F's puzzle is still solvable from its starting layout");
     assert_eq!(solution.first(), Some(&(Point8 { x: 5, y: 15 }, JoypadButton::Down)));
 
+    // ⚠️ **The second silent refusal, found by a deployed run on 2026-09-04 and on this very
+    // fixture: there was nowhere to stand.** A push west is made from the square *east* of the
+    // boulder, and (6, 15) is solid rock — so the shove could never be attempted, and a shove that
+    // is never attempted is the same sixty seconds of nothing as a shove the cartridge refuses.
+    //
+    // It got through because `reachable_tiles` is not the set of squares the player can stand on:
+    // it is the key set of `bfs_from_player`, which records every *neighbour* of an open square
+    // (its own doc says so, because a route has to be allowed to end at a door or a person) and only
+    // declines to expand the ones that cannot be walked through. So a wall touching floor is in it,
+    // and asking `reach.contains` alone put the player inside the wall. Three of the four boulders
+    // in this repo's fixtures had a push accepted this way and every one of them was a **left**
+    // push with rock to the east, which is exactly the shape the run reported.
+    assert_eq!(fresh.map.tile_at(Point8 { x: 6, y: 15 }), crate::pokemon::tile::MetaTile::Obstacle,
+        "the square this push would be made from is solid rock");
+    let nowhere = fresh.map.boulder_push_refusal(Point8 { x: 5, y: 15 }, JoypadButton::Left)
+        .expect("a push with nowhere to stand must be refused");
+    assert!(nowhere.contains("(6, 15)") && nowhere.contains("nowhere to stand"), "{nowhere}");
+    // And it is refused as a *row*, which is the seam the model actually meets: `actions()` offers
+    // the two pushes that work and neither of the two that do not.
+    let offered: Vec<(Point8, JoypadButton)> = fresh.map.actions().iter()
+        .filter_map(|action| match action.tile {
+            crate::pokemon::tile::MetaTile::Boulder { at, push } if at == Point8 { x: 5, y: 15 } => Some((at, push)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, vec![(Point8 { x: 5, y: 15 }, JoypadButton::Up),
+                             (Point8 { x: 5, y: 15 }, JoypadButton::Down)],
+        "only the pushes the cartridge would make are rows");
+
     // And the driver, which is the seam that actually burned the minute. Asking for the refused push
     // must come back with the reason on the events, in far less time than `DRIVER_ESCAPE_SILENCE`.
     let asked = PushOnce::new(Point8 { x: 5, y: 14 }, JoypadButton::Up);

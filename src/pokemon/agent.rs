@@ -928,7 +928,17 @@ pub(crate) enum AgentState {
     /// pushable; DIG warps the player out of the cave. Same press/release mashing as
     /// `CuttingTree`/`Surfing`; `entered_menu` tracks that we left the overworld, so a return to it —
     /// or a move away from `from_map`, which is all DIG does — means the move finished.
-    UsingFieldMove { press: bool, entered_menu: bool, slot: u8, move_index: u8, from_map: Map },
+    ///
+    /// ⚠️ **`resume` is a boulder push waiting on STRENGTH, and it is the reason arming is not a
+    /// decision anybody is asked to make.** `BIT_STRENGTH_ACTIVE` is cleared on every map change, so
+    /// "arm it, then push" is two steps of which the first is pure bookkeeping the game does not
+    /// even show — and forgetting it is silent, because an unarmed shove returns on the first line
+    /// of `TryPushingBoulder` with nothing on screen. So `PushingBoulder` comes through here when it
+    /// finds the flag clear and is handed straight back when the menu closes. Same shape as
+    /// [`Self::Surfing`]'s `resume`, which exists because a Surf mount interrupts a walk that is
+    /// nobody's decision either.
+    UsingFieldMove { press: bool, entered_menu: bool, slot: u8, move_index: u8, from_map: Map,
+                     resume: Option<(Point8, JoypadButton)> },
 
     /// Tossing a bag item to make room: START→ITEM→(bag list)→TOSS→quantity→YES. Gen 1's bag holds 20
     /// items and a mart purchase of a *new* item silently fails once it is full ("You can't carry any
@@ -1008,7 +1018,15 @@ pub(crate) enum AgentState {
     /// that from a shove still in progress — so it is [`MetaTileMap::boulder_push_refusal`], asked
     /// every tick, that ends it on anything else.
     /// Planning which boulder to push where lives in the policy (`MetaTileMap::solve_boulder_push`), not here.
-    PushingBoulder { boulder: Point8, dir: JoypadButton },
+    ///
+    /// ⚠️ **`armed` is a one-shot, and it is a livelock guard rather than bookkeeping.** This state
+    /// arms `BIT_STRENGTH_ACTIVE` itself when it finds it clear, by going through
+    /// [`Self::UsingFieldMove`] and being handed back — so if the arming did not take, coming
+    /// straight back here would send it round again for ever, and the only thing that would end it
+    /// is `DRIVER_ESCAPE_SILENCE` reporting "got no answer from the game", which is the exact
+    /// sentence this whole mechanism exists to stop producing. One attempt; a second failure is a
+    /// named refusal.
+    PushingBoulder { boulder: Point8, dir: JoypadButton, armed: bool },
 }
 
 impl AgentState {
@@ -1069,7 +1087,7 @@ impl Display for AgentState {
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
-            AgentState::PushingBoulder { boulder, dir } => write!(f, "push-boulder:{boulder}{dir:?}"),
+            AgentState::PushingBoulder { boulder, dir, .. } => write!(f, "push-boulder:{boulder}{dir:?}"),
         }
     }
 }
@@ -2619,7 +2637,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::UseFieldMove { slot, move_index }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::UsingFieldMove { press: true, entered_menu: false, slot, move_index, from_map: game_state.map.map });
+                            self.set_state(AgentState::UsingFieldMove { press: true, entered_menu: false, slot, move_index, from_map: game_state.map.map, resume: None });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::TossItem { item }) => {
@@ -2659,7 +2677,7 @@ CascadeBadge; not cutting".to_string(),
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             }
-                            self.set_state(AgentState::PushingBoulder { boulder, dir });
+                            self.set_state(AgentState::PushingBoulder { boulder, dir, armed: false });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::UseElevator { panel, floor }) => {
@@ -2926,6 +2944,43 @@ CascadeBadge; not cutting".to_string(),
                                     api.release_all_buttons();
                                     self.set_state(AgentState::Fishing(
                                         crate::pokemon::postgame::fishing::FishState::new(rod, at)));
+                                    return Ok(());
+                                }
+                                // ⚠️ **A cut tree and a boulder finish their own action, for the
+                                // same reason the fishing row does.** Both walks end facing a thing
+                                // with exactly one legal continuation — the party menu, and nothing
+                                // else — so ending the action there and handing back made the
+                                // continuation a second decision: a paid request for the model, and
+                                // a step to forget for anything scripted. What that cost is on the
+                                // record: a deployed run walked to trees and boulders it then did
+                                // not act on, and the `use_field_move` calls that were supposed to
+                                // follow are the ones that stalled. The row now says what it does
+                                // and does it.
+                                //
+                                // Every policy gets this, exactly as with fishing: the rows are in
+                                // `actions()`, and both drivers re-resolve everything they need from
+                                // the live game (`field_move_carrier` for the carrier, and
+                                // `PushingBoulder`'s per-tick `boulder_push_refusal`), so nothing
+                                // depends on the state the row was minted in.
+                                if let MetaTile::Cut { at: tree_pos } = destination
+                                    && game_state.can_use_cut
+                                    // The row's own tree, and the driver cuts whatever is in front
+                                    // of the player — so if the walk has ended facing something
+                                    // else, this is not that row's cut and the ordinary completion
+                                    // below is the honest answer.
+                                    && game_state.map.tile_in_front()
+                                        .is_some_and(|(at, tile)| at == tree_pos && tile == MetaTile::CutTree)
+                                    && let Some((slot, move_index)) = crate::pokemon::policy::field_move_carrier(
+                                        &game_state, crate::pokemon::move_name::PokemonMoveName::Cut)
+                                {
+                                    api.release_all_buttons();
+                                    self.set_state(AgentState::CuttingTree {
+                                        press: true, entered_menu: false, tree_pos, slot, move_index });
+                                    return Ok(());
+                                }
+                                if let MetaTile::Boulder { at, push } = destination {
+                                    api.release_all_buttons();
+                                    self.set_state(AgentState::PushingBoulder { boulder: at, dir: push, armed: false });
                                     return Ok(());
                                 }
                                 new_events.push(AgentEvent::OverworldActionCompleted { destination });
@@ -4323,7 +4378,7 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::Surfing {
                     press: false, entered_menu, water_pos, slot, move_index, resume, settle: 0 });
             }
-            AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map } => {
+            AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map, resume } => {
                 use crate::pokemon::menu::TextBoxId;
                 // A field move opens the party menu → field-move menu → the move, shows a confirmation
                 // dialog ("… can now use STRENGTH!" / the Dig animation), then returns to the overworld
@@ -4338,7 +4393,18 @@ CascadeBadge; not cutting".to_string(),
                 let map_changed = api.game_state().map_or(false, |s| s.map.map != from_map);
                 if entered_menu && (game_mode == GameMode::Overworld || map_changed) {
                     api.release_all_buttons();
-                    self.set_state(AgentState::Idle);
+                    // ⚠️ **A push that came here to arm STRENGTH is given straight back**, rather
+                    // than dropping to `Idle` and costing a whole decision to say "now push it" —
+                    // which for the model is a paid request and for the scripted policy is a step
+                    // that has to remember the flag. `map_changed` is deliberately not carried
+                    // through: `BIT_STRENGTH_ACTIVE` is cleared by the map change, the boulder is on
+                    // the map that was left, and `PushingBoulder`'s own refusal check would be
+                    // asking about a floor nobody is standing on.
+                    match resume.filter(|_| !map_changed) {
+                        Some((boulder, dir)) =>
+                            self.set_state(AgentState::PushingBoulder { boulder, dir, armed: true }),
+                        None => self.set_state(AgentState::Idle),
+                    }
                     return Ok(());
                 }
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;
@@ -4346,7 +4412,7 @@ CascadeBadge; not cutting".to_string(),
                 // Plain press/release mashing (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::UsingFieldMove { press: true, entered_menu, slot, move_index, from_map });
+                    self.set_state(AgentState::UsingFieldMove { press: true, entered_menu, slot, move_index, from_map, resume });
                     return Ok(());
                 }
 
@@ -4357,7 +4423,7 @@ CascadeBadge; not cutting".to_string(),
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::UsingFieldMove { press: false, entered_menu, slot, move_index, from_map });
+                self.set_state(AgentState::UsingFieldMove { press: false, entered_menu, slot, move_index, from_map, resume });
             }
             AgentState::TossingItem { item, press, entered_menu } => {
                 use crate::pokemon::menu::TextBoxId;
@@ -4420,7 +4486,7 @@ CascadeBadge; not cutting".to_string(),
                 api.press_button(button);
                 self.set_state(AgentState::TossingItem { item, press: false, entered_menu });
             }
-            AgentState::PushingBoulder { boulder, dir } => {
+            AgentState::PushingBoulder { boulder, dir, armed } => {
                 let game_state = self.observe_state(api)?;
                 // Any interruption (wild battle in the cave, a script/text box) — drop to Idle. The policy
                 // decides the next push from the live positions, so partial progress is never lost.
@@ -4437,6 +4503,14 @@ CascadeBadge; not cutting".to_string(),
                 // fell through a hole. Either way this single push is complete; hand back to the policy.
                 if !boulder_at(boulder) {
                     api.release_all_buttons();
+                    // ⚠️ **Said out loud, because a scripted push is otherwise completely silent.**
+                    // This is a menu row now (`MetaTile::Boulder`), and a row whose only trace is
+                    // the map having changed shape is one a model reads back as an action that did
+                    // nothing — the same reason a battle the script decided gets a report. It is
+                    // emitted for `FieldMove::PushBoulder` too: the scripted policy's Victory Road
+                    // is a dozen of these and the page had no line for any of them.
+                    self.event(AgentEvent::OverworldActionCompleted {
+                        destination: MetaTile::Boulder { at: boulder, push: dir } });
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -4455,6 +4529,43 @@ CascadeBadge; not cutting".to_string(),
                     api.release_all_buttons();
                     self.event(AgentEvent::TextBox { message: refusal });
                     self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // ⚠️ **STRENGTH is armed here rather than asked for, and that is the whole reason
+                // there is no separate arming decision.** `TryPushingBoulder` returns on its first
+                // instruction when `BIT_STRENGTH_ACTIVE` is clear — no text, no animation, nothing —
+                // and the flag is reset by *every* map change, so "arm it once per floor" is a piece
+                // of bookkeeping that is invisible when it is forgotten and costs a request when it
+                // is not. Both used to be true of the model, which was offered `strength` and
+                // `push_boulder` as two separate calls; now the menu offers the push and this arms
+                // what it needs. `UsingFieldMove`'s `resume` brings the push back when the menu
+                // closes.
+                //
+                // The badge and the move are `MetaTileMap::can_strength`, which keeps the row out of
+                // the menu — this is the last line of defence, exactly as `can_use_cut` is for
+                // `FieldMove::CutTree` above, because a policy that asked anyway would otherwise
+                // mash A at a party menu with no STRENGTH row in it until `DRIVER_ESCAPE_SILENCE`.
+                if !game_state.strength_active {
+                    api.release_all_buttons();
+                    let carrier = crate::pokemon::policy::field_move_carrier(
+                        &game_state, crate::pokemon::move_name::PokemonMoveName::Strength)
+                        .filter(|_| game_state.badges.contains(crate::pokemon::badge::Badge::RainbowBadge));
+                    let Some((slot, move_index)) = carrier.filter(|_| !armed) else {
+                        self.event(AgentEvent::TextBox { message: match carrier {
+                            // Back from the party menu with the flag still clear. Nothing here can
+                            // tell why, and going round again is the livelock `armed` is for; what
+                            // the model can act on is that the shove did not happen.
+                            Some(_) => format!(
+                                "Strength did not arm, so the boulder at {boulder} was not pushed"),
+                            None => "Strength needs a party member that knows it, and the \
+                                     RainbowBadge; not pushing".to_string(),
+                        }});
+                        self.set_state(AgentState::Idle);
+                        return Ok(());
+                    };
+                    self.set_state(AgentState::UsingFieldMove {
+                        press: true, entered_menu: false, slot, move_index,
+                        from_map: game_state.map.map, resume: Some((boulder, dir)) });
                     return Ok(());
                 }
                 // The tile the player must stand on to push: one step *behind* the boulder.
@@ -4483,7 +4594,7 @@ CascadeBadge; not cutting".to_string(),
                     api.release_all_buttons();
                     api.press_button(dir);
                 }
-                self.set_state(AgentState::PushingBoulder { boulder, dir });
+                self.set_state(AgentState::PushingBoulder { boulder, dir, armed });
             }
             AgentState::UsingItemPc(s) => return crate::pokemon::postgame::item_storage::tick(self, api, s),
             AgentState::UsingPcBox(s) => return crate::pokemon::postgame::pc_box::tick(self, api, s),

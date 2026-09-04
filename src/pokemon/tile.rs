@@ -23,7 +23,43 @@ pub enum MetaTile {
     Counter,
     /// A shrub that blocks passage until the player uses HM Cut.
     /// Treated as impassable until `can_use_cut` is true.
+    ///
+    /// ⚠️ **As an *action* it is the whole cut, not the walk up to it.** The row's route ends
+    /// facing the tree and `AgentState::OverworldMovement`'s empty-route arm hands off to
+    /// `AgentState::CuttingTree`, the same seam [`Self::Fish`] uses. It used to end there and
+    /// leave the model to call `use_field_move` with `cut` as a second turn, which is a paid
+    /// request for a step with exactly one legal continuation.
     CutTree,
+    /// **The whole cut of the tree at `at`**: walk to a square beside it, face it, use Cut.
+    ///
+    /// ⚠️ **A separate variant from [`Self::CutTree`], which is the *terrain*.** They used to be
+    /// one, and the row was therefore about "a tree" rather than about a tree: `actions()` emits one
+    /// per reachable tree, `AgentState::OverworldMovement` re-derives its target every tick by
+    /// `a.tile == destination`, and with every row carrying the same tile that match found whichever
+    /// sorted first — so a row that named its tree could be walked to a different one. It also meant
+    /// the row could not say which tree it was about at all, which is the thing the model is
+    /// choosing between. Carrying `at` fixes both, and makes the walk stable when the nearest square
+    /// beside a tree changes as the player approaches it.
+    ///
+    /// ⚠️ **[`Self::id_kind`] still says `CutTree`.** The id is a key the model quotes back out of
+    /// its own history, and a resumed run's history is full of `Route9:5,9:CutTree`.
+    Cut { at: Point8 },
+    /// **One shove of the boulder at `at`, one tile in `push`.** Synthesised by `actions()` like
+    /// [`Self::Fish`] rather than classified from the tileset: the tile the row's coordinate names
+    /// is ordinary floor, and what makes it a row is the conjunction of a boulder beside it, a push
+    /// the cartridge would not refuse ([`MetaTileMap::boulder_push_refusal`]) and a party that can
+    /// use Strength ([`MetaTileMap::can_strength`]).
+    ///
+    /// ⚠️ **Strength is armed by the row rather than asked for.** `AgentState::PushingBoulder`
+    /// opens the party menu itself when `BIT_STRENGTH_ACTIVE` is clear, so there is no separate
+    /// "arm Strength" decision to get wrong — the flag is reset on every map change, and a run that
+    /// has to remember that spends a request per floor on it and stalls silently when it forgets.
+    ///
+    /// ⚠️ **`at` is carried even though it is derivable** (`at` = the row's tile stepped one square
+    /// in `push`). The prose has to name the boulder's own square, and an action that computes the
+    /// thing it is about from the square the player stands on is one more place for the two
+    /// coordinate conventions to be confused.
+    Boulder { at: Point8, push: crate::joypad::JoypadButton },
     /// A PC (a hidden-object tile the player faces and presses A to use — Someone's PC / Bill's PC).
     /// Impassable like `Obstacle`, but `actions()` emits a route that faces it and presses A. The
     /// tile is not classified from the tileset; PC coordinates are looked up per map (`pc_locations`).
@@ -102,8 +138,33 @@ impl MetaTile {
             // told apart by their coordinates, so this is about the row reading as English rather
             // than about uniqueness.
             Self::Switch { object, ordinal } => format!("{}{ordinal}", <&'static str>::from(object)).into(),
+            // The direction is part of the key rather than of the prose: one boulder is up to four
+            // different decisions and they share the square the player stands on for none of them,
+            // but `stand + push` is what names the boulder, so without the word two rows for two
+            // boulders either side of one tile would mint the same id.
+            Self::Boulder { push, .. } => format!("PushBoulder{push}").into(),
+            // ⚠️ **Not `"Cut"`.** An id is a key, and a run resumed across this change reads
+            // `Route9:5,9:CutTree` back out of its own conversation and quotes it at
+            // `resolve_overworld`. The variant split is an implementation detail; the key is not.
+            Self::Cut { .. } => "CutTree".into(),
             other => other.kind().into(),
         }
+    }
+}
+
+/// A push direction as the word a person would use, lower case, for the prose above.
+///
+/// ⚠️ **Not `JoypadButton`'s own `Display`**, which is the variant name and therefore capitalised:
+/// this reads inside a sentence ("push it left"), and the capitalised form is what the *id* uses,
+/// where it is a key rather than English. `tile_map::push_word` is the same three lines for the
+/// refusal sentences; they are separate because one is prose about a button and the other is prose
+/// about a tile, and folding them would put a `pub` on a formatting detail.
+fn push_word(push: crate::joypad::JoypadButton) -> &'static str {
+    use crate::joypad::JoypadButton;
+    match push {
+        JoypadButton::Up => "up", JoypadButton::Down => "down",
+        JoypadButton::Left => "left", JoypadButton::Right => "right",
+        _ => "that way",
     }
 }
 
@@ -137,6 +198,8 @@ impl Display for MetaTile {
             Self::ConnectionWater(to_map) => write!(f, "the water crossing into {to_map}"),
             Self::Counter => write!(f, "a counter"),
             Self::CutTree => write!(f, "a cuttable tree"),
+            Self::Cut { at } => write!(f, "the tree at ({}, {}), to cut it down", at.x, at.y),
+            Self::Boulder { at, push } => write!(f, "the boulder at ({}, {}), to push it {}", at.x, at.y, push_word(*push)),
             Self::Pc => write!(f, "the PC"),
             Self::Fish { rod } => write!(f, "the water's edge, to fish with the {}", rod.name()),
             Self::Switch { object, .. } => write!(f, "{object}"),

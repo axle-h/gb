@@ -73,11 +73,13 @@ lives in the code.
   Removing the verb and the `facing` property only it used gave the Overworld tool array **370
   bytes** back, its largest single reclaim.
 - **A row that leads to a coordinate being asked for names both squares.** An id's coordinate is
-  where the *player stands*; `use_field_move`'s `target` and `push_boulder`'s are where the *thing
-  is*. `Route16:27,10:Snorlax` with the Snorlax on (26, 10) had a run play the Poké Flute at open
+  where the *player stands*; `use_field_move`'s `target` is where the *thing is*.
+  `Route16:27,10:Snorlax` with the Snorlax on (26, 10) had a run play the Poké Flute at open
   ground three times, each answered "Accepted". `resolve_field_move` now refuses a `use_item` whose
   target is `Empty`/`Grass`/`Water` or off the map, or that cannot be faced, and names what is
-  beside it. Only those rows carry both coordinates: a person the agent walks to needs no number.
+  beside it. Only those rows carry both coordinates: a person the agent walks to needs no number. A
+  `MetaTile::Boulder` row carries them for the same reason — a Sokoban puzzle is reasoned about in
+  the boulder's coordinates and walked in the player's.
 - **`resolve_overworld` falls back to `connection_action`** for an id naming a `Connection` tile
   `actions()` did not mint, and a connection row lists the other reachable landing groups by id
   (`MetaTileMap::crossings`). Without it the model could not say "same map, different door", and one
@@ -87,18 +89,40 @@ lives in the code.
   (`tools::door_side`, only where a destination repeats, since a double-wide front door is two tiles
   onto one square). A gate house's warps are all `LAST_MAP`, so its menu was three identical
   `Warp → Route7` rows and a run filed a bug about a missing Saffron warp.
-- An action the game would refuse is not offered. `MetaTileMap::can_cut`/`can_surf` keep `CutTree`
-  rows and water crossings out of `actions()` (on the map, so scripted policies are held to it),
-  `tools::hm_available` refuses the call against `HM_BADGES` with separate complaints for "nobody
-  knows it" and "no badge", and `agent.rs` refuses on the way into `CuttingTree` with decisions
-  still coming. `prompt`'s `Blocked here:` line names what would clear a `CutTree` and nothing
-  else: naming water fired on every coast and one run spent 65 turns blaming it.
-  `fly_bike::blocked_by` still does not check the Thunder Badge.
-  ⚠️ **`push_boulder` is the same family and its refusal is the quiet one**: Strength armed and a
-  badge held still leaves a shove the cartridge answers with nothing at all, so
-  `resolve_field_move` asks `MetaTileMap::boulder_push_refusal` before it accepts the call, and the
-  complaint names the directions that *would* work. See the ⚠️ in
-  [pokemon-agent](pokemon-agent.md) for the two cartridge rules behind it.
+- An action the game would refuse is not offered. `MetaTileMap::can_cut`/`can_strength`/`can_surf`
+  keep `CutTree` rows, boulder pushes and water crossings out of `actions()` (on the map, so
+  scripted policies are held to it), `tools::hm_available` refuses the call against `HM_BADGES` with
+  separate complaints for "nobody knows it" and "no badge", and `agent.rs` refuses on the way into
+  `CuttingTree` and `PushingBoulder` with decisions still coming. `prompt`'s `Blocked here:` line
+  names what would clear a `CutTree` and nothing else: naming water fired on every coast and one run
+  spent 65 turns blaming it. `fly_bike::blocked_by` still does not check the Thunder Badge.
+- ⚠️ **`cut`, `push_boulder` and `strength` are gone from `use_field_move` (2026-09-04), and what
+  replaced them is that the walk finishes the job.** Each was the second half of a pair whose first
+  half was a menu row, so one decision cost two paid requests and the first of them completed
+  looking like success. `MetaTile::Cut { at }` now cuts the tree it walks up to and `MetaTile::Boulder
+  { at, push }` is one row per shove the cartridge would actually make, arming `BIT_STRENGTH_ACTIVE`
+  itself (`AgentState::PushingBoulder` → `UsingFieldMove`'s `resume`); both hand off from
+  `OverworldMovement`'s empty-route arm, the seam the fishing row already used. Both carry the square
+  they are about, so a row can name it and the re-derived walk goes to *that* one; `Cut`'s `id_kind`
+  is still `CutTree`, because an id is a key a resumed run quotes out of its own history. `strength`
+  went because arming was never a decision — the flag is cleared by every map change and forgetting it is
+  silent. A boulder's own sprite row is withheld from `overworld_menu` (pressing A at one does
+  nothing), and the id is `{map}:{stand}:PushBoulder{Up,Down,Left,Right}`, unique because
+  `stand + push` names the boulder.
+- ⚠️ **The boulder refusal's "can you get to the push tile" arm was over-permissive and shipped a
+  stall.** `MetaTileMap::reachable_tiles` is the key set of `bfs_from_player`, which records every
+  *neighbour* of an open square — a route must be allowed to end at a door or a person — so a wall
+  touching floor is in it and `reach.contains(stand)` put the player inside the wall. A deployed run
+  was offered, and accepted, a push **left** on a boulder with solid rock to its east; three of the
+  four boulders in the committed fixtures had the same hole and every one was that shape. The stand
+  tile must now also be `Empty`/`Grass`/`Warp`, which is `solve_boulder_push`'s own `floor`
+  predicate. `endgame::a_boulder_that_cannot_move_is_refused_rather_than_shoved_at` pins it.
+- **The overworld turn names a map's boulders, its switches and its cuttable trees**, at their own
+  coordinates, and says in the same line either that each legal push or cut is a row below or which
+  half of Strength/Cut is missing. Unconditional on purpose: a floor with three boulders and no
+  Strength has no boulder rows at all, and a puzzle with no way to touch it and nothing said about
+  why is what sent a run round Route 2 for eleven turns. ⚠️ The switches are named where
+  `wFirstLockTrashCanIndex` is not, because a boulder switch is a tile the game *draws*.
 - Two more lines on the overworld turn, each with its own narrow trigger, each silent otherwise.
   The gate line fires when
   `warp_targets` holds several landings on one map and says nothing beyond it is behind a door here.

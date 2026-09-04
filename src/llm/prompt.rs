@@ -197,7 +197,9 @@ The game is not broken, and you are not debugging it:
   you, and it never once works.
 - Restarting, resetting, backing out to another map to 'clear the state', and waiting for something \
   to settle are not moves this game has. Nothing about the world changes because you left and came \
-  back.
+  back, with two exceptions the turn tells you about where they matter: a cut tree grows back, and \
+  a floor's boulders go back to where they started, which is the only way to undo a Strength puzzle \
+  you have pushed into a corner.
 
 Play the game in front of you, not the one you remember:
 
@@ -744,6 +746,24 @@ pub fn situation(
         use crate::pokemon::item::ItemId;
         use crate::pokemon::learnset::can_learn;
         use crate::pokemon::tile::MetaTile;
+        // Where the trees actually are, which the line below either offers or explains. ⚠️ **The
+        // coordinates are said whichever way it goes**: a model that is told "there are cuttable
+        // trees on this map" and cannot see them on the menu has been given a fact it can only act
+        // on by calling `read_map`, and the answer is four numbers.
+        let trees: Vec<crate::geometry::Point8> = state.map.meta_tiles.iter().enumerate()
+            .filter(|(_, tile)| **tile == MetaTile::CutTree)
+            .map(|(index, _)| crate::geometry::Point8 {
+                x: (index % state.map.width) as u8, y: (index / state.map.width) as u8 })
+            .collect();
+        if !trees.is_empty() && state.can_use_cut {
+            out.push_str(&format!(
+                "Cuttable trees on this map: {}. Each one you can reach is a row in the menu below \
+                 and choosing it does the whole thing — walk over, use Cut, tree gone. A tree \
+                 grows back when the map is reloaded, which a black-out or a trip through a door \
+                 does.\n",
+                point_list(&trees),
+            ));
+        }
         // ⚠️ **Water was the second entry here and is deliberately gone — it named an obstacle
         // that was almost never the obstacle.** A `CutTree` is a specific tile that is *the way on*;
         // water is scenery on most outdoor maps, so the line fired on Route 9, Route 10, Cerulean,
@@ -785,9 +805,73 @@ pub fn situation(
                     "{name}, which is an HM to be found and taught, and needs the {badge}"),
             };
             out.push_str(&format!(
-                "Blocked here: {noun} on this map cannot be passed yet. That needs {what}. \
+                "Blocked here: {noun} on this map cannot be passed yet, at {}. That needs {what}. \
                  Nothing in the menu below leads past it, and retrying will not change that.\n",
+                point_list(&trees),
             ));
+        }
+
+        // **Boulders, said every turn there are any, whether or not anything can be done with
+        // them.** A Strength puzzle is the one obstacle in the game that is *arranged* rather than
+        // simply passed, so the positions are what the decision is made out of — which boulder onto
+        // which switch — and a model that has to spend a `read_map` to learn them spends it on every
+        // floor of Victory Road.
+        //
+        // ⚠️ **The switches are not the trash cans and naming them gives nothing away.** A boulder
+        // switch is a tile the game *draws*: it is on screen, in the picture `read_map` answers
+        // with, and a player standing in the room can see it. `wFirstLockTrashCanIndex` is the
+        // opposite — state no player can observe — which is why the gym line above withholds it.
+        //
+        // ⚠️ **And the "but" clause is the whole reason this is unconditional.** A floor with three
+        // boulders and no Strength has no boulder rows in its menu at all; without a line saying
+        // why, that is a map with an obvious puzzle and no way to touch it, which is the shape that
+        // makes a model decide the agent is broken (the Route 2 cut trees, eleven turns and two
+        // issue reports).
+        let boulders = state.map.boulders();
+        if !boulders.is_empty() {
+            out.push_str(&format!("Boulders on this map: {}.", point_list(&boulders)));
+            if !state.map.strength_switches.is_empty() {
+                out.push_str(&format!(" Boulder switches (push a boulder onto one to open the \
+                    barrier it controls): {}.", point_list(&state.map.strength_switches)));
+            }
+            // ⚠️ **The third kind of target, and without it this line is misleading on the one map
+            // where it is the whole puzzle.** Seafoam has boulders and no switches: what stops the
+            // current on B3F is dropping boulders through the holes, and a line that named the
+            // boulders and then said nothing about where they go reads as a puzzle with no answer.
+            // Victory Road 3F has one of these too, and it reveals the hidden 2F boulder.
+            if !state.map.holes.is_empty() {
+                out.push_str(&format!(" Holes a boulder can be pushed into, dropping it to the \
+                    floor below: {}. You fall through one yourself if you step on it.",
+                    point_list(&state.map.holes)));
+            }
+            let known = state.pokemon.iter()
+                .any(|mon| mon.moves.iter().flatten().any(|m| m.name == crate::pokemon::move_name::PokemonMoveName::Strength));
+            let badged = state.badges.contains(Badge::RainbowBadge);
+            out.push_str(&match (known, badged) {
+                (true, true) => " Every shove the game would actually allow is a row in the menu \
+                    below, one row per boulder per direction, and choosing one walks over and pushes \
+                    it (Strength is armed for you). A push the game refuses is not offered rather \
+                    than failing quietly, so a boulder with no rows cannot be moved from where it \
+                    is standing. Leaving the map and coming back puts every boulder on it back where \
+                    it started, which is how a push that went wrong is undone.".to_string(),
+                (false, true) => format!(
+                    " No Pokémon in your party knows Strength, so there are no boulder actions in \
+                     the menu below. {} You have the {}, so a Pokémon taught HM04 is all this needs.",
+                    match state.bag.iter().any(|entry| entry.id == ItemId::Hm04Strength) {
+                        true => "HM04 is in your bag.",
+                        false => "HM04 has to be found first.",
+                    },
+                    Badge::RainbowBadge),
+                (true, false) => format!(
+                    " Strength needs the {} before the game will let it be used outside battle and \
+                     you do not have it yet, so there are no boulder actions in the menu below.",
+                    Badge::RainbowBadge),
+                (false, false) => format!(
+                    " Nothing in your party knows Strength and you do not have the {} either, so \
+                     there are no boulder actions in the menu below and both have to come first.",
+                    Badge::RainbowBadge),
+            });
+            out.push('\n');
         }
 
         // **W9 — Vermilion Gym: 87 turns, the largest single sink in the deployed run of
@@ -1028,6 +1112,25 @@ fn named(mon: &crate::pokemon::pokemon::Pokemon) -> String {
     match nickname.eq_ignore_ascii_case(&species) {
         true => nickname,
         false => format!("{nickname} the {species}"),
+    }
+}
+
+/// A list of squares as `(x, y), (x, y)`, bounded.
+///
+/// ⚠️ **The bound is not tidiness.** Celadon Gym's garden is thirteen cuttable trees and the
+/// Pokémon Mansion has more; a line that names every one of them is a paragraph of numbers on every
+/// turn spent on that map, and the tail of it says nothing the first few do not — the model is
+/// choosing from the menu, and the menu carries the reachable ones. What the tail is replaced by is
+/// a count, so nothing is silently missing.
+fn point_list(points: &[crate::geometry::Point8]) -> String {
+    /// Enough for every Strength puzzle in the game (Victory Road 2F's three boulders, Seafoam
+    /// B3F's six) and for the trees on a route.
+    const MAX: usize = 8;
+    let shown: Vec<String> = points.iter().take(MAX)
+        .map(|point| format!("({}, {})", point.x, point.y)).collect();
+    match points.len() > MAX {
+        false => shown.join(", "),
+        true => format!("{}, and {} more", shown.join(", "), points.len() - MAX),
     }
 }
 
@@ -1744,10 +1847,79 @@ mod tests {
         assert!(teachable.contains("`use_field_move` with `teach`"), "{teachable}");
 
         // ⚠️ **And it stops the moment it stops being true**, or it is a line on every turn of the
-        // rest of the game telling the model about a thing it can already do.
+        // rest of the game telling the model about a thing it can already do. What replaces it is
+        // the *positive* line: the same trees, at the same coordinates, said as something to do.
+        // Both halves name the squares, because a model told trees exist and shown none has been
+        // handed a fact it can only act on by spending a `read_map` on four numbers.
         state.can_use_cut = true;
         let cleared = rendered(DecisionKind::Overworld, &state);
         assert!(!cleared.contains("Blocked here: Cuttable trees"), "{cleared}");
+        assert!(cleared.contains("Cuttable trees on this map:"), "{cleared}");
+        assert!(cleared.contains("walk over, use Cut, tree gone"),
+                "the row is the whole action now, and the line has to say so: {cleared}");
+        let tree = state.map.meta_tiles.iter().position(|tile| *tile == crate::pokemon::tile::MetaTile::CutTree)
+            .expect("Vermilion has trees");
+        assert!(cleared.contains(&format!("({}, {})", tree % state.map.width, tree / state.map.width)),
+                "and where they are: {cleared}");
+    }
+
+    /// **A Strength puzzle is said out loud every turn it is in the room, and the "but" clause is
+    /// why it is unconditional.**
+    ///
+    /// A boulder floor is the one obstacle in the game that is *arranged* rather than passed, so the
+    /// positions are what the decision is made out of — and the pushes the cartridge would allow are
+    /// the only rows in the menu, so a party that cannot use Strength sees a puzzle it has no way at
+    /// all to touch. That is the exact shape that made the deployed run of 2026-09-02 spend eleven
+    /// turns and two issue reports on Route 2's cut trees, one obstacle along.
+    ///
+    /// ⚠️ **The switches are named and the trash cans are not, and that is not an inconsistency.** A
+    /// boulder switch is a tile the game draws: it is on screen and in `read_map`'s picture.
+    /// `wFirstLockTrashCanIndex` is state no player can observe.
+    #[test]
+    fn a_strength_puzzle_names_its_boulders_whether_or_not_they_can_be_pushed() {
+        use crate::pokemon::badge::Badge;
+        use crate::pokemon::move_name::PokemonMoveName;
+        let mut state = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
+        let rendered = |state: &GameState| situation(
+            DecisionKind::Overworld, state, &ApiSnapshot::default(), &[], &[], TurnContext::None, &[],
+        );
+
+        assert!(state.map.can_strength, "the deployed party can use Strength");
+        let armed = rendered(&state);
+        // Reading order, which is the order `read_map`'s picture is scanned in.
+        assert!(armed.contains("Boulders on this map: (14, 2), (2, 10), (5, 14)."), "{armed}");
+        assert!(armed.contains("Boulder switches"), "{armed}");
+        assert!(armed.contains("(17, 13)"), "the switch VictoryRoad1F's puzzle is about: {armed}");
+        assert!(armed.contains("Every shove the game would actually allow is a row"), "{armed}");
+        // ⚠️ **The half that keeps a wedged floor from reading as a broken game.** Gen 1 re-reads a
+        // map's objects on every `LoadMapData`, so walking out and back undoes every push.
+        assert!(armed.contains("back where it started"), "{armed}");
+
+        // Neither half of Strength: the boulders are still named, and so is the reason there is
+        // nothing in the menu about them.
+        let mut helpless = state.clone();
+        helpless.badges.remove(Badge::RainbowBadge);
+        for index in 0..helpless.pokemon.len() {
+            let mon = helpless.pokemon.get_mut(index).expect("in range");
+            for slot in mon.moves.iter_mut() {
+                if slot.is_some_and(|m| m.name == PokemonMoveName::Strength) { *slot = None; }
+            }
+        }
+        let none = rendered(&helpless);
+        assert!(none.contains("Boulders on this map:"), "{none}");
+        assert!(none.contains("Nothing in your party knows Strength"), "{none}");
+        assert!(none.contains("RainbowBadge"), "{none}");
+        assert!(none.contains("no boulder actions in the menu below"), "{none}");
+
+        // The badge alone, which is the case the whole run is usually in: HM04 is the errand.
+        let mut unbadged = state.clone();
+        unbadged.badges.remove(Badge::RainbowBadge);
+        assert!(rendered(&unbadged).contains("before the game will let it be used outside battle"),
+                "{}", rendered(&unbadged));
+
+        // ⚠️ **Silent where there are no boulders**, or it is a line on every turn of the game.
+        state.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder"));
+        assert!(!rendered(&state).contains("Boulders on this map"), "{}", rendered(&state));
     }
 
     /// **The four things the system prompt has to keep saying**, each bought with a measured

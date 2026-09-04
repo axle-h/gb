@@ -12,9 +12,9 @@ south down `Route21` instead.
 2. Optional, and the only chance at it: `SeafoamIslands1F`, halfway along `Route20`.
    Articuno is on B4F. The current on B3F sweeps you along and cannot be surfed
    against; **the way to stop it is Strength**, pushing four boulders down the holes
-   above it. Without Strength there is no point going in. ⚠️ **Strength is armed once per
-   map and switched off again by every map change**, so use the field move afresh on each
-   floor before pushing anything; a push before that moves nothing and reports nothing.
+   above it. Without Strength there is no point going in. Once something in the party
+   knows it and you hold the RainbowBadge, every push the game would allow is a row in
+   the action menu and choosing one does the whole thing, arming Strength included.
 3. On `CinnabarIsland`, `CinnabarGym` is locked from the outside. `CinnabarLab`, the
    building on the east side, will turn a fossil into a Pokémon, so bring the Dome or
    Helix Fossil you chose in Mt. Moon.
