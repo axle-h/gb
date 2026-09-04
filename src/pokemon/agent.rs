@@ -4609,9 +4609,16 @@ CascadeBadge; not cutting".to_string(),
                 };
 
                 if map.player_position != behind {
-                    // Walk to the push tile. `route_to` is recomputed each tick and routes around the
-                    // boulders (sprites/obstacles), so the approach never accidentally shoves one.
-                    match map.route_to(behind).and_then(|r| r.first().copied()) {
+                    // Walk to the push tile. Recomputed each tick and routed around the boulders
+                    // (sprites/obstacles), so the approach never accidentally shoves one.
+                    //
+                    // ⚠️ **`route_to_push_tile`, not `route_to`.** The ordinary routing BFS will not
+                    // expand through a warp tile, and Victory Road's puzzle has to be pushed from
+                    // one — so this used to be able to find no route to a square the menu had just
+                    // offered a row for, and drop to `Idle` without a word. See
+                    // `MetaTileMap::push_search` for the two rules that make walking over a warp
+                    // safe, and for the floor it cost.
+                    match map.route_to_push_tile(behind).and_then(|r| r.first().copied()) {
                         Some(btn) => { api.release_all_buttons(); api.press_button(btn); }
                         None => { api.release_all_buttons(); self.set_state(AgentState::Idle); return Ok(()); }
                     }

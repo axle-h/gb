@@ -186,6 +186,25 @@ price.
   give back this state ends at the policy and `Idle` clears the box itself.
   `endgame::a_boulder_row_arms_strength_and_pushes_on_one_decision` asks for one push from a fixture
   with Strength unarmed and then answers nothing at all.
+- ⚠️ **A boulder is pushed from squares `bfs_from_player` will not route to, and the two halves
+  disagreed about exactly one of them.** `MetaTileMap::push_search` is the flood fill the boulder
+  code uses instead: `solve_boulder_push`'s `floor` has always counted a warp tile as standable
+  (VictoryRoad1F is unsolvable from its *starting* layout otherwise — measured, not assumed), while
+  `boulder_push_refusal` asked `reachable_tiles`, which records a warp but never expands through one.
+  With its boulder on (9, 16) the deployed run of 2026-09-04 was shown one row, `Down`, which puts
+  the boulder on the bottom row where nothing can stand behind it again; the `Up` the solver wanted
+  is pushed from the entrance warp at (9, 17). It saw it coming and had to take it anyway.
+  ⚠️ **A warp is walked *over*, never *into***: a `StepOn` warp is not a square anybody can stand on,
+  and a `HoldDirection` one must never be arrived at in the direction that fires it — entering
+  (8, 17) from above is a step Down at the map edge, which is how `actions()` takes that warp on
+  purpose, so the fill goes round through (7, 17) holding Right. ⚠️ **`warp_trigger` answers for any
+  square, not only a warp** (`HoldDirection(Down)` for every tile on a bottom row, walls included),
+  so that rule must be asked only of a `MetaTile::Warp` — asked of everything it sealed off the two
+  ordinary squares that are the way round. `route_to_push_tile` is the same fill with the path kept,
+  because `PushingBoulder` walking with `route_to` had the identical split one layer down.
+  `endgame::victory_road_1f_is_solvable_from_the_action_menu_alone` plays the floor the way a model
+  has to — `solve_boulder_push` for the next push, and it must be a row — and
+  `a_push_from_a_warp_tile_is_offered_because_victory_road_needs_one` pins the square itself.
 - ⚠️ **A wedged floor is a fact only the solver has, and the turn now states it.** A Strength puzzle
   is the one thing a player can put permanently out of reach without being told: every remaining push
   is legal, offered and useless. `prompt::situation` runs `solve_boulder_push` against the floor's
