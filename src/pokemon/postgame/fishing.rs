@@ -221,10 +221,18 @@ pub fn pick(state: &GameState, rod: Rod) -> Option<FieldMove> {
 /// offers and the cast the driver then performs have to agree about which shore, or the row routes
 /// the player to one puddle and the driver casts at another.
 pub fn nearest_castable_water(map: &MetaTileMap) -> Option<Point8> {
+    // ⚠️ **One search for the whole sweep, not one per water tile.** `route_to_face` runs a full
+    // Dijkstra, so asking it about every water tile on the map is quadratic — and this is called
+    // from `actions()`, which the route follower re-derives on every 20 ms agent tick. Route 23 has
+    // 369 water tiles and measured **117 ms per tick** that way, six times the tick's whole budget,
+    // so the emulator crawled at a sixth of real time from the moment the party could Surf (water
+    // is a pass-through node only then, which triples what each search explores). Hoisting it is
+    // the same answer at 0.37 ms. See `MetaTileMap::route_to_face_within`.
+    let (dist, came_from) = map.search_for_faces();
     (0..map.height as u8)
         .flat_map(|y| (0..map.width as u8).map(move |x| Point8 { x, y }))
         .filter(|&p| map.tile_at(p) == MetaTile::Water)
-        .filter_map(|p| map.route_to_face(p).map(|route| (p, route)))
+        .filter_map(|p| map.route_to_face_within(&dist, &came_from, p, None).map(|route| (p, route)))
         .filter(|(_, route)| route_stays_on_land(map, route))
         .min_by_key(|(_, route)| route.len())
         .map(|(p, _)| p)
