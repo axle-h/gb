@@ -174,8 +174,32 @@ price.
   `MetaTile::Fish`, one row per shove `boulder_push_refusal` allows and one per reachable tree, gated
   on `MetaTileMap::can_strength` and `can_cut`. `AgentState::PushingBoulder` arms
   `BIT_STRENGTH_ACTIVE` itself through `UsingFieldMove`'s new `resume`, which is why there is no
-  arming decision anywhere any more; it also emits `OverworldActionCompleted`, because a scripted
-  push was otherwise invisible.
+  arming decision anywhere any more.
+- ⚠️ **The arming's own text box is inside the decision, and `UsingFieldMove` needed
+  `MOUNT_SETTLE_TICKS` to stop it eating the push.** "The overworld is back" is briefly true between
+  the party menu closing and "SHELDON can move boulders!" being drawn, so handing the push back on
+  the first overworld tick handed it into the gap: `PushingBoulder`'s next tick saw a text box,
+  called it an interruption and dropped the decision, and the model paid a second request for the
+  identical shove — *"Retrying the up push, the Strength text box interrupted the first attempt"*,
+  2026-09-04, within an hour of the change that was supposed to make a push one decision. The settle
+  is on the `resume` path only, exactly as `Surfing` counts only a mount that took: without a push to
+  give back this state ends at the policy and `Idle` clears the box itself.
+  `endgame::a_boulder_row_arms_strength_and_pushes_on_one_decision` asks for one push from a fixture
+  with Strength unarmed and then answers nothing at all.
+- ⚠️ **A wedged floor is a fact only the solver has, and the turn now states it.** A Strength puzzle
+  is the one thing a player can put permanently out of reach without being told: every remaining push
+  is legal, offered and useless. `prompt::situation` runs `solve_boulder_push` against the floor's
+  switches *and its holes* (Seafoam has no switches at all) once a turn, and when nothing reaches any
+  of them it says so and says to walk out and back. The run of 2026-09-04 worked it out for itself
+  after twenty turns and spent the conclusion on an issue report asking whether the switch
+  coordinates were wrong; they were not, and `solve_boulder_push` agreed with it.
+- ⚠️ **A push cannot report its own completion, and an `OverworldActionCompleted { Boulder }` that
+  never fired once was deleted rather than chased.** The shove and its dust animation are
+  `GameMode::Script`, `assert_script_state` takes the state over on sight of one, and
+  `PushingBoulder` is not on its exemption list — so the driver is replaced by `RunningScript` on the
+  tick the boulder starts moving and never gets another. Putting it on that list would change how a
+  push interacts with the machinery that stops it over-pushing, which is a large risk for a log line;
+  `MetaTile::Fish` hands off to a driver without a completion for the same reason.
 - ⚠️ **`MetaTile::Cut { at }` is a separate variant from the terrain `MetaTile::CutTree`, and the
   split is what lets a row name its tree.** `OverworldMovement` re-derives its target every tick by
   `a.tile == destination`, so while every cut row shared one anonymous tile that match found

@@ -486,6 +486,42 @@ fn a_boulder_that_cannot_move_is_refused_rather_than_shoved_at() {
          took {:?}", fixture.total_cycles.to_duration());
 }
 
+/// **One decision moves the boulder, including arming Strength — and the arming must not eat the
+/// push.**
+///
+/// A boulder row is the whole shove: walk to the square it is pushed from, arm `BIT_STRENGTH_ACTIVE`
+/// if it is clear, push. The arming goes through the party menu and ends in a text box
+/// ("SHELDON can move boulders!"), and *that box is inside the decision*, not after it — so anything
+/// that treats it as an interruption hands the turn back with the boulder exactly where it was, and
+/// the model pays a second request to ask for the identical push. Which is the pair this whole
+/// mechanism was built to remove, reappearing one layer down.
+///
+/// The deployed run of 2026-09-04 did exactly that within an hour of the deploy: "Retrying the up
+/// push — the Strength text box interrupted the first attempt."
+///
+/// ⚠️ **`PushRowOnce` answers once and then never again**, which is the only way to assert it. A
+/// policy that re-issues the push cannot tell "moved it first time" from "moved it on the fourth
+/// ask", and the scripted policy cannot see this at all because its route arms Strength in a step of
+/// its own before it ever plans a push.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn a_boulder_row_arms_strength_and_pushes_on_one_decision() {
+    let boulder = Point8 { x: 5, y: 15 };
+    let mut fixture = TestFixture::with_policy(VR1F_STRENGTH, Duration::from_secs(45),
+        Box::new(PushRowOnce::new(boulder, JoypadButton::Down)));
+    // The precondition, or this passes on a fixture that had Strength armed all along.
+    assert!(!fixture.game_state().strength_active, "the fixture reaches VictoryRoad1F unarmed");
+    assert!(fixture.game_state().map.can_strength, "and can use Strength");
+
+    // ⚠️ **The policy is asked exactly once**, which is the property under test: `PushRowOnce`
+    // answers nothing after its first row, so a boulder that moves at all moved on one decision.
+    let moved = |fixture: &mut TestFixture| !fixture.game_state().map.boulders().contains(&boulder);
+    while fixture.total_cycles < fixture.max_cycles && !moved(&mut fixture) { fixture.step(); }
+    assert!(moved(&mut fixture),
+        "one decision has to walk over, arm Strength and shove; the boulder is still at {boulder}");
+    assert!(fixture.game_state().strength_active, "and the agent armed Strength itself");
+}
+
 /// The bound `a_boulder_that_cannot_move_is_refused_rather_than_shoved_at` holds the driver to. Well
 /// inside `agent::DRIVER_ESCAPE_SILENCE` (60 s) and well outside any real push, so it fails on the
 /// behaviour rather than on the machine it runs on.
@@ -517,6 +553,33 @@ impl crate::pokemon::policy::Policy for PushOnce {
         self.asked = true;
         Some(crate::pokemon::policy::FieldMove::PushBoulder { boulder: self.boulder, dir: self.dir })
     }
+}
+
+/// [`PushOnce`] through the *menu*, which is the seam the model actually uses: it takes the
+/// `MetaTile::Boulder` row for one shove, once, and then answers nothing at all — so the boulder
+/// only moves if that single decision carried the walk, the arming and the push.
+struct PushRowOnce {
+    boulder: Point8,
+    dir: JoypadButton,
+    asked: bool,
+}
+
+impl PushRowOnce {
+    fn new(boulder: Point8, dir: JoypadButton) -> Self { Self { boulder, dir, asked: false } }
+}
+
+impl crate::pokemon::policy::Policy for PushRowOnce {
+    fn name(&self) -> &'static str { "push-row-once" }
+    fn pick_overworld_action(&mut self, state: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction> {
+        if self.asked { return None; }
+        let action = state.map.actions().into_iter().find(|action| action.tile
+            == crate::pokemon::tile::MetaTile::Boulder { at: self.boulder, push: self.dir })?;
+        self.asked = true;
+        Some(action)
+    }
+    fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
+    fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> { None }
 }
 
 /// **And the way out of a boulder that cannot be pushed is the door**, which is worth pinning
