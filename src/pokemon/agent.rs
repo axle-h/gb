@@ -494,6 +494,35 @@ const MENU_HANDOVER_TICKS: u16 = 50;
 /// *net*, not a schedule: anything that needs it has already failed to notice something.
 const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
 
+/// Consecutive overworld ticks a finished Surf mount waits for before handing the walk back.
+///
+/// The same 300 ms `TeachingMove`'s `settle` uses and for the same reason: "the overworld is back" is
+/// briefly true between the party menu closing and the mount's own text box being drawn, and a walk
+/// resumed into that gap is aborted by the box a tick later. Any tick that is not the overworld resets
+/// it, so this is a bound on the *flicker*, not on how long the box stays up.
+const MOUNT_SETTLE_TICKS: u8 = 15;
+
+/// How long a stopped walk waits to see whether the game walks the player back off the square.
+///
+/// The push-back is not immediate and does not follow the text box directly: the box is read, the
+/// policy is asked (from the square the player has not been moved off yet), and only then does
+/// `StartSimulatingJoypadStates` run. Measured on Cinnabar's gym doorstep that is a little over a
+/// second, so this is three — long enough to span the poll, short enough that an unrelated walk later
+/// in the same map cannot be mistaken for the game's own shove.
+const TURN_BACK_WATCH_TICKS: u16 = 150;
+
+/// A walk stopped by a text box on `tile`, and the square it stepped there from.
+///
+/// `came_from_raw` is raw (`wXCoord`/`wYCoord`) so the per-tick check is two RAM reads rather than a
+/// map decode; `tile` is expanded, because that is what `observe_state` overlays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TurnBackWatch {
+    map: Map,
+    tile: Point8,
+    came_from_raw: Point8,
+    ticks: u16,
+}
+
 /// Overworld ticks between a pickup's text box closing and asking the map whether the item is still
 /// there. See [`PokemonAgent::pending_pickup`] — 10 ticks is 200 ms of game time, far longer than
 /// the `HideObject` at the end of the script needs and far shorter than a decision.
@@ -881,7 +910,18 @@ pub(crate) enum AgentState {
     /// auto-steps onto `water_pos`). Same press/release mashing + cursor-navigate pattern as
     /// `CuttingTree`; `entered_menu` tracks that we left the overworld, so a return to it with the surf
     /// state active means the mount finished. `water_pos` is the tile being surfed onto (used to face it).
-    Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8, move_index: u8 },
+    ///
+    /// ⚠️ **`resume` is what stops a mount costing a paid turn, and it is the one field here that is
+    /// not about menus.** Every other driver in this file is entered from `Idle` because the *policy*
+    /// asked for it; this one is entered from the middle of a walk, by the route follower, without
+    /// anybody deciding anything. Dropping to `Idle` when the mount finished therefore threw the walk
+    /// away and put the identical question back to the policy — free for the scripted one, a whole
+    /// request against a 100 k-token history for the model. The deployed run of 2026-09-03 crossed
+    /// Route 21 that way, and paid for it again on Cinnabar Island getting to the Pokémon Mansion.
+    /// So the interrupted `OverworldMovement` rides through the mount and is put back on success.
+    /// `settle` counts consecutive overworld ticks since the mount took — see [`MOUNT_SETTLE_TICKS`].
+    Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8, move_index: u8,
+              resume: Option<(MetaTile, Map)>, settle: u8 },
 
     /// Using a party field move that has no target tile: drive START→POKéMON→(the mon at `slot`)→the
     /// field-move entry at `move_index`. STRENGTH arms `BIT_STRENGTH_ACTIVE` so boulders become
@@ -1059,6 +1099,39 @@ pub struct PokemonAgent {
     /// (reset when the player no longer faces a door). Once it exceeds the open threshold the tile is
     /// treated as an unopenable wall (added to `blocked_tiles`).
     door_open_attempts: u32,
+    /// Squares **this visit to this map** has been turned away from — the third member of the
+    /// `blocked_tiles` family, learned rather than known.
+    ///
+    /// ⚠️ **Gen 1 refuses a square by talking and then walking you off it, and no tile id says so.**
+    /// A dozen map scripts do it (`grep StartSimulatingJoypadStates pokered/scripts`): Cinnabar's gym
+    /// doorstep without the Secret Key, the Route 22 gate and Route 23's checkpoints without the
+    /// badge, Viridian City, the Museum. The square is ordinary floor, the router walks onto it, the
+    /// text box aborts the walk, the game pushes the player back, and the policy re-plans the
+    /// identical route — for ever. [`PokemonAgent::turn_back_watch`] recognises it from the
+    /// cartridge's own behaviour and `observe_state` overlays the result as an obstacle, exactly as
+    /// it does for a card-key wall and a refused Surf.
+    ///
+    /// ⚠️ **Cleared on map re-entry, unlike `blocked_tiles`, and that is the whole safety argument.**
+    /// What is being remembered is "the game turned me away *given what I am carrying*", and that
+    /// expires: the Route 22 guard steps aside on the Boulder Badge, the gym door opens on the Secret
+    /// Key. A permanent entry would wall the run out of somewhere it must later go, which is far
+    /// worse than the loop this prevents — so the memory lasts one visit, and the cost of being
+    /// wrong is one interrupted walk rather than an unwinnable game.
+    turned_back_tiles: std::collections::HashSet<(Map, Point8)>,
+    /// A walk stopped by a text box, waiting to see whether the game puts the player back where they
+    /// came from. See [`PokemonAgent::turned_back_tiles`] and [`TURN_BACK_WATCH_TICKS`].
+    turn_back_watch: Option<TurnBackWatch>,
+    /// While a walk is in flight, the last two **raw** squares the player has stood on, as
+    /// `(previous, current)`. Raw rather than expanded because the only reader is the turn-back watch,
+    /// which compares against `wXCoord`/`wYCoord` — two RAM reads a tick rather than a map decode.
+    /// Maintained by `AgentState::OverworldMovement` alone: a walk is the only thing a turn-back can
+    /// interrupt, and it is the one arm that already holds a `GameState`.
+    ///
+    /// ⚠️ Reset by `take_overworld_action`, and the watch refuses to arm while the pair is still
+    /// equal. Both are defensive rather than measured — no test fails without them — but the failure
+    /// they prevent is a wall invented on a square the player never stepped from, which nothing
+    /// downstream could tell from a real one.
+    walk_squares: Option<(Point8, Point8)>,
     /// Raw button presses queued by `queue_manual_input`, delivered ahead of the state machine at
     /// [`MANUAL_INPUT_TICKS_PER_PRESS`] ticks each. Empty in every ordinary run — nothing in the agent
     /// or in any scripted policy ever enqueues.
@@ -1178,6 +1251,9 @@ impl PokemonAgent {
             last_map: None,
             cut_tiles: std::collections::HashSet::new(),
             blocked_tiles: std::collections::HashSet::new(),
+            turned_back_tiles: std::collections::HashSet::new(),
+            turn_back_watch: None,
+            walk_squares: None,
             door_open_attempts: 0,
             manual_input: VecDeque::new(),
             manual_input_held: 0,
@@ -1214,6 +1290,9 @@ impl PokemonAgent {
         self.last_map = None;
         self.cut_tiles.clear();
         self.blocked_tiles.clear();
+        self.turned_back_tiles.clear();
+        self.turn_back_watch = None;
+        self.walk_squares = None;
         self.door_open_attempts = 0;
         self.manual_input.clear();
         self.manual_input_held = 0;
@@ -1565,8 +1644,11 @@ impl PokemonAgent {
                 }
             }
         }
-        // Overlay discovered runtime door-graphic walls ($18/$24) as obstacles (see `blocked_tiles`).
-        for &(map, pos) in &self.blocked_tiles {
+        // Overlay discovered runtime door-graphic walls ($18/$24) as obstacles (see `blocked_tiles`),
+        // and the squares this visit has been walked back off (see `turned_back_tiles`). Both are the
+        // same statement — the cartridge will not let the player stand here — so both are the same
+        // overlay; they differ only in how long they are believed.
+        for &(map, pos) in self.blocked_tiles.iter().chain(self.turned_back_tiles.iter()) {
             if state.map.map == map {
                 let idx = pos.x as usize + pos.y as usize * state.map.width;
                 if idx < state.map.meta_tiles.len() {
@@ -1709,6 +1791,10 @@ impl PokemonAgent {
 
     pub fn take_overworld_action(&mut self, action: OverworldAction) {
         self.event(AgentEvent::StartedOverworldAction { destination: action.tile.clone() });
+        // A fresh walk has no square behind it yet. Without this the first tick of *this* walk would
+        // pair up with the last square of the *previous* one, and a walk stopped immediately would
+        // arm the turn-back watch on somewhere the player never stepped from.
+        self.walk_squares = None;
         self.set_state(AgentState::OverworldMovement { destination: action.tile, map: action.map });
     }
 
@@ -1783,8 +1869,18 @@ impl PokemonAgent {
         // the same: DIG warps the player out of the cave, and that warp runs as a script — hand it to
         // RunningScript and the short rollback restores `UsingFieldMove` with `entered_menu` cleared, so
         // the agent re-opens the menu and tries to Dig again from wherever it landed, forever.
+        //
+        // ⚠️ **`Surfing` belongs on that list for the same reason, and leaving it off is what made a
+        // Surf mount cost a paid turn.** `ItemUseSurfboard` ends with `.makePlayerMoveForward`, which
+        // sets `BIT_SCRIPTED_MOVEMENT_STATE` and a simulated button press to step the player onto the
+        // water — so every successful mount runs a script, from a state that is not
+        // `OverworldMovement` and therefore gets `DelayContext::short`'s 40 ms rollback. The step is
+        // much longer than that, so the script "committed", the backup was dropped and the agent was
+        // put into `AwaitingOverworldAction` — i.e. the walk the mount was part of was thrown away and
+        // the identical question put back to the policy. The driver below reaches the overworld on its
+        // own and hands the walk back itself (`Surfing::resume`); it needs no rollback machinery.
         if matches!(self.state, AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }
-            | AgentState::UsingFieldMove { .. }) {
+            | AgentState::UsingFieldMove { .. } | AgentState::Surfing { .. }) {
             return;
         }
         if game_mode == GameMode::Script {
@@ -1961,6 +2057,41 @@ impl PokemonAgent {
         }
     }
 
+    /// Answer an armed [`TurnBackWatch`]: has the cartridge walked the player back off the square the
+    /// last walk was stopped on?
+    ///
+    /// ⚠️ **"Was I moved" is not the test; "was I put back where I came from" is.** Plenty of scripts
+    /// move the player and almost all of them are progress rather than refusal — Route 5's guard
+    /// steps you *through* the gate once you hand over the drink, a Rocket Hideout arrow slides you
+    /// across the room, a Seafoam hole drops you a floor, Oak marches you to his lab. Every one of
+    /// those goes somewhere new. Only a refusal returns the player to the exact square they stepped
+    /// from, and only that is treated as a wall.
+    ///
+    /// `OverworldMovement` is excluded so that a re-issued walk stepping back cannot be read as the
+    /// game's own shove. ⚠️ **That guard is reasoning, not a measurement** — removing it breaks no
+    /// test, because on Cinnabar's doorstep the shove lands while the agent is in `script`/`wait`,
+    /// the policy having been asked from the square it has not been moved off yet. It is kept because
+    /// the alternative failure is a wall invented on a square that has nothing wrong with it, and
+    /// because nothing is lost by waiting: a missed shove just bounces once more and re-arms.
+    fn check_turn_back(&mut self, api: &PokemonApi) {
+        let Some(watch) = self.turn_back_watch.as_mut() else { return };
+        if watch.ticks == 0 || self.last_map != Some(watch.map) {
+            self.turn_back_watch = None;
+            return;
+        }
+        watch.ticks -= 1;
+        if matches!(self.state, AgentState::OverworldMovement { .. }) { return }
+        if api.raw_player_coords() != watch.came_from_raw { return }
+        let (map, tile) = (watch.map, watch.tile);
+        self.turn_back_watch = None;
+        if self.turned_back_tiles.insert((map, tile)) {
+            // No em dash: this is one of the strings the agent generates.
+            self.event(AgentEvent::TextBox { message: format!(
+                "the game walked you back off {tile}, so it is being treated as a wall until you \
+                 leave {map} and come back") });
+        }
+    }
+
     fn assert_text_box_state(&mut self, game_mode: GameMode, api: &PokemonApi) {
         // wFontLoaded=1 while the naming screen is active too; NamingPokemon{decided:true}
         // handles its own exit, so don't interfere.
@@ -1986,6 +2117,21 @@ impl PokemonAgent {
                         self.event(AgentEvent::OverworldInteractionCompleted { target: destination });
                     } else {
                         let at = self.player_at(api);
+                        // ⚠️ **This is where "the game stopped you to say something" might mean "and
+                        // you may not stand there".** Arm the watch and let the cartridge answer —
+                        // see [`PokemonAgent::turned_back_tiles`]. Nothing is concluded here: a guard
+                        // who merely talks, an NPC, a sign all come through this line too, and none of
+                        // them moves the player.
+                        if let (Some(at), Some((came_from_raw, current_raw)), Some(map))
+                            = (at, self.walk_squares, self.last_map)
+                            // The walk has to have actually stepped somewhere, or "back where you
+                            // came from" is the square you are already on and the watch answers
+                            // itself on its first tick.
+                            && came_from_raw != current_raw
+                        {
+                            self.turn_back_watch = Some(TurnBackWatch {
+                                map, tile: at, came_from_raw, ticks: TURN_BACK_WATCH_TICKS });
+                        }
                         self.abort_overworld(destination, OverworldActionAbortedReason::Textbox, at);
                     }
                 }
@@ -2125,6 +2271,9 @@ impl PokemonAgent {
         // machine keeps running underneath it, and if the jam clears itself the next ordinary poll
         // resets the clock and nothing more is said.
         self.run_watchdog(api);
+
+        // ── Did the game just walk the player off a square? ───────────────────────
+        self.check_turn_back(api);
 
         // ── The end of the game ───────────────────────────────────────────────────
         // ⚠️ **Above the `?` below, and that placement is the whole reason this is a separate
@@ -2364,6 +2513,12 @@ impl PokemonAgent {
                         // enclosure after Lt. Surge). `CuttingTree` cuts sequentially without changing
                         // maps, so this never fires mid-cut.
                         self.cut_tiles.clear();
+                        // And the squares this map turned the player away from, for the opposite
+                        // reason: they are remembered *because* they might stop being true, and a
+                        // map change is the cheapest honest moment to ask again. See
+                        // [`PokemonAgent::turned_back_tiles`].
+                        self.turned_back_tiles.clear();
+                        self.turn_back_watch = None;
                     }
                     // A non-walking field action (e.g. teach an HM) takes priority over walking.
                     match self.policy.pick_field_move(&game_state) {
@@ -2569,6 +2724,15 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 let game_state = self.observe_state(api)?;
+                // Keep the last two squares of the walk — the turn-back watch needs the one the
+                // player stepped *from*, and this is the only arm that already holds a `GameState`.
+                // See [`PokemonAgent::walk_squares`].
+                let raw = api.raw_player_coords();
+                self.walk_squares = match self.walk_squares {
+                    Some((_, current)) if current != raw => Some((current, raw)),
+                    Some(pair) => Some(pair),
+                    None => Some((raw, raw)),
+                };
                 if game_state.mode != GameMode::Overworld {
                     let at = Some(game_state.map.player_position);
                     self.abort_overworld(
@@ -2715,7 +2879,10 @@ CascadeBadge; not cutting".to_string(),
                                     if let (Some(water_pos), Some((slot, move_index))) = (next,
                                         crate::pokemon::policy::field_move_carrier(&game_state, crate::pokemon::move_name::PokemonMoveName::Surf)) {
                                         api.release_all_buttons();
-                                        self.set_state(AgentState::Surfing { press: true, entered_menu: false, water_pos, slot, move_index });
+                                        // The walk rides through the mount — see `Surfing::resume`.
+                                        self.set_state(AgentState::Surfing {
+                                            press: true, entered_menu: false, water_pos, slot, move_index,
+                                            resume: Some((destination, expected_map)), settle: 0 });
                                         return Ok(());
                                     }
                                 }
@@ -4030,7 +4197,7 @@ CascadeBadge; not cutting".to_string(),
                 api.press_button(button);
                 self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos, slot, move_index });
             }
-            AgentState::Surfing { press, entered_menu, water_pos, slot, move_index } => {
+            AgentState::Surfing { press, entered_menu, water_pos, slot, move_index, resume, settle } => {
                 use crate::pokemon::menu::TextBoxId;
                 // Mounting Surf opens the party menu, plays the field-move menu + a mount animation,
                 // then returns to the overworld now surfing (the game auto-steps onto the water tile).
@@ -4039,10 +4206,35 @@ CascadeBadge; not cutting".to_string(),
                 // the mount didn't take — we never spin in the menu).
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
-                    if api.mmu().read_pointer(&pokered_symbols::wWalkBikeSurfState) == 2 {
+                    let mounted = api.mmu().read_pointer(&pokered_symbols::wWalkBikeSurfState) == 2;
+                    // ⚠️ **A *sustained* overworld, for the reason `TeachingMove`'s `settle` gives.**
+                    // `ItemUseSurfboard` sets the surf state, queues the simulated step onto the water
+                    // and only then calls `PrintText`, and the screen lags RAM — so the overworld is
+                    // reported for a tick or two before "<mon> got on!" is drawn. Leaving on that
+                    // flicker hands the walk back with the box about to open on top of it, and a text
+                    // box during a walk is an abort: the run paid for the mount and then paid again to
+                    // be told the walk had stopped. Counting only fires on a mount that took, so a
+                    // refusal still bails on the first overworld tick.
+                    if mounted && settle < MOUNT_SETTLE_TICKS {
+                        self.set_state(AgentState::Surfing {
+                            press, entered_menu, water_pos, slot, move_index, resume, settle: settle + 1 });
+                        return Ok(());
+                    }
+                    if mounted {
                         self.event(AgentEvent::TextBox { message: format!("Surfed onto the water at {water_pos}") });
                     }
-                    self.set_state(AgentState::Idle);
+                    // ⚠️ **Back to the walk, not to the policy** — see `Surfing::resume`. Only on a
+                    // mount that took, and only on the map the walk was on: a mount that did not take
+                    // has nothing to resume onto (the route's next step is still into water and the
+                    // follower would re-enter this state for ever), and a changed map means the walk's
+                    // destination is a tile on somewhere else — the mount's own step can cross a
+                    // `ConnectionWater` seam, which is the walk arriving rather than being interrupted.
+                    let same_map = api.game_state().map(|g| g.map.map);
+                    match resume {
+                        Some((destination, map)) if mounted && same_map == Ok(map) =>
+                            self.set_state(AgentState::OverworldMovement { destination, map }),
+                        _ => self.set_state(AgentState::Idle),
+                    }
                     return Ok(());
                 }
                 // ⚠️ **A refused surf has to be *remembered*, or the same tile is chosen again.** "No
@@ -4070,10 +4262,23 @@ CascadeBadge; not cutting".to_string(),
                 }
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;
 
+                // ⚠️ **Nothing is pressed while the cartridge is moving the player.** The mount ends
+                // in `.makePlayerMoveForward`, a simulated joypad step onto the water that runs in
+                // `GameMode::Script`; the menu-navigation branch below reads `menu_geometry` and would
+                // press Up/Down at a screen with no menu on it, and a held direction across a scripted
+                // movement is the wedge `RunningScript` releases buttons for.
+                if game_mode == GameMode::Script {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Surfing {
+                        press: true, entered_menu, water_pos, slot, move_index, resume, settle: 0 });
+                    return Ok(());
+                }
+
                 // Plain press/release mashing (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::Surfing { press: true, entered_menu, water_pos, slot, move_index });
+                    self.set_state(AgentState::Surfing {
+                        press: true, entered_menu, water_pos, slot, move_index, resume, settle: 0 });
                     return Ok(());
                 }
 
@@ -4094,7 +4299,8 @@ CascadeBadge; not cutting".to_string(),
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::Surfing { press: false, entered_menu, water_pos, slot, move_index });
+                self.set_state(AgentState::Surfing {
+                    press: false, entered_menu, water_pos, slot, move_index, resume, settle: 0 });
             }
             AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map } => {
                 use crate::pokemon::menu::TextBoxId;

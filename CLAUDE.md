@@ -14,10 +14,12 @@ that carries the full argument, so the code stays the source of truth and the do
 
 Two docs below are plans rather than rule-indexes. `docs/llm-web-playthrough-plan.md` (W0–W9, all
 done) is the design one; where a comment attributes a number to "Phase C" or "Phase D", that is
-history, not a file you can open. `docs/deployed-run-defects.md` is the open one: what the deployed
-run of 2026-09-02 walked into, six root causes and nine work items, of which **W8 is done and the
-other eight are not started**. Read it before touching routing, map connections, `use_field_move`
-targets or the plan tools — every item carries the save state or the fixture that reproduces it.
+history, not a file you can open. `docs/deployed-run-defects.md` is the evidence one: what
+the deployed run of 2026-09-02 walked into, six root causes and eleven work items, **all of them
+shipped**. Read it before touching routing, map connections, `use_field_move` targets or the plan
+tools — every item carries the save state or the fixture that reproduces it, and the rules they left
+behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
+[llm-turn-loop](docs/llm-turn-loop.md).
 
 ## Rules of the road
 

@@ -442,3 +442,210 @@ fn the_route_8_gate_can_be_re_entered_from_its_own_doorstep() {
         .expect("and straight back in from the doorstep, which is what never used to happen");
 }
 
+
+/// **The deployed run of 2026-09-03, crossing Route 21 to Cinnabar Island.** Three defects met on
+/// one map, and the visible symptom was a run that looked frozen: the same walk issued over and over,
+/// a paid request each time, while the player drifted a few tiles south between them.
+///
+/// Route 21 is ninety tiles of sea with two four-tile islands in it, at y = 25/26. The search priced
+/// a step onto water at 1, exactly like a step onto grass, so the route from the south end to Pallet
+/// Town went straight up x = 7 — over both islands. Each one meant stepping ashore, walking two
+/// tiles, and mounting Surf again to leave, where going round cost *nothing*: the water at x = 8 is
+/// the same three steps.
+///
+/// The mounts were then far worse than slow. `ItemUseSurfboard` ends by simulating a joypad press to
+/// step the player onto the water, which runs as `GameMode::Script`, and `Surfing` was not on
+/// `assert_script_state`'s exemption list — so the agent handed itself to `RunningScript` from a state
+/// whose rollback window is 40 ms, the step outlasted that, the script "committed", and the walk was
+/// dropped in favour of `AwaitingOverworldAction`. The policy was asked again, said the same thing,
+/// and the whole crossing went that way.
+///
+/// What this asserts is the routing half: **the way north touches no land at all.** The mount half is
+/// [`a_surf_mount_hands_the_walk_back_to_itself_rather_than_to_the_policy`], which needs a player
+/// standing on dry ground and so cannot be this fixture.
+///
+/// The fixture is the deployed run's own checkpoint, at (7, 72) mid-crossing and mid-battle; like
+/// `pocket-route14.bin` it is evidence rather than a link in the leg chain, and the property it
+/// carries is *which map*, so it must not be re-cut somewhere tidier.
+#[test]
+fn a_water_route_does_not_climb_out_onto_route_21s_islands() {
+    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+    gb.load_state(include_bytes!("../data/route21-islands.bin")).expect("the Route 21 fixture loads");
+    let mut cache = MapMetadataCache::default();
+    let map = PokemonApi::with_cache(&mut gb, &mut cache).game_state().expect("a map to route on").map;
+    assert_eq!(map.map, Map::Route21);
+    assert!(map.can_surf, "the fixture is mid-crossing, so the search must believe it can surf");
+
+    let north = map.water_connection_action(Map::PalletTown)
+        .expect("the way back to Pallet Town is a water crossing and it is reachable");
+    // Walk the route and collect every square it puts the player on. The last button is the press
+    // *into* the connection, which steps off the map, so it is dropped.
+    let mut at = map.player_position;
+    let ashore: Vec<(Point8, Option<MetaTile>)> = north.route[..north.route.len() - 1].iter()
+        .map(|b| {
+            at = match b {
+                JoypadButton::Up    => Point8 { x: at.x, y: at.y - 1 },
+                JoypadButton::Down  => Point8 { x: at.x, y: at.y + 1 },
+                JoypadButton::Left  => Point8 { x: at.x - 1, y: at.y },
+                _                   => Point8 { x: at.x + 1, y: at.y },
+            };
+            (at, map.tile_at_checked(at))
+        })
+        .filter(|(_, t)| !matches!(t, Some(MetaTile::Water) | Some(MetaTile::ConnectionWater(_))))
+        .collect();
+    assert!(ashore.is_empty(),
+            "the crossing steps ashore at {ashore:?}, which is a Surf mount apiece to leave again — \
+             the islands at y = 25/26 are what the search's mount price is for");
+}
+
+/// **The other half of the Route 21 crossing: a mount must not end the walk it is part of.**
+///
+/// Every other menu driver in `agent.rs` is entered from `Idle` because the policy asked for it, so
+/// dropping back to `Idle` afterwards costs nothing. `Surfing` is the exception — the route follower
+/// enters it mid-walk, without anybody deciding anything — and dropping to `Idle` there put the
+/// identical question back to the policy: free for the scripted one, a whole request against a 100 k
+/// token history for the model. `Surfing::resume` carries the walk through the mount; without it this
+/// reads `move→ surf idle wait move→` and the extra `wait` is the request.
+///
+/// ⚠️ **It does not cover the `assert_script_state` hijack, though that is the same bug's third
+/// cause** — Pallet Town's people all `STAY`, so `wScriptedNPCWalkCounter` is zero and the mount is
+/// never seen as a script here. [`a_surf_mount_is_not_taken_over_by_the_script_handler`] is that half,
+/// on a map where somebody walks.
+///
+/// ⚠️ **The settle is load-bearing and its absence looks like success.** Without
+/// [`MOUNT_SETTLE_TICKS`] the walk *is* handed back, and then aborted a tick later by "<mon> got on!"
+/// being drawn on top of it — so the sequence below reads `move→ surf move→ text wait move→`, which
+/// still ends in an extra poll. Asserting arrival alone would pass on that.
+///
+/// `postgame-fishing.bin` is the fixture because the player is standing on Pallet Town's dry land
+/// with Surf in the party, which is where the deployed run was when it crossed.
+#[test]
+fn a_surf_mount_hands_the_walk_back_to_itself_rather_than_to_the_policy() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/postgame-fishing.bin"),
+        Duration::from_secs(300),
+        vec![PolicyStep::enter(Map::Route21)],
+    );
+    assert_eq!(fixture.game_state().map.map, Map::PalletTown);
+
+    // The distinct agent states from the decision to the landing, in order. The sequence is the
+    // assertion: `wait` is `AwaitingOverworldAction`, which is where the policy is asked, so counting
+    // them counts the requests a model would have paid for.
+    let mut seen: Vec<String> = vec![];
+    let mut arrived = false;
+    for _ in 0..12_000 {
+        fixture.step();
+        let state = fixture.agent.state_debug();
+        if seen.last() != Some(&state) { seen.push(state); }
+        if fixture.try_game_state().map(|g| g.map.map) == Ok(Map::Route21) { arrived = true; break }
+    }
+    assert!(arrived, "the crossing has to finish, or the sequence below is about nothing: {seen:?}");
+    assert!(seen.iter().any(|s| s == "surf"),
+            "the walk had to mount Surf to leave Pallet Town, or this proves nothing: {seen:?}");
+    assert_eq!(seen.first().map(String::as_str), Some("wait"),
+               "the crossing opens on the one decision that starts it: {seen:?}");
+    assert!(!seen[1..].iter().any(|s| s.starts_with("wait")),
+            "the whole crossing is one decision: a second `wait` is the walk being thrown away and \
+             the identical question put back to the policy, which is a paid request. {seen:?}");
+}
+
+/// **Cinnabar Island's gym doorstep, and the general rule it is the test case for.**
+///
+/// Found by the mount price above: once a Surf mount cost something, the walk from the Pokémon Centre
+/// to the Pokémon Mansion stopped going round by sea and went overland, over raw (18, 4) — the square
+/// below the gym door. `CinnabarIslandDefaultScript` watches for exactly that square, and without the
+/// Secret Key prints "The door is locked..." and simulates a Down press to shove the player off it.
+/// The walk is stopped by the text box, re-planned identically, and loops for ever: 100 iterations
+/// before the probe was cut off.
+///
+/// ⚠️ **The first fix was a hard-coded obstacle at (18, 4) and it was the wrong shape.** Two reasons,
+/// and the second is the one that matters. It is one square of hand-transcribed ROM knowledge and
+/// `grep StartSimulatingJoypadStates pokered/scripts` finds a dozen more of the same kind — the
+/// Route 22 gate, Route 23's badge checkpoints, Viridian City, the Museum — so the table would never
+/// have been finished. And the square is not reached by one route: the walk that steps on it and the
+/// walk that avoids it are **both 29 steps**, differing by a one-tile dogleg, so which one comes out
+/// is a tie-break and any unrelated change can flip it. Coming at it from a different direction,
+/// after a battle, or from a model's own choice of row would all have gone straight past the fix.
+///
+/// So what is asserted here is the general mechanism: the agent is walked back off the square, sees
+/// that it was put down exactly where it stepped from, and treats it as a wall for the rest of this
+/// visit (`PokemonAgent::turned_back_tiles`). One interrupted walk, then a route that arrives.
+#[test]
+fn a_square_the_game_walks_you_back_off_is_learned_and_routed_around() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/at-cinnabar.bin"),
+        Duration::from_secs(300),
+        vec![PolicyStep::enter(Map::CinnabarPokecenter),
+             PolicyStep::enter(Map::CinnabarIsland),
+             PolicyStep::enter(Map::PokemonMansion1F)],
+    );
+    // The fixture is before the Mansion, so the key cannot be in the bag — if it ever is, the gym
+    // doorstep is ordinary floor and this test is about nothing.
+    assert!(!fixture.game_state().bag.iter()
+                .any(|i| i.id == crate::pokemon::item::ItemId::SecretKey),
+            "the Secret Key is inside the Mansion, so a fixture standing outside it must not hold one");
+
+    let mut learned = vec![];
+    for _ in 0..40_000 {
+        fixture.step();
+        learned.extend(fixture.agent.drain_events().into_iter().map(|e| format!("{e}"))
+                           .filter(|e| e.contains("walked you back")));
+        if fixture.agent.policy_steps_remaining() == Some(0) { break }
+    }
+    assert_eq!(fixture.try_game_state().map(|g| g.map.map), Ok(Map::PokemonMansion1F),
+               "the walk to the Mansion has to arrive; over the doorstep it is stopped by \
+                \"The door is locked...\" and re-planned identically for ever");
+    // ⚠️ Arrival alone would also pass if the router simply never chose that square — which is a
+    // tie-break away from being true again. The learning is the thing under test.
+    assert!(learned.iter().any(|e| e.contains("(18, 5)")),
+            "the doorstep has to be recognised from the shove rather than avoided by luck: {learned:?}");
+}
+
+/// **The mount must not be handed to `RunningScript`, and whether it *is* depends on the map's NPCs.**
+///
+/// `ItemUseSurfboard` finishes with `.makePlayerMoveForward`, which sets `wStatusFlags5`'
+/// `BIT_SCRIPTED_MOVEMENT_STATE` and a simulated button press to step the player onto the water.
+/// `read_game_mode` calls that `GameMode::Script` when `wScriptedNPCWalkCounter` is also non-zero —
+/// and that counter "cycles 8→1 and never resets to 0", so it is non-zero on any map where an NPC has
+/// walked. ⚠️ **That is why this needed a second fixture.**
+/// [`a_surf_mount_hands_the_walk_back_to_itself_rather_than_to_the_policy`] mounts in Pallet Town,
+/// whose people all `STAY`, so the counter is zero and the hijack never fires there — it went green
+/// against the unfixed agent. Cinnabar Island has a `WALK`ing girl, so it fires every time, which is
+/// where the deployed run met it.
+///
+/// Hijacked, the mount is replaced by `RunningScript` on a 40 ms rollback it cannot possibly beat, the
+/// script "commits", and the driver is thrown away mid-menu: the sequence becomes
+/// `surf script text script` and the agent finishes the crossing by reading its own mount message off
+/// the screen. Exempting `Surfing` in `assert_script_state` is what this asserts.
+#[test]
+fn a_surf_mount_is_not_taken_over_by_the_script_handler() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/at-cinnabar.bin"),
+        Duration::from_secs(300),
+        // Cinnabar's east shore *is* the seam into Route 20, so the mount's own step crosses it —
+        // there is no walk left to resume, which is the other half of why this is a separate case.
+        vec![PolicyStep::enter(Map::Route20)],
+    );
+    assert_eq!(fixture.game_state().map.map, Map::CinnabarIsland);
+
+    let mut seen: Vec<String> = vec![];
+    let mut arrived = false;
+    for _ in 0..12_000 {
+        fixture.step();
+        let state = fixture.agent.state_debug();
+        if seen.last() != Some(&state) { seen.push(state); }
+        if fixture.try_game_state().map(|g| g.map.map) == Ok(Map::Route20) { arrived = true; break }
+    }
+    assert!(arrived, "the crossing has to finish: {seen:?}");
+    let mount = seen.iter().position(|s| s == "surf")
+        .unwrap_or_else(|| panic!("it has to mount Surf to get there: {seen:?}"));
+    // ⚠️ **From the mount onward, not from the decision.** Getting to the shore crosses the gym
+    // doorstep, which costs one text box and one re-plan while the agent learns it
+    // (`a_square_the_game_walks_you_back_off_is_learned_and_routed_around`) — a different fact, and
+    // asserting over the whole sequence made this test fail for that instead.
+    assert!(!seen[mount..].iter().any(|s| s == "script" || s == "text"),
+            "the mount drives its own menus and ends in its own scripted step, so nothing between \
+             it and the landing may be `script` or `text`: {seen:?}");
+}
+
+
