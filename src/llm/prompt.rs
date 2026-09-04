@@ -872,6 +872,19 @@ pub fn situation(
             // What is left is what the run actually needed, and it is already in the clause below:
             // the rows are the legal pushes, and leaving the map puts every boulder back.
             out.push_str(&match (known, badged) {
+                // ⚠️ **Zero rows is not "every legal shove is below", and the difference cost an
+                // issue report.** With VictoryRoad2F's first switch pressed and its other boulder
+                // against a wall there is no legal push on the floor at all, and the clause below
+                // read as a promise of rows the model could then not find: it asked whether the push
+                // it wanted was "wrongly suppressed". It was not — the square it would have been
+                // shoved onto is solid rock — but nothing said so. This restates the menu and claims
+                // nothing else: no verdict on the floor, and no advice to go and reset it. That
+                // sentence has been tried twice and is a tombstone above.
+                (true, true) if state.map.boulder_pushes().is_empty() => " None of them can be pushed \
+                    in any direction from where they are standing, so there are no boulder rows in \
+                    the menu below: every shove that is left would put a boulder into a wall, off \
+                    the map, or onto a square with nowhere to stand behind it. Leaving the map and \
+                    coming back puts every boulder on it back where it started.".to_string(),
                 (true, true) => " Every shove the game would actually allow is a row in the menu \
                     below, one row per boulder per direction, and choosing one walks over and pushes \
                     it (Strength is armed for you). A push the game refuses is not offered rather \
@@ -1956,9 +1969,21 @@ mod tests {
         // which is walled in on its *starting* square and has never been touched. The reset is said
         // once, in the clause above, as a thing that is always true.
         assert!(!armed.contains("cannot be solved"), "{armed}");
-        assert!(!armed.contains("no row at all"), "{armed}");
         let untouched = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
         assert!(!rendered(&untouched).contains("cannot be solved"), "{}", rendered(&untouched));
+
+        // ⚠️ **A floor with no legal push says that, rather than promising rows that are not
+        // there.** The deployed run of 2026-09-04 met exactly this on VictoryRoad2F — first switch
+        // pressed, the other boulder against a wall — and filed an issue report asking whether the
+        // push it wanted had been "wrongly suppressed". It had not: the square it would have been
+        // shoved onto is solid rock. This restates the menu and claims nothing more.
+        let mut none_left = state.clone();
+        none_left.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder")
+            || sprite.position == crate::geometry::Point8 { x: 14, y: 2 });
+        assert!(none_left.map.boulder_pushes().is_empty(), "(14, 2) is walled in on its own square");
+        let quiet = rendered(&none_left);
+        assert!(quiet.contains("None of them can be pushed in any direction"), "{quiet}");
+        assert!(!quiet.contains("cannot be solved"), "no verdict on the floor: {quiet}");
 
         // ⚠️ **Silent where there are no boulders**, or it is a line on every turn of the game.
         state.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder"));
