@@ -543,6 +543,15 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                         .to_string(),
                 );
             }
+            // ⚠️ **And whether the shove itself would do anything, which is a refusal with no
+            // message behind it.** `TryPushingBoulder` falls into `ResetBoulderPushFlags` and
+            // returns on a blocked destination — no text, no animation — so the agent holds the
+            // direction until `DRIVER_ESCAPE_SILENCE` and reports "got no answer from the game for
+            // 60s", which reads as a broken emulator. The deployed run of 2026-09-02 filed five
+            // issue reports about one boulder on VictoryRoad1F whose north neighbour is a staircase.
+            if let Some(refusal) = state.map.boulder_push_refusal(*boulder, *direction) {
+                return Err(refusal);
+            }
             FieldMove::PushBoulder { boulder: *boulder, dir: *direction }
         }
         FieldMoveRequest::ReorderParty { slot } => FieldMove::ReorderParty { slot: party_slot(*slot)? },
@@ -4514,6 +4523,27 @@ mod tests {
             direction: JoypadButton::Up,
         });
         assert!(unarmed.contains("not armed"), "{unarmed}");
+
+        // ⚠️ **And armed is still not enough.** pokered refuses a push onto a staircase by tile id
+        // (`CheckForCollisionWhenPushingBoulder`) and says nothing at all about it, so the agent used
+        // to hold the direction for `DRIVER_ESCAPE_SILENCE` and report a malfunction. This is the
+        // state the deployed run of 2026-09-02 was in when it filed the fifth of five issue reports
+        // about the boulder at (5, 14) on VictoryRoad1F: Strength armed, standing on the push tile,
+        // and a staircase one square north of the boulder.
+        let stuck = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
+        assert!(stuck.strength_active, "the deployed state has Strength armed");
+        let stairs = complaint(&stuck, FieldMoveRequest::PushBoulder {
+            boulder: Point8 { x: 5, y: 14 },
+            direction: JoypadButton::Up,
+        });
+        assert!(stairs.contains("stairs"), "{stairs}");
+        // The push it *had* just made, back the way it came, is refused for the honest second reason
+        // rather than being offered as a way out that is not one.
+        let back = complaint(&stuck, FieldMoveRequest::PushBoulder {
+            boulder: Point8 { x: 5, y: 14 },
+            direction: JoypadButton::Down,
+        });
+        assert!(back.contains("cannot get to"), "{back}");
     }
 
     /// **The naming screen asks for a name, and takes only names the cartridge can write.**
