@@ -205,13 +205,18 @@ price.
   `endgame::victory_road_1f_is_solvable_from_the_action_menu_alone` plays the floor the way a model
   has to — `solve_boulder_push` for the next push, and it must be a row — and
   `a_push_from_a_warp_tile_is_offered_because_victory_road_needs_one` pins the square itself.
-- ⚠️ **A wedged floor is a fact only the solver has, and the turn now states it.** A Strength puzzle
-  is the one thing a player can put permanently out of reach without being told: every remaining push
-  is legal, offered and useless. `prompt::situation` runs `solve_boulder_push` against the floor's
-  switches *and its holes* (Seafoam has no switches at all) once a turn, and when nothing reaches any
-  of them it says so and says to walk out and back. The run of 2026-09-04 worked it out for itself
-  after twenty turns and spent the conclusion on an issue report asking whether the switch
-  coordinates were wrong; they were not, and `solve_boulder_push` agreed with it.
+- ⛔ **The turn must not tell a model that a Strength floor is lost, and two versions of that
+  sentence have now shipped and been reverted.** The tombstone is in `prompt::situation`. Read off
+  `solve_boulder_push` for every switch and hole, "no plan" is *not* "unsolvable": the solver plans a
+  boulder onto a target, and on a multi-stage floor no boulder reaching the switch yet is ordinary —
+  VictoryRoad3F answers exactly that on arrival (four boulders, a switch behind a barrier, a hole to
+  the floor below), so the line fired on the hardest puzzle in the game and a deployed run walked up
+  from 2F and straight back down **twenty times**. Measured per boulder off `boulder_pushes` instead,
+  it is a true sentence and still wrong: VictoryRoad1F's boulder at (14, 2) is walled in on its
+  *starting* square, so it fires where nothing has gone wrong and advises a reset that changes
+  nothing. Telling a stuck boulder from a decorative one needs the map's original object data, which
+  that layer does not have. What the turn says is what is measured — these are the legal pushes, and
+  leaving the map puts every boulder back.
 - ⚠️ **A push cannot report its own completion, and an `OverworldActionCompleted { Boulder }` that
   never fired once was deleted rather than chased.** The shove and its dust animation are
   `GameMode::Script`, `assert_script_state` takes the state over on sight of one, and

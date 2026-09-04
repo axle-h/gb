@@ -847,34 +847,31 @@ pub fn situation(
             let known = state.pokemon.iter()
                 .any(|mon| mon.moves.iter().flatten().any(|m| m.name == crate::pokemon::move_name::PokemonMoveName::Strength));
             let badged = state.badges.contains(Badge::RainbowBadge);
-            // ⚠️ **Whether the floor is still solvable at all, asked once a turn.** A Strength puzzle
-            // is the one thing in the game a player can put permanently beyond reach without being
-            // told: shove a boulder into a corner and every remaining push is legal, offered, and
-            // useless. The deployed run of 2026-09-04 did exactly that within twenty turns of being
-            // handed the rows — walked Boulder 1 east along row 16 and down to (9, 17), where it has
-            // no pushes at all — and then filed an issue report asking whether the switch data was
-            // wrong. It was not: `solve_boulder_push` agrees with it that nothing reaches (17, 13)
-            // any more. The answer is a fact about the cartridge that no amount of looking at the map
-            // can produce (`LoadMapData` re-reads a map's objects, so walking out and back undoes
-            // every push), and the line below already says it — but it says it as a footnote to
-            // "here are your rows", which is not where a model that has run out of ideas is reading.
+            // ⚠️ **There were two more sentences here and both were inferences the data does not
+            // support. Neither is coming back without new evidence.**
             //
-            // ⚠️ **Holes count as targets as well as switches.** Seafoam has no switches at all: what
-            // stops the current is dropping boulders through the holes, and a floor judged only on
-            // its switches would be called unsolvable on every turn spent there.
-            let targets: Vec<crate::geometry::Point8> = state.map.strength_switches.iter()
-                .chain(state.map.holes.iter()).copied().collect();
-            let done = targets.iter().any(|target| boulders.contains(target));
-            let wedged = known && badged && !targets.is_empty() && !done
-                && targets.iter().all(|target| state.map.solve_boulder_push(*target).is_none());
+            // The first read `solve_boulder_push` for every switch and hole and, on all-`None`, told
+            // the model the floor could not be solved as it stood and to walk out and back to reset
+            // the boulders. The inference does not hold: the solver plans a boulder onto a *target*,
+            // and on a multi-stage floor "no boulder can reach the switch from here" is an ordinary
+            // state of play. VictoryRoad3F answers exactly that on arrival — four boulders, a switch
+            // behind a barrier, a hole that drops one to the floor below — so the line fired the
+            // instant the player stepped onto the hardest Strength puzzle in the game, and the
+            // deployed run of 2026-09-04 did as it was told **twenty times**, walking up from 2F and
+            // straight back down without pushing anything. It caused a longer loop than the one it
+            // was written to prevent.
+            //
+            // The second was the same claim made per *boulder* and measured rather than inferred —
+            // "there is no row at all for the boulder at (x, y)" — which is a true sentence and
+            // still the wrong one. Some boulders are scenery: VictoryRoad1F's at (14, 2) is walled
+            // in on its starting square, so the note fires on a floor where nothing has gone wrong
+            // at all, and its advice to leave and come back is advice that changes nothing. Telling
+            // a stuck boulder from a decorative one needs the map's *original* object data, which
+            // this layer does not have.
+            //
+            // What is left is what the run actually needed, and it is already in the clause below:
+            // the rows are the legal pushes, and leaving the map puts every boulder back.
             out.push_str(&match (known, badged) {
-                (true, true) if wedged => " ⚠️ From where the boulders are standing now, no sequence \
-                    of pushes reaches any of those, so this floor cannot be solved as it is: some \
-                    earlier push put a boulder somewhere it cannot come back from. This is not a \
-                    fault and it is not permanent. The game re-reads a map's objects every time it \
-                    loads one, so leaving this map and coming back puts every boulder on it back \
-                    exactly where it started, and the puzzle can be attempted again. Go out through \
-                    any door and return.".to_string(),
                 (true, true) => " Every shove the game would actually allow is a row in the menu \
                     below, one row per boulder per direction, and choosing one walks over and pushes \
                     it (Strength is armed for you). A push the game refuses is not offered rather \
@@ -1952,17 +1949,16 @@ mod tests {
         // the line the model is left to work that out from an absence of rows, and the run of
         // 2026-09-04 that did work it out spent its conclusion on an issue report asking whether the
         // switch coordinates were wrong.
-        let switch = crate::geometry::Point8 { x: 17, y: 13 };
-        let wedged = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
-        assert_eq!(wedged.map.solve_boulder_push(switch), None, "that fixture cannot be solved");
-        let stuck = rendered(&wedged);
-        assert!(stuck.contains("no sequence of pushes reaches any of those"), "{stuck}");
-        assert!(stuck.contains("leaving this map and coming back"), "{stuck}");
-
-        // ⚠️ **And it is silent on a floor that is merely awkward**, or it is an alarm on every turn
-        // of every Strength puzzle in the game. The same floor one push earlier still solves.
-        assert!(state.map.solve_boulder_push(switch).is_some(), "this one does solve");
-        assert!(!armed.contains("no sequence of pushes"), "{armed}");
+        // ⚠️ **Nothing here claims the floor is lost, and nothing may.** Two versions of that
+        // sentence shipped and both were wrong: read off `solve_boulder_push`, VictoryRoad3F answers
+        // "no plan" on arrival and the line sent a deployed run up from 2F and straight back down
+        // twenty times; read per boulder off `boulder_pushes`, it fires on VictoryRoad1F's (14, 2),
+        // which is walled in on its *starting* square and has never been touched. The reset is said
+        // once, in the clause above, as a thing that is always true.
+        assert!(!armed.contains("cannot be solved"), "{armed}");
+        assert!(!armed.contains("no row at all"), "{armed}");
+        let untouched = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
+        assert!(!rendered(&untouched).contains("cannot be solved"), "{}", rendered(&untouched));
 
         // ⚠️ **Silent where there are no boulders**, or it is a line on every turn of the game.
         state.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder"));
