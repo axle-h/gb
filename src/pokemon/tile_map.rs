@@ -771,6 +771,13 @@ impl MetaTileMap {
         Some(route)
     }
 
+    /// One [`Self::bfs_from_player`], for a caller that is about to ask
+    /// [`Self::route_to_face_within`] about many targets. See that method for why the loop must not
+    /// run its own search per target.
+    pub fn search_for_faces(&self) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
+        self.bfs_from_player()
+    }
+
     /// Search from `player_position` outward.
     ///
     /// Returns `(dist, came_from)` where `dist[p]` is the cheapest way to reach `p` and
@@ -1650,6 +1657,37 @@ impl MetaTileMap {
     /// other adjacent tile faces the wrong way and pressing A does nothing.
     pub fn route_to_face_dir(&self, target: Point8, required: Option<PlayerFacingDirection>) -> Option<Vec<JoypadButton>> {
         let (dist, came_from) = self.bfs_from_player();
+        self.route_to_face_within(&dist, &came_from, target, required)
+    }
+
+    /// [`Self::route_to_face_dir`] against a search somebody else has already run.
+    ///
+    /// ⚠️ **A `route_to_face` is a whole Dijkstra, so a caller that asks about every tile of a map
+    /// is quadratic in the tile count — and one of them was.** `fishing::nearest_castable_water`
+    /// sweeps the map for the nearest water it can cast at, and called `route_to_face` per water
+    /// tile; `actions()` calls that, and the route follower re-derives `actions()` **every 20 ms
+    /// agent tick**. On Route 23 (369 water tiles) that measured **117 ms per tick against a 20 ms
+    /// budget**, and it was Surf that made it visible, because water is a pass-through node only
+    /// once the party can mount it, which triples what each of those 369 searches has to explore
+    /// (1490 reachable tiles against 551).
+    ///
+    /// ⚠️ **It does not look like slow motion, it looks like a stutter**, which is why it went
+    /// unrecognised as a performance fault. `host.rs` publishes **one video frame per loop
+    /// iteration** and each iteration emulates up to `MAX_CATCHUP` of game time, so an iteration
+    /// that spends 1.5 s of wall clock on twelve of these ticks advances the game a whole 250 ms —
+    /// about one walking step — and shows the viewer nothing in between. Measured on Route 23 at
+    /// 20 % speed: **1.9 s of wall clock per tile, worst 4.2 s**, against 0.28 s of game time.
+    /// The player jumps a tile, the picture sits still for seconds, the player jumps another tile.
+    ///
+    /// Sweeping through this instead is one search for the lot: the same map measures **0.37 ms**
+    /// and 98 % speed. Anything asking about more than one target wants this.
+    pub fn route_to_face_within(
+        &self,
+        dist: &HashMap<Point8, u32>,
+        came_from: &HashMap<Point8, (Point8, JoypadButton)>,
+        target: Point8,
+        required: Option<PlayerFacingDirection>,
+    ) -> Option<Vec<JoypadButton>> {
         let adj: [(PlayerFacingDirection, Point8); 4] = [
             (PlayerFacingDirection::Down,  Point8 { x: target.x,                   y: target.y.saturating_sub(1) }),
             (PlayerFacingDirection::Up,    Point8 { x: target.x,                   y: target.y + 1               }),

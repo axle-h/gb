@@ -297,3 +297,19 @@ price.
 `OverworldMovement`'s empty-route arm enters `AgentState::Fishing` with the rod re-resolved from the
 live bag, always the best rod. It is not a grind engine; the measurement is on
 `PolicyStep::gauntlet_grind_steps`.
+
+- ⚠️ **`nearest_castable_water` sweeps every water tile on the map, so it must run *one* search for
+  the lot.** `route_to_face` is a whole Dijkstra, and `actions()` is re-derived on every 20 ms agent
+  tick — one search per water tile put Route 23 at **117 ms a tick against a 20 ms budget**. Surf is
+  what made it visible: water is a pass-through node only once the party can mount it, which tripled
+  what each of the 369 searches explored. `MetaTileMap::route_to_face_within` takes a search already
+  run (`search_for_faces`); the same map measures 0.37 ms. Any new caller asking about more than one
+  target wants it too.
+- ⚠️ **A tick that overruns its budget reads as a *stutter*, not as slow motion**, which is why the
+  above was watched for a whole deployed run without being recognised as a performance fault.
+  `host.rs` publishes one video frame per loop iteration and each iteration emulates up to
+  `MAX_CATCHUP` (250 ms) of game time, so an iteration that spends 1.5 s of wall clock on twelve
+  over-budget agent ticks moves the player about one whole walking step and shows nothing in
+  between. Route 23 measured **1.9 s of wall clock per tile, worst 4.2 s** at 20 % speed — a
+  character that jumps a tile, freezes for seconds, jumps another tile. The symptom to reach for
+  here is the per-tick cost of `actions()`, not anything in the movement drivers.
