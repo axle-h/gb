@@ -544,6 +544,81 @@ impl MetaTileMap {
         found
     }
 
+    /// Where the player can get to **in order to shove a boulder**, with the step that got them
+    /// there — a flood fill from where they stand, and deliberately not [`Self::bfs_from_player`].
+    ///
+    /// ⚠️ **The routing BFS records a warp tile but never expands *through* one, and Victory Road's
+    /// puzzle cannot be solved without walking over its entrance warps.** VR1F's entrance is
+    /// (8, 17) and (9, 17), plain cave floor `$21` that warps only when a direction is held into the
+    /// map edge — `solve_boulder_push`'s `floor` has counted them as walkable all along, with a
+    /// comment saying that excluding them "was the bug that made VR1F look unsolvable", and it is
+    /// right: excluded, the solver cannot solve that floor from its *starting* layout either.
+    /// `boulder_push_refusal` never learned it. So the planner and the menu disagreed about one
+    /// square, and the deployed run of 2026-09-04 paid for the disagreement: with its boulder on
+    /// (9, 16) the solver's next step was `Up`, pushed from (9, 17) — and the menu, unable to reach
+    /// (9, 17), offered `Down` and nothing else. Down puts the boulder on row 17, the bottom of the
+    /// map, where there is nowhere to stand on the far side and it can never be pushed again. The
+    /// model saw it coming — *"this pushes it DOWN to (9,17), the warp tile — dead. But it's the
+    /// only option"* — and had to take it, because it was.
+    ///
+    /// ⚠️ **A warp is walked over, never *into*.** Two rules keep that honest, and they are the
+    /// reason this can expand through warps where the routing BFS may not. A `StepOn` warp fires on
+    /// arrival whatever direction you came from, so it is not a square anybody can stand on; and a
+    /// `HoldDirection` warp fires on a collision while standing on it, so the one thing that must
+    /// never happen is arriving on one *in the direction that fires it*. Entering VR1F's (8, 17)
+    /// from (8, 16) is a step Down at the bottom edge, which is exactly how that warp is taken —
+    /// `actions()` takes it that way on purpose. Entering the same square from (7, 17) holding Right
+    /// is not, and that is the way round this fill finds.
+    fn push_search(&self) -> (std::collections::HashSet<Point8>,
+                              HashMap<Point8, (Point8, JoypadButton)>) {
+        use std::collections::{HashSet, VecDeque};
+        let boulders: HashSet<Point8> = self.boulders().into_iter().collect();
+        let standable = |p: Point8| !boulders.contains(&p) && match self.tile_at(p) {
+            MetaTile::Empty | MetaTile::Grass => true,
+            MetaTile::Warp { .. } => self.warp_trigger(p) != WarpTrigger::StepOn,
+            _ => false,
+        };
+        let mut seen = HashSet::from([self.player_position]);
+        let mut came: HashMap<Point8, (Point8, JoypadButton)> = HashMap::new();
+        let mut queue = VecDeque::from([self.player_position]);
+        while let Some(at) = queue.pop_front() {
+            for dir in [JoypadButton::Up, JoypadButton::Down, JoypadButton::Left, JoypadButton::Right] {
+                let Some(next) = self.step(at, dir) else { continue };
+                if !standable(next) || self.pair_blocked(at, next) { continue }
+                // ⚠️ **Only ask a *warp* what fires it.** `warp_trigger` answers for any square —
+                // it is "what would make a warp here go", not "is there one" — and on the bottom row
+                // of a map that is `HoldDirection(Down)` for plain floor and for walls alike. Asked
+                // of every tile, this rule sealed off the whole of VictoryRoad1F's row 17, including
+                // the two ordinary squares at (6, 17) and (7, 17) that are the only way round to the
+                // entrance warps in the first place.
+                if matches!(self.tile_at(next), MetaTile::Warp { .. })
+                    && self.warp_trigger(next) == WarpTrigger::HoldDirection(dir) { continue }
+                if seen.insert(next) {
+                    came.insert(next, (at, dir));
+                    queue.push_back(next);
+                }
+            }
+        }
+        (seen, came)
+    }
+
+    /// The walk to a square a boulder can be shoved from, under [`Self::push_search`]'s rules rather
+    /// than `route_to`'s — which is the same disagreement one layer down: `AgentState::PushingBoulder`
+    /// routed with `route_to`, so even a push the menu offered could have been a walk the driver could
+    /// not make, and it drops to `Idle` without a word when it cannot find one.
+    pub fn route_to_push_tile(&self, dest: Point8) -> Option<Vec<JoypadButton>> {
+        let (seen, came) = self.push_search();
+        if !seen.contains(&dest) { return None }
+        let mut route = vec![];
+        let mut at = dest;
+        while let Some(&(prev, dir)) = came.get(&at) {
+            route.push(dir);
+            at = prev;
+        }
+        route.reverse();
+        Some(route)
+    }
+
     /// Every one-tile shove on this map the cartridge would actually carry out, as
     /// `(boulder, direction, the square it is pushed from)`.
     ///
@@ -553,12 +628,12 @@ impl MetaTileMap {
     /// the reachable set rather than computing one, and this is where it is computed once. The same
     /// lesson `nearest_castable_water` cost a whole deployed run of stutter — see its ⚠️.
     pub fn boulder_pushes(&self) -> Vec<(Point8, JoypadButton, Point8)> {
-        self.boulder_pushes_within(&self.reachable_tiles())
+        self.boulder_pushes_within(&self.push_search().0)
     }
 
-    /// [`Self::boulder_pushes`] against a reachable set already computed, which is what `actions()`
-    /// calls: it has run `bfs_from_player` at the top of itself and a second flood fill per tick is
-    /// the cost `nearest_castable_water` learned about the hard way.
+    /// [`Self::boulder_pushes`] against a [`Self::push_search`] already run, which is what
+    /// `actions()` calls: it wants the came-from map as well, to build each row's walk, and a second
+    /// flood fill per tick is the cost `nearest_castable_water` learned about the hard way.
     pub fn boulder_pushes_within(&self, reach: &std::collections::HashSet<Point8>)
         -> Vec<(Point8, JoypadButton, Point8)> {
         let mut pushes = vec![];
@@ -612,8 +687,9 @@ impl MetaTileMap {
         };
         // One flood fill for all four directions: the "and these do work" clause asks about three
         // more pushes, and each of them needs to know whether the tile it would be shoved from can
-        // be walked to.
-        let reach = self.reachable_tiles();
+        // be walked to. ⚠️ [`Self::push_search`], never `reachable_tiles` — the difference is a
+        // whole floor of Victory Road; see that function.
+        let reach = self.push_search().0;
         let refused = |why: String| {
             // ⚠️ **Naming the directions that do work is the half that matters.** A bare "no" leaves
             // a model with four squares to guess between and nothing said about which, and the last
@@ -685,7 +761,15 @@ impl MetaTileMap {
         // `floor` predicate `solve_boulder_push` uses (a coordinate warp is floor: VR1F's entrance
         // warps are plain cave floor and a boulder is legitimately pushed past them).
         match self.tile_at(stand) {
-            MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. } => {}
+            MetaTile::Empty | MetaTile::Grass => {}
+            // ⚠️ **A warp entry is floor unless it fires on the step onto it.** Victory Road's
+            // puzzle is unsolvable without standing on its entrance squares, which are plain cave
+            // floor that warps only on a held direction — see [`Self::push_search`]. One that warps
+            // on arrival is a square nobody can be standing on.
+            MetaTile::Warp { .. } if self.warp_trigger(stand) != WarpTrigger::StepOn => {}
+            MetaTile::Warp { to_map, .. } => return Some(format!(
+                "({}, {}) is the way to {to_map} and you would be taken there the moment you stepped \
+                 on it, so there is nowhere to stand to push from that side", stand.x, stand.y)),
             MetaTile::Sprite(who) => return Some(format!(
                 "{who} is standing at ({}, {}), which is the only square this can be pushed from",
                 stand.x, stand.y)),
@@ -1470,10 +1554,16 @@ impl MetaTileMap {
         //    region, and past the Rainbow Badge `can_strength` is true on every map in the game
         //    while boulders are on five of them.
         if self.can_strength && self.sprites.iter().any(|s| !s.hidden && s.name.starts_with("Boulder")) {
-            let reach: std::collections::HashSet<Point8> = full_dist.keys().copied().collect();
+            // ⚠️ **The row's walk comes from [`Self::push_search`] rather than from the BFS above**,
+            // and it has to: the routing BFS will not expand through a warp tile, and the square
+            // Victory Road's puzzle has to be pushed from is one. A row routed the ordinary way
+            // simply did not exist, which left a deployed run holding one push and no way to decline
+            // it. `AgentState::PushingBoulder` re-derives the same walk through
+            // `route_to_push_tile`, so the row and the driver agree.
+            let (reach, came) = self.push_search();
             for (boulder, push, stand) in self.boulder_pushes_within(&reach) {
-                let Some((_, came_from)) = best_dist_from(&stand) else { continue };
-                let mut route = reconstruct(stand, came_from);
+                if !reach.contains(&stand) { continue }
+                let mut route = reconstruct(stand, &came);
                 // Facing is not optional: `TryPushingBoulder` reads
                 // `wSpritePlayerStateData1FacingDirection` and the push needs the direction held
                 // twice, so the route ends turned toward the boulder exactly as a cut tree's does.

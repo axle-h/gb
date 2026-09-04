@@ -522,6 +522,84 @@ fn a_boulder_row_arms_strength_and_pushes_on_one_decision() {
     assert!(fixture.game_state().strength_active, "and the agent armed Strength itself");
 }
 
+/// **Victory Road 1F is solvable through the action menu, which is the only lever a model has.**
+///
+/// ⚠️ **`can_climb_victory_road_1f` does not prove this and cannot.** The scripted route pushes
+/// through `FieldMove::PushBoulder`, which names a boulder and a direction directly; a model can
+/// only choose a `MetaTile::Boulder` row, and a push the row layer withholds is a push it can never
+/// ask for. The two layers disagreed about one square and the floor was lost: `solve_boulder_push`
+/// counts VR1F's entrance warps at (8, 17) and (9, 17) as standable — it has to, the floor is
+/// unsolvable from its *starting* layout without them — while `boulder_push_refusal` asked
+/// `reachable_tiles`, which never expands through a warp. So with its boulder on (9, 16) the deployed
+/// run of 2026-09-04 was shown one row, `Down`, which puts the boulder on the bottom row of the map
+/// where nothing can ever stand behind it again. It knew: *"this pushes it DOWN to (9,17), the warp
+/// tile — dead. But it's the only option."* It was.
+///
+/// So this plays the floor the way the model does. `SolveViaRows` asks `solve_boulder_push` what to
+/// do next and then insists on finding that push in `actions()` — if the planner and the menu ever
+/// disagree again the run stops dead rather than wandering, and the assertion is that a boulder
+/// reaches the switch.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn victory_road_1f_is_solvable_from_the_action_menu_alone() {
+    let switch = Point8 { x: 17, y: 13 };
+    let mut fixture = TestFixture::with_policy(VR1F_STRENGTH, Duration::from_mins(30),
+        Box::new(SolveViaRows::new(switch)));
+    let pressed = |fixture: &mut TestFixture| fixture.game_state().map.boulders().contains(&switch);
+    // ⚠️ **Asserted before the loop as well**, or a fixture that happened to start solved would
+    // make this test pass without playing anything at all.
+    assert!(!pressed(&mut fixture), "the fixture starts with the switch unpressed");
+    while fixture.total_cycles < fixture.max_cycles && !pressed(&mut fixture) { fixture.step(); }
+    assert!(pressed(&mut fixture),
+        "a boulder has to reach {switch} using nothing but the rows the menu offers");
+}
+
+/// **The one square the planner and the menu disagreed about.**
+///
+/// Reconstructed rather than played, because getting a boulder to (9, 16) takes four pushes the
+/// solver would never choose: the model walked it one square too far along row 16. From there the
+/// solver's next step is `Up`, pushed from the entrance warp at (9, 17) — and `Down`, the only row
+/// the menu used to offer, is terminal. Both must now be rows, `Up` first.
+#[test]
+fn a_push_from_a_warp_tile_is_offered_because_victory_road_needs_one() {
+    use crate::pokemon::tile::MetaTile;
+    let mut fixture = TestFixture::new(VR1F_STRENGTH, Duration::from_secs(10), Vec::new());
+    let mut state = fixture.game_state();
+    let width = state.map.width;
+    let (from, to) = (Point8 { x: 5, y: 15 }, Point8 { x: 9, y: 16 });
+    for sprite in state.map.sprites.iter_mut() {
+        if sprite.position == from { sprite.position = to; }
+    }
+    state.map.meta_tiles[from.x as usize + from.y as usize * width] = MetaTile::Empty;
+    state.map.meta_tiles[to.x as usize + to.y as usize * width] = MetaTile::Sprite("Boulder 1");
+    state.map.player_position = Point8 { x: 9, y: 15 };
+
+    // The square in question is a warp, and it is the only one the push can be made from.
+    let stand = Point8 { x: 9, y: 17 };
+    assert!(matches!(state.map.tile_at(stand), MetaTile::Warp { .. }), "(9, 17) is the entrance");
+    assert_eq!(state.map.boulder_push_refusal(to, JoypadButton::Up), None,
+        "the push the solver wants must be one the menu will offer");
+
+    // ⚠️ **And the walk to it must exist under the same rules**, or the row is a decision the driver
+    // cannot carry out — `PushingBoulder` finds no route and drops to `Idle` without a word. The
+    // route has to reach the warp from the *side*: entering (8, 17) from (8, 16) is a step Down at
+    // the bottom edge, which is exactly how that warp is taken.
+    let route = state.map.route_to_push_tile(stand).expect("a walk to the push tile");
+    assert!(!route.is_empty() && !route.contains(&JoypadButton::Start), "{route:?}");
+    assert_eq!(route.last(), Some(&JoypadButton::Right), "it arrives from the west, not from above");
+
+    let offered: Vec<JoypadButton> = state.map.actions().iter()
+        .filter_map(|action| match action.tile {
+            MetaTile::Boulder { at, push } if at == to => Some(push),
+            _ => None,
+        })
+        .collect();
+    assert!(offered.contains(&JoypadButton::Up), "the way on has to be a row: {offered:?}");
+    assert!(offered.contains(&JoypadButton::Down), "and the dead end is still a legal push");
+    // The dead end is exactly that, which is why withholding the other one was fatal.
+    assert!(state.map.solve_boulder_push(Point8 { x: 17, y: 13 }).is_some(), "solvable from here");
+}
+
 /// The bound `a_boulder_that_cannot_move_is_refused_rather_than_shoved_at` holds the driver to. Well
 /// inside `agent::DRIVER_ESCAPE_SILENCE` (60 s) and well outside any real push, so it fails on the
 /// behaviour rather than on the machine it runs on.
@@ -566,6 +644,43 @@ struct PushRowOnce {
 
 impl PushRowOnce {
     fn new(boulder: Point8, dir: JoypadButton) -> Self { Self { boulder, dir, asked: false } }
+}
+
+/// A policy that solves a Strength puzzle **using only the action menu**, which is the whole point:
+/// it asks `solve_boulder_push` for the next push and then requires that push to be a
+/// `MetaTile::Boulder` row. A plan step the menu does not offer is a hard failure rather than a
+/// wander, because that is the shape of the fault it exists to catch.
+struct SolveViaRows {
+    switch: Point8,
+    /// Victory Road is thick with wild encounters and this test is about the boulders, so the
+    /// battles are handed to a seeded `RandomPolicy` rather than answered here.
+    battles: crate::pokemon::policy::RandomPolicy,
+}
+
+impl SolveViaRows {
+    fn new(switch: Point8) -> Self {
+        Self { switch, battles: crate::pokemon::policy::RandomPolicy::seeded(7) }
+    }
+}
+
+impl crate::pokemon::policy::Policy for SolveViaRows {
+    fn name(&self) -> &'static str { "solve-via-rows" }
+    fn pick_overworld_action(&mut self, state: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction> {
+        let plan = state.map.solve_boulder_push(self.switch)
+            .expect("the floor has to stay solvable while this policy is playing it");
+        let (boulder, push) = *plan.first().expect("a plan with no steps is a solved puzzle");
+        let wanted = crate::pokemon::tile::MetaTile::Boulder { at: boulder, push };
+        state.map.actions().into_iter().find(|action| action.tile == wanted).or_else(|| panic!(
+            "the solver wants to push the boulder at {boulder} {push:?} and the menu does not offer \
+             it; the rows are {:?}",
+            state.map.actions().iter().filter(|a| matches!(a.tile,
+                crate::pokemon::tile::MetaTile::Boulder { .. })).map(|a| a.tile).collect::<Vec<_>>()))
+    }
+    fn pick_battle_action(&mut self, state: &GameState) -> Option<crate::pokemon::battle::BattleAction> {
+        self.battles.pick_battle_action(state)
+    }
+    fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> { None }
 }
 
 impl crate::pokemon::policy::Policy for PushRowOnce {
