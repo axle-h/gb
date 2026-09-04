@@ -141,6 +141,24 @@ price.
   reaching for one again. The square is reached by more than one route — on Cinnabar the walk that
   steps on the doorstep and the walk that avoids it are *both 29 steps*, a one-tile dogleg, so which
   comes out is a tie-break — and the table of coordinates would never have been finished.
+- ⚠️ **A boulder push the cartridge refuses is refused in *silence*, so nothing downstream can see
+  it and everything has to ask first.** `CheckForCollisionWhenPushingBoulder` adds two rules to the
+  tileset's own collision list — no boulder onto a **staircase**, by raw tile id (`$15`), and none
+  across a `TilePairCollisionsLand` boundary, where the pair tested is **(the player's tile, the
+  destination)**, two squares apart and never the boulder's own — and answers a failure by returning
+  with no text box, no animation and nothing on screen. `MetaTileMap::boulder_push_refusal` is that
+  routine plus the one thing it has no reason to check (a push tile with no route to it, which is a
+  push that can never be attempted), and all three seams go through it:
+  `solve_boulder_push` will not plan one, `tools::resolve_field_move` will not accept one, and
+  `AgentState::PushingBoulder` asks **every tick**, because the boulder moving is its only other
+  exit and the map moves underneath it. A deployed run pushed VictoryRoad1F's boulder north into the
+  alcove at (5, 14), under the staircase at (5, 13) that reads as ordinary walkable floor, and then
+  held Up into it for `DRIVER_ESCAPE_SILENCE` five times, filing five issue reports calling the
+  emulator broken. `endgame::a_boulder_that_cannot_move_is_refused_rather_than_shoved_at` runs on
+  that exact save state. ⚠️ **A boulder with no push left is a reset rather than a dead end**, and
+  the refusal says so: Gen 1 re-reads a map's objects on every `LoadMapData`, so walking out and back
+  undoes every push on the floor (`endgame::leaving_a_map_puts_its_boulders_back`). Saying only the
+  first half is how a model decides the game is broken.
 - ⚠️ **`observe::map_view` filters people by reachability and *flags* warps.** Different answers on
   purpose: a person out of reach is someone nothing can be done with, a door out of reach is still
   where you come out if you get there. `WarpView::reachable_from_here` is the same call

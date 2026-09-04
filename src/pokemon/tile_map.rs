@@ -477,6 +477,150 @@ impl MetaTileMap {
         })
     }
 
+    /// The raw tile id `CheckForCollisionWhenPushingBoulder` refuses a boulder onto **by id**, as a
+    /// special case sitting beside the tileset's own collision list. It is compared regardless of
+    /// tileset, and in the only ones a boulder is ever on — every Strength puzzle in the game is
+    /// Cavern, on Victory Road and in the Seafoam Islands — it is the staircase, which is why the
+    /// refusal calls it one. Stairs are walkable, so nothing else about the tile says no: this is
+    /// the constant that cost a deployed run its Victory Road, at (5, 13) on VictoryRoad1F, one
+    /// square north of the boulder at (5, 14).
+    const BOULDER_STAIRS_TILE: u8 = 0x15;
+
+    /// The two refusals a boulder push gets **that ordinary walking does not**, given the tile the
+    /// player would be standing on and the tile the boulder would be pushed onto: `Some(reason)` if
+    /// the cartridge would refuse.
+    ///
+    /// One implementation with two callers that need different halves of it — `solve_boulder_push`
+    /// wants the yes/no, because it simulates layouts the live map does not have and so cannot ask
+    /// [`Self::boulder_push_refusal`]; the refusal wants the sentence. They must never drift, which
+    /// is the whole reason this is not written out twice.
+    ///
+    /// ⚠️ **The tile pair the cartridge tests is (the player's tile, the destination), which are two
+    /// squares apart.** `CheckForCollisionWhenPushingBoulder` calls `GetTileTwoStepsInFrontOfPlayer`
+    /// — which overwrites `wTileInFrontOfPlayer` with the tile two ahead — and then
+    /// `CheckForTilePairCollisions2`, which compares that against `wTilePlayerStandingOn`. The
+    /// boulder's own tile is never in it. This used to test (boulder, destination), which is a
+    /// different pair on any cliff a boulder is standing on the edge of.
+    fn boulder_push_terrain_refusal(&self, stand: Point8, dest: Point8) -> Option<String> {
+        // Two rules, two sentences: they are refused at the same moment and are nothing alike, and a
+        // model told "a step up or down" about a staircase will look for a cliff that is not there.
+        if self.raw_tile_ids[dest.x as usize + dest.y as usize * self.width] == Self::BOULDER_STAIRS_TILE {
+            return Some(format!(
+                "there are stairs at ({}, {}), and a boulder will not go onto stairs", dest.x, dest.y));
+        }
+        if self.pair_blocked(stand, dest) {
+            return Some(format!(
+                "({}, {}) is a step up or down from where you would be standing, and a boulder will \
+                 not go over one", dest.x, dest.y));
+        }
+        None
+    }
+
+    /// Why the cartridge would refuse to shove the boulder at `boulder` one tile in `dir`, in a
+    /// sentence the model can act on — or `None` if it would move.
+    ///
+    /// ⚠️ **A refused push is silent, and silence is a sixty-second stall.** pokered's
+    /// `TryPushingBoulder` answers every one of these by falling into `ResetBoulderPushFlags` and
+    /// returning: no message, no animation, nothing on screen at all. `AgentState::PushingBoulder`
+    /// completes only when the boulder leaves its tile, so it holds the direction until
+    /// `agent::DRIVER_ESCAPE_SILENCE` and reports "got no answer from the game for
+    /// 60s", which reads as a malfunction — the same mistake `teach_refusal` and
+    /// `item_use::field_use_refusal` were written to stop making. The deployed run of 2026-09-02
+    /// filed five issue reports about it against the one boulder at (5, 14) on VictoryRoad1F, whose
+    /// north neighbour is a staircase, and got no further into Victory Road.
+    ///
+    /// Every rule is a conjunct, so the order is only about which sentence comes back first: the
+    /// destination has to be on the map, then clear of every other sprite and passable in this
+    /// tileset, then neither of [`Self::boulder_push_terrain_refusal`]'s two, and finally the tile
+    /// the shove happens from has to be walkable to.
+    pub fn boulder_push_refusal(&self, boulder: Point8, dir: JoypadButton) -> Option<String> {
+        let name = self.sprites.iter()
+            .find(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == boulder)
+            .map(|s| s.name.clone());
+        let Some(name) = name else {
+            return Some(format!(
+                "There is no boulder at ({}, {}). `read_map` gives the exact position of every one \
+                 on this map.", boulder.x, boulder.y));
+        };
+        // One flood fill for all four directions: the "and these do work" clause asks about three
+        // more pushes, and each of them needs to know whether the tile it would be shoved from can
+        // be walked to.
+        let reach = self.reachable_tiles();
+        let refused = |why: String| {
+            // ⚠️ **Naming the directions that do work is the half that matters.** A bare "no" leaves
+            // a model with four squares to guess between and nothing said about which, and the last
+            // one it tried is the one it reads back on its next request; a run that is told "east or
+            // west" pushes east. `teach_refusal` names who *can* take the move for the same reason.
+            let ways: Vec<&str> = [(JoypadButton::Up, "up"), (JoypadButton::Down, "down"),
+                                   (JoypadButton::Left, "left"), (JoypadButton::Right, "right")]
+                .into_iter()
+                .filter(|(d, _)| *d != dir && self.boulder_push_refusal_inner(boulder, *d, &reach).is_none())
+                .map(|(_, w)| w).collect();
+            let rest = match ways.as_slice() {
+                // ⚠️ **A boulder with nowhere to go is a *reset*, not a dead end, and saying only
+                // the first half is how a model decides the game is broken.** Gen 1 keeps nothing
+                // about where a boulder has been shoved to: the sprites come off the map's own
+                // object data every time `LoadMapData` runs, so walking out and back undoes every
+                // push on the floor. `endgame::leaving_a_map_puts_its_boulders_back` is the proof,
+                // taken on the save state of the run that needed to be told this.
+                [] => "It cannot be pushed any way at all from where it is standing. Leaving this \
+                       map and coming back puts every boulder on it back where it started, which is \
+                       the way to undo a push that went wrong.".to_string(),
+                ways => format!("It can be pushed {}.", ways.join(" or ")),
+            };
+            format!("{name} at ({}, {}) will not push {}: {why}. {rest}",
+                boulder.x, boulder.y, push_word(dir))
+        };
+        self.boulder_push_refusal_inner(boulder, dir, &reach).map(refused)
+    }
+
+    /// [`Self::boulder_push_refusal`] without the sentence, so the "and these directions do work"
+    /// clause can ask the same question of the other three without recursing into its own prose.
+    fn boulder_push_refusal_inner(&self, boulder: Point8, dir: JoypadButton,
+        reach: &std::collections::HashSet<Point8>) -> Option<String> {
+        let step = |p: Point8, d: JoypadButton| -> Option<Point8> {
+            let (dx, dy): (i32, i32) = match d {
+                JoypadButton::Up => (0, -1), JoypadButton::Down => (0, 1),
+                JoypadButton::Left => (-1, 0), JoypadButton::Right => (1, 0),
+                _ => return None,
+            };
+            let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
+            (x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height)
+                .then(|| Point8 { x: x as u8, y: y as u8 })
+        };
+        let Some(dest) = step(boulder, dir) else {
+            return Some(format!("the edge of {} is there", self.map));
+        };
+        // The tile the player has to stand on to shove it, one square the other way. If that is off
+        // the map there is nowhere to push from and the shove can never happen.
+        let Some(stand) = step(boulder, opposite_dir(dir)) else {
+            return Some(format!("there is nowhere to stand on the far side, at the edge of {}", self.map));
+        };
+        match self.tile_at(dest) {
+            // A hole is a legitimate destination — Victory Road 3F and Seafoam B3F are solved by
+            // dropping a boulder through one — so a warp tile is passable here where it is not for
+            // `dest_floor`'s ordinary floor.
+            MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. } => {}
+            MetaTile::Sprite(who) => return Some(format!("{who} is standing in the way at ({}, {})", dest.x, dest.y)),
+            other => return Some(format!("({}, {}) is {other}", dest.x, dest.y)),
+        }
+        if let Some(refusal) = self.boulder_push_terrain_refusal(stand, dest) {
+            return Some(refusal);
+        }
+        // ⚠️ **Not one of the cartridge's checks, and it has to be here anyway.** A shove happens by
+        // walking into the boulder, so a push tile the player cannot get to is a push that can never
+        // be attempted — `AgentState::PushingBoulder` finds no route, drops to `Idle` without a
+        // word, and the policy asks for the identical push again. It is also the difference between
+        // a boulder that is merely awkward and one that is *stuck*, which on a Strength puzzle is
+        // the whole answer: on VictoryRoad1F a boulder shoved north into the alcove at (5, 14) seals
+        // the only way to the tile it would have to be pushed back from.
+        if stand != self.player_position && !reach.contains(&stand) {
+            return Some(format!(
+                "you cannot get to ({}, {}) to push from there", stand.x, stand.y));
+        }
+        None
+    }
+
     /// Multi-boulder Sokoban: plan a sequence of one-tile pushes that lands *some* boulder on `switch`.
     /// Each entry is `(boulder_position_before_that_push, push_direction)`; returns `None` if no boulder
     /// can reach the switch. Boulders are the sprites named "Boulder …".
@@ -588,10 +732,14 @@ impl MetaTileMap {
                 for &(dx, dy, dir) in &dirs {
                     let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
                     // The player must be able to reach the tile behind the boulder, the destination must
-                    // be plain floor, and there must be no elevation/tile-pair cliff between the boulder
-                    // and its destination (pokered `CheckForCollisionWhenPushingBoulder`).
+                    // be plain floor, and the two extra refusals pokered
+                    // `CheckForCollisionWhenPushingBoulder` adds — a staircase, and an elevation
+                    // boundary — must not apply.
                     if !r.contains(&side) || bs.contains(&dest) || !dest_floor(dest) { continue; }
-                    if self.pair_blocked(b, dest) { continue; }
+                    // ⚠️ **`side`, not `b`** — the cartridge tests the player's tile against the
+                    // destination, and the staircase rule with it. See
+                    // [`Self::boulder_push_terrain_refusal`].
+                    if self.boulder_push_terrain_refusal(side, dest).is_some() { continue; }
                     let mut next = bs.clone();
                     next[i] = dest;
                     next.sort_by_key(|p| (p.y, p.x));
@@ -1754,6 +1902,16 @@ pub fn elevator_for(map: Map) -> Option<(Point8, &'static [Map])> {
         Map::CeladonMartElevator   => Some((Point8 { x: 3, y: 0 }, CELADON)),
         Map::SilphCoElevator       => Some((Point8 { x: 3, y: 0 }, SILPH)),
         _ => None,
+    }
+}
+
+/// The word `use_field_move`'s `direction` argument takes, so a refusal names a push in the
+/// vocabulary the model would have to type to make it.
+fn push_word(dir: JoypadButton) -> &'static str {
+    match dir {
+        JoypadButton::Up => "up", JoypadButton::Down => "down",
+        JoypadButton::Left => "left", JoypadButton::Right => "right",
+        _ => "that way",
     }
 }
 

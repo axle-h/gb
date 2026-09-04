@@ -378,3 +378,141 @@ fn probe_stall_actions() {
         println!("  action {:?} → {} ({} steps)", action.tile, action.destination, action.route.len());
     }
 }
+
+
+/// **A boulder that will not move says so, instead of being shoved at for a minute.**
+///
+/// The deployed run of 2026-09-02 reached VictoryRoad1F, pushed the boulder north out of the corridor
+/// into the alcove at (5, 14) — a legal push — and then asked for the same push again. The square
+/// north of it is the staircase at (5, 13), and pokered's `CheckForCollisionWhenPushingBoulder`
+/// refuses a boulder onto a staircase **by tile id**, beside the tileset's own collision list, which
+/// is why nothing in the map model saw it: `$15` is walkable, so the tile reads as ordinary floor and
+/// `solve_boulder_push` happily planned `(5,14) Up` as the first step of a route to the switch.
+///
+/// The refusal is silent — `TryPushingBoulder` falls into `ResetBoulderPushFlags` and returns, with
+/// no text box, no animation and nothing on screen — and `AgentState::PushingBoulder` finished only
+/// when the boulder left its tile. So the agent held Up for `DRIVER_ESCAPE_SILENCE` and reported
+/// "push-boulder:(5, 14)Up got no answer from the game for 60s; starting over", the model read that
+/// as a broken emulator, and it happened again. Five issue reports, and the run never got into
+/// Victory Road.
+///
+/// So this pins all three seams the fix put the cartridge's own rules behind: the planner, the
+/// sentence, and the driver.
+#[test]
+fn a_boulder_that_cannot_move_is_refused_rather_than_shoved_at() {
+    // The save state out of `issues/turn-1701/` of run-20260902-215720, as the model was handed it.
+    let mut stuck = TestFixture::new(VR1F_STUCK_PUSH, Duration::from_secs(30), Vec::new());
+    let state = stuck.game_state();
+    let map = &state.map;
+    assert_eq!(map.player_position, Point8 { x: 5, y: 15 }, "the deployed run stood here");
+    assert!(state.strength_active, "Strength was armed; the stall was not the arming gate");
+
+    // ⚠️ **The tile is `Empty`, and that is the point.** A staircase is walkable, so no amount of
+    // looking at the map model can tell this push from a legal one — only the tile id can.
+    assert_eq!(map.tile_at(Point8 { x: 5, y: 13 }), crate::pokemon::tile::MetaTile::Empty);
+    let refusal = map.boulder_push_refusal(Point8 { x: 5, y: 14 }, JoypadButton::Up)
+        .expect("the push the deployed run hung on must be refused");
+    assert!(refusal.contains("stairs"), "the reason has to be the real one: {refusal}");
+    assert!(refusal.contains("(5, 13)"), "and has to name the square: {refusal}");
+
+    // Every way out of the alcove needs a push tile the boulder itself now seals off, so the honest
+    // answer is that this one is finished — which is a thing to be told, not to be shoved at.
+    for dir in [JoypadButton::Down, JoypadButton::Left, JoypadButton::Right] {
+        assert!(map.boulder_push_refusal(Point8 { x: 5, y: 14 }, dir).is_some(),
+            "the alcove is sealed by the boulder in it, so no push works: {dir:?}");
+    }
+    assert!(map.solve_boulder_push(Point8 { x: 17, y: 13 }).is_none(),
+        "and the planner must not offer a route through a push the cartridge refuses");
+    // ⚠️ **The half that keeps this from reading as "the game is broken".** A wedged Strength puzzle
+    // is undone by leaving the map, which `leaving_a_map_puts_its_boulders_back` proves.
+    assert!(refusal.contains("Leaving this map"), "a sealed boulder must name the way out: {refusal}");
+
+    // The same floor before the run shoved the boulder into the corner still solves, so the rules
+    // added here refuse the impossible push without taking the possible one away.
+    let mut pristine = TestFixture::new(VR1F_STRENGTH, Duration::from_secs(30), Vec::new());
+    let fresh = pristine.game_state();
+    assert_eq!(fresh.map.boulder_push_refusal(Point8 { x: 5, y: 15 }, JoypadButton::Down), None,
+        "the first push of the real solution is legal");
+    let solution = fresh.map.solve_boulder_push(Point8 { x: 17, y: 13 })
+        .expect("VictoryRoad1F's puzzle is still solvable from its starting layout");
+    assert_eq!(solution.first(), Some(&(Point8 { x: 5, y: 15 }, JoypadButton::Down)));
+
+    // And the driver, which is the seam that actually burned the minute. Asking for the refused push
+    // must come back with the reason on the events, in far less time than `DRIVER_ESCAPE_SILENCE`.
+    let asked = PushOnce::new(Point8 { x: 5, y: 14 }, JoypadButton::Up);
+    let mut fixture = TestFixture::with_policy(VR1F_STUCK_PUSH, Duration::from_secs(20), Box::new(asked));
+    let mut said = None;
+    while fixture.total_cycles < fixture.max_cycles && said.is_none() {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::TextBox { message } = &event {
+                if message.contains("stairs") { said = Some(message.clone()); }
+            }
+        }
+    }
+    let said = said.expect("the driver must report the refusal rather than hold the direction");
+    assert!(said.contains("(5, 13)"), "{said}");
+    assert!(fixture.total_cycles.to_duration() < DRIVER_ESCAPE_SILENCE_SECS,
+        "the refusal must arrive long before the 60 s escape that used to report it as a malfunction; \
+         took {:?}", fixture.total_cycles.to_duration());
+}
+
+/// The bound `a_boulder_that_cannot_move_is_refused_rather_than_shoved_at` holds the driver to. Well
+/// inside `agent::DRIVER_ESCAPE_SILENCE` (60 s) and well outside any real push, so it fails on the
+/// behaviour rather than on the machine it runs on.
+const DRIVER_ESCAPE_SILENCE_SECS: Duration = Duration::from_secs(10);
+
+const VR1F_STUCK_PUSH: &[u8] = include_bytes!("../data/vr1f-stuck-push.bin");
+const VR1F_STRENGTH: &[u8] = include_bytes!("../data/vr1f-strength.bin");
+
+/// A policy that asks for one boulder push and nothing else, so the test drives the agent's
+/// `PushingBoulder` seam directly. `DeterministicPolicy` cannot express this: it plans its pushes
+/// through `solve_boulder_push`, which — since the fix — will never ask for a refused one.
+struct PushOnce {
+    boulder: Point8,
+    dir: JoypadButton,
+    asked: bool,
+}
+
+impl PushOnce {
+    fn new(boulder: Point8, dir: JoypadButton) -> Self { Self { boulder, dir, asked: false } }
+}
+
+impl crate::pokemon::policy::Policy for PushOnce {
+    fn name(&self) -> &'static str { "push-once" }
+    fn pick_overworld_action(&mut self, _: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction> { None }
+    fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
+    fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
+        if self.asked { return None; }
+        self.asked = true;
+        Some(crate::pokemon::policy::FieldMove::PushBoulder { boulder: self.boulder, dir: self.dir })
+    }
+}
+
+/// **And the way out of a boulder that cannot be pushed is the door**, which is worth pinning
+/// because it is the sentence the refusal above ends on.
+///
+/// Gen 1 keeps nothing about where a boulder has been shoved to: the sprites come off the map's own
+/// object data every time `LoadMapData` runs, and `wMissableObjectList` records only whether one is
+/// shown, never its position. So a Strength puzzle the player has wedged is undone by leaving the map
+/// and coming back. A model told only "this cannot be pushed any way at all" is a model about to
+/// decide the game is broken — the deployed run of 2026-09-02 filed five bug reports from exactly
+/// this square — so the refusal says to walk out and back, and this is why that is true.
+#[test]
+fn leaving_a_map_puts_its_boulders_back() {
+    let mut fixture = TestFixture::new(VR1F_STUCK_PUSH, Duration::from_mins(4), vec![
+        PolicyStep::goto(Map::Route23),
+        PolicyStep::goto(Map::VictoryRoad1F),
+    ]);
+    let state = fixture.run_leg(|s| s.map.map == Map::VictoryRoad1F
+        && s.map.sprites.iter().any(|sprite| sprite.name == "Boulder 1" && !sprite.hidden
+            && sprite.position == Point8 { x: 5, y: 15 }));
+    assert_eq!(state.map.map, Map::VictoryRoad1F);
+    // Where the map header puts it, not the alcove the run had shoved it into.
+    let boulder = state.map.sprites.iter().find(|s| s.name == "Boulder 1")
+        .expect("VictoryRoad1F has a boulder");
+    assert_eq!(boulder.position, Point8 { x: 5, y: 15 }, "a re-entered map re-reads its objects");
+    assert_eq!(state.map.boulder_push_refusal(Point8 { x: 5, y: 15 }, JoypadButton::Down), None,
+        "and the puzzle is winnable again");
+}

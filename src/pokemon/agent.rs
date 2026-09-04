@@ -1002,6 +1002,11 @@ pub(crate) enum AgentState {
     /// game's double-press logic advances the boulder one tile (the dust animation locks input, so it
     /// never over-pushes). Done as soon as the boulder leaves `boulder` (moved one tile, or fell through a
     /// hole). Any interruption (wild battle, script) drops to Idle; the policy re-decides the next push.
+    ///
+    /// ⚠️ **"The boulder moved" is the only *success*, so it must not be the only way out.** A shove
+    /// the cartridge will not make is refused without a word on screen, and this state cannot tell
+    /// that from a shove still in progress — so it is [`MetaTileMap::boulder_push_refusal`], asked
+    /// every tick, that ends it on anything else.
     /// Planning which boulder to push where lives in the policy (`MetaTileMap::solve_boulder_push`), not here.
     PushingBoulder { boulder: Point8, dir: JoypadButton },
 }
@@ -2638,6 +2643,22 @@ CascadeBadge; not cutting".to_string(),
                             // Primitive: push the boulder at `boulder` one tile in `dir`. The policy plans
                             // *which* push (via `MetaTileMap::solve_boulder_push`); the agent just executes it.
                             api.release_all_buttons();
+                            // ⚠️ **The last line of defence `CutTree`, `TeachMove` and
+                            // `UseFieldItem` have, for the fourth member of the same family.** A
+                            // push the cartridge will not make is refused in silence
+                            // (`TryPushingBoulder` → `ResetBoulderPushFlags`, no text box), and
+                            // `PushingBoulder` finishes only when the boulder leaves its tile — so
+                            // the whole attempt is 60 s of a held direction ended by
+                            // `DRIVER_ESCAPE_SILENCE` and reported as "got no answer from the game",
+                            // after which the policy asks for the identical push again.
+                            // `MetaTileMap::solve_boulder_push` no longer plans one and
+                            // `tools::resolve_field_move` refuses one; this is the seam both go
+                            // through.
+                            if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir) {
+                                self.event(AgentEvent::TextBox { message: refusal });
+                                self.set_state(AgentState::Idle);
+                                return Ok(());
+                            }
                             self.set_state(AgentState::PushingBoulder { boulder, dir });
                             return Ok(());
                         }
@@ -4416,6 +4437,23 @@ CascadeBadge; not cutting".to_string(),
                 // fell through a hole. Either way this single push is complete; hand back to the policy.
                 if !boulder_at(boulder) {
                     api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // ⚠️ **Asked every tick, not once on the way in, and it is what ends this state on
+                // anything but success.** A push the cartridge refuses is refused in silence
+                // (`TryPushingBoulder` → `ResetBoulderPushFlags`), and the only other exit here is
+                // the boulder moving — so without this the driver holds the direction for
+                // `DRIVER_ESCAPE_SILENCE` and reports a malfunction. Every tick rather than once
+                // because the map moves underneath it: an NPC that wanders onto the destination
+                // square blocks the shove exactly as a wall does, and the walk to the push tile can
+                // be cut off by a boulder the same walk shoves. It also carries the two silent
+                // `Idle` drops this state used to make — an off-map push tile, and a push tile with
+                // no route to it — into a sentence, which is the whole complaint the deployed run of
+                // 2026-09-02 filed five times.
+                if let Some(refusal) = map.boulder_push_refusal(boulder, dir) {
+                    api.release_all_buttons();
+                    self.event(AgentEvent::TextBox { message: refusal });
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }

@@ -94,6 +94,11 @@ lives in the code.
   still coming. `prompt`'s `Blocked here:` line names what would clear a `CutTree` and nothing
   else: naming water fired on every coast and one run spent 65 turns blaming it.
   `fly_bike::blocked_by` still does not check the Thunder Badge.
+  ⚠️ **`push_boulder` is the same family and its refusal is the quiet one**: Strength armed and a
+  badge held still leaves a shove the cartridge answers with nothing at all, so
+  `resolve_field_move` asks `MetaTileMap::boulder_push_refusal` before it accepts the call, and the
+  complaint names the directions that *would* work. See the ⚠️ in
+  [pokemon-agent](pokemon-agent.md) for the two cartridge rules behind it.
 - Two more lines on the overworld turn, each with its own narrow trigger, each silent otherwise.
   The gate line fires when
   `warp_targets` holds several landings on one map and says nothing beyond it is behind a door here.
