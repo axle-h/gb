@@ -937,8 +937,22 @@ pub(crate) enum AgentState {
     /// finds the flag clear and is handed straight back when the menu closes. Same shape as
     /// [`Self::Surfing`]'s `resume`, which exists because a Surf mount interrupts a walk that is
     /// nobody's decision either.
+    ///
+    /// ⚠️ **`settle` is [`MOUNT_SETTLE_TICKS`] again, and the push is what needed it.** "The
+    /// overworld is back" is briefly true between the party menu closing and the move's own text box
+    /// being drawn ("SHELDON can move boulders!"), because the screen lags RAM — so handing the push
+    /// back on the first overworld tick handed it into the gap, and `PushingBoulder`'s next tick saw
+    /// a text box, called it an interruption and dropped the whole decision. The model then paid a
+    /// second request for the identical shove: *"Retrying the up push, the Strength text box
+    /// interrupted the first attempt"*, on the deployed run of 2026-09-04, within an hour of the
+    /// change that was supposed to make a push one decision.
+    ///
+    /// ⚠️ **Only on the `resume` path**, exactly as `Surfing` counts only a mount that took. Without
+    /// a push to give back this state ends at the policy, and `Idle` clears the box by itself — so
+    /// waiting there would be 300 ms added to every Dig, Flash and Teleport in the scripted route
+    /// for no fault it has.
     UsingFieldMove { press: bool, entered_menu: bool, slot: u8, move_index: u8, from_map: Map,
-                     resume: Option<(Point8, JoypadButton)> },
+                     resume: Option<(Point8, JoypadButton)>, settle: u8 },
 
     /// Tossing a bag item to make room: START→ITEM→(bag list)→TOSS→quantity→YES. Gen 1's bag holds 20
     /// items and a mart purchase of a *new* item silently fails once it is full ("You can't carry any
@@ -2637,7 +2651,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::UseFieldMove { slot, move_index }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::UsingFieldMove { press: true, entered_menu: false, slot, move_index, from_map: game_state.map.map, resume: None });
+                            self.set_state(AgentState::UsingFieldMove { press: true, entered_menu: false, slot, move_index, from_map: game_state.map.map, resume: None, settle: 0 });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::TossItem { item }) => {
@@ -4378,7 +4392,7 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::Surfing {
                     press: false, entered_menu, water_pos, slot, move_index, resume, settle: 0 });
             }
-            AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map, resume } => {
+            AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map, resume, settle } => {
                 use crate::pokemon::menu::TextBoxId;
                 // A field move opens the party menu → field-move menu → the move, shows a confirmation
                 // dialog ("… can now use STRENGTH!" / the Dig animation), then returns to the overworld
@@ -4393,6 +4407,14 @@ CascadeBadge; not cutting".to_string(),
                 let map_changed = api.game_state().map_or(false, |s| s.map.map != from_map);
                 if entered_menu && (game_mode == GameMode::Overworld || map_changed) {
                     api.release_all_buttons();
+                    // ⚠️ **A *sustained* overworld before a push is handed back** — see `settle` on
+                    // this variant. Any tick that is not the overworld falls through to the mashing
+                    // below and resets the count, so this bounds the flicker rather than the box.
+                    if resume.is_some() && !map_changed && settle < MOUNT_SETTLE_TICKS {
+                        self.set_state(AgentState::UsingFieldMove {
+                            press, entered_menu, slot, move_index, from_map, resume, settle: settle + 1 });
+                        return Ok(());
+                    }
                     // ⚠️ **A push that came here to arm STRENGTH is given straight back**, rather
                     // than dropping to `Idle` and costing a whole decision to say "now push it" —
                     // which for the model is a paid request and for the scripted policy is a step
@@ -4412,7 +4434,7 @@ CascadeBadge; not cutting".to_string(),
                 // Plain press/release mashing (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::UsingFieldMove { press: true, entered_menu, slot, move_index, from_map, resume });
+                    self.set_state(AgentState::UsingFieldMove { press: true, entered_menu, slot, move_index, from_map, resume, settle: 0 });
                     return Ok(());
                 }
 
@@ -4423,7 +4445,7 @@ CascadeBadge; not cutting".to_string(),
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::UsingFieldMove { press: false, entered_menu, slot, move_index, from_map, resume });
+                self.set_state(AgentState::UsingFieldMove { press: false, entered_menu, slot, move_index, from_map, resume, settle: 0 });
             }
             AgentState::TossingItem { item, press, entered_menu } => {
                 use crate::pokemon::menu::TextBoxId;
@@ -4490,6 +4512,18 @@ CascadeBadge; not cutting".to_string(),
                 let game_state = self.observe_state(api)?;
                 // Any interruption (wild battle in the cave, a script/text box) — drop to Idle. The policy
                 // decides the next push from the live positions, so partial progress is never lost.
+                //
+                // ⚠️ **A *successful* push leaves through here too, and there is no way to report it
+                // from this state.** The shove and its dust animation run as `GameMode::Script`, and
+                // `assert_script_state` takes the state over on sight of one — `PushingBoulder` is
+                // not on its exemption list, so the driver is replaced by `RunningScript` on the tick
+                // the boulder starts moving and never gets another. An
+                // `OverworldActionCompleted { Boulder }` was written on the "the boulder has left its
+                // tile" arm below and **never fired once**, here or across an hour of the deployed
+                // run of 2026-09-04. It is gone rather than chased: putting this state on the
+                // exemption list would change how a push interacts with the script machinery that
+                // stops it over-pushing, which is a large risk for a log line, and a row that hands
+                // off to a driver without a completion is what `MetaTile::Fish` already does.
                 if game_state.mode != GameMode::Overworld {
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
@@ -4501,16 +4535,10 @@ CascadeBadge; not cutting".to_string(),
 
                 // Done the moment the boulder leaves its tile — it moved one step (into `boulder + dir`) or
                 // fell through a hole. Either way this single push is complete; hand back to the policy.
+                // In practice the arm above gets there first; this covers a push that resolves without
+                // a script frame the agent sees, and a boulder that went while this state was rebuilt.
                 if !boulder_at(boulder) {
                     api.release_all_buttons();
-                    // ⚠️ **Said out loud, because a scripted push is otherwise completely silent.**
-                    // This is a menu row now (`MetaTile::Boulder`), and a row whose only trace is
-                    // the map having changed shape is one a model reads back as an action that did
-                    // nothing — the same reason a battle the script decided gets a report. It is
-                    // emitted for `FieldMove::PushBoulder` too: the scripted policy's Victory Road
-                    // is a dozen of these and the page had no line for any of them.
-                    self.event(AgentEvent::OverworldActionCompleted {
-                        destination: MetaTile::Boulder { at: boulder, push: dir } });
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -4565,7 +4593,7 @@ CascadeBadge; not cutting".to_string(),
                     };
                     self.set_state(AgentState::UsingFieldMove {
                         press: true, entered_menu: false, slot, move_index,
-                        from_map: game_state.map.map, resume: Some((boulder, dir)) });
+                        from_map: game_state.map.map, resume: Some((boulder, dir)), settle: 0 });
                     return Ok(());
                 }
                 // The tile the player must stand on to push: one step *behind* the boulder.

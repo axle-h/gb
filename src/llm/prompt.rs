@@ -847,7 +847,34 @@ pub fn situation(
             let known = state.pokemon.iter()
                 .any(|mon| mon.moves.iter().flatten().any(|m| m.name == crate::pokemon::move_name::PokemonMoveName::Strength));
             let badged = state.badges.contains(Badge::RainbowBadge);
+            // ⚠️ **Whether the floor is still solvable at all, asked once a turn.** A Strength puzzle
+            // is the one thing in the game a player can put permanently beyond reach without being
+            // told: shove a boulder into a corner and every remaining push is legal, offered, and
+            // useless. The deployed run of 2026-09-04 did exactly that within twenty turns of being
+            // handed the rows — walked Boulder 1 east along row 16 and down to (9, 17), where it has
+            // no pushes at all — and then filed an issue report asking whether the switch data was
+            // wrong. It was not: `solve_boulder_push` agrees with it that nothing reaches (17, 13)
+            // any more. The answer is a fact about the cartridge that no amount of looking at the map
+            // can produce (`LoadMapData` re-reads a map's objects, so walking out and back undoes
+            // every push), and the line below already says it — but it says it as a footnote to
+            // "here are your rows", which is not where a model that has run out of ideas is reading.
+            //
+            // ⚠️ **Holes count as targets as well as switches.** Seafoam has no switches at all: what
+            // stops the current is dropping boulders through the holes, and a floor judged only on
+            // its switches would be called unsolvable on every turn spent there.
+            let targets: Vec<crate::geometry::Point8> = state.map.strength_switches.iter()
+                .chain(state.map.holes.iter()).copied().collect();
+            let done = targets.iter().any(|target| boulders.contains(target));
+            let wedged = known && badged && !targets.is_empty() && !done
+                && targets.iter().all(|target| state.map.solve_boulder_push(*target).is_none());
             out.push_str(&match (known, badged) {
+                (true, true) if wedged => " ⚠️ From where the boulders are standing now, no sequence \
+                    of pushes reaches any of those, so this floor cannot be solved as it is: some \
+                    earlier push put a boulder somewhere it cannot come back from. This is not a \
+                    fault and it is not permanent. The game re-reads a map's objects every time it \
+                    loads one, so leaving this map and coming back puts every boulder on it back \
+                    exactly where it started, and the puzzle can be attempted again. Go out through \
+                    any door and return.".to_string(),
                 (true, true) => " Every shove the game would actually allow is a row in the menu \
                     below, one row per boulder per direction, and choosing one walks over and pushes \
                     it (Strength is armed for you). A push the game refuses is not offered rather \
@@ -1879,7 +1906,9 @@ mod tests {
     fn a_strength_puzzle_names_its_boulders_whether_or_not_they_can_be_pushed() {
         use crate::pokemon::badge::Badge;
         use crate::pokemon::move_name::PokemonMoveName;
-        let mut state = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
+        // VictoryRoad1F as the deployed run's route reaches it: three boulders, the switch at
+        // (17, 13), and the puzzle still solvable.
+        let mut state = state_from(include_bytes!("../pokemon/data/vr1f-strength.bin"));
         let rendered = |state: &GameState| situation(
             DecisionKind::Overworld, state, &ApiSnapshot::default(), &[], &[], TurnContext::None, &[],
         );
@@ -1887,7 +1916,7 @@ mod tests {
         assert!(state.map.can_strength, "the deployed party can use Strength");
         let armed = rendered(&state);
         // Reading order, which is the order `read_map`'s picture is scanned in.
-        assert!(armed.contains("Boulders on this map: (14, 2), (2, 10), (5, 14)."), "{armed}");
+        assert!(armed.contains("Boulders on this map: (14, 2), (2, 10), (5, 15)."), "{armed}");
         assert!(armed.contains("Boulder switches"), "{armed}");
         assert!(armed.contains("(17, 13)"), "the switch VictoryRoad1F's puzzle is about: {armed}");
         assert!(armed.contains("Every shove the game would actually allow is a row"), "{armed}");
@@ -1916,6 +1945,24 @@ mod tests {
         unbadged.badges.remove(Badge::RainbowBadge);
         assert!(rendered(&unbadged).contains("before the game will let it be used outside battle"),
                 "{}", rendered(&unbadged));
+
+        // ⚠️ **A floor nobody can solve any more says so, and says the one thing that undoes it.**
+        // This fixture is the deployed run of 2026-09-02's own wedge: the boulder at (5, 14) is
+        // sealed in an alcove and `solve_boulder_push` agrees nothing reaches the switch. Without
+        // the line the model is left to work that out from an absence of rows, and the run of
+        // 2026-09-04 that did work it out spent its conclusion on an issue report asking whether the
+        // switch coordinates were wrong.
+        let switch = crate::geometry::Point8 { x: 17, y: 13 };
+        let wedged = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
+        assert_eq!(wedged.map.solve_boulder_push(switch), None, "that fixture cannot be solved");
+        let stuck = rendered(&wedged);
+        assert!(stuck.contains("no sequence of pushes reaches any of those"), "{stuck}");
+        assert!(stuck.contains("leaving this map and coming back"), "{stuck}");
+
+        // ⚠️ **And it is silent on a floor that is merely awkward**, or it is an alarm on every turn
+        // of every Strength puzzle in the game. The same floor one push earlier still solves.
+        assert!(state.map.solve_boulder_push(switch).is_some(), "this one does solve");
+        assert!(!armed.contains("no sequence of pushes"), "{armed}");
 
         // ⚠️ **Silent where there are no boulders**, or it is a line on every turn of the game.
         state.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder"));
