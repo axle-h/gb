@@ -251,6 +251,18 @@ pub struct Crossing {
     pub tiles: usize,
 }
 
+/// What the search charges for a step from land onto water, in walking steps.
+///
+/// ⚠️ **Measured, not picked.** A Surf mount is the whole START→POKéMON→mon→SURF menu chain plus the
+/// cartridge's own mount animation and the scripted step onto the water: about 150 agent ticks
+/// against roughly 14 for one walking step, so ten steps is what it actually costs, and the encounter
+/// roll on that scripted step is thrown in free. The number decides one thing — how far the search
+/// will walk round a piece of water rather than get on it — and both sides of it are load-bearing.
+/// Too low and it goes back to crossing Route 21's islands and Cinnabar's harbour a mount at a time.
+/// Too high and it walks the long way round a lake that Surf crosses in three tiles, which is slower
+/// in exactly the way this is meant to avoid.
+const SURF_MOUNT_COST: u32 = 10;
+
 impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
         let dimensions = map.metadata.dimensions();
@@ -447,8 +459,12 @@ impl MetaTileMap {
     /// considered — never a Warp/Connection tile (stepping onto one would leave the map). `None` if the only
     /// reachable tile is the player's own.
     pub fn wander_action(&self) -> Option<crate::pokemon::actions::OverworldAction> {
-        let (dist, _) = self.bfs_from_player();
-        let dest = dist.iter()
+        // ⚠️ **Steps, not the price `bfs_from_player` reports.** This wants the tile that takes the
+        // most *walking* to reach, because walking is what rolls for an encounter; measured on the
+        // price, every water tile would gain [`SURF_MOUNT_COST`] and a mixed map would send the
+        // trainee out to sea to pace on the nearest wave instead of walking the floor.
+        let (_, steps, _) = self.search_from_player();
+        let dest = steps.iter()
             .filter(|(p, _)| matches!(
                 self.meta_tiles[p.x as usize + p.y as usize * self.width],
                 MetaTile::Empty | MetaTile::Grass | MetaTile::Water))
@@ -607,137 +623,196 @@ impl MetaTileMap {
         Some(route)
     }
 
-    /// BFS from `player_position` outward.
+    /// Search from `player_position` outward.
     ///
-    /// Returns `(dist, came_from)` where `dist[p]` is the minimum step-count to reach `p`
-    /// and `came_from[p]` is the `(previous_position, direction)` on the shortest path.
+    /// Returns `(dist, came_from)` where `dist[p]` is the cheapest way to reach `p` and
+    /// `came_from[p]` is the `(previous_position, direction)` before it on that route.
+    ///
+    /// ⚠️ **`dist` is a *price*, not a step count, and the only thing that is not free is getting on
+    /// the water.** Every ordinary step costs 1; a step from land onto `Water` or `ConnectionWater`
+    /// costs [`SURF_MOUNT_COST`] more, because the agent has to stop and drive
+    /// START→POKéMON→mon→SURF before it can take it. Callers that ask "which of these is nearest"
+    /// (`actions`, `crossings`, `connection_action`, `route_to_face_dir`) all want that price rather
+    /// than a step count — a land bridge two steps further off beats a river seam — so they read this
+    /// unchanged. [`Self::wander_action`] is the one caller that genuinely means *steps*, and it takes
+    /// them from [`Self::search_from_player`]'s third map instead.
+    ///
+    /// ⚠️ **A bucket queue, so a map with no water routes exactly as it did under the plain BFS this
+    /// replaced.** Bucket *n* holds the frontier at price *n* and is drained FIFO, so when every edge
+    /// costs 1 the buckets are the BFS layers and the order within one is the BFS queue order — and
+    /// `came_from` is written on first discovery in both. That property is the whole reason for the
+    /// bucket queue over a binary heap, whose tie-breaking would quietly re-shape every route on every
+    /// map in the game.
     fn bfs_from_player(&self) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
-        use std::collections::{HashMap, VecDeque};
+        let (dist, _, came_from) = self.search_from_player();
+        (dist, came_from)
+    }
+
+    /// [`Self::bfs_from_player`] plus the step count along each tile's chosen route, for the one
+    /// caller that wants distance in the walking sense rather than in the priced one.
+    fn search_from_player(&self)
+        -> (HashMap<Point8, u32>, HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
+        use std::collections::{HashMap, HashSet, VecDeque};
 
         let mut dist: HashMap<Point8, u32> = HashMap::new();
+        let mut steps: HashMap<Point8, u32> = HashMap::new();
         let mut came_from: HashMap<Point8, (Point8, JoypadButton)> = HashMap::new();
-        let mut queue = VecDeque::new();
+        let mut settled: HashSet<Point8> = HashSet::new();
+        let mut buckets: Vec<VecDeque<Point8>> = vec![VecDeque::new()];
 
         // If the player is standing on an arrow tile (mid-slide), the forced movement will carry them
         // to its rest destination — start the search from there.
         let start = self.resolve_spinner(self.player_position);
         dist.insert(start, 0);
-        queue.push_back(start);
+        steps.insert(start, 0);
+        buckets[0].push_back(start);
 
-        while let Some(pos) = queue.pop_front() {
-            let d = dist[&pos];
-            let neighbors = [
-                (JoypadButton::Up,    Point8 { x: pos.x,                    y: pos.y.wrapping_sub(1) }),
-                (JoypadButton::Down,  Point8 { x: pos.x,                    y: pos.y.wrapping_add(1) }),
-                (JoypadButton::Left,  Point8 { x: pos.x.wrapping_sub(1),    y: pos.y                 }),
-                (JoypadButton::Right, Point8 { x: pos.x.wrapping_add(1),    y: pos.y                 }),
-            ];
-            for (dir, nb) in neighbors {
-                if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }
-                if dist.contains_key(&nb) { continue; }
+        // Record the edge into `to` if it is the cheapest way there so far, and say whether it was.
+        // A terminal tile (a door, a wall, a person) goes through this too — it is a place a route may
+        // *end* — and the caller then declines to queue it.
+        macro_rules! relax {
+            ($from:expr, $to:expr, $dir:expr, $edge:expr) => {{
+                let price = dist[&$from] + $edge;
+                if !settled.contains(&$to) && dist.get(&$to).is_none_or(|&d| price < d) {
+                    dist.insert($to, price);
+                    steps.insert($to, steps[&$from] + 1);
+                    came_from.insert($to, ($from, $dir));
+                    true
+                } else { false }
+            }};
+        }
 
-                // Arrow (spinner) tile: stepping onto `nb` hands control to the game, which slides the
-                // player to a fixed destination. Record an edge from `pos` (press `dir`) → that
-                // destination; the player never stops on the arrow itself.
-                if self.spinners.contains_key(&nb) {
-                    let dest = self.resolve_spinner(nb);
-                    if !dist.contains_key(&dest) {
-                        dist.insert(dest, d + 1);
-                        came_from.insert(dest, (pos, dir));
-                        queue.push_back(dest);
-                    }
-                    continue;
-                }
+        // Buckets are grown on demand: the highest price any tile can carry is one step per square
+        // plus one mount per land→water boundary crossed, which is bounded but not worth computing.
+        fn push(buckets: &mut Vec<VecDeque<Point8>>, price: u32, p: Point8) {
+            let i = price as usize;
+            if buckets.len() <= i { buckets.resize(i + 1, VecDeque::new()); }
+            buckets[i].push_back(p);
+        }
 
-                let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
+        let mut bucket = 0usize;
+        while bucket < buckets.len() {
+            while let Some(pos) = buckets[bucket].pop_front() {
+                // A stale copy: this tile was queued at this price and then found more cheaply, or it
+                // has already been expanded. Either way there is nothing left to do with it.
+                if dist[&pos] != bucket as u32 || !settled.insert(pos) { continue; }
+                let neighbors = [
+                    (JoypadButton::Up,    Point8 { x: pos.x,                    y: pos.y.wrapping_sub(1) }),
+                    (JoypadButton::Down,  Point8 { x: pos.x,                    y: pos.y.wrapping_add(1) }),
+                    (JoypadButton::Left,  Point8 { x: pos.x.wrapping_sub(1),    y: pos.y                 }),
+                    (JoypadButton::Right, Point8 { x: pos.x.wrapping_add(1),    y: pos.y                 }),
+                ];
+                let here = self.meta_tiles[pos.x as usize + pos.y as usize * self.width];
+                for (dir, nb) in neighbors {
+                    if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }
+                    if settled.contains(&nb) { continue; }
 
-                // Intra-map teleporter (the Saffron Gym warp maze): stepping onto `nb` warps the
-                // player to `to_position` on *this same map*. Like a spinner, the player never stops
-                // on the pad — record an edge from `pos` (press `dir`) → the landing tile and continue
-                // the search from there, so routes cross the maze automatically. Routes are recomputed
-                // each tick, so after the warp the follower simply re-plans from the new room. (Regular
-                // inter-map warps stay terminal — handled in the `else` branch below.)
-                if let MetaTile::Warp { to_map, to_position } = tile {
-                    if *to_map == self.map {
-                        let dest = *to_position;
-                        if (dest.x as usize) < self.width
-                            && (dest.y as usize) < self.height
-                            && !dist.contains_key(&dest)
-                        {
-                            dist.insert(dest, d + 1);
-                            came_from.insert(dest, (pos, dir));
-                            queue.push_back(dest);
-                        }
+                    // Arrow (spinner) tile: stepping onto `nb` hands control to the game, which slides the
+                    // player to a fixed destination. Record an edge from `pos` (press `dir`) → that
+                    // destination; the player never stops on the arrow itself.
+                    if self.spinners.contains_key(&nb) {
+                        let dest = self.resolve_spinner(nb);
+                        if relax!(pos, dest, dir, 1) { push(&mut buckets, dist[&dest], dest); }
                         continue;
                     }
-                }
 
-                if let MetaTile::Jump(jump_dir) = tile {
-                    // The player never stands on a Jump tile — they either jump over it
-                    // (one button press, two tiles of movement) or are blocked.
-                    // Jump tiles are never added to `dist`; only the landing position is.
-                    let can_jump = matches!((dir, jump_dir),
-                        (JoypadButton::Down,  JumpDirection::South) |
-                        (JoypadButton::Left,  JumpDirection::West)  |
-                        (JoypadButton::Right, JumpDirection::East)
-                    );
-                    if can_jump {
-                        if let Some(landing) = step_one(nb, dir, self.width, self.height) {
-                            let landing_tile = &self.meta_tiles[landing.x as usize + landing.y as usize * self.width];
-                            // Only record the landing if the player can actually stand on it. A
-                            // blocked landing means the ledge is not traversable from here — recording
-                            // it anyway would both invent a phantom route step (the agent presses the
-                            // jump direction into an immovable ledge forever) and mark the tile as
-                            // visited, hiding any genuine path that reaches it another way.
-                            let landing_blocked = matches!(landing_tile,
-                                MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water |
-                                MetaTile::ConnectionWater(_) | MetaTile::Jump(_)
-                            );
-                            if !landing_blocked && !dist.contains_key(&landing) {
-                                dist.insert(landing, d + 1);
-                                came_from.insert(landing, (pos, dir));
-                                queue.push_back(landing);
+                    let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
+
+                    // Intra-map teleporter (the Saffron Gym warp maze): stepping onto `nb` warps the
+                    // player to `to_position` on *this same map*. Like a spinner, the player never stops
+                    // on the pad — record an edge from `pos` (press `dir`) → the landing tile and continue
+                    // the search from there, so routes cross the maze automatically. Routes are recomputed
+                    // each tick, so after the warp the follower simply re-plans from the new room. (Regular
+                    // inter-map warps stay terminal — handled in the `else` branch below.)
+                    if let MetaTile::Warp { to_map, to_position } = tile {
+                        if *to_map == self.map {
+                            let dest = *to_position;
+                            if (dest.x as usize) < self.width && (dest.y as usize) < self.height
+                                && relax!(pos, dest, dir, 1)
+                            {
+                                push(&mut buckets, dist[&dest], dest);
+                            }
+                            continue;
+                        }
+                    }
+
+                    if let MetaTile::Jump(jump_dir) = tile {
+                        // The player never stands on a Jump tile — they either jump over it
+                        // (one button press, two tiles of movement) or are blocked.
+                        // Jump tiles are never added to `dist`; only the landing position is.
+                        let can_jump = matches!((dir, jump_dir),
+                            (JoypadButton::Down,  JumpDirection::South) |
+                            (JoypadButton::Left,  JumpDirection::West)  |
+                            (JoypadButton::Right, JumpDirection::East)
+                        );
+                        if can_jump {
+                            if let Some(landing) = step_one(nb, dir, self.width, self.height) {
+                                let landing_tile = &self.meta_tiles[landing.x as usize + landing.y as usize * self.width];
+                                // Only record the landing if the player can actually stand on it. A
+                                // blocked landing means the ledge is not traversable from here — recording
+                                // it anyway would both invent a phantom route step (the agent presses the
+                                // jump direction into an immovable ledge forever) and mark the tile as
+                                // visited, hiding any genuine path that reaches it another way.
+                                let landing_blocked = matches!(landing_tile,
+                                    MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water |
+                                    MetaTile::ConnectionWater(_) | MetaTile::Jump(_)
+                                );
+                                if !landing_blocked && relax!(pos, landing, dir, 1) {
+                                    push(&mut buckets, dist[&landing], landing);
+                                }
                             }
                         }
-                    }
-                } else {
-                    // Elevation boundary: the player cannot step between certain tile pairs
-                    // even though both are passable (e.g. Cavern $20↔$05). Skip this edge so
-                    // `nb` may still be reached from a non-blocked neighbour.
-                    if self.pair_blocked(pos, nb) { continue; }
-                    // Getting ON the water is refused from certain shore tiles (Seafoam B4F's
-                    // (7,11), where the current is "much too fast"). One-way — coming ashore there
-                    // is fine — so only skip the land → water direction.
-                    if self.no_surf_mount.contains(&pos)
-                        && matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_))
-                        && !matches!(self.meta_tiles[pos.x as usize + pos.y as usize * self.width],
-                            MetaTile::Water | MetaTile::ConnectionWater(_))
-                    {
-                        continue;
-                    }
-                    dist.insert(nb, d + 1);
-                    came_from.insert(nb, (pos, dir));
-                    // Warp and Connection tiles are terminal: the player can reach one but cannot
-                    // walk *through* it, because stepping onto it fires the transition. Not
-                    // queueing them keeps routes to a specific warp from crossing (and triggering)
-                    // a different warp/connection en route.
-                    //
-                    // Water is normally terminal too — but when the player can Surf, plain `Water`
-                    // becomes a pass-through node so routes can cross it (the agent mounts Surf at the
-                    // land→water boundary). `ConnectionWater` stays terminal: stepping onto it while
-                    // surfing crosses to the connected map (a crossing target, like `Connection`).
-                    let surfable_water = self.can_surf && matches!(tile, MetaTile::Water);
-                    if surfable_water || !matches!(tile,
-                        MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water
-                        | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree
-                        | MetaTile::Warp { .. } | MetaTile::Connection { .. })
-                    {
-                        queue.push_back(nb);
+                    } else {
+                        // Elevation boundary: the player cannot step between certain tile pairs
+                        // even though both are passable (e.g. Cavern $20↔$05). Skip this edge so
+                        // `nb` may still be reached from a non-blocked neighbour.
+                        if self.pair_blocked(pos, nb) { continue; }
+                        // Getting ON the water is refused from certain shore tiles (Seafoam B4F's
+                        // (7,11), where the current is "much too fast"). One-way — coming ashore there
+                        // is fine — so only skip the land → water direction.
+                        if self.no_surf_mount.contains(&pos)
+                            && matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_))
+                            && !matches!(here, MetaTile::Water | MetaTile::ConnectionWater(_))
+                        {
+                            continue;
+                        }
+                        // ⚠️ **Getting on the water is the one step that is not one step.** Walking
+                        // from land onto water means stopping to drive START→POKéMON→mon→SURF, which is
+                        // about [`SURF_MOUNT_COST`] walking steps of game time, plus the encounter roll on
+                        // the auto-step the mount ends with. Priced at 1, the search took every water
+                        // short cut it was offered and paid a mount for it: the deployed run of
+                        // 2026-09-03 crossed Route 21 straight up x = 7, which runs over the two little
+                        // islands at y = 25/26, so it dismounted onto sand and remounted twice for a
+                        // detour of *two tiles* — and each remount, before `Surfing::resume`, also threw
+                        // the walk away and cost a request. Water→water and water→land stay at 1: coming
+                        // ashore is free, and a player already surfing pays nothing to carry on.
+                        let mounting = !matches!(here, MetaTile::Water | MetaTile::ConnectionWater(_))
+                            && matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_));
+                        let edge = if mounting { 1 + SURF_MOUNT_COST } else { 1 };
+                        if !relax!(pos, nb, dir, edge) { continue; }
+                        // Warp and Connection tiles are terminal: the player can reach one but cannot
+                        // walk *through* it, because stepping onto it fires the transition. Not
+                        // queueing them keeps routes to a specific warp from crossing (and triggering)
+                        // a different warp/connection en route.
+                        //
+                        // Water is normally terminal too — but when the player can Surf, plain `Water`
+                        // becomes a pass-through node so routes can cross it (the agent mounts Surf at the
+                        // land→water boundary). `ConnectionWater` stays terminal: stepping onto it while
+                        // surfing crosses to the connected map (a crossing target, like `Connection`).
+                        let surfable_water = self.can_surf && matches!(tile, MetaTile::Water);
+                        if surfable_water || !matches!(tile,
+                            MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water
+                            | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree
+                            | MetaTile::Warp { .. } | MetaTile::Connection { .. })
+                        {
+                            push(&mut buckets, dist[&nb], nb);
+                        }
                     }
                 }
             }
+            bucket += 1;
         }
-        (dist, came_from)
+        (dist, steps, came_from)
     }
 
     /// Fixed PC-tile coordinates on this map — see [`pc_locations_for`]. `actions()` emits a

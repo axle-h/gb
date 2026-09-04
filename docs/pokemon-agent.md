@@ -42,6 +42,16 @@ below is a comment on the function or constant it names; this is the index of th
   A two-step plan only completes if the next recomputation independently picks step two first;
   walking is memoryless so it usually does, and the step-off/step-back a warp used to emit was the
   case where it did not.
+- **A Surf mount is the one driver entered from the middle of a walk, so it is the one that has to
+  give the walk back** (`AgentState::Surfing`'s `resume`). Three separate things were dropping it,
+  and each cost a paid request on a route that crosses water: `assert_script_state` took the state
+  over (the mount's own `.makePlayerMoveForward` is `GameMode::Script`, so `Surfing` is on the
+  exemption list beside `UsingFieldMove`); the driver dropped to `Idle` rather than back to
+  `OverworldMovement`; and it left on the first overworld tick, which is a flicker before the mount's
+  text box is drawn, so `MOUNT_SETTLE_TICKS` waits for a sustained one exactly as `TeachingMove`'s
+  `settle` does. ⚠️ **Whether the hijack fires at all depends on the map's NPCs** —
+  `read_game_mode` needs `wScriptedNPCWalkCounter` non-zero, which is true only where someone has
+  walked — so Pallet Town cannot test it and Cinnabar Island can.
 - `GameMode::Script` during a walk is either a ledge hop (~660 ms, inside `DelayContext::long`'s
   rollback window) or an arrow-tile slide (up to 14 s). `wMovementFlags` bit 7 (`BIT_SPINNING`)
   says which, and the deadline is re-armed every tick while it is set. The guard asserts the abort
@@ -112,6 +122,25 @@ price.
 - `actions()` still emits **one** crossing per adjacent map, the nearest, because emitting one per
   edge perturbs `route_toward` and the scripted run's timing. The others are named in the row's own
   prose and resolved by `tools::resolve_overworld`'s `connection_action` fallback.
+- **A step from land onto water costs `SURF_MOUNT_COST` extra, and `bfs_from_player`'s `dist` is
+  therefore a price rather than a step count.** Everything that asks "which of these is nearest"
+  wants the price; `wander_action` is the one caller that means steps and takes them from
+  `search_from_player`'s third map. It is a bucket queue rather than a heap **so that a map with no
+  water routes exactly as it did under the plain BFS** — see the ⚠️ on `bfs_from_player`.
+- ⚠️ **A square the *cartridge* refuses to let the player stand on is not in the block map, and
+  routing over one loops rather than fails.** Gen 1 refuses by talking and then walking you off:
+  `grep StartSimulatingJoypadStates pokered/scripts` finds a dozen, including Cinnabar's gym doorstep
+  without the Secret Key, the Route 22 gate and Route 23's checkpoints without the badge. The walk is
+  stopped by the text box, the policy re-plans the identical route, and it never ends.
+  `PokemonAgent::turned_back_tiles` learns them from the cartridge's own behaviour — the test is *put
+  back on the square you stepped from*, which a refusal does and progress never does — and
+  `observe_state` overlays them beside `blocked_tiles`. ⚠️ **Cleared on map re-entry**, because what
+  is remembered ("refused, given what I am carrying") expires, and a permanent entry would wall a run
+  out of Victory Road.
+- ⚠️ **A hard-coded obstacle was the first fix and it was the wrong shape**, worth knowing before
+  reaching for one again. The square is reached by more than one route — on Cinnabar the walk that
+  steps on the doorstep and the walk that avoids it are *both 29 steps*, a one-tile dogleg, so which
+  comes out is a tie-break — and the table of coordinates would never have been finished.
 - ⚠️ **`observe::map_view` filters people by reachability and *flags* warps.** Different answers on
   purpose: a person out of reach is someone nothing can be done with, a door out of reach is still
   where you come out if you get there. `WarpView::reachable_from_here` is the same call

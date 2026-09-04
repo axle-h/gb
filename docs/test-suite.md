@@ -115,6 +115,10 @@ make it pass, say so in the hand-off.
   `postgame-itemfinder.bin`, its predecessor. A fixture whose producing leg is removed has to be
   re-pointed or deleted, never left in the list: `every_committed_fixture_decodes` would still load
   it and nothing would say it had stopped being reachable.
+- `route21-islands.bin` is the same kind of thing: the deployed run of 2026-09-03's own checkpoint,
+  at Route 21 (7, 72) mid-crossing and mid-battle, read by
+  `stalls::a_water_route_does_not_climb_out_onto_route_21s_islands`. Its property is *which map*, so
+  it must not be re-cut somewhere tidier, and it is not in the leg chain.
 - `soak-*.bin` are **not** part of the chain: nothing reads one as the input to a route, so the
   rules above about cutting where the mainline stands and where the party is healed do not apply to
   them. They are re-cut wholesale by `regen_soak_checkpoints`, never by hand.

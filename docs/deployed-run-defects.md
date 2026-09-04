@@ -4,9 +4,10 @@ What the deployed run of 2026-09-02 (`run-20260902-215720`, `z-ai/glm-5.3-flash`
 actually walked into, why, and what to do about it. Written 2026-09-03 against a run in flight at
 turn ~1287, 60.3 M prompt tokens, 17 issue reports filed by the model itself.
 
-**Status:** six root causes, ten work items. **All ten are done (2026-09-03).** W10 is not from the
-2026-09-02 evidence below: it came out of watching the *same run still going* on 2026-09-03, and it
-is the one item here that removes a feature rather than fixing one.
+**Status:** six root causes, eleven work items. **All eleven are done (2026-09-03).** W10 and W11 are
+not from the 2026-09-02 evidence below: both came out of watching the *same run still going* on
+2026-09-03. W10 is the one item here that removes a feature rather than fixing one, and W11 — the
+Route 21 crossing, at the foot of the file — is a jam of its own with its own reproduction.
 The rules they left behind have moved into [pokemon-agent](pokemon-agent.md) and
 [llm-turn-loop](llm-turn-loop.md), which are the indexes to keep current; what is kept here is the
 evidence, because every one of these was argued from a save state rather than from a guess.
@@ -487,6 +488,78 @@ remaining benefit.
 
 Reclaimed: **370 bytes** on every Overworld turn, the largest single drop the tool-array budget has
 recorded.
+
+---
+
+## W11 — the Route 21 crossing: a Surf mount cost a request, three times over — **done 2026-09-03**
+
+Not from the 2026-09-02 evidence above. This is the same run on the evening of 2026-09-03, after a
+`POST /api/clear`, crossing Route 21 to Cinnabar Island, and from outside it looked like the run was
+frozen: turn after turn re-issuing `Route21:10,91:Connection` while the player drifted a few tiles
+south between them. Reproduced from the run's own checkpoint, now
+`src/pokemon/data/route21-islands.bin` — Route 21 (7, 72), mid-crossing.
+
+Three defects, in the order they cost anything.
+
+**a. The search priced a step onto water at 1, exactly like a step onto grass.** Route 21 is ninety
+tiles of sea with two four-tile islands in it at y = 25/26, and the route from the south end to
+Pallet Town went straight up x = 7 — over both. Each meant stepping ashore, walking two tiles and
+mounting Surf again to leave, where going round costs *nothing*: the water at x = 8 is the same three
+steps. `bfs_from_player` is now a bucket-queue search charging `SURF_MOUNT_COST` (10 walking steps,
+measured: ~150 agent ticks for a mount against ~14 for a step) on a land→water edge, and a map with
+no water routes exactly as it did before.
+
+**b. `assert_script_state` took the mount over.** `ItemUseSurfboard` ends with
+`.makePlayerMoveForward` — `BIT_SCRIPTED_MOVEMENT_STATE` and a simulated press to step onto the water
+— so a successful mount runs as `GameMode::Script`, from a state that gets `DelayContext::short`'s
+40 ms rollback. The step outlasts it, the script "committed", and the agent was put into
+`AwaitingOverworldAction`: the walk thrown away and the identical question put back to the model, at
+a request each. `Surfing` is now on the exemption list beside `UsingFieldMove`, which was there for
+the same reason. ⚠️ **Whether this fires at all depends on the map's NPCs** — `read_game_mode` also
+wants `wScriptedNPCWalkCounter` non-zero, which is true only where somebody has walked — so Pallet
+Town cannot reproduce it and Cinnabar Island always does.
+
+**c. The mount was the one driver with a walk to give back, and it dropped it.** Every other menu
+driver is entered from `Idle` because the policy asked; this one is entered mid-walk by the route
+follower. `AgentState::Surfing` now carries the interrupted `OverworldMovement` and puts it back —
+and waits `MOUNT_SETTLE_TICKS` of *sustained* overworld first, because "the overworld is back" is
+briefly true between the party menu closing and "<mon> got on!" being drawn, and a walk resumed into
+that gap is aborted by the box a tick later.
+
+Then a fourth, found by fixing (a): **Cinnabar Island's gym doorstep is a wall and nothing on the map
+says so.** With mounts priced properly the walk from the Pokémon Centre to the Pokémon Mansion
+stopped going round by sea and went overland, over raw (18, 4), which
+`CinnabarIslandDefaultScript` watches for: without the Secret Key it prints "The door is locked..."
+and simulates a Down press. The walk is stopped by a text box, re-planned identically, and loops for
+ever.
+
+⚠️ **The first fix was a hard-coded obstacle at raw (18, 4) and it was the wrong shape.** Two things
+say so. The overland route that steps on the doorstep and the one that avoids it are **both 29
+steps** — the corner west is turned at (18, 5) or at (17, 6)/(17, 5), a one-tile dogleg — so the
+search is choosing between equal routes and the tie goes to whichever it expanded first; pricing the
+mount moved the choice from *sea* to *land*, but which land route came out was already a coin toss
+that any unrelated change can flip, and a square reached from more than one direction is not
+something a single avoided route protects. And it is one square of hand-transcribed ROM knowledge
+when `grep StartSimulatingJoypadStates pokered/scripts` finds a dozen of the same kind — the Route 22
+gate, Route 23's badge checkpoints, Viridian City, the Museum — so the table would never have been
+finished.
+
+What shipped instead is `PokemonAgent::turned_back_tiles`: the agent recognises the shove from the
+cartridge's own behaviour — **put back on the exact square you stepped from**, which a refusal does
+and progress (a gate letting you through, an arrow tile, a hole, Oak marching you to his lab) never
+does — and `observe_state` overlays the result as an obstacle beside `blocked_tiles`. Measured, the
+doorstep costs one interrupted walk and is then routed around. ⚠️ It is cleared on map re-entry
+rather than kept for the run: what is remembered is "refused, given what I am carrying", the Route 22
+guard steps aside on the Boulder Badge, and a permanent entry would wall a run out of Victory Road —
+a far worse failure than the loop it prevents.
+
+Measured on the reproduction, Pallet Town → Route 21 went from three agent states and two policy
+polls to `wait move→ surf move→` — **one decision for the whole crossing**. Tests, each watched
+failing against the code it is about:
+`stalls::{a_water_route_does_not_climb_out_onto_route_21s_islands,
+a_surf_mount_hands_the_walk_back_to_itself_rather_than_to_the_policy,
+a_surf_mount_is_not_taken_over_by_the_script_handler,
+cinnabars_locked_gym_doorstep_is_not_routed_over}`.
 
 ---
 
