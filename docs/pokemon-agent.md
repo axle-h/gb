@@ -274,6 +274,24 @@ price.
   (a heal is done when the party is full, not when the nurse speaks), the bag-aware flee threshold,
   `damage_per_turn` halving charge moves, and a damage gate replacing the level gate on switching.
   Each function carries its own reasoning.
+- A `CatchPokemon` that gives up records the species in `DeterministicPolicy::catch_abandoned`, and
+  `TeachMove` / `UseStrength` / `Dig` skip a `PartyRef` naming one. Their wait on a `Species` target
+  is unbounded on purpose (the Celadon Eevee is still a Poké Ball on the floor when its step reaches
+  the front), so the failed catch has to say so or the route stops for the life of the process, with
+  no watchdog to see it — `stuck_timeout` is `None` for every scripted policy. Both halves are pinned
+  by `abandoned_catch_tests`, since a plain pop passes the skip half and breaks the Eevee.
+- The heal arm sits **above** the catch throw in `pick_battle_action`: a throw is a turn spent not
+  defending, so a catch is the one place the lead takes damage for several turns running with nothing
+  answering back, and below the throw the arm was unreachable for the whole hunt.
+- ⚠️ Weakening before a ball is gated on a throw having **missed** (`catch_ball_baseline`, read off
+  the bag because `pick_battle_action` is polled many times a turn). The level guard beside it
+  suppresses weakening and throws at a **full-HP** target, which is how the 2026-09-05 run lost its
+  Cut carrier; dropping it is correct in isolation (`pick_best_move`'s non-KO filter is the better
+  test) but costs two turns at the Route 25 catch, re-rolling the RNG stream `full_playthrough` is a
+  golden replay of — it then fails at 258/522 on `CutTree { CeladonGym }`. The golden stream lands
+  that Oddish on its first ball, so gating on a miss leaves the recording untouched. ⚠️ **Mainline
+  battle tactics are frozen: a change that costs a turn before the last mainline catch re-cuts the
+  route.** The full argument is on the guard.
 - `Policy::restart` rebuilds the policy from its seed, so a field added later is untainted by
   construction. `resuming_in` parks when the cursor file is missing on a mid-game save or the route
   has changed under it; neither can be told from "a new game" by the file's absence.
