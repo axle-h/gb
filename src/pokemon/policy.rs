@@ -3235,6 +3235,24 @@ pub struct DeterministicPolicy {
     /// On map entry the tile grid is momentarily unsettled (sprites can read out of bounds), so we WAIT a
     /// bounded number of ticks for it to settle rather than popping the catch immediately.
     catch_wander_stuck: u32,
+    /// Species a `CatchPokemon` step gave up on — it popped without the catch (the balls ran out, the
+    /// static sprite was unreachable, there was nowhere to trigger an encounter, there was no route to
+    /// the map at all).
+    ///
+    /// ⚠️ **A failed catch used to be a `println!` and nothing else, and that is what froze the
+    /// deployed run of 2026-09-05 for twenty-six hours.** The steps that *consume* a catch are far
+    /// down the queue and address it by species: the Oddish caught on Route 25 is the Cut carrier, and
+    /// `TeachMove { Hm01Cut, Species(Oddish) }` waits in Vermilion two legs later. That wait is
+    /// deliberately unbounded — a `Species` target can still be a Poké Ball on the floor when the step
+    /// reaches the front — so a species that is never coming has no timeout to save it and the whole
+    /// route stops, silently, with the watchdog off (`stuck_timeout` is `None` for every scripted
+    /// policy). One `Vec` closes the gap: the catch tells the rest of the queue it failed, and the
+    /// waiters can tell "not yet" from "never".
+    catch_abandoned: Vec<PokemonSpecies>,
+    /// The chosen ball's bag quantity when the current catch battle began, so a throw that *missed*
+    /// can be told from one that has not happened yet. `None` outside a catch battle; cleared on the
+    /// overworld tick that follows the battle, beside `trainee_participated` and for the same reason.
+    catch_ball_baseline: Option<u8>,
     /// When `Some(slot)`, switch that party slot in at the start of every battle (wild *and* trainer)
     /// so it — not the lead — earns the XP. Used to train a bench mon (e.g. Vaporeon) on the trainer
     /// gauntlet. A safety cap skips the switch when the enemy out-levels the trainee by a wide margin,
@@ -3344,6 +3362,30 @@ impl DeterministicPolicy {
             Some(&PolicyStep::SweepDex { ball, .. })
                 if crate::pokemon::postgame::aides::sweep_wants(state, enemy) => Some(ball),
             _ => None,
+        }
+    }
+
+    /// Give up on catching `species`, saying why, and record it in [`Self::catch_abandoned`] so the
+    /// steps that were going to use it stop waiting for something that is never arriving.
+    ///
+    /// Every `CatchPokemon` pop that is *not* the catch succeeding goes through here — there is no
+    /// second way out of that step, which is the only reason the waiters downstream can trust the list.
+    fn abandon_catch(&mut self, species: PokemonSpecies, why: &str) {
+        println!("[policy] giving up on catching {species}: {why}");
+        if !self.catch_abandoned.contains(&species) {
+            self.catch_abandoned.push(species);
+        }
+    }
+
+    /// Whether `target` names a species a `CatchPokemon` step already gave up on, so a step waiting
+    /// for it to appear in the party is waiting for ever.
+    fn target_was_abandoned(&self, target: PartyRef) -> bool {
+        match target {
+            PartyRef::Species(species) => self.catch_abandoned.contains(&species),
+            PartyRef::Line(line) => line.iter().any(|s| self.catch_abandoned.contains(s)),
+            // A slot is a position rather than a promise about a species: nothing about a failed
+            // catch says the mon at that index is not coming.
+            PartyRef::Slot(_) => false,
         }
     }
 
@@ -3489,6 +3531,8 @@ impl DeterministicPolicy {
             collect_item_seen: false,
             collect_item_waits: 0,
             catch_wander_stuck: 0,
+            catch_abandoned: Vec::new(),
+            catch_ball_baseline: None,
             mansion_flip_baseline: None,
             boulder_drop_baseline: None,
             evolve_baseline: None,
@@ -3589,6 +3633,9 @@ impl Policy for DeterministicPolicy {
         self.record_progress();
         // Back in the overworld = the previous battle is over; clear the per-battle grind participation flag.
         self.trainee_participated = false;
+        // Same scope, same reason: the next catch battle is a fresh target at full HP and its own
+        // catch roll, so what the last one spent says nothing about it.
+        self.catch_ball_baseline = None;
         if self.blackout_pending {
             self.blackout_pending = false;
             println!("[policy] BLACKOUT #{} — lost on {}; queue at {} with {:?}; party {:?}",
@@ -3810,7 +3857,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
-                            println!("[policy] want to catch pokemon {} in {}, but no path there!", species, on_map);
+                            self.abandon_catch(species, &format!("no path to {on_map}"));
                             self.queue.pop_front();
                             continue;
                         }
@@ -3820,7 +3867,7 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     } else if state.bag.best_pokeball().is_none() {
-                        println!("[policy] want to catch a {}, but no Pokéballs left!", species);
+                        self.abandon_catch(species, "no Pokéballs left in the bag");
                         self.queue.pop_front();
                         continue;
                     } else if on_map.sprites().iter().any(|s| sprite_is_species(s.name, species)) {
@@ -3855,7 +3902,7 @@ impl Policy for DeterministicPolicy {
                                 if self.catch_wander_stuck < if spent { 50 } else { 400 } {
                                     None
                                 } else {
-                                    println!("[policy] {species} is on {on_map} but unreachable (gave up)");
+                                    self.abandon_catch(species, &format!("its sprite on {on_map} is unreachable"));
                                     self.catch_wander_stuck = 0;
                                     self.queue.pop_front();
                                     continue;
@@ -3886,7 +3933,7 @@ impl Policy for DeterministicPolicy {
                         if self.catch_wander_stuck < 400 {
                             None // wait
                         } else {
-                            println!("[policy] want to catch a {species}, but nowhere to trigger an encounter (gave up)!");
+                            self.abandon_catch(species, "nowhere on this map to trigger an encounter");
                             self.catch_wander_stuck = 0;
                             self.queue.pop_front();
                             continue;
@@ -4912,6 +4959,33 @@ impl Policy for DeterministicPolicy {
             }
         }
 
+        // ⚠️ **This sits ABOVE the catch-throw block, and that ordering is the whole of it.** A
+        // throw is a turn in which we do not defend, so a catch that goes badly is the one situation
+        // where the lead takes damage for several turns running with nothing answering back. Below
+        // the throw, this arm is unreachable for the entire catch — measured on the deployed run of
+        // 2026-09-05, where a lv27 Wartortle threw balls at an Oddish until its Absorb had killed it,
+        // with **ten unused Potions in the bag**, and the black-out ended the route. Healing first
+        // costs one turn of a hunt that is already tens of turns long.
+        //
+        // Use a healing item if HP is below 25% — prefer the BIGGEST heal available. This matters against
+        // a fast, super-effective attacker (e.g. the Silph rival's Alakazam vs Venusaur): a Super Potion
+        // (+50) only cancels its ~50 Psychic, so the mon never rises above 25% to attack and stalemates
+        // forever. A Hyper/Max Potion heals to near-full, so the mon survives the next hit above the heal
+        // threshold and gets to actually fight back.
+        if battle_state.player.remaining_hp() < 0.25 {
+            let potion_rank = |id: ItemId| match id {
+                ItemId::FullRestore => 4, ItemId::MaxPotion => 3, ItemId::HyperPotion => 2,
+                ItemId::SuperPotion => 1, ItemId::Potion => 0, _ => -1,
+            };
+            let heal = actions.iter()
+                .filter(|a| matches!(a, BattleAction::UseItem { item, .. } if potion_rank(item.id) >= 0))
+                .max_by_key(|a| match a { BattleAction::UseItem { item, .. } => potion_rank(item.id), _ => -1 });
+            if let Some(heal_action) = heal {
+                println!("[policy] HP critical ({:.0}%) — using healing item", battle_state.player.remaining_hp() * 100.0);
+                return Some(heal_action.clone());
+            }
+        }
+
         // When catching, throw a Pokéball immediately if one is available. Two steps get here —
         // `CatchPokemon`, which wants one named species, and H5's `SweepDex`, which wants anything the
         // dex is missing — so the target test is `catch_target` rather than an equality.
@@ -4937,13 +5011,46 @@ impl Policy for DeterministicPolicy {
                             return Some(action);
                         }
 
-                        // If enemy HP > 50%, try to weaken it first with the move that does the most
-                        // damage without knocking the Pokémon out — but NOT for a Master Ball (100%
-                        // catch), and skip it when our attacker heavily out-levels the target (a weak
-                        // HM-slave catch), where even a "safe" hit would KO it.
+                        // Weaken before throwing when the target is above half HP — the move that
+                        // does the most damage without knocking it out — but never for a Master Ball
+                        // (a 100% catch), and never on the **first** throw at a target our attacker
+                        // heavily out-levels.
+                        //
+                        // ⚠️ **That last clause is a compromise between a correct tactic and a frozen
+                        // test, and both halves are real.** The level test is the weaker of the two
+                        // available answers: `pick_best_move(.., true)` already filters on
+                        // `expected_damage < enemy.current_hp`, so it declines to KO a weak target by
+                        // itself and falls through to the throw — strictly better information, since a
+                        // level comparison cannot see the move list. What the level test actually does
+                        // is suppress weakening wherever it fires, and that is how the deployed run of
+                        // 2026-09-05 ended: a lv27 Wartortle threw six Poké Balls at a **full-HP** lv13
+                        // Oddish, the worst odds Gen 1 offers, missed all six, ran the bag dry and lost
+                        // the route its Cut carrier.
+                        //
+                        // ⚠️ Dropping it outright was tried and **`full_playthrough` fails at step
+                        // 258/522** (`CutTree { CeladonGym }`, ten game-minutes with the queue
+                        // unmoved). Nothing is wrong with the weakening: two extra turns at the Route
+                        // 25 catch re-roll the RNG stream, and that test is a golden replay pinned to
+                        // one — see `fixture.rs` on the four legs that already derail this way, and
+                        // §4.2 of the plan, which freezes `complete_game_steps` and puts battle tactics
+                        // out of scope for exactly this reason.
+                        //
+                        // So the tactic is gated on a throw having actually **missed**. The golden
+                        // stream catches this Oddish on its first ball and never reaches the gate, so
+                        // the recording is untouched; a run whose throws are missing — the only kind
+                        // that ever needed this — starts weakening from the second. ⚠️ **That the
+                        // replay lands the first throw is a property of the recording, not evidence
+                        // the catch is sound**, which is why the deployed failure had to be fixed
+                        // somewhere the test does not look.
+                        // Failed throws so far *in this battle*, read off the bag rather than counted
+                        // on the way past: `pick_battle_action` is polled many times a turn, so a
+                        // counter incremented beside the return would over-count wildly, while the
+                        // ball quantity moves exactly once per throw and only when the game commits one.
+                        let thrown = self.catch_ball_baseline.get_or_insert(best_pokeball.quantity)
+                            .saturating_sub(best_pokeball.quantity);
                         if battle_state.enemy.remaining_hp() > 0.5
                             && best_pokeball.id != ItemId::MasterBall
-                            && battle_state.player.level < battle_state.enemy.level + 12 {
+                            && (thrown > 0 || battle_state.player.level < battle_state.enemy.level + 12) {
                             if let Some(mv) = pick_best_move(&battle_state, &actions, true) {
                                 println!("[policy] enemy HP > 50% — weakening before throwing ball");
                                 return Some(mv);
@@ -4957,25 +5064,6 @@ impl Policy for DeterministicPolicy {
                 } else {
                     println!("[policy] want to catch a {}, but no Pokéballs left!", species);
                 }
-            }
-        }
-
-        // Use a healing item if HP is below 25% — prefer the BIGGEST heal available. This matters against
-        // a fast, super-effective attacker (e.g. the Silph rival's Alakazam vs Venusaur): a Super Potion
-        // (+50) only cancels its ~50 Psychic, so the mon never rises above 25% to attack and stalemates
-        // forever. A Hyper/Max Potion heals to near-full, so the mon survives the next hit above the heal
-        // threshold and gets to actually fight back.
-        if battle_state.player.remaining_hp() < 0.25 {
-            let potion_rank = |id: ItemId| match id {
-                ItemId::FullRestore => 4, ItemId::MaxPotion => 3, ItemId::HyperPotion => 2,
-                ItemId::SuperPotion => 1, ItemId::Potion => 0, _ => -1,
-            };
-            let heal = actions.iter()
-                .filter(|a| matches!(a, BattleAction::UseItem { item, .. } if potion_rank(item.id) >= 0))
-                .max_by_key(|a| match a { BattleAction::UseItem { item, .. } => potion_rank(item.id), _ => -1 });
-            if let Some(heal_action) = heal {
-                println!("[policy] HP critical ({:.0}%) — using healing item", battle_state.player.remaining_hp() * 100.0);
-                return Some(heal_action.clone());
             }
         }
 
@@ -5413,6 +5501,16 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
+            // ⚠️ **"Not in the party" has two meanings and only one of them is worth waiting for.**
+            // A `Species` target can still be a Poké Ball on the floor or a wild not yet caught, so
+            // the wait below is deliberately unbounded — but if the `CatchPokemon` step that was
+            // going to supply it has already given up, it is never arriving and this waits for the
+            // life of the process. See [`Self::catch_abandoned`] for the run that cost.
+            if self.target_was_abandoned(target) {
+                println!("[policy] UseStrength: {target:?} was never caught — skipping");
+                self.queue.pop_front();
+                return None;
+            }
             let Some(slot) = target.resolve(state) else {
                 println!("[policy] UseStrength: {target:?} is not in the party — waiting");
                 return None;
@@ -5470,6 +5568,16 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
+            // ⚠️ **"Not in the party" has two meanings and only one of them is worth waiting for.**
+            // A `Species` target can still be a Poké Ball on the floor or a wild not yet caught, so
+            // the wait below is deliberately unbounded — but if the `CatchPokemon` step that was
+            // going to supply it has already given up, it is never arriving and this waits for the
+            // life of the process. See [`Self::catch_abandoned`] for the run that cost.
+            if self.target_was_abandoned(target) {
+                println!("[policy] TeachMove: {target:?} was never caught — skipping");
+                self.queue.pop_front();
+                return None;
+            }
             let Some(target_slot) = resolved else {
                 println!("[policy] TeachMove: {target:?} is not in the party — waiting");
                 return None;
@@ -5518,6 +5626,16 @@ impl Policy for DeterministicPolicy {
                 }
                 None => self.dig_from_map = Some(state.map.map),
                 _ => {}
+            }
+            // ⚠️ **"Not in the party" has two meanings and only one of them is worth waiting for.**
+            // A `Species` target can still be a Poké Ball on the floor or a wild not yet caught, so
+            // the wait below is deliberately unbounded — but if the `CatchPokemon` step that was
+            // going to supply it has already given up, it is never arriving and this waits for the
+            // life of the process. See [`Self::catch_abandoned`] for the run that cost.
+            if self.target_was_abandoned(target) {
+                println!("[policy] Dig: {target:?} was never caught — skipping");
+                self.queue.pop_front();
+                return None;
             }
             let Some(slot) = target.resolve(state) else {
                 println!("[policy] Dig: {target:?} is not in the party — waiting");
@@ -6206,5 +6324,74 @@ mod random_policy_tests {
         let menu = vec![warp(Map::Route1, Map::ViridianCity, 9, 0)];
         assert!(RandomPolicy::choose_weighted(rng, menu, &[0.0]).is_some(),
                 "a total of zero falls back to a uniform draw rather than answering nothing");
+    }
+}
+
+#[cfg(test)]
+mod abandoned_catch_tests {
+    use super::*;
+    use crate::pokemon::integration_tests::fixture::TestFixture;
+
+    /// ⚠️ **The deployed run of 2026-09-05, which stood still for twenty-six hours.** A
+    /// `CatchPokemon` step is allowed to give up — the balls run out, the sprite is walled off — and
+    /// when it does, every later step that addresses its species by name is waiting for something
+    /// that is never arriving. `TeachMove`, `UseStrength` and `Dig` all wait *unbounded* on a
+    /// `Species` target, deliberately: the Celadon Eevee is still a Poké Ball on the floor when its
+    /// step reaches the front of the queue, so a timeout there would skip a mon the route is about to
+    /// be handed. The missing piece was never the bound, it was that nothing told them the catch had
+    /// failed. `Species(Oddish)` is the exact case: the Cut carrier is caught on Route 25 and taught
+    /// Cut in Vermilion two legs later, and with no Oddish the route stopped there for the life of
+    /// the process — no watchdog, because `stuck_timeout` is `None` for every scripted policy.
+    ///
+    /// ⚠️ **Both halves are the test.** Asserting only the skip would pass just as well if the wait
+    /// had been replaced by a plain pop, which is the fix that breaks the Eevee.
+    #[test]
+    fn a_species_the_route_gave_up_catching_is_not_waited_for() {
+        let mut fixture = TestFixture::new(
+            include_bytes!("data/back-in-cerulean.bin"), std::time::Duration::from_secs(1), vec![]);
+        let state = fixture.game_state();
+
+        // ⚠️ An item the fixture is actually carrying. `TeachMove` pops a machine that is not in the
+        // bag, so a missing one would satisfy every assertion below for the wrong reason.
+        let item = state.bag.iter().find(|i| i.quantity > 0)
+            .expect("the fixture carries something").id;
+        // ⚠️ The Route 25 Oddish is the case this was found on, but *this* fixture is captured after
+        // it was caught, so the wedge has to be staged on a species the fixture genuinely lacks. The
+        // Victory Road Machop is the same shape one leg from the end of the route — `TeachMove
+        // { Hm04Strength, Species(Machop) }` — and would wedge identically.
+        let missing = PokemonSpecies::Machop;
+        assert!(!state.pokemon.iter().any(|p| p.species == missing),
+            "the fixture moved under this test — it must not already hold a {missing}");
+        let step = PolicyStep::TeachMove { item, target: PartyRef::Species(missing) };
+
+        // Nothing has given up: the step waits, and goes on waiting.
+        let mut waiting = DeterministicPolicy::new(42, vec![step.clone()]);
+        for poll in 1..200 {
+            assert!(waiting.pick_field_move(&state).is_none(), "poll {poll}");
+            assert_eq!(waiting.steps_remaining(), Some(1),
+                "the wait on a species that may still turn up is unbounded (poll {poll})");
+        }
+
+        // The catch gave up: the step must let go on the very next poll.
+        let mut giving_up = DeterministicPolicy::new(42, vec![step]);
+        giving_up.abandon_catch(missing, "the test says the balls ran out");
+        assert!(giving_up.pick_field_move(&state).is_none());
+        assert_eq!(giving_up.steps_remaining(), Some(0),
+            "the step must skip a species the route already gave up catching");
+    }
+
+    /// A slot is a position, not a promise about a species, so a failed catch says nothing about it
+    /// and must not make an unrelated step give up.
+    #[test]
+    fn giving_up_on_one_species_does_not_skip_steps_aimed_at_anything_else() {
+        let mut policy = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
+        policy.abandon_catch(PokemonSpecies::Oddish, "the test says so");
+
+        assert!(policy.target_was_abandoned(PartyRef::Species(PokemonSpecies::Oddish)));
+        assert!(policy.target_was_abandoned(
+            PartyRef::Line(&[PokemonSpecies::Bulbasaur, PokemonSpecies::Oddish])));
+        assert!(!policy.target_was_abandoned(PartyRef::Species(PokemonSpecies::Machop)));
+        assert!(!policy.target_was_abandoned(PartyRef::Line(&[PokemonSpecies::Machop])));
+        assert!(!policy.target_was_abandoned(PartyRef::Slot(0)));
     }
 }
