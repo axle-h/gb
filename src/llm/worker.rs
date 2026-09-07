@@ -233,6 +233,32 @@ const TRIM_TO: f64 = 0.50;
 /// the per-turn [`prompt::PLAN_UNCHANGED`] note already covers.
 pub const PLAN_REFRESH_TURNS: u32 = 10;
 
+/// What a turn found the conversation looking like when it started, so a turn that fails outright
+/// can put it back exactly.
+///
+/// ⚠️ **⛔ This is the fix for the death loop of 2026-09-05** (`docs/coverage-plan.md` §2.2.1). The
+/// run's credit ran out and the endpoint answered every request with an undated `402`; sixteen and a
+/// half thousand turns later `history.json` held **1377 messages of which 1375 were `user`**, and
+/// 1373 of those began `## Your plan`. Two compounding faults put them there and both are about a
+/// *failed* turn:
+///
+/// 1. only the trailing situation was rolled back (`pop_if_user`), so the plan message
+///    [`Worker::sync_plan`] had appended immediately before it stayed;
+/// 2. a failed turn still counted towards [`PLAN_REFRESH_TURNS`], so the periodic refresh kept
+///    falling due and kept appending another copy nothing would ever remove.
+///
+/// Recording both and restoring both makes the whole turn atomic: a turn that produced no completion
+/// leaves the conversation byte for byte as it found it. ⚠️ **The rollback is to a *length*, not one
+/// `pop`** — a turn can fail on its second or third tool step, with an assistant message and its
+/// tool results already appended, and popping one message there leaves the rest.
+#[derive(Debug, Clone, Copy, Default)]
+struct TurnOpen {
+    /// `history.len()` before the plan or the situation was appended.
+    at: usize,
+    /// [`Worker::turns_since_plan`] as it stood then.
+    turns_since_plan: u32,
+}
+
 pub struct Worker {
     endpoint: Box<dyn ChatEndpoint>,
     config: LlmConfig,
@@ -274,6 +300,9 @@ pub struct Worker {
     /// Turns since the plan message was last (re)placed at the tail of the history — see
     /// [`Self::sync_plan`] and [`PLAN_REFRESH_TURNS`].
     turns_since_plan: u32,
+    /// Where the turn in flight started, so a turn that fails outright can be **rolled back whole**.
+    /// See [`Self::roll_back_failed_turn`].
+    turn_open: TurnOpen,
     /// **W6** — tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
     accounting: Accounting,
     /// **`POST /api/new-run` and `POST /api/clear`** — taken at the top of every turn. See
@@ -345,6 +374,7 @@ pub fn channels(
         // rest of the work it always did.
         published_script: None,
         turns_since_plan,
+        turn_open: TurnOpen::default(),
         accounting,
         reset: Arc::clone(&reset),
         run: None,
@@ -366,6 +396,15 @@ impl Worker {
     /// is what every test wants and what `gb serve` never does.
     pub fn with_run(mut self, run: Arc<CurrentRun>) -> Self {
         self.run = Some(run);
+        self
+    }
+
+    /// Replace the retry policy. For the e2e harness, whose fault tests would otherwise spend the
+    /// shipped 1+2+4+8 seconds of backoff proving something the backoff is not part of. See
+    /// `integration_tests::llm_harness::NO_BACKOFF`, and `RetryPolicy`'s own note on why its tests
+    /// set `base` to zero.
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
         self
     }
 
@@ -519,6 +558,9 @@ impl Worker {
         let TurnRequest { id, kind, situation, headline, menu } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 
+        // ⚠️ **Before `sync_plan`, not after.** The plan message is the one a failed turn used to
+        // leave behind, so the mark has to sit above the call that appends it. See [`TurnOpen`].
+        self.turn_open = TurnOpen { at: self.history.len(), turns_since_plan: self.turns_since_plan };
         let carried = self.sync_plan(kind);
         self.publish_todo();
         self.publish_battle_script();
@@ -643,6 +685,21 @@ impl Worker {
         self.turns_since_plan = 0;
         self.history.push(plan);
         true
+    }
+
+    /// Put the conversation back exactly as this turn found it, and un-count the turn.
+    ///
+    /// Called only when the turn produced **no completion at all** — the endpoint refused it, the
+    /// connection broke, the body was malformed. A turn that got an answer and then went wrong is a
+    /// different thing: what the model said belongs in the record even when it was useless.
+    ///
+    /// ⚠️ **`turns_since_plan` is restored as well as the messages, and that half is not
+    /// bookkeeping.** It is what makes the plan refresh fire every ten *completed* overworld turns
+    /// rather than every ten attempts — the difference between a plan message a model actually reads
+    /// and 1373 of them nobody ever answered. See [`TurnOpen`].
+    fn roll_back_failed_turn(&mut self) {
+        self.history.rollback_to(self.turn_open.at);
+        self.turns_since_plan = self.turn_open.turns_since_plan;
     }
 
     /// Service one battle-script call, returning the sentence the model is shown.
@@ -911,9 +968,10 @@ impl Worker {
                             level: "error",
                             message: format!("the turn could not be completed: {failure}"),
                         });
-                        // The request is still the last thing in the history and was never answered.
-                        // Drop it so the next turn does not open on a dangling question.
-                        self.history.pop_if_user();
+                        // Nothing this turn appended was ever answered, so none of it belongs in
+                        // the conversation. See [`TurnOpen`] for the sixteen thousand turns that
+                        // taught us to roll back the whole turn rather than its last message.
+                        self.roll_back_failed_turn();
                         return Some((Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None));
                     }
                 }
@@ -1244,10 +1302,31 @@ impl Worker {
         if self.accounting.occupancy(&self.history) >= self.config.compact_above {
             self.trim_history();
         }
+        // ⚠️ **And the last resort has a last resort, because a history can hold no turns to drop.**
+        // See [`Self::drop_unanswered`] and `docs/coverage-plan.md` §2.2.1 (c): the run whose credit
+        // ran out ended on 1375 `user` messages that no turn boundary and no summary could reach.
+        if self.accounting.occupancy(&self.history) >= self.config.compact_above {
+            self.drop_unanswered();
+        }
 
         let after = self.accounting.tokens_in(&self.history);
         let summarised = summary.is_some();
         self.published.publish_event(UiEventBody::Compacted { before, after, images_evicted, summarised });
+        // ⚠️ **A compaction that reclaimed nothing has to say so.** It used to publish
+        // `{"before":403300,"after":403300,"summarised":false}` and set the status back to whatever
+        // it had been, which reads on the page and in the transcript as a compaction that ran —
+        // while the history it was called to shrink is exactly as big as it was and the next turn
+        // will call it again. Every request from here on is over the window; that is an operator's
+        // problem, and an operator can only act on it if it is said out loud.
+        if after >= before && self.accounting.occupancy(&self.history) >= self.config.compact_above {
+            self.published.publish_event(UiEventBody::Notice {
+                level: "error",
+                message: format!(
+                    "compaction reclaimed nothing: the history is still {after} tokens against a                      limit of {}, and there is nothing left in it that can be dropped safely. Every                      request from here will be over the window.",
+                    self.accounting.limit(),
+                ),
+            });
+        }
         self.published.set_status(resume);
         Some(CompactionNote {
             before,
@@ -1349,6 +1428,56 @@ impl Worker {
             });
         }
     }
+
+    /// The last resort's last resort: drop `user` messages that were never answered.
+    ///
+    /// ⚠️ **⛔ Written for the death loop of 2026-09-05** (`docs/coverage-plan.md` §2.2.1 (c)).
+    /// [`Self::trim_history`] drops whole *turns*, and a turn is delimited by
+    /// [`compaction::is_turn_start`] — which deliberately does not count a plan message. A run whose
+    /// every request failed therefore accumulated a history made almost entirely of plan messages
+    /// with no completed turn anywhere in it, so `trim_history` found no boundary to cut at, dropped
+    /// nothing, and said nothing. The whole compaction reported `before == after` as a success.
+    ///
+    /// The rule here is the narrowest one that is provably safe: a `user` message **immediately
+    /// followed by another `user` message** was never answered, so nothing depends on it. It cannot
+    /// orphan a `tool` result, because a tool result always follows an `assistant` message. The tail
+    /// is left alone — [`compaction::KEEP_MESSAGES`], the same window `apply_summary` keeps — so the
+    /// live turn and the plan it belongs to are never touched.
+    ///
+    /// ⚠️ **A pass of last resort, not a tidy-up.** In a healthy run there is nothing here to find:
+    /// an answered turn is `user`, `assistant`, `tool`…, and the only back-to-back `user` pair is
+    /// the plan and the situation it precedes, which lives in the protected tail. Running it
+    /// unconditionally would quietly change what a normal compaction keeps.
+    fn drop_unanswered(&mut self) -> usize {
+        // Index 0 is the system prompt; index 1 is the summary, if a stage 2 has ever run.
+        let first = 1 + usize::from(self.history.get(1).is_some_and(compaction::is_summary));
+        let protected = self.history.len().saturating_sub(compaction::KEEP_MESSAGES);
+        if protected <= first {
+            return 0;
+        }
+        let mut keep = Vec::with_capacity(self.history.len());
+        let mut dropped = 0;
+        for index in 0..self.history.len() {
+            let unanswered = index >= first
+                && index < protected
+                && self.history[index].role == crate::llm::protocol::Role::User
+                && self.history[index + 1].role == crate::llm::protocol::Role::User;
+            match unanswered {
+                true => dropped += 1,
+                false => keep.push(self.history[index].clone()),
+            }
+        }
+        if dropped > 0 {
+            *self.history = keep;
+            self.published.publish_event(UiEventBody::Notice {
+                level: "warn",
+                message: format!(
+                    "context is full and holds no completed turn to drop; removed {dropped}                      questions the endpoint never answered",
+                ),
+            });
+        }
+        dropped
+    }
 }
 
 /// What the status shows while a batch is out. One name reads better than one; four read worse than
@@ -1406,23 +1535,5 @@ fn describe(decision: &Terminal) -> String {
             None => "forget_move (decline)".to_string(),
         },
         Terminal::Wait { ticks } => format!("wait {ticks} ticks"),
-    }
-}
-
-/// Drop a trailing `user` message. Used when a request failed outright, so the question is not left
-/// in the history unanswered — the next turn asks a fresher version of it anyway.
-///
-/// ⚠️ It tests for a **turn start**, not merely for a `user` message: W5's picture and W6's evicted
-/// picture are both `user` messages in the middle of a turn, and popping either would leave the tool
-/// result they belong beside without the context that explains it.
-trait PopIfUser {
-    fn pop_if_user(&mut self);
-}
-
-impl PopIfUser for Vec<Message> {
-    fn pop_if_user(&mut self) {
-        if self.last().is_some_and(compaction::is_turn_start) {
-            self.pop();
-        }
     }
 }

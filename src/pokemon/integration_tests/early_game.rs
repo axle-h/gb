@@ -24,12 +24,31 @@ fn can_navigate_to_pewter_city() {
             PolicyStep::enter(Map::Route2),
             PolicyStep::enter(Map::PewterCity),
         ]
-    );
+    )
+    // **C3 §5.2.** Free, and it is what sizes the rest: a verdict on every action this leg takes,
+    // under the driver that is already here. See `the_coverage_log_reads_an_ordinary_leg`.
+    .with_coverage();
 
     fixture.step_until_exhausted();
 
     let state = fixture.game_state();
     assert_eq!(state.map.map, Map::PewterCity, "agent should have navigated to Pewter City");
+
+    // ⚠️ **A defect here is the agent failing to do something it had already committed to** — a
+    // route it could not walk, a walk that never arrived, a menu row it offered and could not
+    // execute. It is asserted rather than printed because this leg is the machinery every later one
+    // is built on: if it can walk Viridian Forest at all, it can walk it without one of these.
+    let log = fixture.coverage.as_ref().expect("coverage was asked for");
+    println!("[coverage] can_navigate_to_pewter_city: {}", log.summary());
+    let hard: Vec<&str> = log
+        .entries()
+        .filter(|entry| matches!(entry.verdict, super::coverage::Verdict::Defect { .. }))
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert!(hard.is_empty(), "the agent could not execute what it chose: {hard:?}\n{}", log.report());
+    assert!(log.watchdog.is_empty(), "the watchdog fired on an ordinary leg: {:?}", log.watchdog);
+    // And it saw something, so a log that silently observed nothing cannot pass this.
+    assert!(log.len() > 5, "only {} ids across this whole leg: {}", log.len(), log.report());
 }
 
 /// Explicit Mt Moon traversal, discovered from the ROM warp graph + live sprite-resolved

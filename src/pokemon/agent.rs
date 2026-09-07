@@ -230,7 +230,17 @@ impl OverworldActionAbortedReason {
 
 #[derive(Debug)]
 pub enum AgentEvent {
-    StartedOverworldAction { destination: MetaTile },
+    /// A walk was issued. ⚠️ **`id` is the action menu's own id** — [`OverworldAction::id`] — and it
+    /// is here so that something reading the event stream can key on the same string the model chose
+    /// from. Nothing else in the stream can mint one: the terminal events carry a [`MetaTile`] and,
+    /// for an abort, where the walk *stopped*, and neither is the square the action was aimed at.
+    /// It is not in the prose; it is a key, and `Display` is a sentence.
+    ///
+    /// Pairing is by position rather than by id: this event opens an action and the next
+    /// [`Self::OverworldActionCompleted`], [`Self::OverworldActionAborted`],
+    /// [`Self::OverworldInteractionCompleted`] or [`Self::OverworldPickupFailed`] closes it. See
+    /// `integration_tests::coverage::CoverageLog`.
+    StartedOverworldAction { destination: MetaTile, id: String },
     /// ⚠️ **`at` is where the walk actually stopped, in the *expanded* coordinates everything else
     /// the model reads uses** — the ids in the action menu, the ruler on the map picture, the
     /// `Location:` line of every turn. Never `raw_player_coords`, which is the same square in a
@@ -348,7 +358,7 @@ impl Display for AgentEvent {
     /// page keeps the JSON it received and shows it on demand.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AgentEvent::StartedOverworldAction { destination } =>
+            AgentEvent::StartedOverworldAction { destination, .. } =>
                 write!(f, "→ heading for {destination}"),
             AgentEvent::OverworldActionAborted { destination, reason, at } => match at {
                 Some(at) => write!(f, "✗ gave up on {destination} at ({}, {}): {reason}", at.x, at.y),
@@ -1827,7 +1837,10 @@ impl PokemonAgent {
     }
 
     pub fn take_overworld_action(&mut self, action: OverworldAction) {
-        self.event(AgentEvent::StartedOverworldAction { destination: action.tile.clone() });
+        self.event(AgentEvent::StartedOverworldAction {
+            destination: action.tile.clone(),
+            id: action.id(),
+        });
         // A fresh walk has no square behind it yet. Without this the first tick of *this* walk would
         // pair up with the last square of the *previous* one, and a walk stopped immediately would
         // arm the turn-back watch on somewhere the player never stepped from.
@@ -5249,7 +5262,7 @@ mod tests {
         };
         assert_eq!(format!("{blocked}"), "✗ gave up on the PC at (19, 11): the game stopped you to say something");
         assert_eq!(
-            format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass }),
+            format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass, id: String::new() }),
             "→ heading for tall grass",
         );
     }
@@ -5287,7 +5300,7 @@ mod tests {
     /// [`MetaTile`], so naming the target is that type's `Display` and this is what watches it.
     #[test]
     fn a_walk_says_where_it_is_going() {
-        let started = |destination| format!("{}", AgentEvent::StartedOverworldAction { destination });
+        let started = |destination| format!("{}", AgentEvent::StartedOverworldAction { destination, id: String::new() });
         let reached = |destination| format!("{}", AgentEvent::OverworldActionCompleted { destination });
 
         let warp = MetaTile::Warp { to_map: Map::OaksLab, to_position: Point8 { x: 5, y: 11 } };
@@ -5378,7 +5391,7 @@ mod tests {
     #[test]
     fn no_event_formats_to_nothing() {
         let events = [
-            AgentEvent::StartedOverworldAction { destination: MetaTile::Pc },
+            AgentEvent::StartedOverworldAction { destination: MetaTile::Pc, id: String::new() },
             AgentEvent::OverworldActionAborted { destination: MetaTile::Pc, reason: OverworldActionAbortedReason::Unknown, at: None },
             AgentEvent::OverworldActionCompleted { destination: MetaTile::Pc },
             AgentEvent::OverworldInteractionCompleted { target: MetaTile::Pc },

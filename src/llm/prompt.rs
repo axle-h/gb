@@ -1343,7 +1343,10 @@ mod tests {
         // What the agent said since the last decision. Rendered through `describe_event`, which is
         // the same funnel the live buffer goes through.
         let events: Vec<String> = [
-            AgentEvent::StartedOverworldAction { destination: MetaTile::Sprite("Gym Guide") },
+            AgentEvent::StartedOverworldAction {
+                destination: MetaTile::Sprite("Gym Guide"),
+                id: "ViridianGym:5,9:GymGuide".to_string(),
+            },
             AgentEvent::OverworldInteractionCompleted { target: MetaTile::Sprite("Gym Guide") },
             AgentEvent::TextBox { message: "Hey! You look weak! Let me give you some advice!".into() },
             AgentEvent::OverworldActionAborted {

@@ -176,6 +176,82 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write(battle_hp + 1, 0);
     }
 
+    /// **C1** — hand the player a set of gym badges outright.
+    ///
+    /// `docs/coverage-plan.md` §3.1. Every HM field move is gated on a badge *and* on a party member
+    /// that knows it, and a missing badge is the one refusal the cartridge answers by dropping
+    /// straight back to the same party menu with the cursor where it was — which the agent has no
+    /// exit condition for. Seeding the badges is how a coverage walk reaches the terrain those moves
+    /// unlock without playing eight gyms first.
+    ///
+    /// ⚠️ **A badge is a capability, not an event flag.** `wObtainedBadges` is read by
+    /// `UsedCut`/`UsedSurf`/`UsedStrength` and by the trainer card, and nothing else in the game
+    /// keys a *script* off it — which is why this is the one wholesale RAM write §1.2 of the plan
+    /// admits. Writing `wEventFlags` instead would desynchronise scripts from map objects, and every
+    /// stall found in such a save is a false positive.
+    pub fn debug_set_badges(&mut self, badges: crate::pokemon::badge::Badge) {
+        self.mmu_mut().write(pokered_symbols::wObtainedBadges.address, badges.bits());
+    }
+
+    /// **C1** — every party member to full HP with its status cleared.
+    ///
+    /// ⚠️ **Overworld only.** Gen 1 copies the active party member into `wBattleMon` on send-out and
+    /// writes it back on switch-out, so a party-struct write mid-battle desynchronises the two and
+    /// the symptom is a Pokémon that heals and then un-heals on the next switch. The sidecar that
+    /// calls this gates on `!in_battle` for exactly that reason — see
+    /// [`crate::pokemon::integration_tests::cheats::Cheats`]. Nothing here can enforce it, because
+    /// the party struct is all this function can see.
+    pub fn debug_heal_party(&mut self) -> Result<(), String> {
+        let mut party = self.mmu().read_player_pokemon_party()?;
+        for index in 0..party.len() {
+            let member = &mut party[index];
+            member.current_hp = member.stats.hp;
+            member.status = crate::pokemon::status::PokemonStatus::None;
+        }
+        self.mmu_mut().write_player_pokemon_party(&party)
+    }
+
+    /// **C1** — every move of every party member back to its maximum PP.
+    ///
+    /// Separate from [`Self::debug_heal_party`] because they run at different rates: HP is topped up
+    /// after every fight, PP only matters over a long run of them, and a caller that wants one
+    /// rarely wants to pay for the other. The same battle caveat applies.
+    pub fn debug_restore_pp(&mut self) -> Result<(), String> {
+        let mut party = self.mmu().read_player_pokemon_party()?;
+        for index in 0..party.len() {
+            for slot in party[index].moves.iter_mut().flatten() {
+                slot.pp = slot.name.metadata().pp;
+            }
+        }
+        self.mmu_mut().write_player_pokemon_party(&party)
+    }
+
+    /// **C1** — put `battle_move` into `slot` of party member `member`, at full PP.
+    ///
+    /// For the HM slave. A field move needs a party member that knows it, and teaching one the
+    /// legitimate way needs the TM/HM in the bag, the right species and a walk to wherever it lies
+    /// on the floor — none of which is the thing under test when what is wanted is a boulder pushed.
+    ///
+    /// `Err` if the member is not there or the slot is out of range; a silent no-op would leave a
+    /// caller believing a move is available that is not, which is the same wedge the badge gate is.
+    pub fn debug_teach_move(
+        &mut self,
+        member: usize,
+        slot: usize,
+        battle_move: crate::pokemon::move_name::PokemonMoveName,
+    ) -> Result<(), String> {
+        let mut party = self.mmu().read_player_pokemon_party()?;
+        if member >= party.len() {
+            return Err(format!("no party member {member}; the party holds {}", party.len()));
+        }
+        let moves = &mut party[member].moves;
+        if slot >= moves.len() {
+            return Err(format!("no move slot {slot}; a Pokémon has {}", moves.len()));
+        }
+        moves[slot] = Some(crate::pokemon::move_name::PokemonMove::with_max_pp(battle_move));
+        self.mmu_mut().write_player_pokemon_party(&party)
+    }
+
     /// **Workstream J1** — force the OPTION menu's settings by writing `wOptions` directly.
     ///
     /// §3 of the plan rules the OPTION *menu driver* out of scope — the options are worth setting and

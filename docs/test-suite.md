@@ -24,6 +24,10 @@ cargo test --release --features full-playthrough full_playthrough
 # The same run carried on to the credits, ~26 min.
 cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
 
+# C2's measurement: a stretch of route played through the deployed LlmPolicy against an in-process
+# mock, with a god party and a battle script. Prints ms per turn and turns per game-minute. ~5 s.
+cargo test --release --features godmode --bin gb -- godmode --nocapture
+
 # The stall hunt: 40 min of game time under RandomPolicy from each of 26 starting states, in
 # parallel. ~39 s each, about 5.5 min of wall clock on 16 threads.
 cargo test --release --features soak-tests --bin gb -- soak --nocapture
@@ -73,6 +77,7 @@ cargo test --release --features bench --bin gb -- web::audio::bench --nocapture
 | `bench` | the two throughput benches and `web::{video,audio}::bench` |
 | `soak-tests` | `integration_tests::soak`, gated as a module so it never appears in the ignored list |
 | `regen-fixtures` | lets a leg test overwrite the snapshot the next leg reads |
+| `godmode` | C2's measured run. The machinery under it — `Intent`, `ScriptedBrain`, `cheats::Cheats`, `coverage::CoverageLog` — is all default tier; only the run that spends game time is gated |
 
 A test that is `#[ignore]`d should be blocked, not merely slow; everything else goes behind a
 feature. With every feature on, the ignored list is exactly 18 blocked emulator tests (9 `oam_bug`,
@@ -167,6 +172,53 @@ make it pass, say so in the hand-off.
 - Nearly everything it finds is a closed loop under A. The rules that cover the class are on their
   constants in `agent.rs` and summarised in [pokemon-agent](pokemon-agent.md). Each is a
   frame-timing change, so `full_playthrough` is the only thing that can price one.
+
+## The LLM end-to-end harness
+
+`integration_tests/llm_harness.rs` is the assembly every LLM test is a client of: a mock OpenAI
+endpoint on a loopback port, a pluggable `Brain`, and `LlmRun` — worker, policy, agent, emulator and
+a real run directory. Default tier; the whole of `llm.rs` runs in about two seconds.
+
+- ⚠️ **A `Brain` is handed strings and nothing else, and the type enforces it.** No `GameState`, no
+  `&mut GameBoy`, no fixture handle. If a brain cannot find what it needs in the rendered situation
+  and the action menu, a real model cannot either — and that is a finding about `llm::prompt`, not a
+  test to work around. Anything that adds a live-state field to `TurnRequest` throws the property
+  away.
+- ⚠️ **It drives `step_coarse`, not `step`** — see the ⚠️ under *Soak and stalls* below. It is the one
+  test assembly that runs at a driver's cadence rather than the harness's.
+- ⚠️ **The endpoint fragments tool-call arguments across several `data:` frames and interleaves
+  parallel calls**, on purpose. That is the part of the wire format most likely to be got wrong.
+  Inherited from the mock it replaces; do not simplify it away.
+- The seven `Fault`s — a hard HTTP status, a dated 429, an undated 429, a timeout, malformed
+  arguments, a truncated stream, an empty choice — each have a test asserting *what the run does
+  next*. The dated 429 asserts the **cartridge clock** did not advance, which is what the
+  leaderboard ranks on, so `LlmRun::tick` honours `throttled_until` exactly as `host.rs` does.
+- `LlmRun::restart` checkpoints, drops the worker and the fixture, and rebuilds both from the run
+  directory. It is the only thing that exercises `GB_RESTORE_HISTORY`, the re-minted system prompt
+  and `prompt::RESUMED_NOTE` end to end.
+- Backoff is `NO_BACKOFF` by default. The shipped policy sleeps 1+2+4+8 s between attempts and none
+  of that is what a fault test is asserting.
+
+## Coverage and cheats
+
+- `coverage::CoverageLog` folds `AgentEvent`s into a verdict per action id, so it works under any
+  driver. `TestFixture::with_coverage()` turns it on — **opt-in, because the fixture then owns the
+  event stream**: the agent's buffer is drained rather than peeked and is capped at 100, so a test
+  that opts in must read events from `fixture.coverage` and not from `agent.drain_events()`.
+- ⚠️ **A repeat is the signal, not the first block.** Being stopped is how this game says almost
+  everything, so `Textbox`/`Script` is `Blocked` and only becomes a defect past
+  `coverage::REPEAT_IS_A_DEFECT`. Everything that says the agent could not execute a row it had
+  already offered — `NoRoute`, `DidNotArrive`, `WrongMap`, `NoAdjacentGrass`, `Unknown` — is a defect
+  on the first one, and a watchdog firing always is.
+- `cheats::Cheats` is applied by the **driver between ticks**, never from a policy, which is what
+  keeps a finding from a cheated run trustworthy: `LlmPolicy` is byte-identical to the deployed one
+  and sees the result only through an ordinary `GameState`.
+  `postgame::debug::play_path_contains_no_debug_ram_writes` still passes unchanged and must keep
+  doing so.
+- ⚠️ **A party write mid-battle desynchronises `wBattleMon` from the party struct** — Gen 1 copies the
+  active member out on send-out and back on switch-out — so the sidecar gates its top-up on
+  `!in_battle` *and* on the black-out window (`wIsInBattle == $ff`) being closed. Both refusals are
+  counted and both have a test.
 
 ## Turns the game takes back
 
