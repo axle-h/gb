@@ -12,14 +12,21 @@ indexed below. **They are not loaded automatically.** Read the one for the area 
 touch, before touching it. Each is a list of rules, and each rule points at the comment in the code
 that carries the full argument, so the code stays the source of truth and the doc stays short.
 
-Two docs below are plans rather than rule-indexes. `docs/llm-web-playthrough-plan.md` (W0–W9, all
+Three docs below are plans rather than rule-indexes. `docs/llm-web-playthrough-plan.md` (W0–W9, all
 done) is the design one; where a comment attributes a number to "Phase C" or "Phase D", that is
 history, not a file you can open. `docs/deployed-run-defects.md` is the evidence one: what
 the deployed run of 2026-09-02 walked into, six root causes and eleven work items, **all of them
 shipped**. Read it before touching routing, map connections, `use_field_move` targets or the plan
 tools — every item carries the save state or the fixture that reproduces it, and the rules they left
 behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
-[llm-turn-loop](docs/llm-turn-loop.md).
+[llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third and the only one that is
+still ahead of the code. It replaces the soak tier's random walk with an exhaustive one, driven
+through `LlmPolicy` against a mock endpoint so the thing under test is the deployed stack, and it
+cheats past the game's gates with the debug tier rather than around them. **C0 and C1 are built and
+the machinery under C2 and C3 with them; the god run and the frontier walk are not** — its status
+table says exactly what, and §0.4 records where the plan itself turned out to be wrong. Read it
+before touching the soak tier, `postgame/debug.rs`, `integration_tests/llm*.rs` or anything under
+`integration_tests/{cheats,coverage,godmode}.rs`.
 
 ## Rules of the road
 

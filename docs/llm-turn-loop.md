@@ -237,3 +237,33 @@ model asked mid-battle sees a fight in which its own last decision was silently 
   unchecked to `GB_MAX_TOOL_STEPS` between compactions. `image_tokens` prices a map from its
   dimensions. A local endpoint's limit is its KV cache per slot, not its window; run one slot with
   the whole window.
+
+## A turn that failed outright
+
+⛔ The 402 death loop of 2026-09-05, and the three faults it needed at once. `docs/coverage-plan.md`
+§2.2.1 is the evidence; `worker::TurnOpen` carries the argument.
+
+- **A failed turn is rolled back whole.** `Worker::run_one` records `history.len()` **and**
+  `turns_since_plan` before `sync_plan` runs, and `roll_back_failed_turn` puts both back when the
+  turn produced no completion at all. To a *length*, not one `pop`: a turn can fail on its second
+  tool step with an assistant message and its results already appended. `History::rollback_to` is
+  the only shortening that is not a compaction, and it is safe because the log is flushed at the end
+  of a turn and this happens in the middle of one.
+- **`turns_since_plan` is restored too, and that half is not bookkeeping.** It is what makes the
+  plan refresh fire every ten *completed* overworld turns rather than every ten attempts. Without
+  it, a run whose every request failed appended a fresh plan message every `PLAN_REFRESH_TURNS` and
+  nothing ever removed one: 1373 copies in the deployed file.
+- **A compaction that can drop nothing says so.** `trim_history` cuts only at turn boundaries and
+  `compaction::is_turn_start` deliberately does not count a plan message, so a history of unanswered
+  plans had no boundary anywhere in it — it dropped nothing and published `before == after` as a
+  success. `Worker::drop_unanswered` is the pass below it: a `user` message immediately followed by
+  another `user` message was never answered, so nothing depends on it and it cannot orphan a tool
+  result. The tail (`KEEP_MESSAGES`) is left alone. A compaction that still reclaims nothing raises
+  an `error` notice, because every request from there on is over the window and only an operator can
+  act on that.
+- ⚠️ **An undated hard failure is still not parked**, and that is the decision rather than an
+  omission: parking stops the bleeding and does not touch the ratchet, and any endpoint can produce
+  one. `llm::an_undated_hard_failure_does_not_ratchet_the_history` is the guard, and it fails
+  against the old code with `[3, 3, …, 4, 4, …, 5, 5, 5]`.
+- Every fault the endpoint can produce now has a test on the e2e harness — see
+  [test-suite](test-suite.md)'s *The LLM end-to-end harness*.

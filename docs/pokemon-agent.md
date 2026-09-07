@@ -238,6 +238,49 @@ price.
   `map_view_flags_every_warp_the_menu_cannot_offer` hold the two views together across every
   committed fixture.
 
+## The coverage oracle
+
+`integration_tests/coverage.rs`, over the event stream, so it works under any driver. See
+[test-suite](test-suite.md) for the tier and [coverage-plan](coverage-plan.md) §5 for the plan.
+
+- Four verdicts and a fifth that was not in the plan: `Completed`, `Blocked { times, message }`,
+  `Defect { reason }`, `Unreached`, and `Silent` — chosen, outcome never reported (the finding
+  above).
+- ⚠️ **`REPEAT_IS_A_DEFECT` is 10 and was 3.** A gate is worth one try per pass over a map, because
+  the thing that opens it may have happened since; three sweeps of Pewter City re-tried its east
+  exit three times and were called a defect for diligence. Ten sits clearly above once-per-pass and
+  clearly below the 143 aborts that made this a rule.
+- ⚠️ **An exploring frontier must order its exits by how often it has already taken them, not by
+  where they lead.** Being turned back at a gate changes nothing the brain can see, so an exit that
+  scores best on promise stays best for ever: the first version took
+  `PewterCity:40,18:Connection` 59 times in one run. Count first, promise second, and every exit is
+  taken once before any is taken twice — 12 maps became 28.
+
+## Cheating past the gates, safely
+
+`integration_tests/cheats.rs` and the `debug_*` half of `postgame/debug.rs`. See
+`docs/coverage-plan.md` §3, and [test-suite](test-suite.md) for the tier.
+
+- The line is unchanged: **play path — button input only; debug tier — free to write RAM**, and
+  `play_path_contains_no_debug_ram_writes` reads the play-path sources from disk to enforce it.
+  Nothing in `cheats.rs` is on the play path: a driver applies it *between* agent ticks, so a policy
+  sees the result only through an ordinary `GameState`.
+- Four new primitives: `debug_set_badges`, `debug_heal_party`, `debug_restore_pp`,
+  `debug_teach_move`. ⚠️ **A badge is the one wholesale write admitted, and it is admitted because it
+  is a *capability* rather than an event**: nothing in the game keys a script off `wObtainedBadges`.
+  Writing `wEventFlags` desynchronises scripts from map objects and every stall found in such a save
+  is a false positive.
+- ⚠️ **Never write the party during a battle or inside the black-out window.** Gen 1 copies the
+  active member into `wBattleMon` on send-out and writes it back on switch-out, so a party-struct
+  write mid-battle un-heals on the next switch; and `wIsInBattle == LOST_BATTLE` is written by the
+  overworld loop *before* `HandleBlackOut` heals and warps, so a write there is one the cartridge
+  throws away. `Cheats::party_writes_are_safe` gates both, counts every refusal, and has a test.
+- ⚠️ **Five HMs do not fit in four move slots**, so the god party is three: a fighter with four
+  attacks and no HM (an HM is the one move `pick_move_to_forget` will never drop), a slave with
+  Cut/Surf/Strength/Flash — the four the action menu gates rows on — and a slave with Fly, which is
+  the only field move that travels. Whatever the game itself produced is kept behind them, as the
+  evidence that the story ran rather than being skipped.
+
 ## The random policy
 
 - `RandomPolicy::exploring` is the fuzzer `integration_tests::soak` drives: the ids of the last
@@ -323,9 +366,22 @@ price.
 - `impl Display for AgentEvent` is a UI contract: `host.rs` formats it straight onto the page and
   `prompt::describe_event` sends it to the model. `MetaTile`'s `Display` names its target as a noun
   phrase (`the warp to OaksLab`, `Mom`); `MetaTile::kind` stays the variant name because
-  `overworld_id` mints `PalletTown:5,6:Warp` from it and the id is re-resolved by string equality.
-  `id_kind` ends a person's id in their name with spaces stripped, and the word "sprite" appears
-  nowhere a model reads.
+  `OverworldAction::id` mints `PalletTown:5,6:Warp` from it and the id is re-resolved by string
+  equality. `id_kind` ends a person's id in their name with spaces stripped, and the word "sprite"
+  appears nowhere a model reads.
+- **`OverworldAction::id` is the one definition of an action id**, in `actions.rs` rather than in
+  `llm::tools` — `agent.rs` is not compiled with the `llm` feature at all, and two spellings of an
+  id would be two spellings of a key. `tools::overworld_id` is one line onto it, and
+  `AgentEvent::StartedOverworldAction` carries it so something reading the event stream can key on
+  the same string the model chose from. ⚠️ **It is not in the prose**: `Display` is a sentence, the
+  id is a key.
+- ⚠️ **Only the *start* of a walk carries an id, so a reader pairs positionally**: a start opens an
+  action and the next `OverworldActionCompleted`, `OverworldActionAborted`,
+  `OverworldInteractionCompleted` or `OverworldPickupFailed` closes it. The terminal events carry a
+  `MetaTile` and, for an abort, where the walk *stopped* — neither identifies the row that was
+  chosen. `coverage::CoverageLog` is built on that pairing and counts the walks that interleave
+  rather than overwriting a verdict; a walk re-issued after a battle is a normal one, and the count
+  is a fact rather than a fault.
 - `BattleActionStarted` carries the nickname and the opponent's species, read at the decision point
   (a trainer's lead is not loaded at `BattleStarted`).
 - `OverworldActionAborted` carries `at` in the expanded coordinate space, and its `Textbox` reason
@@ -341,6 +397,14 @@ price.
   `interact` existed: it read "Can't reach trash can at (23, 30)" wherever the model pointed it, and
   three of a deployed run's ten Cerulean issue reports quote that line as proof the map model is
   broken. There is no gym in Cerulean.
+- ⭐ **`Grass` and `CutTree` are actions with no outcome event at all**, and C3's first walk from
+  Pallet Town found it: 66 of 307 chosen ids went silent and every one was one of those two.
+  Reaching tall grass hands over to `AgentState::PacingForEncounters` **without an event**; a cave
+  wander (`MetaTile::Empty`) does the same; pacing then ends either at a battle — whose
+  `assert_battle_state` arm for a non-`OverworldMovement` state emits only `BattleStarted`, with no
+  abort — or at its own budget, which emits a `TextBox`. So a model that chooses "walk in the grass
+  at (6, 29)" is told nothing about what happened to it. Open; see
+  `coverage::Verdict::Silent` and [coverage-plan](coverage-plan.md) §5.2.2.
 - `check_pending_pickup` reports `OverworldPickupFailed` when the ball sprite is still there after
   the overworld returns, which is how a full bag refuses every pickup: armed on the interaction,
   answered later, latch cleared either way, keyed on `PictureId::PokeBall`.

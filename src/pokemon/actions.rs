@@ -13,6 +13,28 @@ pub struct OverworldAction {
     pub route: Vec<JoypadButton>,
 }
 
+impl OverworldAction {
+    /// The id of this action: stable across a re-sort, unique within a map, and readable enough that
+    /// a model quoting it back is obviously quoting the right thing.
+    ///
+    /// ⚠️ **The one definition, and it lives here rather than in `llm::tools` because it is not only
+    /// the model's.** `tools::overworld_id` renders the action menu with it, `AgentEvent`'s
+    /// [`StartedOverworldAction`](crate::pokemon::agent::AgentEvent::StartedOverworldAction) carries
+    /// it so a coverage log can key on the same string, and `resolve_overworld` matches on it by
+    /// string equality. Two spellings of an id is two spellings of a key.
+    ///
+    /// ⚠️ **`MetaTile::id_kind`, never its `Display`.** The `Display` is prose written for the status
+    /// log ("the warp to OaksLab") and is free to be reworded; an id is a key.
+    ///
+    /// ⚠️ **The map prefix looks redundant beside the turn's own header and is not.**
+    /// `resolve_overworld` re-mints ids against whatever map the player is on *now*, and the answer
+    /// to a turn can land after a warp — so without the prefix, `5,6:Warp` chosen in Oak's lab could
+    /// match a warp that happens to sit at (5, 6) in Pallet Town and be carried out silently.
+    pub fn id(&self) -> String {
+        format!("{}:{},{}:{}", self.map, self.destination.x, self.destination.y, self.tile.id_kind())
+    }
+}
+
 impl PartialOrd for OverworldAction {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))

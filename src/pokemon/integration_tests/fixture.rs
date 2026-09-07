@@ -40,6 +40,9 @@ pub struct TestFixture {
     options: GameOptions,
     /// How many policy steps the run was handed, so a failure can report how far it got.
     steps_at_start: Option<usize>,
+    /// **C3** — what this run touched, and whether the agent could carry it out. `None` unless
+    /// [`Self::with_coverage`] asked for it.
+    pub coverage: Option<super::coverage::CoverageLog>,
 }
 
 impl TestFixture {
@@ -91,8 +94,21 @@ impl TestFixture {
             stall_threshold: MachineCycles::from_duration(Duration::from_secs(10 * 60)),
             options_reapplied: false,
             options_drifts: 0,
+            coverage: None,
             agent: PokemonAgent::new(policy),
         }
+    }
+
+    /// **C3** — keep a [`CoverageLog`](super::coverage::CoverageLog) of everything this run does.
+    ///
+    /// ⚠️ **A driver that opts in must read its events from `self.coverage` rather than from
+    /// `agent.drain_events()`.** The agent's buffer is drained, not peeked — and it is capped at a
+    /// hundred, so a fixture that only peeked would silently lose events on any run longer than a
+    /// few seconds. Opt-in for exactly that reason: it changes who owns the events, and no existing
+    /// test wants that.
+    pub fn with_coverage(mut self) -> Self {
+        self.coverage = Some(super::coverage::CoverageLog::new());
+        self
     }
 
     /// **J, opt-out** — hold this fixture to the options the suite used *before* workstream J, i.e.
@@ -158,6 +174,11 @@ impl TestFixture {
         }
         self.options_reapplied = true;
         self.agent.update(&mut api, cycles).ok();
+        if let Some(log) = self.coverage.as_mut() {
+            for event in self.agent.drain_events() {
+                log.observe(&event);
+            }
+        }
 
         self.total_cycles += cycles;
 
@@ -232,6 +253,11 @@ impl TestFixture {
     pub fn step_coarse(&mut self, min_cycles: MachineCycles) {
         PokemonApi::with_cache(&mut self.gb, &mut self.map_cache).debug_set_options(&self.options);
         let (ran, _) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
+        if let Some(log) = self.coverage.as_mut() {
+            for event in self.agent.drain_events() {
+                log.observe(&event);
+            }
+        }
         self.total_cycles += ran;
         assert!(self.total_cycles < self.max_cycles,
             "exceeded max cycles ({:?} game time){}", self.max_cycles, self.progress_note());

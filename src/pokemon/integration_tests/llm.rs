@@ -1,36 +1,28 @@
-//! **W4** — the LLM path end to end, against a mock OpenAI server in this process.
+//! **W4** — the LLM path end to end, against a mock OpenAI server in this process; and **C0**, the
+//! seven faults that have actually ended deployed runs.
 //!
-//! This is the test that stops the tool schema, the resolution logic and the agent's expectations
-//! drifting apart, and it costs no API key and no network. Everything between the model and the game
-//! is the real thing: a real socket, a real `text/event-stream` body, [`OpenAiClient`] parsing it,
-//! the real worker, the real [`LlmPolicy`], the real agent, and the real emulator executing what
-//! comes out. Only the model is a stand-in — a forty-line program that reads the menu it is sent and
-//! picks the warp.
+//! Everything between the model and the game is the real thing: a real socket, a real
+//! `text/event-stream` body, [`OpenAiClient`](crate::llm::client::OpenAiClient) parsing it, the real
+//! worker, the real [`LlmPolicy`](crate::pokemon::llm_policy::LlmPolicy), the real agent, the real
+//! emulator, and — since C0 — a real run directory too. Only the model is a stand-in.
 //!
-//! ⚠️ **The mock fragments its tool-call arguments across several `data:` frames on purpose.** That is
-//! the one thing about the wire format most likely to be got wrong (§7.1's ⚠️), and a mock that sends
-//! a whole call in one frame would never catch it.
+//! The assembly lives in [`llm_harness`], not here: this file is a *client* of it, and so is
+//! everything `docs/coverage-plan.md` builds after it. What is left here is the tests.
+//!
+//! ⚠️ **A [`Brain`] is handed strings and nothing else**, and every test below has to find what it
+//! needs in the rendered situation. See the harness's module note for why that property is worth
+//! more than any test in this file.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::header;
-use axum::response::IntoResponse;
-use axum::routing::post;
-
-use crate::llm::client::OpenAiClient;
 use crate::llm::map_image;
 use crate::llm::screenshot::SCALE;
-use crate::llm::config::LlmConfig;
-use crate::llm::worker;
-use crate::pokemon::integration_tests::fixture::TestFixture;
-use crate::pokemon::llm_policy::LlmPolicy;
+use crate::pokemon::integration_tests::llm_harness::{
+    Always, Brain, Call, Fault, FaultThen, LlmRun, Reply, TurnRequest,
+};
 use crate::pokemon::map::Map;
-use crate::web::published::Published;
+use crate::pokemon::integration_tests::TestFixture;
 
 /// Pallet Town, standing outside. Chosen for what it does **not** contain: no tall grass and no
 /// scripted encounter, so the only thing that can move the player off this map is the decision the
@@ -41,267 +33,80 @@ use crate::web::published::Published;
 /// the RNG rather than the wire format.
 const FIXTURE: &[u8] = include_bytes!("../data/pallet-town-state.bin");
 
-#[derive(Clone, Default)]
-struct Mock {
-    turns: Arc<AtomicUsize>,
-    /// What came back from `read_map`. `None` until the batch round trip has completed, which is the
-    /// only way a `tool` message can appear in a request at all.
-    map_result: Arc<std::sync::Mutex<Option<String>>>,
-    /// **W5** — the `image_url` the `screenshot` answer put into the history, as the endpoint saw it.
-    /// This is the only place the multi-part content form is exercised over a real socket.
-    /// Every `(data_url, detail)` the endpoint was sent, in arrival order and deduplicated —
-    /// a turn that reads the map and takes a screenshot sends two.
-    picture: Arc<std::sync::Mutex<Vec<(String, String)>>>,
-    /// **W9** — the situation of the first watchdog turn, and the terminal tools it was sent with.
-    /// `None` until one arrives, which for the test below is the whole question.
-    stuck_turn: Arc<std::sync::Mutex<Option<(String, Vec<String>)>>>,
-}
+/// How long a default-tier test will wait on the wall clock for something to happen. Generous: the
+/// worker is a real thread talking over a real socket, and a machine under load is not a failure.
+const PATIENCE: Duration = Duration::from_secs(30);
 
 /// The stand-in model.
 ///
-/// Two rules, both of which need the request to have been *correct* for the test to pass: on its
-/// first overworld turn it asks for `read_map` **and** a `screenshot` in one message — which only
-/// come back if the batch round trip and the worker's own encoding both work — and after that it
-/// picks the warp out of the menu it was sent, which only exists if the situation carried one.
-async fn completions(State(mock): State<Mock>, body: String) -> impl IntoResponse {
-    let request: serde_json::Value = serde_json::from_str(&body).expect("the client sends JSON");
-    let tools: Vec<&str> = request["tools"]
-        .as_array()
-        .expect("a request always carries tools")
-        .iter()
-        .map(|tool| tool["function"]["name"].as_str().unwrap_or_default())
-        .collect();
-    let last_user = request["messages"]
-        .as_array()
-        .expect("messages")
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "user")
-        .and_then(|message| message["content"].as_str())
-        .unwrap_or_default()
-        .to_string();
-
-    if let Some(result) = request["messages"]
-        .as_array()
-        .expect("messages")
-        .iter()
-        .find(|message| message["role"] == "tool")
-        .and_then(|message| message["content"].as_str())
-    {
-        *mock.map_result.lock().expect("not poisoned") = Some(result.to_string());
+/// Two rules, both of which need the request to have been *correct* for a test to pass: on its first
+/// turn it asks for `read_map` **and** a `screenshot` in one message — which only come back if the
+/// batch round trip and the worker's own encoding both work — and after that it picks the warp out
+/// of the menu it was sent, which only exists if the situation carried one.
+fn plays_the_menu(request: &TurnRequest) -> Reply {
+    // Compaction asks the same endpoint, with no tools and an instruction. A tool call here would
+    // hang the compaction rather than fail it.
+    if request.is_summary() {
+        return Reply::Content("I am in Pallet Town and I am trying to leave it.".to_string());
     }
-
-    // The picture arrives as a *user* message in the multi-part form, never on the tool result —
-    // see `Message::user_with_image`. Finding it here is finding it exactly where an endpoint would.
-    // ⚠️ **Every** image part, not the first. A turn that reads the map *and* takes a screenshot
-    // sends two, and which one arrives first is the order the model called the tools in.
-    for part in request["messages"]
-        .as_array()
-        .expect("messages")
-        .iter()
-        .filter(|message| message["role"] == "user")
-        .filter_map(|message| message["content"].as_array())
-        .flatten()
-        .filter(|part| part["type"] == "image_url")
-    {
-        let url = part["image_url"]["url"].as_str().expect("a data URL").to_string();
-        let detail = part["image_url"]["detail"].as_str().unwrap_or_default().to_string();
-        let mut seen = mock.picture.lock().expect("not poisoned");
-        if !seen.iter().any(|(existing, _)| *existing == url) {
-            seen.push((url, detail));
-        }
-    }
-
-    let turn = mock.turns.fetch_add(1, Ordering::SeqCst);
-    let ids = menu_ids(&last_user);
-    // **W9.** A stuck turn is recognisable from the `tools` array alone, which is the point of §7.5
-    // scoping it: it is the only kind that can press buttons and has no menu tool to choose from.
-    let is_stuck = tools.contains(&"press_buttons")
-        && !tools.contains(&"choose_action")
-        && !tools.contains(&"choose_battle_action");
-    let calls = if is_stuck {
-        let mut seen = mock.stuck_turn.lock().expect("not poisoned");
-        if seen.is_none() {
-            let terminals = tools.iter().filter(|name| **name != "screenshot")
-                .filter(|name| name.starts_with("press") || **name == "wait")
-                .map(|name| name.to_string())
-                .collect();
-            *seen = Some((last_user.clone(), terminals));
-        }
+    if request.is_stuck() {
         // `why` is required of the model and read back out of the record it lands in — see
         // `the_watchdog_asks_the_model_for_a_nudge_and_delivers_it`.
-        vec![("press_buttons", serde_json::json!({ "buttons": ["a"], "why": "the agent is wedged" }))]
-    } else if tools.contains(&"choose_battle_action") {
-        // Nothing should start a battle here, but a wild encounter is never impossible and a mock
-        // that only knows how to run would hang the test in a trainer fight.
+        return Reply::call(
+            "press_buttons",
+            serde_json::json!({ "buttons": ["a"], "why": "the agent is wedged" }),
+        );
+    }
+    let ids = request.menu_ids();
+    if request.is_battle() {
+        // Nothing should start a battle here, but a wild encounter is never impossible and a brain
+        // that only knew how to run would hang the test in a trainer fight.
         let id = ids.iter().find(|id| id.starts_with("fight:")).cloned().unwrap_or_else(|| "run".into());
-        vec![("choose_battle_action", serde_json::json!({ "id": id }))]
-    } else if turn == 0 {
+        return Reply::call("choose_battle_action", serde_json::json!({ "id": id }));
+    }
+    if request.seen == 0 {
         // Both in one assistant message: the read goes to the emulator thread and the screenshot is
         // answered by the worker, so this is the one request that exercises both paths at once.
-        vec![("read_map", serde_json::json!({})), ("screenshot", serde_json::json!({}))]
-    } else if let Some(id) = ids.iter().find(|id| id.ends_with(":Warp") || id.ends_with(":Connection")) {
-        vec![("choose_action", serde_json::json!({ "id": id }))]
-    } else {
-        vec![("wait", serde_json::json!({ "ticks": 1 }))]
-    };
-
-    // ⚠️ **Every terminal call needs a `summary` and `tools::classify` refuses one without it**, so
-    // it is added here rather than repeated in each arm above. A real model fills it in: across the
-    // deployed run's 2427 decisions the only ones without were the synthesised fallback waits, which
-    // never go through `classify`. A mock that omitted it would have every turn rejected and spend
-    // its whole tool budget finding that out.
-    let calls: Vec<(&str, String)> = calls
-        .into_iter()
-        .map(|(name, mut arguments)| {
-            if let Some(object) = arguments.as_object_mut() {
-                object.entry("summary").or_insert_with(|| serde_json::json!("what the mock is doing"));
-            }
-            (name, serde_json::to_string(&arguments).expect("valid JSON"))
-        })
-        .collect();
-    ([(header::CONTENT_TYPE, "text/event-stream")], sse(&calls))
-}
-
-/// The ids the turn request offered, in order. Parsed out of the rendered menu exactly as a model
-/// would have to.
-fn menu_ids(situation: &str) -> Vec<String> {
-    situation
-        .lines()
-        .filter_map(|line| line.strip_prefix("- `"))
-        .filter_map(|line| line.split_once('`'))
-        .map(|(id, _)| id.to_string())
-        .collect()
-}
-
-/// One completion, as an OpenAI-compatible stream — with the arguments deliberately chopped into
-/// three-character fragments, and every call's fragments interleaved with every other's, which is
-/// what a parallel tool call actually looks like on the wire.
-fn sse(calls: &[(&str, String)]) -> String {
-    let mut out = String::new();
-    let frame = |value: serde_json::Value| format!("data: {value}\n\n");
-
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": { "role": "assistant", "content": "Let me look at where I am." } }]
-    })));
-    for (index, (name, _)) in calls.iter().enumerate() {
-        out.push_str(&frame(serde_json::json!({
-            "choices": [{ "delta": { "tool_calls": [{
-                "index": index, "id": format!("call_mock_{index}"), "type": "function",
-                "function": { "name": name, "arguments": "" },
-            }] } }]
-        })));
+        return Reply::Calls(vec![
+            Call::new("read_map", serde_json::json!({})),
+            Call::new("screenshot", serde_json::json!({})),
+        ]);
     }
-    let fragments: Vec<Vec<&str>> = calls.iter().map(|(_, arguments)| chunks(arguments, 3)).collect();
-    for step in 0..fragments.iter().map(Vec::len).max().unwrap_or(0) {
-        for (index, call) in fragments.iter().enumerate() {
-            let Some(fragment) = call.get(step) else { continue };
-            out.push_str(&frame(serde_json::json!({
-                "choices": [{ "delta": { "tool_calls": [{
-                    "index": index, "function": { "arguments": fragment },
-                }] } }]
-            })));
-        }
+    match ids.iter().find(|id| id.ends_with(":Warp") || id.ends_with(":Connection")) {
+        Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id })),
+        None => Reply::Calls(vec![Call::wait(1)]),
     }
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
-    })));
-    out.push_str(&frame(serde_json::json!({
-        "choices": [], "usage": { "prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240 }
-    })));
-    out.push_str("data: [DONE]\n\n");
-    out
 }
 
-fn chunks(text: &str, size: usize) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let split = rest.char_indices().nth(size).map_or(rest.len(), |(i, _)| i);
-        let (head, tail) = rest.split_at(split);
-        out.push(head);
-        rest = tail;
+/// The same, with a name, so a test can pass it as a `Box<dyn Brain>`.
+struct Menu;
+
+impl Brain for Menu {
+    fn respond(&mut self, request: &TurnRequest) -> Reply {
+        plays_the_menu(request)
     }
-    out
-}
-
-/// Start the mock on an arbitrary port and return the base URL. The runtime lives on its own thread
-/// and is never joined — the test process ends and takes it with it.
-fn serve_mock(mock: Mock) -> String {
-    let (ready, address) = std::sync::mpsc::channel::<SocketAddr>();
-    std::thread::Builder::new()
-        .name("mock-openai".to_string())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("a current-thread runtime");
-            runtime.block_on(async move {
-                let app = Router::new()
-                    .route("/v1/chat/completions", post(completions))
-                    .with_state(mock);
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                    .await
-                    .expect("an arbitrary loopback port");
-                ready.send(listener.local_addr().expect("bound")).expect("the test is waiting");
-                axum::serve(listener, app).await.expect("the mock serves");
-            });
-        })
-        .expect("the mock server thread starts");
-
-    let address = address.recv_timeout(Duration::from_secs(10)).expect("the mock server bound a port");
-    format!("http://{address}/v1")
 }
 
 /// **W4's acceptance, without an API key.** The model asks a read tool, is answered from the live
 /// game, picks the warp out of the menu it was given, and the agent walks the player through it.
 #[test]
 fn the_llm_plays_from_a_fixture() {
-    let mock = Mock::default();
-    let config = LlmConfig {
-        base_url: serve_mock(mock.clone()),
-        api_key: "mock".to_string(),
-        model: "mock".to_string(),
-        context_limit: 128_000,
-        compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
-        temperature: 1.0,
-        max_tool_steps: 6,
-        request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
-        max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
-        reasoning_effort: None,
-        stuck_timeout: None,
-    };
-    let published = Published::new();
-    let (worker, handles) =
-        worker::channels(
-            Box::new(OpenAiClient::new(&config)),
-            config,
-            Arc::clone(&published),
-            crate::llm::todo::TodoList::open(None),
-            crate::llm::battle_script::BattleScript::open(None),
-            crate::llm::history::History::open(None),
-        );
-    let _worker = worker.spawn().expect("the worker thread starts");
-
-    let mut fixture = TestFixture::with_policy(
-        FIXTURE,
-        Duration::from_secs(120),
-        Box::new(LlmPolicy::new(handles, None)),
-    );
-    let arrived = fixture.try_run_until(|state| state.map.map != Map::PalletTown);
-
-    let state = arrived.unwrap_or_else(|| {
-        let state = fixture.game_state();
-        panic!("the player never left Pallet Town — still at {}", state.map.player_position);
-    });
-    assert_ne!(state.map.map, Map::PalletTown, "the decision the model made is what moved the player");
+    let mut run = LlmRun::builder(FIXTURE).named("llm-plays").start(Box::new(Menu));
+    let left = run.tick_until(PATIENCE, |run| run.map() != Map::PalletTown);
+    assert!(left, "the player never left Pallet Town — still at {}", run.fixture().game_state().map.player_position);
 
     // …and it got there having actually used a tool. Without this the test would still pass if the
     // batch round trip silently answered nothing, because the second turn does not need the answer.
-    let read = mock.map_result.lock().expect("not poisoned").clone();
-    let read = read.expect("`read_map` was never answered — the tool round trip did not complete");
+    let read = run
+        .endpoint
+        .requests()
+        .iter()
+        .flat_map(|request| request.messages.clone())
+        .find(|message| message.role == "tool" && message.text.contains("\"warps\""))
+        .map(|message| message.text)
+        .expect("`read_map` was never answered — the tool round trip did not complete");
     assert!(read.contains("\"PalletTown\""), "read_map answered from the wrong state: {read:.200}");
-    assert!(read.contains("\"warps\"") && read.contains("\"is_dark\""), "read_map lost its shape: {read:.200}");
+    assert!(read.contains("\"is_dark\""), "read_map lost its shape: {read:.200}");
     // ⚠️ The grid and its legend were *replaced* by the picture, not supplemented — a model given
     // both would be reading the same map twice, in two coordinate systems, for twice the tokens.
     assert!(!read.contains("\"grid\"") && !read.contains("\"legend\""),
@@ -312,7 +117,9 @@ fn the_llm_plays_from_a_fixture() {
     // that form goes through the real client, so it is the only place a PNG the endpoint would have
     // accepted is actually proved to be one.
     use image::GenericImageView;
-    let pictures = mock.picture.lock().expect("not poisoned").clone();
+    let mut pictures: Vec<(String, String)> =
+        run.endpoint.requests().iter().flat_map(TurnRequest::images).collect();
+    pictures.dedup();
     assert!(!pictures.is_empty(), "no picture reached the endpoint as an image part");
     let decoded: Vec<_> = pictures
         .iter()
@@ -342,6 +149,58 @@ fn the_llm_plays_from_a_fixture() {
             "no `detail: high` map at {map:?} among {decoded:?}");
 }
 
+/// **The run directory is written as it is in deployment, and a restart resumes on it.**
+///
+/// ⚠️ **The one seam the pre-C0 test omitted entirely.** `history.json`, `conversation.jsonl`,
+/// `todo.json` and `battle-script.json` are all written by the real code paths here, and the restart
+/// below is the only place `GB_RESTORE_HISTORY`, the re-minted system prompt and
+/// [`prompt::RESUMED_NOTE`](crate::llm::prompt::RESUMED_NOTE) are ever exercised end to end.
+#[test]
+fn a_restart_resumes_the_conversation_as_well_as_the_game() {
+    let mut run = LlmRun::builder(FIXTURE).named("llm-restart").start(Box::new(Menu));
+    assert!(run.tick_until_requests(3, PATIENCE), "the run never got going");
+
+    let before = run.saved_history();
+    let stored = before["messages"].as_array().expect("history.json holds messages").len();
+    assert!(stored > 0, "a turn completed and nothing was written down: {before}");
+    // ⚠️ The system prompt is never stored — it is re-minted from the build that is running — so a
+    // deployment that edits it gets the edit rather than a copy pinned to the last process.
+    assert!(
+        !before["messages"].as_array().unwrap().iter().any(|m| m["role"] == "system"),
+        "message 0 must not be stored: {before}",
+    );
+    // ⚠️ Only the two the conversation owns. `todo.json` and `battle-script.json` are written when
+    // the model first touches them, and this brain touches neither — asserting on them here would be
+    // asserting that the *defaults* get files, which is not something anything relies on.
+    assert!(run.run_dir.join(crate::run::files::CONVERSATION).exists(), "no conversation log");
+
+    let directory = run.run_dir.clone();
+    let served = run.endpoint.requests_served();
+    run.restart();
+    assert_eq!(run.run_dir, directory, "a restart must resume the run in place, not mint a new one");
+
+    assert!(run.tick_until_requests(served + 1, PATIENCE), "the second process never asked anything");
+    let resumed = run
+        .endpoint
+        .requests()
+        .last()
+        .cloned()
+        .expect("a request after the restart");
+    // The conversation came back: the first request of the second process carries the messages the
+    // first one wrote, plus the note that says the game may be a little behind them.
+    assert!(
+        resumed.messages.len() > stored,
+        "the restarted process started from {} messages, not the {stored} it had written",
+        resumed.messages.len(),
+    );
+    assert!(
+        resumed.messages.iter().any(|m| m.text.contains(crate::llm::prompt::RESUMED_NOTE)),
+        "a resumed conversation has to say so, once: {:?}",
+        resumed.messages.iter().map(|m| m.role.clone()).collect::<Vec<_>>(),
+    );
+    assert_eq!(run.processes, 2);
+}
+
 /// **W9's acceptance (§14): fires on a deliberately jammed agent.**
 ///
 /// The whole chain, and every link of it is the real thing except the model: the agent notices it
@@ -356,63 +215,56 @@ fn the_llm_plays_from_a_fixture() {
 /// measures the real headroom); what is under test here is the mechanism, not the threshold.
 #[test]
 fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
-    let mock = Mock::default();
-    let config = LlmConfig {
-        base_url: serve_mock(mock.clone()),
-        api_key: "mock".to_string(),
-        model: "mock".to_string(),
-        context_limit: 128_000,
-        compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
-        temperature: 1.0,
-        max_tool_steps: 6,
-        request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
-        max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
-        reasoning_effort: None,
-        stuck_timeout: Some(Duration::from_secs(1)),
-    };
-    let published = Published::new();
-    let (worker, handles) = worker::channels(
-        Box::new(OpenAiClient::new(&config)),
-        config,
-        Arc::clone(&published),
-        crate::llm::todo::TodoList::open(None),
-        crate::llm::battle_script::BattleScript::open(None),
-        crate::llm::history::History::open(None),
-    );
-    // A real run directory, so the press is recorded the way a deployed one would be.
-    let scratch = crate::run::tests::Scratch::new("watchdog");
-    let (run, _, _) = crate::run::RunDir::open(&scratch.0, true, "mock", &|_| false)
-        .expect("a fresh run directory");
-    let run_path = run.path().to_path_buf();
-    let current = Arc::new(crate::run::CurrentRun::new(scratch.0.clone(), "mock".into(), run));
-    let _worker = worker.with_run(current).spawn().expect("the worker thread starts");
+    use crate::pokemon::agent::AgentEvent;
+    use std::sync::Mutex;
 
-    let mut fixture = TestFixture::with_policy(
-        FIXTURE,
-        Duration::from_secs(120),
-        Box::new(LlmPolicy::new(handles, Some(Duration::from_secs(1)))),
-    );
+    /// The stuck turn as the endpoint saw it: its situation and the terminal tools it was offered.
+    #[derive(Default)]
+    struct Watch(Arc<Mutex<Option<(String, Vec<String>)>>>);
 
-    let mut reported = false;
-    let mut delivered = false;
-    for _ in 0..4_000 {
-        fixture.step();
-        reported |= fixture.agent.drain_events().iter().any(|event| {
-            matches!(event, crate::pokemon::agent::AgentEvent::WatchdogFired { .. })
-        });
-        delivered |= fixture.agent.manual_input_pending() > 0;
-        if reported && delivered && mock.stuck_turn.lock().expect("not poisoned").is_some() {
-            break;
+    impl Brain for Watch {
+        fn respond(&mut self, request: &TurnRequest) -> Reply {
+            if request.is_stuck() {
+                let mut seen = self.0.lock().expect("not poisoned");
+                if seen.is_none() {
+                    let mut terminals: Vec<String> = request
+                        .tool_names()
+                        .into_iter()
+                        .filter(|name| name.starts_with("press") || *name == "wait")
+                        .map(str::to_string)
+                        .collect();
+                    terminals.sort();
+                    *seen = Some((request.situation().to_string(), terminals));
+                }
+            }
+            plays_the_menu(request)
         }
     }
 
-    let stuck = mock.stuck_turn.lock().expect("not poisoned").clone();
+    let seen = Arc::new(Mutex::new(None));
+    let mut run = LlmRun::builder(FIXTURE)
+        .named("watchdog")
+        .stuck_timeout(Duration::from_secs(1))
+        .start(Box::new(Watch(Arc::clone(&seen))));
+
+    let mut reported = false;
+    let mut delivered = false;
+    run.tick_until(PATIENCE, |run| {
+        reported |= run
+            .fixture()
+            .agent
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event, AgentEvent::WatchdogFired { .. }));
+        delivered |= run.fixture().agent.manual_input_pending() > 0;
+        reported && delivered && seen.lock().expect("not poisoned").is_some()
+    });
+
+    let stuck = seen.lock().expect("not poisoned").clone();
     let (situation, terminals) = stuck.expect("no stuck turn ever reached the endpoint");
 
     // Scoped as §7.5 requires: the escape hatch and doing nothing, and nothing else. A menu tool
     // here would let a turn end in a decision the wedged agent cannot carry out.
-    let mut terminals = terminals;
-    terminals.sort();
     assert_eq!(terminals, vec!["press_buttons".to_string(), "wait".to_string()]);
 
     // And the turn says what is wrong in terms the model can act on — the agent's own state, and
@@ -426,7 +278,7 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
     // And the press left a record: the reason the model gave, the screen at the time, and the
     // conversation that led to it. ⚠️ This is the only end-to-end proof of the wiring — the unit
     // tests in `llm::incident` never go through the worker, and `with_run` is one line to forget.
-    let records = run_path.join(crate::run::files::PRESS_BUTTONS);
+    let records = run.run_dir.join(crate::run::files::PRESS_BUTTONS);
     let record = std::fs::read_dir(&records)
         .unwrap_or_else(|e| panic!("no records in {records:?}: {e}"))
         .next()
@@ -438,6 +290,308 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
     assert!(json.contains("the agent is wedged"), "the model's reason is the point of it: {json:.400}");
     assert!(json.contains("\"kind\": \"stuck\""), "a sanctioned press has to be tellable apart");
     assert!(json.contains("## Decision: the game is stuck"), "the turn that asked is in the slice");
+}
+
+// ── C0 §2.2: the seven faults ────────────────────────────────────────────────────────────────────
+//
+// Not one of these had a test before, and every one of them is a way a deployed run has actually
+// ended. What each asserts is *what the run does next*, because that is the only thing an operator
+// ever sees.
+
+/// ⛔ **The 402 death loop** — `docs/coverage-plan.md` §2.2.1, and the four criteria are its own.
+///
+/// Observed live on 2026-09-05: OpenRouter credit ran out, which presents as an **undated 402**
+/// rather than as the dated 429 the park is built for. It is therefore an ordinary turn failure and
+/// is retried at once, for ever — and the history *ratchets*, because a failed turn used to leave
+/// behind both the situation it was rejected on and the plan message
+/// [`sync_plan`](crate::llm::worker::Worker) had just appended in front of it. The run reached turn
+/// 16 555 and a 403 300-token history against a 100 000-token limit, of which 1373 messages were
+/// copies of the plan.
+///
+/// (a) the messages a failed turn appended are rolled back;
+/// (b) a failed turn does not count towards `turns_since_plan`;
+/// (d) **the history does not grow across N consecutive failures** — the one assertion that would
+///     have caught it.
+///
+/// (c) is [`a_compaction_with_no_turn_to_drop_says_so`], which needs a full history rather than a
+/// failing one.
+#[test]
+fn an_undated_hard_failure_does_not_ratchet_the_history() {
+    /// More than [`PLAN_REFRESH_TURNS`](crate::llm::worker::PLAN_REFRESH_TURNS), twice over, so a
+    /// periodic plan refresh falls due inside the failing stretch. That is what the deployed run's
+    /// 1373 copies were made of, and a run of five failures would not reach it.
+    const FAILURES: usize = 25;
+
+    let brain = FaultThen::new(
+        Fault::Http { status: 402, message: "Prompt tokens limit exceeded: add more credits".into() },
+        FAILURES,
+        Reply::Calls(vec![Call::wait(1)]),
+    );
+    let served = Arc::clone(&brain.served);
+    let mut run = LlmRun::builder(FIXTURE)
+        .named("hard-402")
+        .game_time(Duration::from_secs(600))
+        .start(Box::new(brain));
+
+    assert!(
+        run.tick_until(PATIENCE, |run| served.load(std::sync::atomic::Ordering::SeqCst) >= FAILURES),
+        "only {} of {FAILURES} failures were served",
+        served.load(std::sync::atomic::Ordering::SeqCst),
+    );
+
+    // A 402 is not retryable, so one request is one turn: what follows is a picture of the
+    // conversation across `FAILURES` consecutive failed turns.
+    let sizes: Vec<usize> = run.endpoint.requests().iter().map(|r| r.messages.len()).collect();
+    let plans: Vec<usize> = run
+        .endpoint
+        .requests()
+        .iter()
+        .map(|r| r.messages.iter().filter(|m| m.text.starts_with("## Your plan")).count())
+        .collect();
+
+    // (d) — one line, and it is the whole defect.
+    assert_eq!(
+        sizes.iter().max(), sizes.iter().min(),
+        "the history grew across {FAILURES} consecutive failures: {sizes:?}",
+    );
+    // (a) and (b), said in the terms the deployed file was wrong in.
+    assert!(
+        plans.iter().all(|count| *count <= 1),
+        "a failed turn left its plan message behind: {plans:?}",
+    );
+
+    // And the run is still playing rather than wedged: the failures resolve to a wait, the operator
+    // is told, and the turn after the last one decides something.
+    assert!(run.said("the turn could not be completed"), "a failing endpoint has to be visible");
+    let before = run.decisions().len();
+    assert!(
+        run.tick_until(PATIENCE, |run| run.decisions().len() > before),
+        "the run never recovered once the endpoint did",
+    );
+}
+
+/// **A dated 429 parks the run**: the emulator stops, the cartridge's own clock stops with it, and
+/// the same question is put again when the window reopens.
+///
+/// ⚠️ **The cartridge clock is the assertion that matters**, because it is what the leaderboard ranks
+/// on. A park that stopped the requests and let the game run would hand a run a free hour.
+#[test]
+fn a_dated_rate_limit_parks_the_run_and_stops_the_cartridge_clock() {
+    use crate::web::published::RunStatus;
+
+    let brain = FaultThen::new(
+        Fault::RateLimited {
+            retry_after: Some(Duration::from_secs(2)),
+            message: "your daily quota is spent".into(),
+        },
+        1,
+        Reply::Calls(vec![Call::wait(1)]),
+    );
+    let mut run = LlmRun::builder(FIXTURE).named("park-429").start(Box::new(brain));
+
+    // Wait for the park to be entered, and read the clock at that moment.
+    assert!(
+        run.tick_until(PATIENCE, |run| matches!(run.published.run_status(), RunStatus::Throttled { .. })),
+        "a dated rate limit did not park the run; status is {:?}",
+        run.published.run_status(),
+    );
+    assert!(run.said("the endpoint's quota is spent"), "a park has to say so: {:?}", run.notices());
+    let stopped_at = run.playtime_seconds();
+
+    // Through the park: the driver honours `throttled_until` exactly as `host.rs` does.
+    let parked_until = std::time::Instant::now() + Duration::from_millis(1500);
+    while std::time::Instant::now() < parked_until {
+        run.tick();
+    }
+    assert_eq!(run.playtime_seconds(), stopped_at, "the cartridge clock ran while the run was parked");
+
+    // And it comes back on its own, with the same question.
+    assert!(
+        run.tick_until(PATIENCE, |run| !run.decisions().is_empty()),
+        "the run never resumed after the quota window reopened",
+    );
+    assert!(run.said("the quota window reopened"), "{:?}", run.notices());
+    // ⚠️ The cartridge clock counts whole seconds, so "it is moving again" needs more than one of
+    // them — a resumed run that had ticked twice would read as still parked.
+    assert!(
+        run.tick_until(PATIENCE, |run| run.playtime_seconds() > stopped_at + 1),
+        "the game never restarted: still {stopped_at}s on the cartridge clock",
+    );
+}
+
+/// **An undated 429 is the ordinary transient one**: back off in seconds, do not park.
+///
+/// ⚠️ **The distinction is the whole of [`LlmError::RateLimited`](crate::llm::LlmError)** — a limit
+/// with no stated reset is far more often a per-minute one than a daily cap, and parking a run for
+/// twenty-five hours on one would be far worse than the four wasted requests.
+#[test]
+fn an_undated_rate_limit_is_backed_off_from_rather_than_parked() {
+    let brain = FaultThen::new(
+        Fault::RateLimited { retry_after: None, message: "slow down".into() },
+        2,
+        Reply::Calls(vec![Call::wait(1)]),
+    );
+    let served = Arc::clone(&brain.served);
+    let mut run = LlmRun::builder(FIXTURE).named("backoff-429").start(Box::new(brain));
+
+    assert!(
+        run.tick_until(PATIENCE, |run| !run.decisions().is_empty()),
+        "the run never got past two rate limits",
+    );
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2, "both limits were served");
+    assert!(run.said("retrying in"), "a retry has to be visible: {:?}", run.notices());
+    // ⚠️ The park is what must *not* have happened. Its notice and its status are both distinctive.
+    assert!(!run.said("the endpoint's quota is spent"), "an undated 429 parked the run: {:?}", run.notices());
+    assert!(run.published.throttled_until().is_none(), "an undated 429 stopped the emulator");
+}
+
+/// **A request the endpoint took and never answered ends the turn without a retry.**
+///
+/// ⚠️ **Not retried, deliberately** — see [`LlmError::Timeout`](crate::llm::LlmError). A connection
+/// that never opened consumed no work at the far end; a request that was *accepted* is being worked
+/// on, and on an endpoint that serves one at a time a retry queues behind the very request it is
+/// replacing.
+#[test]
+fn a_timeout_ends_the_turn_without_retrying_it() {
+    let brain = FaultThen::new(Fault::Timeout, 1, Reply::Calls(vec![Call::wait(1)]));
+    let served = Arc::clone(&brain.served);
+    let mut run = LlmRun::builder(FIXTURE)
+        .named("timeout")
+        .request_timeout(Duration::from_millis(400))
+        .start(Box::new(brain));
+
+    assert!(
+        run.tick_until(PATIENCE, |run| !run.decisions().is_empty()),
+        "the run never got past a timed-out request",
+    );
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1, "the timeout was served once");
+    assert!(run.said("took the request"), "a timeout must not read as a broken connection: {:?}", run.notices());
+    assert!(!run.said("retrying in"), "a timeout was retried: {:?}", run.notices());
+    // And the question it was asked on is not left in the conversation twice.
+    assert!(
+        run.endpoint.requests().windows(2).all(|pair| pair[1].messages.len() >= pair[0].messages.len()),
+        "the history went backwards, which means a message was dropped that had been answered",
+    );
+}
+
+/// **Arguments that are not JSON are refused, and the turn still ends in a decision.**
+///
+/// The model is told what was wrong and gets its remaining tool steps; the loop's own fallback ends
+/// the turn if it cannot use them. What must never happen is a turn that simply does not finish.
+#[test]
+fn malformed_tool_arguments_do_not_stop_the_turn_ending() {
+    let brain = FaultThen::new(Fault::MalformedToolArgs, 2, Reply::Calls(vec![Call::wait(1)]));
+    let mut run = LlmRun::builder(FIXTURE).named("bad-args").start(Box::new(brain));
+    assert!(
+        run.tick_until(PATIENCE, |run| !run.decisions().is_empty()),
+        "a turn whose arguments would not parse never ended: {:?}",
+        run.notices(),
+    );
+}
+
+/// **A body that stops part-way through a `data:` frame.** The stream is unparseable, the turn
+/// fails, and the run carries on.
+#[test]
+fn a_truncated_stream_fails_the_turn_and_the_run_carries_on() {
+    let brain = FaultThen::new(Fault::TruncatedStream, 1, Reply::Calls(vec![Call::wait(1)]));
+    let mut run = LlmRun::builder(FIXTURE).named("truncated").start(Box::new(brain));
+    assert!(
+        run.tick_until(PATIENCE, |run| !run.decisions().is_empty()),
+        "the run never got past a truncated stream: {:?}",
+        run.notices(),
+    );
+    assert!(
+        run.said("malformed") || run.said("the turn could not be completed"),
+        "a truncated stream said nothing an operator could act on: {:?}",
+        run.notices(),
+    );
+}
+
+/// **A completion with neither content nor a tool call is nudged once, then the rule is enforced.**
+///
+/// §7.5's fallback. A model that replies twice with nothing gets a forced `wait` rather than a turn
+/// that hangs — the run has to keep playing, and a stall here is invisible from outside.
+#[test]
+fn a_completion_with_nothing_in_it_is_nudged_then_forced() {
+    let mut run = LlmRun::builder(FIXTURE)
+        .named("empty-choice")
+        .start(Box::new(Always(Reply::Fault(Fault::EmptyChoice))));
+    assert!(
+        run.tick_until(PATIENCE, |run| !run.decisions().is_empty()),
+        "a model that says nothing at all hung the turn: {:?}",
+        run.notices(),
+    );
+    assert!(
+        run.decisions().iter().any(|decision| decision.starts_with("wait")),
+        "the forced fallback is a wait: {:?}",
+        run.decisions(),
+    );
+    // The nudge went out before the rule was enforced, and it quoted the contract.
+    let nudged = run
+        .endpoint
+        .requests()
+        .iter()
+        .any(|request| request.situation().contains("no tool call, so nothing happened"));
+    assert!(nudged, "the model was never told what it was doing wrong");
+}
+
+/// ⛔ **§2.2.1 (c) — a compaction that can drop nothing must say so rather than report success.**
+///
+/// The deployed run's compaction fell all the way through to `trim_history`, which cuts only at turn
+/// boundaries — and its history held no completed turn, only unanswered questions. It dropped
+/// nothing and published `{"before":403300,"after":403300,"summarised":false}`, which reads exactly
+/// like a compaction that worked.
+///
+/// Reproduced by making the window small enough that an ordinary conversation overruns it and the
+/// summary itself fails, which is what a spent quota does to it.
+#[test]
+fn a_compaction_with_no_turn_to_drop_says_so() {
+    /// A brain that plays normally until the history is being summarised, and then refuses — the
+    /// shape of an endpoint whose credit has run out mid-run.
+    struct RefusesToSummarise;
+
+    impl Brain for RefusesToSummarise {
+        fn respond(&mut self, request: &TurnRequest) -> Reply {
+            match request.is_summary() {
+                true => Reply::Fault(Fault::Http {
+                    status: 402,
+                    message: "Prompt tokens limit exceeded".into(),
+                }),
+                false => plays_the_menu(request),
+            }
+        }
+    }
+
+    // Small enough that the system prompt and two turns overrun it, so a compaction is due almost
+    // immediately and every one of them has to fall through to the last resort.
+    let mut run = LlmRun::builder(FIXTURE)
+        .named("dead-compaction")
+        .context_limit(4_000)
+        .compact_above(0.5)
+        .start(Box::new(RefusesToSummarise));
+
+    assert!(
+        run.tick_until(PATIENCE, |run| !run.compactions().is_empty()),
+        "no compaction ever fired: {:?}",
+        run.notices(),
+    );
+    assert!(
+        run.said("could not summarise the history"),
+        "the summary was refused and nothing said so: {:?}",
+        run.notices(),
+    );
+
+    // The point: every compaction either reclaimed something or said out loud that it could not.
+    for (before, after, summarised) in run.compactions() {
+        if after < before || summarised {
+            continue;
+        }
+        assert!(
+            run.said("compaction reclaimed nothing") || run.said("dropped the"),
+            "a compaction reported {before} → {after} and said nothing about it: {:?}",
+            run.notices(),
+        );
+    }
 }
 
 // ── The bundled strategy, against real battles ───────────────────────────────────────────────────
@@ -460,6 +614,8 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
 #[test]
 #[ignore]
 fn probe_scripted_battles() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::llm::battle_report::BattleReport;
     use crate::llm::battle_script::{self, Outcome};
     use crate::pokemon::GameState;

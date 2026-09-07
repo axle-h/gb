@@ -2161,22 +2161,18 @@ pub struct MenuItem {
     pub description: String,
 }
 
-/// The id of one overworld action: stable across a re-sort, unique within a map, and readable
-/// enough that a model quoting it back is obviously quoting the right thing.
+/// The id of one overworld action, as the menu renders it.
 ///
-/// ⚠️ **`MetaTile::id_kind`, never its `Display`.** The `Display` is prose written for the status
-/// log ("the warp to OaksLab") and is free to be reworded; an id is a key that a model quotes back
-/// and that is re-resolved by string equality, so it takes the variant name — except for a person,
-/// who is named instead of being called a "sprite". See `MetaTile::id_kind`.
+/// ⚠️ **The formatting moved to [`OverworldAction::id`] and this is now one line.** An id is not
+/// only the model's: `AgentEvent::StartedOverworldAction` carries it so a coverage log can key on
+/// the same string, and `agent.rs` cannot reach into `llm::` — it is not even compiled with it. Two
+/// spellings of an id is two spellings of a key, so there is one, and it is over there with its
+/// arguments about `id_kind` and the map prefix.
 ///
-/// ⚠️ **The map prefix looks redundant beside the turn's own header and is not.** `resolve_overworld`
-/// re-mints ids against whatever map the player is on *now*, and the answer to a turn can land after
-/// a warp — so without the prefix, `5,6:Warp` chosen in Oak's lab could match a warp that happens to
-/// sit at (5, 6) in Pallet Town and be carried out silently. With it, a stale id simply fails to
-/// resolve, which is a sentence the model is told.
-pub fn overworld_id(state: &GameState, action: &OverworldAction) -> String {
-    let destination = action.destination;
-    format!("{}:{},{}:{}", state.map.map, destination.x, destination.y, action.tile.id_kind())
+/// `state` is kept in the signature because every call site has one and a future id may want more
+/// of it than the action carries; the map it used to be read from is on the action itself.
+pub fn overworld_id(_state: &GameState, action: &OverworldAction) -> String {
+    action.id()
 }
 
 /// What one menu row says *beyond* its id: the action, in words.

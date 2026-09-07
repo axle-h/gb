@@ -71,6 +71,22 @@ full-playthrough = []
 # essentially all of the difference: 2306 wild battles to bring three Pokémon to lv75.
 #   cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
 hall-of-fame = []
+# **C2** — a run played to a milestone through the deployed `LlmPolicy` against an in-process mock
+# endpoint, with the battles won by a god party and decided by a battle script. It is gated because
+# it is a *measurement* as much as a test: `godmode_turn_cost` prints milliseconds per request and
+# requests per game-minute, and that number is what decides whether the god run can ever replace
+# `full_playthrough` as the pre-push gate (`docs/coverage-plan.md` §4.2). The machinery under it —
+# `Intent`, `ScriptedBrain`, the cheat sidecar, the coverage log — is all default tier.
+#   cargo test --release --features godmode --bin gb -- godmode --nocapture
+godmode = []
+# **C3** — every reachable action in the game, taken once, with a verdict on each. Driven through
+# the deployed `LlmPolicy` against an in-process mock endpoint by `coverage::ExploringBrain`, which
+# reads the rendered action menu and nothing else. It **fails on any defect** — a row the menu
+# offered that the agent could not then execute, or a watchdog firing — and writes the whole table
+# to `target/test-artifacts/coverage/` either way. Its first deliverable is a number: ids discovered
+# per game-minute. The oracle under it (`coverage::CoverageLog`) is default tier.
+#   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+coverage-tests = []
 # The stall hunt: hours of `RandomPolicy` play, failing if the agent ever goes longer than
 # `GB_STUCK_TIMEOUT_SECS` without reaching a decision point — i.e. exactly when a deployed
 # `LlmPolicy`'s watchdog would fire. A random decider explores the agent's state machine far more

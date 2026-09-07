@@ -58,6 +58,20 @@ use crate::ram::{RAM, ROM};
 pub(crate) mod fixture;
 pub use fixture::TestFixture;
 
+/// **C1** — the cheats a driver applies between agent ticks, so a coverage run can reach the whole
+/// game without playing eight gyms first. See `docs/coverage-plan.md` §3.
+pub(crate) mod cheats;
+
+/// **C3** — the verdict oracle: what a run touched and whether the agent could carry it out. Over
+/// the agent's event stream, so it works under any driver. See `docs/coverage-plan.md` §5.2.
+pub(crate) mod coverage;
+
+/// **C2** — a run through `LlmPolicy` that cannot lose, and what one of its turns costs. The
+/// machinery is default-tier; the measured run is behind `--features godmode`. See
+/// `docs/coverage-plan.md` §4.
+#[cfg(feature = "llm")]
+pub(crate) mod godmode;
+
 mod mechanics;
 mod early_game;
 /// Turns abandoned mid-flight because the game asked a different question. See the module header.
@@ -67,6 +81,11 @@ mod interruption;
 /// a few seconds of game time.
 #[cfg(feature = "llm")]
 mod llm;
+/// **C0** — the harness `llm` and everything after it is built on: a mock endpoint with a pluggable
+/// brain, the faults that have ended deployed runs, and the assembled stack with a run directory and
+/// a restart. See `docs/coverage-plan.md` §2.
+#[cfg(feature = "llm")]
+pub(crate) mod llm_harness;
 mod vermilion;
 mod celadon;
 mod fuchsia;

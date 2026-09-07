@@ -277,6 +277,19 @@ impl History {
         history
     }
 
+    /// Shorten the conversation back to `len` messages, for a turn that produced no completion at
+    /// all — see [`crate::llm::worker::Worker::roll_back_failed_turn`].
+    ///
+    /// ⚠️ **The one shortening that is not a compaction, and the only one that is safe without a
+    /// [`Self::note_compaction`].** Everything above `len` was appended by the turn that is being
+    /// abandoned, so by construction none of it has reached the log: the flush happens at the end of
+    /// a turn and this happens in the middle of one. The `min` below is therefore expected to be a
+    /// no-op and is here so that a future caller cannot make it one that matters silently.
+    pub fn rollback_to(&mut self, len: usize) {
+        self.messages.truncate(len);
+        self.logged = self.logged.min(self.messages.len());
+    }
+
     /// What was recovered, if anything. Drives `Accounting::resumed` and the notice on the page.
     pub fn restored(&self) -> Option<&Restored> {
         self.restored.as_ref()
@@ -337,10 +350,11 @@ impl History {
     }
 
     fn flush_log(&mut self, turn: u64) {
-        // ⚠️ `DerefMut` hands the worker the vector itself, and one path in `decide` pops from it.
-        // A watermark past the end would panic the slice below, so it is clamped rather than
-        // trusted — and asserted in debug, since a *silent* clamp would hide a pop that dropped a
-        // message the log never received.
+        // ⚠️ `DerefMut` hands the worker the vector itself, and one path in `decide` shortens it —
+        // `Worker::roll_back_failed_turn`, which puts a turn that produced no completion back the
+        // way it found the conversation. A watermark past the end would panic the slice below, so it
+        // is clamped rather than trusted — and asserted in debug, since a *silent* clamp would hide
+        // a rollback that dropped a message the log never received.
         debug_assert!(self.logged <= self.messages.len(), "the log watermark ran past the history");
         self.logged = self.logged.min(self.messages.len());
         let mut fresh = self.messages[self.logged..].to_vec();
