@@ -420,6 +420,17 @@ price.
   `AgentEvent::StartedOverworldAction` carries it so something reading the event stream can key on
   the same string the model chose from. ⚠️ **It is not in the prose**: `Display` is a sentence, the
   id is a key.
+- ⭐ **A sprite id has no coordinate — `ViridianCity:OldMan`, two fields where every other id has
+  three** — because the square it used to carry was the *approach tile*, which `actions()` re-picks
+  as the nearest of four every time the player moves. One object minted an id per square it could be
+  faced from: the C3 sweep of 2026-09-08 held 270 sprite ids for 136 objects, 26% of the whole
+  frontier redundant, eleven of them for one Viridian City Youngster. It is the boulder-goal fault
+  one layer over and it has the same answer — key on what does not move. Two facts hold it up, both
+  asserted in `actions::tests`: `map + name` is unique across all 208 maps (919 sprites, no repeat),
+  and anything reading an id takes the map off the front and the kind off the back rather than
+  counting fields. ⚠️ It also removed a *misreading*: the coordinate was the player's square and a
+  deployed run read it as the object's, playing the Poké Flute at empty ground three times
+  ([deployed-run-defects](deployed-run-defects.md), Route 16 Snorlax).
 - ⚠️ **Only the *start* of a walk carries an id, so a reader pairs positionally**: a start opens an
   action and the next `OverworldActionCompleted`, `OverworldActionAborted`,
   `OverworldInteractionCompleted` or `OverworldPickupFailed` closes it. The terminal events carry a

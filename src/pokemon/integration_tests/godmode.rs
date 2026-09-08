@@ -381,7 +381,7 @@ mod tests {
              \n\
              - `ViridianCity:33,20:Connection` — go to Route2, arriving at (10, 71)\n\
              - `ViridianCity:23,26:Warp` — take the warp to ViridianMart, arriving at (3, 7)\n\
-             - `ViridianCity:21,25:OldMan` — talk to Old Man\n",
+             - `ViridianCity:OldMan` — talk to Old Man\n",
         );
 
         assert_eq!(request.location().as_deref(), Some("ViridianCity"));
@@ -391,7 +391,7 @@ mod tests {
         );
         assert_eq!(
             Intent::Row("OldMan").resolve(&request).as_deref(),
-            Some("ViridianCity:21,25:OldMan"),
+            Some("ViridianCity:OldMan"),
         );
         assert_eq!(
             Intent::Says("ViridianMart").resolve(&request).as_deref(),

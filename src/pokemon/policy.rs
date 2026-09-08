@@ -376,16 +376,22 @@ impl RandomPolicy {
         Self { explore: true, ..Self::seeded(seed) }
     }
 
-    /// The key an action is remembered by: the same shape as the id the model chooses from
-    /// (`PalletTown:5,6:Warp`), built here rather than borrowed from `llm::tools::overworld_id`
-    /// because that module is behind the `llm` feature and this one is not.
+    /// The key an action is remembered by: the id the model chooses from (`PalletTown:5,6:Warp`).
+    ///
+    /// ⚠️ **It was a *copy* of [`OverworldAction::id`] rather than a call to it**, on the argument
+    /// that `llm::tools::overworld_id` is behind the `llm` feature and this module is not — which is
+    /// true of that wrapper and was never true of `id` itself, which lives in
+    /// `pokemon::actions` and is always compiled. The copy then drifted, silently and in exactly the
+    /// way `id`'s own ⚠️ warns about: it keyed a boulder goal on the square the first shove is made
+    /// from, so every push minted a fresh key and the novelty weight below never suppressed a
+    /// puzzle the walker was going round in circles on. Two spellings of an id is two spellings of a
+    /// key; there is one spelling now.
     ///
     /// ⚠️ **The map has to be in it.** Coordinates repeat across maps, so without the prefix a warp
     /// at (5, 6) in Oak's lab and one at (5, 6) in Pallet Town would share a weight and suppress each
-    /// other — and those two are precisely the pair a walker bounces between.
+    /// other — and those two are precisely the pair a walker bounces between. `id` carries it.
     fn action_key(action: &OverworldAction) -> String {
-        format!("{}:{},{}:{}", action.map, action.destination.x, action.destination.y,
-                action.tile.id_kind())
+        action.id()
     }
 
     /// `EXPLORE_DECAY ^ (times this action appears in the window)`.
