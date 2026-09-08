@@ -22,7 +22,7 @@ across §4.5, §5.2.7, §5.3, §5.4, §6.1 and §7 and two of those are prose ra
 | **C0** | the LLM e2e harness | ✅ **built.** `integration_tests/llm_harness.rs`; `llm.rs` moved onto it; all seven faults have a test; the ⛔ 402 death loop of §2.2.1 is **fixed** — (a)–(d) below |
 | **C1** | the cheat tier | ✅ **built.** Four new `debug_*` primitives and `integration_tests/cheats.rs`; `play_path_contains_no_debug_ram_writes` still passes unchanged |
 | **C2** | the god run | ◐ **the machinery and the measurement.** `integration_tests/godmode.rs`: `Intent`, `ScriptedBrain`, the driver, and `godmode_turn_cost` behind `--features godmode`. **The run to the Hall of Fame is not built** — see §4.5 |
-| **C3** | the exploration | ◐ **the oracle, the frontier and the sweep loop.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`, a 30-second progress heartbeat and an honest stop reason. ~535 ids across **38 maps** a walk at ~48× real time; eleven faults found, nine fixed (§5.2.6, §5.2.8), two open (§5.2.7). ⚠️ **38 of 248 maps is the walk's ceiling today** and closing it is W2 — ⚠️ but take that baseline from a run rather than from this file, because §5.2.5's table quotes 41 from a sweep taken *before* the §5.2.6 fixes and the walk prints its own number. **Branch-point snapshots and the ROM cross-check are not built** |
+| **C3** | the exploration | ◐ **the oracle, the frontier and the sweep loop.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`, a 30-second progress heartbeat and an honest stop reason. ~535 ids across **38 maps** a walk at ~48× real time; eleven faults found, nine fixed (§5.2.6, §5.2.8), two open (§5.2.7). ⚠️ **38 of 248 maps is the walk's ceiling today** and closing it is W2 — ⚠️ but take that baseline from a run rather than from this file, because §5.2.5's table quotes 41 from a sweep taken *before* the §5.2.6 fixes and the walk prints its own number. **The ROM cross-check is built (§5.3); branch-point snapshots are not** |
 | **C4** | the battle matrix | ◐ **the audit is done and committed** — §6.0. Six cells exist nowhere, sixteen are proved under `DeterministicPolicy` only. No test written yet |
 
 ⚠️ **Where this plan was wrong is recorded rather than edited out** (§11.5). Two so far, both in §3.3
@@ -89,7 +89,6 @@ mentioned in the status table at all.
 | **The intent list to the Hall of Fame** — the rest of C2 | §4.5, acceptance §4.3 | `godmode` reaches `Map::HallOfFame` from `start-of-game-state.bin` with the intent list exhausted (not the agent wandering into the credits) and at least one compaction fired; prints ms/turn and total turns | **Large.** Six `PolicyStep` variants have no menu row behind them — each is a `llm::prompt` gap or a new `Intent`, one argument at a time |
 | **W1** — no `GameMode` for the title screen | §5.2.7 | A bare `PokemonAgent` (no `host.rs`) does not spend a budget offering overworld rows after the cartridge soft-resets. ⚠️ Not a `Map::HallOfFame` special case | Medium |
 | **W2** — the walk reaches 38 maps of 248 | §5.2.7 | Maps reached moves past the baseline **the walk itself prints**, not past a number in this file | Medium. A measurement is ~5 min of wall clock |
-| **The ROM cross-check** | §5.3 | A printed report: every warp in a map header that never once appeared as a row. A report, not an assertion | Small |
 | **Branch-point snapshots** | §5.4 | The five branches (starter, fossil, Hitmon*, Bike Voucher, the trades) each covered by snapshot × N under `--features regen-fixtures` | Medium |
 | **C4's six missing cells** | §6.0, §6.1 | One LLM-path test each: ball failure, run failure, run from something that cannot flee, trainer ball refused, an item with none left, the Safari counter expiring mid-battle, the old man's tutorial | Medium. All refusals, which is where §6 predicted the findings would be |
 | **C4's sixteen promotions** | §6.0, §6.1 | Each cell proved through `LlmPolicy` and the worker rather than `DeterministicPolicy`, or a committed row saying why not | **Large**, and §6.0 says this is the half with the findings in it |
@@ -663,8 +662,8 @@ Two defects, and only one of them is fatal:
   the landing a door actually deposits the player at, which is a change to routing that needs the
   leg chain re-verified behind it.
 
-⚠️ **What is not built**: §5.4's branch-point snapshots, §5.3's ROM cross-check, and the fixpoint
-actually being reached. The walk stops on a budget with the frontier open, which §9's last risk says
+⚠️ **What is not built**: §5.4's branch-point snapshots and the fixpoint actually being reached
+(§5.3's ROM cross-check has since been built). The walk stops on a budget with the frontier open, which §9's last risk says
 is the right way to fail — *cap the passes and report a non-empty frontier as a result rather than a
 hang* — but it means "every reachable action" is not yet proven, only "~355 of them, and counting".
 
@@ -905,12 +904,67 @@ and a deployed run read it as the object's:
 Flute at (27, 10) because the row said `Route16:27,10:Snorlax` while the Snorlax was on (26, 10).
 The row is `Route16:Snorlax` now and there is no second number to confuse with the first.
 
-### 5.3 The ROM tables, demoted to a cross-check
+### 5.3 ✅ The ROM tables, demoted to a cross-check — built 2026-09-08
 
 `read_warp_events`, `header.connections()` and `map.sprites()` do not define the universe (§0.1), but
 a warp in a map's header that **never once appeared as a row** is worth printing. It is either
-correctly gated, or a row the model is never offered — and the second is invisible today. A report,
-not an assertion.
+correctly gated, or a row the model is never offered — and the second was invisible.
+
+`coverage::rom_cross_check(mmu, offered_ids)` is that report, printed by `coverage_walk` after the
+walk stops and **asserting nothing**. It takes the set of ids the run was offered rather than the log
+itself, which keeps it a pure function of (ROM, ids) and lets
+`the_rom_cross_check_finds_a_door_that_was_never_offered` pin it in the **default tier** — the walk
+costs minutes, and the part that would rot is the arithmetic, not the walking.
+
+**What it checks, and only over maps the walk actually entered** — a warp on a map never visited is
+W2's ceiling, not a missing row:
+
+| | |
+|---|---|
+| warps | Every `warp_event` in the header, at the id `actions()` would mint for it. ⚠️ **Not the ROM's own coordinate**: `meta_tiles_base` shifts every square by the map's connection strips, so Pallet Town's Oak's Lab warp is `(12, 11)` in the table and `(12, 12)` in the id. Getting that shift wrong is the one way this report can lie, so the test states it |
+| sprites | `map.sprites()` against `{map}:{name}`. ⚠️ **Only possible since §5.2.8**: while a sprite id carried the player's approach square there was no single id to look up |
+| connections | Counted rather than matched, because a `Connection` id names the crossing tile and not the map it leads to |
+
+**A missing row is classified, because the raw list is mostly noise.** Three causes are named and set
+aside: a **sibling** warp leading to the same destination that *was* offered (`actions()` emits one
+row per unique destination, so the Mansion's four bottom exits are one door); a square with **no
+walkable sub-tile**, dropped from the grid on purpose; and a **toggleable object** — every item ball
+on a finished save is already in the bag. Boulders are counted apart too: `VictoryRoad1F:Boulder1` is
+a real row, but the same rock is offered as a `PushBoulder*` goal and facing it is not the decision
+anyone came for. What is left over is the part worth reading.
+
+**What a run of it says**, over the 38 maps of the sweep of 2026-09-08:
+
+```
+scope      38 maps the walk entered, of 248 in the game
+warps      131 in those headers; 18 never a row (14 the same door as one that was, 1 not on the grid)
+objects    166 in those sprite tables; 7 people never a row (15 toggleable objects and 8 boulders also, both expected)
+```
+
+⭐ **The three warps left over are W2's, and it found them without being told.** `Route4 (24, 5) →
+MtMoonB1F` and two `MtMoonB2F → MtMoonB1F` ladders come out as *"on the grid, no sibling, and never a
+row"* — which is exactly §5.2.7's account of why Kanto east of Pewter is unreachable, arrived at from
+the ROM rather than from a diagnosis. That is the strongest thing that can be said for the report:
+its first run reproduced the one finding there was something to check it against. The classification
+is carrying its weight too — 14 of the 18 are a door with a sibling that *was* offered, and quoting
+those as gaps would have buried the three that matter.
+
+**The seven people** are `Route4:CooltrainerFemale2`, `Route23`'s two Swimmers,
+`ViridianForest:Youngster4`, `MtMoonB2F`'s Rockets 2 and 3, and `MtMoonPokecenter:Clipboard`. Most sit
+in the same regions the three warps do, which is the same finding again; the Clipboard does not, and
+is the one genuinely new thread this report has pulled.
+
+⚠️ **It surfaced one thing §5.2.8 did not fix.** A `Connection` row's coordinate is the *nearest*
+crossing per adjacent map, so it moves with the player exactly as a sprite's used to: Viridian City
+carried **6 ids for 3 neighbours**, Pewter 5 for 2, Route 2 5 for 2, Route 3 5 for 2. It is not the same fix, because
+for a connection the coordinate is *meaningful* — `resolve_overworld`'s `connection_action` fallback
+exists precisely so a model can ask for a specific landing, and the Route 13 → 14 pocket is why. The
+row that is minted is the nearest one; the ids that accumulate name landings the menu never actually
+offered. Worth a work item, not a one-line fix.
+
+**Not done here**: which neighbour a `Connection` row was for cannot be recovered from the id, so the
+connection half is a count rather than a match. Carrying the `MetaTile` on a `CoverageLog` entry
+would close that, and would also let the report say which *specific* crossings went unoffered.
 
 ### 5.4 Branch points
 
@@ -944,6 +998,20 @@ iteration took, and there is a worker thread and a real socket in that loop. Fou
 defect the other two did not see. So the totals are an
 observation with a couple of per cent of noise on them, and *which* id fails is not reproducible by
 re-running: that is what the save state dropped at the moment of the defect is for.
+
+⚠️⚠️ **And "a couple of per cent" is true of `pallet-town-state.bin` and badly wrong for
+`postgame-phase0.bin`, which is what `coverage_walk` actually runs.** Two runs of *identical* code on
+2026-09-08, same command and same 6-game-hour budget, came out **38 maps / 365 ids / 352 turns,
+settled on the Hall of Fame** and **30 maps / 315 ids / 763 turns, cut off on the budget with the
+frontier still open**. The whole difference is Victory Road: the second run put 475 of its 763 turns
+into its three floors, because a Strength puzzle is a long walk that discovers nothing, and a walk
+that wanders in early never comes back out inside its budget. The Pallet Town figures do not
+transfer — that walk is *walled in* at Pewter and so has almost nothing to vary over.
+
+⚠️ **So W2's "A/B two runs of the same command" is not enough on this fixture.** A change that moved
+the number by eight maps would be indistinguishable from this. Anyone measuring W2 needs several runs
+a side, or a fixed seed, or a start fixture that cannot reach Victory Road — direction 1's regional
+sweeps would give the last of those for free, which is another argument for doing it first.
 
 ### 5.6 What "all nodes" costs
 
@@ -1062,7 +1130,7 @@ anything added.
 longer gate one another — every row of §0.5 is independently startable against code that exists:
 
 1. ✅ **W3** — done (§5.2.8), and it took the frontier from 510 ids to 365 without losing a map.
-2. **§5.3's cross-check**. Small, and it sharpens the oracle that scores everything else.
+2. ✅ **§5.3's cross-check** — done, and it printed W2's three Mt Moon doors without being told.
 3. **W1**. It is the only open item that is a defect in the *agent* rather than in the walk, so it
    is the one a deployed run could meet.
 4. **C4's six missing cells** (§6.0). Self-contained, and the audit already says exactly what each

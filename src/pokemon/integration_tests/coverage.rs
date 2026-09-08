@@ -433,6 +433,44 @@ mod tests {
         AgentEvent::StartedOverworldAction { destination: MetaTile::Grass, id: id.to_string() }
     }
 
+    /// ⭐ **§5.3's cross-check, pinned without a sweep.** The report itself only ever runs at the
+    /// end of a walk that costs minutes, so the thing that would rot — the arithmetic that turns a
+    /// ROM warp entry into the id `actions()` would mint for it — is exercised here instead. Pallet
+    /// Town is the case to hold it to: three warps in the header, one connection strip on its north
+    /// edge, and every coordinate checkable by hand against `pokered/data/maps/objects/PalletTown.asm`.
+    #[test]
+    fn the_rom_cross_check_finds_a_door_that_was_never_offered() {
+        let gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        let mmu = gb.core().mmu();
+
+        // Oak's lab was offered and nothing else was. ⚠️ The id has to be the one `actions()` would
+        // mint, which is **not** the coordinate in the ROM's own table: Pallet Town has a north
+        // connection, so every square is shifted one row down by the strip
+        // (`MapMetadata::dimensions`). Oak's lab sits at (12, 11) in the header and (12, 12) on the
+        // grid — see `map_metadata`'s own Pallet Town warp assertions for the other two. Getting
+        // this shift wrong is the one way this report can lie, which is why the test states it.
+        let offered: std::collections::BTreeSet<String> =
+            ["PalletTown:12,12:Warp".to_string()].into_iter().collect();
+        let report = rom_cross_check(mmu, &offered);
+
+        assert!(report.contains("1 maps the walk entered"), "{report}");
+        // Red's house and the rival's house are both real doors that this run never saw.
+        assert!(report.contains("(5, 6) → RedsHouse1F"), "{report}");
+        assert!(report.contains("(13, 6) → BluesHouse"), "{report}");
+        // And the one that *was* offered is not in the list.
+        assert!(!report.contains("→ OaksLab"), "the offered door must not be reported: {report}");
+
+        // ⚠️ **A map the walk never entered is not in the report at all** — that is W2's ceiling
+        // rather than a missing row, and mixing the two would bury the finding under 200 maps.
+        assert!(!report.contains("ViridianCity"), "{report}");
+
+        // Nothing was offered anywhere: the scope is empty and the report says so rather than
+        // listing the whole game.
+        let nothing = rom_cross_check(mmu, &std::collections::BTreeSet::new());
+        assert!(nothing.contains("0 maps the walk entered"), "{nothing}");
+        assert!(nothing.contains("nothing to report"), "{nothing}");
+    }
+
     fn aborted(reason: OverworldActionAbortedReason) -> AgentEvent {
         AgentEvent::OverworldActionAborted { destination: MetaTile::Grass, reason, at: None }
     }
@@ -1168,8 +1206,173 @@ fn coverage_walk_of_the_finished_game() {
         boxed_at = boxed_at.join("\n            "),
     );
 
+    // Both taken as owned values here, so the borrow of the run's log ends before the cross-check
+    // below reaches back into the same run for its MMU.
+    let offered_ids: std::collections::BTreeSet<String> =
+        log.entries().map(|entry| entry.id.clone()).collect();
     let defects = log.defects();
+
+    // §5.3, and it is printed rather than asserted on purpose: the ROM's tables are a cross-check,
+    // not the universe (§0.1). ⚠️ Over the ids this run was offered, so it reports on the maps this
+    // walk reached and no others.
+    println!("{}", rom_cross_check(run.fixture().gb.core().mmu(), &offered_ids));
+
     assert!(defects.is_empty(), "the walk found {} defects:\n  {}", defects.len(), defects.join("\n  "));
     assert!(discovered > 10, "only {discovered} ids were ever offered; the walk did not happen");
 }
 
+
+/// **§5.3 — the ROM's own tables, as a cross-check rather than as the universe.**
+///
+/// The plan settled early (§0.1) that `read_warp_events`, `header.connections()` and
+/// `map.sprites()` do **not** define what the walk should have covered: what the model may choose is
+/// what `MetaTileMap::actions` mints, and a row correctly withheld — a tree with no Cut, a boulder
+/// with no Strength, an item already in the bag — is the agent working rather than a gap. So this
+/// asserts nothing. It answers one question the frontier cannot ask itself: *is there something in
+/// the ROM that never once appeared as a row?* That is either a gate doing its job, or a decision
+/// the model is never offered and nobody can see — and the second is invisible today.
+///
+/// ⚠️ **Only over maps the walk actually entered.** A warp on a map never visited is W2's ceiling,
+/// not a missing row, and mixing the two would bury the finding under two hundred maps of "never
+/// went there".
+///
+/// ⚠️ **A missing row is classified where it can be, because the raw list is mostly noise.**
+/// `actions()` emits one warp row per unique *destination*, so the Mansion's four bottom exits are
+/// one door and three of them are correctly never rows; a warp square with no walkable sub-tile is
+/// dropped on purpose (`meta_tiles_base`); and every item ball on a finished save is `hidden`,
+/// having already been picked up. Those three are named and set aside, and what is left over is the
+/// part worth reading.
+///
+/// ⚠️ **Sprite ids are matched exactly, which they could not have been before 2026-09-08.** A sprite
+/// row is keyed on `map + name` now ([`OverworldAction::id`](crate::pokemon::actions::OverworldAction::id)),
+/// so "did this object ever appear" is one lookup. While the id carried the player's approach
+/// square there was no id to look up: the same object appeared under up to eleven of them.
+pub fn rom_cross_check(
+    mmu: &crate::mmu::MMU,
+    offered: &std::collections::BTreeSet<String>,
+) -> String {
+    use crate::pokemon::map::Map;
+    use crate::pokemon::map_metadata::{MapMetadataCache, MapMetadataReader};
+    use crate::pokemon::tile::MetaTile;
+    use strum::IntoEnumIterator;
+
+    let by_name: std::collections::HashMap<String, Map> =
+        Map::iter().map(|m| (m.to_string(), m)).collect();
+    let visited: std::collections::BTreeSet<Map> = offered
+        .iter()
+        .filter_map(|id| id.split(':').next())
+        .filter_map(|name| by_name.get(name).copied())
+        .collect();
+
+    let cache = MapMetadataCache::default();
+    let mut lines: Vec<String> = Vec::new();
+    let (mut warps, mut warps_missing, mut same_door, mut impassable) = (0, 0, 0, 0);
+    let (mut objects, mut npcs_missing, mut gated_missing, mut boulders_missing) = (0, 0, 0, 0);
+    let mut unreadable: Vec<String> = Vec::new();
+
+    for map in &visited {
+        let map = *map;
+        let metadata = match cache.read_map(mmu, map) {
+            Ok(metadata) => metadata,
+            // A handful of maps are drawn from RAM rather than from the ROM's block list
+            // (`map_uses_runtime_blocks`). Named rather than skipped silently: an absence in this
+            // report has to mean "nothing missing", never "not looked at".
+            Err(why) => { unreadable.push(format!("{map}: {why}")); continue }
+        };
+        let dims = metadata.dimensions();
+        let was_offered = |id: &str| offered.contains(id);
+        let mut said: Vec<String> = Vec::new();
+
+        // Where a warp *would* be minted: the ROM's square, shifted by this map's connection strips,
+        // exactly as `meta_tiles_base` places it.
+        let square = |warp: &crate::pokemon::tile::WarpEvent| {
+            (warp.position.x as usize + dims.west_extra, warp.position.y as usize + dims.north_extra)
+        };
+        for warp in &metadata.warp_events {
+            warps += 1;
+            let (mx, my) = square(warp);
+            if was_offered(&format!("{map}:{mx},{my}:Warp")) { continue }
+            warps_missing += 1;
+            // The destination is what `actions()` dedupes on, so a sibling that leads to the same
+            // place and *was* offered is the reason this one is not a row.
+            let sibling = metadata.warp_events.iter()
+                .filter(|other| other.destination_map == warp.destination_map
+                             && other.destination_position == warp.destination_position)
+                .map(square)
+                .find(|(ox, oy)| (*ox, *oy) != (mx, my) && was_offered(&format!("{map}:{ox},{oy}:Warp")));
+            let on_grid = metadata.meta_tiles_base
+                .get(mx + my * dims.full_width())
+                .copied()
+                .unwrap_or(MetaTile::Obstacle);
+            match (sibling, on_grid) {
+                (Some((ox, oy)), _) => { same_door += 1;
+                    said.push(format!("({mx}, {my}) → {}: the same door as ({ox}, {oy}), which was offered",
+                                      warp.destination_map)) }
+                (None, tile) if !matches!(tile, MetaTile::Warp { .. }) => { impassable += 1;
+                    said.push(format!("({mx}, {my}) → {}: no walkable sub-tile, so it is not on the grid at all",
+                                      warp.destination_map)) }
+                (None, _) => said.push(format!(
+                    "({mx}, {my}) → {}: ⚠️ **on the grid, no sibling, and never a row**",
+                    warp.destination_map)),
+            }
+        }
+
+        for sprite in map.sprites() {
+            objects += 1;
+            let id = format!("{map}:{}", MetaTile::Sprite(sprite.name).id_kind());
+            if was_offered(&id) { continue }
+            match sprite.hidden_object_id {
+                // A toggleable object: an item ball already in the bag, or something a script has
+                // not put on the map yet. On the finished save the walk starts from, most of the
+                // game's item balls are in this state and none of them is a finding.
+                Some(_) => gated_missing += 1,
+                // ⚠️ **A boulder is a sprite and does get a talk row** — `VictoryRoad1F:Boulder1` is
+                // one, minted by `actions()`'s sprite scan like any other — so it belongs in this
+                // check rather than out of it. It is counted apart because facing a boulder is not
+                // the decision anyone came for: the same rock is offered as a `PushBoulder*` goal,
+                // and a walk that took the goal and never faced the rock has missed nothing.
+                None if sprite.name.starts_with("Boulder") => boulders_missing += 1,
+                None => { npcs_missing += 1;
+                    said.push(format!("{:?}: ⚠️ **a person on this map who was never a row**", sprite.name)) }
+            }
+        }
+
+        // Connections are counted rather than matched: a `Connection` id names the crossing tile
+        // and not the map it leads to, so which neighbour a row was for cannot be recovered from
+        // the id alone. ⚠️ The count going the *other* way is a finding of its own —
+        // `actions()` mints one crossing per adjacent map and picks the nearest, so the coordinate
+        // moves with the player exactly as a sprite's used to (§5.2.8). Route 3 carried seven
+        // Connection ids for three neighbours on the sweep of 2026-09-08.
+        let neighbours = [&metadata.map_header.north_connection, &metadata.map_header.south_connection,
+                          &metadata.map_header.east_connection,  &metadata.map_header.west_connection]
+            .iter().filter(|c| c.is_some()).count();
+        let prefix = format!("{map}:");
+        let rows = offered.iter()
+            .filter(|id| id.starts_with(&prefix) && id.rsplit(':').next() == Some("Connection"))
+            .count();
+        if neighbours > 0 && rows < neighbours {
+            said.push(format!("connections: {rows} row(s) for {neighbours} neighbour(s) in the header"));
+        } else if rows > neighbours {
+            said.push(format!("connections: {rows} ids for {neighbours} neighbour(s) — the crossing \
+                               coordinate is moving with the player (§5.2.8)"));
+        }
+
+        if !said.is_empty() {
+            lines.push(format!("  {map}\n    {}", said.join("\n    ")));
+        }
+    }
+
+    format!(
+        "\n──── §5.3: the ROM's tables against what was offered ────\n\
+         scope      {} maps the walk entered, of {} in the game\n\
+         warps      {warps} in those headers; {warps_missing} never a row \
+         ({same_door} the same door as one that was, {impassable} not on the grid)\n\
+         objects    {objects} in those sprite tables; {npcs_missing} people never a row \
+         ({gated_missing} toggleable objects and {boulders_missing} boulders also, both expected)\n\
+         unreadable {}\n\
+         {}\n",
+        visited.len(), Map::iter().count(),
+        if unreadable.is_empty() { "none".to_string() } else { unreadable.join("; ") },
+        if lines.is_empty() { "  nothing to report".to_string() } else { lines.join("\n") },
+    )
+}

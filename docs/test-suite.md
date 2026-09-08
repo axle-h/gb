@@ -28,8 +28,15 @@ cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
 # mock, with a god party and a battle script. Prints ms per turn and turns per game-minute. ~5 s.
 cargo test --release --features godmode --bin gb -- godmode --nocapture
 
-# C3's walk: 90 game-minutes of exhaustive exploration from Pallet Town through the deployed
-# LlmPolicy, with a god party. Fails on any defect and writes the whole table either way. ~95 s.
+# C3's walk: 90 game-minutes of exhaustive exploration through the deployed LlmPolicy, from a
+# *finished* save with a god party and every key item. Fails on any defect, writes the whole table
+# either way, and then prints §5.3's ROM cross-check — every warp and object in the headers of the
+# maps it entered that never once appeared as a row. ~95 s.
+# ⚠️ 90 game-minutes is a smoke budget. A coverage run wants GB_COVERAGE_MINUTES=360 and
+# GB_COVERAGE_PATIENCE high (patience, not the budget, is what has stopped every sweep), which
+# costs 3-7 min of wall clock. ⚠️ And two runs of identical code differ by more than noise on this
+# fixture — 38 maps and 30 maps on the same day — so a single pair of runs cannot A/B a change; see
+# coverage-plan §5.5.
 cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 
 # The stall hunt: 40 min of game time under RandomPolicy from each of 26 starting states, in
