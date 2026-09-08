@@ -39,6 +39,14 @@ cargo test --release --features godmode --bin gb -- godmode --nocapture
 # coverage-plan §5.5.
 cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 
+# ⭐ The same walk from every region, and the union of what they reach. One start cannot reach
+# Kanto — see coverage-plan §5.2.7 W2 — so `GB_COVERAGE_START` picks one of eight committed
+# finished-game fixtures (`phase0` cerulean vermilion lavender celadon saffron fuchsia cinnabar) and
+# `all` walks each in turn and prints the union. ⚠️ `all` spends GB_COVERAGE_MINUTES **per region**,
+# so the coverage budget above is 40 min of wall clock rather than 5; for a measurement run the eight
+# in parallel, one per directory, and union the walk-*.tsv files.
+GB_COVERAGE_START=all cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+
 # The stall hunt: 40 min of game time under RandomPolicy from each of 26 starting states, in
 # parallel. ~39 s each, about 5.5 min of wall clock on 16 threads.
 cargo test --release --features soak-tests --bin gb -- soak --nocapture

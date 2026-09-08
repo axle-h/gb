@@ -429,6 +429,56 @@ mod tests {
     use super::*;
     use crate::pokemon::tile::MetaTile;
 
+    /// ⭐ **Every regional start stands where its row says, on a game the cartridge finished.**
+    ///
+    /// A [`Start`] contributes exactly one thing — the square the walk begins on — so a fixture
+    /// regenerated onto a different map turns a regional sweep into a duplicate of another one, and
+    /// nothing else in the suite would notice: the walk would run, settle, and report a perfectly
+    /// healthy number for somewhere it had already been. This is the check, and it is in the
+    /// **default** tier because the sweep it protects costs minutes and is behind a feature.
+    ///
+    /// ⚠️ **`hall_of_fame_teams` is the part that is not cosmetic.** §5.2.5: badges are a byte a
+    /// cheat can write and the gates that actually shut Kanto read *event flags*, which only the
+    /// cartridge's own scripts set. A start whose game was never finished walls its walk in at
+    /// Pewter exactly as the Pallet Town sweeps were, and would look like a bad region rather than
+    /// a bad fixture.
+    #[test]
+    fn every_coverage_start_stands_where_it_says_on_a_finished_game() {
+        use crate::pokemon::integration_tests::fixture::TestFixture;
+
+        let mut names: Vec<&str> = COVERAGE_STARTS.iter().map(|start| start.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), COVERAGE_STARTS.len(), "two starts share a name: {names:?}");
+        assert_eq!(
+            COVERAGE_STARTS.first().map(|start| start.name),
+            Some("phase0"),
+            "`phase0` is the default and every figure in the plan was taken from it",
+        );
+
+        let mut maps = std::collections::BTreeSet::new();
+        for start in COVERAGE_STARTS {
+            let mut fixture =
+                TestFixture::new(start.state, std::time::Duration::from_mins(1), vec![]);
+            let state = fixture.game_state();
+            assert_eq!(
+                state.map.map, start.map,
+                "the {} start stands on {:?}, not the {:?} its row claims",
+                start.name, state.map.map, start.map,
+            );
+            assert!(
+                state.hall_of_fame_teams > 0,
+                "the {} start is not a finished game, so the event gates §5.2.5 is about are shut",
+                start.name,
+            );
+            assert!(
+                maps.insert(state.map.map),
+                "two starts stand on {:?}, so one of them is a wasted sweep",
+                state.map.map,
+            );
+        }
+    }
+
     fn started(id: &str) -> AgentEvent {
         AgentEvent::StartedOverworldAction { destination: MetaTile::Grass, id: id.to_string() }
     }
@@ -996,6 +1046,113 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
     }
 }
 
+/// ⭐ **W2's direction 1 — where a walk starts is a knob, because no single walk can reach Kanto.**
+///
+/// Every sweep from `postgame-phase0.bin` settles in north-west Kanto plus Victory Road: Cerulean,
+/// Vermilion, Lavender, Celadon, Fuchsia, Saffron and Cinnabar are never entered at all. Two
+/// different things do that, and `docs/coverage-plan.md` §5.2.7 spent a while conflating them.
+///
+/// ⭐ **The walk stops because it *wins*.** Seven of eight identical walks halt at exactly 38 maps
+/// on [`ExploringBrain::reached_the_end`]: the god party's way out of Viridian is Route 22 → Route
+/// 23 → Victory Road → the Indigo Plateau, so it meets the Elite Four before it meets Cerulean, and
+/// beating them ends the cartridge. No budget moves that, because there is no world left to walk.
+///
+/// ⚠️ **And separately, east is shut.** Mt Moon B1F's regions are entry-dependent, so three of its
+/// eight warps are never in the menu to be chosen, and the brain's frontier cannot steer toward a
+/// map it has no id for — a walk that misses the Plateau still does not get past Route 4.
+///
+/// So the walk is given somewhere else to start. Each of these is a **finished game** — the credits
+/// have rolled, so every gate is open because the cartridge opened it, which is the whole reason
+/// §5.2.5 abandoned Pallet Town and §1.2 rules out writing the event flags by hand.
+///
+/// ⚠️ **The party and the bag do not come from the fixture and must not be read into this table.**
+/// `Cheats::default()` installs the god party (Cut/Surf/Strength/Flash and Fly) and
+/// `with_key_items` stocks the bag, so what a start contributes is one thing only: *where the
+/// player is standing*. That is what makes the table cheap — any postgame fixture would do, and
+/// these are chosen for their map and nothing else.
+///
+/// ⚠️ **`phase0` is first and is the default, and its name is the fixture's rather than its
+/// region's.** Every measurement in the plan is "the phase0 walk", and renaming it here would make
+/// a baseline taken before this change impossible to line up against one taken after it.
+pub struct Start {
+    /// What `GB_COVERAGE_START` names it by.
+    pub name: &'static str,
+    /// The committed fixture. ⚠️ Never a state the walk writes: exploration is destructive, so a
+    /// start is a file in the tree that a sweep can be re-run against, not a checkpoint.
+    pub state: &'static [u8],
+    /// Where it stands, asserted by [`every_coverage_start_stands_where_it_says_on_a_finished_game`]
+    /// in the **default** tier. The map is the entire content of a start, so a fixture regenerated
+    /// onto a different square is a regional sweep quietly becoming a duplicate of another one.
+    pub map: crate::pokemon::map::Map,
+}
+
+/// The regional starts, one per region the `phase0` walk never reaches, plus `phase0` itself.
+///
+/// ⚠️ **Cerulean has no city fixture and Route 5 is the stand-in.** Nothing in the postgame chain
+/// ends inside Cerulean City; Route 5 runs south out of it to Saffron's north gate, so the walk
+/// starts one connection from Cerulean and one gate from Saffron.
+pub const COVERAGE_STARTS: &[Start] = &[
+    Start {
+        name: "phase0",
+        state: include_bytes!("../data/postgame-phase0.bin"),
+        map: crate::pokemon::map::Map::ViridianPokecenter,
+    },
+    Start {
+        name: "cerulean",
+        state: include_bytes!("../data/postgame-daycare.bin"),
+        map: crate::pokemon::map::Map::Route5,
+    },
+    Start {
+        name: "vermilion",
+        state: include_bytes!("../data/postgame-farfetchd.bin"),
+        map: crate::pokemon::map::Map::VermilionCity,
+    },
+    Start {
+        name: "lavender",
+        state: include_bytes!("../data/postgame-sweep-lavender.bin"),
+        map: crate::pokemon::map::Map::Route10,
+    },
+    Start {
+        name: "celadon",
+        state: include_bytes!("../data/postgame-game-corner.bin"),
+        map: crate::pokemon::map::Map::CeladonCity,
+    },
+    Start {
+        name: "saffron",
+        state: include_bytes!("../data/postgame-silph-floors.bin"),
+        map: crate::pokemon::map::Map::SaffronCity,
+    },
+    Start {
+        name: "fuchsia",
+        state: include_bytes!("../data/postgame-safari.bin"),
+        map: crate::pokemon::map::Map::FuchsiaCity,
+    },
+    Start {
+        name: "cinnabar",
+        state: include_bytes!("../data/postgame-seel.bin"),
+        map: crate::pokemon::map::Map::CinnabarIsland,
+    },
+];
+
+/// What one walk came back with, so a run of several can be summed without keeping eight logs alive.
+///
+/// ⚠️ **`maps` and `ids` are sets rather than counts, because the union is the whole point.** Eight
+/// walks that each reach 30 maps have reached somewhere between 30 and 240 of them, and only the
+/// sets say which.
+#[cfg(feature = "coverage-tests")]
+struct WalkOutcome {
+    name: &'static str,
+    ids: std::collections::BTreeSet<String>,
+    maps: std::collections::BTreeSet<String>,
+    defects: Vec<String>,
+    turns: usize,
+    game_time: std::time::Duration,
+    wall: std::time::Duration,
+    /// The line the walk printed about why it stopped, kept so the summary of a multi-region sweep
+    /// can say which regions settled and which were cut off.
+    stopped: String,
+}
+
 /// **C3's walk.** Every reachable action from a starting save, taken once, with a verdict on each.
 ///
 /// ⚠️ **Its first deliverable is a number, not a pass**: ids discovered per game-minute, and the
@@ -1005,15 +1162,14 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
 /// ⚠️ **It fails on any `defect`**, which is the whole point of the verdict oracle: a row the menu
 /// offered and the agent could not then execute, or a watchdog firing. A `blocked` is not a failure
 /// until it repeats — being stopped is how this game says almost everything.
+///
+/// ⭐ **`GB_COVERAGE_START` picks where it starts** — a name from [`COVERAGE_STARTS`], or `all` for
+/// one walk per region and the union of what they reached. See [`Start`] for why one walk is not
+/// enough. The default is `phase0`, which is the sweep every number in the plan was taken from.
 #[test]
 #[cfg(feature = "coverage-tests")]
 fn coverage_walk_of_the_finished_game() {
-    use crate::pokemon::integration_tests::cheats::Cheats;
-    use crate::pokemon::integration_tests::llm_harness::LlmRun;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    /// How much game time this walk may spend, in game-minutes, from `GB_COVERAGE_MINUTES`.
+    /// How much game time **each** walk may spend, in game-minutes, from `GB_COVERAGE_MINUTES`.
     ///
     /// ⚠️ **A bound, not a target, and it is `min`'d against the fixture's own cap deliberately.**
     /// §9's last risk is that the fixpoint keeps discovering rows and the walk never terminates —
@@ -1025,10 +1181,11 @@ fn coverage_walk_of_the_finished_game() {
     /// the rest of the world is a matter of game time and nothing else: the emulator runs at ~56x,
     /// so an hour of wall clock buys about 56 game-hours. Set `GB_COVERAGE_MINUTES` for a real
     /// sweep; the committed default stays small so the tier is runnable.
+    ///
+    /// ⚠️ **It is per walk, not per run.** `GB_COVERAGE_START=all` spends it eight times over.
     let minutes: u64 = std::env::var("GB_COVERAGE_MINUTES").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90);
-    let budget = Duration::from_mins(minutes);
 
     // Turns with nothing new before the frontier is called settled. Generous: a walk that has just
     // crossed into a new building spends several turns on rows it has already seen.
@@ -1043,6 +1200,97 @@ fn coverage_walk_of_the_finished_game() {
     let patience: usize = std::env::var("GB_COVERAGE_PATIENCE").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or((60 * minutes.max(90) / 90) as usize);
+
+    // How long **each** walk may take in wall clock, as opposed to game time. It was
+    // `60 + minutes * 3` inline, which quietly assumes the agent manages about 20x real time; a
+    // sweep that runs slower than that is cut off having covered a fraction of what it was asked
+    // for, and before this printed a reason it looked exactly like a sweep that had finished.
+    let wall_secs: u64 = std::env::var("GB_COVERAGE_WALL_SECS").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60 + minutes * 3);
+
+    // ⚠️ **An unknown name is a failure rather than a fallback to the default.** A typo that
+    // silently walked `phase0` would report the baseline under another region's name, which is the
+    // one way this knob can produce a number that is wrong rather than merely disappointing.
+    let wanted = std::env::var("GB_COVERAGE_START").unwrap_or_else(|_| "phase0".to_string());
+    let starts: Vec<&Start> = match wanted.as_str() {
+        "all" => COVERAGE_STARTS.iter().collect(),
+        name => vec![COVERAGE_STARTS
+            .iter()
+            .find(|start| start.name == name)
+            .unwrap_or_else(|| panic!(
+                "GB_COVERAGE_START={name:?} names no start; the table holds {}",
+                COVERAGE_STARTS.iter().map(|s| s.name).collect::<Vec<_>>().join(", ")))],
+    };
+
+    let outcomes: Vec<WalkOutcome> = starts
+        .iter()
+        .map(|start| walk_from(start, minutes, patience, wall_secs))
+        .collect();
+
+    // ⭐ **The union is W2's number**, and it is only meaningful when more than one walk ran — a
+    // single-region run prints its own figures above and this would just repeat them.
+    if outcomes.len() > 1 {
+        let maps: std::collections::BTreeSet<&String> =
+            outcomes.iter().flat_map(|o| o.maps.iter()).collect();
+        let ids: std::collections::BTreeSet<&String> =
+            outcomes.iter().flat_map(|o| o.ids.iter()).collect();
+        let rows: Vec<String> = outcomes
+            .iter()
+            .map(|o| format!(
+                "  {:<10} {:>4} maps {:>5} ids {:>6} turns  {:>5.0}s wall  {}",
+                o.name, o.maps.len(), o.ids.len(), o.turns, o.wall.as_secs_f64(), o.stopped))
+            .collect();
+        // How much each region added that no other did. ⚠️ **Overlap is the thing to read here**:
+        // two starts whose walks reach the same places are one start and a wasted five minutes, and
+        // the table is what says which of these to keep.
+        let only: Vec<String> = outcomes
+            .iter()
+            .map(|o| {
+                let mine = o.maps.iter().filter(|map| {
+                    !outcomes.iter().any(|other| other.name != o.name && other.maps.contains(*map))
+                }).count();
+                format!("{}:{mine}", o.name)
+            })
+            .collect();
+        println!(
+            "\n════ C3: the regional sweep ════\n{}\n\
+             union      ⭐ {} maps of 248, {} ids, over {} walks\n\
+             only here  {}\n\
+             cost       {:?} of game time, {:?} of wall clock in total\n",
+            rows.join("\n"),
+            maps.len(),
+            ids.len(),
+            outcomes.len(),
+            only.join(" "),
+            outcomes.iter().map(|o| o.game_time).sum::<std::time::Duration>(),
+            outcomes.iter().map(|o| o.wall).sum::<std::time::Duration>(),
+        );
+    }
+
+    // ⚠️ **Every region walks before any assertion, and that is deliberate.** A defect in the first
+    // region would otherwise take the other seven's numbers with it, and those numbers are the
+    // deliverable; a sweep is minutes long and re-running it to see the rest is not a trade worth
+    // making. The failure below still names the region it came from.
+    let defects: Vec<String> = outcomes
+        .iter()
+        .flat_map(|o| o.defects.iter().map(|d| format!("[{}] {d}", o.name)))
+        .collect();
+    assert!(defects.is_empty(), "the walk found {} defects:\n  {}", defects.len(), defects.join("\n  "));
+    let discovered: usize = outcomes.iter().map(|o| o.ids.len()).sum();
+    assert!(discovered > 10, "only {discovered} ids were ever offered; the walk did not happen");
+}
+
+/// One walk, from one [`Start`]. Everything above it is knobs and arithmetic; this is the walk that
+/// every number in `docs/coverage-plan.md` §5.2 came out of.
+#[cfg(feature = "coverage-tests")]
+fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> WalkOutcome {
+    use crate::pokemon::integration_tests::cheats::Cheats;
+    use crate::pokemon::integration_tests::llm_harness::LlmRun;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let budget = Duration::from_mins(minutes);
 
     /// A handle on the brain, since the endpoint owns it.
     #[derive(Clone)]
@@ -1068,10 +1316,9 @@ fn coverage_walk_of_the_finished_game() {
     // unreachable, and the walk settled at 33 maps of 248 having spent 2 of its 12 game-hours.
     //
     // ⚠️ **And the fix is not to write that flag.** §1.2: setting `wEventFlags` desynchronises
-    // scripts from map objects and every stall found in such a save is a false positive.
-    // `postgame-phase0.bin` is the game *played* to the credits — eight badges, every gate opened by
-    // the cartridge itself, Cut/Surf/Strength and every key item in the bag, party healed.
-    let mut run = LlmRun::builder(include_bytes!("../data/postgame-phase0.bin"))
+    // scripts from map objects and every stall found in such a save is a false positive. Every
+    // entry in `COVERAGE_STARTS` is a game the cartridge itself played to the credits.
+    let mut run = LlmRun::builder(start.state)
         .named("coverage-walk")
         // Twice `BUDGET`, so the walk always stops on its own bound rather than on the fixture's
         // panic. The two are different failures and only one of them is a result.
@@ -1085,14 +1332,6 @@ fn coverage_walk_of_the_finished_game() {
     // it is given the badges. See `cheats::COVERAGE_KEY_ITEMS`.
     run.with_cheats(Cheats::default().with_key_items(999_999));
 
-    // How long the walk may take in **wall clock**, as opposed to game time. It was
-    // `60 + minutes * 3` inline, which quietly assumes the agent manages about 20x real time; a
-    // sweep that runs slower than that is cut off having covered a fraction of what it was asked
-    // for, and before this printed a reason it looked exactly like a sweep that had finished.
-    let wall_secs: u64 = std::env::var("GB_COVERAGE_WALL_SECS").ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60 + minutes * 3);
-
     /// Wall-clock seconds between progress lines. ⭐ **A walk with no heartbeat is indistinguishable
     /// from a hung one**, and the 24-hour sweep of 2026-09-07 was left running for two and a half
     /// hours before anyone could tell it was livelocked on one Victory Road boulder at a rate of one
@@ -1105,6 +1344,7 @@ fn coverage_walk_of_the_finished_game() {
     let mut beat = started;
     let mut beat_turns = 0usize;
     let mut beat_visited = 0usize;
+    let name = start.name;
     let settled = run.tick_until(Duration::from_secs(wall_secs), |run| {
         spent_the_budget |= run.fixture().total_cycles.to_duration() >= budget;
         if beat.elapsed().as_secs() >= BEAT_SECS {
@@ -1121,7 +1361,7 @@ fn coverage_walk_of_the_finished_game() {
             // one.
             let per_min = (turns - beat_turns) as u64 * 60 / BEAT_SECS;
             let warn = if turns - beat_turns <= 2 { "  ⚠️ NOT MOVING" } else { "" };
-            println!("[walk] {wall:>5.0}s wall {game:>6.0}s game ({rate:>4.1}x) | {turns} turns \
+            println!("[walk:{name}] {wall:>5.0}s wall {game:>6.0}s game ({rate:>4.1}x) | {turns} turns \
                       (+{per_min}/min) | {visited} chosen (+{new_ids}) | {maps} maps | on {here}{warn}",
                 wall = wall.as_secs_f64(), game = game.as_secs_f64(),
                 rate = game.as_secs_f64() / wall.as_secs_f64().max(0.001),
@@ -1161,43 +1401,48 @@ fn coverage_walk_of_the_finished_game() {
         }
     }
     let log = run.coverage().expect("coverage was asked for");
-    let written = log.write_report("walk-of-the-finished-game");
+    // ⚠️ **The report is named after the start**, so a regional sweep does not overwrite itself
+    // eight times. The plan's older figures quote `walk-of-the-finished-game.tsv`, which is this
+    // file under its previous name and is `walk-phase0.tsv` now.
+    let written = log.write_report(&format!("walk-{name}"));
+
+    // ⚠️ **Three ways to stop and they are not interchangeable.** This used to print "stopped
+    // on the {budget} budget" for every unsettled walk, including the ones that had run out of
+    // *wall clock* having spent a tenth of their game-time budget — which reads as "the sweep
+    // finished, the world is just big" when it means "the sweep was cut off and you are
+    // looking at a fraction of it". The 24-hour walk of 2026-09-07 reported exactly that after
+    // reaching 8 365 s of 86 400, and the two hours spent believing it are the reason this
+    // string is now computed rather than assumed.
+    let stopped = match (settled, spent_the_budget) {
+        _ if brain.0.lock().expect("not poisoned").reached_the_end => format!(
+            "⭐ the walk played the game to the **Hall of Fame** and stopped there, which is a \
+             terminus rather than a fault: the cartridge saves and soft-resets to the title \
+             screen, and there is no world left to walk. {:.0}% of the {budget:?} game-time \
+             budget was spent getting there",
+            100.0 * game_time.as_secs_f64() / budget.as_secs_f64()),
+        (true, _) => format!("{patience} turns with nothing new"),
+        (false, true) => format!("stopped on the {budget:?} game-time budget with the frontier still open"),
+        (false, false) => format!(
+            "⚠️ CUT OFF after {elapsed:?} of WALL CLOCK with only {:.0}% of the {budget:?} \
+             game-time budget spent — raise GB_COVERAGE_WALL_SECS, or find out what is running \
+             this slowly",
+            100.0 * game_time.as_secs_f64() / budget.as_secs_f64()),
+    };
 
     println!(
-        "\n════ C3: a walk of the finished game ════\n\
+        "\n════ C3: a walk of the finished game, from {name} ({:?}) ════\n\
          frontier   {discovered} ids offered, {visited} chosen, across {maps} maps in {turns} turns\n\
          cost       {game_time:?} of game time, {elapsed:?} of wall clock\n\
          rate       {:.1} ids discovered per game-minute\n\
-         settled    {settled} ({})\n\
+         settled    {settled} ({stopped})\n\
          verdicts   {}\n\
          silent     {:?}\n\
          busiest    {busiest}\n\
          stuck      {stalled_worst} consecutive turns choosing nothing; {rowless} turn(s) had no rows at all\n\
          where      {boxed_at}\n\
          table      {written:?}\n",
+        start.map,
         discovered as f64 / (game_time.as_secs_f64() / 60.0).max(0.001),
-        // ⚠️ **Three ways to stop and they are not interchangeable.** This used to print "stopped
-        // on the {budget} budget" for every unsettled walk, including the ones that had run out of
-        // *wall clock* having spent a tenth of their game-time budget — which reads as "the sweep
-        // finished, the world is just big" when it means "the sweep was cut off and you are
-        // looking at a fraction of it". The 24-hour walk of 2026-09-07 reported exactly that after
-        // reaching 8 365 s of 86 400, and the two hours spent believing it are the reason this
-        // string is now computed rather than assumed.
-        match (settled, spent_the_budget) {
-            _ if brain.0.lock().expect("not poisoned").reached_the_end => format!(
-                "⭐ the walk played the game to the **Hall of Fame** and stopped there, which is a \
-                 terminus rather than a fault: the cartridge saves and soft-resets to the title \
-                 screen, and there is no world left to walk. {:.0}% of the {budget:?} game-time \
-                 budget was spent getting there",
-                100.0 * game_time.as_secs_f64() / budget.as_secs_f64()),
-            (true, _) => format!("{patience} turns with nothing new"),
-            (false, true) => format!("stopped on the {budget:?} game-time budget with the frontier still open"),
-            (false, false) => format!(
-                "⚠️ CUT OFF after {elapsed:?} of WALL CLOCK with only {:.0}% of the {budget:?} \
-                 game-time budget spent — raise GB_COVERAGE_WALL_SECS, or find out what is running \
-                 this slowly",
-                100.0 * game_time.as_secs_f64() / budget.as_secs_f64()),
-        },
         log.summary(),
         log.silent_kinds(),
         busiest = busiest,
@@ -1208,19 +1453,31 @@ fn coverage_walk_of_the_finished_game() {
 
     // Both taken as owned values here, so the borrow of the run's log ends before the cross-check
     // below reaches back into the same run for its MMU.
-    let offered_ids: std::collections::BTreeSet<String> =
+    let ids: std::collections::BTreeSet<String> =
         log.entries().map(|entry| entry.id.clone()).collect();
     let defects = log.defects();
 
     // §5.3, and it is printed rather than asserted on purpose: the ROM's tables are a cross-check,
     // not the universe (§0.1). ⚠️ Over the ids this run was offered, so it reports on the maps this
     // walk reached and no others.
-    println!("{}", rom_cross_check(run.fixture().gb.core().mmu(), &offered_ids));
+    println!("{}", rom_cross_check(run.fixture().gb.core().mmu(), &ids));
 
-    assert!(defects.is_empty(), "the walk found {} defects:\n  {}", defects.len(), defects.join("\n  "));
-    assert!(discovered > 10, "only {discovered} ids were ever offered; the walk did not happen");
+    // ⚠️ **Maps come off the ids rather than off the brain's own tally**, so that the union across
+    // regions is the same arithmetic as `CoverageLog::maps_touched` and the two can be compared. An
+    // id is `{map}:…` and `actions()` only ever mints rows for the map the player is standing on,
+    // so an id's prefix is a map the walk stood on.
+    let maps = ids.iter().filter_map(|id| id.split(':').next().map(str::to_string)).collect();
+    WalkOutcome {
+        name,
+        ids,
+        maps,
+        defects,
+        turns,
+        game_time,
+        wall: elapsed,
+        stopped,
+    }
 }
-
 
 /// **§5.3 — the ROM's own tables, as a cross-check rather than as the universe.**
 ///
@@ -1376,3 +1633,4 @@ pub fn rom_cross_check(
         if lines.is_empty() { "  nothing to report".to_string() } else { lines.join("\n") },
     )
 }
+

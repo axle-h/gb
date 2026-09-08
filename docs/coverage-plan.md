@@ -6,12 +6,18 @@ unlosable so the story can be finished in minutes rather than hours; the finishe
 starting point for an exhaustive walk of the world.
 
 **Status.** Written 2026-09-06. Updated 2026-09-07 after the first two implementation passes,
-**2026-09-08 after the sweep loop**, and again the same day after **W3, §5.3 and W1**. **Ten faults
-fixed (§5.2.6, §5.2.8, W1) and one open item (§5.2.7)** — W2, a ceiling rather than a fault —
-written up for someone else to pick up. Most were agent bugs rather than harness ones, which is the
-oracle doing its job. ⭐ W3 was **not** the defect it was filed as: the Mansion row is sound, and
-what the investigation found instead was that a sprite's id moved with the player, which cost 26% of
-the frontier (§5.2.8).
+**2026-09-08 after the sweep loop**, then the same day after **W3, §5.3 and W1**, and again after
+**W2's direction 1**. **Ten faults fixed (§5.2.6, §5.2.8, W1)**; the open items are W2's second half
+and the **42 defects its first sweep found** (§5.2.9). Most were agent bugs rather than harness ones,
+which is the oracle doing its job. ⭐ W3 was **not** the defect it was filed as: the Mansion row is
+sound, and what the investigation found instead was that a sprite's id moved with the player, which
+cost 26% of the frontier (§5.2.8).
+
+⭐ **The walk's start is `GB_COVERAGE_START` now, and one walk per region unions to 159 maps of 248
+against a single walk's 38** (§5.2.7 W2). ⚠️ **And the 38 was never the ceiling the plan said it
+was**: seven of eight identical walks stop there because the god party beats the Elite Four and the
+cartridge ends. ⛔ Three of the eight regions come back **red**, which is the oracle working — two
+root causes, both in maps no previous sweep had ever stood on.
 
 ⚠️ **Everything still to do is in one table below, §0.5.** The status table says what each phase is;
 §0.5 says what picking it up costs and what "done" is, because the open work is otherwise spread
@@ -22,11 +28,11 @@ across §4.5, §5.2.7, §5.3, §5.4, §6.1 and §7 and two of those are prose ra
 | **C0** | the LLM e2e harness | ✅ **built.** `integration_tests/llm_harness.rs`; `llm.rs` moved onto it; all seven faults have a test; the ⛔ 402 death loop of §2.2.1 is **fixed** — (a)–(d) below |
 | **C1** | the cheat tier | ✅ **built.** Four new `debug_*` primitives and `integration_tests/cheats.rs`; `play_path_contains_no_debug_ram_writes` still passes unchanged |
 | **C2** | the god run | ◐ **the machinery and the measurement.** `integration_tests/godmode.rs`: `Intent`, `ScriptedBrain`, the driver, and `godmode_turn_cost` behind `--features godmode`. **The run to the Hall of Fame is not built** — see §4.5 |
-| **C3** | the exploration | ◐ **the oracle, the frontier and the sweep loop.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`, a 30-second progress heartbeat and an honest stop reason. ~535 ids across **38 maps** a walk at ~48× real time; eleven faults found, nine fixed (§5.2.6, §5.2.8), two open (§5.2.7). ⚠️ **38 of 248 maps is the walk's ceiling today** and closing it is W2 — ⚠️ but take that baseline from a run rather than from this file, because §5.2.5's table quotes 41 from a sweep taken *before* the §5.2.6 fixes and the walk prints its own number. **The ROM cross-check is built (§5.3); branch-point snapshots are not** |
+| **C3** | the exploration | ◐ **the oracle, the frontier, the sweep loop and the regional starts.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`, a 30-second progress heartbeat, an honest stop reason and `GB_COVERAGE_START`. One walk is ~360 ids across **38 maps**; the eight regional walks union to **1409 ids across 159 maps** at ~55× real time and seven minutes of wall clock in parallel (§5.2.7 W2). Eleven faults found and nine fixed (§5.2.6, §5.2.8), then **42 more found by the first regional sweep and none fixed** (§5.2.9). ⚠️ Take any baseline from a run rather than from this file, and read §5.5 first — the spread is a coin flip between two different walks, not noise. **The ROM cross-check is built (§5.3); branch-point snapshots are not** |
 | **C4** | the battle matrix | ◐ **the audit is done and committed** — §6.0. Six cells exist nowhere, sixteen are proved under `DeterministicPolicy` only. No test written yet |
 
-⚠️ **Where this plan was wrong is recorded rather than edited out** (§11.5). Two so far, both in §3.3
-— see §0.4 below.
+⚠️ **Where this plan was wrong is recorded rather than edited out** (§11.5). Four so far — see §0.4
+below.
 
 **The point is the end-to-end.** Every phase runs the real agent, the real `LlmPolicy`, the real
 worker and the real wire, against a mock endpoint in-process. A phase that could be done more cheaply
@@ -73,6 +79,18 @@ Recorded here rather than fixed in place, because the reasoning is the useful pa
    square. So the id is now minted once by `OverworldAction::id` — moved out of `llm::tools`, which
    `agent.rs` is not even compiled with — and carried on `StartedOverworldAction`. Pairing is
    positional: a start opens an id and the next terminal overworld event closes it.
+3. ⚠️ **§5.2.7's diagnosis of W2 was answering the wrong question.** "The walk reaches 38 maps"
+   was written up as a reachability problem — Mt Moon B1F's entry-dependent regions, the frontier's
+   inability to steer — and all of that is true about why the walk never goes *east*. It is not why
+   the walk **stops**: seven of eight identical walks halt on the Hall of Fame terminus, because the
+   god party's route out of Viridian reaches the Elite Four before it reaches Cerulean and winning
+   ends the cartridge. A ceiling and a terminus look identical in a single number, and the plan spent
+   two sections reasoning about the wrong one. See W2.
+4. ⚠️ **§5.5's "a couple of per cent of noise" was measuring the machine.** The 38-versus-30-map
+   spread between "identical" runs tracks whether something else is compiling at the time: §2.3's
+   `step_coarse` hands the agent however long the last loop iteration took, so CPU load is an input
+   to the walk. Eight walks in parallel on an idle box agree to ±1.3%; one walk taken beside a
+   `cargo build -j24` does not agree with itself. See §5.5.
 
 ---
 
@@ -87,7 +105,9 @@ mentioned in the status table at all.
 | Item | § | Done looks like | Size |
 |---|---|---|---|
 | **The intent list to the Hall of Fame** — the rest of C2 | §4.5, acceptance §4.3 | `godmode` reaches `Map::HallOfFame` from `start-of-game-state.bin` with the intent list exhausted (not the agent wandering into the credits) and at least one compaction fired; prints ms/turn and total turns | **Large.** Six `PolicyStep` variants have no menu row behind them — each is a `llm::prompt` gap or a new `Intent`, one argument at a time |
-| **W2** — the walk reaches 38 maps of 248 | §5.2.7 | Maps reached moves past the baseline **the walk itself prints**, not past a number in this file | Medium. A measurement is ~5 min of wall clock |
+| **W2's second half** — a *single* walk still reaches 38 maps of 248 | §5.2.7, direction 2 | A walk that can `use_field_move` Fly reaches materially more than 38 on its own, measured against the eight-region union of 159 that direction 1 already gets | Medium. A measurement is ~7 min of wall clock for eight walks in parallel |
+| ⛔ **§5.2.9's 42 defects** — Saffron Gym's teleport maze and the Safari Zone's pond | §5.2.9 | `GB_COVERAGE_START=all` comes back green. Both reproduce in minutes and both drop a save state | Medium each. ⚠️ The gym one is a routing change, so the leg chain, `full_playthrough` **and** `hall_of_fame` are behind it |
+| **§5.2.9's Route 16 ping-pong** — where two thirds of two regions' turns went | §5.2.9, item 3 | Those regions' `busiest` line stops being a two-map gate, without losing maps. ⚠️ Measure it as §5.5 now says to, because the fix that looks obvious cost 20 maps last time it was tried | Small to write, and the whole cost is in measuring it. It is a fault in `ExploringBrain`, so nothing that ships is behind it |
 | **Branch-point snapshots** | §5.4 | The five branches (starter, fossil, Hitmon*, Bike Voucher, the trades) each covered by snapshot × N under `--features regen-fixtures` | Medium |
 | **C4's six missing cells** | §6.0, §6.1 | One LLM-path test each: ball failure, run failure, run from something that cannot flee, trainer ball refused, an item with none left, the Safari counter expiring mid-battle, the old man's tutorial | Medium. All refusals, which is where §6 predicted the findings would be |
 | **C4's sixteen promotions** | §6.0, §6.1 | Each cell proved through `LlmPolicy` and the worker rather than `DeterministicPolicy`, or a committed row saying why not | **Large**, and §6.0 says this is the half with the findings in it |
@@ -817,10 +837,21 @@ the fix there were fifteen walks and none of them was that one.
 Hall of Fame ends the game, so `ExploringBrain::reached_the_end` makes the walk report a terminus and
 stop. That is orthogonal to W1 and should stay whatever W1 does.
 
-#### W2 — the walk reaches 38 maps of 248
+#### W2 — the walk reaches 38 maps of 248 ◐ **direction 1 built and measured 2026-09-08; 159 maps now, and the ceiling turned out to be something else**
 
 **What happens.** Every sweep settles in north-west Kanto plus Victory Road and the Indigo Plateau.
 Cerulean, Vermilion, Lavender, Celadon, Fuchsia, Saffron and Cinnabar are never entered.
+
+⭐ **And the reason is not the one written below. The walk wins the game.** Measured on eight
+identical `phase0` walks run at once with nothing else on the machine, **seven of the eight stopped
+at exactly 38 maps on the Hall of Fame terminus** — 356 to 365 ids, 342 to 352 turns, agreeing to
+±1.3%. The god party goes Viridian → Route 22 → Route 23 → Victory Road → Indigo Plateau, beats the
+Elite Four and ends the cartridge, and `ExploringBrain::reached_the_end` correctly stops there
+because there is no world left to walk. The 38-map set contains all five Elite Four rooms and
+`HallOfFame`, and no map east of Mt Moon. **The Elite Four is nearer to Viridian than Cerulean is**,
+so the walk finds the end of the game before it finds the middle of it, and everything below about
+Mt Moon B1F is why *east* is shut rather than why the walk stops. The eighth walk is the tell: it
+missed the Plateau, spent its budget in Victory Road instead, and reached **61**.
 
 **It is not a routing bug, and that was checked.** Route 4's west block — where Mt Moon's 1F door
 lets out — is a genuine dead end: its east side is walled by west-only ledges, and `goto(CeruleanCity)`
@@ -842,30 +873,105 @@ warps are never in the menu to be chosen.
   west block while 90% of it is unreachable, so the door to its east half scores as leading
   somewhere known.
 
-**Two directions worth trying**, neither started:
-1. **Regional sweeps.** Make the start fixture selectable (`GB_COVERAGE_START` over a table of
-   `postgame-*.bin`, the `every_committed_fixture_decodes` pattern) and run one walk per region.
-   Cheap, needs no new search, and multiplies reach immediately. It does not make any single walk
-   better.
-2. **Give the walk something to travel *with*.** The postgame party has **Fly**, and Fly is a real
-   mechanism the model has too — `use_field_move` with a destination, the way `PC_OPS` already
-   issues non-menu field moves from the brain. A walk that can fly to a town it has not explored
-   turns a local random walk into something that can cross Kanto. ⚠️ Fly is outdoors-only
-   (`Map::is_overworld`) and cannot escape a cave, so it is a complement to the frontier, not a
-   replacement.
+##### ✅ Direction 1 — regional sweeps over a selectable start
+
+`GB_COVERAGE_START` picks the walk's start from `coverage::COVERAGE_STARTS`: `phase0` (the default,
+and the fixture every figure in this plan was taken from) plus one finished-game fixture standing in
+each region the `phase0` walk never reaches. `all` walks every one of them in turn and prints the
+union. Nothing else changed — same brain, same frontier, same cheats, no new search — which is why
+this was the direction to take first.
+
+⚠️ **A start contributes exactly one thing: the square the player is standing on.**
+`Cheats::default()` installs the god party and `with_key_items` stocks the bag, so a regional start
+is chosen for its map and for nothing else, and any postgame fixture would have done.
+`every_coverage_start_stands_where_it_says_on_a_finished_game` pins the map *and* `wNumHoFTeams > 0`
+in the **default** tier: a fixture regenerated onto another square would turn a regional sweep into a
+duplicate of one that already ran, and a start whose game was never finished would be walled in at
+Pewter by the event gates of §5.2.5 while looking like a bad region rather than a bad fixture.
+
+**The measurement.** Eight walks a side, 6 game-hours each, all eight at once on an idle 24-core
+machine, `GB_COVERAGE_PATIENCE=100000`, `GB_COVERAGE_WALL_SECS=2400`. About **7 minutes of wall
+clock for 42 game-hours** either side, so this is a measurement rather than an argument.
+
+| the control: 8 × `phase0` | the sweep: 8 regions |
+|---|---|
+| 38 maps in seven of eight walks (61 in the eighth) | 34 to 86 maps per walk |
+| **union 86 maps, 804 ids** | **union ⭐ 159 maps of 248, 1409 ids** |
+| 0 defects | **42 defects across 3 of the 8 walks** — §5.2.9 |
+
+| region | maps | ids | turns | stopped on |
+|---|---|---|---|---|
+| `phase0` | 61 | 572 | 4544 | the game-time budget |
+| `cerulean` | 86 | 699 | 3817 | the game-time budget |
+| `vermilion` | 58 | 470 | 5152 | the game-time budget |
+| `lavender` | 34 | 217 | 6578 | the game-time budget |
+| `celadon` | 86 | 731 | 4592 | the game-time budget |
+| `saffron` | 49 | 370 | 6699 | the game-time budget |
+| `fuchsia` | 63 | 558 | 887 | the game-time budget |
+| `cinnabar` | 41 | 379 | 347 | ⭐ the Hall of Fame |
+
+⭐ **The regional union is a strict superset of the control union: 73 maps gained, none lost.** What
+comes in is every region the diagnosis above named and then some — Saffron and all eleven floors of
+Silph, Fuchsia and all five Safari areas, the Seafoam Islands, Vermilion, Lavender, Cinnabar, both
+Underground Paths, Routes 1, 5, 6, 12, 15, 18, 19, 20 and 21, and Pallet Town.
+
+⚠️ **Two separate effects are in that 159, and only one of them is the regions.** A single walk is 38 maps; eight identical walks union to 86; eight *different starts*
+union to 159. So roughly half the gain is "run it eight times" — the walk is not deterministic
+(§5.5) and repeats diffuse differently — and the other half is the starts. Anyone tempted to drop
+the start table and just run `phase0` eight times should read that as the answer: it costs the same
+and reaches 73 fewer maps.
+
+**What is left of W2.** The union is past the baseline the walk prints, so the item has moved, but it
+is not closed:
+
+1. **Direction 2, Fly**, is untouched — see below. It is the one that would make a *single* walk
+   cross Kanto, which is what a sweep run by CI rather than by hand would want.
+2. **89 maps are still unreached**, and the honest first suspect is not a gate or the budget:
+   §5.2.9's third finding says four of the eight walks put 60% to 98% of their turns into one
+   two-map gate on Route 16, and the two worst are two of the three lowest map counts. Fix that
+   before spending anything on more budget.
+3. ⛔ **§5.2.9's 42 defects.** Three of the eight regions fail, so the regional tier is **red**, and
+   that is the oracle working exactly as it did for §5.2.6: nine sweeps, eight fixes. They are two
+   root causes, both in parts of the world no `phase0` walk has ever stood in.
+4. ⭐ **§5.2.9's third finding**, which is the frontier's rather than the agent's and is the largest
+   number in this whole section: four of the eight walks spent between 60% and **97.6%** of their
+   turns oscillating through Route 16's four-door gate, every action completing. That is where the
+   budget for point 2 comes from, and it is a change to a test file rather than to the agent.
+
+##### Direction 2 — give the walk something to travel *with* (not started)
+
+The postgame party has **Fly**, and Fly is a real mechanism the model has too — `use_field_move` with
+a destination, the way `PC_OPS` already issues non-menu field moves from the brain. A walk that can
+fly to a town it has not explored turns a local random walk into something that can cross Kanto.
+⚠️ Fly is outdoors-only (`Map::is_overworld`) and cannot escape a cave, so it is a complement to the
+frontier, not a replacement.
+
+⚠️ **And it now has a second job**, which the measurement above handed it: a walk that can fly is a
+walk that can be started anywhere and *stay* anywhere, so it would let a single sweep cover what
+eight starts cover — and it would let the `phase0` walk go somewhere other than the Elite Four.
 
 **Done looks like.** A number, not a feeling: maps reached, which the walk already reports. ⚠️ **Take
-the baseline from a run of unmodified `HEAD` before changing anything** — ~38 is what the last sweep
-saw and §5.2.5's 41 is an older one, so a figure from this file is not something to claim an
-improvement against. A/B two runs of the same command, and remember §5.5: the totals carry a couple
-of per cent of noise, so a move of one or two maps is not a result. The run is cheap enough (~5
-minutes of wall clock for 6 game-hours) to measure rather than argue about:
+the baseline from a run of unmodified `HEAD` before changing anything** — §5.2.5's 41 and the 38 in
+the status table are older sweeps, so a figure from this file is not something to claim an
+improvement against. ⚠️ And read §5.5 before choosing how to run it: the variance is not what this
+file used to say it was.
 
 ```shell
-GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
+# one region
+GB_COVERAGE_START=cerulean GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
+  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+
+# every region in turn, in one process, with the union at the end (8x the budget in wall clock)
+GB_COVERAGE_START=all GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 ```
 
+⚠️ **For a measurement, run the eight in parallel instead**, one directory each, off a *copy* of the
+test binary — eight processes on this machine cost the same 7 minutes as one, each writes its own
+`walk-<region>.tsv`, and the union is `cut -f1 | cut -d: -f1 | sort -u` over the lot. It is the same
+arithmetic `CoverageLog::maps_touched` and the in-process union both use, because a sprite id is
+`{map}:{name}` and every other id is `{map}:{x},{y}:{kind}`, so an id's prefix is a map the walk
+stood on.
 #### W3 — one undiagnosed row ✅ investigated 2026-09-08, and it was the *id* rather than the route
 
 **What it said.** `PokemonMansion1F:15,3:EscapeRope` scores **defect**: *"there is no route to Escape
@@ -910,7 +1016,8 @@ tick the player moves. So the id moved with the player rather than with the thin
 an id built from something that moves is an unbounded family of ids, and the frontier can never
 finish one.
 
-**The measurement, off the sweep's own table** (`walk-of-the-finished-game.tsv`, HEAD of
+**The measurement, off the sweep's own table** (`walk-of-the-finished-game.tsv` — the file is
+`walk-phase0.tsv` since the starts became selectable, HEAD of
 2026-09-08): **270 sprite ids covering 136 objects — 134 redundant, 26% of the whole 510-id
 frontier.** The worst is `ViridianCity:Youngster1` with **eleven ids, ten of them scored
 `completed`**: the walk talked to one Youngster ten times, each time believing it had discovered a
@@ -951,6 +1058,140 @@ and a deployed run read it as the object's:
 [deployed-run-defects](deployed-run-defects.md)'s Route 16 Snorlax spent three turns playing the Poké
 Flute at (27, 10) because the row said `Route16:27,10:Snorlax` while the Snorlax was on (26, 10).
 The row is `Route16:Snorlax` now and there is no second number to confuse with the first.
+
+### 5.2.9 ⛔ What the regional sweep found on its first run: 42 defects, and where the turns went
+
+W2's whole argument was that the rest of the world is invisible to everything else on the list. It
+was, and this is what was in it. **All three of these are in maps no `phase0` walk has ever stood
+on**, which is why nine previous sweeps reported them zero times, and all three are open. Two are
+defects in the agent; the third is a fault in the brain, it fails nothing, and it is where **17 602
+of the sweep's turns** actually went — read that one first.
+
+None of the three has been root-caused past the evidence written here. That is deliberate: §5.5's rule is that
+*which* id fails is not reproducible by re-running, and what makes one of these actionable is the
+save state the walk drops at the moment the verdict turns. ⚠️ **Cut those states fresh — do not go
+looking for the old ones.** `target/` is gitignored and swept; every recipe below re-cuts them in
+under a minute.
+
+#### 1. Saffron Gym's teleport maze — 37 to 40 defects, in three of the eight regions
+
+**What it says**, from the `celadon` walk, and the same list appears in `cerulean` and `saffron`:
+
+```
+SaffronGym:1,3:Warp:  there is no route to the warp to SaffronGym (standing at (15, 9))
+SaffronGym:11,3:Warp: there is no route to the warp to SaffronGym (standing at (15, 5))
+SaffronGym:15,3:Warp: there is no route to the warp to SaffronGym (standing at (2, 3))
+```
+
+⭐ **Read the square it is standing on rather than the message.** Every one of those is a warp
+*destination* somewhere else in the gym, and none of them is anywhere near the row that was chosen —
+`(15, 5)` is exactly where the pad at `(1, 3)` sends you, and it is where the walk was standing on the
+turn *after* it asked for that pad. **The player is being teleported between the choice and the
+walk.** `pokered/data/maps/objects/SaffronGym.asm` is **32 warps of which 30 lead back into the same
+map** — a row here is a warp to `SaffronGym` from `SaffronGym` — so the route to one pad crosses
+others, and stepping on one relocates the player and takes the row away. The agent has a model for exactly this shape — `spinners`, the
+Rocket Hideout arrow tiles, where the BFS treats stepping onto an arrow as landing at its
+destination — and it does not apply it here.
+
+**It is also the most expensive single room the sweep found.** `busiest` says where the turns went:
+`celadon` put **3849 of its 4592 turns into `SaffronGym`** and `saffron` 2453 of 6699, both at over a
+thousand turns a minute discovering nothing. ⚠️ **`stuck` reads 0 in all three**, so this is not the
+boxed-in case §5.2.2's counters were added for — the brain has rows, chooses them, and gets nowhere.
+That is the §5.2.6 fault-1 shape one more time, a room the frontier can never finish, and it is why
+`saffron` reached only 49 maps.
+
+⚠️ **A fix here is a change to routing**, which means the leg chain and `full_playthrough` behind it
+(§11.5's first bullet), and `hall_of_fame` too: the scripted route walks this gym for the Marsh
+Badge.
+
+```shell
+GB_COVERAGE_START=celadon GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
+  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+```
+
+#### 2. The Safari Zone's pond, offered for one turn on the way in — 2 defects
+
+**What it says**, from the `fuchsia` walk, both while standing on the entrance warp at `(15, 25)`:
+
+```
+SafariZoneCenter:Nugget:      there is no route to Nugget
+SafariZoneCenter:0,10:Warp:   there is no route to the warp to SafariZoneWest
+```
+
+**Both targets are across the water, and the water is a wall here on purpose.**
+`pokered/data/maps/objects/SafariZoneCenter.asm` puts the Nugget on `object_event 14, 10`, and the
+map is a ring of land around a pond with a six-square island in the middle of it: printing
+`MetaTileMap` from the dropped state shows `XXXX__S___XXXX` on that row, water on every side.
+`GameState`'s `can_use_surf` is **false in all four Safari areas** — their `FOREST` tileset has
+`TilePairCollisionsWater` rules that answer "No SURFing here!", and treating the pond as pass-through
+is what workstream E already found makes the agent re-issue a refused mount for the rest of its
+budget. So from `(15, 25)` `actions()` correctly offers neither row, which the same dropped state
+confirms.
+
+⚠️ **So the row was minted on a tick when the map was not yet this map.** The event log puts it one
+turn after the gate script takes the ¥500 and auto-walks the player north into `SafariZoneCenter`,
+and the screenshot saved beside the state is **black** — a fade, mid-transition. Something in that
+window reads the centre's block map without the refusal that goes with it, mints two rows across a
+pond that is not yet a pond, and the walk aborts on the first tick after it settles. It is the
+`position_settled` family (`MetaTileMap`'s own ⚠️, and W1's), one map-load earlier: *the map is not
+the map yet*.
+
+**It reproduces in 30 seconds of wall clock**, which is the best thing about it:
+
+```shell
+GB_COVERAGE_START=fuchsia GB_COVERAGE_MINUTES=3 \
+  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+```
+
+⚠️ **The other two `fuchsia` rows are not this and are not diagnosed at all**:
+`SeafoamIslandsB3F:21,17:Warp` and `SeafoamIslandsB4F:21,17:Warp` both give up after 60 s of game
+time *standing on the square they were walking to* — `DidNotArrive` at the destination — which is the
+sentence §5.2.6 fault 5 split `PuzzleRanLong` out of, so it is a walk rather than a puzzle and it is
+a fresh finding.
+
+
+#### 3. ⭐ Route 16's gate, four doors wide — 17 602 turns across four regions, and not a defect at all
+
+**What it looks like** in the `saffron` walk's event log, for hundreds of turns at a stretch, with
+every single action **completing**:
+
+```
+Route16:24,5:Warp      → Route16Gate1F (7, 3)   completed
+Route16Gate1F:0,3:Warp → Route16       (17, 5)  completed
+Route16:17,5:Warp      → Route16Gate1F (0, 3)   completed
+Route16Gate1F:7,3:Warp → Route16       (24, 5)  completed
+```
+
+Route 16's gate is a corridor with **four** doors — `(0, 2)`, `(0, 3)`, `(7, 2)`, `(7, 3)` — and
+Route 16 has the four squares that face them, so the pair of maps carries eight warp ids and every
+one of them works. Nothing is wrong with any of them, and that is what makes this the interesting
+one: the frontier's ordering has no defence against it. Once a map's non-exit rows are all visited
+the brain takes the **least-taken exit**, and on a two-map ping-pong the least-taken exit is always
+the door back — so it round-robins the eight for ever, discovering nothing.
+
+**It is the sweep's largest single cost by an order of magnitude.** Turns spent on
+`Route16`/`Route16Gate1F`/`Route16FlyHouse`, off each walk's `busiest` line:
+
+| | turns there | of the walk's | maps reached |
+|---|---|---|---|
+| `lavender` | **6419** | 6578 — **97.6%** | 34, the worst of the eight |
+| `vermilion` | 4729 | 5152 — 91.8% | 58 |
+| `saffron` | 4035 | 6699 — 60.2% | 49 |
+| `cerulean` | 2419 | 3817 — 63.4% | 86 |
+
+That is **17 602 turns** across four of the eight regions, against the **345** an entire `phase0`
+walk takes to finish the game. ⭐ **And it is very likely most of the "89 maps still unreached"**: the
+two worst-affected walks are also two of the three lowest map counts, and they were not out of budget
+or out of frontier, they were crossing the same gate.
+
+⚠️ **This is a fault in the brain, not in the agent**, which makes it the first of its kind in this
+plan and the cheapest of the three to fix — `ExploringBrain` is a test file and nothing that ships
+depends on it. ⚠️ **But it is not "prefer an exit that leads somewhere new"**, which is the fix that
+looks obvious and is the one §5.2.2 measured at **41 maps → 21** and reverted twice; whatever is done
+here has to survive that, and the two-try priority already in the ordering is the shape that did.
+⭐ The honest description of the miss is that `times` is per **id** while the thing being oscillated
+over is a **pair of maps**: eight ids that all mean "cross this gate" look like eight untried options
+and are one.
 
 ### 5.3 ✅ The ROM tables, demoted to a cross-check — built 2026-09-08
 
@@ -1060,6 +1301,29 @@ transfer — that walk is *walled in* at Pewter and so has almost nothing to var
 the number by eight maps would be indistinguishable from this. Anyone measuring W2 needs several runs
 a side, or a fixed seed, or a start fixture that cannot reach Victory Road — direction 1's regional
 sweeps would give the last of those for free, which is another argument for doing it first.
+
+⭐ **Measured properly on 2026-09-08, that variance is mostly not variance: it tracks how busy the
+machine is.** Eight identical `phase0` walks run at once on an otherwise idle 24-core box came out
+**38 maps in seven of the eight** — 356 to 365 ids, 342 to 352 turns, agreeing to ±1.3% — with the
+eighth at 61 maps. The three earlier runs that produced the 30/30/38 above were taken *while a
+`cargo build -j24` was competing with them*: they ran at 33x real time against the idle runs' 50 to
+60x, and two of the three fell into the Victory Road mode. §2.3 is why this is not a surprise —
+`step_coarse` hands the agent however long the last loop iteration took, so the load on the machine
+is an input to the walk, not an annoyance around it.
+
+⚠️ **The practical rule is therefore "do not build while you measure"**, and it is a stronger rule
+than "run several a side": eight walks in parallel on an idle machine cost the same seven minutes as
+one and agree with each other, and one walk taken next to a build does not agree with itself. The
+two modes are still real — a walk that misses the Indigo Plateau spends its budget in Victory Road
+and reaches more of the world for it — so several a side is still worth having; it is the *reason*
+for the spread that was wrong.
+
+⚠️ **What the spread actually is, is a coin flip between two different walks.** The 38-map mode is
+the walk *finishing the game* — 38 maps, ~360 ids, ~345 turns, stopped on the Hall of Fame — and the
+61-map mode is the walk missing the Indigo Plateau and spending its budget in Victory Road instead —
+61 maps, 562 ids, 4696 turns. Those are not a few per cent apart, and no amount of budget moves the
+first one, because there is nothing left to walk. So a single figure from a single run is a sample of
+*which walk happened*, not of how far a walk gets. See W2.
 
 ### 5.6 What "all nodes" costs
 
@@ -1183,9 +1447,11 @@ longer gate one another — every row of §0.5 is independently startable agains
    walk, so it was the one a deployed run could meet.
 4. **C4's six missing cells** (§6.0). Self-contained, and the audit already says exactly what each
    one is.
-5. **W2**, starting with §5.2.7's direction 1 (regional sweeps over a selectable start fixture) —
-   cheap, needs no new search, and it is what makes the rest of the world visible to everything else
-   on this list.
+5. ✅ **W2's direction 1** — done. Regional sweeps over `GB_COVERAGE_START`, 38 maps → a union of
+   159, and it did what it was picked for: the first run made 121 maps' worth of world visible and
+   came back with §5.2.9's two root causes in it. **§5.2.9 is what to take next**, because a red tier
+   is worth less every day it stays red, and the Saffron Gym half is also the most expensive stall
+   any sweep has found.
 6. **The intent list** (§4.5). The largest, and the only one whose value depends on finishing it: a
    god run that stops short of the Hall of Fame replaces nothing.
 7. **C4's promotions** and **§5.4's branch points**, as long tails.
@@ -1289,13 +1555,18 @@ or a coverage run:
 
 | | |
 |---|---|
-| `GB_COVERAGE_MINUTES` | the walk's budget in **game**-minutes (default 90 — a smoke budget, not a coverage one). The emulator runs at ~56x, so an hour of wall clock buys ~56 game-hours |
+| `GB_COVERAGE_START` | ⭐ **where the walk starts** — a name from `coverage::COVERAGE_STARTS` (`phase0`, the default, then `cerulean`, `vermilion`, `lavender`, `celadon`, `saffron`, `fuchsia`, `cinnabar`), or `all` for one walk per region and the union of what they reached. Built for W2; see §5.2.7. ⚠️ An unknown name **panics** rather than falling back to `phase0`, because a typo that quietly walked the default would report the baseline under another region's name |
+| `GB_COVERAGE_MINUTES` | the walk's budget in **game**-minutes (default 90 — a smoke budget, not a coverage one). The emulator runs at ~56x, so an hour of wall clock buys ~56 game-hours. ⚠️ **Per walk, not per run**: `GB_COVERAGE_START=all` spends it eight times over |
 | `GB_COVERAGE_PATIENCE` | barren turns before the frontier is called settled. ⚠️ **This, not the budget, is what has stopped every sweep** — §5.2.5: a 24-game-hour walk settled having spent 2.6 of them. Set it high for a real sweep |
 | `GB_COVERAGE_WALL_SECS` | a wall-clock stop, so a wedged sweep fails instead of running all night |
 | `GB_SOAK_MINUTES`, `GB_SOAK_SEED` | the soak tier's equivalents, for §7 |
 
-⚠️ **`GB_COVERAGE_START` does not exist**; it is proposed by W2's direction 1 and building it is part
-of that item. Today the walk's start fixture is fixed in `coverage_walk_of_the_finished_game`.
+✅ **`GB_COVERAGE_START` exists** (2026-09-08) and the table above is the authority on its values.
+The starts themselves are `coverage::COVERAGE_STARTS`, and what each one is *for* is
+[`coverage::Start`]'s own doc comment; `every_coverage_start_stands_where_it_says_on_a_finished_game`
+pins the map and the finished game in the **default** tier, because a fixture regenerated onto
+another square turns a regional sweep into a duplicate of one that already ran and nothing else in
+the suite would notice.
 
 Always `--release`; the crate is `--bin gb`, never `--lib`; agent and policy debugging goes to
 stdout, so `--nocapture` when you care. Failure artifacts go to `target/test-artifacts/`, which is
