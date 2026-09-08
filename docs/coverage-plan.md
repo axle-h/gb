@@ -6,8 +6,8 @@ unlosable so the story can be finished in minutes rather than hours; the finishe
 starting point for an exhaustive walk of the world.
 
 **Status.** Written 2026-09-06. Updated 2026-09-07 after the first two implementation passes,
-**2026-09-08 after the sweep loop**, and again the same day after **W3**. **Nine faults fixed
-(§5.2.6, §5.2.8) and two open items (§5.2.7)** — one is a fault (W1) and one is a ceiling (W2) —
+**2026-09-08 after the sweep loop**, and again the same day after **W3, §5.3 and W1**. **Ten faults
+fixed (§5.2.6, §5.2.8, W1) and one open item (§5.2.7)** — W2, a ceiling rather than a fault —
 written up for someone else to pick up. Most were agent bugs rather than harness ones, which is the
 oracle doing its job. ⭐ W3 was **not** the defect it was filed as: the Mansion row is sound, and
 what the investigation found instead was that a sprite's id moved with the player, which cost 26% of
@@ -87,7 +87,6 @@ mentioned in the status table at all.
 | Item | § | Done looks like | Size |
 |---|---|---|---|
 | **The intent list to the Hall of Fame** — the rest of C2 | §4.5, acceptance §4.3 | `godmode` reaches `Map::HallOfFame` from `start-of-game-state.bin` with the intent list exhausted (not the agent wandering into the credits) and at least one compaction fired; prints ms/turn and total turns | **Large.** Six `PolicyStep` variants have no menu row behind them — each is a `llm::prompt` gap or a new `Intent`, one argument at a time |
-| **W1** — no `GameMode` for the title screen | §5.2.7 | A bare `PokemonAgent` (no `host.rs`) does not spend a budget offering overworld rows after the cartridge soft-resets. ⚠️ Not a `Map::HallOfFame` special case | Medium |
 | **W2** — the walk reaches 38 maps of 248 | §5.2.7 | Maps reached moves past the baseline **the walk itself prints**, not past a number in this file | Medium. A measurement is ~5 min of wall clock |
 | **Branch-point snapshots** | §5.4 | The five branches (starter, fossil, Hitmon*, Bike Voucher, the trades) each covered by snapshot × N under `--features regen-fixtures` | Medium |
 | **C4's six missing cells** | §6.0, §6.1 | One LLM-path test each: ball failure, run failure, run from something that cannot flee, trainer ball refused, an item with none left, the Safari counter expiring mid-battle, the old man's tutorial | Medium. All refusals, which is where §6 predicted the findings would be |
@@ -725,12 +724,11 @@ reported, never made unreachable.
 
 ### 5.2.7 Open work items
 
-Two — W1 and W2 — and they are independent of each other. Both are written up from evidence the
-sweeps produced; neither is started. They are C3's; the rest of the backlog is §0.5. **W3 is kept
-below, closed**, because what it turned out to be is worth reading before filing the next one like
-it.
+One — W2 — is open. **W1 and W3 are kept below, closed**: W1 because the window it turned out to
+cover is wider than its title says, and W3 because what it turned out to *be* is worth reading before
+filing the next one like it. The rest of the backlog is §0.5.
 
-#### W1 — the agent has no `GameMode` for the title screen
+#### W1 — the agent has no `GameMode` for the title screen ✅ fixed 2026-09-08
 
 **What happens.** With the god party the walk beat the Elite Four a second time. The Champion's room
 offers no door to choose — the cartridge **force-walks** the player into the Hall of Fame — and
@@ -764,6 +762,56 @@ offering overworld rows rather than acting on stale RAM. ⚠️ **Do not simply 
 `Map::HallOfFame`**: the room is legitimate to stand in, and the fault is the *reset*, which is a
 whole-cartridge event that a map check cannot see. Whatever is added needs a test that a bare
 `PokemonAgent` (no `host.rs`) does not spend a budget at the title screen.
+
+✅ **What was built.** `PokemonAgent::ending`, a two-phase latch (`agent::Ending`) set by the same
+`wNumHoFTeams` edge that emits `AgentEvent::HallOfFame` and cleared when the world comes back. While
+it is engaged `update` returns before the watchdog, before `game_mode()` and before any policy poll,
+so the agent offers nothing, decides nothing and presses nothing.
+
+⭐ **The window is wider than the title screen, and that is the correction the plan needed.** The
+announcement fires on the ceremony's *first frame* and `jp Init` is the *last* thing
+`HallOfFameResetEventsAndSaveScript` does — measured from `post-hall-of-fame.bin`, the ceremony
+starts at 12 s of game time and the reset lands at **169 s**. For all 157 seconds in between,
+`wCurMap` reads `HallOfFame`, the coordinates read (4, 2), and none of it is a world. Latching on the
+*announcement* rather than on the reset covers the credits too, and it needs no new signal: the agent
+was already watching that byte.
+
+**The clearing condition is `PokemonApiTrait::a_game_is_loaded` (`wPlayerID != 0`), in two phases.**
+`game_mode()` cannot do it — it answers `None` through every screen transition, so it cannot tell a
+fade between two rooms from a reset — but `Init` clears WRAM and `wPlayerID` is written only when a
+save is loaded or a new game is named. So the latch waits to see the byte go to **zero** and then
+non-zero again. ⚠️ **The two phases are not decoration**: the byte holds its value throughout the
+ceremony, so a one-sided test would clear on the frame it was set. ⚠️ And `restart` clears it
+outright, because a new run loads a save state straight into WRAM and never passes through zero.
+
+**Measured, from `post-hall-of-fame.bin` with `RandomPolicy` and nothing else driving:** 15 walks in
+900 s of game time before, **1** after — and that one is issued before the announcement, when the
+room really is a room. Pinned by
+`postgame::phase0::the_agent_stops_playing_a_world_the_cartridge_has_reset`, default tier, 1.6 s,
+which fails on the unmodified agent.
+
+⚠️ **The agent does not drive the ceremony to its end, and it never did.** `jp Init` is reached only
+through `WaitForTextScrollButtonPress`, which waits on A or B; a walk presses directions. Measured on
+the *unmodified* agent, 900 s left alone never reached the reset either — so going quiet costs
+nothing that was there. In the product `host.rs` archives and starts the next run at the
+announcement, and `drive_out_of_hall_of_fame` A-mashes in the tests. ⚠️ **And the agent must not
+press A here of its own accord**: the screen it lands on is the title menu, and an agent mashing at
+NEW GAME would erase the save it has just written.
+
+⚰️ **It is not the row-filtering attempt above, and the difference is the one that mattered there.**
+That attempt took the rows out of the *menu*, which could not stop the walk arriving — it left the
+brain with an empty list to choose from and the sweep burned 20 059 of 20 538 turns at the title
+screen while reporting zero defects. This stops the agent one layer up: `update` returns before the
+policy is consulted at all, so no turn is *put*, no turn is answered, and nothing is silently
+absorbed. A walk that ran past `ExploringBrain::reached_the_end` would now spend its game-time budget
+taking no turns and say so, rather than spending twenty thousand of them saying nothing. The terminus
+is still reported by the harness, which is where the plan says it belongs.
+
+⚠️ **One thing seen and deliberately left.** For a few ticks *after* CONTINUE the save restores
+`wCurMap` as `HallOfFame` — the save was written standing there — before the special warp moves the
+player to Pallet Town, and the agent, correctly un-latched, can start one walk into it. That is the
+ordinary map-transition case the agent already abandons on the map change, not this fault; before
+the fix there were fifteen walks and none of them was that one.
 
 **The harness already stops there**, and that is deliberate rather than a workaround: reaching the
 Hall of Fame ends the game, so `ExploringBrain::reached_the_end` makes the walk report a terminus and
@@ -1123,7 +1171,7 @@ anything added.
 2. ✅ **C1** — the new `debug_*` primitives and the sidecar. The play-path guard keeps passing.
 3. ◐ **C2** — the god run. Turn cost measured (§4.2.1); the intent list is what is left.
 4. ◐ **C3** — `CoverageLog` wired into the existing drivers, the frontier brain and the verdict
-   oracle. All built; W1, W2, §5.3 and §5.4 are what is left (W3 is closed — §5.2.8).
+   oracle. All built; W2 and §5.4 are what is left (W1, W3 and §5.3 are done).
 5. ◐ **C4** — audit committed; the matrix is unwritten.
 
 **The order to take the remaining work in**, which is not the order above because the phases no
@@ -1131,8 +1179,8 @@ longer gate one another — every row of §0.5 is independently startable agains
 
 1. ✅ **W3** — done (§5.2.8), and it took the frontier from 510 ids to 365 without losing a map.
 2. ✅ **§5.3's cross-check** — done, and it printed W2's three Mt Moon doors without being told.
-3. **W1**. It is the only open item that is a defect in the *agent* rather than in the walk, so it
-   is the one a deployed run could meet.
+3. ✅ **W1** — done. It was the only open item that was a defect in the *agent* rather than in the
+   walk, so it was the one a deployed run could meet.
 4. **C4's six missing cells** (§6.0). Self-contained, and the audit already says exactly what each
    one is.
 5. **W2**, starting with §5.2.7's direction 1 (regional sweeps over a selectable start fixture) —

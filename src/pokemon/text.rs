@@ -239,6 +239,10 @@ mod tests {
             Some(self.game_state.mode)
         }
 
+        fn a_game_is_loaded(&self) -> bool {
+            true
+        }
+
         fn trainer_battle_pending(&self) -> bool {
             false
         }

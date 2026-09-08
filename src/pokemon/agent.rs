@@ -1401,6 +1401,39 @@ pub struct PokemonAgent {
     /// `wNumHoFTeams` as of the last tick, and `None` until the first one — see
     /// [`Self::check_hall_of_fame`], where the whole of the edge trigger lives.
     hall_of_fame_teams: Option<u8>,
+    /// How far through the ending the cartridge is, once it has started. `None` for all of an
+    /// ordinary run — see [`Ending`] and [`Self::the_world_has_been_left`].
+    ending: Option<Ending>,
+}
+
+/// ⭐ **W1 — what the cartridge is doing between winning the game and being playable again.**
+///
+/// Winning does not hand the world back. `scripts/HallOfFame.asm` increments `wNumHoFTeams` on the
+/// ceremony's first frame and then runs the parade, the credits, `SaveGameData`,
+/// `WaitForTextScrollButtonPress` and finally **`jp Init`** — a whole-cartridge reset that clears
+/// WRAM and returns to the title screen. For all of that, `wCurMap` still reads `HallOfFame` and
+/// `wXCoord`/`wYCoord` still read the square the player was standing on, so `game_state()` answers
+/// with a room the player has left and `actions()` mints its two exit warps.
+///
+/// ⚠️ **The agent used to walk to them.** Measured from `post-hall-of-fame.bin`: the ceremony starts
+/// at 12 s of game time and the reset lands at **169 s**, and across that window the agent issued one
+/// walk after another to `HallOfFame:4,7:Warp` and `HallOfFame:5,7:Warp`, each abandoned by the
+/// 60-second movement bound while standing at (4, 2). A C3 sweep that ran past the terminus spent
+/// **197 turns** there, its busiest map of the run, the two exits tried 98 and 97 times. ⚠️ **The
+/// watchdog cannot catch it**: `GB_STUCK_TIMEOUT_SECS` fires on emulated silence, and an agent
+/// walking into a wall and giving up every sixty seconds is not silent.
+///
+/// ⚠️ **A map check cannot see this and must not be used for it.** The Hall of Fame is a legitimate
+/// room to stand in — the scripted route walks into it — and the fault is the *reset*, which is a
+/// property of the cartridge rather than of a map. What is used instead is the reset itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// `wNumHoFTeams` has gone up and `jp Init` has not run yet: the ceremony, the parade, the
+    /// credits and the save. WRAM still describes the old world, so nothing in it is worth reading.
+    BeforeTheReset,
+    /// The reset has happened — WRAM is cleared and the title screen is up. Still nothing to play,
+    /// but now the *next* thing to happen is a game being loaded, which is what ends this.
+    AfterTheReset,
 }
 
 impl Default for PokemonAgent {
@@ -1417,6 +1450,7 @@ impl PokemonAgent {
             .map(MachineCycles::from_duration);
         Self {
             cycles_since_poll: MachineCycles::ZERO,
+            ending: None,
             stuck_after,
             stuck_reported_at: MachineCycles::ZERO,
             state: AgentState::default(),
@@ -1485,6 +1519,10 @@ impl PokemonAgent {
         // cartridge says. `POST /api/new-run` loads the start-of-game state, so that is 0 — but a
         // future caller that restarts from something else must not be told it has just won.
         self.hall_of_fame_teams = None;
+        // ⚠️ **And the ending with it.** A new run loads a save state straight into WRAM, so
+        // `wPlayerID` never passes through zero and `the_world_has_been_left` would never see the
+        // reset it is waiting for. The restart *is* the world coming back; see [`Ending`].
+        self.ending = None;
     }
 
     /// **`POST /api/clear`** — pass the request straight through to the policy.
@@ -1677,6 +1715,51 @@ impl PokemonAgent {
             .map(|party| party.iter().map(|mon| mon.nickname.to_default_string()).collect())
             .unwrap_or_default();
         self.event(AgentEvent::HallOfFame { teams, playtime, playtime_seconds, badges, party });
+
+        // ⭐ **W1** — and from this frame the world in RAM is one the player has left. See [`Ending`].
+        //
+        // ⚠️ **Buttons released and the state machine dropped, once, here.** Whatever walk was in
+        // flight is a walk across a room that is about to stop existing, and a *held direction* is
+        // not merely useless: the ending finishes on `WaitForTextScrollButtonPress`, which waits on A
+        // or B, so an agent leaning on a d-pad holds the cartridge at the end of the credits for as
+        // long as the process lives. After this the agent presses nothing at all until the world
+        // comes back, which leaves the ceremony to whatever else is driving it — the host, a test's
+        // A-mash, or a person.
+        self.ending = Some(Ending::BeforeTheReset);
+        api.release_all_buttons();
+        self.backup_state = None;
+        self.set_state(AgentState::Idle);
+    }
+
+    /// ⭐ **W1 — is the cartridge between the end of one game and the start of the next?**
+    ///
+    /// `true` means: do nothing this tick. Not a decision point, not a policy poll, not a button.
+    /// See [`Ending`] for what the window is and what it used to cost.
+    ///
+    /// ⚠️ **It clears itself, and it has to.** `postgame::phase0` drives one agent through the
+    /// ceremony, the reset, the CONTINUE and out into Pallet Town to cut
+    /// `postgame-post-credits.bin`, and a latch that only `restart` could clear would strand it at
+    /// the title screen. The two phases are what make that safe: `a_game_is_loaded` is false only
+    /// after `Init` has cleared WRAM, so the world coming back is `wPlayerID` going non-zero
+    /// **after** it has been seen zero. Requiring the zero is the whole of it — the byte holds its
+    /// value throughout the ceremony, so a one-sided test would clear on the frame it was set.
+    fn the_world_has_been_left(&mut self, api: &PokemonApi) -> bool {
+        match self.ending {
+            None => false,
+            Some(Ending::BeforeTheReset) => {
+                if !api.a_game_is_loaded() {
+                    self.ending = Some(Ending::AfterTheReset);
+                }
+                true
+            }
+            Some(Ending::AfterTheReset) if api.a_game_is_loaded() => {
+                // A save was loaded (CONTINUE) or a new game was named. Either way the world under
+                // the agent is a real one again.
+                self.ending = None;
+                false
+            }
+            Some(Ending::AfterTheReset) => true,
+        }
     }
 
     /// Emit an event: to the policy first, then to the buffer the host drains.
@@ -2487,6 +2570,21 @@ impl PokemonAgent {
             return Ok(());
         }
 
+        // ── The end of the game ───────────────────────────────────────────────────
+        // ⚠️ **Above the `?` far below, and that placement is the whole reason this is a separate
+        // check.** `game_mode()` answers `None` through every screen transition, and a Hall of Fame
+        // ceremony is made of them — a fade to black, a party parade, the credits. Anything hung off
+        // `game_state()` or off the state machine below would miss the one frame that matters.
+        //
+        // ⚠️ **And above the watchdog too, which it did not used to be.** Everything after the
+        // announcement is cutscene: the agent reaches no decision point, so the watchdog's clock
+        // runs, and a nudge there would cost a paid request to tell a model it is stuck in a room
+        // that no longer exists. See [`Ending`] — W1.
+        self.check_hall_of_fame(api);
+        if self.the_world_has_been_left(api) {
+            return Ok(());
+        }
+
         // ── W9: the stuck-run watchdog ────────────────────────────────────────────
         // Below the manual-input queue on purpose: while a nudge is being delivered the run is being
         // un-stuck, and asking for another on top of it would stack presses. Above everything else,
@@ -2499,13 +2597,6 @@ impl PokemonAgent {
 
         // ── Did the game just walk the player off a square? ───────────────────────
         self.check_turn_back(api);
-
-        // ── The end of the game ───────────────────────────────────────────────────
-        // ⚠️ **Above the `?` below, and that placement is the whole reason this is a separate
-        // check.** `game_mode()` answers `None` through every screen transition, and a Hall of Fame
-        // ceremony is made of them — a fade to black, a party parade, the credits. Anything hung off
-        // `game_state()` or off the state machine below would miss the one frame that matters.
-        self.check_hall_of_fame(api);
 
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;

@@ -93,6 +93,17 @@ pub trait PokemonApiTrait {
     /// about to start, but `wIsInBattle` has not yet flipped to its trainer-battle value.
     /// In this window the game initialises the battle on its own — the agent must NOT press
     /// any button (a held direction wedges the engagement and a battle never starts).
+    /// Whether WRAM holds a game at all — `wPlayerID` is non-zero.
+    ///
+    /// ⭐ **The one signal that says the cartridge has been reset, as opposed to merely being
+    /// mid-transition.** `game_mode()` answers `None` through every screen change there is, so it
+    /// cannot tell a fade between two rooms from `jp Init`; this can, because `Init` clears WRAM and
+    /// `wPlayerID` is only written when a save is loaded or a new game is named. Measured through a
+    /// real ending: it holds its value for the whole Hall of Fame ceremony and the credits, and goes
+    /// to zero 169 s of game time later at the reset. [`PokemonAgent`](crate::pokemon::agent::PokemonAgent)
+    /// uses it to know when the world it was standing in has come back.
+    fn a_game_is_loaded(&self) -> bool;
+
     fn trainer_battle_pending(&self) -> bool;
     /// True while the player is inside a **PC menu that A-mashing cannot leave**.
     ///
@@ -563,6 +574,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             return None;
         }
         Some(mmu.read_game_mode())
+    }
+
+    fn a_game_is_loaded(&self) -> bool {
+        self.mmu().read_pointer_u16_be(&pokered_symbols::wPlayerID) != 0
     }
 
     fn trainer_battle_pending(&self) -> bool {
