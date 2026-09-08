@@ -166,6 +166,51 @@ price.
   seconds. The stand tile must be `Empty`/`Grass`/`Warp` as well as reachable. Reported from a
   deployed run on 2026-09-04, and true of three of the four boulders in the committed fixtures,
   every one of them a **left** push with rock to the east.
+- ⚠️ **A goal row's search is cached, because `actions()` runs on every 20 ms tick.** One capped
+  BFS over boulder layouts per (boulder, target) pair, fifty times a second, measured **11.4 ms per
+  call on Seafoam B3F and 3.1 ms on VictoryRoad1F against 82 us on a map with no boulders** — a tick
+  costs ~0.4 ms of wall clock to emulate, so the menu alone took the agent from ~48x real time to
+  **1.9x**. `PlanKey` is the memo and it is exact rather than hashed, because the cost of a
+  collision is a boulder shoved somewhere nobody asked for. Two of its fields carry the design: the
+  player's **reachability component** rather than their square (they move every tick, the region
+  does not, and the search already keys its own states this way), and a **two-bit-per-tile
+  walkability bitmap** rather than `meta_tiles` (which carries NPC sprites, so hashing it wholesale
+  would invalidate every entry whenever anyone took a step). The pre-filter is inside the memo too:
+  it is a BFS per pair and most pairs are hopeless, so an unsolvable pair is the one that most needs
+  answering once. `cinnabar::a_boulder_floors_action_menu_is_not_a_search_per_tick` is the bound.
+- ⚠️ **A boulder goal is bounded on *progress*, not on a shove count, and a fixed count was
+  measured wrong.** `MAX_PUSHES` was 24, justified as "Victory Road's worst floor solves in well
+  under ten"; VictoryRoad3F's (3, 5) switch needs **27** — a boulder walked across the floor one
+  push per tile with three others shifted out of the corridor first — so the coverage walk of
+  2026-09-08 was abandoned three pushes from the end having done nothing wrong. The planner returns
+  a shortest path through boulder layouts, so a productive shove leaves strictly fewer to make:
+  `MAX_PUSHES_WITHOUT_PROGRESS` (12) counts shoves since the plan last got shorter, which catches a
+  loop in a dozen pushes and never fires on a hard puzzle, and `MAX_PUSHES` (120) is only a
+  backstop. ⚠️ **And it aborts as `PuzzleRanLong`, not `DidNotArrive`** — the two shared a reason
+  whose prose says "the walk was given up after 60 seconds of game time", so a puzzle out of shoves
+  reported a failed *walk* and sent two investigations to the router.
+  `endgame::victory_roads_hardest_switch_is_one_decision_however_many_shoves_it_takes`.
+- ⚠️ **A cast reports its outcome, and for a long time it was the one action that did not.**
+  `fishing::tick` dropped to `Idle` in silence on a miss, and on a bite the wild battle replaced the
+  state before it could say anything — so a model that cast was told nothing at all, and the
+  coverage walk scored every `Fish` row `Silent`. A miss now completes and says whether anything bit
+  (and, on a Super Rod `wRodResponse` of 2, that the map has no fish at all, so casting again is
+  pointless); a bite aborts with `Battle`, which is what `resume_after_battle` picks back up.
+  `postgame::fishing::the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag`.
+- ⚠️ **A hole goal and a switch goal are *done* differently, and writing one test for both stalled
+  the Seafoam leg for its whole budget.** A switch keeps its boulder, so
+  `AgentState::SolvingBoulderPuzzle` finishes when `boulders()` contains the target. A **hole
+  swallows it**: nothing is ever standing on a hole, so that same test is structurally unreachable
+  there and the driver simply pushed to `MAX_PUSHES` — long enough, on Seafoam B3F, to shove a
+  second boulder down the *other* hole in passing and strand the next goal. A hole is done on either
+  of two sightings, because a boulder is drawn *on* the hole for the frame before it drops: a
+  boulder on the target, or the tracked one gone with nothing on a neighbouring square for the
+  re-acquire to pick up. Catching only the second reports the success as `NoRoute`.
+  `PolicyStep::DropBoulderInHole` had the mirror of the same bug — a *count* baseline captured on
+  the first tick the step is asked, which on that floor was after the drop, so a solved floor never
+  popped. A step that names its boulder needs no baseline at all.
+  `cinnabar::both_seafoam_holes_are_filled_by_the_only_boulders_that_can_reach_them` pins both, off
+  `seafoam-b3f.bin`, in ten seconds rather than the leg's sixty game-minutes.
 - ⚠️ **A cut tree and a boulder push finish their own action**, in `OverworldMovement`'s empty-route
   arm beside the fishing row (2026-09-04). Both walks end facing a thing with exactly one legal
   continuation, so ending there made the continuation a second decision — a paid request for the
@@ -384,12 +429,39 @@ price.
   is a fact rather than a fault.
 - `BattleActionStarted` carries the nickname and the opponent's species, read at the decision point
   (a trainer's lead is not loaded at `BattleStarted`).
+- ⭐ **`MetaTileMap::position_settled` is false for one tick per northward or westward connection,
+  and nothing may draw a conclusion from `player_position` while it is.** Crossing north or west
+  leaves `wYCoord`/`wXCoord` at **255** (the ROM's −1) with `wCurMap` still the *old* map, until
+  `CheckMapConnections` runs; `MetaTileMap::new`'s bounds clamp — which has to stay, it is what keeps
+  `meta_tiles` indexing in range — turns that into `(255 + north_extra).min(height - 1)`, a plausible
+  square at the **opposite** edge. The BFS then reaches nothing and the walk was abandoned with
+  `NoRoute` one tick before it landed. ⚠️ Southward and eastward crossings go one row *past* the map
+  onto the connection strip, which is a real reachable tile, so they must stay settled;
+  `a_coordinate_that_underflows_a_map_edge_is_not_a_position` pins both halves. ⚠️ **The hold is in
+  `OverworldMovement`'s `NoRoute` arm, not at the top of the arm**, and that placement is the whole
+  care in the change: gating the whole tick also works and breaks `full_playthrough`, because a
+  golden RNG replay re-rolls every route after any tick that presses a different button. Only the
+  arm that told the lie changes, and it presses and releases nothing.
 - `OverworldActionAborted` carries `at` in the expanded coordinate space, and its `Textbox` reason
   reads "the game stopped you to say something": "it was interrupted" made a deployed run file a bug
   about a locked gym. Nothing counts or withholds repeated aborts; noticing is the model's job.
   `OverworldInteractionCompleted` exists because a route to a sprite is `[A]` for ever once
   adjacent. Facing means what the game means, over a counter (`interaction_in_front` hops;
   `tile_in_front` must not).
+- ⭐ **The heal-return detour is bounded by hops taken (`MAX_HEAL_HOPS`), not only by failures to
+  route.** `heal_route_stuck` counts polls where `route_toward` answered nothing and is reset by
+  every hop that *does* route, so a detour that routes perfectly and never arrives resets it for
+  ever. Measured: 33 Route 13 ↔ Route 14 crossings and still going when the fixture's stall
+  detector killed the run. ⚠️ A wedged scripted run is silent — no watchdog, and `/api/events` goes
+  on looking healthy — and `--policy deterministic` is what is deployed.
+- ⚠️ **The oscillation under it is a `WorldGraph` landing mismatch and is *not* fixed.** A map split
+  by ledges is held as several sections keyed on the raw landing; an edge to it records the
+  **geometric** border `to_position`, and `bfs_nodes`' `SNAP_THRESHOLD` resolves that to whichever
+  observed node is nearest. Route 13's exit to Route 14 resolves to a 9-edge section at (19, 8)
+  while walking it actually lands in a 1-edge pocket at (19, 6) whose only exit is back to Route 13
+  — so the planner scores the door 7 hops from the Fuchsia Centre, takes it, arrives somewhere else
+  and re-plans identically. The two sections are **two tiles apart**, so no distance threshold can
+  separate them; the graph has to learn the landing a door actually deposits the player at.
 - `AgentState::CheckingTrashCan` had three callers and now has two — the gym-bin puzzle and the
   Mansion/Rocket switches, both progression gates. Hidden-item collection and the `interact` tool
   that shared the driver are gone (2026-09-03); see [llm-turn-loop](llm-turn-loop.md). Its
@@ -397,14 +469,25 @@ price.
   `interact` existed: it read "Can't reach trash can at (23, 30)" wherever the model pointed it, and
   three of a deployed run's ten Cerulean issue reports quote that line as proof the map model is
   broken. There is no gym in Cerulean.
-- ⭐ **`Grass` and `CutTree` are actions with no outcome event at all**, and C3's first walk from
-  Pallet Town found it: 66 of 307 chosen ids went silent and every one was one of those two.
-  Reaching tall grass hands over to `AgentState::PacingForEncounters` **without an event**; a cave
-  wander (`MetaTile::Empty`) does the same; pacing then ends either at a battle — whose
-  `assert_battle_state` arm for a non-`OverworldMovement` state emits only `BattleStarted`, with no
-  abort — or at its own budget, which emits a `TextBox`. So a model that chooses "walk in the grass
-  at (6, 29)" is told nothing about what happened to it. Open; see
-  `coverage::Verdict::Silent` and [coverage-plan](coverage-plan.md) §5.2.2.
+- ⭐ **Every door out of a driver state closes the action that opened it** — and `Grass` and
+  `CutTree` closed none of theirs until 2026-09-07, which C3's first walk from Pallet Town found:
+  66 of 307 chosen ids went silent and every one was one of those two.
+  `AgentState::PacingForEncounters` now carries the `MetaTile` the row named and reports all three
+  of its exits: an encounter as `Battle` (the same abort an interrupted walk gets, so
+  `resume_after_battle` picks the patch back up by itself), the budget expiring as
+  `NothingAppeared`, and a map change as `WrongMap`. `AgentState::CuttingTree` carries `from_row`
+  and ends with `OverworldActionCompleted { Cut }`, whose sentence is "✓ cut down the tree at
+  (5, 8)" rather than "✓ reached" it. ⚠️ Both replaced a `TextBox` **the agent had made up**, which
+  is the cartridge's voice used for the agent's own account. A **boulder push is still silent and
+  deliberately so** — see `AgentState::PushingBoulder`'s ⚠️, where the shove runs as a script that
+  takes the state away before it can report. `coverage::Verdict::Silent` stays as the guard that
+  finds the next one; [coverage-plan](coverage-plan.md) §5.2.2.
+- `OverworldActionAbortedReason::NothingAppeared` is an abort the oracle scores a **completion**: the
+  pace ran its whole `PACING_BUDGET_TICKS` and the game's own 8-in-256 roll came up empty, which is
+  the action done rather than the action failed. ⚠️ Its sentence quotes the budget in seconds
+  because "nothing appeared" without a number reads as "I did not walk far enough" — and
+  `PACING_BUDGET_SECS` rounds in nanoseconds, since a tick is 19.9996 ms and `as_millis()` was
+  telling the model 57.
 - `check_pending_pickup` reports `OverworldPickupFailed` when the ball sprite is still there after
   the overworld returns, which is how a full bag refuses every pickup: armed on the interaction,
   answered later, latch cleared either way, keyed on `PictureId::PokeBall`.

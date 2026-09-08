@@ -59,7 +59,29 @@ pub enum MetaTile {
     /// in `push`). The prose has to name the boulder's own square, and an action that computes the
     /// thing it is about from the square the player stands on is one more place for the two
     /// coordinate conventions to be confused.
-    Boulder { at: Point8, push: crate::joypad::JoypadButton },
+    /// ⭐ **The whole Strength puzzle as one decision: put a boulder on `at`.**
+    ///
+    /// `at` is a pressure switch (`strength_switches`) or a floor hole (`holes`); `hole` says which,
+    /// because the sentence differs and so does the point of doing it.
+    ///
+    /// ⚠️ **This exists because a Sokoban puzzle solved a shove at a time is the wrong unit of
+    /// decision, and the evidence is unusually direct.** Every individual shove is a paid request
+    /// and a chance to seal the floor, and the prompt layer twice tried to explain the puzzle in
+    /// prose instead and had to withdraw both attempts — one of them told a deployed run the floor
+    /// could not be solved the instant it arrived on Victory Road 3F, and the run walked up from 2F
+    /// and straight back down **twenty times**. Two more deployed runs filed issue reports asking
+    /// whether the switch coordinates were wrong. They were not; the puzzle was simply not a thing
+    /// to ask a language model to do one shove at a time.
+    ///
+    /// `MetaTileMap::solve_boulder_push` is a capped BFS over boulder layouts that the scripted
+    /// route has relied on for the whole game, so the planning was already solved and only the
+    /// *offer* was missing. It is the same move `Cut` and `Boulder` each made a level lower: a
+    /// sequence whose every step has one legal continuation is one decision, not N.
+    ///
+    /// ⚠️ **Withheld unless it is solvable right now** — `solve_boulder_push` answering `None` is
+    /// the gate, exactly as `can_cut` gates a tree. Offering it otherwise would recreate "a row the
+    /// agent cannot then execute" on the hardest floor in the game.
+    BoulderGoal { boulder: Point8, at: Point8, hole: bool },
     /// A PC (a hidden-object tile the player faces and presses A to use — Someone's PC / Bill's PC).
     /// Impassable like `Obstacle`, but `actions()` emits a route that faces it and presses A. The
     /// tile is not classified from the tileset; PC coordinates are looked up per map (`pc_locations`).
@@ -115,6 +137,26 @@ impl MetaTile {
         self.into()
     }
 
+    /// Whether `other` is **the same row of the menu as this one**, for a walk that re-derives its
+    /// target every tick.
+    ///
+    /// ⚠️ **`==` is wrong here for exactly one variant, and it cost a coverage sweep.**
+    /// `OverworldMovement` re-asks `actions()` from wherever the player now stands and looks for the
+    /// row it set out for. Every other tile is the thing itself and holds still, but a
+    /// `BoulderGoal` also carries the boulder `actions()` picked as nearest-capable — and after a
+    /// push, or after the player has walked, that can be a different boulder. Full equality then
+    /// finds nothing, the walk has no route, and it is abandoned on `MAX_MOVEMENT_SILENCE` sixty
+    /// seconds later: the walk of 2026-09-08 gave up "without getting there" **standing one square
+    /// from the push tile**. What the row is about is the target, which is also why the id is keyed
+    /// on it (see [`Self::id_kind`]).
+    pub fn is_same_row_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::BoulderGoal { at, hole, .. }, Self::BoulderGoal { at: b, hole: h, .. }) =>
+                at == b && hole == h,
+            _ => self == other,
+        }
+    }
+
     /// The last field of an action id: [`Self::kind`] for everything except a person, who is named.
     ///
     /// ⚠️ **`Sprite` is the one variant whose *kind* is not worth saying.** Every other id ends in a
@@ -142,7 +184,22 @@ impl MetaTile {
             // different decisions and they share the square the player stands on for none of them,
             // but `stand + push` is what names the boulder, so without the word two rows for two
             // boulders either side of one tile would mint the same id.
-            Self::Boulder { push, .. } => format!("PushBoulder{push}").into(),
+            // ⚠️ **The target is in the key, not just in the prose.** A floor has several switches
+            // and the square the player stands on to start is the solver's choice and moves between
+            // turns, so without the target two goals could mint the same id — and the *same* goal
+            // could mint two.
+            //
+            // ⚠️ **The boulder is named in the row's prose and deliberately *not* in its id, and
+            // the coordinate is the target rather than the square the player stands on.** Both
+            // halves move: every shove changes the layout, so `actions()` re-picks the nearest
+            // capable boulder and the solver re-picks the square to start from — and an id built
+            // from either is a *new* id after every push. The coverage walk of 2026-09-07 spent two
+            // and a half hours at one action a minute on VictoryRoad3F because of it: each push
+            // minted an id the frontier had never seen, so one puzzle was an unbounded family of
+            // rows that could never be finished, and each new id started the long walk again.
+            // The target is the one thing about a goal that does not move, so the target is the key.
+            Self::BoulderGoal { hole, .. } =>
+                if *hole { "PushBoulderIntoHole".into() } else { "PushBoulderOntoSwitch".into() },
             // ⚠️ **Not `"Cut"`.** An id is a key, and a run resumed across this change reads
             // `Route9:5,9:CutTree` back out of its own conversation and quotes it at
             // `resolve_overworld`. The variant split is an implementation detail; the key is not.
@@ -152,21 +209,6 @@ impl MetaTile {
     }
 }
 
-/// A push direction as the word a person would use, lower case, for the prose above.
-///
-/// ⚠️ **Not `JoypadButton`'s own `Display`**, which is the variant name and therefore capitalised:
-/// this reads inside a sentence ("push it left"), and the capitalised form is what the *id* uses,
-/// where it is a key rather than English. `tile_map::push_word` is the same three lines for the
-/// refusal sentences; they are separate because one is prose about a button and the other is prose
-/// about a tile, and folding them would put a `pub` on a formatting detail.
-fn push_word(push: crate::joypad::JoypadButton) -> &'static str {
-    use crate::joypad::JoypadButton;
-    match push {
-        JoypadButton::Up => "up", JoypadButton::Down => "down",
-        JoypadButton::Left => "left", JoypadButton::Right => "right",
-        _ => "that way",
-    }
-}
 
 impl Display for MetaTile {
     /// **Prose, and a UI contract** — this is what the status log says the agent is walking to, via
@@ -199,7 +241,18 @@ impl Display for MetaTile {
             Self::Counter => write!(f, "a counter"),
             Self::CutTree => write!(f, "a cuttable tree"),
             Self::Cut { at } => write!(f, "the tree at ({}, {}), to cut it down", at.x, at.y),
-            Self::Boulder { at, push } => write!(f, "the boulder at ({}, {}), to push it {}", at.x, at.y, push_word(*push)),
+            // Names the *goal*, because that is the decision being taken; how many shoves it costs
+            // and from which side is the solver's business and changes nothing the model can act on.
+            // ⚠️ **The boulder is named as well as the target.** A floor with two of each — Seafoam
+            // B3F — makes "push a boulder into that hole" ambiguous, and choosing the wrong one
+            // leaves the other hole unreachable: a complete search then answers "unsolvable" on a
+            // floor that was fine ten pushes earlier.
+            Self::BoulderGoal { boulder, at, hole: false } => write!(
+                f, "the boulder at ({}, {}), to push it onto the switch at ({}, {})",
+                boulder.x, boulder.y, at.x, at.y),
+            Self::BoulderGoal { boulder, at, hole: true } => write!(
+                f, "the boulder at ({}, {}), to push it into the hole at ({}, {})",
+                boulder.x, boulder.y, at.x, at.y),
             Self::Pc => write!(f, "the PC"),
             Self::Fish { rod } => write!(f, "the water's edge, to fish with the {}", rod.name()),
             Self::Switch { object, .. } => write!(f, "{object}"),
@@ -283,5 +336,43 @@ impl JumpDirection {
             Self::West => "west",
             Self::East => "east",
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Point8;
+
+    /// **A goal row is identified by its target, and the boulder is free to move under it.**
+    ///
+    /// ⚠️ Both halves of this cost a coverage sweep. `MetaTile::id_kind` keys the id on the target
+    /// because an id that changes per push is a row the frontier has never seen — a 24-hour walk
+    /// spent two and a half hours at one action a minute on VictoryRoad3F. `is_same_row_as` is the
+    /// same fact one layer down: `OverworldMovement` re-derives its target every tick, and matching
+    /// the row with `==` stopped finding it the moment `actions()` re-picked the nearest capable
+    /// boulder, so the walk was abandoned sixty seconds later a single square from the push tile.
+    #[test]
+    fn a_boulder_goal_is_the_target_and_not_the_boulder() {
+        let target = Point8 { x: 3, y: 5 };
+        let goal = |bx, by| MetaTile::BoulderGoal {
+            boulder: Point8 { x: bx, y: by }, at: target, hole: false };
+
+        assert!(goal(2, 3).is_same_row_as(&goal(13, 12)),
+            "the same switch is the same row whichever boulder is going to reach it");
+        assert_eq!(goal(2, 3).id_kind(), goal(13, 12).id_kind(), "and so is its id");
+
+        // A different target is a different row, and a hole is not a switch.
+        let elsewhere = MetaTile::BoulderGoal {
+            boulder: Point8 { x: 2, y: 3 }, at: Point8 { x: 9, y: 16 }, hole: false };
+        assert!(!goal(2, 3).is_same_row_as(&elsewhere));
+        let hole = MetaTile::BoulderGoal { boulder: Point8 { x: 2, y: 3 }, at: target, hole: true };
+        assert!(!goal(2, 3).is_same_row_as(&hole), "a hole at the same square is not the switch");
+        assert_ne!(goal(2, 3).id_kind(), hole.id_kind());
+
+        // Every other tile keeps plain equality, which is what the walk relies on everywhere else.
+        assert!(MetaTile::Cut { at: Point8 { x: 5, y: 8 } }
+            .is_same_row_as(&MetaTile::Cut { at: Point8 { x: 5, y: 8 } }));
+        assert!(!MetaTile::Cut { at: Point8 { x: 5, y: 8 } }
+            .is_same_row_as(&MetaTile::Cut { at: Point8 { x: 5, y: 9 } }));
     }
 }

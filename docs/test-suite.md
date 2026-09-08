@@ -28,6 +28,10 @@ cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
 # mock, with a god party and a battle script. Prints ms per turn and turns per game-minute. ~5 s.
 cargo test --release --features godmode --bin gb -- godmode --nocapture
 
+# C3's walk: 90 game-minutes of exhaustive exploration from Pallet Town through the deployed
+# LlmPolicy, with a god party. Fails on any defect and writes the whole table either way. ~95 s.
+cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+
 # The stall hunt: 40 min of game time under RandomPolicy from each of 26 starting states, in
 # parallel. ~39 s each, about 5.5 min of wall clock on 16 threads.
 cargo test --release --features soak-tests --bin gb -- soak --nocapture
@@ -78,6 +82,7 @@ cargo test --release --features bench --bin gb -- web::audio::bench --nocapture
 | `soak-tests` | `integration_tests::soak`, gated as a module so it never appears in the ignored list |
 | `regen-fixtures` | lets a leg test overwrite the snapshot the next leg reads |
 | `godmode` | C2's measured run. The machinery under it — `Intent`, `ScriptedBrain`, `cheats::Cheats`, `coverage::CoverageLog` — is all default tier; only the run that spends game time is gated |
+| `coverage-tests` | C3's frontier walk, the one test that spends game time going *everywhere*. Same split: the oracle is default tier and only the walk is gated |
 
 A test that is `#[ignore]`d should be blocked, not merely slow; everything else goes behind a
 feature. With every feature on, the ignored list is exactly 18 blocked emulator tests (9 `oam_bug`,
@@ -124,6 +129,18 @@ make it pass, say so in the hand-off.
   at Route 21 (7, 72) mid-crossing and mid-battle, read by
   `stalls::a_water_route_does_not_climb_out_onto_route_21s_islands`. Its property is *which map*, so
   it must not be re-cut somewhere tidier, and it is not in the leg chain.
+- `vr3f-strength.bin` is the other **mid-leg** cut, by `endgame::cut_vr3f_fixture`: the 1F climb
+  plus the 2F half of `victory_road_2f_3f_steps()`, stopping on VictoryRoad3F with Strength armed
+  and its four boulders untouched. Same reason as `seafoam-b3f.bin` below — the boulder work lives
+  in the last steps of a long leg — and the same rule: not read by the chain, so free to re-cut, but
+  it must keep landing on 3F armed.
+- `seafoam-b3f.bin` is a **mid-leg** cut, and the only other one: `cinnabar::cut_seafoam_b3f_fixture`
+  runs `seafoam_articuno_steps()` truncated at the first `DropBoulderInHole` and saves there. The
+  Articuno leg is 60 game-minutes end to end and its whole difficulty lives in its last two steps,
+  so debugging the boulder puzzle through the leg meant a minutes-long round trip per idea; off this
+  fixture it is ten seconds. It is not something the chain reads — `post-articuno.bin` still comes
+  from the full leg — so it can be re-cut freely, but it must keep landing on B3F with Strength
+  armed and all four boulders untouched, which the cutter asserts.
 - `soak-*.bin` are **not** part of the chain: nothing reads one as the input to a route, so the
   rules above about cutting where the mainline stands and where the party is healed do not apply to
   them. They are re-cut wholesale by `regen_soak_checkpoints`, never by hand.
@@ -205,6 +222,16 @@ a real run directory. Default tier; the whole of `llm.rs` runs in about two seco
   driver. `TestFixture::with_coverage()` turns it on — **opt-in, because the fixture then owns the
   event stream**: the agent's buffer is drained rather than peeked and is capped at 100, so a test
   that opts in must read events from `fixture.coverage` and not from `agent.drain_events()`.
+- ⭐ **A defect drops a save state and a screenshot where it happened**, into
+  `target/test-artifacts/coverage/defect-<id>_state.bin`, taken by `TestFixture::observe_coverage`
+  on the tick the verdict turns. ⚠️ **It cannot be taken at the end of the run.** Exploration is
+  destructive and mostly one-shot — a sprite talked to is gone, an item picked up is gone — so by
+  the time a walk ends the square that failed cannot be stood on again.
+- ⚠️ **The walk is not reproducible, and that is `step_coarse` rather than a bug.** `LlmRun` hands
+  the agent however long the driver's last loop iteration took, with a worker thread and a real
+  socket in that loop, so three runs from the same fixture gave 352, 355 and 360 ids (always 28
+  maps) and two different defects. Read the totals as a measurement with a couple of per cent on
+  them, and chase a defect from its save state rather than by re-running.
 - ⚠️ **A repeat is the signal, not the first block.** Being stopped is how this game says almost
   everything, so `Textbox`/`Script` is `Blocked` and only becomes a defect past
   `coverage::REPEAT_IS_A_DEFECT`. Everything that says the agent could not execute a row it had

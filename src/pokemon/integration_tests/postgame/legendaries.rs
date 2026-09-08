@@ -45,8 +45,10 @@ fn dump_map(fixture: &mut TestFixture, x0: u8, x1: u8, y0: u8, y1: u8) {
                 Some(MetaTile::Counter) => 'n',
                 Some(MetaTile::Pc) => 'P',
                 Some(MetaTile::Switch { .. }) => 's',
-                // Never in `meta_tiles` — a fishing spot and a boulder push are actions, not tiles.
-                Some(MetaTile::Fish { .. } | MetaTile::Boulder { .. } | MetaTile::Cut { .. }) => '.',
+                // Never in `meta_tiles` — a fishing spot, a boulder push and a Strength goal are
+                // actions, not tiles.
+                Some(MetaTile::Fish { .. } | MetaTile::Cut { .. }
+                     | MetaTile::BoulderGoal { .. }) => '.',
                 None => ' ',
             })
             .collect();
@@ -82,10 +84,10 @@ fn probe_route_to_moltres() {
         PolicyStep::enter(Map::Route23),
         PolicyStep::goto(Map::VictoryRoad1F),
         PolicyStep::UseStrength { target: PartyRef::Slot(3) },
-        PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+        PolicyStep::SolveBoulders { switch: Point8 { x: 17, y: 13 }, boulder: None },
         PolicyStep::enter(Map::VictoryRoad2F),
         PolicyStep::UseStrength { target: PartyRef::Slot(3) },
-        PolicyStep::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
+        PolicyStep::SolveBoulders { switch: Point8 { x: 1, y: 16 }, boulder: None },
         // Moltres is not in the (1,16)-opened region either — the north strip that holds it, Super
         // Nerd 2 (4,2) and the Guard Spec (11,0) is entered only through VR2F's own (1,1) ladder,
         // which is the far side of VR3F's (2,0) warp (`VictoryRoad3F.asm:20`).

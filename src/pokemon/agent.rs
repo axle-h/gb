@@ -156,6 +156,42 @@ fn blackout_in_flight(api: &PokemonApi) -> bool {
 /// to Route8Gate" while standing two tiles from that warp, and filed an issue about it.
 const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
 
+/// Total ticks of *successful* pacing in tall grass or on cave floor before giving up on the
+/// encounter ever coming. 3000 ticks is 60 s of game time.
+///
+/// ⚠️ **The stall counter cannot see this failure**, which is the whole reason this exists: that one
+/// counts ticks spent failing to *reach* the target tile, so it catches "walking into a wall" and is
+/// reset on arrival by healthy pacing. An agent pacing perfectly in grass where nothing will ever
+/// appear resets it for ever.
+///
+/// ⚠️ **This is not sized to guarantee an encounter, and the first attempt at it was.** That
+/// reasoning gave 180 s: three times the ~57 s in which 99.9% of encounters on the rarest map
+/// (Viridian Forest, 8/256 per step) should land. It was wrong twice over. The pair is often
+/// grass↔plain, so only every *other* step rolls, which doubles the figure; and more importantly,
+/// giving up is not a failure. The policy is simply asked again, and if it picks grass again the
+/// pace resumes, so the only thing that changes is that the run stopped being silent.
+///
+/// So what this actually bounds is **how long the agent may go without being asked anything**, and
+/// 180 s of that is 60% of the watchdog. `soak` measured exactly that: seed 1's worst healthy
+/// stretch was 182 s, which was this budget running to the end in Viridian Forest and nothing else.
+///
+/// ⚠️ **It is at module scope because [`OverworldActionAbortedReason::NothingAppeared`] quotes it.**
+/// The sentence the model reads has to carry the number, or the obvious reading of "nothing
+/// appeared" is "I did not walk far enough".
+const PACING_BUDGET_TICKS: u16 = 3000;
+
+/// [`PACING_BUDGET_TICKS`] in seconds of game time, for the sentence that reports it.
+///
+/// ⚠️ **Nanoseconds and a rounded division, because milliseconds and a truncating one said 57.**
+/// A tick is 20 ms asked for and 19.9996 ms delivered — `MachineCycles::from_duration` quantises to
+/// whole machine cycles — so `as_millis()` is 19, and 3000 of those came out as 57 seconds in the
+/// message this replaced. The budget really is a minute; the arithmetic was losing three seconds of
+/// it in front of the model.
+const PACING_BUDGET_SECS: u64 = {
+    let nanos = PACING_BUDGET_TICKS as u64 * AGENT_RESOLUTION.to_duration().as_nanos() as u64;
+    (nanos + 500_000_000) / 1_000_000_000
+};
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OverworldActionAbortedReason {
     Unknown,
@@ -169,6 +205,40 @@ pub enum OverworldActionAbortedReason {
     /// The walk ran for [`MAX_MOVEMENT_SILENCE`] and never arrived. Not a routing failure: the
     /// route existed on every tick, it just never ended.
     DidNotArrive,
+    /// A boulder goal that kept finding a plan and kept shoving without the boulder arriving.
+    ///
+    /// ⚠️ **Not `DidNotArrive`, which is what it used to be and cost an evening.** That reason's
+    /// prose says "the walk was given up after 60 seconds of game time", which is true of
+    /// `OverworldMovement`'s bound and a lie about this one — the walk had long since finished and
+    /// the puzzle was being solved. A coverage defect reading "given up without getting there,
+    /// standing at (2, 1)" while standing one square from the push tile sent the investigation to
+    /// the router, twice, when what had happened was that the shove budget ran out three pushes
+    /// from the end.
+    PuzzleRanLong { pushes: u8 },
+    /// A boulder goal whose floor has no solution left from where the player is standing.
+    ///
+    /// ⚠️ **Not `NoRoute`, which is what it was and which reads as a pathfinder bug.** "There is no
+    /// route to the boulder at (23, 16)" says the agent could not *walk* somewhere, and a model
+    /// that has just watched itself walk across that floor reads it as the game being broken — the
+    /// deployed run of 2026-09-02 filed five reports off sentences of exactly this shape. What has
+    /// actually happened is that the layout moved (a shove of its own, or another goal's) into one
+    /// this floor cannot be solved from, and Gen 1's answer to that is the door: `LoadMapData`
+    /// re-reads a map's objects every time, so leaving and coming back puts every boulder back.
+    PuzzleUnsolvable,
+    /// ⭐ **The tall grass or the cave floor was paced to the end of its budget and no wild Pokémon
+    /// turned up.** The action was carried out in full; what did not happen is the thing it was for.
+    ///
+    /// ⚠️ **This is not a failure and the oracle scores it as a completion**
+    /// (`integration_tests::coverage`). It is an abort only because the walk is over and the policy
+    /// has to be asked again, which is what every other member of this enum also means.
+    ///
+    /// ⚠️ **It replaced a `TextBox` the agent made up.** The sentence was there before this reason
+    /// was, phrased as `📖 paced (6, 29)↔(6, 30) on Route1 for 57s of game time with no encounter`,
+    /// which claimed the *cartridge* had said it, and got the number wrong besides
+    /// ([`PACING_BUDGET_SECS`]). Worse, nothing closed the action, so the id the
+    /// model chose ended in silence: `LlmPolicy` read it as `Dropped::Unreported` and threw away the
+    /// rest of any chain behind it, and C3's frontier walk scored it `Verdict::Silent`.
+    NothingAppeared,
 }
 
 impl Display for OverworldActionAbortedReason {
@@ -212,6 +282,19 @@ impl Display for OverworldActionAbortedReason {
             Self::DidNotArrive => write!(
                 f, "the walk was given up after {} seconds of game time without getting there",
                 MAX_MOVEMENT_SILENCE.as_secs()),
+            Self::PuzzleUnsolvable => write!(
+                f, "no boulder on this floor can be pushed onto it from where you are standing any \
+                    more; leaving this floor and coming back puts every boulder where it started"),
+            Self::PuzzleRanLong { pushes } => write!(
+                f, "the boulder was pushed {pushes} times without reaching its target, so it was \
+                    given up; leaving this floor and coming back puts every boulder where it started"),
+            // ⚠️ **Says what happened rather than that something went wrong**, for the same reason
+            // `Textbox` does: walking in grass and meeting nothing is the game's own 8-in-256 roll
+            // coming up empty, and a model told its action failed goes looking for a broken action
+            // instead of walking somewhere else. The seconds are here because the alternative
+            // reading is "I did not walk far enough", and the number settles it.
+            Self::NothingAppeared => write!(
+                f, "nothing appeared after {PACING_BUDGET_SECS} seconds of game time walking about in it"),
         }
     }
 }
@@ -364,6 +447,11 @@ impl Display for AgentEvent {
                 Some(at) => write!(f, "✗ gave up on {destination} at ({}, {}): {reason}", at.x, at.y),
                 None => write!(f, "✗ gave up on {destination}: {reason}"),
             },
+            // ⚠️ **Two of these are not arrivals**, and "✓ reached the tree at (5, 8), to cut it
+            // down" is the sentence that says so. A cut and a push are rows that *do* something at
+            // the end of the walk, so the completion is of the deed rather than of the journey.
+            AgentEvent::OverworldActionCompleted { destination: MetaTile::Cut { at } } =>
+                write!(f, "✓ cut down the tree at ({}, {})", at.x, at.y),
             AgentEvent::OverworldActionCompleted { destination } =>
                 write!(f, "✓ reached {destination}"),
             // Not rendered by the page — `useEventStream`'s `fold` drops the kind, because the
@@ -890,8 +978,16 @@ pub(crate) enum AgentState {
     /// Walking back and forth between two tiles so the ROM rolls for a wild encounter on each step.
     /// `stalled` counts ticks spent failing to reach the target (walking into something); `paced`
     /// counts every tick, successful or not, and is what bounds the wait for an encounter that is
-    /// never coming. See the two constants in the tick for why one cannot do both jobs.
-    PacingForEncounters { map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool, stalled: u16, paced: u16 },
+    /// never coming. `STALL_TICKS` in the tick and [`PACING_BUDGET_TICKS`] at module scope say why
+    /// one counter cannot do both jobs.
+    ///
+    /// ⚠️ **`destination` is carried so the pace can be *closed*, and that is the whole reason it is
+    /// here.** Reaching grass hands over to this state and the walk that got here is never
+    /// terminated, so a model that chose "walk in the tall grass at (6, 29)" used to be told nothing
+    /// whatever about what became of it: C3's first frontier walk found 66 of 307 chosen ids ending
+    /// in silence and every one of them was a `Grass` or a `CutTree`. Every exit below now ends the
+    /// action it belongs to, which needs the tile the action named.
+    PacingForEncounters { destination: MetaTile, map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool, stalled: u16, paced: u16 },
 
     Battle(BattleState),
 
@@ -913,7 +1009,13 @@ pub(crate) enum AgentState {
     /// "mashing", navigating each menu's cursor to its target index and then confirming with A (never
     /// carrying a held direction into the next menu). `entered_menu` tracks that we left the overworld
     /// (so returning to it means the cut animation finished). `tree_pos` is the tile being cut.
-    CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8, slot: u8, move_index: u8 },
+    ///
+    /// ⚠️ **`from_row` says whether an action menu row is waiting to be closed.** The same driver
+    /// serves two callers: the `MetaTile::Cut` row, which is one of the model's own decisions and
+    /// therefore has a `StartedOverworldAction` open against it, and `FieldMove::CutTree`, which is
+    /// a `use_field_move` call and has nothing open at all. Reporting a completion for the second
+    /// would tell `LlmPolicy` an action it never issued had landed.
+    CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8, slot: u8, move_index: u8, from_row: bool },
 
     /// Mounting Surf to cross water: the route is about to step onto a `Water` tile while the player is
     /// on foot, so drive START→POKéMON→(surf mon at `slot`)→SURF (the game then mounts the player and
@@ -1051,6 +1153,16 @@ pub(crate) enum AgentState {
     /// sentence this whole mechanism exists to stop producing. One attempt; a second failure is a
     /// named refusal.
     PushingBoulder { boulder: Point8, dir: JoypadButton, armed: bool },
+    /// ⭐ **Carrying out a whole Strength puzzle**: push boulders until one sits on `target`.
+    ///
+    /// Re-plans with `MetaTileMap::solve_boulder_push` before every shove rather than committing to
+    /// a plan, for the reason the overworld walk re-derives its route every tick: the floor moves
+    /// under it. A wild battle, a trainer, or the player being nudged all invalidate a stored plan,
+    /// and re-planning costs one capped BFS on a map with at most a handful of boulders.
+    ///
+    /// `pushes` bounds it. A plan that keeps being found and never completes is the shape that
+    /// burned 279 009 turns on Victory Road, and it must not be possible to re-enter it here.
+    SolvingBoulderPuzzle { boulder: Point8, target: Point8, hole: bool, pushes: u8, settle: u16 },
 }
 
 impl AgentState {
@@ -1112,6 +1224,7 @@ impl Display for AgentState {
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
             AgentState::PushingBoulder { boulder, dir, .. } => write!(f, "push-boulder:{boulder}{dir:?}"),
+            AgentState::SolvingBoulderPuzzle { target, pushes, .. } => write!(f, "boulder-goal→{target}#{pushes}"),
         }
     }
 }
@@ -1129,6 +1242,24 @@ pub struct PokemonAgent {
     /// (`WorldGraph::observe`). Provided to the policy each overworld decision for backtracking
     /// (e.g. heal-return); forward travel is scripted with explicit `EnterMap` steps.
     world_graph: WorldGraph,
+    /// ⭐ **The Strength goal being carried out**, if any: `(target, is_a_hole)`.
+    ///
+    /// ⚠️ **On the agent rather than in `AgentState::PushingBoulder`, because a push detours.** An
+    /// unarmed shove goes `PushingBoulder → UsingFieldMove` (to turn `BIT_STRENGTH_ACTIVE` on) and
+    /// back, and `UsingFieldMove::resume` carries only `(boulder, dir)`. Widening that to thread a
+    /// goal through would touch every construction of a state three other features also use; a
+    /// field the detour simply does not disturb is the smaller change.
+    ///
+    /// Cleared wherever the goal ends — landed, unsolvable, or out of pushes — so a later lone
+    /// `FieldMove::PushBoulder` cannot be mistaken for a step of it.
+    boulder_goal: Option<(Map, Point8, Point8, bool)>,
+    /// Shoves the current goal has spent. Beside the goal for the same reason: `PushingBoulder` is
+    /// re-entered once per shove and cannot carry a running total.
+    boulder_goal_pushes: u8,
+    /// Shortest remaining plan this goal has ever seen, and shoves made since it last got shorter.
+    /// See `MAX_PUSHES_WITHOUT_PROGRESS`.
+    boulder_goal_best: usize,
+    boulder_goal_stale: u8,
     /// The map the agent was last on, to detect map changes (warp/connection landings).
     last_map: Option<Map>,
     /// Trees the agent has cut down, by `(map, expanded tile position)`. The `MetaTileMap` is decoded
@@ -1295,6 +1426,10 @@ impl PokemonAgent {
             cycles: MachineCycles::default(),
             policy,
             world_graph: WorldGraph::new(),
+            boulder_goal: None,
+            boulder_goal_pushes: 0,
+            boulder_goal_best: usize::MAX,
+            boulder_goal_stale: 0,
             last_map: None,
             cut_tiles: std::collections::HashSet::new(),
             blocked_tiles: std::collections::HashSet::new(),
@@ -1866,6 +2001,31 @@ impl PokemonAgent {
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
+                // ⭐ **A pace ends at an encounter, and that is the *success* of walking in grass.**
+                // It is still reported the same way an interrupted walk is, because it is the same
+                // fact from the agent's side: the action is over and the policy will be asked
+                // again. What it buys is that `resume_after_battle` picks the pace back up by
+                // itself, so grinding a patch of grass costs one decision rather than one per wild
+                // Pokémon, and the oracle stops scoring the id `Silent`. This arm used to fall
+                // through to the `_` below, which emits `BattleStarted` and nothing else.
+                AgentState::PacingForEncounters { destination, .. } => {
+                    self.abort_overworld(destination, OverworldActionAbortedReason::Battle, None);
+                    self.event(AgentEvent::BattleStarted);
+                    self.set_battle_state(BattleState::default());
+                }
+                // ⭐ **And a bite is the success of a cast, for exactly the same reason.** The
+                // battle replaces this state before `fishing::tick` can see the rod come out of
+                // the water, so without this arm the only account of a cast that *worked* was
+                // silence, and `resume_after_battle` had nothing to pick back up — one paid
+                // decision per fish. It falls through to the `_` below otherwise, which says a
+                // battle started and nothing about why.
+                AgentState::Fishing(state) => {
+                    self.abort_overworld(
+                        MetaTile::Fish { rod: state.rod },
+                        OverworldActionAbortedReason::Battle, None);
+                    self.event(AgentEvent::BattleStarted);
+                    self.set_battle_state(BattleState::default());
+                }
                 _ => {
                     // entering battle from somewhere else, maybe a textbox
                     self.event(AgentEvent::BattleStarted);
@@ -1949,6 +2109,21 @@ impl PokemonAgent {
             if rollback_delay.is_exhausted() {
                 // The script committed (ran long enough to be genuine).
                 self.backup_state = None;
+                // ⭐ **A shove of a Strength goal comes back here, and has to be given back to the
+                // solver.** The push itself runs as `GameMode::Script` — the dust animation — and
+                // `PushingBoulder` is deliberately not on the exemption list above, so the driver is
+                // replaced mid-push and its own "the boulder moved" arm never fires. That is why a
+                // `MetaTile::Boulder` row reports nothing (see `AgentState::PushingBoulder`), and it
+                // is why a *goal* would have stopped dead after one shove without this: the agent
+                // would drop to `AwaitingOverworldAction` and ask for a whole new decision, which is
+                // the N-decisions-per-puzzle this feature exists to end.
+                if let Some((_, boulder, target, hole)) = self.boulder_goal {
+                    self.boulder_goal_pushes = self.boulder_goal_pushes.saturating_add(1);
+                    self.boulder_goal_stale = self.boulder_goal_stale.saturating_add(1);
+                    let pushes = self.boulder_goal_pushes;
+                    self.set_state(AgentState::SolvingBoulderPuzzle { boulder, target, hole, pushes, settle: 0 });
+                    return;
+                }
                 self.set_state(AgentState::AwaitingOverworldAction {
                     delay: DelayContext::default(),
                 });
@@ -2453,6 +2628,25 @@ impl PokemonAgent {
         match self.state {
             AgentState::Idle => {
                 api.release_all_buttons();
+                // ⭐ **A Strength goal picks itself back up here.** Anything that interrupts the
+                // solver — a wild battle, a text box, the shove's own script — drops to `Idle`, and
+                // without this the puzzle would be abandoned half-solved and the model asked for a
+                // whole new decision, which is the per-shove cost the goal row exists to remove.
+                //
+                // ⚠️ **The map is checked, because a black-out does move the player.** Resuming a
+                // Victory Road goal onto the Pokémon Centre it warped to would ask the solver about
+                // a floor nobody is standing on.
+                if game_mode == GameMode::Overworld
+                    && let Some((map, boulder, target, hole)) = self.boulder_goal
+                {
+                    let here = self.observe_state(api)?;
+                    if here.map.map == map {
+                        let pushes = self.boulder_goal_pushes;
+                        self.set_state(AgentState::SolvingBoulderPuzzle { boulder, target, hole, pushes, settle: 0 });
+                        return Ok(());
+                    }
+                    self.boulder_goal = None;
+                }
                 match game_mode {
                     GameMode::TextBox => {
                         self.set_state(AgentState::ReadingTextBox { reader: PokemonTextReader::default() });
@@ -2654,7 +2848,7 @@ CascadeBadge; not cutting".to_string(),
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             };
-                            self.set_state(AgentState::CuttingTree { press: true, entered_menu: false, tree_pos, slot, move_index });
+                            self.set_state(AgentState::CuttingTree { press: true, entered_menu: false, tree_pos, slot, move_index, from_row: false });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::CheckTrashCan { target, facing }) => {
@@ -2857,7 +3051,7 @@ CascadeBadge; not cutting".to_string(),
                     let pos = game_state.map.player_position;
                     match adjacent_pacing_pair(&game_state.map, pos) {
                         Some((tile_a, tile_b)) => self.set_state(AgentState::PacingForEncounters {
-                            map: game_state.map.map, tile_a, tile_b, heading_to_b: false, stalled: 0, paced: 0 }),
+                            destination, map: game_state.map.map, tile_a, tile_b, heading_to_b: false, stalled: 0, paced: 0 }),
                         None => {
                             let at = Some(game_state.map.player_position);
                             self.abort_overworld(
@@ -2878,7 +3072,7 @@ CascadeBadge; not cutting".to_string(),
                         let pair = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
                             .or_else(|| adjacent_pacing_pair(&game_state.map, pos));
                         if let Some((tile_a, tile_b)) = pair {
-                            self.set_state(AgentState::PacingForEncounters { map: game_state.map.map, tile_a, tile_b, heading_to_b: true, stalled: 0, paced: 0 });
+                            self.set_state(AgentState::PacingForEncounters { destination, map: game_state.map.map, tile_a, tile_b, heading_to_b: true, stalled: 0, paced: 0 });
                         } else {
                             // TODO this should not happen, we shouldn't generate an action if this is true
                             //      the adjacent grass tile should be in the action
@@ -2904,7 +3098,9 @@ CascadeBadge; not cutting".to_string(),
                     // tail, and the property is worth stating because the next such recipe will look
                     // just as reasonable.
                     let action = game_state.map.actions().into_iter()
-                        .find(|a| a.tile == destination)
+                        // ⚠️ **Not `==`** — a boulder goal's row also names the boulder `actions()`
+                        // picked, and that changes under the walk. See `MetaTile::is_same_row_as`.
+                        .find(|a| a.tile.is_same_row_as(&destination))
                         // A specific connection landing isn't in `actions()` (only the nearest crossing
                         // is) — re-derive its route each tick so the walk to it can still be tracked.
                         .or_else(|| match destination {
@@ -2919,6 +3115,31 @@ CascadeBadge; not cutting".to_string(),
                             _ => None,
                         });
                     match action {
+                        // ⭐ **"There is no route" is a lie while a map transition is in flight, and
+                        // this is the only tick on which it was ever told.** Crossing a connection
+                        // north or west leaves `wYCoord`/`wXCoord` at 255 for one tick with
+                        // `wCurMap` still the *old* map, and `MetaTileMap`'s bounds clamp turns that
+                        // into a plausible square at the **opposite** edge of it — see
+                        // `MetaTileMap::position_settled`. From the wrong end of the map the BFS
+                        // reaches nothing, so `actions()` and `connection_action` both come back
+                        // empty and the walk was abandoned one tick before it landed: C3's frontier
+                        // walk read "there is no route to the way into PewterCity, standing at
+                        // (8, 73)" about a walk that was in Pewter City on the next tick, and the
+                        // deployed run of 2026-09-02 went hunting a pathfinder bug over the same
+                        // sentence.
+                        //
+                        // ⚠️ **Held rather than acted on, and deliberately placed *here* rather
+                        // than at the top of this arm.** Gating the whole tick on `position_settled`
+                        // also works and is what this was first written as, but it changes what the
+                        // agent does on every unsettled tick rather than only on the ones that were
+                        // wrong — and `full_playthrough` is a golden RNG replay, so a tick that
+                        // presses a different button re-rolls every route after it. This arm is the
+                        // one that told the lie; nothing else moves.
+                        //
+                        // Nothing is pressed and nothing is released: the walk keeps holding the
+                        // direction it already had, and one tick later `wCurMap` is the new map and
+                        // the map-change arm above reports the arrival.
+                        None if !game_state.map.position_settled => {}
                         None => self.abort_overworld(
                             destination,
                             OverworldActionAbortedReason::NoRoute(destination),
@@ -3002,12 +3223,23 @@ CascadeBadge; not cutting".to_string(),
                                 {
                                     api.release_all_buttons();
                                     self.set_state(AgentState::CuttingTree {
-                                        press: true, entered_menu: false, tree_pos, slot, move_index });
+                                        press: true, entered_menu: false, tree_pos, slot, move_index,
+                                        from_row: true });
                                     return Ok(());
                                 }
-                                if let MetaTile::Boulder { at, push } = destination {
+                                // ⭐ **A Strength goal takes over here and runs to completion.** The
+                                // walk brought the player to the first push of the plan; from now on
+                                // the solver re-plans and shoves until the boulder is home, so the
+                                // model is asked once for the whole puzzle rather than once per
+                                // shove. See `MetaTile::BoulderGoal`.
+                                if let MetaTile::BoulderGoal { boulder, at, hole } = destination {
                                     api.release_all_buttons();
-                                    self.set_state(AgentState::PushingBoulder { boulder: at, dir: push, armed: false });
+                                    self.boulder_goal = Some((game_state.map.map, boulder, at, hole));
+                                    self.boulder_goal_pushes = 0;
+                                    self.boulder_goal_best = usize::MAX;
+                                    self.boulder_goal_stale = 0;
+                                    self.set_state(AgentState::SolvingBoulderPuzzle {
+                                        boulder, target: at, hole, pushes: 0, settle: 0 });
                                     return Ok(());
                                 }
                                 new_events.push(AgentEvent::OverworldActionCompleted { destination });
@@ -3873,49 +4105,37 @@ CascadeBadge; not cutting".to_string(),
                     }
                 }
             }
-            AgentState::PacingForEncounters { map, tile_a, tile_b, ref mut heading_to_b, ref mut stalled, ref mut paced } => {
+            AgentState::PacingForEncounters { destination, map, tile_a, tile_b, ref mut heading_to_b, ref mut stalled, ref mut paced } => {
                 /// Overworld ticks on the same tile before the pair is declared unwalkable. One tile
                 /// step is ~13 ticks at `AGENT_RESOLUTION`, so this is several steps' worth of slack —
                 /// long enough never to fire on healthy pacing, short enough to cost nothing.
                 const STALL_TICKS: u16 = 60;
 
-                /// Total ticks of *successful* pacing before giving up on the encounter ever coming.
-                ///
-                /// ⚠️ **`STALL_TICKS` cannot see this failure**, which is the whole reason this
-                /// exists: it counts ticks spent failing to reach the target tile, so it catches
-                /// "walking into a wall" and is reset on arrival by healthy pacing. An agent pacing
-                /// perfectly in grass where nothing will ever appear resets it for ever.
-                ///
-                /// 3000 ticks is 60 s of game time.
-                ///
-                /// ⚠️ **This is not sized to guarantee an encounter, and the first attempt at it was.**
-                /// That reasoning gave 180 s — three times the ~57 s in which 99.9% of encounters on
-                /// the rarest map (Viridian Forest, 8/256 per step) should land. It was wrong twice
-                /// over: the pair is often grass↔plain, so only every *other* step rolls, which
-                /// doubles the figure; and more importantly, giving up is not a failure. The policy is
-                /// simply asked again, and if it picks grass again the pace resumes — the only thing
-                /// that changes is that the run stopped being silent.
-                ///
-                /// So what this actually bounds is **how long the agent may go without being asked
-                /// anything**, and 180 s of that is 60% of the watchdog. `soak` measured exactly that:
-                /// seed 1's worst healthy stretch was 182 s, which was this budget running to the end
-                /// in Viridian Forest and nothing else.
-                const PACING_BUDGET_TICKS: u16 = 3000;
-
+                // ⚠️ **Every exit below ends the action that got here**, and none of them used to.
+                // A pace is the tail of an ordinary overworld action — the walk to the grass has
+                // already been reported as started and never as finished — so leaving by any door
+                // without an `OverworldActionAborted` leaves the model holding a decision it is
+                // never told the outcome of. See the ⭐ on `PacingForEncounters`.
                 let game_state = api.game_state()?;
                 if game_state.mode == GameMode::Overworld {
                     if game_state.map.map != map {
-                        // Blackout or other warp moved us off the grass map — let policy re-route.
-                        self.set_state(AgentState::Idle);
+                        // Something moved the player off the map the pace belongs to. There is no
+                        // healthy way this happens: a lost battle warps from `Battle`, not from
+                        // here, so what is left is a pacing pair that included a warp tile, which
+                        // is the agent walking somewhere nobody asked it to go.
+                        let at = Some(game_state.map.player_position);
+                        self.abort_overworld(
+                            destination,
+                            OverworldActionAbortedReason::WrongMap(game_state.map.map),
+                            at,
+                        );
                         return Ok(());
                     }
                     *paced += 1;
                     if *paced >= PACING_BUDGET_TICKS {
-                        self.event(AgentEvent::TextBox { message: format!(
-                            "paced {tile_a}↔{tile_b} on {map} for {}s of game time with no encounter \
-                             — re-deciding", PACING_BUDGET_TICKS as u64 * AGENT_RESOLUTION.to_duration().as_millis() as u64 / 1000) });
                         api.release_all_buttons();
-                        self.set_state(AgentState::Idle);
+                        let at = Some(game_state.map.player_position);
+                        self.abort_overworld(destination, OverworldActionAbortedReason::NothingAppeared, at);
                         return Ok(());
                     }
                     let pos = game_state.map.player_position;
@@ -3927,10 +4147,17 @@ CascadeBadge; not cutting".to_string(),
                         // Not there yet. Either we are mid-walk, or we are walking into something.
                         *stalled += 1;
                         if *stalled >= STALL_TICKS {
-                            self.event(AgentEvent::TextBox { message: format!(
-                                "pacing {tile_a}↔{tile_b} on {map} is blocked at {pos}; re-picking") });
+                            // ⚠️ **`Unknown`, which the oracle scores as a defect, and rightly.**
+                            // The pair came out of `adjacent_grass`/`adjacent_pacing_pair` and one
+                            // half of it turned out not to be walkable, so the agent offered a row
+                            // it could not then carry out. Bumping is not a step, so the ROM never
+                            // rolls: this is the agent doing nothing at all for a minute.
                             api.release_all_buttons();
-                            self.set_state(AgentState::Idle);
+                            self.abort_overworld(
+                                destination,
+                                OverworldActionAbortedReason::Unknown,
+                                Some(pos),
+                            );
                             return Ok(());
                         }
                     }
@@ -4255,7 +4482,7 @@ CascadeBadge; not cutting".to_string(),
                 api.press_button(button);
                 self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0, evolve_from });
             }
-            AgentState::CuttingTree { press, entered_menu, tree_pos, slot, move_index } => {
+            AgentState::CuttingTree { press, entered_menu, tree_pos, slot, move_index, from_row } => {
                 use crate::pokemon::menu::TextBoxId;
                 // A successful Cut opens the Pokémon menu, plays a fade/animation, then returns to the
                 // overworld. So once we've entered a menu, the first return to the overworld means the
@@ -4273,7 +4500,18 @@ CascadeBadge; not cutting".to_string(),
                 // `DRIVER_ESCAPE_SILENCE` rather than by anything here.
                 if entered_menu && game_mode == GameMode::Overworld {
                     self.cut_tiles.insert((api.game_state()?.map.map, tree_pos));
-                    self.event(AgentEvent::TextBox { message: format!("Cut down the tree at {tree_pos}") });
+                    // ⭐ **The row that asked for this is closed here, and it used to end in a text
+                    // box the agent had made up.** `📖 Cut down the tree at (5, 8)` said the right
+                    // thing in the wrong voice — a `TextBox` is the cartridge speaking — and, worse,
+                    // it left the action open: 14 of the 66 silent ids on C3's first frontier walk
+                    // were `CutTree`, and a chain behind one of them was thrown away as
+                    // `Dropped::Unreported`. `from_row` is why this is conditional; see the state.
+                    if from_row {
+                        self.event(AgentEvent::OverworldActionCompleted {
+                            destination: MetaTile::Cut { at: tree_pos } });
+                    } else {
+                        self.event(AgentEvent::TextBox { message: format!("Cut down the tree at {tree_pos}") });
+                    }
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -4285,7 +4523,7 @@ CascadeBadge; not cutting".to_string(),
                 // held direction never carries into the next menu.
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::CuttingTree { press: true, entered_menu, tree_pos, slot, move_index });
+                    self.set_state(AgentState::CuttingTree { press: true, entered_menu, tree_pos, slot, move_index, from_row });
                     return Ok(());
                 }
 
@@ -4298,7 +4536,7 @@ CascadeBadge; not cutting".to_string(),
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos, slot, move_index });
+                self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos, slot, move_index, from_row });
             }
             AgentState::Surfing { press, entered_menu, water_pos, slot, move_index, resume, settle } => {
                 use crate::pokemon::menu::TextBoxId;
@@ -4521,6 +4759,186 @@ CascadeBadge; not cutting".to_string(),
                 api.press_button(button);
                 self.set_state(AgentState::TossingItem { item, press: false, entered_menu });
             }
+            AgentState::SolvingBoulderPuzzle { boulder: which, target, hole, pushes, settle } => {
+                /// Absolute ceiling on the shoves one goal may spend, so that "a plan is always
+                /// found and never completes" cannot become the 279 009-turn loop this whole
+                /// feature was written to end.
+                ///
+                /// ⚠️ **It was 24, on the belief that "Victory Road's worst floor solves in well
+                /// under ten", and that belief was wrong.** VictoryRoad3F's switch at (3, 5) is a
+                /// boulder walked most of the way across the floor, one push per tile, with the
+                /// other three shifted out of the corridor first: the coverage walk of 2026-09-08
+                /// spent its 24 and was abandoned **three pushes from the end**, having done
+                /// nothing wrong. A total-shove cap cannot tell a hard puzzle from a stuck one, so
+                /// the real bound is `MAX_PUSHES_WITHOUT_PROGRESS` below and this is only a
+                /// backstop.
+                const MAX_PUSHES: u8 = 120;
+                /// ⭐ **The bound that actually protects anything: shoves since the plan last got
+                /// shorter.** The planner returns a shortest path through boulder layouts, so a
+                /// productive shove leaves strictly fewer to make; a goal that is going nowhere
+                /// stops making progress immediately, whatever the floor's difficulty. This
+                /// catches a loop in a dozen pushes where a total cap either fires on a hard
+                /// puzzle or lets a stuck one run for a hundred.
+                const MAX_PUSHES_WITHOUT_PROGRESS: u8 = 12;
+                /// Ticks to let a shove's script and its dust settle before re-planning. A boulder
+                /// read mid-animation is still on its old square, and re-planning off that asks for
+                /// the push that has just been made.
+                const SETTLE_TICKS: u16 = 12;
+
+                let game_state = self.observe_state(api)?;
+                // ⭐ **Success is checked before the mode is, because success is what changes the
+                // mode.** A boulder landing on a Strength switch runs the barrier script, so the
+                // very tick this goal completes is a tick on which the game is in
+                // `GameMode::Script` — and the bail-out below took it to `Idle` without a word.
+                // The puzzle was solved, the barrier opened, and nothing was reported: the coverage
+                // walk of 2026-09-08 scored four `PushBoulderOntoSwitch` rows `Silent` that had all
+                // *worked*, and a model would have been left with no idea its own decision had
+                // landed. A boulder standing on the target is success whatever the game is doing
+                // about it.
+                if self.boulder_goal.is_some()
+                    && pushes > 0
+                    && !hole
+                    && game_state.map.boulders().contains(&target)
+                {
+                    self.boulder_goal = None;
+                    // ⚠️ **`self.event`, not `new_events.push`** — this arm `return`s, and an
+                    // early return jumps clean over the `new_events` drain at the bottom of `tick`.
+                    // Every boulder-goal completion this state has ever pushed was thrown away on
+                    // the floor: the coverage walk scored solved puzzles `Silent`, and the model
+                    // saw its own decision produce no result at all. The same ⚠️ is on the
+                    // black-out warp above, which is why that one sets a flag instead of returning.
+                    self.event(AgentEvent::OverworldActionCompleted {
+                        destination: MetaTile::BoulderGoal { boulder: which, at: target, hole } });
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                if game_state.mode != GameMode::Overworld {
+                    // ⭐ **The goal survives, which is the same argument `resume_after_battle` makes.**
+                    // Victory Road is thick with wild encounters and a battle moves neither the
+                    // player nor the boulders, so dropping the puzzle every time a Geodude appears
+                    // would make a one-decision row a lie — it took eight shoves and one Geodude for
+                    // this to show up. the `Idle` arm puts it back when the overworld returns, and
+                    // checks the map first because a black-out does move the player.
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                if settle < SETTLE_TICKS {
+                    api.release_all_buttons();
+                    self.set_state(AgentState::SolvingBoulderPuzzle { boulder: which, target, hole, pushes, settle: settle + 1 });
+                    return Ok(());
+                }
+                let live = game_state.map.boulders();
+                // A push moves a boulder **exactly one tile**, so the one this goal named is either
+                // still on its square or on a neighbour. Used twice below: to re-acquire it, and to
+                // tell "it fell in" from "it is one tile along".
+                let step_away = |b: &Point8| (b.x as i32 - which.x as i32).abs()
+                                           + (b.y as i32 - which.y as i32).abs();
+                let moved_to = live.iter().copied().min_by_key(step_away)
+                    .filter(|b| step_away(b) <= 1);
+
+                // ⭐ **Done, and a switch and a hole are done differently — which is the whole of
+                // the Seafoam B3F defect.** A switch keeps the boulder, so it is done when one is
+                // standing on it. A **hole swallows it**: nothing is ever standing on a hole, so
+                // `boulders().contains(&target)` can never fire for one, and for its entire life
+                // this state drove hole goals with a completion test that was structurally
+                // unreachable. It pushed until `MAX_PUSHES`, which on a floor with two holes and
+                // four boulders is long enough to shove a second boulder down the *other* hole in
+                // passing — stranding the next goal, which then wants a boulder that is gone.
+                //
+                // A hole is done when the tracked boulder has left the floor: not on its square,
+                // and nothing beside it for the re-acquire to pick up. `pushes > 0` because a
+                // goal that has shoved nothing has not made anything vanish; a row naming a
+                // boulder that was never there is a bug elsewhere, not a success here.
+                //
+                // ⚠️ **Two sightings, because a boulder is drawn *on* the hole for the frame before
+                // it drops.** Catching only the vanishing leaves a tick in which the tracked
+                // boulder has been re-acquired onto the hole square itself, and the planner is then
+                // asked to push a boulder that is already on its target and answers `None` — which
+                // this state reports as `NoRoute`, a failure, for a goal that had just succeeded.
+                let done = pushes > 0 && match hole {
+                    false => live.contains(&target),
+                    true => live.contains(&target) || (!live.contains(&which) && moved_to.is_none()),
+                };
+                if done {
+                    self.boulder_goal = None;
+                    // ⚠️ **`self.event`, not `new_events.push`** — this arm `return`s, and an
+                    // early return jumps clean over the `new_events` drain at the bottom of `tick`.
+                    // Every boulder-goal completion this state has ever pushed was thrown away on
+                    // the floor: the coverage walk scored solved puzzles `Silent`, and the model
+                    // saw its own decision produce no result at all. The same ⚠️ is on the
+                    // black-out warp above, which is why that one sets a flag instead of returning.
+                    self.event(AgentEvent::OverworldActionCompleted {
+                        destination: MetaTile::BoulderGoal { boulder: which, at: target, hole } });
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                if pushes >= MAX_PUSHES || self.boulder_goal_stale >= MAX_PUSHES_WITHOUT_PROGRESS {
+                    self.boulder_goal = None;
+                    self.abort_overworld(
+                        MetaTile::BoulderGoal { boulder: which, at: target, hole },
+                        OverworldActionAbortedReason::PuzzleRanLong { pushes },
+                        Some(game_state.map.player_position),
+                    );
+                    return Ok(());
+                }
+                // Re-planned every time rather than held: the floor moves under a stored plan, and
+                // the search is capped and cheap on a map with a handful of boulders.
+                // ⭐ **Re-planned for the boulder the row named, re-acquired rather than tracked.**
+                //
+                // The name has to be honoured here and not only at the moment the row was chosen:
+                // Seafoam B3F's second hole is reachable by exactly one of its three remaining
+                // boulders, and a driver free to re-plan for "whichever" spends a different one and
+                // strands the floor. That is the leg's whole failure.
+                //
+                // ⚠️ **But the boulder's coordinate cannot be *bookkept*, and two attempts at it are
+                // the reason this comment is long.** Advancing it when a push is issued is wrong the
+                // moment that push is refused or a battle interrupts it; not advancing it is wrong
+                // as soon as one lands. Either way the planner is asked about a boulder that is not
+                // there and answers `None` for a floor it had just solved.
+                //
+                // So it is re-acquired from the live map instead: a push moves a boulder **exactly
+                // one tile**, so the tracked one is either still on its square or on a neighbour.
+                // Nothing to keep in sync, and it survives every interruption.
+                // It is not on its square and nothing is beside it: for a hole that is the goal
+                // and the check above has already taken it; for a switch it is a floor that moved
+                // in some way this state cannot follow, and the planner below says so.
+                let which = moved_to.unwrap_or(which);
+                if let Some((map, _, target, hole)) = self.boulder_goal {
+                    self.boulder_goal = Some((map, which, target, hole));
+                }
+                // ⭐ **The plan's length is the progress measure.** It is a shortest path through
+                // boulder layouts, so a shove that helped leaves strictly fewer to make; one that
+                // did not leaves the same number or more. That is what `MAX_PUSHES_WITHOUT_PROGRESS`
+                // counts, and it is the only thing here that can tell VictoryRoad3F's twenty-odd
+                // legitimate pushes from a goal going round in circles.
+                let plan = game_state.map.solve_boulder_push_for(which, target);
+                if let Some(steps) = plan.as_ref().map(|p| p.len())
+                    && steps < self.boulder_goal_best
+                {
+                    self.boulder_goal_best = steps;
+                    self.boulder_goal_stale = 0;
+                }
+                match plan.and_then(|plan| plan.into_iter().next())
+                {
+                    Some((boulder, push)) => {
+                        api.release_all_buttons();
+                        self.set_state(AgentState::PushingBoulder { boulder, dir: push, armed: false });
+                    }
+                    // ⚠️ **`NoRoute`, and it is honest here**: the layout in front of us has no
+                    // solution, which for this row is exactly "the action cannot be carried out".
+                    // `actions()` withholds the row when this is true on the way in, so reaching it
+                    // means the floor changed under the walk.
+                    None => {
+                        self.boulder_goal = None;
+                        let at = Some(game_state.map.player_position);
+                        self.abort_overworld(
+                            MetaTile::BoulderGoal { boulder: which, at: target, hole },
+                            OverworldActionAbortedReason::PuzzleUnsolvable,
+                            at,
+                        );
+                    }
+                }
+            }
             AgentState::PushingBoulder { boulder, dir, armed } => {
                 let game_state = self.observe_state(api)?;
                 // Any interruption (wild battle in the cave, a script/text box) — drop to Idle. The policy
@@ -4539,6 +4957,10 @@ CascadeBadge; not cutting".to_string(),
                 // off to a driver without a completion is what `MetaTile::Fish` already does.
                 if game_state.mode != GameMode::Overworld {
                     api.release_all_buttons();
+                    // A goal in flight ends with it: the interruption may be a battle that moves the
+                    // player, and a puzzle resumed onto a floor nobody is standing on is worse than
+                    // one handed back.
+                    self.boulder_goal = None;
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -4552,7 +4974,19 @@ CascadeBadge; not cutting".to_string(),
                 // a script frame the agent sees, and a boulder that went while this state was rebuilt.
                 if !boulder_at(boulder) {
                     api.release_all_buttons();
-                    self.set_state(AgentState::Idle);
+                    // ⭐ **One shove of a goal is not the end of the decision.** This is the whole
+                    // difference between a `MetaTile::BoulderGoal` row and a `MetaTile::Boulder` one:
+                    // the boulder moved, so re-plan and keep going rather than handing a half-solved
+                    // puzzle back to the model.
+                    match self.boulder_goal {
+                        Some((_, boulder, target, hole)) => {
+                            self.boulder_goal_pushes = self.boulder_goal_pushes.saturating_add(1);
+                            self.boulder_goal_stale = self.boulder_goal_stale.saturating_add(1);
+                            let pushes = self.boulder_goal_pushes;
+                            self.set_state(AgentState::SolvingBoulderPuzzle { boulder, target, hole, pushes, settle: 0 });
+                        }
+                        None => self.set_state(AgentState::Idle),
+                    }
                     return Ok(());
                 }
                 // ⚠️ **Asked every tick, not once on the way in, and it is what ends this state on
@@ -4569,6 +5003,20 @@ CascadeBadge; not cutting".to_string(),
                 if let Some(refusal) = map.boulder_push_refusal(boulder, dir) {
                     api.release_all_buttons();
                     self.event(AgentEvent::TextBox { message: refusal });
+                    // ⚠️ **A refused shove ends the goal rather than re-planning into it.** The
+                    // planner asked for a push the cartridge will not make, so asking it again would
+                    // get the same answer. The row is withheld next turn if the floor is genuinely
+                    // unsolvable and offered again if it is not, which is the honest place for that
+                    // decision.
+                    let at = map.player_position;
+                    if let Some((_, which, target, hole)) = self.boulder_goal.take() {
+                        self.abort_overworld(
+                            MetaTile::BoulderGoal { boulder: which, at: target, hole },
+                            OverworldActionAbortedReason::Unknown,
+                            Some(at),
+                        );
+                        return Ok(());
+                    }
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -5264,6 +5712,61 @@ mod tests {
         assert_eq!(
             format!("{}", AgentEvent::StartedOverworldAction { destination: MetaTile::Grass, id: String::new() }),
             "→ heading for tall grass",
+        );
+    }
+
+    /// ⭐ **An action the model is never told the outcome of is an action it cannot learn from**, and
+    /// walking in grass was one for the whole life of this codebase: the walk handed over to
+    /// `PacingForEncounters` and that state left by three doors and reported through none of them.
+    /// C3's first frontier walk scored 52 `Grass` ids `Silent`.
+    ///
+    /// Both sentences below are the ones the *model* reads, so both have to say what happened
+    /// without saying that something went wrong: an empty roll in tall grass is the cartridge's own
+    /// 8-in-256 coming up short, and a wild Pokémon appearing is the action working.
+    #[test]
+    fn walking_in_grass_says_what_became_of_it() {
+        let nothing = AgentEvent::OverworldActionAborted {
+            destination: MetaTile::Grass,
+            reason: OverworldActionAbortedReason::NothingAppeared,
+            at: Some(Point8 { x: 6, y: 29 }),
+        };
+        assert_eq!(
+            format!("{nothing}"),
+            "✗ gave up on tall grass at (6, 29): nothing appeared after 60 seconds of game time walking about in it",
+        );
+        // ⚠️ **The budget is quoted rather than described.** Without the number the obvious reading
+        // of "nothing appeared" is "I did not walk far enough", and the model walks the same patch
+        // again. It comes from the constant, so the two cannot drift apart.
+        assert!(format!("{nothing}").contains(&format!("{PACING_BUDGET_SECS} seconds")));
+
+        // An encounter ends the same action, reported the way an interrupted walk always has been:
+        // the pace is over and the policy is about to be asked again, which is what every member of
+        // this enum means. `resume_after_battle` then picks the same patch back up by itself.
+        let met_something = AgentEvent::OverworldActionAborted {
+            destination: MetaTile::Grass,
+            reason: OverworldActionAbortedReason::Battle,
+            at: None,
+        };
+        assert_eq!(format!("{met_something}"), "✗ gave up on tall grass: a battle started");
+    }
+
+    /// A cut is a row that *does* something at the end of its walk, so its completion is of the deed
+    /// rather than of the journey. "✓ reached the tree at (5, 8), to cut it down" would be a
+    /// sentence about arriving somewhere, which is not what the model asked for and not what
+    /// happened.
+    ///
+    /// It replaced a `TextBox` the agent had made up, which said the right thing in the cartridge's
+    /// voice and left the action open: 14 `CutTree` ids came back `Silent` on C3's first walk.
+    #[test]
+    fn a_tree_that_was_cut_down_says_so_in_the_agents_own_voice() {
+        let cut = AgentEvent::OverworldActionCompleted {
+            destination: MetaTile::Cut { at: Point8 { x: 5, y: 8 } },
+        };
+        assert_eq!(format!("{cut}"), "✓ cut down the tree at (5, 8)");
+        // Every other destination is an arrival and keeps the sentence it had.
+        assert_eq!(
+            format!("{}", AgentEvent::OverworldActionCompleted { destination: MetaTile::Pc }),
+            "✓ reached the PC",
         );
     }
 

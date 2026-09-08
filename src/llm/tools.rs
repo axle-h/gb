@@ -1306,8 +1306,9 @@ fn use_field_move_spec() -> ToolSpec {
              Hideout, Celadon Mart and Silph Co.\n\
              Cutting a tree, pushing a boulder and mounting Surf are not here: each of the three is \
              a walk with one legal ending, so the walk does it. A `:CutTree` row cuts the tree it \
-             walks up to, a `:PushBoulder…` row arms Strength if it needs to and shoves the boulder, \
-             and any route that crosses water mounts Surf on its own. All three rows are withheld \
+             walks up to, a `:PushBoulder…` row names a boulder and a target and does the whole \
+             puzzle, arming Strength and shoving until that boulder is on that switch or down that \
+             hole, and any route that crosses water mounts Surf on its own. All three rows are withheld \
              while the game would refuse them, and the turn says so in a line above the menu.\n\
              `fly` and `flash` each need a Pokémon taught that HM *and* a particular badge; until \
              you have both the game refuses them, and retrying will not change it.",
@@ -2265,17 +2266,6 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
         // happened, and the `use_field_move cut` that had to follow it often did not. Choosing this
         // now cuts the tree.
         MetaTile::Cut { at } => format!("cut down the tree at ({}, {})", at.x, at.y),
-        // Both coordinates, for the reason the sprite rows below carry them: the square the player
-        // stands on and the square the thing is on are never the same square, and a Sokoban puzzle
-        // is reasoned about in the boulder's coordinates.
-        MetaTile::Boulder { at, push } => format!(
-            "push the boulder at ({}, {}) one tile {} (you stand at ({}, {}))",
-            at.x, at.y,
-            match push {
-                JoypadButton::Up => "up", JoypadButton::Down => "down",
-                JoypadButton::Left => "left", _ => "right",
-            },
-            action.destination.x, action.destination.y),
         // The row only exists when a rod is in the bag and this map has water to cast at, so what it
         // needs to say is what fishing is *for* rather than that it is possible: a wild battle with
         // something that lives in the water, without walking anywhere.
@@ -4494,8 +4484,9 @@ mod tests {
     ///
     /// Three properties, all of them about the menu rather than about a complaint:
     ///
-    /// * every boulder row names a push `boulder_push_refusal` would allow, so the sealed boulder
-    ///   the deployed run created at (5, 14) has no row in any direction;
+    /// * every boulder row is a **goal** whose plan opens on a push `boulder_push_refusal` would
+    ///   allow, so the sealed boulder the deployed run created at (5, 14) is named by no row at
+    ///   all — it cannot move, so it cannot be the boulder that reaches anything;
     /// * a party that cannot use Strength gets no boulder rows at all, which is the case the turn's
     ///   own line has to explain (`prompt::situation`);
     /// * the boulders themselves are no longer offered as people to walk up to and press A at.
@@ -4505,32 +4496,49 @@ mod tests {
         // VictoryRoad1F, one push after the deployed run sealed its own boulder in the alcove:
         // Strength armed, a staircase north of the boulder, and the tile it would have to be pushed
         // back from walled off by the boulder itself.
-        let mut stuck = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
+        let stuck = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
         assert!(stuck.map.can_strength, "the deployed party can use Strength");
         assert!(stuck.map.boulders().contains(&Point8 { x: 5, y: 14 }), "the sealed boulder is there");
 
         for action in stuck.map.actions() {
-            let MetaTile::Boulder { at, push } = action.tile else { continue };
-            assert_eq!(stuck.map.boulder_push_refusal(at, push), None,
-                "the menu offered a push the cartridge would refuse: {}", overworld_id(&stuck, &action));
-            assert_ne!(at, Point8 { x: 5, y: 14 },
-                "the sealed boulder cannot be pushed any way at all, so it has no rows");
+            let MetaTile::BoulderGoal { boulder, at, .. } = action.tile else { continue };
+            let plan = stuck.map.solve_boulder_push_for(boulder, at)
+                .expect("a row is only minted for a goal that solves");
+            let (first, push) = plan[0];
+            assert_eq!(stuck.map.boulder_push_refusal(first, push), None,
+                "the menu offered a goal opening on a push the cartridge would refuse: {}",
+                overworld_id(&stuck, &action));
+            assert_ne!(boulder, Point8 { x: 5, y: 14 },
+                "the sealed boulder cannot be pushed any way at all, so no goal names it");
         }
-        // And a row for a push that *is* legal, or this proves nothing about the filter.
-        assert!(stuck.map.actions().iter().any(|a| matches!(a.tile, MetaTile::Boulder { .. })),
-            "VictoryRoad1F's other boulders can still be pushed");
+        // ⭐ **On this floor that leaves no rows at all, and that is the finding rather than a
+        // gap in the fixture.** A row is a goal now, and the deployed run sealed the only boulder
+        // that could reach the switch — so the floor is unsolvable and the menu says so by being
+        // empty of boulders, which is exactly what `boulder_push_refusal`'s "Leaving this map"
+        // prose is for (`endgame::a_boulder_that_cannot_move_is_refused_rather_than_shoved_at`).
+        assert!(!stuck.map.actions().iter().any(|a| matches!(a.tile, MetaTile::BoulderGoal { .. })),
+            "the run sealed its own boulder, so nothing can reach the switch and nothing is offered");
+
+        // So the other half — that a *solvable* floor is a row, or the filter above proves nothing —
+        // is stated on the same floor before the run wedged it.
+        let pristine = state_from(include_bytes!("../pokemon/data/vr1f-strength.bin"));
+        assert!(pristine.map.actions().iter().any(|a| matches!(a.tile, MetaTile::BoulderGoal { .. })),
+            "VictoryRoad1F's switch is a goal row from its starting layout");
 
         // A boulder is not somebody to talk to. The sprite rows stay in `actions()` for the scripted
-        // policies; what the model is shown is the pushes.
-        let menu = overworld_menu(&stuck, None);
+        // policies; what the model is shown is the goals.
+        let menu = overworld_menu(&pristine, None);
         assert!(menu.iter().all(|item| !item.id.contains("Boulder") || item.id.contains("PushBoulder")),
             "a boulder's own sprite row is withheld: {menu:?}");
         assert!(menu.iter().any(|item| item.id.contains("PushBoulder")), "{menu:?}");
 
         // Without the move or the badge there is nothing to choose, which is the whole of what the
         // turn's boulder line then has to explain.
-        stuck.map.can_strength = false;
-        assert!(!stuck.map.actions().iter().any(|a| matches!(a.tile, MetaTile::Boulder { .. })),
+        // ⚠️ **On `pristine`, not on `stuck`** — the sealed floor has no rows either way, so
+        // turning Strength off there would pass without testing anything.
+        let mut unarmed = pristine;
+        unarmed.map.can_strength = false;
+        assert!(!unarmed.map.actions().iter().any(|a| matches!(a.tile, MetaTile::BoulderGoal { .. })),
             "no Strength, no boulder rows");
     }
 

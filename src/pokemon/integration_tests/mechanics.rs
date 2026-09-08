@@ -2683,3 +2683,127 @@ fn a_corner_is_turned_at_a_coarse_host_tick() {
         println!("{tick_ms} ms tick: reached Route11 in {:?} of game time", fixture.total_cycles.to_duration());
     }
 }
+
+
+/// ⭐ **A walk that has already arrived must not be reported as a routing failure**, and for one
+/// tick per northward or westward map connection the agent was told it had.
+///
+/// Crossing a connection north leaves `wYCoord` at **255** — the ROM's own −1 — while `wCurMap` is
+/// still the old map, until `CheckMapConnections` runs on the following frame.
+/// `MetaTileMap::new`'s bounds clamp, which exists to keep `meta_tiles` indexing in range and has
+/// to stay, turns that −1 into `(255 + north_extra).min(height - 1)`: a perfectly plausible square
+/// at the **opposite** edge of the map. From the wrong end of Route 2 the BFS reaches nothing, so
+/// `connection_action` answered `None` and the walk was abandoned with `NoRoute`.
+///
+/// C3's frontier walk caught it three times in one run, and the shape is the tell: every target was
+/// on row 0 and every reported position on the last row (`Route2:8,0` "standing at (8, 73)",
+/// `Route2:9,0` at (9, 73), `ViridianCity:19,0` at (19, 37)). The save state taken at the abort
+/// showed `wCurMap=Route2, raw=(8, 255)` and the very next tick `wCurMap=PewterCity, raw=(18, 35)`.
+///
+/// ⚠️ **A southward or eastward crossing must stay `settled`**, and that is the half a naive
+/// "coordinate looks odd" check would break: there the coordinate goes one row *past* the map, which
+/// lands on the connection strip and is a real, reachable tile the agent routes to by design.
+#[test]
+fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use std::sync::Arc;
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/viridian-city-north-of-bush.bin"),
+        Duration::from_secs(10),
+        vec![],
+    );
+    let metadata = Arc::new(
+        PokemonApi::new(&mut fixture.gb)
+            .mmu()
+            .read_map_metadata(Map::ViridianCity)
+            .expect("Viridian City's map data"),
+    );
+    let dimensions = metadata.dimensions();
+    // Viridian City connects north (Route 2) and south (Route 1), so both strips are present and
+    // the underflow and the overflow are both reachable from here.
+    assert_eq!((dimensions.north_extra, dimensions.south_extra), (1, 1));
+
+    let at = |y: u8| {
+        MetaTileMap::new(&CurrentMap {
+            player_position: Point8 { x: 19, y },
+            player_direction: PlayerFacingDirection::Down,
+            sprites: Vec::new(),
+            metadata: Arc::clone(&metadata),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            card_key_locked: false,
+        })
+    };
+
+    let inside = at(10);
+    assert!(inside.position_settled, "an ordinary square in the middle of the map");
+    assert_eq!(inside.player_position.y, 10 + dimensions.north_extra as u8);
+
+    // ⚠️ One row *past* the bottom is the southern connection strip, which is a real tile: the agent
+    // walks onto it on purpose on the way to Route 1, and calling it unsettled would break every
+    // southward crossing in the game.
+    let leaving_south = at(dimensions.meta_height as u8);
+    assert!(leaving_south.position_settled, "the southern strip is a square, not a transient");
+
+    // …and 255 is not a square at all. It is −1 with the map still reading as the old one, and the
+    // clamp's answer is the *far* edge: the whole height of the map away from where the player is.
+    let leaving_north = at(255);
+    assert!(!leaving_north.position_settled, "wYCoord == 255 is a transition, not a position");
+    assert_eq!(
+        leaving_north.player_position.y,
+        (leaving_north.height - 1) as u8,
+        "and this is the fiction the flag exists to catch: the clamp puts a player who stepped off \
+         the *top* of the map on its bottom row",
+    );
+}
+
+
+/// ⭐ **Every driver built on `TestFixture` plays at the fastest settings the cartridge has**, and
+/// this is the proof rather than the claim. `LlmRun` — the god run and C3's frontier walk both —
+/// goes through `TestFixture::with_policy`, which writes
+/// [`FAST_FIXTURE_OPTIONS`](crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS) on the way in and
+/// re-writes it on every tick, because the cartridge restores its own `wOptions` from SRAM across a
+/// save/reload.
+///
+/// The three bits, and all three matter to what a run costs:
+///
+/// - **text speed FAST**, so a conversation is not paid for a character at a time;
+/// - **battle animations OFF** — every battle in the suite otherwise pays for the attack animations,
+///   and nothing in the agent watches them;
+/// - **battle style SET**, which is what stops the game asking "will you switch?" every time an
+///   opponent faints.
+///
+/// ⚠️ **A test asserted this before it existed**: `fixture.rs` cited a `probe_fixture_options` as the
+/// proof and there was no such test, so the guarantee was a comment.
+#[test]
+fn every_fixture_plays_at_the_fastest_game_options() {
+    use crate::pokemon::options::{BattleStyle, GameOptionsReader, TextSpeed};
+    use crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
+
+    // The constant is what was asked for.
+    assert_eq!(FAST_FIXTURE_OPTIONS.text_speed, TextSpeed::Fast);
+    assert!(!FAST_FIXTURE_OPTIONS.battle_animations_on);
+    assert_eq!(FAST_FIXTURE_OPTIONS.battle_style, BattleStyle::Set, "SET is the no-switch-prompt one");
+
+    // …and it is live in RAM the moment a fixture exists, before a single tick is run.
+    let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
+    let live = PokemonApi::new(&mut fixture.gb).mmu().read_game_options().expect("readable");
+    assert_eq!(live, FAST_FIXTURE_OPTIONS, "a fresh fixture is already at the fast options");
+
+    // …and it survives the game writing its own back, which is what the per-tick re-apply is for.
+    {
+        use crate::pokemon::options::{GameOptions, GameOptionsWriter};
+        let slow = GameOptions {
+            battle_animations_on: true,
+            battle_style: BattleStyle::Shift,
+            text_speed: TextSpeed::Slow,
+        };
+        PokemonApi::new(&mut fixture.gb).mmu_mut().write_game_options(&slow).expect("writable");
+    }
+    fixture.step();
+    let live = PokemonApi::new(&mut fixture.gb).mmu().read_game_options().expect("readable");
+    assert_eq!(live, FAST_FIXTURE_OPTIONS, "a tick puts the fast options back");
+}
+
+

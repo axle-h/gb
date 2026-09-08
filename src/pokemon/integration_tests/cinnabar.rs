@@ -141,3 +141,107 @@ fn can_catch_articuno() {
     assert_eq!(s.map.map, Map::CinnabarIsland, "the leg should end back on Cinnabar Island");
     fixture.save_state_named("src/pokemon/data/post-articuno.bin").unwrap();
 }
+
+/// **The fixture the boulder test below stands on**: B3F with Strength armed and all four boulders
+/// untouched. Cut here rather than replayed, because the Seafoam leg is 60 game-minutes end to end
+/// and that is no way to debug a puzzle that lives in its last two steps.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn cut_seafoam_b3f_fixture() {
+    let all = PolicyStep::seafoam_articuno_steps();
+    let upto = all.iter().position(|s| matches!(s, PolicyStep::DropBoulderInHole { .. }))
+        .expect("the leg has a hole step");
+    let steps: Vec<PolicyStep> = all.into_iter().take(upto).collect();
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/post-volcano-badge.bin"), Duration::from_mins(60), steps);
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("stopped on {} @ {} boulders {:?}", s.map.map, s.map.player_position, s.map.boulders());
+    assert_eq!(s.map.map, Map::SeafoamIslandsB3F);
+    assert!(s.map.can_strength, "the fixture must carry Strength and the badge");
+    fixture.save_state_named("src/pokemon/data/seafoam-b3f.bin").unwrap();
+}
+
+/// **Seafoam B3F's two holes, and it is the floor that catches what Victory Road's cannot.**
+///
+/// Victory Road's goals are all *switches*, and a switch keeps its boulder — so a switch goal is
+/// done when one is standing on the target, and `a_strength_puzzle_is_one_decision_…` proves that
+/// path. A **hole swallows the boulder**, so nothing is ever standing on one and that same test is
+/// structurally unreachable for it. Two separate completion tests, one in the agent and one in the
+/// policy step, were written against the switch shape and silently never fired here; between them
+/// they pushed for the whole budget, spent the *other* hole's only capable boulder in passing, and
+/// then stalled on a floor that was already solved. See `AgentState::SolvingBoulderPuzzle` and
+/// `PolicyStep::DropBoulderInHole`.
+///
+/// This floor is also the reason a goal row names its boulder: of the four here, only (3,15) can
+/// reach (3,16) and only (8,14) can reach (6,16).
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn both_seafoam_holes_are_filled_by_the_only_boulders_that_can_reach_them() {
+    use crate::geometry::Point8;
+    const HOLE_A: Point8 = Point8 { x: 3, y: 16 };
+    const HOLE_B: Point8 = Point8 { x: 6, y: 16 };
+    const ONLY_A: Point8 = Point8 { x: 3, y: 15 };
+    const ONLY_B: Point8 = Point8 { x: 8, y: 14 };
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/seafoam-b3f.bin"), Duration::from_mins(20),
+        vec![PolicyStep::DropBoulderInHole { hole: HOLE_A, boulder: Some(ONLY_A) },
+             PolicyStep::DropBoulderInHole { hole: HOLE_B, boulder: Some(ONLY_B) }]);
+    let before = fixture.game_state().map.boulders();
+    assert_eq!(before.len(), 4, "the fixture starts with all four: {before:?}");
+
+    fixture.step_until_exhausted();
+    let after = fixture.game_state().map.boulders();
+    println!("boulders {before:?} -> {after:?}");
+
+    // ⚠️ **Which two went matters as much as how many.** The first goal shoves a third boulder
+    // west to clear the corridor, and a driver that kept pushing after its own boulder dropped
+    // sent (8,14) down hole B in passing — leaving the count right, both holes full, and the
+    // second step wanting a boulder that no longer existed.
+    assert!(!after.contains(&ONLY_A), "(3,15) should be in hole A: {after:?}");
+    assert!(!after.contains(&ONLY_B), "(8,14) should be in hole B: {after:?}");
+    assert_eq!(after.len(), 2, "exactly the two named boulders should have left: {after:?}");
+}
+
+/// **A boulder floor's menu must not cost more than a handful of ordinary ones.**
+///
+/// ⚠️ **`actions()` is called on every 20 ms agent tick**, and a goal row's existence is a capped
+/// BFS over boulder layouts, one per (boulder, target) pair. Emitting the rows without caching the
+/// searches measured **11.4 ms per call on Seafoam B3F and 3.1 ms on Victory Road 1F against 82 us
+/// on a map with no boulders** — and a tick is 20 ms of game time that costs about 0.4 ms of wall
+/// clock to emulate, so the menu alone dropped the agent from ~48x real time to **1.9x**. The
+/// coverage walk of 2026-09-07 spent 73 minutes of wall clock to buy 2.3 of the 24 game-hours it
+/// was given and stopped with the frontier wide open. `PlanKey` is the fix and this is its bound.
+///
+/// The ceiling is deliberately loose — twenty times a boulder-free map, where the fix measured
+/// three — because this is guarding against a regression of two orders of magnitude, not policing
+/// microseconds on whatever machine happens to run it.
+#[test]
+fn a_boulder_floors_action_menu_is_not_a_search_per_tick() {
+    /// Calls to average over. Small: the first call on a fresh `MetaTileMap` is the cold one that
+    /// fills `PLAN_CACHE`, and it is the *steady state* that runs fifty times a second.
+    const CALLS: u32 = 100;
+    let cost = |bytes: &[u8]| {
+        let mut fixture = TestFixture::new(bytes, Duration::from_secs(5), vec![]);
+        let state = fixture.game_state();
+        std::hint::black_box(state.map.actions());     // warm the cache, as a tick after the first is
+        let started = std::time::Instant::now();
+        for _ in 0..CALLS { std::hint::black_box(state.map.actions()); }
+        (started.elapsed() / CALLS, state.map.actions().len(), state.map.boulders().len())
+    };
+
+    let (plain, plain_rows, plain_boulders) = cost(include_bytes!("../data/at-cinnabar.bin"));
+    assert_eq!(plain_boulders, 0, "the baseline map must have no boulders to search over");
+    println!("at-cinnabar    {plain_rows} rows, no boulders  {plain:?}/call");
+
+    for (name, bytes) in [("seafoam-b3f", &include_bytes!("../data/seafoam-b3f.bin")[..]),
+                          ("vr1f-strength", &include_bytes!("../data/vr1f-strength.bin")[..])] {
+        let (cost, rows, boulders) = cost(bytes);
+        println!("{name:14} {rows} rows, {boulders} boulders  {cost:?}/call");
+        assert!(boulders > 0 && rows > 0, "{name} is a boulder floor with rows");
+        assert!(cost < plain * 20,
+            "{name}'s menu costs {cost:?} against {plain:?} on a map with nothing to search; \
+             a goal row is re-running its layout search every tick");
+    }
+}

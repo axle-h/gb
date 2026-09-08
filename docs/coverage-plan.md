@@ -5,14 +5,18 @@ once, through the stack exactly as it is deployed". A god party and the debug ti
 unlosable so the story can be finished in minutes rather than hours; the finished save is then the
 starting point for an exhaustive walk of the world.
 
-**Status.** Written 2026-09-06. Updated 2026-09-07, after the first implementation pass.
+**Status.** Written 2026-09-06. Updated 2026-09-07 after the first two implementation passes, and
+**2026-09-08 after the sweep loop**: nine sweeps, each one fixing what the last surfaced. **Nine
+faults, eight fixed, two open work items** — the fixes are §5.2.6, the open items are §5.2.7 and are
+written up for someone else to pick up. Six of the eight were agent bugs rather than harness ones,
+which is the oracle doing its job.
 
 | | | |
 |---|---|---|
 | **C0** | the LLM e2e harness | ✅ **built.** `integration_tests/llm_harness.rs`; `llm.rs` moved onto it; all seven faults have a test; the ⛔ 402 death loop of §2.2.1 is **fixed** — (a)–(d) below |
 | **C1** | the cheat tier | ✅ **built.** Four new `debug_*` primitives and `integration_tests/cheats.rs`; `play_path_contains_no_debug_ram_writes` still passes unchanged |
 | **C2** | the god run | ◐ **the machinery and the measurement.** `integration_tests/godmode.rs`: `Intent`, `ScriptedBrain`, the driver, and `godmode_turn_cost` behind `--features godmode`. **The run to the Hall of Fame is not built** — see §4.5 |
-| **C3** | the exploration | ◐ **the oracle and the frontier.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`. 352 ids across 28 maps on its first walk, 0 defects, three findings — §5.2.2. **Branch-point snapshots and the ROM cross-check are not built** |
+| **C3** | the exploration | ◐ **the oracle, the frontier and the sweep loop.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`, a 30-second progress heartbeat and an honest stop reason. ~535 ids across **38 maps** a walk at ~48× real time; nine faults found, eight fixed (§5.2.6), two open (§5.2.7). ⚠️ **38 of 248 maps is the walk's ceiling today** and closing it is W2. **Branch-point snapshots and the ROM cross-check are not built** |
 | **C4** | the battle matrix | ◐ **the audit is done and committed** — §6.0. Six cells exist nowhere, sixteen are proved under `DeterministicPolicy` only. No test written yet |
 
 ⚠️ **Where this plan was wrong is recorded rather than edited out** (§11.5). Two so far, both in §3.3
@@ -475,10 +479,12 @@ the agent's buffer is drained rather than peeked and is capped at 100) and into
 and prints its own figure: **7 ids across 6 maps, 7 completed**. That is the number §5.2 said would
 size the rest, and it says plainly that the existing leg tests touch almost nothing.
 
-### 5.2.2 ✅ The frontier, and what its first walk found
+### 5.2.2 ✅ The frontier, and what its walks have found
 
 `coverage::ExploringBrain`, behind `--features coverage-tests`. 90 game-minutes from
-`pallet-town-state.bin` with the god party and the badges, 96 s of wall clock:
+`pallet-town-state.bin` with the god party and the badges, ~95 s of wall clock.
+
+The first walk, 2026-09-07:
 
 ```
 frontier   352 ids offered, 307 chosen, across 28 maps in 344 turns
@@ -494,21 +500,31 @@ ran out. For scale, `can_navigate_to_pewter_city` — a whole leg of the existin
 
 ⭐ **Finding 1: `Grass` and `CutTree` are actions the model is never told the outcome of.** A new
 verdict, `Silent`: the action was taken and no terminal event followed. Sixty-six of 307, and every
-one of them one of those two kinds. Reaching tall grass hands over to
-`AgentState::PacingForEncounters` **without an event**; a cave wander (`MetaTile::Empty`) does the
-same; and pacing then ends either at a battle — whose `assert_battle_state` arm for a
-non-`OverworldMovement` state emits only `BattleStarted`, with no abort — or at its own budget, which
-emits a `TextBox`. So a model that chooses "walk in the grass at (6, 29)" is told nothing at all
-about what happened. ⚠️ **Left reported rather than fatal**: nothing went wrong in the game, what is
-missing is the sentence, and closing it is an `AgentEvent` change that belongs with the rest of the
-prose the model reads.
+one of them one of those two kinds.
+
+✅ **Closed the same day**, and it turned out to be worth more than a log line. The fix is in
+`agent.rs`: `AgentState::PacingForEncounters` carries the `MetaTile` its row named and reports all
+three of its exits (an encounter as `Battle`, the budget as a new `NothingAppeared`, a map change as
+`WrongMap`), and `AgentState::CuttingTree` carries `from_row` and ends in
+`OverworldActionCompleted { Cut }`. Both had been ending in a `TextBox` **the agent made up**, which
+is the cartridge's voice used for the agent's own account, and one of them had the budget wrong
+besides: a tick is 19.9996 ms and `as_millis()` is 19, so the model was told 57 seconds where the
+budget is 60.
+
+⭐ **And `resume_after_battle` was dead on tall grass, which nothing was looking for.** It keys on
+`OverworldActionAborted { Battle }` and a pace emitted no abort at all, so every wild encounter in
+grass dropped the queue as `Dropped::Unreported` and cost a fresh request. That is the commonest way
+in the game to meet a wild Pokémon, and the feature the README describes had never once applied to
+it. ⚠️ **No test under `src/llm/` could have seen this**:
+`a_chain_does_not_advance_on_an_ending_the_agent_never_reported` pins what happens *given* silence
+and cannot say which endings are silent. Scoring every id somebody chose is what found it.
 
 ⭐ **Finding 2 was in the plan's own oracle, not in the game.** `REPEAT_IS_A_DEFECT` was 3, on the
-reasoning that "the second attempt is already a model that did not read the answer". That ignores
-the honest case: a gate is worth **one** try per pass, because the thing that opens it may have
-happened since. The walk re-tried Pewter City's east exit — Brock's gym guide, who blocks it until
-the Boulder Badge — once on each of three sweeps, and was called a defect for diligence. It is 10
-now: clearly above once-per-pass and clearly below the 143 that made this a rule.
+reasoning that "the second attempt is already a model that did not read the answer". That ignores the
+honest case: a gate is worth **one** try per pass, because the thing that opens it may have happened
+since. The walk re-tried Pewter City's east exit — Brock's gym guide, who blocks it until the Boulder
+Badge — once on each of three sweeps, and was called a defect for diligence. It is 10 now: clearly
+above once-per-pass and clearly below the 143 that made this a rule.
 
 ⭐ **Finding 3 was in the frontier heuristic, and the oracle caught it.** The first version scored an
 exit by where it led (a map with no ids yet is the most promising) and tie-broke on whether it had
@@ -518,10 +534,234 @@ same shape as the deployed run's 143. Ordering exits by *how often they have alr
 first, and promise second, takes every exit once before any twice — and moved the walk from 12 maps
 to 28.
 
+⭐ **Finding 4 is the brain's, and it is the price of Finding 1's fix.** The explorer asked for
+`resume_after_battle` on every row. Once a pace started reporting its encounters, that finally *did*
+something — and what it did was grind: a `Grass` row resumed through `MAX_BATTLE_RESUMES` battles
+before handing back, so the same 90 game-minutes bought **16 maps and 258 ids** instead of 28 and
+352. Resuming is the right answer for a model playing the game and the wrong one for a walk whose
+whole job is breadth, so the brain now asks for it on everything except `Grass` and `Empty` — the two
+rows whose entire purpose is to *start* a battle.
+
+### 5.2.3 ✅ Finding 5: a walk that had already arrived, reported as a routing failure
+
+With Finding 1 closed the walk scores every id it takes, and the first thing that came out of that
+was a **defect** in about two runs in three. The run that caught three at once is the whole story:
+
+```
+Route2:8,0:Connection        there is no route to the way into PewterCity (standing at (8, 73))
+Route2:9,0:Connection        there is no route to the way into PewterCity (standing at (9, 73))
+ViridianCity:19,0:Connection there is no route to the way into Route2     (standing at (19, 37))
+```
+
+⭐ **The shape is the diagnosis.** Every target is on row **0** and every reported position on the
+map's **last** row, in the same column. And the event straight after each abort says the walk
+*worked*: the id after `ViridianCity:19,0` failing is `Route2:8,73:Connection`, and the id after
+`Route2:8,0` failing is `PewterCity:40,18:Connection`. The agent was calling a successful walk a
+pathfinder failure.
+
+The save state dropped at the abort settled it in one probe:
+
+```
+tick 0   wCurMap=13 (Route2)     raw=(8, 255)    <- wYCoord is -1
+tick 1   wCurMap=2  (PewterCity) raw=(18, 35)
+```
+
+Crossing a connection **north or west** leaves `wYCoord`/`wXCoord` at 255 for one agent tick while
+`wCurMap` is still the old map, until `CheckMapConnections` runs. `MetaTileMap::new` clamps the
+coordinate to keep `meta_tiles` indexing in range — and that clamp is
+`(255 + north_extra).min(height - 1)`, which is the **opposite edge of the map**. From the wrong end
+of Route 2 the BFS reaches nothing, `connection_action` answers `None`, and the walk is abandoned.
+⚠️ The clamp's own comment already said "during map transitions wXCoord/wYCoord can briefly hold
+values outside the new map's bounds"; what it could not do was say that the number it then produced
+was a fiction.
+
+✅ **Fixed**: `MetaTileMap::position_settled` says when the coordinate is a transition rather than a
+position, and `OverworldMovement`'s **`NoRoute` arm** holds on such a tick instead of giving up,
+pressing and releasing nothing; the map-change arm reports the arrival on the next tick, which is
+what should always have happened.
+
+⚠️ **The placement is the care in this fix, and the first version got it wrong.** Gating the whole
+tick on `position_settled` is the obvious shape and it is what this was first written as. It works,
+and it broke `full_playthrough` at 69% — because that test is a golden RNG replay and *any* tick that
+presses a different button re-rolls every route after it. Narrowing the hold to the one arm that told
+the lie changes behaviour only on the ticks that were already wrong. ⚠️ Southward and eastward crossings go one row *past* the map onto the
+connection strip, which is a real reachable tile, so they stay settled; a check that merely looked
+for an odd-looking coordinate would have broken every one of them.
+`mechanics::a_coordinate_that_underflows_a_map_edge_is_not_a_position` pins both halves.
+
+⚠️ **This is almost certainly the deployed defect of 2026-09-02 too.** That run read "there is no
+route to the warp to Route8Gate" while standing two tiles from that warp and went looking for a
+pathfinder bug; `DidNotArrive` was split out of `NoRoute` to stop one false version of that sentence
+and this was the other one.
+
+### 5.2.4 ⭐ What fixing §5.2.3 flushed out, and where it stopped
+
+⚠️ **Recorded because the *method* is the transferable part.** The first version of §5.2.3's fix
+gated the whole tick on `position_settled`. That is correct and it broke `full_playthrough` at 69% —
+a golden RNG replay re-rolls every route after any tick that presses a different button. Narrowing
+the hold to the one arm that told the lie restored it. But the stall the broad version landed on was
+real, and it was worth chasing rather than waving away as divergence:
+
+- it reproduces **deterministically** — same step (365/522), same maps, same coordinates, every run —
+  so restoring the broad gate is a harness for diagnosing it;
+- instrumenting that harness printed the world graph at the moment the route flips:
+  Route 14 is split by ledges into sections the graph holds separately, and Route 13's exit to it
+  resolves to a **9-edge** section at (19, 8) while walking it actually lands in a **1-edge** pocket
+  at (19, 6) whose only exit is back to Route 13. The planner scores the door 7 hops from the
+  Fuchsia Centre, takes it, arrives somewhere else, and re-plans identically. Thirty-three crossings
+  and counting when the stall detector fired.
+
+Two defects, and only one of them is fatal:
+
+- ✅ **The missing bound is fixed.** The heal detour's `heal_route_stuck` counts polls where routing
+  answered *nothing* and is reset by every hop that routes, so a detour that routes perfectly and
+  never arrives resets it for ever. `MAX_HEAL_HOPS` is the bound every sibling routing step already
+  had, and the code's own comment says so. Proved on the harness: the run that wedged for ever now
+  gives up at 60 hops, latches, and **finishes the playthrough**. ⚠️ This is a production matter, not
+  a test one: a wedged scripted run is silent, and `--policy deterministic` is what is deployed.
+- ⛔ **The landing mismatch is not fixed**, and it is its own work item. `bfs_nodes` resolves an
+  edge's *geometric* `to_position` to the nearest observed node, and here the right and wrong
+  sections are **two tiles apart** — no distance threshold can separate them. The graph has to learn
+  the landing a door actually deposits the player at, which is a change to routing that needs the
+  leg chain re-verified behind it.
+
 ⚠️ **What is not built**: §5.4's branch-point snapshots, §5.3's ROM cross-check, and the fixpoint
 actually being reached. The walk stops on a budget with the frontier open, which §9's last risk says
 is the right way to fail — *cap the passes and report a non-empty frontier as a result rather than a
-hang* — but it means "every reachable action" is not yet proven, only "352 of them, and counting".
+hang* — but it means "every reachable action" is not yet proven, only "~355 of them, and counting".
+
+### 5.2.5 ⭐ The exhaustive sweep, and what each wall turned out to be
+
+⚠️ **The walk starts from `postgame-phase0.bin`, not Pallet Town**, which is what §5.1 asked for all
+along ("from C2's finished save") and took three sweeps to arrive at. Measured progression, each
+number a wall coming down rather than a bigger budget:
+
+| Sweep | Maps | Ids | What was actually limiting it |
+|---|---|---|---|
+| Pallet Town, no bag | 28 | 352 | — |
+| Pallet Town, key items | 33 | 479 | ⭐ **the bag**: no rod means no `Fish` row *anywhere*, and no Bicycle/Silph Scope/Card Key/Lift Key/Secret Key/S.S. Ticket means whole regions are shut |
+| finished save | 41 | 582 | ⭐ **Brock**: Pewter's east exit and Brock's own guide read the *event flag* for having beaten him, which `debug_set_badges` does not write, so everything east of Pewter was unreachable |
+| + capped exit count | 21 | 331 | ⛔ **a regression of mine** — see the ⚠️ on the frontier's sort key |
+
+⚠️ **Coverage is not a budget problem and it never was.** Every sweep so far ended `settled: true`
+with hours of its budget unspent: the 24-game-hour walk stopped after 960 barren turns having used
+2.6 of them. What binds is `patience` and the frontier heuristic, so `GB_COVERAGE_PATIENCE` is now
+its own knob.
+
+⚠️ **`debug_set_badges` opens badge gates and not event gates, and the difference is a third of the
+map.** Route 23's guards check the badge byte and let a cheated walk through; Pewter's Youngster and
+Brock's guide check `EVENT_BEAT_BROCK`. §1.2 rules out writing the flag — a save with flags set
+behind its scripts makes every stall found in it a false positive — so the answer is to start from a
+save the cartridge itself finished.
+
+### 5.2.6 What the sweeps have found, and what was done about it
+
+The sweeps of 2026-09-07/08 ran the walk nine times, fixing what each one surfaced and re-running.
+**Nine faults, eight fixed**; the open two are §5.2.7. Every fix is verified against the default
+tier, the leg chain and `full_playthrough` — that last one matters, because it is a golden RNG
+replay and any behaviour change on any tick re-rolls every route after it.
+
+| # | What it was | Root cause, and the test that pins it |
+|---|---|---|
+| 1 | The walk livelocked at **one action a minute** for 2½ hours on VictoryRoad3F | A `BoulderGoal`'s **id** carried the boulder and the square the walk started from, both of which move on every push — so one puzzle minted a fresh id per shove and the frontier never saw the same row twice. The target is the key now. `tile::a_boulder_goal_is_the_target_and_not_the_boulder` |
+| 2 | *"given up after 60 s without getting there"*, **one square from the push tile** | Same root one layer down: `OverworldMovement` re-derives its row each tick with `==`, which stopped matching when `actions()` re-picked the nearest capable boulder. `MetaTile::is_same_row_as` compares the target |
+| 3 | `ViridianGym:14,15:Fish` — a cast **inside a gym** | `is_water_tile_id` accepted the two *overworld* shore ids (`$32`, `$48`) in every tileset on `WaterTilesets`, and GYM is on that list because Cerulean's gym has a pool. The exclusion list had already been extended twice (SHIP_PORT, FOREST); it is a whitelist now. `map_metadata::a_shore_tile_id_is_only_a_shore_in_the_overworld` |
+| 4 | Every `Fish` row `Silent` (14–16 a sweep) | Fishing was the **only overworld action in the game reporting no outcome at all** — `Idle` in silence on a miss, replaced by the battle on a bite. A miss now completes and says whether anything bit; a bite aborts with `Battle`, which `resume_after_battle` picks up. `postgame::fishing::the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag` |
+| 5 | `VictoryRoad3F:3,5` abandoned **three pushes from the end** | `MAX_PUSHES` was 24 on a floor that needs **27** (measured). A total cap cannot tell a hard puzzle from a stuck one, so the bound is `MAX_PUSHES_WITHOUT_PROGRESS` — shoves since the plan last got shorter. ⚠️ It shared `DidNotArrive` with the walk's 60-second bound, whose prose describes only the walk, so a puzzle out of shoves reported a failed *walk* — **that message cost two wrong investigations**; it has its own `PuzzleRanLong` now. `endgame::victory_roads_hardest_switch_is_one_decision_however_many_shoves_it_takes` |
+| 6 | The `diagnostics` build was broken | Two `SolveBoulders` initializers missed when the `boulder` field was added. Invisible because that feature is not in the default tier |
+| 7 | A wedged Strength floor blamed the pathfinder | *"there is no route to the boulder at (23, 16)"* is a claim the agent could not **walk** somewhere, said to a model that has just walked across that floor — the shape of sentence a deployed run filed five bug reports off. `PuzzleUnsolvable` names the real answer: leaving the floor and coming back resets every boulder. `endgame::a_wedged_strength_floor_is_reported_as_a_reset_rather_than_a_missing_route` |
+| 8 | Solved puzzles scored `Silent` | **Two causes stacked.** A boulder landing on a switch runs the barrier script, so the tick a goal completes is a tick in `GameMode::Script` — which the driver treated as an interruption. And the event was discarded even when it fired: the arm pushed to `new_events` and then `return`ed, and an early return jumps over the drain at the bottom of `tick` (the ⚠️ on the black-out warp is about this exact mistake). **Every boulder-goal completion the feature ever emitted was thrown away**, so a model asked for a puzzle, the agent solved it, and the model was told nothing |
+
+⚰️ **Two entries here were wrong before they were right, and both are worth remembering.** The
+original `PushBoulder* × 7 Silent` row blamed "the shove runs as a script that takes the driver's
+state away", which described a per-shove row that no longer existed; the truth was #1, then #8. And
+the first attempt at the Hall of Fame (§5.2.7 W1) *filtered the rows out of the menu*, which could
+not stop the walk arriving — it only left the brain with nothing to choose, so the sweep reported
+**zero defects** while spending 20 059 of its 20 538 turns at the title screen. A terminus has to be
+reported, never made unreachable.
+
+### 5.2.7 Open work items
+
+Two, and they are independent of each other. Both are written up from evidence the sweeps produced;
+neither is started.
+
+#### W1 — the agent has no `GameMode` for the title screen
+
+**What happens.** With the god party the walk beat the Elite Four a second time. The Champion's room
+offers no door to choose — the cartridge **force-walks** the player into the Hall of Fame — and
+pokered then increments `wNumHoFTeams` on the ceremony's first frame, plays the parade, saves, and
+**soft-resets to the title screen**. `PokemonAgent` has no state for that, so it went on reading
+stale map RAM (`HallOfFame` at (4, 2)) and offering the two exit warps to a player no longer in the
+world: **197 turns**, its busiest map, the exits tried 98 and 97 times, each giving up after 60 s of
+game time. The saved screenshot is the CONTINUE menu.
+
+**Why it is not already fatal.** `host.rs` watches `wNumHoFTeams`, archives the run and starts a new
+one, so in the product nothing downstream meets the reset. Nothing *guarantees* that ordering, and
+⚠️ **the watchdog cannot save it**: `GB_STUCK_TIMEOUT_SECS` fires on emulated *silence*, and an agent
+walking into a wall and giving up every 60 seconds is not silent.
+
+**Reproduce.** `target/test-artifacts/coverage/defect-HallOfFame-4-7-Warp_state.bin` is dropped by
+the walk at the moment the verdict turns; load it with `TestFixture::new` and read `game_mode()` and
+`map.map`. (Re-cut it by removing the `reached_the_end` stop in `ExploringBrain` and running the
+walk with a large `GB_COVERAGE_MINUTES`.)
+
+**Done looks like.** The agent recognises that the cartridge has reset — the obvious signal is
+`wCurMap`/`wIsInBattle` being meaningless while the title screen's own state is live — and stops
+offering overworld rows rather than acting on stale RAM. ⚠️ **Do not simply special-case
+`Map::HallOfFame`**: the room is legitimate to stand in, and the fault is the *reset*, which is a
+whole-cartridge event that a map check cannot see. Whatever is added needs a test that a bare
+`PokemonAgent` (no `host.rs`) does not spend a budget at the title screen.
+
+**The harness already stops there**, and that is deliberate rather than a workaround: reaching the
+Hall of Fame ends the game, so `ExploringBrain::reached_the_end` makes the walk report a terminus and
+stop. That is orthogonal to W1 and should stay whatever W1 does.
+
+#### W2 — the walk reaches 38 maps of 248
+
+**What happens.** Every sweep settles in north-west Kanto plus Victory Road and the Indigo Plateau.
+Cerulean, Vermilion, Lavender, Celadon, Fuchsia, Saffron and Cinnabar are never entered.
+
+**It is not a routing bug, and that was checked.** Route 4's west block — where Mt Moon's 1F door
+lets out — is a genuine dead end: its east side is walled by west-only ledges, and `goto(CeruleanCity)`
+fails from there for the scripted policy too. The way east is Mt Moon **B1F**'s far exit, which the
+mainline reaches via `enter_at(MtMoonB1F, 23, 3)`. Three of B1F's eight warps are never opened,
+because B1F's regions are **entry-dependent**: the walk keeps arriving in the same one, and the other
+warps are never in the menu to be chosen.
+
+**Why the obvious fixes do not work.**
+- ⚠️ **The world graph cannot steer it.** `WorldGraph` is built incrementally *by traversal* — its
+  own doc says routing to a not-yet-visited map is impossible — so it does not know where the
+  unexplored maps are.
+- ⚠️ **Promise-first ordering was tried and reverted**, twice. Leading with `promise_of` took the
+  walk from 41 maps to 21 (§5.2.2), and unconditional priority for an exit into an unseen map is how
+  Brock's gym guide held it on `PewterCity:40,18:Connection` for 59 attempts. The current ordering is
+  `(times, promise)` with a *two-try* priority for unseen-map doors, which expires precisely so it
+  cannot reproduce that loop. It did not move the number.
+- ⚠️ **`promise_of` is per-map, but connectivity is per-region.** Route 4 counts as "seen" from its
+  west block while 90% of it is unreachable, so the door to its east half scores as leading
+  somewhere known.
+
+**Two directions worth trying**, neither started:
+1. **Regional sweeps.** Make the start fixture selectable (`GB_COVERAGE_START` over a table of
+   `postgame-*.bin`, the `every_committed_fixture_decodes` pattern) and run one walk per region.
+   Cheap, needs no new search, and multiplies reach immediately. It does not make any single walk
+   better.
+2. **Give the walk something to travel *with*.** The postgame party has **Fly**, and Fly is a real
+   mechanism the model has too — `use_field_move` with a destination, the way `PC_OPS` already
+   issues non-menu field moves from the brain. A walk that can fly to a town it has not explored
+   turns a local random walk into something that can cross Kanto. ⚠️ Fly is outdoors-only
+   (`Map::is_overworld`) and cannot escape a cave, so it is a complement to the frontier, not a
+   replacement.
+
+**Done looks like.** A number, not a feeling: maps reached, reported by the walk already. Anything
+that does not move it past 38 has not worked, and the run is cheap enough (~5 minutes of wall clock
+for 6 game-hours) to measure rather than argue about.
+
+#### W3 — one undiagnosed row
+
+`PokemonMansion1F:15,3:EscapeRope` scores **defect**: *"there is no route to Escape Rope"* — an item
+row offered and then not routable. Seen on several sweeps, never investigated. Small, and the
+reproduce-from-the-dropped-state recipe in W1 applies.
 
 ### 5.3 The ROM tables, demoted to a cross-check
 
@@ -553,8 +793,15 @@ turns out to be unreachable by resume, argue the specific flag on the specific w
 
 Fails on any `defect` verdict, naming the id and dropping a save state. Writes the full table to
 `target/test-artifacts/coverage/` either way — every id, its kind, its verdict, and for a `blocked`
-the message the game printed. A second run from the same snapshot produces the same table; if it does
-not, the exploration is not deterministic and that is a bug in the brain, not in the agent.
+the message the game printed. ⚠️ **A second run does *not* produce the same table, and the plan was wrong to expect it to.**
+The claim here was "if it does not, the exploration is not deterministic and that is a bug in the
+brain" — but the brain is a pure function of the strings it is sent, and what is not deterministic is
+underneath it: §2.3 chose `step_coarse` on purpose, so the agent is handed however long the last loop
+iteration took, and there is a worker thread and a real socket in that loop. Four runs from
+`pallet-town-state.bin` gave 352, 353, 355 and 360 ids, always 28 maps, and two of them failed on a
+defect the other two did not see. So the totals are an
+observation with a couple of per cent of noise on them, and *which* id fails is not reproducible by
+re-running: that is what the save state dropped at the moment of the defect is for.
 
 ### 5.6 What "all nodes" costs
 

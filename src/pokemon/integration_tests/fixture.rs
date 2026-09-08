@@ -174,11 +174,7 @@ impl TestFixture {
         }
         self.options_reapplied = true;
         self.agent.update(&mut api, cycles).ok();
-        if let Some(log) = self.coverage.as_mut() {
-            for event in self.agent.drain_events() {
-                log.observe(&event);
-            }
-        }
+        self.observe_coverage();
 
         self.total_cycles += cycles;
 
@@ -229,13 +225,50 @@ impl TestFixture {
         }
     }
 
+    /// Fold this tick's events into the [`CoverageLog`](super::coverage::CoverageLog), and drop a
+    /// save state wherever one of them was a defect.
+    ///
+    /// ⚠️ **The state has to be taken *here*, not at the end of the run.** `docs/coverage-plan.md`
+    /// §5.5 asks a coverage run to fail "naming the id and dropping a save state", and §5.4 says why
+    /// nothing later can: exploration is destructive and mostly one-shot, so a sprite talked to is
+    /// gone and an item picked up is gone, and by the time a ninety-second walk ends the square that
+    /// failed cannot be stood on again. This is the one moment the emulator is still there.
+    ///
+    /// The id becomes the file name, with `:` and `,` turned into `-` — a colon is legal on Linux
+    /// and not worth relying on.
+    fn observe_coverage(&mut self) {
+        let Some(log) = self.coverage.as_mut() else { return };
+        for event in self.agent.drain_events() {
+            log.observe(&event);
+        }
+        let defects = log.take_new_defects();
+        for id in defects {
+            let name: String = id
+                .chars()
+                .map(|c| match c {
+                    ':' | ',' | '/' | ' ' => '-',
+                    other => other,
+                })
+                .collect();
+            self.save_failure_artifacts(&format!("coverage/defect-{name}"));
+        }
+    }
+
     /// Dropped under `target/` rather than the repo root: a failing run must not leave untracked
     /// junk in the working tree next to the fixtures it is being compared against.
     fn save_failure_artifacts(&self, name: &str) {
         let dir = std::path::Path::new("target/test-artifacts");
-        std::fs::create_dir_all(dir).ok();
         let state = dir.join(format!("{name}_state.bin"));
         let shot = dir.join(format!("{name}_screenshot.png"));
+        // ⚠️ **The file's parent, not the artifacts root.** `name` may carry a subdirectory —
+        // `observe_coverage` writes `coverage/defect-…` — and `save_state_to_file` answers a missing
+        // directory with an error this function deliberately swallows, so creating only the root
+        // would lose exactly the artifact that is hardest to reproduce.
+        for path in [&state, &shot] {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        }
         self.gb.save_state_to_file(&state.to_string_lossy()).ok();
         self.gb.save_screenshot_to_file(&shot.to_string_lossy()).ok();
         println!("saved failure artifacts: {}, {}", state.display(), shot.display());
@@ -253,11 +286,7 @@ impl TestFixture {
     pub fn step_coarse(&mut self, min_cycles: MachineCycles) {
         PokemonApi::with_cache(&mut self.gb, &mut self.map_cache).debug_set_options(&self.options);
         let (ran, _) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
-        if let Some(log) = self.coverage.as_mut() {
-            for event in self.agent.drain_events() {
-                log.observe(&event);
-            }
-        }
+        self.observe_coverage();
         self.total_cycles += ran;
         assert!(self.total_cycles < self.max_cycles,
             "exceeded max cycles ({:?} game time){}", self.max_cycles, self.progress_note());
@@ -420,9 +449,12 @@ fn dump_fixture_states() {
         ("post-marsh-badge", include_bytes!("../data/post-marsh-badge.bin")),
         ("at-cinnabar", include_bytes!("../data/at-cinnabar.bin")),
         ("post-secret-key", include_bytes!("../data/post-secret-key.bin")),
+        ("post-volcano-badge", include_bytes!("../data/post-volcano-badge.bin")),
+        ("seafoam-b3f", include_bytes!("../data/seafoam-b3f.bin")),
         ("post-articuno", include_bytes!("../data/post-articuno.bin")),
         ("post-earth-badge", include_bytes!("../data/post-earth-badge.bin")),
         ("vr1f-strength", include_bytes!("../data/vr1f-strength.bin")),
+        ("vr3f-strength", include_bytes!("../data/vr3f-strength.bin")),
         ("vr2f-ladder", include_bytes!("../data/vr2f-ladder.bin")),
         ("at-indigo-articuno", include_bytes!("../data/at-indigo-articuno.bin")),
         ("post-champion", include_bytes!("../data/post-champion.bin")),

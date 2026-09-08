@@ -333,11 +333,23 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
     // has already replaced this state — so this is the "not even a nibble" path (or a refusal).
     if s.entered_menu && game_mode == GameMode::Overworld && !casting {
         let response = api.mmu().read_pointer(&pokered_symbols::wRodResponse);
-        if response == 2 {
-            // Super Rod only: this map has no fishing group at all, so every cast here will answer the
-            // same. Say so on the event stream — the policy would otherwise burn its whole cast budget.
-            agent.event(AgentEvent::TextBox { message: format!("{:?}: no fish on this map", s.rod) });
-        }
+        agent.event(AgentEvent::TextBox {
+            message: match response {
+                // Super Rod only: this map has no fishing group at all, so every cast here will
+                // answer the same. Say so, or the policy burns its whole cast budget finding out.
+                2 => format!("You cast the {} in. There are no fish on this map at all, so \
+                              casting here again will do the same.", s.rod.name()),
+                _ => format!("You cast the {} in. Not even a nibble.", s.rod.name()),
+            },
+        });
+        // ⭐ **A cast that caught nothing is a *completed* action, and saying so is the whole
+        // point.** The driver used to drop to `Idle` in silence, so the only overworld action in
+        // the game that reported no outcome at all was fishing: the coverage walk scored every
+        // `Fish` row `Silent` (14-16 a sweep, the largest single group in the table), and a model
+        // that cast was told nothing whatsoever about what happened. Same fault, and same fix, as
+        // the grass pace and the cut tree before it.
+        agent.event(AgentEvent::OverworldActionCompleted {
+            destination: crate::pokemon::tile::MetaTile::Fish { rod: s.rod } });
         finish(agent, api);
         return Ok(());
     }
