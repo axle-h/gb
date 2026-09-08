@@ -75,7 +75,11 @@ lives in the code.
 - **A row that leads to a coordinate being asked for names both squares.** An id's coordinate is
   where the *player stands*; `use_field_move`'s `target` is where the *thing is*.
   `Route16:27,10:Snorlax` with the Snorlax on (26, 10) had a run play the Poké Flute at open
-  ground three times, each answered "Accepted". `resolve_field_move` now refuses a `use_item` whose
+  ground three times, each answered "Accepted". ⭐ **A sprite id has carried no coordinate at all
+  since 2026-09-08** — `OverworldAction::id` keys it on `map + name`, because the square it used to
+  name was the player's approach tile and moved every time the player did — so the row above is
+  `Route16:Snorlax` now and there is no second number to mistake for the first. The refusal below
+  stays: it is what catches a target invented from somewhere else. `resolve_field_move` refuses a `use_item` whose
   target is `Empty`/`Grass`/`Water` or off the map, or that cannot be faced, and names what is
   beside it. Only those rows carry both coordinates: a person the agent walks to needs no number. A
   `MetaTile::Boulder` row carries them for the same reason — a Sokoban puzzle is reasoned about in

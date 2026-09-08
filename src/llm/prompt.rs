@@ -1356,7 +1356,7 @@ mod tests {
         let events: Vec<String> = [
             AgentEvent::StartedOverworldAction {
                 destination: MetaTile::Sprite("Gym Guide"),
-                id: "ViridianGym:5,9:GymGuide".to_string(),
+                id: "ViridianGym:GymGuide".to_string(),
             },
             AgentEvent::OverworldInteractionCompleted { target: MetaTile::Sprite("Gym Guide") },
             AgentEvent::TextBox { message: "Hey! You look weak! Let me give you some advice!".into() },

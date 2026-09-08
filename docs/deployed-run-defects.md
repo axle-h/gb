@@ -151,7 +151,9 @@ tile the **thing is on**. Nothing says so, and `resolve_field_move`'s `UseItem` 
 (`src/llm/tools.rs:439`) passes `target` straight through with no check that anything is there.
 
 **Route 16 Snorlax, turns 1019–1022, three wasted turns.** The menu row was
-`Route16:27,10:Snorlax`; the Snorlax was at **(26,10)**. The model played the Poké Flute at (27,10)
+`Route16:27,10:Snorlax`; the Snorlax was at **(26,10)**. ⭐ **That row is `Route16:Snorlax` now** —
+a sprite id has carried no coordinate since 2026-09-08 (`OverworldAction::id`), so the number that
+was misread is not there to misread. The model played the Poké Flute at (27,10)
 three times, once from (39,10) and twice from (28,10). Each was answered `"Accepted. The agent is
 carrying it out now; the next turn will tell you what happened."` and each did nothing at all. It
 recovered only by calling `read_map`, which returned

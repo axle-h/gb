@@ -171,6 +171,11 @@ impl MetaTile {
     /// an id built straight off one would be whitespace-sensitive under a string-equality resolve —
     /// a model that re-spaced or collapsed it would silently miss. `Display` keeps the spaces,
     /// because that half is prose.
+    ///
+    /// ⚠️ **For `Sprite` this is the *whole* key past the map prefix** — see
+    /// [`OverworldAction::id`](crate::pokemon::actions::OverworldAction::id), which gives a sprite
+    /// row no coordinate, because the only coordinate it had was the square beside the object and
+    /// that square moves with the player.
     pub fn id_kind(&self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::Sprite(name) if name.contains(' ') => name.replace(' ', "").into(),

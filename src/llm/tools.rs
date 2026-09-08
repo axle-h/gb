@@ -1534,10 +1534,12 @@ fn not_on_the_menu(id: &str, menu: &[String]) -> Option<String> {
     if menu.is_empty() || menu.iter().any(|offered| offered == id) {
         return None;
     }
-    // ⚠️ Every overworld id is `{map}:{x},{y}:{kind}`, so the menu already names the map the player
-    // is on and nothing has to carry it here separately — which is also what stops the complaint and
-    // the situation disagreeing about where the player is. A battle menu's ids have no prefix, and
-    // then this says nothing about maps at all: a battle id going stale is a different mistake.
+    // ⚠️ Every overworld id starts `{map}:`, so the menu already names the map the player is on and
+    // nothing has to carry it here separately — which is also what stops the complaint and the
+    // situation disagreeing about where the player is. What follows the prefix is `{x},{y}:{kind}`
+    // for everything except a sprite, which is keyed on the object alone; both are taken apart from
+    // the ends rather than by counting fields. A battle menu's ids have no prefix, and then this
+    // says nothing about maps at all: a battle id going stale is a different mistake.
     let here = menu[0].contains(':').then(|| menu[0].split(':').next()).flatten();
     let elsewhere = match (here, id.split_once(':')) {
         (Some(here), Some((named, _))) if named != here => format!(
@@ -2994,7 +2996,10 @@ mod tests {
         // ⚠️ A person is named by the id *and* by the row: the name is what the verb needs. But the
         // verb is the game's own kind of thing — this one is a bookcase, by its picture — and never
         // "Sprite", the emulator's word for anything that moves.
-        assert!(rows.contains(&"- `OaksLab:2,2:Pokedex1` — read the Pokedex 1".to_string()), "{rows:#?}");
+        // ⚠️ And no coordinate: a sprite id is `{map}:{name}` — see `OverworldAction::id`, which
+        // dropped the square because it was the one the *player* stands on rather than the one the
+        // object is on, so it moved every time the player did.
+        assert!(rows.contains(&"- `OaksLab:Pokedex1` — read the Pokedex 1".to_string()), "{rows:#?}");
         assert!(!rows.iter().any(|row| row.contains("Sprite")),
                 "no row may call a person a sprite: {rows:#?}");
 
@@ -3847,17 +3852,17 @@ mod tests {
     /// the *next* turn's situation rather than as a tool result this turn can still act on.
     #[test]
     fn every_id_in_a_chain_is_held_to_the_menu_the_turn_offered() {
-        let menu = ["PalletTown:5,6:Warp".to_string(), "PalletTown:3,3:Mom".to_string()];
+        let menu = ["PalletTown:5,6:Warp".to_string(), "PalletTown:Mom".to_string()];
         let chain = |arguments: &str| classify(DecisionKind::Overworld, &call("choose_action", arguments), &menu);
 
         // The shape the whole feature is for, and both flags defaulted.
         let CallKind::Terminal(Terminal::ChooseAction { id, then, resume_after_battle }) = chain(
-            r#"{"id":"PalletTown:5,6:Warp","then":["PalletTown:3,3:Mom"],"summary":"in, then talk"}"#,
+            r#"{"id":"PalletTown:5,6:Warp","then":["PalletTown:Mom"],"summary":"in, then talk"}"#,
         ) else {
             panic!("a chain of two ids from the menu is an ordinary call");
         };
         assert_eq!(id, "PalletTown:5,6:Warp");
-        assert_eq!(then, ["PalletTown:3,3:Mom"]);
+        assert_eq!(then, ["PalletTown:Mom"]);
         // ⚠️ **Omitted means `true`, and it used to mean `false`.** A battle interrupting a walk
         // says nothing about the walk, and left opt-in the deployed run of 2026-09-01 never once
         // asked for it — so every wild encounter bought a fresh overworld turn describing a
@@ -3876,7 +3881,7 @@ mod tests {
 
         let CallKind::Rejected(complaint) = chain(&format!(
             r#"{{"id":"PalletTown:5,6:Warp","then":[{}],"summary":"far too many"}}"#,
-            ["\"PalletTown:3,3:Mom\""; MAX_CHAINED_ACTIONS].join(","),
+            ["\"PalletTown:Mom\""; MAX_CHAINED_ACTIONS].join(","),
         )) else {
             panic!("a chain longer than the cap is refused");
         };
@@ -3884,7 +3889,7 @@ mod tests {
 
         // Not a list of strings at all. One sentence, because there is one thing to fix.
         let CallKind::Rejected(complaint) =
-            chain(r#"{"id":"PalletTown:5,6:Warp","then":"PalletTown:3,3:Mom","summary":"a bare string"}"#)
+            chain(r#"{"id":"PalletTown:5,6:Warp","then":"PalletTown:Mom","summary":"a bare string"}"#)
         else {
             panic!("`then` must be a list");
         };
@@ -3991,7 +3996,7 @@ mod tests {
     fn an_id_the_turn_never_offered_is_refused_before_it_costs_the_turn() {
         let menu = [
             "ViridianPokecenter:3,7:Warp".to_string(),
-            "ViridianPokecenter:5,3:Nurse".to_string(),
+            "ViridianPokecenter:Nurse".to_string(),
         ];
         let chose = |id: &str| call("choose_action", &format!(r#"{{"id":"{id}","summary":"s"}}"#));
 

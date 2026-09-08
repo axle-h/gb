@@ -24,9 +24,12 @@ still ahead of the code. It replaces the soak tier's random walk with an exhaust
 through `LlmPolicy` against a mock endpoint so the thing under test is the deployed stack, and it
 cheats past the game's gates with the debug tier rather than around them. **C0, C1 and C3's frontier
 walk are built; the god run is not** — its status table says exactly what, and §0.4 records where the
-plan itself turned out to be wrong. ⭐ **§5.2.6 is the nine faults nine sweeps found and §5.2.7 is the
-two that are still open**, written up to be picked up cold; six of the eight fixed were agent bugs
-rather than harness ones. Read it before touching the soak tier, `postgame/debug.rs`,
+plan itself turned out to be wrong. ⭐ **§5.2.6 and §5.2.8 are the faults the sweeps found and
+§5.2.7 is the two that are still open**, written up to be picked up cold; most of the fixed ones were
+agent bugs rather than harness ones. ⚠️ **§5.2.8 is the one to read before filing a coverage defect**:
+the row that had been on the open list longest was sound, and what was actually wrong was that a
+sprite's action id moved with the player — a quarter of the frontier was one object counted many
+times. Read it before touching the soak tier, `postgame/debug.rs`,
 `integration_tests/llm*.rs` or anything under `integration_tests/{cheats,coverage,godmode}.rs`.
 
 ## Rules of the road
