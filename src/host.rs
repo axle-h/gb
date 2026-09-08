@@ -2002,7 +2002,12 @@ mod tests {
         assert_eq!(row.run_id, finished_id);
         assert_eq!(row.teams, 1);
         assert_eq!(row.policy, "random", "the decider names itself");
-        assert_eq!(row.model, Some("gpt-test".into()));
+        // ⚠️ **`None`, and that is the rule rather than a gap.** The ledger's model column is only
+        // filled for the LLM policy — see `handle_completion` — so a run decided by `RandomPolicy`
+        // files no model however the host was configured, which is the point: `scripted` on a model
+        // column would be a small lie. This assertion said `Some("gpt-test")` until 2026-09-08 and
+        // had been failing since the rule changed under it.
+        assert_eq!(row.model, None, "only an LLM run names a model");
         assert_eq!(row.app_version, crate::cli::VERSION);
         assert_eq!(row.badges, 8, "the winning tally is read at the moment of victory");
         assert!(row.playtime_seconds > 0 && !row.playtime_maxed);

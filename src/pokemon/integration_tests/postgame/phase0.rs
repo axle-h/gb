@@ -129,6 +129,113 @@ fn the_hall_of_fame_is_announced_once_when_the_ceremony_starts() {
     }
 }
 
+/// ⭐ **W1 — winning the game does not hand the world back, and the agent must stop playing it.**
+///
+/// `scripts/HallOfFame.asm` increments `wNumHoFTeams` on the ceremony's first frame and only then
+/// runs the parade, the credits, `SaveGameData`, `WaitForTextScrollButtonPress` and **`jp Init`** —
+/// a whole-cartridge reset. Measured from this fixture, that is **169 seconds of game time** in
+/// which `wCurMap` still reads `HallOfFame` and the player's coordinates still read (4, 2), so
+/// `actions()` happily mints the room's two exit warps for a player who is watching the credits.
+///
+/// Before `PokemonAgent::ending` existed the agent walked to them: **15 walks in 900 s** here, every
+/// one abandoned by the 60-second movement bound, and a C3 sweep that ran past the terminus spent
+/// **197 turns** on it — its busiest map of the whole run, the two exits tried 98 and 97 times.
+/// ⚠️ The watchdog cannot catch that: it fires on emulated *silence*, and an agent walking into a
+/// wall and giving up every minute is not silent.
+///
+/// ⚠️ **What is asserted is the reset, not the room.** The Hall of Fame is a legitimate place to
+/// stand — the scripted route walks into it, and the one action started before the announcement
+/// below is correct — so a `Map::HallOfFame` special case would be both wrong and unable to see the
+/// thing that is actually happening. The test therefore insists the run really reached the title
+/// screen (`a_game_is_loaded` goes false) before it believes the silence means anything.
+///
+/// ⚠️ **A bare `PokemonAgent`, driven through `agent.run`** — `host.rs` is what makes this
+/// survivable in the product, by archiving the run and starting the next one at the announcement,
+/// and this is the layer underneath that ordering rather than the one that depends on it.
+///
+/// ⚠️ **The A-mash is the harness, not the agent, and it is here because the ending will not finish
+/// without one.** `HallOfFameResetEventsAndSaveScript` ends on `WaitForTextScrollButtonPress`, which
+/// waits on A or B, so something has to press it — `drive_out_of_hall_of_fame` above does the same
+/// thing for the same reason. That was **already true before this change**: measured on the
+/// unmodified agent, 900 s of game time left alone with `RandomPolicy` never reached `jp Init`
+/// either, because a walk presses directions and never A. So going quiet costs the ceremony nothing
+/// it used to have. What the agent must *not* do is press A here of its own accord: the screen this
+/// lands on is the title menu, and an agent mashing at NEW GAME would erase the save it just wrote.
+///
+/// **In the default tier**, for the reason the announcement test above is: ~1 s, and it is the only
+/// proof against the real ROM that the agent goes quiet at the right moment.
+#[test]
+fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
+    // `RandomPolicy` answers every overworld turn it is offered, so a single quiet tick here is the
+    // agent declining to ask rather than a policy declining to answer.
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../../data/post-hall-of-fame.bin"),
+        Duration::from_mins(20),
+        Box::new(crate::pokemon::policy::RandomPolicy::seeded(7)),
+    );
+
+    let (mut won, mut reset) = (false, false);
+    let (mut before, mut after) = (0usize, 0usize);
+    let mut tick = 0u32;
+    // Until the world comes back: a real overworld on some map other than the one being left. That
+    // is `drive_out_of_hall_of_fame`'s own exit condition, and the window it closes is the whole of
+    // what this test is about — everything the agent does after it is ordinary play in Pallet Town.
+    loop {
+        let (mode, map) = {
+            let api = fixture.api();
+            (api.game_mode(), api.mmu().read_pointer(&pokered_symbols::wCurMap))
+        };
+        if won && mode == Some(GameMode::Overworld) && map != Map::HallOfFame as u8 { break }
+        assert!(fixture.total_cycles.to_duration() < Duration::from_secs(600),
+                "the ending never finished");
+        {
+            let mut api = fixture.api();
+            if tick % 2 == 0 { api.press_button(JoypadButton::A); } else { api.release_all_buttons(); }
+        }
+        tick += 1;
+        // ⚠️ **Read before the step, and stated as the same two phases the agent uses**, because
+        // the window is not "after the announcement": it opens at the announcement and closes when
+        // the cartridge has reset *and* a game has been loaded again. `wCurMap` alone will not do
+        // it — CONTINUE restores the map the save was written on, which was the Hall of Fame, so for
+        // a few ticks after the load the old room is back in RAM legitimately while the special warp
+        // to Pallet Town runs. A walk issued there is the ordinary map-transition case (the agent
+        // abandons it when the map changes) and not the thing under test; before this change there
+        // were fifteen walks and none of them was that one.
+        let loaded = fixture.api().a_game_is_loaded();
+        if won && !loaded { reset = true }
+        let in_the_window = won && !(reset && loaded);
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            match event {
+                AgentEvent::HallOfFame { .. } => won = true,
+                AgentEvent::StartedOverworldAction { .. } if in_the_window => after += 1,
+                AgentEvent::StartedOverworldAction { .. } => before += 1,
+                _ => {}
+            }
+        }
+    }
+
+    assert!(won, "the ceremony never started, so this test proved nothing");
+    // ⚠️ Without this the test passes on a run that simply sat in the Hall of Fame for ten minutes.
+    assert!(reset, "the cartridge never reached `jp Init`, so the window under test never opened");
+    assert!(before <= 2, "{before} walks before the announcement — the room is small");
+    assert_eq!(after, 0, "the agent started {after} walks across a room the player had left");
+
+    // ⭐ **And it comes back.** The latch clears on the save being loaded, not on a `restart`, so an
+    // agent that drives its own way out of the credits is playing again on the other side — which is
+    // what `can_walk_out_of_the_hall_of_fame` depends on and what a latch that only `restart` could
+    // clear would have broken.
+    let state = fixture.game_state();
+    assert_eq!(state.map.map, Map::PalletTown, "the reset lands outside the player's own front door");
+    let mut played = 0usize;
+    for _ in 0..600 {
+        fixture.step();
+        played += fixture.agent.drain_events().iter()
+            .filter(|e| matches!(e, AgentEvent::StartedOverworldAction { .. })).count();
+    }
+    assert!(played > 0, "the agent never started playing again after the world came back");
+}
+
 /// **Task 0.35** — the postgame root fixture. Emulates ~3 min of game time (≈8 s wall clock).
 ///
 /// `post-hall-of-fame.bin` is captured on *arrival* in the Hall of Fame, so it is three minutes of

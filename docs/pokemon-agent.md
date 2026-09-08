@@ -431,6 +431,17 @@ price.
   counting fields. ⚠️ It also removed a *misreading*: the coordinate was the player's square and a
   deployed run read it as the object's, playing the Poké Flute at empty ground three times
   ([deployed-run-defects](deployed-run-defects.md), Route 16 Snorlax).
+- ⭐ **Winning the game does not hand the world back, and the agent stops playing it.**
+  `wNumHoFTeams` goes up on the ceremony's *first* frame and `scripts/HallOfFame.asm` only reaches
+  its `jp Init` at the end of the credits — 12 s to 169 s of game time, measured — and for all of it
+  `wCurMap` still reads `HallOfFame` and the coordinates still read the square the player was
+  standing on. `PokemonAgent::ending` latches on that same edge and `update` returns above the
+  watchdog, above `game_mode()` and above any policy poll, pressing nothing: 15 walks into the room's
+  two exits became 1. ⚠️ **Not a `Map::HallOfFame` check** — the room is legitimate to stand in and
+  the fault is the reset. ⚠️ **It clears itself**, on `a_game_is_loaded` (`wPlayerID`) going zero and
+  then non-zero again, which is the only signal that separates a reset from an ordinary screen
+  transition; `restart` clears it outright because a loaded save state never passes through zero.
+  `postgame::phase0::the_agent_stops_playing_a_world_the_cartridge_has_reset`.
 - ⚠️ **Only the *start* of a walk carries an id, so a reader pairs positionally**: a start opens an
   action and the next `OverworldActionCompleted`, `OverworldActionAborted`,
   `OverworldInteractionCompleted` or `OverworldPickupFailed` closes it. The terminal events carry a
