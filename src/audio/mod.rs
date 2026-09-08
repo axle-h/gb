@@ -61,9 +61,9 @@ pub struct Audio {
     /// it is neither serialised nor part of equality. `true` by default, which is what every caller
     /// that has not thought about it wants.
     output_enabled: bool,
-    /// Video M-cycles the four channels have **not** been advanced by yet. See the batching note
-    /// in [`Audio::update`]; zero whenever the output side is running, and zero again after
-    /// [`Audio::sync`].
+    /// Video M-cycles the four channels have **not** been advanced by yet, and equally the cycles
+    /// the resampler's clock is behind the machine. See the batching note in [`Audio::update`];
+    /// zero again after [`Audio::sync`].
     ///
     /// Derived, like `output` and `mixed`: a debt against the channels rather than state of its
     /// own, so it is neither serialised nor part of equality. [`Audio::settled`] is how the cold
@@ -74,6 +74,20 @@ pub struct Audio {
     /// update", which is the initial value and what every path that disturbs a channel leaves
     /// behind.
     channel_deadline: u64,
+    /// Whether a batch is taken at all. Always `true` outside a test build, where this field does
+    /// not exist at all — see [`Audio::deadline_after_flush`] for why it exists in one.
+    ///
+    /// ⚠️ **And not under `bench` either, which is not tidiness.** §4.1 of
+    /// `docs/emulator-performance.md` records a guarded branch on a never-taken path in this
+    /// function costing 1.5%, purely in the layout of `MMU::update`, which the whole of
+    /// [`Audio::update`] inlines into. This one measured **2.5%** the same way — 105.1-106.1x
+    /// against 108.2-109.3x, gated, interleaved. `bench_core_throughput` is a `#[test]`, so
+    /// without this second condition the one instrument this file's numbers are taken with would
+    /// be reporting a machine 2.5% slower than the one that ships. The cost is to the two tests
+    /// that need a control machine, which do not exist under `bench`; they are in the default
+    /// tier, which is what gates everything.
+    #[cfg(all(test, not(feature = "bench")))]
+    batching: bool,
 }
 
 impl Default for Audio {
@@ -97,6 +111,8 @@ impl Default for Audio {
             pending: 0,
             // Nothing has been measured yet, so the first update must flush rather than batch.
             channel_deadline: 0,
+            #[cfg(all(test, not(feature = "bench")))]
+            batching: true,
         }
     }
 }
@@ -159,10 +175,12 @@ impl Audio {
         if enabled == self.output_enabled {
             return;
         }
-        // ⚠️ The gate is also what decides whether the channels are batched, so it cannot move
-        // with a batch outstanding: everything past here assumes `pending` is a debt against the
-        // regime that incurred it. Opening the gate would otherwise mix a level the channels have
-        // not caught up to yet.
+        // ⚠️ The gate cannot move with a batch outstanding. Those cycles were incurred under the
+        // old regime and [`Audio::update`]'s `lead` would hand them to whichever resampler clock
+        // is running when they are finally paid: on the way in, cycles from before anyone was
+        // listening, ending up in front of the first sample a listener hears; on the way out,
+        // nothing, since the clock is about to stop. Paying them off here leaves the next update
+        // with `lead` at zero either way.
         self.sync();
         self.output_enabled = enabled;
         if enabled {
@@ -181,10 +199,33 @@ impl Audio {
     /// video M-cycles. See the batching note in [`Audio::update`].
     ///
     /// Exists for the same reason [`Self::output_enabled`] does: batching that silently stopped
-    /// happening would cost 10% and nothing would say so, and batching that ran while a listener
-    /// was attached would be a bug no ear could localise. A test can assert both.
+    /// happening would cost 10% gated and 14% with a listener attached, and nothing would say so.
+    /// A test can assert it engaged.
     pub fn pending_channel_cycles(&self) -> u64 {
         self.pending
+    }
+
+    /// Turn the batch off, so a test has a per-instruction machine to compare a batching one
+    /// against. **The only callers are tests**, and the field it sets does not exist in a release
+    /// build or under `bench`; see [`Audio::deadline_after_flush`].
+    #[cfg(all(test, not(feature = "bench")))]
+    pub fn set_channel_batching(&mut self, batching: bool) {
+        self.sync();
+        self.batching = batching;
+    }
+
+    /// Log every amplitude transition handed to the synth, run-length merged by
+    /// [`Self::take_output_transitions`]. The instrument the C6 test compares two machines with:
+    /// it is upstream of the samples and says *when* a level moved, which is the whole property
+    /// batching has to preserve.
+    #[cfg(test)]
+    pub fn capture_output_transitions(&mut self) {
+        self.output.start_capture();
+    }
+
+    #[cfg(test)]
+    pub fn take_output_transitions(&mut self) -> Vec<(u16, i16, i16)> {
+        self.output.take_capture()
     }
 
     /// Fill `out` with interleaved L/R frames, returning the number of *frames* written; zero means
@@ -224,8 +265,9 @@ impl Audio {
     /// the power switch, all of which only move on a register write.
     ///
     /// The output is bit-identical either way: `mixed` is exactly the value the old code would
-    /// have recomputed, and the resampler still gets a call every instruction so the 16.16 time
-    /// cursor advances as before.
+    /// have recomputed, and the resampler's 16.16 time cursor still ends up on the same clock —
+    /// per instruction when C4 landed, and since C6 in two pieces per flush, which is the same
+    /// arithmetic.
     pub fn update(&mut self, delta: MachineCycles, div_clocks: DividerClocks) {
         if !self.enabled {
             // Nothing is ever outstanding here, and it is enforced where the state is *created*
@@ -261,12 +303,16 @@ impl Audio {
         // envelope, the sweep — hangs off the frame sequencer, and an event breaks the batch on
         // the line below; the rest needs a register write, and [`Audio::write`] flushes first.
         //
-        // ⚠️ **A batch is only ever taken while the output side is gated.** With a listener
-        // attached the resampler has to be told *when* a level moved, not merely that it did, so
-        // the flush below leaves `channel_deadline` at zero and every call flushes — `pending` is
-        // then always exactly `delta` and this whole path is bit-identical to the per-instruction
-        // one it replaces. See `docs/emulator-performance.md` §5 for what that costs a listener
-        // and what taking it back would need.
+        // ⭐ **C6: a listener gets the batch too, and pays for it with one extra `end_frame`.**
+        // This used to flush every instruction whenever anything was listening, because the
+        // resampler has to be told *when* a level moved and not merely that it did — which cost
+        // the desktop UI and anyone who pressed the speaker **14%** on the pokemon fixture and
+        // 22% on `cpu_instrs`, measured. It does not have to: the deadline is the moment the
+        // soonest level *could* move, so the cycles before it are silence by construction, and
+        // `end_frame(a); end_frame(b)` is `end_frame(a + b)`.
+        // `lead` below is those cycles, handed to the resampler in one call, after which the
+        // transition lands on exactly the instruction boundary it landed on per instruction.
+        let lead = self.pending;
         self.pending += delta.m_cycles();
         if events.is_empty() && self.pending < self.channel_deadline {
             return;
@@ -278,21 +324,16 @@ impl Audio {
             // belong before the tick to after it. That is not a rounding error: a length counter
             // that deactivates the channel returns early, and the whole batch is dropped on the
             // floor — which is what made an idle noise channel freeze 60 cycles late.
-            let before = self.pending - delta.m_cycles();
-            if before > 0 {
-                self.advance_channels(MachineCycles::from_m(before), FrameSequencerEvent::empty());
+            if lead > 0 {
+                self.advance_channels(MachineCycles::from_m(lead), FrameSequencerEvent::empty());
             }
             self.pending = delta.m_cycles();
         }
-        let delta = MachineCycles::from_m(std::mem::take(&mut self.pending));
-        self.advance_channels(delta, events);
+        let batch = MachineCycles::from_m(std::mem::take(&mut self.pending));
+        self.advance_channels(batch, events);
         // `None` — nothing is clocking — batches until the frame sequencer next has something to
         // say, which is the correct answer and a few thousand cycles rather than for ever.
-        self.channel_deadline = if self.output_enabled {
-            0
-        } else {
-            self.soonest_channel_event().unwrap_or(u64::MAX)
-        };
+        self.channel_deadline = self.deadline_after_flush();
 
         // ⭐ **Everything past here produces samples for somebody, and when there is nobody it is
         // skipped.** Worth **+10.2%** on `bench_core_throughput` — mixing, `BlipStereo` and
@@ -305,6 +346,16 @@ impl Audio {
         // [`Audio::set_output_enabled`] is where the cost of it is paid: coming back is a resync.
         if !self.output_enabled {
             return;
+        }
+
+        // ⚠️ **The batched cycles, paid to the resampler's clock and to nothing else.** No level
+        // can have moved in them — that is what `channel_deadline` means — so there is no
+        // transition to report and one `end_frame` puts the clock where per-instruction driving
+        // would have left it. It has to come *before* the mixing below, because whatever that
+        // finds moved, moved at the boundary these cycles end on. Bounded by the deadline, which
+        // is bounded in turn by the frame sequencer's 2048 M-cycles, so the cast is safe.
+        if lead > 0 {
+            self.output.end_frame(lead as u32);
         }
 
         // When all four channel DACs are off, the master volume units are disconnected from the
@@ -329,8 +380,9 @@ impl Audio {
             // ⭐ Only *now* is there a transition to report. `BlipStereo::update` quantises with a
             // libm `roundf` per channel before `BlipSynth` discovers the amplitude has not moved —
             // `perf` put 5.5% of the whole emulator in `roundf` alone, essentially all of it
-            // arriving at last instruction's answer. The resampler's clock still advances every
-            // instruction, so the output is bit-identical.
+            // arriving at last instruction's answer. The clock still lands on the same cycle, so
+            // the output is bit-identical: the `end_frame` above and the one below sum to what
+            // the skipped instructions and this one would have advanced it by one at a time.
             self.output.update(self.mixed);
         }
         // ⚠️ The two early returns above hand the resampler a literal `ZERO` instead, and must keep
@@ -401,13 +453,52 @@ impl Audio {
     /// `channel_deadline` is left at zero rather than recomputed: whatever is about to happen is
     /// the reason this was called, and one extra flush on the next update is cheaper than being
     /// wrong about it.
+    ///
+    /// ⚠️ **The deadline is cleared even when there was nothing to pay off**, which is not
+    /// belt-and-braces. A write that lands on an instruction whose predecessor happened to flush
+    /// finds `pending` at zero and still moves the channel it writes to — a new frequency, a
+    /// trigger — so the deadline measured before it is a promise about a machine that no longer
+    /// exists. With the output side gated that was merely wasteful; the closed forms in
+    /// `PhaseTimer::update` are exact over any window, so the channels came out right whenever the
+    /// flush happened. With a listener it is [`Audio::update`]'s `lead` that assumes it, and a
+    /// transition reported tens of cycles late is audible and nothing else here would catch it.
     fn sync(&mut self) {
+        self.channel_deadline = 0;
         if self.pending == 0 {
             return;
         }
         let delta = MachineCycles::from_m(std::mem::take(&mut self.pending));
         self.advance_channels(delta, FrameSequencerEvent::empty());
-        self.channel_deadline = 0;
+        // ⚠️ **And the resampler's clock with them.** `pending` is a debt against the output side
+        // as much as against the channels (see [`Audio::update`]'s `lead`), and this is the one
+        // flush that is not followed by an `end_frame` for the same window — so without this the
+        // cycles between the last flush and the write are simply deleted from the timeline, and
+        // every transition after them lands early by that much, for the rest of the run. There is
+        // nothing to *report* in them, only time to account for: the deadline says no level moved.
+        //
+        // [`Audio::set_output_enabled`] is the other caller and it reads correctly both ways: the
+        // gate still holds its old value here, so cycles played to a listener are paid to the
+        // clock on the way out, and on the way in there is no clock to pay — it is about to be
+        // cleared.
+        if self.output_enabled {
+            self.output.end_frame(delta.m_cycles() as u32);
+        }
+    }
+
+    /// How long the channels may be left alone from a flush that has just happened.
+    ///
+    /// One line, in a function of its own, because the tests need a machine that never batches to
+    /// compare a batching one against — and after C6 there is no longer any configuration of the
+    /// real thing that provides one. See `Audio::set_channel_batching`.
+    #[inline]
+    fn deadline_after_flush(&self) -> u64 {
+        #[cfg(all(test, not(feature = "bench")))]
+        {
+            if !self.batching {
+                return 0;
+            }
+        }
+        self.soonest_channel_event().unwrap_or(u64::MAX)
     }
 
     /// Hand all four channels one window. The only place any of them is advanced.

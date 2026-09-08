@@ -316,23 +316,30 @@ mod tests {
     /// slightly out: blargg's twelve `dmg_sound` sub-tests, run **batched**, against the same
     /// reference frame `blargg_dmg_sound::all` checks unbatched.
     ///
-    /// ⚠️ **Every other APU test in this file runs with the output side open**, which is the
-    /// per-instruction path — so without this one the whole hardware-accuracy suite says nothing
-    /// about the batch. Registers, length counters, triggers, sweep and all three wave-RAM
-    /// aperture tests are in here, and the aperture is the one thing the batch has to compensate
-    /// for arithmetically rather than by flushing.
+    /// ⚠️ **Every other APU test in this file runs the un-batched path**, which is what
+    /// [`crate::audio::Audio::set_channel_batching`] exists to reach — so without this one the
+    /// whole hardware-accuracy suite says nothing about the batch. Registers, length counters,
+    /// triggers, sweep and all three wave-RAM aperture tests are in here, and the aperture is the
+    /// one thing the batch has to compensate for arithmetically rather than by flushing.
     ///
-    /// A second machine runs beside it with the gate open, and their APUs are compared every
+    /// A second machine runs beside it that never batches, and their APUs are compared every
     /// slice: the screen answers "does the game still pass", the comparison answers "was it the
     /// same machine that passed", and the two together are what the earlier bug needed — a batch
     /// carried *into* a frame-sequencer event froze an idle noise channel 60 cycles late, which no
     /// screen would ever have shown.
+    // Needs a control machine that never batches, which the `bench` build does not have —
+    // see `Audio::batching`. Runs in the default tier, which is where it matters.
+    #[cfg(not(feature = "bench"))]
     #[test]
     fn deadline_driving_the_channels_is_invisible_to_the_game() {
         let expected = parse_png(crate::roms::blargg_dmg_sound::EXPECTED_ALL);
         let mut batched = GameBoy::dmg(crate::roms::blargg_dmg_sound::ROM);
         let mut open = GameBoy::dmg(crate::roms::blargg_dmg_sound::ROM);
         batched.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
+        // ⚠️ The control has to be told not to batch. It used to get that for free by leaving the
+        // gate open, because a listener forced a flush every instruction; C6 took that away, and
+        // an open machine now batches exactly as a gated one does.
+        open.core_mut().mmu_mut().audio_mut().set_channel_batching(false);
 
         let mut cycles = MachineCycles::ZERO;
         let mut ever_batched = false;
@@ -343,9 +350,7 @@ mod tests {
 
             let (a, b) = (batched.core().mmu().audio(), open.core().mmu().audio());
             assert!(a == b, "the APU diverged with the channels deadline-driven, at {cycles:?}");
-            // The open machine is the control, and it must never batch: with a listener attached
-            // the resampler has to be told when a level moved, not merely that it did.
-            assert_eq!(b.pending_channel_cycles(), 0, "the open machine batched");
+            assert_eq!(b.pending_channel_cycles(), 0, "the control machine batched");
             ever_batched |= a.pending_channel_cycles() > 0;
 
             if batched.core().mmu().ppu().screenshot() == expected {
@@ -361,6 +366,119 @@ mod tests {
                 batched.core().mmu().ppu().screenshot(),
                 "audio-all-batched",
                 "screenshot does not match",
+            );
+        }
+    }
+
+    /// ⭐ **C6's correctness test, and the only thing standing between a batching APU and music
+    /// that is quietly wrong.** With a listener attached the four channels are still advanced to a
+    /// deadline rather than per instruction, and the resampler is handed the skipped cycles as one
+    /// `end_frame` before the transition that ends them — see [`crate::audio::Audio::update`].
+    ///
+    /// ⚠️ **Nothing about this fails loudly.** The machine is bit-identical either way, so
+    /// `full_playthrough`, the blargg suites and every assertion in this file would all pass a
+    /// version that had merely moved every transition a few dozen cycles. So this compares what
+    /// comes *out*: two machines playing the same music, one batching and one forced onto the
+    /// per-instruction path, checked on both the amplitude transitions the synth is handed and the
+    /// `f32` frames a sink reads back.
+    ///
+    /// The transition stream is the sharper of the two — it is `(clocks, left, right)` runs, so a
+    /// transition landing one cycle late moves a `clocks` and fails here while the resampled
+    /// samples might still round to the same floats. The samples are checked as well because they
+    /// are what a listener actually gets, and because they cover the resampler itself.
+    ///
+    /// Only the **last** run of each stream is allowed to differ, and only in its length: the
+    /// batching machine is up to a deadline behind at the moment the capture is taken, so its
+    /// trailing silence is shorter. Everything before it is complete and must match exactly.
+    // Needs a control machine that never batches, which the `bench` build does not have —
+    // see `Audio::batching`. Runs in the default tier, which is where it matters.
+    #[cfg(not(feature = "bench"))]
+    #[test]
+    fn batching_the_channels_under_a_listener_is_inaudible() {
+        /// One frame: 154 scanlines x 456 T-cycles.
+        const FRAME: MachineCycles = MachineCycles::from_t(70_224);
+        const FRAMES: usize = 300;
+
+        // The same fixture the gating test uses: a real game mid-play with overworld music, so all
+        // four channels are moving and there is something to get wrong.
+        let build = || {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data/at-celadon.bin");
+            let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+            gb.load_state(&std::fs::read(path).expect("fixture")).expect("load fixture");
+            gb
+        };
+        let (mut batched, mut control) = (build(), build());
+        control.core_mut().mmu_mut().audio_mut().set_channel_batching(false);
+        batched.core_mut().mmu_mut().audio_mut().capture_output_transitions();
+        control.core_mut().mmu_mut().audio_mut().capture_output_transitions();
+
+        fn drain(gb: &mut GameBoy, into: &mut Vec<f32>, scratch: &mut [f32]) {
+            loop {
+                let frames = gb.core_mut().mmu_mut().audio_mut().read_samples_f32(scratch);
+                if frames == 0 {
+                    return;
+                }
+                into.extend_from_slice(&scratch[..frames * 2]);
+            }
+        }
+
+        let mut scratch = vec![0.0f32; 8192];
+        let (mut batched_pcm, mut control_pcm) = (Vec::new(), Vec::new());
+        let mut ever_batched = false;
+        for frame in 0..FRAMES {
+            batched.run(FRAME);
+            control.run(FRAME);
+            assert_eq!(batched, control, "the machine diverged at frame {frame}");
+            assert!(
+                batched.core().mmu().ppu().lcd() == control.core().mmu().ppu().lcd(),
+                "the framebuffer diverged at frame {frame}",
+            );
+            ever_batched |= batched.core().mmu().audio().pending_channel_cycles() > 0;
+            assert_eq!(
+                control.core().mmu().audio().pending_channel_cycles(), 0,
+                "the control machine batched, so it is not a control",
+            );
+            drain(&mut batched, &mut batched_pcm, &mut scratch);
+            drain(&mut control, &mut control_pcm, &mut scratch);
+        }
+
+        // Otherwise both halves of this are comparing two silent machines that never batched.
+        assert!(ever_batched, "the channels were never once left behind, so this proves nothing");
+        assert!(control_pcm.len() > 100_000, "the fixture produced almost no audio: {}", control_pcm.len());
+
+        let a = batched.core_mut().mmu_mut().audio_mut().take_output_transitions();
+        let b = control.core_mut().mmu_mut().audio_mut().take_output_transitions();
+        assert!(a.len() > 1000, "only {} transitions, so this proves little", a.len());
+        assert_eq!(a.len(), b.len(), "a transition went missing or was invented");
+        for (i, (x, y)) in a.iter().zip(&b).take(a.len() - 1).enumerate() {
+            if x != y {
+                // The neighbours, because one `(clocks, left, right)` on its own says nothing
+                // about whether a transition moved, was lost, or was invented.
+                for j in i.saturating_sub(4)..(i + 5).min(a.len()) {
+                    println!("{j:6}  batched {:?}   control {:?}", a[j], b[j]);
+                }
+                panic!("transition {i} of {} differs: batched {x:?}, control {y:?}", a.len());
+            }
+        }
+        let (last_a, last_b) = (a[a.len() - 1], b[b.len() - 1]);
+        assert_eq!(
+            (last_a.1, last_a.2), (last_b.1, last_b.2),
+            "the final amplitude differs: batched {last_a:?}, control {last_b:?}",
+        );
+
+        // The frames a sink reads back. The batching machine may be holding a few hundred cycles
+        // of silence it has not ended a frame on yet, so it can be a sample or two short; every
+        // sample they both produced has to be bit-for-bit the same one.
+        let common = batched_pcm.len().min(control_pcm.len());
+        assert!(
+            control_pcm.len() - common < 16,
+            "the two machines produced very different amounts of audio: {} and {}",
+            batched_pcm.len(), control_pcm.len(),
+        );
+        if let Some(i) = (0..common).find(|&i| batched_pcm[i] != control_pcm[i]) {
+            panic!(
+                "sample {i} of {common} differs: batched {}, control {}",
+                batched_pcm[i], control_pcm[i],
             );
         }
     }

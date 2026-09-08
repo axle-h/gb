@@ -18,18 +18,22 @@ BENCH_FRAMES=60000 BENCH_ONLY=pokemon …          # long enough for perf to sam
 ```
 
 ```
-workload                     realtime       t-cycles/s     frames
-pokemon-red (fixture)           89.0x        373204810        600
-cpu_instrs.gb                   53.5x        224202759        600     # never HALTs
-dmg-acid2.gb                   189.1x        793088768        600     # HALTs heavily
+workload                      open      gated (BENCH_AUDIO=off)      # 2026-09-08, after §6.3
+pokemon-red (fixture)         103.6x                 108.3x
+cpu_instrs.gb                  67.3x                  67.7x          # never HALTs
+dmg-acid2.gb                  192.2x                 196.7x          # HALTs heavily
 ```
 
-⚠️ **`BENCH_AUDIO=off` is the number that matters now, and it is a different number.** It gates the
-APU's output side, which is the state every agent test tier and the deployment actually run in —
-nothing has ever listened in either — and two of the three optimisations in §6 only exist there. The
-table above is the *open* configuration, which is what a listener at the desktop or on the page gets.
-Score work on the channels against the gated baseline and work on the mixer against the open one, and
-say which you used; §6's tables do.
+⚠️ **`BENCH_AUDIO=off` gates the APU's output side**, which is the state every agent test tier and
+the deployment actually run in — nothing has ever listened in either. Say which you used; §6's
+tables do. The two columns used to be 89x against 108x and §6.3 closed most of that, so the
+choice matters much less than it did — but the mixer only exists in the open one, so work on it is
+still scored there.
+
+⚠️ **The bench is a `#[test]`, and one thing in this file is deliberately not in it.** The control
+knob C6's tests need (`Audio::batching`) is `#[cfg(all(test, not(feature = "bench")))]`, because
+carrying it cost **2.5%** — see §6.3. So `--features bench` builds a binary with two APU tests
+missing, and every other tier has them.
 
 ⭐ **Pressing no buttons is not a weakness of that benchmark, and this was checked rather than
 assumed.** A scripted joypad timeline was built for exactly this doubt — "at absolute emulated time
@@ -110,7 +114,7 @@ of three. Baseline for this table was the walking circuit at **88.5x**; against
 |---|---|---|---|
 | `draw_pixels_to` returns immediately | **137.2x** | pixel rendering = **35%** of wall clock | no — bounds only |
 | `Audio::update` returns immediately | **126.5x** | the whole APU = **30%** | no — bounds only |
-| APU channels run, mixing/blip/`end_frame` skipped | **97.3x** | the audio **output side alone = 9%** | ⭐ **done — see §6** |
+| APU channels run, mixing/blip/`end_frame` skipped | **97.3x** | the audio **output side alone = 9%** | ⭐ **done — see §6.1** |
 | render once per scanline instead of per instruction | **93.8x** | `draw_pixels_to`'s per-call setup = **5.6%** | nearly — needs write-triggered catch-up |
 | hoist the tile-map base out of the per-pixel path | 89.2x | +0.8%, at the noise floor | yes |
 | expand `TileRow` to eight resolved colours per tile | 86.4x | ⚠️ a **2.4% regression** | yes, and don't |
@@ -160,18 +164,8 @@ exact. See the comment in `Audio::update`, and §6.2's noise-channel bug for wha
    Predicted +10%, delivered +10.2%.
 2. ~~**Deadline-drive the APU's channel updates.**~~ **Done, 2026-09-08 — §6.2.** Predicted 12%,
    delivered **+10.4%** gated and **+18.2%** on `cpu_instrs`.
-3. ⭐ **Let a listener have the batch too.** §6.2 only batches while the output side is gated,
-   because with a listener attached the resampler has to be told *when* a level moved and not merely
-   that it did. The crude ablation that ignored this measured the open configuration at **104x**
-   against 89, so there is **~17%** here for the desktop UI and for anyone who presses the speaker.
-   The shape is known and it is small: a level can only move at a flush, so between flushes the
-   mixer is already doing nothing but `end_frame`, and `end_frame(a); end_frame(b)` is
-   `end_frame(a+b)` — split the flush into `end_frame(pending - delta)`, `update(mixed)`,
-   `end_frame(delta)` and every transition lands on the cycle it lands on today. What makes it work
-   worth doing carefully rather than quickly is that **nothing here fails loudly**: the machine stays
-   bit-identical either way, so `full_playthrough` and the blargg suites would all pass a version
-   that had merely made the music slightly wrong. It needs a test that compares *samples*, and
-   `src/audio/blip/tests.rs`'s spectral check is the closest thing to a template.
+3. ~~⭐ **Let a listener have the batch too.**~~ **Done, 2026-09-08 — §6.3.** Predicted ~17%,
+   delivered **+13.8%** on the pokemon fixture and **+21.7%** on `cpu_instrs`.
 4. **Render a scanline in one pass, catching up only when a write demands it.** +5.6%. Medium-high
    difficulty for a modest return: correctness needs a catch-up on every write to VRAM, OAM, LCDC,
    SCX/SCY, WX/WY and the palettes, and `dmg-acid2`/`cgb-acid2` plus
@@ -311,3 +305,62 @@ from wherever the change was. It also corroborates the bench from the other end 
 §6.1's 256.65 s**, which is the +8% a whole scripted playthrough sees, and the agent tiers run gated
 for the same reason the deployment does. The default tier is 28.5 s and the slow tier 85 s, both
 green.
+
+### 6.3 The batch is taken with a listener attached too (2026-09-08, +13.8%)
+
+Ranked #3 above, and the last of the three APU items. §6.2 batched only while the output side was
+gated, because with a listener attached the resampler has to be told **when** a level moved and not
+merely that it did — so the desktop UI and anyone who pressed the speaker paid per instruction for
+a mechanism the headless deployment had.
+
+It does not have to. `channel_deadline` is the moment the soonest level *could* move, so the cycles
+before it are silence by construction, and `end_frame(a); end_frame(b)` is `end_frame(a + b)`. The
+flush splits into `end_frame(lead)`, the mix, `end_frame(delta)` — where `lead` is the batch and
+`delta` is the instruction that ended it — and every transition lands on exactly the instruction
+boundary it landed on before.
+
+Best of three, the two binaries run **alternately** (§6.2's warning about this machine's afternoon
+drift still applies), `BENCH_FRAMES=2500`:
+
+| `bench_core_throughput`, open | before | after | |
+|---|---|---|---|
+| pokemon-red (fixture) | 88.2–90.2x | **101.0–102.6x** | **+13.8%** |
+| cpu_instrs.gb | 53.4–54.6x | **65.1–66.4x** | **+21.7%** |
+| dmg-acid2.gb | 183.6–185.1x | 182.2–186.1x | unchanged |
+
+The gated configuration is unchanged in all three, which is the point: this is the same mechanism,
+reaching one more caller. The spread is §6.2's spread for the same reasons — `cpu_instrs` never
+HALTs so all of its cycles are newly batched, Pokémon HALTs for 65% of its cycles which were
+skipped already, and `dmg-acid2` powers the APU on and plays no note, so there is nothing to batch.
+Open and gated are now within 5% on the fixture, against 18% before.
+
+⚠️ **`Audio::sync` was dropping the resampler's clock, and this is what found it.** `sync` pays off
+the batch against the four channels and is reached from every APU register write; it did not pay it
+against `BlipStereo`, because until now there was never a batch outstanding when the output side
+was running. Left alone, the cycles between the last flush and the write are **deleted from the
+timeline** and every transition after them lands early by that much, for the rest of the run —
+music that is subtly, permanently wrong, on a machine that is still bit-identical. Nothing else in
+this repo would have caught it: `full_playthrough`, the blargg suites and every existing APU test
+compare *machines*, and the machine was right.
+
+So the test compares what comes **out**. `game_boy::tests::batching_the_channels_under_a_listener_is_inaudible`
+runs the Celadon music fixture on two machines, one batching and one forced onto the
+per-instruction path, and compares both the amplitude transitions the synth is handed — captured as
+run-length-merged `(clocks, left, right)`, which is where a transition moved by one cycle shows up —
+and the `f32` frames a sink reads back. Only the final run may differ, and only in length: the
+batching machine is up to a deadline behind when the capture is taken. It caught the `sync` bug at
+transition 111 of 60855, as an 84-cycle shift that then held for the rest of the run.
+
+⚠️ **Forcing the per-instruction path needs a knob, and the knob is not free.** `Audio::batching`
+exists only under `#[cfg(all(test, not(feature = "bench")))]`, and the second half of that is
+measured rather than fastidious: with the branch present, the *gated* bench read **105.1–106.1x**
+against **108.2–109.3x** without it, interleaved. That is §4.1's negative result again — a branch
+on a path that is never taken, paid for in the layout of `MMU::update`, which the whole of
+`Audio::update` inlines into. It costs nothing in a release build, where the field does not exist;
+what it costs is that `--features bench` builds a binary missing this test and §6.2's.
+
+`full_playthrough` passes unchanged in **240.23 s**, against §6.2's 236.65 s — the same run, which
+is the point: it runs gated, so what it proves here is that the open path's split flush did not
+disturb the machine. It carries the weight it carried in §6.1 and §6.2 for the same reason, being a
+golden RNG replay that a one-cycle change would fail hundreds of steps from wherever the change was.
+The default tier is 27-31 s and the slow tier 78 s, both green.
