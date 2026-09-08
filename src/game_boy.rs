@@ -188,6 +188,12 @@ mod tests {
         let measured_frames: usize = std::env::var("BENCH_FRAMES")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(600);
         let only = std::env::var("BENCH_ONLY").unwrap_or_default();
+        // A third knob, and this one changes what is being measured rather than how long for.
+        // `BENCH_AUDIO=off` gates the APU's output side, which is the state every agent test tier
+        // and the deployment actually run in — nothing has ever listened in either. The channels
+        // keep clocking either way, so this is the baseline any work on *them* has to be scored
+        // against; `docs/emulator-performance.md` §6 had to hand-edit this file to get it.
+        let audio_output = std::env::var("BENCH_AUDIO").unwrap_or_default() != "off";
 
         fn pokemon_in_game() -> GameBoy {
             use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
@@ -216,7 +222,8 @@ mod tests {
             ("dmg-acid2.gb", Box::new(|| GameBoy::dmg(crate::roms::acid::ROM))),
         ];
 
-        println!("\n{:<24} {:>12} {:>16} {:>10}", "workload", "realtime", "t-cycles/s", "frames");
+        println!("\naudio output side: {}", if audio_output { "on" } else { "gated (BENCH_AUDIO=off)" });
+        println!("{:<24} {:>12} {:>16} {:>10}", "workload", "realtime", "t-cycles/s", "frames");
         println!("{}", "-".repeat(66));
 
         for (name, build) in &workloads {
@@ -224,6 +231,7 @@ mod tests {
                 continue;
             }
             let mut gb = build();
+            gb.core_mut().mmu_mut().audio_mut().set_output_enabled(audio_output);
             for _ in 0..WARM_UP_FRAMES {
                 gb.run(FRAME);
             }
@@ -299,6 +307,61 @@ mod tests {
                 );
             }
             assert!(halted, "{name} never HALTs, so it proves nothing about the fast path");
+        }
+    }
+
+    /// ⭐ **C5's correctness test.** With the output side gated the four channels are advanced to
+    /// the soonest moment any of them could move rather than once per instruction (see
+    /// [`crate::audio::Audio::update`]), and this is the ROM written to catch an APU that is even
+    /// slightly out: blargg's twelve `dmg_sound` sub-tests, run **batched**, against the same
+    /// reference frame `blargg_dmg_sound::all` checks unbatched.
+    ///
+    /// ⚠️ **Every other APU test in this file runs with the output side open**, which is the
+    /// per-instruction path — so without this one the whole hardware-accuracy suite says nothing
+    /// about the batch. Registers, length counters, triggers, sweep and all three wave-RAM
+    /// aperture tests are in here, and the aperture is the one thing the batch has to compensate
+    /// for arithmetically rather than by flushing.
+    ///
+    /// A second machine runs beside it with the gate open, and their APUs are compared every
+    /// slice: the screen answers "does the game still pass", the comparison answers "was it the
+    /// same machine that passed", and the two together are what the earlier bug needed — a batch
+    /// carried *into* a frame-sequencer event froze an idle noise channel 60 cycles late, which no
+    /// screen would ever have shown.
+    #[test]
+    fn deadline_driving_the_channels_is_invisible_to_the_game() {
+        let expected = parse_png(crate::roms::blargg_dmg_sound::EXPECTED_ALL);
+        let mut batched = GameBoy::dmg(crate::roms::blargg_dmg_sound::ROM);
+        let mut open = GameBoy::dmg(crate::roms::blargg_dmg_sound::ROM);
+        batched.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
+
+        let mut cycles = MachineCycles::ZERO;
+        let mut ever_batched = false;
+        let mut passed = false;
+        while cycles < MachineCycles::from_m(60_000_000) {
+            cycles += batched.run(MachineCycles::from_m(1000));
+            open.run(MachineCycles::from_m(1000));
+
+            let (a, b) = (batched.core().mmu().audio(), open.core().mmu().audio());
+            assert!(a == b, "the APU diverged with the channels deadline-driven, at {cycles:?}");
+            // The open machine is the control, and it must never batch: with a listener attached
+            // the resampler has to be told when a level moved, not merely that it did.
+            assert_eq!(b.pending_channel_cycles(), 0, "the open machine batched");
+            ever_batched |= a.pending_channel_cycles() > 0;
+
+            if batched.core().mmu().ppu().screenshot() == expected {
+                passed = true;
+                break;
+            }
+        }
+
+        // Otherwise this is twelve sub-tests passing against a mechanism that never engaged.
+        assert!(ever_batched, "the channels were never once left behind, so this proves nothing");
+        if !passed {
+            gb_test_failed_with_screenshot(
+                batched.core().mmu().ppu().screenshot(),
+                "audio-all-batched",
+                "screenshot does not match",
+            );
         }
     }
 

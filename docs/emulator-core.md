@@ -29,7 +29,12 @@ are in the module docs named below; this is the list of what not to break.
   last. `a_dmg_save_state_does_not_blank_a_compatibility_mode_screen` guards it.
 - `Audio` and `PPU` exclude derived state from `PartialEq` (resampler output, the mix cache, the
   frame buffer, the per-scanline sprite list), because `game_boy::tests::save_and_load_state`
-  compares restored state and none of that is serialised. `Schedule` is derived and not serialised
+  compares restored state and none of that is serialised.
+- ⚠️ **The `apu` section and `Audio`'s `PartialEq` both write the channels *settled*.** The four
+  channels run up to a deadline behind the CPU while the output side is gated (`Audio::update`'s
+  C5 note), so a save state or a comparison taken mid-batch would be of a machine that never
+  existed. Both go through `Audio::settled`, which advances clones. Anything else that comes to
+  read the whole APU through a `&self` has to do the same. `Schedule` is derived and not serialised
   at all; only `MMU::now` is. Output sample rate and emulation speed are applied, not stored (see
   `tune_audio` in [web-streams](web-streams.md)).
 
