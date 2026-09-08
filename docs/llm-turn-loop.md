@@ -99,16 +99,26 @@ lives in the code.
 - ⚠️ **`cut`, `push_boulder` and `strength` are gone from `use_field_move` (2026-09-04), and what
   replaced them is that the walk finishes the job.** Each was the second half of a pair whose first
   half was a menu row, so one decision cost two paid requests and the first of them completed
-  looking like success. `MetaTile::Cut { at }` now cuts the tree it walks up to and `MetaTile::Boulder
-  { at, push }` is one row per shove the cartridge would actually make, arming `BIT_STRENGTH_ACTIVE`
-  itself (`AgentState::PushingBoulder` → `UsingFieldMove`'s `resume`); both hand off from
+  looking like success. `MetaTile::Cut { at }` now cuts the tree it walks up to and
+  `MetaTile::BoulderGoal { boulder, at, hole }` is one row per **target** — one decision that arms
+  `BIT_STRENGTH_ACTIVE`, walks, and keeps shoving that named boulder until it is on that switch or
+  down that hole (`AgentState::SolvingBoulderPuzzle` → `PushingBoulder`); both hand off from
   `OverworldMovement`'s empty-route arm, the seam the fishing row already used. Both carry the square
   they are about, so a row can name it and the re-derived walk goes to *that* one; `Cut`'s `id_kind`
   is still `CutTree`, because an id is a key a resumed run quotes out of its own history. `strength`
   went because arming was never a decision — the flag is cleared by every map change and forgetting it is
   silent. A boulder's own sprite row is withheld from `overworld_menu` (pressing A at one does
-  nothing), and the id is `{map}:{stand}:PushBoulder{Up,Down,Left,Right}`, unique because
-  `stand + push` names the boulder.
+  nothing), and the id is `{map}:{target}:PushBoulder{OntoSwitch,IntoHole}`. ⚠️ **The
+  row's *prose* names the boulder** — Seafoam B3F has two holes and exactly one boulder that can
+  reach each, so "whichever" spends the wrong one and strands the floor — but the **id names only
+  the target**, because the boulder and the square the walk starts from both move on every push and
+  an id built from either is a new id after every shove. The coverage walk of 2026-09-07 spent two
+  and a half hours at one action a minute on VictoryRoad3F for exactly that reason: one puzzle was
+  an unbounded family of rows the frontier had never seen.
+  `endgame::a_boulder_goal_re_chosen_after_every_battle_still_arrives` pins it.
+  There is **no per-shove row and no `FieldMove::PushBoulder` route step any more** — the scripted
+  policy takes the same goal rows the model does, so the two layers cannot disagree about a square
+  the way they did when VictoryRoad1F was lost.
 - ⚠️ **The boulder refusal's "can you get to the push tile" arm was over-permissive and shipped a
   stall.** `MetaTileMap::reachable_tiles` is the key set of `bfs_from_player`, which records every
   *neighbour* of an open square — a route must be allowed to end at a door or a person — so a wall
@@ -118,8 +128,11 @@ lives in the code.
   tile must now also be `Empty`/`Grass`/`Warp`, which is `solve_boulder_push`'s own `floor`
   predicate. `endgame::a_boulder_that_cannot_move_is_refused_rather_than_shoved_at` pins it.
 - **The overworld turn names a map's boulders, its switches and its cuttable trees**, at their own
-  coordinates, and says in the same line either that each legal push or cut is a row below or which
-  half of Strength/Cut is missing. Unconditional on purpose: a floor with three boulders and no
+  coordinates, and says in the same line either that each reachable target is a row below or which
+  half of Strength/Cut is missing. ⚠️ **The "there are no boulder rows" branch counts `BoulderGoal`
+  rows off `actions()`, never `boulder_pushes()`**: a floor can have legal shoves left and still
+  offer no goal (VictoryRoad1F once a run has sealed the only capable boulder), and promising rows
+  the model then cannot find is what earned the issue report the tombstone above it records. Unconditional on purpose: a floor with three boulders and no
   Strength has no boulder rows at all, and a puzzle with no way to touch it and nothing said about
   why is what sent a run round Route 2 for eleven turns. ⚠️ The switches are named where
   `wFirstLockTrashCanIndex` is not, because a boulder switch is a tile the game *draws*.
@@ -141,6 +154,15 @@ lives in the code.
   hop against a fresh `actions()`. `resume_after_battle` is opt-in, battles only,
   `MAX_BATTLE_RESUMES` (5). A single stopped action gets no policy note; the agent already
   reported it.
+- ⭐ **`resume_after_battle` was dead on tall grass until 2026-09-07, which is the commonest way in
+  the game to meet a wild Pokémon.** It keys on `OverworldActionAborted { Battle }`, and a pace that
+  ended in an encounter emitted no abort at all, so the queue was dropped as `Dropped::Unreported`
+  and the model paid a fresh request per encounter. The fix is in `agent.rs`
+  ([pokemon-agent](pokemon-agent.md)); what is worth carrying here is that no test in this file
+  could see it — `a_chain_does_not_advance_on_an_ending_the_agent_never_reported` pins what happens
+  *given* silence and cannot say which endings are silent. C3's coverage oracle found it by scoring
+  ids nobody had a verdict for. ⚠️ **A driver that reports nothing still exists** — the Surf mount,
+  and a boulder push deliberately — so the same hole can be dug again.
 - `set_nickname` is checked by `tools::unencodable`, which round-trips through the charmap: an
   unknown character becomes `0x00`, a control byte, not a failure.
 

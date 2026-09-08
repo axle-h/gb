@@ -1053,11 +1053,14 @@ pub enum PolicyStep {
     /// first). The agent runs `MetaTileMap::solve_boulder_push(switch)` to plan the pushes and drives
     /// them. Completes once a boulder sits on `switch` (the map script then sets the switch event and
     /// opens the barrier). Re-solvable from any partial state, so it resumes after a wild battle.
-    SolveBoulders { switch: crate::geometry::Point8 },
+    /// ⚠️ **`boulder` names which one, and `None` means "whichever can".** A floor with one target
+    /// does not care; Seafoam B3F has two holes and spending the wrong boulder on the first leaves
+    /// the second unreachable, which stalled this leg for its whole budget.
+    SolveBoulders { switch: crate::geometry::Point8, boulder: Option<crate::geometry::Point8> },
     /// Push a boulder onto a floor `hole` (Victory Road 3F) so it falls to the floor below — revealing a
     /// hidden boulder there (VR2F's second-switch boulder). Reuses the boulder solver/executor aimed at
     /// the hole tile; completes once one boulder has fallen (the visible count drops). Requires Strength.
-    DropBoulderInHole { hole: crate::geometry::Point8 },
+    DropBoulderInHole { hole: crate::geometry::Point8, boulder: Option<crate::geometry::Point8> },
     /// Solve the Vermilion Gym trash-can switch puzzle: check the first switch can, then the second,
     /// unlocking the door to Lt. Surge. The correct cans are read from RAM (`GameState::trash_cans`)
     /// so the agent goes straight to them and never triggers a reset. Persists until the 2nd lock is
@@ -1163,6 +1166,14 @@ pub enum FieldMove {
     /// its tile. A policy plans *which* boulder/direction with the `MetaTileMap::solve_boulder_push` helper
     /// (or, for an LLM, by reasoning over `map.sprites` + `map.strength_switches`), then issues these one
     /// at a time.
+    /// ⚠️ **No policy that ships asks for this, and none should.** A boulder is offered as a
+    /// *goal* (`MetaTile::BoulderGoal`), and the scripted route uses the same rows the model does,
+    /// so there is exactly one mechanism and no second layer to disagree with it. What is left here
+    /// is the seam `endgame::a_boulder_that_cannot_move_is_refused_rather_than_shoved_at` drives:
+    /// `AgentState::PushingBoulder` must report a push the cartridge refuses instead of holding the
+    /// direction for a minute, and that safety net is exactly what catches the planner and
+    /// `boulder_push_refusal` disagreeing about a square again, which is how VictoryRoad1F was lost
+    /// once already. There is no other way to hand the agent a push it should not make.
     PushBoulder { boulder: crate::geometry::Point8, dir: crate::joypad::JoypadButton },
 }
 
@@ -2322,9 +2333,20 @@ impl PolicyStep {
             Self::enter_at(Map::SeafoamIslandsB3F, 8, 6),
             // ── SEAFOAM4: two of B3F's four boulders into its two holes. The planner moves (5,14) out
             // of the corridor first — it is the only tile from which (3,15) can be reached at all.
+            //
+            // ⭐ **Both name their boulder, and on this floor there is only ever one right answer.**
+            // Measured from the floor itself: of the four boulders (5,14), (8,14), (9,14) and
+            // (3,15), only **(3,15)** can reach the (3,16) hole, and of the three left afterwards
+            // only **(8,14)** can reach (6,16). Leaving the choice to the planner is what stalled
+            // this leg for its whole budget — `DropBoulderInHole` finishes on the *visible boulder
+            // count* dropping, so a goal that shoves a second boulder through the other hole in
+            // passing reports success and leaves the next step wanting a third that cannot get
+            // there.
             Self::UseStrength { target: PartyRef::Species(PokemonSpecies::Slowpoke) },
-            Self::DropBoulderInHole { hole: Point8 { x: 3, y: 16 } },
-            Self::DropBoulderInHole { hole: Point8 { x: 6, y: 16 } },
+            Self::DropBoulderInHole { hole: Point8 { x: 3, y: 16 },
+                                      boulder: Some(Point8 { x: 3, y: 15 }) },
+            Self::DropBoulderInHole { hole: Point8 { x: 6, y: 16 },
+                                      boulder: Some(Point8 { x: 8, y: 14 }) },
             // Fall through the (6,16) hole into the west lake, already surfing, and Master-Ball the bird.
             Self::enter_at(Map::SeafoamIslandsB4F, 5, 14),
             Self::CatchPokemon { species: PokemonSpecies::Articuno, on_map: Map::SeafoamIslandsB4F,
@@ -2502,7 +2524,7 @@ impl PolicyStep {
         vec![
             // VR1F: push a boulder onto (17,13), climb to VR2F.
             Self::UseStrength { target: Self::MACHOP },
-            Self::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+            Self::SolveBoulders { switch: Point8 { x: 17, y: 13 }, boulder: None },
             // ⚠️ **`goto`, not `enter`, because a black-out on this last walk is otherwise terminal.**
             // VR1F has ~9 mandatory trainers and no Pokémon Center, and the party can lose the last of
             // them on the way to the ladder. When it does, the respawn is in Viridian — and worse, the
@@ -2527,17 +2549,17 @@ impl PolicyStep {
         vec![
             // VR2F: switch1 (1,16) → up the (23,7) stairs to VR3F.
             Self::UseStrength { target: Self::MACHOP },
-            Self::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
+            Self::SolveBoulders { switch: Point8 { x: 1, y: 16 }, boulder: None },
             Self::enter(Map::VictoryRoad3F),
             // VR3F: switch (3,5) opens the hole barrier; drop a boulder into the hole (23,15) to reveal 2F's
             // hidden boulder, then fall through the hole to VR2F's east side.
             Self::UseStrength { target: Self::MACHOP },
-            Self::SolveBoulders { switch: Point8 { x: 3, y: 5 } },
-            Self::DropBoulderInHole { hole: Point8 { x: 23, y: 15 } },
+            Self::SolveBoulders { switch: Point8 { x: 3, y: 5 }, boulder: None },
+            Self::DropBoulderInHole { hole: Point8 { x: 23, y: 15 }, boulder: None },
             Self::enter_at(Map::VictoryRoad2F, 22, 16),
             // VR2F east: push the revealed boulder onto switch2 (9,16); this leaves the player in the west.
             Self::UseStrength { target: Self::MACHOP },
-            Self::SolveBoulders { switch: Point8 { x: 9, y: 16 } },
+            Self::SolveBoulders { switch: Point8 { x: 9, y: 16 }, boulder: None },
             // Return trip: climb back to VR3F and come down on the **exit** side.
             Self::enter(Map::VictoryRoad3F),
             // ⚠️ **(27,7), not the (22,16) the trip in uses, and the difference is the whole exit.**
@@ -3324,6 +3346,8 @@ pub struct DeterministicPolicy {
     /// [`Self::last_battle_map`] instead, for the reason written there.
     blackouts: u32,
     blackout_pending: bool,
+    /// Actions the current heal-return detour has issued. See [`Self::MAX_HEAL_HOPS`].
+    heal_hops: u32,
     /// Round trips a `GrindUntilLevel` has made to a Pokémon Centre because its trainee fainted.
     grind_heal_trips: u32,
     /// The map the last battle was fought on, which is the one a black-out has to be reported against.
@@ -3397,6 +3421,27 @@ impl DeterministicPolicy {
     /// handing back to the main queue. Same units and the same reason as `MAX_GYM_ROUTE_WAIT`
     /// (20 ms each, ~8 s of game time — long enough to cover a black-out warp and its dialogue).
     const MAX_HEAL_ROUTE_WAIT: u32 = 400;
+    /// ⭐ **Hops the heal-return detour may take before it concludes it is going round in circles.**
+    ///
+    /// ⚠️ **`MAX_HEAL_ROUTE_WAIT` cannot see this failure, and that is the whole reason this
+    /// exists** — the same split as `PACING_BUDGET_TICKS` against its stall counter in `agent.rs`.
+    /// That one counts polls on which `route_toward` answered **nothing**, and it is reset by every
+    /// hop that *does* route. A detour that routes perfectly well and never arrives resets it for
+    /// ever.
+    ///
+    /// The observed shape: Route 14 is split by ledges into sections the world graph holds
+    /// separately, and Route 13's exit to it is recorded with the **geometric** border landing,
+    /// which resolves to a section with nine edges — while walking that exit actually deposits the
+    /// player in a neighbouring pocket two tiles away with exactly **one**, straight back to Route
+    /// 13. So the planner scores the door seven hops from the Fuchsia Centre, takes it, lands
+    /// somewhere else, and re-plans identically, for ever. `bfs_nodes`' `SNAP_THRESHOLD` cannot
+    /// separate the two: they are two tiles apart and distinct only because of the ledges.
+    ///
+    /// ⚠️ **The bound is generous on purpose, because giving up is the safe side.** Handing back to
+    /// the main queue is exactly what black-out recovery is for, whereas abandoning a legitimate
+    /// long detour early costs a heal. Sixty actions is far more than any real route to a Centre —
+    /// the deepest is a Silph Co floor at roughly twenty — and far less than for ever.
+    const MAX_HEAL_HOPS: u32 = 60;
     const MAX_MART_ATTEMPTS: u32 = 4;
     /// How many times to hand one `UseBagItem` step to the driver before giving up (workstream I).
     /// A use the game declines consumes nothing, so without a bound the step retries for the whole
@@ -3549,6 +3594,7 @@ impl DeterministicPolicy {
             battle_item_baseline: None,
             blackouts: 0,
             blackout_pending: false,
+            heal_hops: 0,
             grind_heal_trips: 0,
             last_battle_map: None,
         }
@@ -3572,13 +3618,25 @@ impl DeterministicPolicy {
             .or_else(|| world_graph.pick_shortest_path_action(actions, target))
     }
 
-    /// Plan the Sokoban to land a boulder on `target` (a Strength switch or a floor hole) and return the
-    /// FIRST one-tile push as a `FieldMove::PushBoulder`, or `None` if no boulder can reach it right now
-    /// (the caller waits and re-plans next tick). The planner `MetaTileMap::solve_boulder_push` is a shared
-    /// helper any policy can call; the deterministic policy just drives its pushes one at a time.
-    fn next_boulder_push(state: &GameState, target: Point8) -> Option<FieldMove> {
-        let (boulder, dir) = state.map.solve_boulder_push(target)?.into_iter().next()?;
-        Some(FieldMove::PushBoulder { boulder, dir })
+    /// The menu row that puts a boulder on `target` — a Strength switch or a floor hole — or `None`
+    /// while the floor offers none.
+    ///
+    /// ⭐ **This replaced a per-tick push planner.** `next_boulder_push` used to call
+    /// `MetaTileMap::solve_boulder_push` here, take the first shove and hand it over as a
+    /// `FieldMove::PushBoulder`, re-planning on the next tick. The agent does that loop now
+    /// (`AgentState::SolvingBoulderPuzzle`), so every policy gets it and the model gets it as one
+    /// decision instead of a dozen.
+    fn boulder_goal_action(state: &GameState, actions: &[OverworldAction], target: Point8,
+                           boulder: Option<Point8>, hole: bool) -> Option<OverworldAction> {
+        match boulder {
+            // ⭐ **A named boulder is asked for directly.** `actions()` emits one row per target and
+            // picks the boulder itself, which is right for a menu and wrong for a route that knows
+            // the floor: see `MetaTileMap::boulder_goal_action`.
+            Some(which) => state.map.boulder_goal_action(which, target, hole),
+            None => actions.iter()
+                .find(|action| matches!(action.tile, MetaTile::BoulderGoal { at, .. } if at == target))
+                .cloned(),
+        }
     }
 
     /// The action that takes the warp/connection to `to_map` (matching raw `to_position` when
@@ -3670,6 +3728,7 @@ impl Policy for DeterministicPolicy {
             self.heal_return = Some(centre);
             self.heal_came_from = Some(state.map.map);
             self.heal_route_stuck = 0;
+            self.heal_hops = 0;
         }
 
         // ── Heal-return detour ────────────────────────────────────────────────
@@ -3709,6 +3768,20 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] no Nurse in sight on {pokecenter} — carrying on without the heal");
                 self.heal_return = None;
                 self.heal_route_stuck = 0;
+            } else if self.heal_hops >= Self::MAX_HEAL_HOPS {
+                // ⭐ **Routing and arriving are different things, and only one of them was bounded.**
+                // See `MAX_HEAL_HOPS`: a detour whose next hop always resolves but never gets closer
+                // ran here for ever, and a scripted run that wedges is silent — it has no watchdog,
+                // and `/api/events` goes on looking healthy. Handing back to the main queue is the
+                // same answer the "no route" arm below gives, and for the same reason.
+                println!("[policy] the heal detour to {pokecenter} has taken {} hops without \
+                          arriving — carrying on with the route", self.heal_hops);
+                self.heal_return = None;
+                self.heal_route_stuck = 0;
+                self.heal_hops = 0;
+                // Latched for the reason the arm below latches it: the low-PP check would re-arm the
+                // detour on the very next wild encounter and walk the same circle again.
+                self.heal_unreachable = true;
             } else if let Some(action) = Self::route_toward(world_graph, &actions, pokecenter)
                 // ⚠️ **Then the town it stands in**, which is a strictly easier question and the one
                 // that actually gets a hurt party home: towns are joined by walkable connections, so
@@ -3720,6 +3793,7 @@ impl Policy for DeterministicPolicy {
             {
                 // Still travelling — take the next step toward the pokecenter.
                 self.heal_route_stuck = 0;
+                self.heal_hops += 1;
                 return Some(action);
             } else {
                 // Right after a black-out warp the map and its actions are briefly unsettled, so
@@ -4677,10 +4751,21 @@ impl Policy for DeterministicPolicy {
                     // Handled by `pick_field_move` (party-menu field-move chain); wait without advancing.
                     None
                 }
-                PolicyStep::SolveBoulders { .. } | PolicyStep::DropBoulderInHole { .. } => {
-                    // Handled by `pick_field_move` (plans + drives the boulder pushes); wait without advancing.
-                    None
-                }
+                // ⭐ **One goal row carries the whole puzzle**, for the scripted route exactly as for
+                // a model. This used to plan the pushes in `pick_field_move` and emit one per tick;
+                // the agent's `SolvingBoulderPuzzle` now owns that loop, so the step's whole job is
+                // to choose the row and wait for its own completion condition (a boulder on the
+                // target), which is checked in `pick_field_move` as before.
+                //
+                // ⚠️ **`None` while the row is absent rather than popping the step.** The row is
+                // withheld whenever `solve_boulder_push` cannot solve the floor from where the
+                // player stands, and on a multi-stage floor that is an ordinary state of play — the
+                // pushes already made open the way to the next plan. Popping on a missing row would
+                // abandon Victory Road halfway.
+                PolicyStep::SolveBoulders { switch, boulder } =>
+                    Self::boulder_goal_action(state, &actions, switch, boulder, false),
+                PolicyStep::DropBoulderInHole { hole, boulder } =>
+                    Self::boulder_goal_action(state, &actions, hole, boulder, true),
                 PolicyStep::CutTree { map } => {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
@@ -5519,7 +5604,7 @@ impl Policy for DeterministicPolicy {
                 .unwrap_or((slot, field_move_index(state, slot, PokemonMoveName::Strength)));
             return Some(FieldMove::UseFieldMove { slot, move_index });
         }
-        if let Some(&PolicyStep::SolveBoulders { switch }) = self.queue.front() {
+        if let Some(&PolicyStep::SolveBoulders { switch, .. }) = self.queue.front() {
             // Done once a boulder sits on the switch (the map script then opens the barrier).
             let boulder_on_switch = state.map.sprites.iter()
                 .any(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == switch);
@@ -5528,23 +5613,39 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
-            // Plan the Sokoban to `switch` and emit the FIRST push; the agent executes one push, then
-            // this re-plans from the new positions next tick (resumes cleanly after any interruption).
-            return Self::next_boulder_push(state, switch);
+            // ⭐ **Handed to the agent as one goal, not dripped one shove at a time.** This used to
+            // plan the puzzle here and emit the FIRST push, re-planning every tick — which is
+            // exactly the loop `AgentState::SolvingBoulderPuzzle` now owns, for every policy at
+            // once. The step still pops on the same condition (a boulder on the switch), so what is
+            // deleted is the drip and not the decision.
+            return None;
         }
-        if let Some(&PolicyStep::DropBoulderInHole { hole }) = self.queue.front() {
-            // Count visible boulders on this floor; the step is done once one has fallen (count drops).
-            let visible = state.map.sprites.iter()
-                .filter(|s| s.name.starts_with("Boulder") && !s.hidden).count();
-            let baseline = *self.boulder_drop_baseline.get_or_insert(visible);
-            if visible < baseline {
+        if let Some(&PolicyStep::DropBoulderInHole { hole, boulder }) = self.queue.front() {
+            // ⭐ **Exact when the step names its boulder, and it has to be.** The count baseline
+            // below is captured on the first tick this step is *asked for a field move*, and
+            // nothing guarantees that happens before the boulder lands: Seafoam B3F's second hole
+            // filled first, the baseline was therefore taken at the already-dropped count, no drop
+            // was ever seen, and a **solved** floor stalled for the rest of the leg's budget with
+            // both boulders sitting in both holes. A named boulder needs no baseline — it is done
+            // when that boulder is no longer on the floor — and it cannot be fooled by a second
+            // boulder going down the other hole either.
+            let done = match boulder {
+                Some(which) => !state.map.boulders().contains(&which),
+                None => {
+                    let visible = state.map.sprites.iter()
+                        .filter(|s| s.name.starts_with("Boulder") && !s.hidden).count();
+                    let baseline = *self.boulder_drop_baseline.get_or_insert(visible);
+                    visible < baseline
+                }
+            };
+            if done {
                 println!("[policy] DropBoulderInHole: a boulder fell into {hole} — done");
                 self.boulder_drop_baseline = None;
                 self.queue.pop_front();
                 return None;
             }
-            // Plan toward the hole tile (the solver accepts a hole as a push target) and emit one push.
-            return Self::next_boulder_push(state, hole);
+            // Same as the switch above: the goal row carries the whole thing.
+            return None;
         }
         if let Some(&PolicyStep::TeachMove { item, target }) = self.queue.front() {
             // Resolve every tick, not once: a `Species` target may still be a Poké Ball on the floor

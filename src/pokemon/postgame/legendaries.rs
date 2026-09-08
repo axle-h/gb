@@ -294,11 +294,11 @@ impl PolicyStep {
             Self::goto(Map::VictoryRoad1F),
             // VR1F: a boulder onto the (17,13) switch opens the (1,1) ladder up to 2F.
             Self::UseStrength { target: PartyRef::Slot(PARALYSER_SLOT) },
-            Self::SolveBoulders { switch: Point8 { x: 17, y: 13 } },
+            Self::SolveBoulders { switch: Point8 { x: 17, y: 13 }, boulder: None },
             Self::enter(Map::VictoryRoad2F),
             // VR2F west: the (1,16) switch opens the corridor east to the (23,7) stairs.
             Self::UseStrength { target: PartyRef::Slot(PARALYSER_SLOT) },
-            Self::SolveBoulders { switch: Point8 { x: 1, y: 16 } },
+            Self::SolveBoulders { switch: Point8 { x: 1, y: 16 }, boulder: None },
             Self::enter(Map::VictoryRoad3F),
         ];
         // …then down through VR3F's (2,0) warp into 2F's north strip, and walk into Moltres.

@@ -299,10 +299,25 @@ that cut it; a push used to be a `use_field_move` that armed Strength and anothe
 are pairs whose first half is a walk with exactly one legal ending, so both were two paid requests
 for one decision — and worse, the first half completes looking like success, so a run that walked up
 to a tree and then thought about something else left the tree standing. Now `cut down the tree at
-(5, 8)` and `push the boulder at (5, 15) one tile down` are rows in the action menu that do the whole
-thing, `BIT_STRENGTH_ACTIVE` included. There is one row per shove the cartridge would actually
-make — a boulder that cannot move any more simply has none, and the turn says that leaving the floor
-and coming back puts every boulder on it back where it started.
+(5, 8)` is a row in the action menu that does the whole thing.
+
+A boulder went further, because a shove was never the decision either. `push the boulder at (5, 15)
+one tile down` was a row, and a Strength floor is a dozen of those in a particular order — so the
+model was being asked to play Sokoban a move at a time, at a paid request each, on the puzzle that
+has ended more deployed runs here than anything else. The row is now **the goal**: `the boulder at
+(5, 15), to push it onto the switch at (17, 13)`. One decision arms `BIT_STRENGTH_ACTIVE`, walks,
+shoves, walks round, shoves again, and keeps going until that boulder is on that switch — Victory
+Road's first floor is seventeen shoves and one wild battle from a single choice. The search behind
+it is a capped BFS over boulder layouts, so a target no boulder can reach is not a row at all, and
+the turn says that leaving the floor and coming back puts every boulder on it back where it started.
+
+⚠️ **The row names the boulder as well as the target, and that is not cosmetic.** Seafoam B3F has
+two holes, four boulders, and exactly one boulder that can reach each hole; a row that said only
+"fill this hole" would let the agent spend the wrong one and strand the floor. It is also the *only*
+mechanism now — the scripted route takes the same rows the model does, rather than naming a boulder
+and a direction through a private seam. That seam existing is how Victory Road 1F was lost once:
+the two layers disagreed about whether you may stand on an entrance warp to push, the menu withheld
+the only push that led anywhere, and the run took the dead end knowing it was one.
 
 What the game *does* refuse it refuses out loud, and that had the opposite problem: a word. Guards,
 locked doors and scripted scenes stop the player where they stand and put a message on screen, so the

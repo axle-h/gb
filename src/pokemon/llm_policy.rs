@@ -2696,10 +2696,18 @@ mod tests {
         }
     }
 
-    /// ⚠️ **An ending nothing named is not an ending that went well.** Grass and cave pacing and the
-    /// Surf mount all leave `OverworldMovement` for a driver of their own and report no outcome at
-    /// all, on purpose — each is handing the decision back. Reading that silence as success would
-    /// carry a chain on past a step that never happened.
+    /// ⚠️ **An ending nothing named is not an ending that went well.** A row that hands over to a
+    /// driver of its own leaves `OverworldMovement` and may report nothing: the Surf mount and a
+    /// boulder push are both like that today, the push for a reason argued at
+    /// `AgentState::PushingBoulder`. Reading that silence as success would carry a chain on past a
+    /// step that never happened.
+    ///
+    /// ⚠️ **Grass and cave pacing used to be on that list and are the reason it is worth reading
+    /// twice.** They were silent, so `resume_after_battle` was silently *dead* on the commonest way
+    /// in the game to meet a wild Pokémon: the abort it keys on was never emitted, so the queue was
+    /// dropped as `Dropped::Unreported` and the model paid a fresh request for every encounter. The
+    /// hole was found by C3's coverage oracle, not by this test, which is the point — this one pins
+    /// what happens *given* silence, and it cannot tell you which endings are silent.
     #[test]
     fn a_chain_does_not_advance_on_an_ending_the_agent_never_reported() {
         let (mut rig, mut policy) = Rig::new(vec![]);

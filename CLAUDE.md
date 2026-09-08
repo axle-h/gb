@@ -7,7 +7,7 @@ project is, the `src/` tree, the policy/agent model, the run directory, the endp
 environment block, the build and the deployment.
 
 What the README leaves out (the invariants, the traps and the test workflows, nearly every one of
-which was learned by breaking something) is in eight short documents under `docs/`, one per area,
+which was learned by breaking something) is in nine short documents under `docs/`, one per area,
 indexed below. **They are not loaded automatically.** Read the one for the area you are about to
 touch, before touching it. Each is a list of rules, and each rule points at the comment in the code
 that carries the full argument, so the code stays the source of truth and the doc stays short.
@@ -22,11 +22,12 @@ behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
 [llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third and the only one that is
 still ahead of the code. It replaces the soak tier's random walk with an exhaustive one, driven
 through `LlmPolicy` against a mock endpoint so the thing under test is the deployed stack, and it
-cheats past the game's gates with the debug tier rather than around them. **C0 and C1 are built and
-the machinery under C2 and C3 with them; the god run and the frontier walk are not** — its status
-table says exactly what, and §0.4 records where the plan itself turned out to be wrong. Read it
-before touching the soak tier, `postgame/debug.rs`, `integration_tests/llm*.rs` or anything under
-`integration_tests/{cheats,coverage,godmode}.rs`.
+cheats past the game's gates with the debug tier rather than around them. **C0, C1 and C3's frontier
+walk are built; the god run is not** — its status table says exactly what, and §0.4 records where the
+plan itself turned out to be wrong. ⭐ **§5.2.6 is the nine faults nine sweeps found and §5.2.7 is the
+two that are still open**, written up to be picked up cold; six of the eight fixed were agent bugs
+rather than harness ones. Read it before touching the soak tier, `postgame/debug.rs`,
+`integration_tests/llm*.rs` or anything under `integration_tests/{cheats,coverage,godmode}.rs`.
 
 ## Rules of the road
 
@@ -49,6 +50,7 @@ before touching the soak tier, `postgame/debug.rs`, `integration_tests/llm*.rs` 
 | Doc | What it holds | Read before |
 |---|---|---|
 | [emulator-core](docs/emulator-core.md) | save-state format and the committed fixtures, mapper bank registers, DMG state in a CGB, the RTC source, the `#[inline(never)]` hot path, the `MachineCycles` overflow | `src/{mmu,mbc,ppu,savestate,schedule,cycles,game_boy}.rs`, adding or reordering a serialised field, adding a file to `src/pokemon/data/` |
+| [emulator-performance](docs/emulator-performance.md) | where the emulator's time actually goes, the profiling recipe, the ceilings measured by ablation for the PPU and the APU, the ranked list of what to do about them, and the two optimisations that made it slower | optimising `src/{ppu,core,opcode,mmu}.rs` or `src/audio/`, or building a rig to measure them |
 | [pokemon-agent](docs/pokemon-agent.md) | the agent loop and the watchdog, the closed loops A-only input walks into, the scripted policy's rules, screen versus RAM, the prose the model and the page read, the text reader, the SPA's fold | `src/pokemon/{agent,policy,text,tile_map,actions}.rs`, `AgentEvent` or any `Display` it goes through, `web/src/useEventStream.ts`, `Conversation.tsx` |
 | [llm-turn-loop](docs/llm-turn-loop.md) | the append-only history and the prompt cache, the tool catalogue, the action menu and its ids, chaining, the battle script and its sandbox, the battle report, the plan, the system prompt, the wire, the park on a spent quota, compaction | anything under `src/llm/`, `src/pokemon/llm_policy.rs`, any change to what the model is sent |
 | [web-streams](docs/web-streams.md) | `/api/video`'s block-delta codec and `/api/audio`'s Opus stream, both ends: the codec invariants, deflate per connection versus never, 48 kHz against `opus-rs`, the browser's jitter buffer and drift trim | `src/web/{video,audio}*`, `web/src/{stream,video,audio}.ts` |

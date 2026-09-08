@@ -22,6 +22,7 @@
 //! one on the ground that a badge is a capability rather than an event.
 
 use crate::pokemon::badge::Badge;
+use crate::pokemon::item::ItemId;
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::party::PokemonParty;
 use crate::pokemon::pokemon::Pokemon;
@@ -68,6 +69,37 @@ const FLIGHT_MOVES: [PokemonMoveName; 4] = [
     PokemonMoveName::SandAttack,
 ];
 
+/// The key items a coverage walk needs in the bag before the *overworld* is fully offered to it.
+///
+/// ⭐ **Every one of these is a map or an action the game withholds until you carry it**, and
+/// `MetaTileMap::actions()` is right to withhold the row with it — an action the cartridge would
+/// silently decline is worse than no action. So a walk meant to reach everywhere has to be given
+/// them, exactly as it is given the badges.
+///
+/// - the three **rods**, because `actions()` gates a `MetaTile::Fish` row on
+///   `Rod::best_in_bag`: with no rod in the bag there is no fishing row anywhere in the game, which
+///   is why C3's first walks found none;
+/// - the **Bicycle**, for Cycling Road, whose gates refuse a walker;
+/// - the **Poké Flute**, for the Snorlax asleep across Routes 12 and 16;
+/// - the **Silph Scope**, without which Pokémon Tower's ghosts are unbattleable and its upper
+///   floors unreachable;
+/// - the **Card Key** for Silph Co's locked floors, the **Lift Key** for the Rocket Hideout's
+///   elevator, the **Secret Key** for Cinnabar Gym and the **S.S. Ticket** for the S.S. Anne;
+/// - the **Item Finder**, the **Coin Case**, the **Gold Teeth** and the **Town Map**, which are the
+///   remaining conversation gates.
+///
+/// ⚠️ **These are given, not earned, and that is a deliberate widening of §1.2's rule.** The story
+/// is still *played* — no event flag is written — but a walk that had to earn the Silph Scope before
+/// it could look at Pokémon Tower would spend its whole budget on the main quest and never get to
+/// the exhaustive part, which is the thing being measured. What this cannot hide is a row the agent
+/// cannot execute: that is still a defect wherever it appears.
+pub const COVERAGE_KEY_ITEMS: [ItemId; 14] = [
+    ItemId::OldRod, ItemId::GoodRod, ItemId::SuperRod,
+    ItemId::Bicycle, ItemId::PokeFlute, ItemId::SilphScope,
+    ItemId::CardKey, ItemId::LiftKey, ItemId::SecretKey, ItemId::SSTicket,
+    ItemId::Itemfinder, ItemId::CoinCase, ItemId::GoldTeeth, ItemId::TownMap,
+];
+
 /// The sidecar. Built once, [`Self::apply`]-ed between ticks, and idempotent — every field is a
 /// *state to hold the game in* rather than an action to take, so it can be re-applied fifty times a
 /// second and only write when the game has drifted off it.
@@ -92,6 +124,19 @@ pub struct Cheats {
     pub top_ups: u32,
     /// How many times [`Self::apply`] was called while it was not safe to write the party.
     pub refused_in_battle: u32,
+    /// Key items to hold in the bag, and how much money to hold. `None` leaves the bag alone.
+    ///
+    /// ⚠️ **Given once rather than held every tick.** The bag is a list the player reorders and
+    /// spends from, so re-writing it every tick would undo a purchase the run had just made and make
+    /// every mart row untestable. See [`COVERAGE_KEY_ITEMS`].
+    pub key_items: Option<u32>,
+    /// Whether the bag has been stocked yet.
+    pub stocked: bool,
+    /// Key items that would not fit. ⚠️ **Reported rather than fatal**: the bag holds twenty *kinds*
+    /// and a finished save arrives nearly full, so a walk that cannot be handed a Bicycle is a walk
+    /// that cannot reach Cycling Road — a coverage gap worth printing, not a reason to fail before
+    /// the run has taken a single step.
+    pub bag_was_full: u32,
 }
 
 impl Default for Cheats {
@@ -103,6 +148,9 @@ impl Default for Cheats {
             installed: false,
             top_ups: 0,
             refused_in_battle: 0,
+            key_items: None,
+            stocked: false,
+            bag_was_full: 0,
         }
     }
 }
@@ -117,7 +165,16 @@ impl Cheats {
             installed: false,
             top_ups: 0,
             refused_in_battle: 0,
+            key_items: None,
+            stocked: false,
+            bag_was_full: 0,
         }
+    }
+
+    /// Stock the bag with [`COVERAGE_KEY_ITEMS`] and `money`, once.
+    pub fn with_key_items(mut self, money: u32) -> Self {
+        self.key_items = Some(money);
+        self
     }
 
     pub fn with_badges(mut self, badges: Badge) -> Self {
@@ -162,6 +219,29 @@ impl Cheats {
                 Ok(()) => self.installed = true,
                 Err(why) => panic!("could not install the god party: {why}"),
             }
+        }
+
+        // The bag, once the game has one to write into. Same "wait for the cartridge" rule the god
+        // party follows: a fresh save has no bag until Oak's script has run.
+        if let Some(money) = self.key_items
+            && !self.stocked
+            && state.pokemon.len() > 0
+        {
+            // ⚠️ **Only what is missing, and a full bag is not a panic.** A finished save already
+            // carries most of these — `postgame-phase0.bin` has the Poké Flute, Silph Scope, Card
+            // Key, Secret Key, S.S. Ticket, Lift Key and Town Map — and Gen 1's bag holds twenty
+            // *kinds*, so adding them again both wastes slots and overflows. What such a save is
+            // actually missing is the rods and the Bicycle.
+            for item in COVERAGE_KEY_ITEMS {
+                if state.bag.iter().any(|held| held.id == item) {
+                    continue;
+                }
+                if api.debug_give_item(item, 1).is_err() {
+                    self.bag_was_full += 1;
+                }
+            }
+            api.debug_set_money(money);
+            self.stocked = true;
         }
 
         if self.keep_healthy && self.needs_a_top_up(state) {

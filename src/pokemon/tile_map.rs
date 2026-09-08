@@ -13,6 +13,30 @@ use crate::pokemon::tile::{HiddenObject, MetaTile};
 #[derive(Debug, Clone, Default)]
 pub struct MetaTileMap {
     pub player_position: Point8,
+    /// ⚠️ **False on the one tick a map transition is in flight, and everything that draws a
+    /// conclusion from [`Self::player_position`] has to check it.**
+    ///
+    /// Crossing a map connection *northward* or *westward* leaves `wYCoord`/`wXCoord` holding
+    /// **255** — the ROM's own −1 — for one agent tick, before `CheckMapConnections` switches
+    /// `wCurMap` and rebases the coordinates. `wCurMap` is therefore still the **old** map while the
+    /// coordinate is already off its edge, and [`Self::new`]'s clamp (which has to stay: it is what
+    /// keeps the tile indexing in bounds) turns that −1 into a perfectly plausible square at the
+    /// **opposite** edge of the map.
+    ///
+    /// ⭐ **That fiction cost a walk that had already arrived.** C3's frontier walk aborted three
+    /// connections with `NoRoute` — `Route2:8,0` "standing at (8, 73)", `Route2:9,0` at (9, 73),
+    /// `ViridianCity:19,0` at (19, 37) — every one of them a target on row 0 and a reported position
+    /// on the last row, because that is what `(255 + north_extra).min(height - 1)` is. From the
+    /// wrong end of the map the BFS reaches nothing, `connection_action` answers `None`, and the
+    /// agent reports "there is no route to the way into PewterCity" about a walk that was in
+    /// PewterCity on the next tick. It is the same false sentence
+    /// [`OverworldActionAbortedReason::DidNotArrive`](crate::pokemon::agent::OverworldActionAbortedReason::DidNotArrive)
+    /// was split out to stop printing, and a deployed run went hunting a pathfinder bug over it.
+    ///
+    /// Southward and eastward crossings are **not** affected and must not be caught by this: there
+    /// the coordinate goes one *past* the last row, which lands on the connection strip and is a
+    /// real, reachable tile. Only the underflow lies.
+    pub position_settled: bool,
     pub player_direction: PlayerFacingDirection,
     pub map: Map,
     pub width: usize,
@@ -27,6 +51,14 @@ pub struct MetaTileMap {
     /// Unordered raw-tile-ID pairs the player may not walk between in this tileset (elevation
     /// boundaries from pokered `TilePairCollisionsLand`). Empty for most tilesets.
     pub tile_pair_collisions: Vec<(u8, u8)>,
+    /// [`Self::walkable_bits`]'s answer, computed at most once per instance.
+    ///
+    /// ⚠️ **Once per *tick*, which is what this is really saying**, because `agent::observe_state`
+    /// rebuilds the whole map from RAM every tick and paints its overlays on. A boulder floor asks
+    /// for a plan once per (boulder, target) pair, and the bitmap is O(width x height) — computing
+    /// it per pair rather than per map was 8 of the 11 boulder searches' worth of the cost the
+    /// cache was added to remove.
+    walkable_cache: std::cell::OnceCell<Vec<u64>>,
     /// The pairs that apply when **water is on either side** of the move — mounting Surf, stepping
     /// ashore, or moving while surfing (pokered `TilePairCollisionsWater`). In the Cavern tileset
     /// this is `($14, $05)`: inside Seafoam the player can only get on/off the water at a shore
@@ -277,6 +309,62 @@ pub struct Crossing {
 /// in exactly the way this is meant to avoid.
 const SURF_MOUNT_COST: u32 = 10;
 
+/// The answer to one `solve_boulder_push_tracking` question, and everything that answer depends on.
+///
+/// ⭐ **The whole reason this type exists is that `actions()` runs on every 20 ms agent tick.** A
+/// boulder floor emits one goal row per target, and each row's existence is a capped BFS over
+/// boulder *layouts* — so the menu was paying `boulders x targets` searches fifty times a second to
+/// re-derive an answer that only changes when a boulder actually moves. Measured on the committed
+/// fixtures: **11.4 ms per `actions()` call on Seafoam B3F and 3.1 ms on Victory Road 1F, against
+/// 82 us on a map with no boulders.** A tick is 20 ms of *game* time and costs about 0.4 ms of wall
+/// clock to emulate, so 11.4 ms of menu-building dropped the whole agent from ~48x real time to
+/// **1.9x**; the coverage walk of 2026-09-07 spent 73 minutes of wall clock to buy 2.3 game-hours
+/// of a 24-hour budget and stopped with the frontier wide open.
+///
+/// ⚠️ **Every field is something the search actually reads, and nothing here is a hash.** A hashed
+/// key would trade a wrong plan for a few bytes, and a wrong plan is a boulder shoved somewhere
+/// nobody asked for; the comparison on a hit is a few hundred bytes and it is exact.
+#[derive(PartialEq, Eq, Hash)]
+struct PlanKey {
+    /// Covers `raw_tile_ids` and `tile_pair_collisions`, which `pair_blocked` and
+    /// `boulder_push_terrain_refusal` read and which are fixed for a given map.
+    ///
+    /// ⚠️ **The assumption is that a raw tile can only change under a `MetaTile` that changes with
+    /// it.** It holds for the one thing on these floors that does change — a Strength barrier
+    /// opening turns an `Obstacle` into an `Empty`, which `walkable` below sees.
+    map: Map,
+    /// Two bits per tile, in reading order: may the player stand here, may a boulder land here.
+    /// Derived from `meta_tiles` through exactly the `floor` and `dest_floor` predicates the search
+    /// uses, so an overlay the agent paints on (`cut_tiles`, `turned_back_tiles`) invalidates the
+    /// entry and a change the search cannot see does not.
+    walkable: Vec<u64>,
+    /// The visible boulders, in the search's own canonical order (`tracked` first when there is one).
+    layout: Vec<Point8>,
+    /// ⭐ **The player's *component*, not their square** — the lowest tile they can reach with this
+    /// layout as walls. This is the field that makes the cache work at all: the player moves every
+    /// tick and the region they are standing in almost never does, and the search itself already
+    /// keys its states this way (`norm(&reach(..))`), so collapsing them here loses nothing.
+    component: Point8,
+    tracked: Option<Point8>,
+    target: Point8,
+}
+
+thread_local! {
+    /// ⚠️ **Thread-local rather than a field on `MetaTileMap`, because the map is rebuilt from RAM
+    /// every tick** (`agent::observe_state` re-reads it and then paints its overlays on), so a
+    /// cache living on the struct would be thrown away before it was ever read a second time.
+    ///
+    /// Cleared wholesale rather than evicted one at a time: entries are only interesting while the
+    /// player is on the floor they describe, a floor contributes a couple of dozen, and the cost of
+    /// being wrong about which to keep is one search.
+    static PLAN_CACHE: std::cell::RefCell<std::collections::HashMap<PlanKey, Option<Vec<(Point8, JoypadButton)>>>>
+        = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Entries kept before the cache is emptied. A boulder floor with four boulders and two targets
+/// contributes about a dozen per distinct layout, and a puzzle is a few dozen layouts.
+const PLAN_CACHE_CAP: usize = 4_096;
+
 impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
         let dimensions = map.metadata.dimensions();
@@ -285,10 +373,18 @@ impl MetaTileMap {
         // Clamp to valid tile coordinates. During map transitions wXCoord/wYCoord can
         // briefly hold values outside the new map's bounds; adding connection-strip
         // offsets can make them worse. Clamping prevents out-of-bounds tile accesses.
-        let px = (map.player_position.x as usize + dimensions.west_extra).min(width.saturating_sub(1)) as u8;
-        let py = (map.player_position.y as usize + dimensions.north_extra).min(height.saturating_sub(1)) as u8;
+        //
+        // ⚠️ **The clamp stays and `position_settled` is how the lie it tells is caught.** It is a
+        // bounds guard on `meta_tiles` indexing and removing it is an out-of-range panic; what it
+        // cannot do is say that the number it produced is a fiction. See the field's own note.
+        let unclamped_x = map.player_position.x as usize + dimensions.west_extra;
+        let unclamped_y = map.player_position.y as usize + dimensions.north_extra;
+        let px = unclamped_x.min(width.saturating_sub(1)) as u8;
+        let py = unclamped_y.min(height.saturating_sub(1)) as u8;
         let meta_tiles = map.meta_tiles();
         Self {
+            walkable_cache: std::cell::OnceCell::new(),
+            position_settled: unclamped_x < width && unclamped_y < height,
             player_position: Point8 { x: px, y: py },
             player_direction: map.player_direction,
             map: map.metadata.map,
@@ -803,6 +899,30 @@ impl MetaTileMap {
     /// runs every agent tick while a boulder step is active. Hitting the cap returns `None` (an
     /// unsolvable-looking floor) rather than growing without limit.
     pub fn solve_boulder_push(&self, switch: Point8) -> Option<Vec<(Point8, JoypadButton)>> {
+        self.solve_boulder_push_tracking(None, switch)
+    }
+
+    /// [`Self::solve_boulder_push`], for **one named boulder** rather than whichever gets there first.
+    ///
+    /// ⭐ **Two boulders and two holes need this, and nothing said so until Seafoam B3F said it.**
+    /// "Get *some* boulder onto this target" is the right question on a floor with one target and
+    /// the wrong one wherever there are several: the scripted route dropped a boulder into the first
+    /// Seafoam hole, the planner having freely chosen which, and the second hole was then
+    /// unreachable by the one left — a complete BFS answering `None` on a floor that was solvable
+    /// ten pushes earlier. The row has to name the boulder or the decision is ambiguous, and it is
+    /// just as ambiguous for a model as for the scripted route.
+    pub fn solve_boulder_push_for(&self, boulder: Point8, switch: Point8)
+        -> Option<Vec<(Point8, JoypadButton)>> {
+        self.solve_boulder_push_tracking(Some(boulder), switch)
+    }
+
+    /// ⚠️ **`tracked` is kept at index 0 and only the tail is canonicalised.** The search sorts the
+    /// layout after every push so that two boulders swapping places is one state rather than two —
+    /// which is what keeps it inside `MAX_STATES`, and which throws identity away. Holding one
+    /// boulder out of the sort keeps the state space small for the others and still answers "can
+    /// *this* one get there".
+    fn solve_boulder_push_tracking(&self, tracked: Option<Point8>, switch: Point8)
+        -> Option<Vec<(Point8, JoypadButton)>> {
         use std::collections::{HashMap, HashSet, VecDeque};
         /// Layouts explored before giving up. Real floors settle in the low thousands; the cap only
         /// fires on a pathological map, and keeps the search's memory in the low megabytes.
@@ -815,6 +935,12 @@ impl MetaTileMap {
             .map(|s| s.position).collect();
         if boulders.is_empty() { return None; }
         boulders.sort_by_key(|p| (p.y, p.x));   // canonical order, so a layout has one key
+        // The tracked boulder moves to index 0 and stays out of every later sort.
+        if let Some(t) = tracked {
+            let at = boulders.iter().position(|b| *b == t)?;
+            boulders.swap(0, at);
+            boulders[1..].sort_by_key(|p| (p.y, p.x));
+        }
         // `self.tile_at` reports the *live* boulder sprites as occupied, but the solver simulates
         // boulders moving — so the tile UNDER any boulder's STARTING position must count as floor (the
         // solver tracks occupancy itself). Without this, a boulder's own starting tile stays a phantom
@@ -860,6 +986,70 @@ impl MetaTileMap {
         };
         let norm = |set: &HashSet<Point8>| -> Point8 { *set.iter().min_by_key(|p| (p.y, p.x)).unwrap() };
 
+        // ⭐ **An optimistic pre-filter, because an *unsolvable* pair is what costs the cap.**
+        //
+        // The real search only answers "no" by exhausting `MAX_STATES` layouts, and most pairs on a
+        // floor are hopeless — a boulder in the north-west corner and a hole in the south-east are
+        // not going to meet whatever else happens. Emitting a row per (boulder, target) pair asks
+        // that question `boulders × targets` times on **every 20 ms tick**, which measured at 444 s
+        // for a test that had taken 1.56 s.
+        //
+        // So first ask a much easier question: could this boulder reach the target *if no other
+        // boulder existed and the player could stand wherever it liked*? That is one small BFS over
+        // a single boulder's positions.
+        //
+        // ⚠️ **Admissible, which is the only property that makes it safe.** Every constraint it
+        // drops is one that can only ever *remove* a move, so any real solution is still a path in
+        // this relaxed graph. A `false` therefore means "certainly unsolvable" and can be trusted to
+        // withhold the row; a `true` means "worth the real search" and decides nothing. It can never
+        // withhold a row that was actually takeable, which is the failure mode that matters — a menu
+        // that hides the way on is what made Victory Road unplayable in the first place.
+        let could_possibly_reach = |from: Point8| -> bool {
+            let mut seen = HashSet::from([from]);
+            let mut q = VecDeque::from([from]);
+            while let Some(b) = q.pop_front() {
+                if b == switch { return true; }
+                for &(dx, dy, _) in &dirs {
+                    let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
+                    // The player has to be able to *stand* behind it and the boulder has to be able
+                    // to *land* in front: both are properties of the terrain alone, so they hold
+                    // however the other boulders are arranged.
+                    if !floor(side) || !dest_floor(dest) { continue }
+                    if self.boulder_push_terrain_refusal(side, dest).is_some() { continue }
+                    if seen.insert(dest) { q.push_back(dest); }
+                }
+            }
+            false
+        };
+        // ⭐ **Answered from `PLAN_CACHE` when this exact floor has been asked before**, which on a
+        // 20 ms tick loop is almost always. See `PlanKey` for what "exact" has to mean and for the
+        // measurements that made this necessary. The player's starting component is computed here
+        // rather than inside the search because the key needs it either way, and the search is then
+        // seeded from the same flood fill.
+        let start_reach = reach(&boulders, self.player_position);
+        let key = PlanKey {
+            map: self.map,
+            walkable: self.walkable_bits().to_vec(),
+            layout: boulders.clone(),
+            component: norm(&start_reach),
+            tracked,
+            target: switch,
+        };
+        if let Some(hit) = PLAN_CACHE.with(|c| c.borrow().get(&key).cloned()) { return hit }
+
+        // The search proper, in a closure so that both of its exits land in the cache below rather
+        // than each remembering to.
+        let search = || {
+        // ⚠️ **Inside the closure, so that a "no" is cached too.** The pre-filter is a BFS per
+        // (boulder, target) pair and most pairs on a floor are hopeless, so an unsolvable pair is
+        // exactly the one that must not be re-answered fifty times a second.
+        match tracked {
+            // One named boulder: it alone has to be able to get there.
+            Some(t) => if !could_possibly_reach(t) { return None },
+            // Any boulder will do, so the floor is hopeless only if none of them can.
+            None => if !boulders.iter().any(|b| could_possibly_reach(*b)) { return None },
+        }
+
         type Key = (Vec<Point8>, Point8);           // (boulder layout, player component)
         // The component is only known once a state is popped (it needs a flood fill), so dedup happens
         // at pop time and the queue carries the parent link to record on first arrival.
@@ -871,7 +1061,11 @@ impl MetaTileMap {
             let key: Key = (bs.clone(), norm(&reach(&bs, player_at)));
             if !visited.insert(key.clone()) { continue; }
             if let Some(link) = parent { came.insert(key.clone(), link); }
-            if bs.contains(&switch) {
+            let solved = match tracked {
+                Some(_) => bs[0] == switch,
+                None => bs.contains(&switch),
+            };
+            if solved {
                 if std::env::var("BOULDER_DEBUG").is_ok() {
                     eprintln!("  switch {switch}: solved after exploring {} layouts", visited.len());
                 }
@@ -905,7 +1099,10 @@ impl MetaTileMap {
                     if self.boulder_push_terrain_refusal(side, dest).is_some() { continue; }
                     let mut next = bs.clone();
                     next[i] = dest;
-                    next.sort_by_key(|p| (p.y, p.x));
+                    match tracked {
+                        Some(_) => next[1..].sort_by_key(|p| (p.y, p.x)),
+                        None => next.sort_by_key(|p| (p.y, p.x)),
+                    }
                     // After the push the player stands on the boulder's old tile.
                     q.push_back((next, b, Some((key.clone(), b, dir))));
                 }
@@ -916,6 +1113,38 @@ impl MetaTileMap {
                 visited.len(), boulders.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
         }
         None
+        };
+        let answer = search();
+        PLAN_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            if cache.len() >= PLAN_CACHE_CAP { cache.clear(); }
+            cache.insert(key, answer.clone());
+        });
+        answer
+    }
+
+    /// Two bits per tile in reading order: may the player stand here, may a boulder land here.
+    ///
+    /// ⚠️ **Exactly the `floor` and `dest_floor` predicates `solve_boulder_push_tracking` uses,
+    /// minus their boulder-layout term**, which [`PlanKey`] carries separately. Anything else about
+    /// `meta_tiles` is invisible to the search, so leaving it out is what lets a plan survive an NPC
+    /// two rooms away taking a step.
+    fn walkable_bits(&self) -> &[u64] {
+        self.walkable_cache.get_or_init(|| {
+        let mut bits = vec![0u64; (self.width * self.height * 2).div_ceil(64)];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let at = Point8 { x: x as u8, y: y as u8 };
+                let tile = self.tile_at(at);
+                let stand = matches!(tile, MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. });
+                let land = matches!(tile, MetaTile::Empty | MetaTile::Grass);
+                let base = (x + y * self.width) * 2;
+                if stand { bits[base / 64] |= 1 << (base % 64); }
+                if land { bits[(base + 1) / 64] |= 1 << ((base + 1) % 64); }
+            }
+        }
+        bits
+        })
     }
 
     /// The shortest walking route (button sequence) from the player to an arbitrary reachable tile,
@@ -1561,14 +1790,71 @@ impl MetaTileMap {
             // it. `AgentState::PushingBoulder` re-derives the same walk through
             // `route_to_push_tile`, so the row and the driver agree.
             let (reach, came) = self.push_search();
-            for (boulder, push, stand) in self.boulder_pushes_within(&reach) {
+
+            // ⭐ **The Strength rows name the goal, not the shove: put a boulder on a switch, or
+            // into a hole.** One decision for
+            // the whole Sokoban, planned by `solve_boulder_push` — the same capped BFS the scripted
+            // route has used for the whole game — instead of N paid shoves with a chance to seal the
+            // floor at each one.
+            //
+            // ⚠️ **There is deliberately no per-shove row any more.** `MetaTile::Boulder { at, push }`
+            // emitted one row per legal direction of every boulder — up to a dozen on a Victory Road
+            // floor, none of which says which makes progress. That is the wrong unit of decision and
+            // the record is unambiguous: `llm::prompt` twice tried to explain the puzzle in prose
+            // instead and had to withdraw both attempts, one of them sending a deployed run up from
+            // 2F and straight back down twenty times, while two more filed issue reports asking
+            // whether the switch coordinates were wrong. See `MetaTile::BoulderGoal`.
+            //
+            // ⚠️ **Only where it is solvable from the layout in front of us**, which is what
+            // `solve_boulder_push` returning `Some` means. That is the same rule the cut trees and
+            // the water crossings keep, and on this floor it matters most: a promised row the agent
+            // cannot carry out is exactly what made Victory Road unplayable for three deployed runs.
+            //
+            // ⚠️ **Holes as well as switches.** Seafoam Islands' boulders are pushed into holes to
+            // slow the current and Victory Road 3F drops one through onto the floor below; neither
+            // is a pressure plate, and both are the same decision.
+            let targets = self.strength_switches.iter().map(|at| (*at, false))
+                .chain(self.holes.iter().map(|at| (*at, true)));
+            // ⚠️ **One row per target, not one per (boulder, target) pair — and that is a measured
+            // retreat rather than a preference.** Naming the boulder in the row makes a two-boulder,
+            // two-hole floor unambiguous, which Seafoam B3F needs; enumerating the pairs to find out
+            // which are solvable does not fit here. `actions()` runs on **every 20 ms tick**, an
+            // *unsolvable* pair costs the search's whole `MAX_STATES` cap to establish, and there is
+            // no cheap way to know which pairs those are: an admissible pre-filter has to ignore the
+            // other boulders, which on an open cave floor says "possibly" to nearly everything.
+            // Measured at 444 s for a test that took 1.56 s, and 164 s with the filter.
+            //
+            // So the row still *names* a boulder — the driver commits to it and cannot switch
+            // halfway — but it is the one this plan happens to use rather than every one that could.
+            for (at, hole) in targets {
+                // Already done: a boulder is sitting on it, so there is no decision left here.
+                if self.boulders().contains(&at) { continue }
+                // Is this target reachable by *anything*? One search, and the cheap way to withhold
+                // the row on a floor that is genuinely finished.
+                if self.solve_boulder_push(at).is_none() { continue }
+                // ⭐ **Then the *nearest* boulder that can actually do it, not whichever the planner
+                // reached for first.** "Get some boulder onto this target" is the wrong question on a
+                // floor with several targets: Seafoam B3F has two holes, and solving the first with
+                // the boulder the second one needed leaves a complete search answering "unsolvable"
+                // on a floor that was fine ten pushes earlier. The scripted route stalled there for
+                // its whole budget.
+                //
+                // ⚠️ **Nearest-first is a heuristic and the cost is why.** Asking which assignment
+                // keeps every other target solvable is the exact per-(boulder, target) enumeration
+                // that measured 444 s against a 1.56 s baseline in a function that runs every 20 ms.
+                // Nearest-first usually succeeds on its first try, so it costs about one extra
+                // search, and on these floors each hole's own boulder is the one beside it.
+                let mut candidates = self.boulders();
+                candidates.sort_by_key(|b| (b.x as i32 - at.x as i32).abs() + (b.y as i32 - at.y as i32).abs());
+                let Some((which, plan)) = candidates.into_iter()
+                    .find_map(|b| self.solve_boulder_push_for(b, at).map(|plan| (b, plan)))
+                    else { continue };
+                let Some((boulder, push)) = plan.into_iter().next() else { continue };
+                let Some(stand) = self.step(boulder, opposite_dir(push)) else { continue };
                 if !reach.contains(&stand) { continue }
+                // The walk is to the *first* push of the plan; the driver re-plans from there and
+                // keeps going, so this route is what the row promises rather than the whole solution.
                 let mut route = reconstruct(stand, &came);
-                // Facing is not optional: `TryPushingBoulder` reads
-                // `wSpritePlayerStateData1FacingDirection` and the push needs the direction held
-                // twice, so the route ends turned toward the boulder exactly as a cut tree's does.
-                // The driver re-derives all of this every tick anyway — this is what the *menu* row
-                // promises, not what carries it out.
                 if route.is_empty() {
                     let facing: JoypadButton = self.player_direction.into();
                     if facing != push { route.push(push); }
@@ -1576,7 +1862,7 @@ impl MetaTileMap {
                     route.push(push);
                 }
                 actions.push(OverworldAction { map: self.map, origin: self.player_position,
-                    destination: stand, tile: MetaTile::Boulder { at: boulder, push }, route });
+                    destination: stand, tile: MetaTile::BoulderGoal { boulder: which, at, hole }, route });
             }
         }
 
@@ -1782,6 +2068,49 @@ impl MetaTileMap {
         Some(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route })
     }
 
+    /// The goal row for **one named boulder** onto `at`, built on demand.
+    ///
+    /// ⭐ **`actions()` emits one row per target and this names the boulder**, for the same reason
+    /// `connection_action` exists beside the connection rows: the menu carries the common case and a
+    /// caller that means something more specific asks for it. A hand-tuned route knows which boulder
+    /// it means — Seafoam B3F has two holes and spending the wrong boulder on the first leaves the
+    /// second unreachable — while a model choosing off the menu does not have to care.
+    ///
+    /// ⚠️ **Also what the agent re-derives a walk-in-flight from.** The route is recomputed every
+    /// tick from wherever the player now stands, so a goal that is not the one `actions()` happens to
+    /// emit still has to be findable, exactly as a specific connection landing does.
+    pub fn boulder_goal_action(&self, boulder: Point8, at: Point8, hole: bool)
+        -> Option<OverworldAction> {
+        if !self.can_strength { return None }
+        if self.boulders().contains(&at) { return None }
+        let (reach, came) = self.push_search();
+        let plan = self.solve_boulder_push_for(boulder, at)?;
+        let (push_from, push) = plan.into_iter().next()?;
+        let stand = self.step(push_from, opposite_dir(push))?;
+        if !reach.contains(&stand) { return None }
+        let mut route = self.reconstruct_from(stand, &came);
+        if route.is_empty() {
+            let facing: JoypadButton = self.player_direction.into();
+            if facing != push { route.push(push); }
+        } else if route.last() != Some(&push) {
+            route.push(push);
+        }
+        Some(OverworldAction {
+            map: self.map, origin: self.player_position, destination: stand,
+            tile: MetaTile::BoulderGoal { boulder, at, hole }, route,
+        })
+    }
+
+    /// Walk back a `push_search` came-from map into the button sequence that reaches `dest`.
+    fn reconstruct_from(&self, dest: Point8,
+                        came: &HashMap<Point8, (Point8, JoypadButton)>) -> Vec<JoypadButton> {
+        let mut route = vec![];
+        let mut pos = dest;
+        while let Some(&(prev, dir)) = came.get(&pos) { route.push(dir); pos = prev; }
+        route.reverse();
+        route
+    }
+
     /// Route to the nearest reachable **water** edge into `to_map` — a `ConnectionWater` tile, crossed
     /// by Surfing off the map edge.
     ///
@@ -1961,9 +2290,10 @@ impl Display for MetaTileMap {
                     MetaTile::Counter => write!(f, "=")?,
                     MetaTile::Switch { .. } => write!(f, "s")?,
                     MetaTile::CutTree => write!(f, "t")?,
-                    // Never in `meta_tiles` either — a push and a cut are actions on the ordinary
-                    // floor beside the thing they are about, which is drawn as itself.
-                    MetaTile::Boulder { .. } | MetaTile::Cut { .. } => write!(f, "_")?,
+                    // Never in `meta_tiles` either — a push, a cut and a Strength goal are actions
+                    // on the ordinary floor beside the thing they are about, which is drawn as
+                    // itself.
+                    MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } => write!(f, "_")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
                     // Never in `meta_tiles` — a fishing spot is an action on ordinary ground.
@@ -2327,7 +2657,9 @@ mod boulder_solver_tests {
             }
         }
         (MetaTileMap {
-            player_position: player, player_direction: PlayerFacingDirection::Down,
+            walkable_cache: std::cell::OnceCell::new(),
+            player_position: player, position_settled: true,
+            player_direction: PlayerFacingDirection::Down,
             map: Map::VictoryRoad1F, width: w, height: h, meta_tiles: meta,
             raw_tile_ids: vec![0; w * h], tileset: crate::pokemon::map_header::TileSetId::Cavern,
             tile_pair_collisions: vec![],

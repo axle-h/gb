@@ -31,7 +31,15 @@ impl OverworldAction {
     /// to a turn can land after a warp — so without the prefix, `5,6:Warp` chosen in Oak's lab could
     /// match a warp that happens to sit at (5, 6) in Pallet Town and be carried out silently.
     pub fn id(&self) -> String {
-        format!("{}:{},{}:{}", self.map, self.destination.x, self.destination.y, self.tile.id_kind())
+        // ⚠️ **A boulder goal is keyed on its *target*, not on where the walk starts.** For every
+        // other row `destination` is the thing itself and holds still; for a goal it is the square
+        // the first shove is made from, which the solver re-picks after every push. See
+        // `MetaTile::id_kind`'s note for what that cost.
+        let at = match self.tile {
+            MetaTile::BoulderGoal { at, .. } => at,
+            _ => self.destination,
+        };
+        format!("{}:{},{}:{}", self.map, at.x, at.y, self.tile.id_kind())
     }
 }
 
@@ -64,7 +72,6 @@ impl Display for OverworldAction {
             MetaTile::Pc            => write!(f, "Use the PC"),
             MetaTile::CutTree       => write!(f, "Cut the tree"),
             MetaTile::Cut { at }    => write!(f, "Cut the tree at {at}"),
-            MetaTile::Boulder { at, push } => write!(f, "Push the boulder at {at} {push:?}"),
             MetaTile::Fish { rod }  => write!(f, "Fish with the {}", rod.name()),
             other                   => write!(f, "{other}"),
         }

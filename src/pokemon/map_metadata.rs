@@ -626,8 +626,17 @@ fn is_water_tile_id(tile_id: u8, is_water_tileset: bool, tileset: TileSetId) -> 
     if !is_water_tileset {
         return false;
     }
-    let shore_ids_mean_shore = !matches!(tileset, TileSetId::ShipPort | TileSetId::Forest);
-    if shore_ids_mean_shore && (tile_id == EASTERN_SHORE || tile_id == SAFARI_ZONE_EASTERN_SHORE) {
+    // ⚠️ **A whitelist, and it used to be a blacklist that kept being wrong.** Both shore ids are
+    // *overworld* ids — `$32` is `EASTERN_SHORE` in the OVERWORLD tileset and `$48` is the Safari
+    // Zone's, whose maps use OVERWORLD too — so outside it they are whatever that tileset happens
+    // to draw at those numbers. The blacklist excluded SHIP_PORT and FOREST as each one was caught
+    // by a leg dying, and the next one along was **GYM**: Viridian and Pewter gyms have a tile at
+    // one of those ids, GYM is in `WaterTilesets` because Cerulean's gym has a pool, and so
+    // `actions()` minted `ViridianGym:14,15:Fish` — a cast at a floor tile, which the coverage walk
+    // of 2026-09-07 scored as a hard defect because nothing could route to the water's edge.
+    // Naming the one tileset the ids come from cannot go wrong the same way a fourth time.
+    if tileset == TileSetId::Overworld
+        && (tile_id == EASTERN_SHORE || tile_id == SAFARI_ZONE_EASTERN_SHORE) {
         return true;
     }
     tile_id == WATER
@@ -1297,6 +1306,42 @@ mod test {
     use crate::pokemon::roms::POKERED;
     use crate::pokemon::tile_map::MetaTileMap;
     use super::*;
+
+    /// **The two shore ids belong to the overworld and nowhere else.**
+    ///
+    /// ⚠️ **This rule has been wrong three times and each time it cost a leg or a sweep.** `$32` is
+    /// `EASTERN_SHORE` and `$48` the Safari Zone's, both OVERWORLD tile ids (Safari maps use that
+    /// tileset), and `is_water_tile_id` used to accept them in *any* tileset on `WaterTilesets`.
+    /// SHIP_PORT was excluded when a leg drowned on a gangway, FOREST when Viridian Forest's `$32`
+    /// bush blocks made the agent try to Surf on dry land, and then **GYM** turned up: Cerulean's
+    /// gym has a pool so GYM is a water tileset, Viridian's has a floor tile at one of those ids,
+    /// and `actions()` offered `ViridianGym:14,15:Fish` — a cast at a floor, scored a hard defect
+    /// by the coverage walk of 2026-09-07 because nothing could route to the water's edge.
+    #[test]
+    fn a_shore_tile_id_is_only_a_shore_in_the_overworld() {
+        const EASTERN_SHORE: u8 = 0x32;
+        const SAFARI_SHORE: u8 = 0x48;
+        const WATER: u8 = 0x14;
+
+        for id in [EASTERN_SHORE, SAFARI_SHORE] {
+            assert!(is_water_tile_id(id, true, TileSetId::Overworld),
+                "{id:#x} is a shore in the tileset it comes from");
+            for elsewhere in [TileSetId::Gym, TileSetId::Forest, TileSetId::ShipPort,
+                              TileSetId::Cavern, TileSetId::Plateau, TileSetId::Facility] {
+                assert!(!is_water_tile_id(id, true, elsewhere),
+                    "{id:#x} is not water in {elsewhere:?}; it is whatever that tileset draws there");
+            }
+        }
+
+        // ⭐ **`$14` is water everywhere it is allowed to be**, which is the half that must not be
+        // narrowed with the other: it is how Cerulean Gym's pool, Seafoam's lake and every route's
+        // sea are found, and requiring passability instead drops all of them (12 legs, measured).
+        for tileset in [TileSetId::Overworld, TileSetId::Gym, TileSetId::Cavern] {
+            assert!(is_water_tile_id(WATER, true, tileset), "{tileset:?} keeps its real water");
+        }
+        // And nothing at all outside `WaterTilesets`, whatever the id.
+        assert!(!is_water_tile_id(WATER, false, TileSetId::House));
+    }
 
     /// Verifies that `WarpEvent::destination_position` is resolved correctly from ROM data by
     /// cross-checking with known map objects in the pokered disassembly.

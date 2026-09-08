@@ -871,6 +871,9 @@ pub fn situation(
             //
             // What is left is what the run actually needed, and it is already in the clause below:
             // the rows are the legal pushes, and leaving the map puts every boulder back.
+            let boulder_goals = state.map.actions().iter()
+                .filter(|action| matches!(action.tile,
+                    crate::pokemon::tile::MetaTile::BoulderGoal { .. })).count();
             out.push_str(&match (known, badged) {
                 // ⚠️ **Zero rows is not "every legal shove is below", and the difference cost an
                 // issue report.** With VictoryRoad2F's first switch pressed and its other boulder
@@ -880,17 +883,25 @@ pub fn situation(
                 // shoved onto is solid rock — but nothing said so. This restates the menu and claims
                 // nothing else: no verdict on the floor, and no advice to go and reset it. That
                 // sentence has been tried twice and is a tombstone above.
-                (true, true) if state.map.boulder_pushes().is_empty() => " None of them can be pushed \
-                    in any direction from where they are standing, so there are no boulder rows in \
-                    the menu below: every shove that is left would put a boulder into a wall, off \
-                    the map, or onto a square with nowhere to stand behind it. Leaving the map and \
-                    coming back puts every boulder on it back where it started.".to_string(),
-                (true, true) => " Every shove the game would actually allow is a row in the menu \
-                    below, one row per boulder per direction, and choosing one walks over and pushes \
-                    it (Strength is armed for you). A push the game refuses is not offered rather \
-                    than failing quietly, so a boulder with no rows cannot be moved from where it \
-                    is standing. Leaving the map and coming back puts every boulder on it back where \
-                    it started, which is how a push that went wrong is undone.".to_string(),
+                // ⚠️ **Counted off the menu, not off `boulder_pushes()`, and the difference is
+                // the same issue report again.** A row is a *goal* now rather than a shove, so a
+                // floor can have legal shoves left and still offer nothing: VictoryRoad1F after the
+                // deployed run of 2026-09-04 sealed the only boulder that could reach its switch is
+                // exactly that, and asking `boulder_pushes()` there says "not empty" and prints the
+                // promise of rows the model then cannot find.
+                (true, true) if boulder_goals == 0 => " There are no boulder rows in the menu below. \
+                    A boulder row is a whole job rather than a shove, and one is offered only when \
+                    the pushes that finish it can be worked out from where the boulders are \
+                    standing; none of these has one. Leaving the map and coming back puts every \
+                    boulder on it back where it started.".to_string(),
+                (true, true) => " Every boulder that can be pushed onto a switch or into a hole from \
+                    where it is standing is a row in the menu below, one row per target, and the row \
+                    names the boulder it will use. Choosing one does the whole job: it walks over, \
+                    arms Strength for you, and keeps pushing until that boulder is on that target, \
+                    however many shoves and however much walking round that takes. A target no \
+                    boulder can reach is not offered rather than failing quietly. Leaving the map \
+                    and coming back puts every boulder on it back where it started, which is how a \
+                    puzzle that went wrong is undone.".to_string(),
                 (false, true) => format!(
                     " No Pokémon in your party knows Strength, so there are no boulder actions in \
                      the menu below. {} You have the {}, so a Pokémon taught HM04 is all this needs.",
@@ -1932,7 +1943,11 @@ mod tests {
         assert!(armed.contains("Boulders on this map: (14, 2), (2, 10), (5, 15)."), "{armed}");
         assert!(armed.contains("Boulder switches"), "{armed}");
         assert!(armed.contains("(17, 13)"), "the switch VictoryRoad1F's puzzle is about: {armed}");
-        assert!(armed.contains("Every shove the game would actually allow is a row"), "{armed}");
+        assert!(armed.contains("is a row in the menu below, one row per target"), "{armed}");
+        // ⚠️ **A row is a goal now, so the line promises a target rather than a shove.** The
+        // sentence it replaced ("every shove the game would actually allow is a row") is the one
+        // the empty-menu branch above had to be split off from; see that branch's own note.
+        assert!(armed.contains("the row names the boulder it will use"), "{armed}");
         // ⚠️ **The half that keeps a wedged floor from reading as a broken game.** Gen 1 re-reads a
         // map's objects on every `LoadMapData`, so walking out and back undoes every push.
         assert!(armed.contains("back where it started"), "{armed}");
@@ -1984,8 +1999,13 @@ mod tests {
         none_left.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder")
             || sprite.position == crate::geometry::Point8 { x: 14, y: 2 });
         assert!(none_left.map.boulder_pushes().is_empty(), "(14, 2) is walled in on its own square");
+        // ⚠️ **The branch is chosen on goal rows, not on `boulder_pushes()`** — the two agree here
+        // and part company on a floor with legal shoves and no reachable target, which is the case
+        // that would print the promise of rows the model cannot find. See the branch's own note.
+        assert!(!none_left.map.actions().iter().any(|action| matches!(action.tile,
+            crate::pokemon::tile::MetaTile::BoulderGoal { .. })), "and so has no goal row");
         let quiet = rendered(&none_left);
-        assert!(quiet.contains("None of them can be pushed in any direction"), "{quiet}");
+        assert!(quiet.contains("There are no boulder rows in the menu below"), "{quiet}");
         assert!(!quiet.contains("cannot be solved"), "no verdict on the floor: {quiet}");
 
         // ⚠️ **Silent where there are no boulders**, or it is a line on every turn of the game.

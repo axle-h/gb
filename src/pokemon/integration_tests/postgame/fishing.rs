@@ -289,4 +289,23 @@ fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
     println!("fished up {:?}", seen.borrow());
     assert!(bites.get() >= 2, "the row should keep producing wild battles");
     assert_eq!(fixture.game_state().map.map, Map::PalletTown, "fishing does not move the player");
+
+    // ⭐ **Every cast has to say what it did, and for a long time none of them did.** The driver
+    // dropped to `Idle` in silence on a miss and was replaced by the battle on a bite, so fishing
+    // was the one overworld action in the game that reported no outcome at all: the coverage walk
+    // scored every `Fish` row `Silent` — 14 to 16 a sweep, the largest single group in its table —
+    // and a model that cast was told nothing whatsoever about what happened. A miss now completes
+    // and says so; a bite aborts with `Battle`, which is what `resume_after_battle` picks back up.
+    let mut outcomes = 0;
+    for event in fixture.agent.drain_events() {
+        match event {
+            AgentEvent::OverworldActionCompleted { destination: MetaTile::Fish { .. } } => outcomes += 1,
+            AgentEvent::OverworldActionAborted {
+                destination: MetaTile::Fish { .. },
+                reason: crate::pokemon::agent::OverworldActionAbortedReason::Battle, .. } => outcomes += 1,
+            _ => {}
+        }
+    }
+    assert!(outcomes > 0, "a cast must report an outcome; every one of them was silent");
+    println!("{outcomes} of the casts reported an outcome");
 }

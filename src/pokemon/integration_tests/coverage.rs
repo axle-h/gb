@@ -18,6 +18,7 @@
 //! | `Textbox`, `Script` | `Blocked` — expected **once**; a repeat is the signal |
 //! | `Unknown`, `DidNotArrive`, `NoRoute`, `WrongMap`, `NoAdjacentGrass` | `Defect` |
 //! | `WatchdogFired` | `Defect`, always |
+//! | `NothingAppeared` | `Completed` — the pace ran its budget; the empty roll is the game, not a fault |
 //! | a start with no terminal event before the next one | `Silent` — chosen, outcome never reported |
 //!
 //! ⚠️ **A repeat of `Textbox`/`Script` is the signal, not the first one.** Being stopped is how this
@@ -57,24 +58,41 @@ pub enum Verdict {
     /// The game stopped the player to say something, and here is what it said. Expected once.
     Blocked { times: usize, message: Option<String> },
     /// The menu offered a row the agent could not then execute.
-    Defect { reason: String },
+    ///
+    /// ⚠️ **`at` is the square the walk was standing on when it gave up**, off
+    /// `AgentEvent::OverworldActionAborted`'s own `at`, and it is here for the reason that field
+    /// exists at all: a reason on its own is not something anyone can act on. A `NoRoute` names a
+    /// row `MetaTileMap::actions()` minted and the walk then could not re-derive, and the *only*
+    /// thing that changes between those two moments is where the player is standing. Without it the
+    /// next person to read this table has to reproduce a ninety-second walk to learn one coordinate.
+    Defect { reason: String, at: Option<crate::geometry::Point8> },
     /// ⭐ **The action was taken and the agent never said what became of it.** A
     /// `StartedOverworldAction` with no terminal event before the next one.
     ///
     /// ⚠️ **This is a gap in the *event stream*, not in the agent's behaviour, and C3 found it on
     /// its first walk from Pallet Town** — 66 of 307 chosen ids, and **every single one** of them a
-    /// `Grass` (52) or a `CutTree` (14). The cause is in `agent.rs`: reaching tall grass hands over
-    /// to
-    /// `AgentState::PacingForEncounters` without an event, a cave wander (`MetaTile::Empty`) does
-    /// the same, and pacing then ends either at a battle — whose `assert_battle_state` arm for a
-    /// non-`OverworldMovement` state emits only `BattleStarted`, with no abort — or at its own
-    /// budget, which emits a `TextBox`. So "walk in grass" is an action the model is offered and is
-    /// never told the outcome of.
+    /// `Grass` (52) or a `CutTree` (14).
     ///
-    /// ⚠️ **Deliberately not a defect yet.** Nothing went wrong in the game; what is missing is the
-    /// sentence. Failing the walk on it would make C3 permanently red for a reason C3 cannot fix,
-    /// and the number is more useful reported than fatal. Closing the gap is an `AgentEvent` change
-    /// and belongs with the rest of the prose the model reads.
+    /// ✅ **Both are closed** (2026-09-07), and they were two different mechanisms with one shape.
+    /// Reaching tall grass hands over to `AgentState::PacingForEncounters`, which used to leave by
+    /// three doors and report through none of them: a battle fell through `assert_battle_state`'s
+    /// `_` arm, which emits `BattleStarted` and no abort; the budget expiring emitted a `TextBox`
+    /// the agent had made up; and a map change emitted nothing at all. All three now end the action
+    /// they belong to, the budget one through
+    /// [`OverworldActionAbortedReason::NothingAppeared`], which is scored a completion above. A cut
+    /// ended in a made-up `TextBox` too and now ends in `OverworldActionCompleted { Cut }`.
+    ///
+    /// ⚠️ **A boulder push is still silent, and that one is argued rather than missed.** The shove
+    /// runs as `GameMode::Script` and `assert_script_state` takes the driver's state away before it
+    /// can report, so a completion written there fired zero times in an hour of deployed play; see
+    /// `AgentState::PushingBoulder`. So a `PushBoulder*` id scoring `Silent` in this table is the
+    /// known case, not a new one.
+    ///
+    /// ⚠️ **Still not a defect, and it stays that way.** Nothing goes wrong in the game when an
+    /// action goes quiet; what is missing is the sentence. Failing a walk on it would make C3 red
+    /// for something C3 cannot fix from where it stands, and the number is more useful reported.
+    /// What this verdict is *for* is finding the next one of these, which is how the grass case was
+    /// found in the first place.
     Silent,
 }
 
@@ -123,6 +141,15 @@ pub struct CoverageLog {
     /// Every watchdog firing, with the agent state it fired in. ⚠️ **Always a defect**: in a healthy
     /// run the agent never goes a whole timeout without reaching a decision point of any kind.
     pub watchdog: Vec<String>,
+    /// Ids whose verdict became a hard [`Verdict::Defect`] since the last call to
+    /// [`Self::take_new_defects`].
+    ///
+    /// ⚠️ **This exists so the *save state* can be taken where the defect happened**, which
+    /// `docs/coverage-plan.md` §5.5 asks for and nothing else can supply: exploration is destructive
+    /// and one-shot, so by the end of a ninety-second walk the world has moved on and the failing
+    /// square cannot be revisited. A driver drains events every tick, so this is the one moment the
+    /// emulator is still standing where it went wrong.
+    new_defects: Vec<String>,
     /// The last thing the game said, so a `Blocked` verdict can quote it.
     ///
     /// ⚠️ **The message arrives *after* the abort**, not before: Pokémon Red turns the player back
@@ -171,7 +198,7 @@ impl CoverageLog {
                     self.block(&id, message);
                 }
             }
-            AgentEvent::OverworldActionAborted { reason, .. } => {
+            AgentEvent::OverworldActionAborted { reason, at, .. } => {
                 let Some(id) = self.open.take() else { return };
                 self.entry(&id).aborts.entry(reason.to_string()).and_modify(|n| *n += 1).or_insert(1);
                 match reason {
@@ -179,6 +206,27 @@ impl CoverageLog {
                     // re-issued; leaving the verdict alone is what makes it retryable.
                     OverworldActionAbortedReason::Battle
                     | OverworldActionAbortedReason::NamingScreen => {}
+                    // ⭐ **The pace ran its whole budget and nothing turned up, which is the action
+                    // done rather than the action failed.** It is an abort only because the walk is
+                    // over and the policy has to be asked again. Scoring it `Completed` is what
+                    // makes "walk in the grass" gradeable at all: before `NothingAppeared` existed
+                    // the agent said nothing here, and 52 `Grass` ids on C3's first walk came back
+                    // `Silent`.
+                    OverworldActionAbortedReason::NothingAppeared => {
+                        self.entry(&id).verdict = Verdict::Completed;
+                    }
+                    // ⭐ **A Strength floor that has been wedged is the *world* saying no, not the
+                    // agent failing.** The row was legal when it was offered and the layout has
+                    // since moved into one the floor cannot be solved from — usually by a shove of
+                    // this run's own. That is the same shape as a guard turning the player back, so
+                    // it is `Blocked` and not a defect, and it keeps its teeth: `REPEAT_IS_A_DEFECT`
+                    // still fires if the walk keeps choosing a row that keeps being impossible.
+                    // ⚠️ The line the agent gives here already names the cure (leave the floor and
+                    // come back), so this is a verdict the reader can act on rather than a silence.
+                    OverworldActionAbortedReason::PuzzleUnsolvable => {
+                        let message = Some(reason.to_string());
+                        self.block(&id, message);
+                    }
                     // The game spoke. Expected once; the message usually arrives just after this.
                     OverworldActionAbortedReason::Textbox | OverworldActionAbortedReason::Script => {
                         let message = self.last_blocked.clone();
@@ -188,7 +236,11 @@ impl CoverageLog {
                     }
                     // The menu offered a row the agent could not then execute. Nothing about the
                     // world explains these; they are the agent's own failure to do what it offered.
-                    other => self.entry(&id).verdict = Verdict::Defect { reason: other.to_string() },
+                    other => {
+                        self.entry(&id).verdict =
+                            Verdict::Defect { reason: other.to_string(), at: *at };
+                        self.new_defects.push(id);
+                    }
                 }
             }
             AgentEvent::TextBox { message } => {
@@ -230,6 +282,12 @@ impl CoverageLog {
         entry.verdict = Verdict::Blocked { times, message: message.or(kept) };
     }
 
+    /// Ids that became a defect since this was last called, and clear the list. Called by the
+    /// fixture after every drain so a failing square can be saved while the emulator is still on it.
+    pub fn take_new_defects(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.new_defects)
+    }
+
     /// Note an id the menu offered but nothing chose. A frontier walk calls this for the rows it
     /// leaves behind, so the table says what was *not* done as well as what was.
     pub fn offered(&mut self, id: &str) {
@@ -269,7 +327,10 @@ impl CoverageLog {
             .values()
             .filter(|entry| entry.verdict.is_defect())
             .map(|entry| match &entry.verdict {
-                Verdict::Defect { reason } => format!("{}: {reason}", entry.id),
+                Verdict::Defect { reason, at } => match at {
+                    Some(at) => format!("{}: {reason} (standing at ({}, {}))", entry.id, at.x, at.y),
+                    None => format!("{}: {reason}", entry.id),
+                },
                 Verdict::Blocked { times, message } => format!(
                     "{}: stopped {times} times by the same thing{}",
                     entry.id,
@@ -296,7 +357,13 @@ impl CoverageLog {
                     "blocked",
                     format!("{times}x {}", message.as_deref().unwrap_or("(nothing was quoted)")),
                 ),
-                Verdict::Defect { reason } => ("defect", reason.clone()),
+                Verdict::Defect { reason, at } => (
+                    "defect",
+                    match at {
+                        Some(at) => format!("{reason}, standing at ({}, {})", at.x, at.y),
+                        None => reason.clone(),
+                    },
+                ),
                 Verdict::Silent => ("silent", "chosen; no outcome was ever reported".to_string()),
             };
             let aborts: Vec<String> =
@@ -511,7 +578,59 @@ pub struct ExploringBrain {
     /// Turns since an id was seen for the first time. The fixpoint of (4).
     pub barren: usize,
     pub turns: usize,
+    /// Set once the walk has played the game to its end, which is a terminus rather than a fault.
+    /// See the note where it is set.
+    pub reached_the_end: bool,
+    /// The map the last turn was asked on, for the progress heartbeat. Nothing reads it but the
+    /// `[walk]` line, and that line is the only way to tell a slow sweep from a wedged one.
+    pub here: String,
+    /// ⭐ **PC operations the walk has tried, by map.** They are not in the action menu and cannot
+    /// be: `llm::tools` withholds `MetaTile::Pc` on purpose, because every PC operation is a
+    /// `use_field_move` that walks to the PC itself, and offering a row that only walks there would
+    /// leave the agent holding an open storage menu with nothing chosen. "One way in, not two."
+    ///
+    /// So a walk that only ever calls `choose_action` can never touch the boxes or PC item storage —
+    /// which is exactly what C3's walks did, and why the table had no PC coverage at all. This
+    /// drives the other way in.
+    pc_ops_tried: std::collections::BTreeSet<(String, &'static str)>,
+    /// ⭐ **Consecutive turns the menu has offered nothing at all**, and the flies spent escaping it.
+    ///
+    /// A 48-game-hour sweep spent **279 009 of its 279 422 turns on `VictoryRoad1F`** and issued 468
+    /// overworld actions in the whole run: the walk went into the boulder puzzle, ended up somewhere
+    /// `actions()` offers no row from, and answered "nothing to do" for ever. Nothing else can see
+    /// that — the agent is not stuck (it reaches a decision point every turn and asks), so the
+    /// watchdog never fires, and a menu with no rows in it is not a defect against any id.
+    /// Turns on which the menu carried **no rows at all**.
+    pub rowless_turns: usize,
+    /// ⭐ Consecutive turns on which the menu had rows and the brain still chose nothing — every row
+    /// already visited and **no exit among them**. This, not an empty menu, is what the arithmetic
+    /// of the 48-hour sweep points at: 279 422 turns at `wait(20)` (0.4 s of game time each) is
+    /// almost exactly the 172 800 s the run lasted.
+    pub stalled_turns: usize,
+    pub stalled_worst: usize,
+    /// Where the menu went empty, one entry per episode, with the `Location:` line it was standing
+    /// on. ⚠️ **The square is the whole claim**: "boxed in" is otherwise an inference from the brain
+    /// having done nothing, and I have twice been wrong reasoning that way instead of measuring.
+    pub boxed_in_at: Vec<String>,
 }
+
+/// The PC operations the walk exercises, in the order it tries them, as
+/// (`move`, `op`, extra arguments).
+///
+/// ⚠️ **Deposit before withdraw, and an item the walk is certain to be holding.** A withdrawal of
+/// something never deposited is refused by `PcBoxOp::blocked_by` before a button is pressed, which
+/// is the tool working and tells the walk nothing. The god party is six strong so a deposit is
+/// always legal; `blocked_by` refuses depositing the *last* Pokémon, never the sixth.
+const PC_OPS: [(&str, &str, &str); 4] = [
+    ("pc_items", "deposit", r#""item":"PokeBall","quantity":1"#),
+    ("pc_items", "withdraw", r#""item":"PokeBall","quantity":1"#),
+    ("pc_pokemon", "deposit", r#""slot":5"#),
+    ("pc_pokemon", "change_box", r#""box":2"#),
+];
+
+/// Consecutive rowless turns before the walk gives up on where it is standing and flies out.
+/// Generous: a map change settles over a few turns and a menu is briefly empty while it does.
+const BOXED_IN_PATIENCE: usize = 20;
 
 /// A row that leaves the map. Matched on the id's kind, which is the one part of a row that is a key
 /// rather than prose.
@@ -531,8 +650,20 @@ impl ExploringBrain {
             seen: std::collections::BTreeMap::new(),
             maps: std::collections::BTreeMap::new(),
             barren: 0,
+            reached_the_end: false,
+            here: String::new(),
             turns: 0,
+            pc_ops_tried: std::collections::BTreeSet::new(),
+            rowless_turns: 0,
+            stalled_turns: 0,
+            stalled_worst: 0,
+            boxed_in_at: Vec::new(),
         }
+    }
+
+    /// How many distinct PC operations the walk has taken, across all maps.
+    pub fn pc_ops(&self) -> usize {
+        self.pc_ops_tried.len()
     }
 
     /// Every id this brain was ever offered, so the run can tell the log about the ones it never
@@ -552,6 +683,11 @@ impl ExploringBrain {
     /// How many maps the walk has stood on.
     pub fn maps(&self) -> usize {
         self.maps.len()
+    }
+
+    /// Turns spent on each map, so a settled walk can say what it was cycling over.
+    pub fn map_turns(&self) -> &std::collections::BTreeMap<String, usize> {
+        &self.maps
     }
 
     /// Whether the fixpoint has been reached: `barren` turns in a row with nothing new.
@@ -629,10 +765,57 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
 
         self.turns += 1;
         if let Some(map) = request.location() {
+            self.here = map.clone();
             *self.maps.entry(map).or_insert(0) += 1;
         }
 
+        // ⭐ **The PC, which no menu row leads to.** Tried once per operation per map that has one,
+        // before the ordinary frontier choice, so a Pokémon Centre is not left the moment its rows
+        // are exhausted. `use_field_move` walks to the PC itself, so this needs no routing and no
+        // row — but it does need the brain to know a PC is there, and the only string that says so
+        // is the map's name. Every Centre is `…Pokecenter`; `RedsHouse2F` is the player's own.
+        if let Some(map) = request.location()
+            && request.has_tool("use_field_move")
+            && (map.ends_with("Pokecenter") || map == "RedsHouse2F" || map == "CeladonHotel")
+        {
+            if let Some((field_move, op, extra)) = PC_OPS.iter()
+                .find(|(field_move, op, _)| {
+                    !self.pc_ops_tried.contains(&(map.clone(), *field_move))
+                        || !self.pc_ops_tried.contains(&(map.clone(), *op))
+                })
+                .filter(|(_, op, _)| self.pc_ops_tried.insert((map.clone(), *op)))
+            {
+                let arguments: serde_json::Value = serde_json::from_str(&format!(
+                    r#"{{"move":"{field_move}","op":"{op}",{extra},"summary":"exercise the PC"}}"#
+                )).expect("the arguments are valid JSON");
+                return Reply::call("use_field_move", arguments);
+            }
+        }
+
+        // ⭐ **Reaching the Hall of Fame ends the walk, because it ends the *game*.**
+        //
+        // With a god party the walk beat the Elite Four a second time, and the Champion's room
+        // does not offer a door to choose: the cartridge force-walks the player in. pokered then
+        // increments `wNumHoFTeams`, plays the parade, saves, and **soft-resets to the title
+        // screen** — and `PokemonAgent` has no `GameMode` for a title screen, so it goes on reading
+        // stale map RAM (`HallOfFame` at (4, 2)) and offering warps for a player who is no longer
+        // in the world. `host.rs` catches that byte in the product and starts a new run; a bare
+        // agent has nothing.
+        //
+        // ⚠️ **Filtering the rows out was tried first and was strictly worse.** It could not stop
+        // the walk arriving (nothing was chosen to get there), so all it did was leave the brain
+        // with nothing to pick: the sweep reported **zero defects** and spent 20 059 of its 20 538
+        // turns at the title screen. A terminus has to be *reported*, not made unreachable — the
+        // agent gap is a real finding and is logged open in `docs/coverage-plan.md` §5.2.6.
+        if request.location().as_deref() == Some("HallOfFame") {
+            self.reached_the_end = true;
+        }
         let rows = request.menu_rows();
+        // Counted before anything is chosen, so "the menu was empty" is a fact rather than an
+        // inference from the brain having done nothing.
+        if rows.is_empty() {
+            self.rowless_turns += 1;
+        }
         // ⚠️ **Insert only if absent.** A row is re-offered on every turn the player stands near it,
         // and overwriting would reset an id already chosen back to unchosen — an infinite loop on
         // the first row of every map, which is exactly the shape the agent exists to avoid.
@@ -667,24 +850,110 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                     // the walk on `PewterCity:40,18:Connection` for **59 attempts**. With the count
                     // first, every exit is taken once before any is taken twice, and promise decides
                     // the order within a pass, which is what it is for.
+                    // ⚠️ **The count is uncapped, and capping it is measured to be worse.** The
+                    // obvious refinement is `min(times, 1)` so that `promise` decides once every
+                    // exit has been taken once — it sounds strictly better and it took the walk
+                    // from **41 maps to 21**. Promise-leading bounces between two adjacent maps
+                    // that both still have unvisited rows (both score 1) and never pushes outward;
+                    // the plain round-robin diffuses, which is slower per map and reaches far more
+                    // of them. Tried and reverted 2026-09-07.
+                    // ⭐ **A door into a map nobody has been through beats one that only leads
+                    // somewhere known — but only for its first two tries.**
+                    //
+                    // Count-first diffuses, which is why it wins in general (see above), but it
+                    // has no way out of a *cluster*: the walk of 2026-09-08 spent its whole budget
+                    // inside Victory Road because every exit from every floor leads to another
+                    // floor of Victory Road, so `promise` was equal everywhere and the round-robin
+                    // simply cycled the ladders. It settled at **30 of 248 maps**, the whole of it
+                    // north-west Kanto, having never pushed through Mt Moon to Cerulean.
+                    //
+                    // ⚠️ **Two tries and then it rejoins the pool**, which is the half that keeps
+                    // this from being the promise-first ordering that was tried and reverted. A
+                    // blocked door leads somewhere unseen for ever and nothing about being turned
+                    // back changes what the brain can see, so unconditional priority is how
+                    // Brock's gym guide held the walk on `PewterCity:40,18:Connection` for 59
+                    // attempts. Priority that expires cannot do that, and it still cannot help an
+                    // exit whose promise is merely "there is work left there" (score 1), which is
+                    // the case the `min(times, 1)` experiment lost 20 maps on.
                     .min_by_key(|(id, description)| {
-                        (self.seen.get(id).copied().unwrap_or(0), self.promise_of(description))
+                        let times = self.seen.get(id).copied().unwrap_or(0);
+                        let promise = self.promise_of(description);
+                        let new_map_worth_a_try = promise == 0 && times < 2;
+                        (!new_map_worth_a_try, times, promise)
                     })
                     .map(|(id, _)| id.clone())
             });
 
+        // ⭐ **Nothing unvisited and no way out: take the least-taken row again rather than wait.**
+        //
+        // ⚠️ **A once-only frontier cannot solve a puzzle whose pieces toggle**, and that is not a
+        // hypothetical: a 15-game-hour walk spent **80 636 consecutive turns** on
+        // `PokemonMansionB1F` at (27, 10) with four rows on the menu, every one of them already
+        // visited and **no exit among them** — one of the four being `Statue1`. The Mansion statues
+        // toggle a shared barrier, so the walk had pressed one, sealed its own way out, and then
+        // refused to press it again because it had "done" that row. The same shape burned 279 009
+        // turns on `VictoryRoad1F`, which is why that floor looked like the problem and was not.
+        //
+        // A model would simply choose it again, so the walk does too. Coverage is unharmed: the
+        // frontier is over ids *offered*, and an id chosen twice is still one id.
+        let chosen = chosen.or_else(|| {
+            rows.iter()
+                .min_by_key(|(id, _)| self.seen.get(id).copied().unwrap_or(0))
+                .map(|(id, _)| id.clone())
+        });
+
         match chosen {
             Some(id) => {
+                self.stalled_turns = 0;
                 *self.seen.entry(id.clone()).or_insert(0) += 1;
+                // ⚠️ `resume_after_battle` everywhere **except** the two rows that exist to *start*
+                // a battle, and that exception is measured. A wild encounter says nothing about a
+                // walk across a route, so resuming one is a whole turn saved. But a `Grass` or an
+                // `Empty` row is a request for an encounter, so resuming it means fighting the next
+                // one too: `MAX_BATTLE_RESUMES` of them per id, which is a grind. That grind is the
+                // right answer for a model playing the game and the wrong one for a walk whose
+                // whole job is breadth. It cost this walk 12 maps and 94 ids the first time the
+                // agent started reporting a pace that ended in a battle at all: 28 maps and 352 ids
+                // became 16 and 258 in the same 90 game-minutes, because until then the abort was
+                // never emitted and every resume was silently dropped as `Dropped::Unreported`.
+                let resume = !matches!(id.rsplit(':').next(), Some("Grass" | "Empty"));
                 Reply::call(
                     "choose_action",
-                    // ⚠️ `resume_after_battle`: a wild encounter says nothing about the walk, and
-                    // without this every patch of grass costs a turn to re-issue one word for word.
-                    serde_json::json!({ "id": id, "resume_after_battle": true }),
+                    serde_json::json!({ "id": id, "resume_after_battle": resume }),
                 )
             }
-            // Boxed in: no row at all. The turn still has to end, and the situation says so.
-            None => Reply::Calls(vec![Call::wait(20)]),
+            // ⭐ **Boxed in: no row at all.** Waiting is all this branch can do, and waiting is what
+            // burned a 48-hour sweep: 279 009 turns on one map, because a walk with no row to choose
+            // has no way to leave the square it is standing on either.
+            //
+            // ⚠️ **Fly is not the escape, and assuming it was is an error worth leaving written
+            // down.** Gen 1 refuses Fly anywhere but outdoors, and every map this has happened on is
+            // a cave — so the one move that looks like a way out of a dungeon is the one the
+            // cartridge will not allow there. `Map::is_overworld` is the same fact.
+            //
+            // So the turn ends the only way it can, and what the walk does instead is *record* it:
+            // `boxed_in` is counted above and the run dumps a save state the first time it passes
+            // `BOXED_IN_PATIENCE`, because "the menu was empty" is a claim that needs the square it
+            // was empty on.
+            None => {
+                self.stalled_turns += 1;
+                self.stalled_worst = self.stalled_worst.max(self.stalled_turns);
+                if self.stalled_turns == BOXED_IN_PATIENCE {
+                    let situation = request.messages.last().map(|m| m.text.as_str()).unwrap_or("");
+                    let head: Vec<&str> = situation
+                        .lines()
+                        .filter(|l| l.starts_with("Location:") || l.starts_with("Blocked here:"))
+                        .collect();
+                    self.boxed_in_at.push(format!(
+                        "{} | rows={} all-visited, exits={} :: {}",
+                        head.join(" | "),
+                        rows.len(),
+                        rows.iter().filter(|(id, _)| is_a_way_out(id)).count(),
+                        rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", "),
+                    ));
+                }
+                Reply::Calls(vec![Call::wait(20)])
+            }
         }
     }
 }
@@ -700,24 +969,42 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
 /// until it repeats — being stopped is how this game says almost everything.
 #[test]
 #[cfg(feature = "coverage-tests")]
-fn coverage_walk_from_pallet_town() {
+fn coverage_walk_of_the_finished_game() {
     use crate::pokemon::integration_tests::cheats::Cheats;
     use crate::pokemon::integration_tests::llm_harness::LlmRun;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    /// Turns with nothing new before the frontier is called settled. Generous: a walk that has just
-    /// crossed into a new building spends several turns on rows it has already seen.
-    const PATIENCE: usize = 60;
-    /// How much game time this walk may spend. The measurement below says what that bought.
+    /// How much game time this walk may spend, in game-minutes, from `GB_COVERAGE_MINUTES`.
     ///
     /// ⚠️ **A bound, not a target, and it is `min`'d against the fixture's own cap deliberately.**
     /// §9's last risk is that the fixpoint keeps discovering rows and the walk never terminates —
     /// the answer is to *cap the passes and report a non-empty frontier as a result* rather than to
-    /// hang. The fixture's cycle budget is a panic; this is a stop. The first frontier heuristic
-    /// settled after 30 game-minutes because it could only bounce between two maps; the one that
-    /// reads a row's prose for a destination was still discovering at 30 and hit the cap.
-    const BUDGET: Duration = Duration::from_mins(90);
+    /// hang. The fixture's cycle budget is a panic; this is a stop.
+    ///
+    /// ⚠️ **The default is a *smoke* budget, not a coverage one.** 90 game-minutes reaches 28 maps
+    /// of 248 — the Pallet/Viridian/Pewter corner — and stops with the frontier wide open. Reaching
+    /// the rest of the world is a matter of game time and nothing else: the emulator runs at ~56x,
+    /// so an hour of wall clock buys about 56 game-hours. Set `GB_COVERAGE_MINUTES` for a real
+    /// sweep; the committed default stays small so the tier is runnable.
+    let minutes: u64 = std::env::var("GB_COVERAGE_MINUTES").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90);
+    let budget = Duration::from_mins(minutes);
+
+    // Turns with nothing new before the frontier is called settled. Generous: a walk that has just
+    // crossed into a new building spends several turns on rows it has already seen.
+    //
+    // ⚠️ **It scales with the budget.** On a long walk the frontier goes quiet for a while whenever
+    // the run is crossing a region it has already swept to reach one it has not, and calling that
+    // "settled" stops the walk exactly where it was about to be most useful.
+    // ⚠️ **Patience, not the budget, is what stopped the sweeps.** The 24-game-hour walk settled
+    // after 960 barren turns having spent 2.6 of its 24 hours: it was re-treading known maps, and
+    // the round-robin needs a long time to work its way outward through a world this size.
+    // `GB_COVERAGE_PATIENCE` decouples the two so a sweep can be told to run to its budget.
+    let patience: usize = std::env::var("GB_COVERAGE_PATIENCE").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or((60 * minutes.max(90) / 90) as usize);
 
     /// A handle on the brain, since the endpoint owns it.
     #[derive(Clone)]
@@ -734,20 +1021,77 @@ fn coverage_walk_from_pallet_town() {
     }
 
     let brain = Shared(Arc::new(Mutex::new(ExploringBrain::new())));
-    let mut run = LlmRun::builder(crate::pokemon::integration_tests::PALLET_TOWN_STATE)
+    // ⭐ **A *finished* game, which is what §5.1 asked for all along** — "from C2's finished save".
+    // Starting from Pallet Town walls the walk in at Pewter: the east exit is held by the Youngster
+    // who drags you to Brock ("BROCK's looking for new challengers! Follow me!") and Brock's own
+    // guide refuses ("you're still light years from facing BROCK!"), because both read the *event
+    // flag* for having beaten him and not the badge byte `debug_set_badges` writes. So Mt Moon,
+    // Cerulean, Vermilion, Celadon, Lavender, Fuchsia, Saffron, Silph and Victory Road were all
+    // unreachable, and the walk settled at 33 maps of 248 having spent 2 of its 12 game-hours.
+    //
+    // ⚠️ **And the fix is not to write that flag.** §1.2: setting `wEventFlags` desynchronises
+    // scripts from map objects and every stall found in such a save is a false positive.
+    // `postgame-phase0.bin` is the game *played* to the credits — eight badges, every gate opened by
+    // the cartridge itself, Cut/Surf/Strength and every key item in the bag, party healed.
+    let mut run = LlmRun::builder(include_bytes!("../data/postgame-phase0.bin"))
         .named("coverage-walk")
         // Twice `BUDGET`, so the walk always stops on its own bound rather than on the fixture's
         // panic. The two are different failures and only one of them is a result.
-        .game_time(BUDGET * 2)
+        .game_time(budget * 2)
         .with_coverage()
         .start(Box::new(brain.clone()));
-    run.with_cheats(Cheats::default());
+    // ⭐ **The bag is what makes the *overworld* fully offered.** Without a rod there is no
+    // `MetaTile::Fish` row anywhere in the game, and without the Silph Scope, Card Key, Lift Key,
+    // Poké Flute, Bicycle, Secret Key and S.S. Ticket whole regions are shut. `actions()` is right
+    // to withhold those rows; a walk meant to reach everywhere has to be given the items, exactly as
+    // it is given the badges. See `cheats::COVERAGE_KEY_ITEMS`.
+    run.with_cheats(Cheats::default().with_key_items(999_999));
+
+    // How long the walk may take in **wall clock**, as opposed to game time. It was
+    // `60 + minutes * 3` inline, which quietly assumes the agent manages about 20x real time; a
+    // sweep that runs slower than that is cut off having covered a fraction of what it was asked
+    // for, and before this printed a reason it looked exactly like a sweep that had finished.
+    let wall_secs: u64 = std::env::var("GB_COVERAGE_WALL_SECS").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60 + minutes * 3);
+
+    /// Wall-clock seconds between progress lines. ⭐ **A walk with no heartbeat is indistinguishable
+    /// from a hung one**, and the 24-hour sweep of 2026-09-07 was left running for two and a half
+    /// hours before anyone could tell it was livelocked on one Victory Road boulder at a rate of one
+    /// action per minute. The line is cheap and it is the difference between noticing in 30 seconds
+    /// and noticing in two hours.
+    const BEAT_SECS: u64 = 30;
 
     let started = std::time::Instant::now();
     let mut spent_the_budget = false;
-    let settled = run.tick_until(Duration::from_secs(900), |run| {
-        spent_the_budget |= run.fixture().total_cycles.to_duration() >= BUDGET;
-        spent_the_budget || brain.0.lock().expect("not poisoned").settled(PATIENCE)
+    let mut beat = started;
+    let mut beat_turns = 0usize;
+    let mut beat_visited = 0usize;
+    let settled = run.tick_until(Duration::from_secs(wall_secs), |run| {
+        spent_the_budget |= run.fixture().total_cycles.to_duration() >= budget;
+        if beat.elapsed().as_secs() >= BEAT_SECS {
+            beat = std::time::Instant::now();
+            let (turns, visited, maps, here) = {
+                let brain = brain.0.lock().expect("not poisoned");
+                (brain.turns, brain.visited(), brain.maps(), brain.here.clone())
+            };
+            let game = run.fixture().total_cycles.to_duration();
+            let wall = started.elapsed();
+            // ⚠️ **`turns/min` is the number that spots a livelock**, not the id counts: a walk
+            // wedged on one action still discovers rows every time the menu is rebuilt, and still
+            // burns game time. A healthy walk does hundreds of turns a minute; the wedged one did
+            // one.
+            let per_min = (turns - beat_turns) as u64 * 60 / BEAT_SECS;
+            let warn = if turns - beat_turns <= 2 { "  ⚠️ NOT MOVING" } else { "" };
+            println!("[walk] {wall:>5.0}s wall {game:>6.0}s game ({rate:>4.1}x) | {turns} turns \
+                      (+{per_min}/min) | {visited} chosen (+{new_ids}) | {maps} maps | on {here}{warn}",
+                wall = wall.as_secs_f64(), game = game.as_secs_f64(),
+                rate = game.as_secs_f64() / wall.as_secs_f64().max(0.001),
+                new_ids = visited - beat_visited);
+            (beat_turns, beat_visited) = (turns, visited);
+        }
+        let brain = brain.0.lock().expect("not poisoned");
+        spent_the_budget || brain.reached_the_end || brain.settled(patience)
     }) && !spent_the_budget;
     let elapsed = started.elapsed();
 
@@ -757,6 +1101,20 @@ fn coverage_walk_from_pallet_town() {
     };
     // Everything the menu offered and the walk never chose is `Unreached` rather than absent.
     let offered = brain.0.lock().expect("not poisoned").offered_ids();
+    // Where the turns actually went. A walk that has stopped finding anything is usually cycling
+    // over a handful of maps, and this is what says which.
+    let (stalled_worst, rowless, boxed_at) = {
+        let brain = brain.0.lock().expect("not poisoned");
+        (brain.stalled_worst, brain.rowless_turns, brain.boxed_in_at.clone())
+    };
+    let busiest = {
+        let brain = brain.0.lock().expect("not poisoned");
+        let mut by_turns: Vec<(String, usize)> =
+            brain.map_turns().iter().map(|(m, n)| (m.clone(), *n)).collect();
+        by_turns.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        by_turns.truncate(8);
+        by_turns.iter().map(|(m, n)| format!("{m}:{n}")).collect::<Vec<_>>().join(" ")
+    };
     let game_time = run.fixture().total_cycles.to_duration();
     {
         let log = run.fixture().coverage.as_mut().expect("coverage was asked for");
@@ -765,27 +1123,53 @@ fn coverage_walk_from_pallet_town() {
         }
     }
     let log = run.coverage().expect("coverage was asked for");
-    let written = log.write_report("walk-from-pallet-town");
+    let written = log.write_report("walk-of-the-finished-game");
 
     println!(
-        "\n════ C3: a walk from Pallet Town ════\n\
+        "\n════ C3: a walk of the finished game ════\n\
          frontier   {discovered} ids offered, {visited} chosen, across {maps} maps in {turns} turns\n\
          cost       {game_time:?} of game time, {elapsed:?} of wall clock\n\
          rate       {:.1} ids discovered per game-minute\n\
          settled    {settled} ({})\n\
          verdicts   {}\n\
          silent     {:?}\n\
+         busiest    {busiest}\n\
+         stuck      {stalled_worst} consecutive turns choosing nothing; {rowless} turn(s) had no rows at all\n\
+         where      {boxed_at}\n\
          table      {written:?}\n",
         discovered as f64 / (game_time.as_secs_f64() / 60.0).max(0.001),
-        match settled {
-            true => format!("{PATIENCE} turns with nothing new"),
-            false => format!("stopped on the {BUDGET:?} budget with the frontier still open"),
+        // ⚠️ **Three ways to stop and they are not interchangeable.** This used to print "stopped
+        // on the {budget} budget" for every unsettled walk, including the ones that had run out of
+        // *wall clock* having spent a tenth of their game-time budget — which reads as "the sweep
+        // finished, the world is just big" when it means "the sweep was cut off and you are
+        // looking at a fraction of it". The 24-hour walk of 2026-09-07 reported exactly that after
+        // reaching 8 365 s of 86 400, and the two hours spent believing it are the reason this
+        // string is now computed rather than assumed.
+        match (settled, spent_the_budget) {
+            _ if brain.0.lock().expect("not poisoned").reached_the_end => format!(
+                "⭐ the walk played the game to the **Hall of Fame** and stopped there, which is a \
+                 terminus rather than a fault: the cartridge saves and soft-resets to the title \
+                 screen, and there is no world left to walk. {:.0}% of the {budget:?} game-time \
+                 budget was spent getting there",
+                100.0 * game_time.as_secs_f64() / budget.as_secs_f64()),
+            (true, _) => format!("{patience} turns with nothing new"),
+            (false, true) => format!("stopped on the {budget:?} game-time budget with the frontier still open"),
+            (false, false) => format!(
+                "⚠️ CUT OFF after {elapsed:?} of WALL CLOCK with only {:.0}% of the {budget:?} \
+                 game-time budget spent — raise GB_COVERAGE_WALL_SECS, or find out what is running \
+                 this slowly",
+                100.0 * game_time.as_secs_f64() / budget.as_secs_f64()),
         },
         log.summary(),
         log.silent_kinds(),
+        busiest = busiest,
+        stalled_worst = stalled_worst,
+        rowless = rowless,
+        boxed_at = boxed_at.join("\n            "),
     );
 
     let defects = log.defects();
     assert!(defects.is_empty(), "the walk found {} defects:\n  {}", defects.len(), defects.join("\n  "));
     assert!(discovered > 10, "only {discovered} ids were ever offered; the walk did not happen");
 }
+
