@@ -6,17 +6,21 @@ unlosable so the story can be finished in minutes rather than hours; the finishe
 starting point for an exhaustive walk of the world.
 
 **Status.** Written 2026-09-06. Updated 2026-09-07 after the first two implementation passes, and
-**2026-09-08 after the sweep loop**: nine sweeps, each one fixing what the last surfaced. **Nine
-faults, eight fixed, two open work items** — the fixes are §5.2.6, the open items are §5.2.7 and are
-written up for someone else to pick up. Six of the eight were agent bugs rather than harness ones,
-which is the oracle doing its job.
+**2026-09-08 after the sweep loop**: nine sweeps, each one fixing what the last surfaced. **Eight
+faults fixed (§5.2.6) and three open items (§5.2.7)** — two of those are faults (W1, W3) and one is
+a ceiling (W2) — written up for someone else to pick up. Six of the eight were agent bugs rather
+than harness ones, which is the oracle doing its job.
+
+⚠️ **Everything still to do is in one table below, §0.5.** The status table says what each phase is;
+§0.5 says what picking it up costs and what "done" is, because the open work is otherwise spread
+across §4.5, §5.2.7, §5.3, §5.4, §6.1 and §7 and two of those are prose rather than work items.
 
 | | | |
 |---|---|---|
 | **C0** | the LLM e2e harness | ✅ **built.** `integration_tests/llm_harness.rs`; `llm.rs` moved onto it; all seven faults have a test; the ⛔ 402 death loop of §2.2.1 is **fixed** — (a)–(d) below |
 | **C1** | the cheat tier | ✅ **built.** Four new `debug_*` primitives and `integration_tests/cheats.rs`; `play_path_contains_no_debug_ram_writes` still passes unchanged |
 | **C2** | the god run | ◐ **the machinery and the measurement.** `integration_tests/godmode.rs`: `Intent`, `ScriptedBrain`, the driver, and `godmode_turn_cost` behind `--features godmode`. **The run to the Hall of Fame is not built** — see §4.5 |
-| **C3** | the exploration | ◐ **the oracle, the frontier and the sweep loop.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`, a 30-second progress heartbeat and an honest stop reason. ~535 ids across **38 maps** a walk at ~48× real time; nine faults found, eight fixed (§5.2.6), two open (§5.2.7). ⚠️ **38 of 248 maps is the walk's ceiling today** and closing it is W2. **Branch-point snapshots and the ROM cross-check are not built** |
+| **C3** | the exploration | ◐ **the oracle, the frontier and the sweep loop.** `integration_tests/coverage.rs`: `CoverageLog`, the verdict table, `ExploringBrain`, a 30-second progress heartbeat and an honest stop reason. ~535 ids across **38 maps** a walk at ~48× real time; ten faults found, eight fixed (§5.2.6), three open (§5.2.7). ⚠️ **38 of 248 maps is the walk's ceiling today** and closing it is W2 — ⚠️ but take that baseline from a run rather than from this file, because §5.2.5's table quotes 41 from a sweep taken *before* the §5.2.6 fixes and the walk prints its own number. **Branch-point snapshots and the ROM cross-check are not built** |
 | **C4** | the battle matrix | ◐ **the audit is done and committed** — §6.0. Six cells exist nowhere, sixteen are proved under `DeterministicPolicy` only. No test written yet |
 
 ⚠️ **Where this plan was wrong is recorded rather than edited out** (§11.5). Two so far, both in §3.3
@@ -67,6 +71,33 @@ Recorded here rather than fixed in place, because the reasoning is the useful pa
    square. So the id is now minted once by `OverworldAction::id` — moved out of `llm::tools`, which
    `agent.rs` is not even compiled with — and carried on `StartedOverworldAction`. Pairing is
    positional: a start opens an id and the next terminal overworld event closes it.
+
+---
+
+### 0.5 The work that is left
+
+⚠️ **This table is the backlog and it is the thing to keep current.** Everything in it is open;
+everything not in it is either built or explicitly out of scope. Each row names the section that
+argues it, what "done" is as something checkable, and roughly what it costs — because six of the
+nine rows are prose in the middle of a phase that reads as finished, and one of them (§7) is not
+mentioned in the status table at all.
+
+| Item | § | Done looks like | Size |
+|---|---|---|---|
+| **The intent list to the Hall of Fame** — the rest of C2 | §4.5, acceptance §4.3 | `godmode` reaches `Map::HallOfFame` from `start-of-game-state.bin` with the intent list exhausted (not the agent wandering into the credits) and at least one compaction fired; prints ms/turn and total turns | **Large.** Six `PolicyStep` variants have no menu row behind them — each is a `llm::prompt` gap or a new `Intent`, one argument at a time |
+| **W1** — no `GameMode` for the title screen | §5.2.7 | A bare `PokemonAgent` (no `host.rs`) does not spend a budget offering overworld rows after the cartridge soft-resets. ⚠️ Not a `Map::HallOfFame` special case | Medium |
+| **W2** — the walk reaches 38 maps of 248 | §5.2.7 | Maps reached moves past the baseline **the walk itself prints**, not past a number in this file | Medium. A measurement is ~5 min of wall clock |
+| **W3** — `PokemonMansion1F:15,3:EscapeRope` scores `defect` | §5.2.7 | The row routes, or it is not offered | Small |
+| **The ROM cross-check** | §5.3 | A printed report: every warp in a map header that never once appeared as a row. A report, not an assertion | Small |
+| **Branch-point snapshots** | §5.4 | The five branches (starter, fossil, Hitmon*, Bike Voucher, the trades) each covered by snapshot × N under `--features regen-fixtures` | Medium |
+| **C4's six missing cells** | §6.0, §6.1 | One LLM-path test each: ball failure, run failure, run from something that cannot flee, trainer ball refused, an item with none left, the Safari counter expiring mid-battle, the old man's tutorial | Medium. All refusals, which is where §6 predicted the findings would be |
+| **C4's sixteen promotions** | §6.0, §6.1 | Each cell proved through `LlmPolicy` and the worker rather than `DeterministicPolicy`, or a committed row saying why not | **Large**, and §6.0 says this is the half with the findings in it |
+| **The soak decision** | §7 | `soak::SOAK_GAME_TIME` halved (it is still 40 min), both tiers run for a while, and soak dropped **on a measurement** of what it found that the explorer did not | Small to do, then a wait |
+
+⚠️ **Retiring `full_playthrough` is not on this list and must not be done on the numbers in §4.2.1.**
+That measurement was Viridian Mart to Pewter City over a 25-message history and the test says so; the
+god run's figure is unknown until the intent list above exists. Until then `full_playthrough` is
+still the pre-push gate that `CLAUDE.md` says it is.
 
 ---
 
@@ -420,6 +451,12 @@ explicit that where a step does not map, **that is the finding**: either a gap i
 `Intent` this file has to grow. Working through them one at a time, each with its own argument, is
 the rest of C2.
 
+⚠️ **There is no test to add the intent list to yet.** `godmode.rs` has `godmode_turn_cost` and
+nothing else behind the feature, so this item writes a second gated test — §4.3 is its acceptance,
+and it wants a name the `-- godmode` filter in `Cargo.toml` and [test-suite](test-suite.md) already
+matches. ⚠️ **And it will be a golden RNG replay like `full_playthrough`** (§11.5), from the first
+day it exists rather than from the day that becomes inconvenient.
+
 ---
 
 ## 5. C3 — the exploration
@@ -641,7 +678,13 @@ number a wall coming down rather than a bigger budget:
 | Pallet Town, no bag | 28 | 352 | — |
 | Pallet Town, key items | 33 | 479 | ⭐ **the bag**: no rod means no `Fish` row *anywhere*, and no Bicycle/Silph Scope/Card Key/Lift Key/Secret Key/S.S. Ticket means whole regions are shut |
 | finished save | 41 | 582 | ⭐ **Brock**: Pewter's east exit and Brock's own guide read the *event flag* for having beaten him, which `debug_set_badges` does not write, so everything east of Pewter was unreachable |
-| + capped exit count | 21 | 331 | ⛔ **a regression of mine** — see the ⚠️ on the frontier's sort key |
+| + capped exit count | 21 | 331 | ⛔ **a regression of mine** — see the ⚠️ on the frontier's sort key, and it was reverted |
+
+⚠️ **None of these rows is today's baseline, and W2 must not be measured against them.** Every one
+was taken before some of §5.2.6's eight fixes, three of which (#1, #2, #5) changed how far a walk
+gets on a Strength floor — the 41 above and the 38 in the status table are different sweeps of
+different code, not a regression between them. The walk prints maps and ids on the way out: take the
+number from a run, then change something, then take it again.
 
 ⚠️ **Coverage is not a budget problem and it never was.** Every sweep so far ended `settled: true`
 with hours of its budget unspent: the 24-game-hour walk stopped after 960 barren turns having used
@@ -682,8 +725,8 @@ reported, never made unreachable.
 
 ### 5.2.7 Open work items
 
-Two, and they are independent of each other. Both are written up from evidence the sweeps produced;
-neither is started.
+Three — W1, W2 and W3 — and they are independent of each other. All are written up from evidence
+the sweeps produced; none is started. They are C3's; the rest of the backlog is §0.5.
 
 #### W1 — the agent has no `GameMode` for the title screen
 
@@ -700,10 +743,18 @@ one, so in the product nothing downstream meets the reset. Nothing *guarantees* 
 ⚠️ **the watchdog cannot save it**: `GB_STUCK_TIMEOUT_SECS` fires on emulated *silence*, and an agent
 walking into a wall and giving up every 60 seconds is not silent.
 
-**Reproduce.** `target/test-artifacts/coverage/defect-HallOfFame-4-7-Warp_state.bin` is dropped by
-the walk at the moment the verdict turns; load it with `TestFixture::new` and read `game_mode()` and
-`map.map`. (Re-cut it by removing the `reached_the_end` stop in `ExploringBrain` and running the
-walk with a large `GB_COVERAGE_MINUTES`.)
+**Reproduce.** ⚠️ **Cut the state first — do not go looking for the old one.** `target/` is
+gitignored and swept, so `defect-HallOfFame-4-7-Warp_state.bin` is not in the tree and never will
+be; every "the walk dropped a state" recipe in this file means *re-cut it*. Remove the
+`reached_the_end` stop in `ExploringBrain`, then:
+
+```shell
+GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
+  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+```
+
+The walk drops `target/test-artifacts/coverage/defect-<id>_state.bin` at the moment a verdict turns.
+Load it with `TestFixture::new` and read `game_mode()` and `map.map`.
 
 **Done looks like.** The agent recognises that the cartridge has reset — the obvious signal is
 `wCurMap`/`wIsInBattle` being meaningless while the title screen's own state is live — and stops
@@ -753,15 +804,24 @@ warps are never in the menu to be chosen.
    (`Map::is_overworld`) and cannot escape a cave, so it is a complement to the frontier, not a
    replacement.
 
-**Done looks like.** A number, not a feeling: maps reached, reported by the walk already. Anything
-that does not move it past 38 has not worked, and the run is cheap enough (~5 minutes of wall clock
-for 6 game-hours) to measure rather than argue about.
+**Done looks like.** A number, not a feeling: maps reached, which the walk already reports. ⚠️ **Take
+the baseline from a run of unmodified `HEAD` before changing anything** — ~38 is what the last sweep
+saw and §5.2.5's 41 is an older one, so a figure from this file is not something to claim an
+improvement against. A/B two runs of the same command, and remember §5.5: the totals carry a couple
+of per cent of noise, so a move of one or two maps is not a result. The run is cheap enough (~5
+minutes of wall clock for 6 game-hours) to measure rather than argue about:
+
+```shell
+GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
+  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+```
 
 #### W3 — one undiagnosed row
 
 `PokemonMansion1F:15,3:EscapeRope` scores **defect**: *"there is no route to Escape Rope"* — an item
-row offered and then not routable. Seen on several sweeps, never investigated. Small, and the
-reproduce-from-the-dropped-state recipe in W1 applies.
+row offered and then not routable. Seen on several sweeps, never investigated. Small, and W1's
+re-cut recipe applies — ⚠️ but §5.5 is the thing to read first: *which* id fails is not reproducible
+by re-running, so a sweep that does not hit this row is not evidence it has gone.
 
 ### 5.3 The ROM tables, demoted to a cross-check
 
@@ -904,14 +964,36 @@ not argued.
 
 ## 8. Order of work
 
-1. **C0** — harness, brains, faults, `LlmRun` with a run directory and a restart. Existing LLM tests
-   move onto it. *Default tier.*
-2. **C1** — the new `debug_*` primitives and the sidecar. The play-path guard keeps passing.
-3. **C2** — the god run. **Measure the turn cost first**; the decision to retire `full_playthrough`
-   depends on the number.
-4. **C3** — `CoverageLog` wired into the existing drivers (free, and it sizes the rest), then the
-   frontier brain and the verdict oracle.
-5. **C4** — the battle matrix audit and promotion.
+**The original order — C0, C1, C2, C3, C4 — was followed and the first two are done.** It is kept
+below because §0.3 is why nothing was split off to de-risk it, and that argument still binds
+anything added.
+
+1. ✅ **C0** — harness, brains, faults, `LlmRun` with a run directory and a restart. Existing LLM
+   tests move onto it. *Default tier.*
+2. ✅ **C1** — the new `debug_*` primitives and the sidecar. The play-path guard keeps passing.
+3. ◐ **C2** — the god run. Turn cost measured (§4.2.1); the intent list is what is left.
+4. ◐ **C3** — `CoverageLog` wired into the existing drivers, the frontier brain and the verdict
+   oracle. All built; W1–W3, §5.3 and §5.4 are what is left.
+5. ◐ **C4** — audit committed; the matrix is unwritten.
+
+**The order to take the remaining work in**, which is not the order above because the phases no
+longer gate one another — every row of §0.5 is independently startable against code that exists:
+
+1. **W3**, then **§5.3's cross-check**. Both small, both sharpen the oracle that scores everything
+   else, and W3 is a live `defect` that will keep failing the walk for whoever runs it next.
+2. **W1**. It is the only open item that is a defect in the *agent* rather than in the walk, so it
+   is the one a deployed run could meet.
+3. **C4's six missing cells** (§6.0). Self-contained, and the audit already says exactly what each
+   one is.
+4. **W2**, starting with §5.2.7's direction 1 (regional sweeps over a selectable start fixture) —
+   cheap, needs no new search, and it is what makes the rest of the world visible to everything else
+   on this list.
+5. **The intent list** (§4.5). The largest, and the only one whose value depends on finishing it: a
+   god run that stops short of the Hall of Fame replaces nothing.
+6. **C4's promotions** and **§5.4's branch points**, as long tails.
+
+⚠️ **§7's soak decision is not in that order because it is a wait, not a task.** Halve
+`SOAK_GAME_TIME` now — it is one constant — and decide later, on evidence.
 
 ---
 
@@ -970,19 +1052,16 @@ module comment (why breadth beats depth, measured), and `agent.rs`'s `AgentEvent
 
 ### 11.3 The tiers
 
-Two new features, each with a doc comment in `Cargo.toml` in the style of the eight already there
-(what it holds, why it is separate, and the command that runs it):
+✅ **Both features exist** — `godmode` and `coverage-tests`, each with the doc comment in
+`Cargo.toml` the house style asks for. ⚠️ **`Cargo.toml` and [test-suite](test-suite.md) are the
+authority on what runs them, not this file**: the commands here were drafted before the tests were
+named and one of them named a test that was never written (`godmode_playthrough`). The real ones are
+in §11.4 below, and they are the ones the two docs agree on.
 
-```toml
-# C2 — a fresh save played to the Hall of Fame through `LlmPolicy` against an in-process mock
-# endpoint, with battles won by a god party and decided by a script. The pre-push gate
-# `full_playthrough` used to be, and the only test that drives the deployed stack for a whole game.
-#   cargo test --release --features godmode --bin gb -- godmode_playthrough --nocapture
-godmode = []
-# C3 — every reachable action in the finished game, taken once, with a verdict on each.
-#   cargo test --release --features coverage-tests --bin gb -- coverage --nocapture
-coverage-tests = []
-```
+⚠️ **`godmode`'s comment says what the tier is for and it is worth re-reading before adding to it**:
+it is gated because it is a *measurement* as much as a test. The machinery beneath both features —
+`Intent`, `ScriptedBrain`, `cheats::Cheats`, `coverage::CoverageLog` — is deliberately default tier,
+so anything new that does not spend game time belongs there rather than behind the gate.
 
 ⚠️ **A tier goes behind a feature, never behind `#[ignore]`.** The ignored list is a backlog of
 *blocked* tests and is asserted to be exactly 18; adding to it breaks that assertion and, worse,
@@ -992,13 +1071,33 @@ default tier's budget.
 ### 11.4 Running things
 
 ```shell
-cargo test --release                                              # C0 and C1 live here
-cargo test --release --features godmode --bin gb -- godmode_playthrough --nocapture
-cargo test --release --features coverage-tests --bin gb -- coverage --nocapture
+cargo test --release                                              # C0, C1, and both oracles
+cargo test --release --features godmode --bin gb -- godmode --nocapture
+cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 
-# Still the gate for the scripted route, and it does not go away:
+# Still the pre-push gate, and it does not go away until §4.5 exists:
+cargo test --release --features full-playthrough full_playthrough
+# Still the gate for the scripted route, and it does not go away at all:
 cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
 ```
+
+⚠️ **The test names are `godmode_turn_cost` and `coverage_walk_of_the_finished_game`.** A filter
+that matches nothing makes libtest print `0 passed` and exit **0**, so a mistyped command here reads
+exactly like a green run — which is how the draft above went a day claiming a `godmode_playthrough`
+that has never existed. Check the count in the output.
+
+**The walk's knobs**, none of which are flags, all of which decide whether a sweep is a smoke test
+or a coverage run:
+
+| | |
+|---|---|
+| `GB_COVERAGE_MINUTES` | the walk's budget in **game**-minutes (default 90 — a smoke budget, not a coverage one). The emulator runs at ~56x, so an hour of wall clock buys ~56 game-hours |
+| `GB_COVERAGE_PATIENCE` | barren turns before the frontier is called settled. ⚠️ **This, not the budget, is what has stopped every sweep** — §5.2.5: a 24-game-hour walk settled having spent 2.6 of them. Set it high for a real sweep |
+| `GB_COVERAGE_WALL_SECS` | a wall-clock stop, so a wedged sweep fails instead of running all night |
+| `GB_SOAK_MINUTES`, `GB_SOAK_SEED` | the soak tier's equivalents, for §7 |
+
+⚠️ **`GB_COVERAGE_START` does not exist**; it is proposed by W2's direction 1 and building it is part
+of that item. Today the walk's start fixture is fixed in `coverage_walk_of_the_finished_game`.
 
 Always `--release`; the crate is `--bin gb`, never `--lib`; agent and policy debugging goes to
 stdout, so `--nocapture` when you care. Failure artifacts go to `target/test-artifacts/`, which is
