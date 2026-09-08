@@ -23,14 +23,17 @@ behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
 still ahead of the code. It replaces the soak tier's random walk with an exhaustive one, driven
 through `LlmPolicy` against a mock endpoint so the thing under test is the deployed stack, and it
 cheats past the game's gates with the debug tier rather than around them. **C0, C1 and C3's frontier
-walk are built; the god run is not** — its status table says exactly what, and §0.4 records where the
-plan itself turned out to be wrong. ⭐ **§5.2.6 and §5.2.8 are the faults the sweeps found and
-§5.2.7 is the two that are still open**, written up to be picked up cold; most of the fixed ones were
-agent bugs rather than harness ones. ⚠️ **§5.2.8 is the one to read before filing a coverage defect**:
-the row that had been on the open list longest was sound, and what was actually wrong was that a
-sprite's action id moved with the player — a quarter of the frontier was one object counted many
-times. Read it before touching the soak tier, `postgame/debug.rs`,
-`integration_tests/llm*.rs` or anything under `integration_tests/{cheats,coverage,godmode}.rs`.
+walk are built; the god run is not** — its status table says exactly what, and §0.4 records the four
+places the plan itself turned out to be wrong. ⭐ **§5.2.6 and §5.2.8 are the faults the sweeps found
+and §5.2.9 is the 42 the regional sweep found next**, written up to be picked up cold; most of the
+fixed ones were agent bugs rather than harness ones. ⚠️ **§5.2.8 is the one to read before filing a
+coverage defect**: the row that had been on the open list longest was sound, and what was actually
+wrong was that a sprite's action id moved with the player — a quarter of the frontier was one object
+counted many times. ⚠️ **And §5.5 before running one**: the walk's start is `GB_COVERAGE_START` now
+(one walk is 38 maps, eight regions union to 159), and a single run's totals are a coin flip between
+two different walks rather than a measurement. Read it before touching the soak tier,
+`postgame/debug.rs`, `integration_tests/llm*.rs` or anything under
+`integration_tests/{cheats,coverage,godmode}.rs`.
 
 ## Rules of the road
 
