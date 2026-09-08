@@ -81,6 +81,14 @@ impl TestFixture {
         let options = crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
         PokemonApi::new(&mut gb).debug_set_options(&options);
 
+        // ⭐ **Nothing in this harness ever listens, so the APU does not mix or resample.** The
+        // bench measures the mechanism at +10.2%; this tier was not A/B'd separately, so read that
+        // as the shape of the saving rather than as this test's number. The four
+        // channels keep clocking, so the machine is bit-identical either way — that is asserted
+        // directly by `game_boy::tests::silencing_the_output_side_is_invisible_to_the_game`, which
+        // is what makes this safe to do to a golden RNG replay like `full_playthrough`.
+        gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
+
         Self {
             options,
             steps_at_start,
