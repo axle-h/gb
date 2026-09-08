@@ -366,6 +366,10 @@ fn soak(state: &SoakState) {
 
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(state.state).expect("a committed soak fixture loads");
+    // Nobody listens to a jam hunt, so the APU does not mix or resample: ~10% off a tier that runs
+    // for as long as you leave it. Bit-identical either way — see `TestFixture::with_policy`, which
+    // does the same for every other tier, and the test named there.
+    gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
     let mut cache = MapMetadataCache::default();
     // ⚠️ The *deployment's* options, not `FAST_FIXTURE_OPTIONS` — see the module docs. Written once:
     // nothing a random walker can do reloads them short of a soft reset, and a soak that re-applied

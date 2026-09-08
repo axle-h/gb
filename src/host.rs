@@ -1054,6 +1054,12 @@ impl EmulatorHost {
     /// skipping the whole thing is exactly the behaviour a headless run has always had and costs
     /// the emulator thread nothing at all.
     ///
+    /// ⭐ **Nothing is *synthesised* either, and that is worth 10% of the emulator.** The same
+    /// signal shuts [`crate::audio::Audio::set_output_enabled`], so the APU stops mixing and
+    /// resampling into a buffer nobody was going to read. Its four channels keep clocking, so the
+    /// game is bit-identical — see `docs/emulator-performance.md` §6 for the measurement and
+    /// `game_boy::tests::silencing_the_output_side_is_invisible_to_the_game` for the proof.
+    ///
     /// ⚠️ **The 0→1 edge throws away what accumulated while nobody was there** — up to 100 ms of
     /// blip backlog *and* the part-built frame — or the first thing a new listener hears is a
     /// fragment of a moment that may be hours old. That is why this reads an edge and not a level.
@@ -1067,10 +1073,12 @@ impl EmulatorHost {
         // `push`**: without this the loop below would still drain the blip buffer every tick for the
         // rest of the process, for an encoder that is never going to encode any of it again.
         if self.audio.as_ref().is_none_or(AudioEncoder::silenced) {
+            self.set_audio_output(false);
             return;
         }
         if self.published.audio_listeners() == 0 {
             self.audio_listeners = false;
+            self.set_audio_output(false);
             return;
         }
         if !self.audio_listeners {
@@ -1078,9 +1086,18 @@ impl EmulatorHost {
             if let Some(audio) = self.audio.as_mut() {
                 audio.restart();
             }
+            // Ahead of the drain rather than after it, so the two throw the same moment away:
+            // `set_output_enabled` clears the blip buffer, and the read below then finds nothing.
+            // It is kept anyway because the gate may never have been shut — a run whose listener
+            // arrived on the very first tick has an untouched buffer with a frame or two in it.
+            self.set_audio_output(true);
             while self.gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut self.audio_scratch) > 0 {}
             return;
         }
+        // Every tick, not just on the edge: `MMU::reset` replaces the whole `Audio` and a
+        // `load_state` does not carry derived state, so a gate set once would silently reopen.
+        // Setting it is a bool compare when nothing has moved.
+        self.set_audio_output(true);
 
         loop {
             let frames = self.gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut self.audio_scratch);
@@ -1104,6 +1121,13 @@ impl EmulatorHost {
         for packet in self.audio_packets.drain(..) {
             self.published.publish_audio(packet);
         }
+    }
+
+    /// Run the APU's mixer and resampler, or do not. See
+    /// [`crate::audio::Audio::set_output_enabled`] for what stays running either way — which is
+    /// everything the *game* can see.
+    fn set_audio_output(&mut self, enabled: bool) {
+        self.gb.core_mut().mmu_mut().audio_mut().set_output_enabled(enabled);
     }
 
     fn publish_video(&mut self) {
@@ -1632,6 +1656,35 @@ mod tests {
             std::thread::sleep(Duration::from_micros(500));
         }
         assert!(after >= 5, "the sound never came back after the park; only {after} packets");
+    }
+
+    /// ⭐ **Nobody listening means the APU does not synthesise**, which is 10% of the emulator on a
+    /// deployment where the speaker is off nearly all the time. `drain_audio` already declined to
+    /// *encode*; this is the half that declines to make the samples in the first place.
+    ///
+    /// ⚠️ Asserted on the gate itself rather than on how much audio came out, because "no samples"
+    /// is also what a broken APU looks like. The listening half of the test is what says the gate
+    /// still opens.
+    #[test]
+    fn nothing_is_synthesised_while_nobody_is_listening() {
+        let published = Published::new();
+        let mut host = host(Arc::clone(&published));
+
+        for _ in 0..3 {
+            host.tick();
+        }
+        assert!(
+            !host.gb.core().mmu().audio().output_enabled(),
+            "the APU was still mixing and resampling with nobody attached",
+        );
+
+        // A listener arrives and it opens again — on the same edge that restarts the encoder.
+        let _listener = published.join_audio();
+        host.tick();
+        assert!(
+            host.gb.core().mmu().audio().output_enabled(),
+            "a listener attached and the APU never started synthesising again",
+        );
     }
 
     /// The twin of [`the_host_publishes_decodable_video`]: what reaches a listener is real Opus

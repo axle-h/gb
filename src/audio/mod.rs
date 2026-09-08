@@ -55,6 +55,12 @@ pub struct Audio {
     /// Something the levels cannot show has moved — panning, master volume, the power switch — so
     /// [`Audio::mixed`] is stale. Set by every register write, which is cheap and cannot be wrong.
     mix_dirty: bool,
+    /// Whether the mixer and the resampler run at all. See [`Audio::set_output_enabled`].
+    ///
+    /// Derived state, like `output` itself: a property of the sink rather than of the machine, so
+    /// it is neither serialised nor part of equality. `true` by default, which is what every caller
+    /// that has not thought about it wants.
+    output_enabled: bool,
 }
 
 impl Default for Audio {
@@ -74,6 +80,7 @@ impl Default for Audio {
             levels: 0,
             // Nothing has been mixed yet, so the first update must not trust `mixed`.
             mix_dirty: true,
+            output_enabled: true,
         }
     }
 }
@@ -111,6 +118,42 @@ impl Audio {
     /// [`Self::output_sample_rate`]: a missed re-apply should fail a test, not a listener's ear.
     pub fn emulation_speed(&self) -> f64 {
         self.output.speed()
+    }
+
+    /// Turn the mixer and the resampler on or off, without touching the four channels.
+    ///
+    /// **The sink says whether anything is listening, and the APU's output side is nearly a tenth
+    /// of the emulator.** `host.rs` encodes nothing while nobody has pressed the speaker — see
+    /// `drain_audio` — and for that whole time the APU was still mixing four channels, quantising
+    /// them and scatter-adding band-limited steps into a buffer that would be thrown away. Off, the
+    /// machine is unchanged in every way software can observe: the channels keep clocking, NR52
+    /// keeps answering, the wave RAM aperture still opens, and `next_event` still bounds the HALT
+    /// skip. Only [`Audio::read_samples_f32`] notices, by having nothing to hand back.
+    ///
+    /// ⚠️ **Coming back on is a resync, not a resume.** The resampler's 16.16 time cursor stops
+    /// advancing while this is off, so anything still in the buffer belongs to a moment that may be
+    /// hours old and the synth's last amplitude is a level the machine has long since left. Both
+    /// are dropped here, which is the same 0→1 policy `drain_audio` already applies to the encoder.
+    /// `mix_dirty` is what makes the next update re-report the level from scratch.
+    ///
+    /// Derived state: not serialised, not part of equality, and — like the sample rate and the
+    /// emulation speed — **not restored by `load_state`**, which is why the caller re-applies it
+    /// every tick rather than once.
+    pub fn set_output_enabled(&mut self, enabled: bool) {
+        if enabled == self.output_enabled {
+            return;
+        }
+        self.output_enabled = enabled;
+        if enabled {
+            self.output.clear();
+            self.mix_dirty = true;
+        }
+    }
+
+    /// Whether the mixer and the resampler are running. Same reason as
+    /// [`Self::output_sample_rate`]: a gate stuck shut should fail a test rather than a listener.
+    pub fn output_enabled(&self) -> bool {
+        self.output_enabled
     }
 
     /// Fill `out` with interleaved L/R frames, returning the number of *frames* written; zero means
@@ -151,7 +194,9 @@ impl Audio {
     pub fn update(&mut self, delta: MachineCycles, div_clocks: DividerClocks) {
         if !self.enabled {
             self.mixed = AudioSample::ZERO;
-            self.push_sample(delta, AudioSample::ZERO);
+            if self.output_enabled {
+                self.push_sample(delta, AudioSample::ZERO);
+            }
             return;
         }
 
@@ -160,6 +205,19 @@ impl Audio {
         self.channel2.update(delta, events);
         self.channel3.update(delta, events);
         self.channel4.update(delta, events);
+
+        // ⭐ **Everything past here produces samples for somebody, and when there is nobody it is
+        // skipped.** Worth **+10.2%** on `bench_core_throughput` — mixing, `BlipStereo` and
+        // `end_frame` — against a headless run that is the deployment's normal state, since a
+        // viewer has to press the speaker before a single packet is encoded. The
+        // four channels above are *not* skipped and must not be: their registers are CPU-visible
+        // through NR52 and the wave RAM, and [`Audio::next_event`] is the HALT skip's bound.
+        //
+        // ⚠️ Leaving `mixed`, `levels` and the resampler's clock frozen is the whole trick, and
+        // [`Audio::set_output_enabled`] is where the cost of it is paid: coming back is a resync.
+        if !self.output_enabled {
+            return;
+        }
 
         // When all four channel DACs are off, the master volume units are disconnected from the
         // sound output and the output level becomes 0.

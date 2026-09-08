@@ -154,6 +154,17 @@ mod tests {
     /// full `agent.step()` instead, which is a different number and lives in the wrong module.
     /// Phase C is scored against *this* one.
     ///
+    /// ⭐ **The Pokémon workload presses no buttons, and that is not the weakness it looks like.**
+    /// A scripted joypad timeline was built to check exactly that — a 27-tile walking lap and a
+    /// loop through a doorway, both driven by absolute-time button presses against a bare
+    /// `GameBoy` — and the profile came out the same three ways: standing still, walking, and
+    /// changing map, within a couple of points on every source file, at 88-91x realtime. Walking
+    /// costs 2% more wall clock than standing still and a **map load is 5% cheaper**, because the
+    /// screen is off while it runs. The PPU draws 144 scanlines a frame whatever the player does,
+    /// and that is where the time goes; the rig was deleted once it had said so. See
+    /// [docs/emulator-performance.md](../docs/emulator-performance.md) for the numbers, the
+    /// ablation ceilings taken with it, and the ranked list of what to do about them.
+    ///
     /// ```text
     /// cargo test --release --features bench --bin gb -- \
     ///   game_boy::tests::bench_core_throughput --exact --nocapture
@@ -179,9 +190,20 @@ mod tests {
         let only = std::env::var("BENCH_ONLY").unwrap_or_default();
 
         fn pokemon_in_game() -> GameBoy {
+            use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
             let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data/at-celadon.bin");
             let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
             gb.load_state(&std::fs::read(path).expect("fixture")).expect("load fixture");
+            // ⚠️ **The claim below is "a real game, mid-play", and nothing else here checks it.**
+            // A fixture that had drifted into a battle or a menu would still produce a plausible
+            // number — a slower one, off a different code path — and every optimisation measured
+            // against it afterwards would be measured against the wrong thing.
+            let mmu = gb.core().mmu();
+            assert_eq!(
+                (mmu.read_pointer(&pokered_symbols::wCurMap), mmu.read_pointer(&pokered_symbols::wIsInBattle)),
+                (crate::pokemon::map::Map::CeladonCity as u8, 0),
+                "the benchmark fixture is no longer standing in the Celadon overworld"
+            );
             gb
         }
 
@@ -278,6 +300,61 @@ mod tests {
             }
             assert!(halted, "{name} never HALTs, so it proves nothing about the fast path");
         }
+    }
+
+    /// ⭐ **The APU's output side is skipped when nobody is listening, and the machine must not be
+    /// able to tell.** [`crate::audio::Audio::set_output_enabled`] stops the mixer, the resampler
+    /// and `end_frame`; it leaves the frame sequencer and the four channels running, because their
+    /// registers are CPU-visible and `Audio::next_event` is the HALT skip's bound. The saving is 9%
+    /// of the emulator, so the only question is whether it is free, and this is the answer: two
+    /// machines, one gated and one not, compared frame by frame.
+    ///
+    /// The framebuffer is compared for the same reason the HALT test compares it: [`PartialEq`]
+    /// excludes it, and a divergence in the *timing* of the APU's work would land there first.
+    #[test]
+    fn silencing_the_output_side_is_invisible_to_the_game() {
+        /// One frame: 154 scanlines x 456 T-cycles.
+        const FRAME: MachineCycles = MachineCycles::from_t(70_224);
+        const FRAMES: usize = 120;
+
+        // A real game, mid-play with music playing — a workload whose DACs are on, so the mixing
+        // being skipped is mixing that would otherwise have happened.
+        let build = || {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pokemon/data/at-celadon.bin");
+            let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+            gb.load_state(&std::fs::read(path).expect("fixture")).expect("load fixture");
+            gb
+        };
+        let (mut gated, mut open) = (build(), build());
+        gated.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
+
+        let mut scratch = vec![0.0f32; 8192];
+        let (mut gated_frames, mut open_frames) = (0usize, 0usize);
+        for _ in 0..FRAMES {
+            gated.run(FRAME);
+            open.run(FRAME);
+            assert_eq!(gated, open, "the machine diverged with the APU's output side gated");
+            assert!(
+                gated.core().mmu().ppu().lcd() == open.core().mmu().ppu().lcd(),
+                "the framebuffer diverged with the APU's output side gated",
+            );
+            gated_frames += gated.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut scratch);
+            open_frames += open.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut scratch);
+        }
+
+        // Otherwise the equality above is comparing two machines that were both making no sound.
+        assert!(open_frames > 0, "the fixture produced no audio at all, so this proves nothing");
+        assert_eq!(gated_frames, 0, "the gate is open: {gated_frames} frames came out of it");
+
+        // ⚠️ And it comes back. Not a resume — the resampler's clock stopped, so what it holds is
+        // dropped — but sound that starts again, which is what a listener arriving hears.
+        gated.core_mut().mmu_mut().audio_mut().set_output_enabled(true);
+        let mut resumed = 0usize;
+        for _ in 0..FRAMES {
+            gated.run(FRAME);
+            resumed += gated.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut scratch);
+        }
+        assert!(resumed > 0, "the sound never came back after the gate reopened");
     }
 
     /// A1: `reset()` used to be `todo!()`, so any caller panicked.
