@@ -24,6 +24,13 @@ cpu_instrs.gb                   53.5x        224202759        600     # never HA
 dmg-acid2.gb                   189.1x        793088768        600     # HALTs heavily
 ```
 
+⚠️ **`BENCH_AUDIO=off` is the number that matters now, and it is a different number.** It gates the
+APU's output side, which is the state every agent test tier and the deployment actually run in —
+nothing has ever listened in either — and two of the three optimisations in §6 only exist there. The
+table above is the *open* configuration, which is what a listener at the desktop or on the page gets.
+Score work on the channels against the gated baseline and work on the mixer against the open one, and
+say which you used; §6's tables do.
+
 ⭐ **Pressing no buttons is not a weakness of that benchmark, and this was checked rather than
 assumed.** A scripted joypad timeline was built for exactly this doubt — "at absolute emulated time
 T, hold `Left` for 7.6 s" replayed against a bare `GameBoy`, with no agent anywhere in the loop —
@@ -118,24 +125,61 @@ cost more than the bit-twiddling saved.
 A third ablation could not be run at all: removing `MMU::update`'s five-way interrupt poll (6.5% of
 that function) stops the game working, so its value is still unknown.
 
+### 4.1 The same thing again, with the output side gated (2026-09-08)
+
+Once §6.1 landed, the baseline moved and the shares moved with it. These are against
+`BENCH_AUDIO=off` on the pokemon fixture, best of three, baseline **98.2x**:
+
+| ablation | result | so that thing is |
+|---|---|---|
+| the four channels never advance | **122.8x** | the channel side = **20%** of the gated wall clock |
+| the channels advance to a deadline, no correctness plumbing | **110.0x** | ⭐ what §6.2 was worth going after |
+
+⚠️ **A third negative result, and the sharpest one here: flushing defensively in the powered-off
+branch of `Audio::update` costs 1.5%.** That branch cannot carry a batch — `Audio::reset` clears it
+outright and nothing else can turn the APU off — but even a *guarded* `if pending > 0 { sync() }`,
+on a branch the pokemon fixture essentially never takes, measured **105.4–106.6x against
+107.1–108.2x**. The cost is not the compare, it is the layout: this whole function inlines into
+`MMU::update`. The invariant is enforced where the state is created and carries a `debug_assert`
+where it is consumed, which is worth knowing before someone tidies that into a real check.
+
+A fourth, taken after the fact and worth the same one line the other negative results get: `perf`
+blames `flatten.rs` for **1.3%** of the gated run, all of it `soonest_channel_event`'s
+`[..].into_iter().flatten().min()` once per flush. Folding the four `Option`s by hand measured
+**108.0–108.7x against 107.7–108.5x**, which is no change: the compiler was already doing it and the
+samples are attribution rather than work.
+
+⚠️ **The crude second row is 110.0x and the shipped thing is 108.5x, and the gap is not overhead —
+it is the correctness.** The ablation carried a batch straight into the frame sequencer's tick;
+paying it off first is an extra `advance_channels` at 512 Hz and it is what makes the mechanism
+exact. See the comment in `Audio::update`, and §6.2's noise-channel bug for what the shortcut cost.
+
 ## 5. What to do about it, ranked
 
-1. ~~⭐ **Gate the APU's output side when nobody is listening.**~~ **Done, 2026-09-08 — §6.**
+1. ~~⭐ **Gate the APU's output side when nobody is listening.**~~ **Done, 2026-09-08 — §6.1.**
    Predicted +10%, delivered +10.2%.
-2. **Deadline-drive the APU's channel updates.** The other 21 points of the APU's 30%, so the
-   ceiling is large. The four channels are advanced every instruction to move phase timers that fire
-   far less often, and `Audio::next_deadline` — the bound C2's HALT skip already respects — is
-   exactly the "how long can this be left alone" answer needed. High difficulty and high risk:
-   the frame sequencer, length counters, envelopes and sweep all have to land on the same cycle they
-   do now, and the blip clock is unforgiving.
-3. **Render a scanline in one pass, catching up only when a write demands it.** +5.6%. Medium-high
+2. ~~**Deadline-drive the APU's channel updates.**~~ **Done, 2026-09-08 — §6.2.** Predicted 12%,
+   delivered **+10.4%** gated and **+18.2%** on `cpu_instrs`.
+3. ⭐ **Let a listener have the batch too.** §6.2 only batches while the output side is gated,
+   because with a listener attached the resampler has to be told *when* a level moved and not merely
+   that it did. The crude ablation that ignored this measured the open configuration at **104x**
+   against 89, so there is **~17%** here for the desktop UI and for anyone who presses the speaker.
+   The shape is known and it is small: a level can only move at a flush, so between flushes the
+   mixer is already doing nothing but `end_frame`, and `end_frame(a); end_frame(b)` is
+   `end_frame(a+b)` — split the flush into `end_frame(pending - delta)`, `update(mixed)`,
+   `end_frame(delta)` and every transition lands on the cycle it lands on today. What makes it work
+   worth doing carefully rather than quickly is that **nothing here fails loudly**: the machine stays
+   bit-identical either way, so `full_playthrough` and the blargg suites would all pass a version
+   that had merely made the music slightly wrong. It needs a test that compares *samples*, and
+   `src/audio/blip/tests.rs`'s spectral check is the closest thing to a template.
+4. **Render a scanline in one pass, catching up only when a write demands it.** +5.6%. Medium-high
    difficulty for a modest return: correctness needs a catch-up on every write to VRAM, OAM, LCDC,
    SCX/SCY, WX/WY and the palettes, and `dmg-acid2`/`cgb-acid2` plus
    `the_halt_fast_path_matches_stepping_cycle_by_cycle` are what would have to hold.
-4. **A base-cycle table for `OpCode::machine_cycles`.** 4.1% self, called once per instruction (twice
+5. **A base-cycle table for `OpCode::machine_cycles`.** 4.1% self, called once per instruction (twice
    for a taken branch) as a large match over a rich enum, where a `[u8; 256]` indexed by the raw
    opcode byte would do. Untested; the plumbing is that `OpCode` does not currently keep its byte.
-5. **A combined "any interrupt pending" mask**, to replace the five-way poll every instruction.
+6. **A combined "any interrupt pending" mask**, to replace the five-way poll every instruction.
    Unmeasured, plausibly 1-2%.
 
 ⚠️ **The pixel loop has no cheap wins left** — it is 35% of the run and the two obvious ideas came
@@ -145,7 +189,7 @@ and deserves an ablation measuring its ceiling *before* anyone starts writing it
 
 ## 6. What has been done
 
-### The APU's output side is gated when nobody is listening (2026-09-08, +10.2%)
+### 6.1 The APU's output side is gated when nobody is listening (2026-09-08, +10.2%)
 
 Ranked #1 above, and it measured where the ablation said it would:
 
@@ -189,3 +233,81 @@ to each other.
 test is a golden RNG replay: a change that moved the emulator by one cycle would fail it hundreds of
 steps from wherever the change was. It passes unchanged, which is the strongest single statement
 here: eight badges of scripted play, cycle-for-cycle the same game with the APU's output side off.
+
+### 6.2 The four channels are advanced to a deadline rather than per instruction (2026-09-08, +10.4%)
+
+Ranked #2 above, and §4.1 is the ablation that sized it: with the output side already gated the four
+channels were **20%** of the emulator, and almost all of it was four counters being decremented past
+a moment that had not arrived. At the periods a game actually plays, the soonest of the four phase
+timers is tens of M-cycles out and an instruction is two or three.
+
+`Audio::next_event` — the bound C2's HALT skip has always respected — is exactly the "how long can
+this be left alone" answer, so this is that same skip applied to the CPU's *running* cycles as well
+as its idle ones. `Audio::update` accumulates `pending` and returns; when it reaches
+`channel_deadline` the whole batch is handed to the channels in one call.
+
+| `bench_core_throughput`, `BENCH_AUDIO=off` | before | after | |
+|---|---|---|---|
+| pokemon-red (fixture) | 96.6–98.1x | **107.6–108.5x** | **+10.4%** |
+| cpu_instrs.gb | 58.5–59.3x | **69.2–69.6x** | **+18.2%** |
+| dmg-acid2.gb | 193.4–194.7x | 194.0–196.2x | +0.6% |
+
+⚠️ **Those are four rounds of the two binaries run *alternately*, not two runs an hour apart.** This
+machine drifted 1–2% over the afternoon that produced them, which is the same size as the third
+result below — long enough to invent a regression that was not there, and it did, twice. Keep the
+old binary in its own `CARGO_TARGET_DIR` and interleave.
+
+⭐ **The spread across the three is the mechanism explaining itself.** `cpu_instrs` never HALTs, so
+before this it had no deadline-driving anywhere and gains the most. Pokémon HALTs for 65% of its
+cycles, which were already skipped, so it gains on the other 35%. `dmg-acid2` powers the APU on and
+never plays a note, so there is nothing to batch and nothing to gain — and, importantly, nothing lost
+either. The open configuration (a listener attached) measured 90.0–91.8x against a baseline of
+89.1–90.1x: unchanged, which is what it is meant to be.
+
+**Four things had to be got right, and one of them was got wrong first.** All four are the same
+question — *what can move a channel between now and the deadline?* — and the answer is: a frame
+sequencer event, a register write, and nothing else.
+
+- ⚠️ **Nothing may advance a phase inside a batch**, and that is what makes the mechanism exact
+  rather than approximate. `channel_deadline` is the *minimum* over the four channels, so the flush
+  finds every one of them still short of its next tick and the closed forms in `PhaseTimer::update`
+  and `NoiseChannel::update` take their one-step path exactly as they did per instruction.
+- ⚠️ **The batch is paid off *before* a frame-sequencer event, not with it.** This is the one that
+  was wrong first. A channel applies its length counter, envelope and sweep at the *start* of the
+  window it is handed and only then advances, so carrying the batch into the event's call moves
+  cycles that belong before the tick to after it — and when the length counter deactivates the
+  channel, `update` returns early and the whole batch is **dropped on the floor**. The symptom was
+  an idle noise channel frozen 60 cycles later than it should have been, three thousand frames in.
+- ⚠️ **A register write flushes first.** It is the one thing that can move a channel without the
+  frame sequencer. `MMU::update` runs *after* the instruction's bus access, so everything
+  outstanding at a write belongs to strictly earlier instructions and paying it off is exactly
+  right. It also puts `access_offset` back on the instruction boundary that `WaveChannel::trigger`'s
+  retrigger quirk measures from.
+- ⚠️ **The DMG wave-RAM read aperture is compensated arithmetically, not by flushing**, because
+  `Audio::read` takes `&self`. `access_offset` adds the outstanding batch; `fetch_at` subtracts a
+  counter that is stale by the same amount, so the two cancel exactly.
+
+Three more places had to learn to see past a batch, none of them hot: `Audio::next_event` nets it
+off (**and must still answer `None` when nothing is clocking** — a stand-in `u64::MAX` wraps
+`MMU::schedule`'s sum round to a deadline in the past and the HALT skip silently stops skipping),
+and the `apu` save-state section and `PartialEq` both go through `Audio::settled`, which advances
+*clones*. A save state carrying channels a few dozen cycles behind the CPU would restore a machine
+that is subtly not the one that was saved, and `the_halt_fast_path_matches_stepping_cycle_by_cycle`
+builds two machines batching differently on purpose.
+
+⚠️ **Every APU test in this repo ran the un-batched path, so the accuracy suite proved nothing about
+this.** blargg's `dmg_sound` tests run with the output side open, which is where batching is
+switched off. `game_boy::tests::deadline_driving_the_channels_is_invisible_to_the_game` is the fix:
+the whole twelve-sub-test suite run **gated**, against the same reference frame, with a second
+machine beside it comparing APUs every slice — the screen answers "does the game still pass" and the
+comparison answers "was it the same machine that passed". Registers, length counters, triggers,
+sweep, and all three wave-RAM aperture tests are in there. It asserts it actually batched, and it
+asserts the control machine never did. All three of the mechanisms above were mutation-tested
+against it and all three failures were caught.
+
+`full_playthrough` passes unchanged, which carries the same weight it carried in §6.1: it is a
+golden RNG replay, and a change that moved the emulator by one cycle would fail it hundreds of steps
+from wherever the change was. It also corroborates the bench from the other end — **236.65 s against
+§6.1's 256.65 s**, which is the +8% a whole scripted playthrough sees, and the agent tiers run gated
+for the same reason the deployment does. The default tier is 28.5 s and the slow tier 85 s, both
+green.

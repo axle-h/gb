@@ -1,5 +1,5 @@
 use bincode::{Decode, Encode};
-use frame_sequencer::FrameSequencer;
+use frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use blip::BlipStereo;
 use master_volume::MasterVolume;
 use square_channel::SquareWaveChannel;
@@ -61,6 +61,19 @@ pub struct Audio {
     /// it is neither serialised nor part of equality. `true` by default, which is what every caller
     /// that has not thought about it wants.
     output_enabled: bool,
+    /// Video M-cycles the four channels have **not** been advanced by yet. See the batching note
+    /// in [`Audio::update`]; zero whenever the output side is running, and zero again after
+    /// [`Audio::sync`].
+    ///
+    /// Derived, like `output` and `mixed`: a debt against the channels rather than state of its
+    /// own, so it is neither serialised nor part of equality. [`Audio::settled`] is how the cold
+    /// paths that read the whole APU see past it.
+    pending: u64,
+    /// Video M-cycles from the last flush to the soonest moment any channel's output could move
+    /// on its own — the bound `pending` may not reach. `0` means "unknown, flush on the next
+    /// update", which is the initial value and what every path that disturbs a channel leaves
+    /// behind.
+    channel_deadline: u64,
 }
 
 impl Default for Audio {
@@ -81,6 +94,9 @@ impl Default for Audio {
             // Nothing has been mixed yet, so the first update must not trust `mixed`.
             mix_dirty: true,
             output_enabled: true,
+            pending: 0,
+            // Nothing has been measured yet, so the first update must flush rather than batch.
+            channel_deadline: 0,
         }
     }
 }
@@ -143,6 +159,11 @@ impl Audio {
         if enabled == self.output_enabled {
             return;
         }
+        // ⚠️ The gate is also what decides whether the channels are batched, so it cannot move
+        // with a batch outstanding: everything past here assumes `pending` is a debt against the
+        // regime that incurred it. Opening the gate would otherwise mix a level the channels have
+        // not caught up to yet.
+        self.sync();
         self.output_enabled = enabled;
         if enabled {
             self.output.clear();
@@ -156,6 +177,16 @@ impl Audio {
         self.output_enabled
     }
 
+    /// How far behind the rest of the machine the four channels are being allowed to run, in
+    /// video M-cycles. See the batching note in [`Audio::update`].
+    ///
+    /// Exists for the same reason [`Self::output_enabled`] does: batching that silently stopped
+    /// happening would cost 10% and nothing would say so, and batching that ran while a listener
+    /// was attached would be a bug no ear could localise. A test can assert both.
+    pub fn pending_channel_cycles(&self) -> u64 {
+        self.pending
+    }
+
     /// Fill `out` with interleaved L/R frames, returning the number of *frames* written; zero means
     /// nothing was ready.
     ///
@@ -167,6 +198,10 @@ impl Audio {
     }
 
     fn reset(&mut self) {
+        // Only ever reached from a NR52 write, which has already flushed — but the channels are
+        // being replaced wholesale here, so a debt against the old ones would be nonsense.
+        self.pending = 0;
+        self.channel_deadline = 0;
         self.frame_sequencer.reset();
         self.panning = Panning::default();
         self.master_volume = MasterVolume::default();
@@ -193,6 +228,14 @@ impl Audio {
     /// cursor advances as before.
     pub fn update(&mut self, delta: MachineCycles, div_clocks: DividerClocks) {
         if !self.enabled {
+            // Nothing is ever outstanding here, and it is enforced where the state is *created*
+            // rather than checked here: the only way to reach a powered-off APU is a NR52 write,
+            // which flushes on the way through [`Audio::write`] and is then followed by
+            // [`Audio::reset`] clearing the debt outright; a fresh or restored `Audio` starts
+            // clear. ⚠️ **Do not "just be safe" and flush here.** Even a guarded `if pending > 0 {
+            // sync() }` measured **1.5%** on the pokemon fixture — a branch this one never takes,
+            // paid for in the layout of `MMU::update`, which this whole function inlines into.
+            debug_assert_eq!(self.pending, 0, "a powered-off APU is carrying a batch");
             self.mixed = AudioSample::ZERO;
             if self.output_enabled {
                 self.push_sample(delta, AudioSample::ZERO);
@@ -201,10 +244,55 @@ impl Audio {
         }
 
         let events = self.frame_sequencer.update(div_clocks);
-        self.channel1.update(delta, events);
-        self.channel2.update(delta, events);
-        self.channel3.update(delta, events);
-        self.channel4.update(delta, events);
+
+        // ⭐ **C5: the four channels are advanced to a deadline rather than once per instruction.**
+        // They were **20% of the emulator** with the output side already gated, and almost all of
+        // it was four counters being decremented past a moment that had not arrived: at the
+        // periods a game actually plays, the soonest of the four phase timers is tens of M-cycles
+        // out and an instruction is two or three. [`Audio::next_event`] — the bound the HALT skip
+        // has always respected — is exactly the "how long can this be left alone" answer, so this
+        // is the same skip applied to the CPU's *running* cycles as well as its idle ones.
+        //
+        // ⚠️ **Nothing may advance a phase inside a batch, and that is what makes it free rather
+        // than approximate.** `channel_deadline` is the *minimum* over the four channels, so the
+        // flush finds every one of them still short of its next tick and the closed forms in
+        // `PhaseTimer::update` and `NoiseChannel::update` take their one-step path exactly as they
+        // did per instruction. Everything else that can move a channel — a length counter, an
+        // envelope, the sweep — hangs off the frame sequencer, and an event breaks the batch on
+        // the line below; the rest needs a register write, and [`Audio::write`] flushes first.
+        //
+        // ⚠️ **A batch is only ever taken while the output side is gated.** With a listener
+        // attached the resampler has to be told *when* a level moved, not merely that it did, so
+        // the flush below leaves `channel_deadline` at zero and every call flushes — `pending` is
+        // then always exactly `delta` and this whole path is bit-identical to the per-instruction
+        // one it replaces. See `docs/emulator-performance.md` §5 for what that costs a listener
+        // and what taking it back would need.
+        self.pending += delta.m_cycles();
+        if events.is_empty() && self.pending < self.channel_deadline {
+            return;
+        }
+        if !events.is_empty() {
+            // ⚠️ **The batch is paid off before the event, not with it.** A channel applies its
+            // length counter, envelope and sweep at the *start* of the window it is handed and
+            // only then advances, so carrying the batch into this call would move cycles that
+            // belong before the tick to after it. That is not a rounding error: a length counter
+            // that deactivates the channel returns early, and the whole batch is dropped on the
+            // floor — which is what made an idle noise channel freeze 60 cycles late.
+            let before = self.pending - delta.m_cycles();
+            if before > 0 {
+                self.advance_channels(MachineCycles::from_m(before), FrameSequencerEvent::empty());
+            }
+            self.pending = delta.m_cycles();
+        }
+        let delta = MachineCycles::from_m(std::mem::take(&mut self.pending));
+        self.advance_channels(delta, events);
+        // `None` — nothing is clocking — batches until the frame sequencer next has something to
+        // say, which is the correct answer and a few thousand cycles rather than for ever.
+        self.channel_deadline = if self.output_enabled {
+            0
+        } else {
+            self.soonest_channel_event().unwrap_or(u64::MAX)
+        };
 
         // ⭐ **Everything past here produces samples for somebody, and when there is nobody it is
         // skipped.** Worth **+10.2%** on `bench_core_throughput` — mixing, `BlipStereo` and
@@ -268,7 +356,31 @@ impl Audio {
         if !self.enabled {
             return None;
         }
-        let soonest = [
+        // ⚠️ Net of the outstanding batch. The channels are up to `pending` M-cycles behind the
+        // rest of the machine (see [`Audio::update`]), so their own answer is that much too late.
+        // It cannot actually go negative — a batch is bounded by this very minimum, and every
+        // path that moves the minimum clears the batch first — so the saturation is a guard on
+        // that argument rather than a case.
+        let soonest = self.soonest_channel_event()?.saturating_sub(self.pending);
+        Some(soonest.saturating_sub(1).max(1))
+    }
+
+    /// Video M-cycles from where the *channels* have got to until the soonest of them could move
+    /// its own output, or `None` if none of them is clocking at all.
+    ///
+    /// Measured from the channels rather than from the machine, so a caller that cares about the
+    /// machine has to net off `pending` — [`Audio::next_event`] is the one that does.
+    ///
+    /// ⚠️ **`None` has to survive out to [`MMU::schedule`](crate::mmu::MMU::schedule)**, which adds
+    /// what it is given to the absolute clock. A stand-in `u64::MAX` wraps that sum round to a
+    /// deadline in the past and the HALT skip stops skipping — silently, and only for a game whose
+    /// APU is on with every channel idle, which is not a case any ROM here covers.
+    #[inline]
+    fn soonest_channel_event(&self) -> Option<u64> {
+        // ⚠️ `perf` blames `flatten.rs` for 1.3% of the whole emulator here, and folding the four
+        // `Option`s by hand to get rid of it measured **no change at all** — the compiler was
+        // already doing it, and the samples are attribution rather than work. Leave it idiomatic.
+        [
             self.channel1.next_event(),
             self.channel2.next_event(),
             self.channel3.next_event(),
@@ -276,8 +388,57 @@ impl Audio {
         ]
         .into_iter()
         .flatten()
-        .min()?;
-        Some(soonest.saturating_sub(1).max(1))
+        .min()
+    }
+
+    /// Pay off the outstanding batch, so the channels are where the rest of the machine is.
+    ///
+    /// Cheap and almost always a no-op: with the output side running there is never a batch, and
+    /// with it gated this is only reached from a register write and the handful of cold paths that
+    /// read the whole APU. The events are empty because a batch never spans one — see
+    /// [`Audio::update`].
+    ///
+    /// `channel_deadline` is left at zero rather than recomputed: whatever is about to happen is
+    /// the reason this was called, and one extra flush on the next update is cheaper than being
+    /// wrong about it.
+    fn sync(&mut self) {
+        if self.pending == 0 {
+            return;
+        }
+        let delta = MachineCycles::from_m(std::mem::take(&mut self.pending));
+        self.advance_channels(delta, FrameSequencerEvent::empty());
+        self.channel_deadline = 0;
+    }
+
+    /// Hand all four channels one window. The only place any of them is advanced.
+    #[inline]
+    fn advance_channels(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
+        self.channel1.update(delta, events);
+        self.channel2.update(delta, events);
+        self.channel3.update(delta, events);
+        self.channel4.update(delta, events);
+    }
+
+    /// The four channels as they would be with the batch paid off, without paying it off.
+    ///
+    /// The cold half of [`Audio::sync`], for the two callers that read the whole APU through a
+    /// `&self` they cannot flush: the `apu` save-state section and [`PartialEq`]. A save state
+    /// carrying channels a few dozen cycles behind the CPU would restore a machine that is subtly
+    /// not the one that was saved, and two machines batching differently — which is exactly what
+    /// `the_halt_fast_path_matches_stepping_cycle_by_cycle` builds — are equal or the fast path is
+    /// broken, so neither may see the debt.
+    fn settled(&self) -> (SquareWaveChannel, SquareWaveChannel, WaveChannel, NoiseChannel) {
+        let (mut c1, mut c2, mut c3, mut c4) =
+            (self.channel1.clone(), self.channel2.clone(), self.channel3.clone(), self.channel4.clone());
+        if self.pending > 0 {
+            let delta = MachineCycles::from_m(self.pending);
+            let events = FrameSequencerEvent::empty();
+            c1.update(delta, events);
+            c2.update(delta, events);
+            c3.update(delta, events);
+            c4.update(delta, events);
+        }
+        (c1, c2, c3, c4)
     }
 
     /// All four channels' DAC inputs packed into one word, so "has anything moved?" is a single
@@ -414,6 +575,14 @@ impl Audio {
 
     pub fn write(&mut self, address: u16, value: u8) {
         // println!("Write to audio register: {:04X} = {:02X}", address, value);
+        // ⚠️ **Before anything else.** A write is the one thing that can move a channel without
+        // the frame sequencer, so it is where a batch has to be paid off — a trigger, a frequency
+        // change or a DAC switch applied on top of channels that are tens of cycles behind would
+        // land at the wrong moment and, worse, invalidate the deadline that let them fall behind.
+        // It also puts `access_offset` back on the instruction boundary the wave channel's
+        // retrigger quirk measures from. `MMU::update` runs *after* the instruction's bus access,
+        // so everything outstanding here belongs to strictly earlier instructions.
+        self.sync();
         // Any APU register write can move the mixer's output, and several do so without the
         // channels seeing it at all (NR50/NR51/NR52). Marking it here rather than per register is
         // both cheaper and impossible to get wrong — see `Audio::update`.
@@ -465,7 +634,17 @@ impl Audio {
     /// T-cycles each). Hardware puts a load's or store's memory access in the instruction's final
     /// M-cycle, so it is one M-cycle short of the whole instruction.
     fn access_offset(&self) -> u16 {
-        (self.access_machine_cycles.saturating_sub(1) as u16) * 2
+        // ⚠️ **Plus the outstanding batch**, because the offset is measured from where the wave
+        // timer has actually got to and [`Audio::update`] may have left it up to `pending`
+        // M-cycles short of the instruction boundary. `fetch_at` subtracts the timer's counter,
+        // which is stale by the same amount, so the two cancel exactly.
+        //
+        // On the *write* path this term is always zero — [`Audio::write`] flushes first — which is
+        // what keeps `WaveChannel::trigger`'s `trigger_after(3 + access_offset)` measuring from
+        // the instruction boundary it means. Reads are the case this exists for: [`Audio::read`]
+        // takes `&self` and cannot flush.
+        let batch = u16::try_from(self.pending).unwrap_or(u16::MAX).saturating_mul(2);
+        ((self.access_machine_cycles.saturating_sub(1) as u16) * 2).saturating_add(batch)
     }
 
     pub fn channel1(&self) -> &SquareWaveChannel {
@@ -519,15 +698,18 @@ pub const APU_SECTION_VERSION: u16 = 1;
 
 impl Audio {
     pub(crate) fn write_sections(&self, writer: &mut SectionWriter) -> Result<(), String> {
+        // ⚠️ Settled, not as they stand: the channels may be running a batch behind the CPU (see
+        // [`Audio::update`]) and a save state has to be the machine at one moment.
+        let (channel1, channel2, channel3, channel4) = self.settled();
         writer.write(labels::APU, APU_SECTION_VERSION, &ApuSection {
             enabled: self.enabled,
             panning: self.panning,
             master_volume: self.master_volume.clone(),
             frame_sequencer: self.frame_sequencer.clone(),
-            channel1: self.channel1.clone(),
-            channel2: self.channel2.clone(),
-            channel3: self.channel3.clone(),
-            channel4: self.channel4.clone(),
+            channel1,
+            channel2,
+            channel3,
+            channel4,
         })
     }
 
@@ -544,21 +726,40 @@ impl Audio {
             // `mixed` is derived and not in the section, so the restored machine must recompute it
             // before trusting it — see `Audio::update`.
             self.mix_dirty = true;
+            // The section was written settled, so the restored channels owe nothing; the deadline
+            // that let them fall behind belonged to the machine that was saved, not this one.
+            self.pending = 0;
+            self.channel_deadline = 0;
         }
         Ok(())
     }
 }
 
 impl PartialEq for Audio {
+    /// ⚠️ **Compares the channels settled**, for the same reason the save-state section writes
+    /// them settled: two machines at the same instant may be carrying different batches (see
+    /// [`Audio::update`]), and one stepping every M-cycle against one taking the HALT skip is
+    /// precisely what `the_halt_fast_path_matches_stepping_cycle_by_cycle` builds. `pending` and
+    /// `channel_deadline` themselves are derived and take no part.
+    ///
+    /// The clone is why it asks first, and why the cheap arm is "neither owes anything" rather
+    /// than "both owe the same": advancing a channel is not injective — an inactive one has its
+    /// output zeroed — so two equal debts are not enough to make the raw states comparable.
     fn eq(&self, other: &Self) -> bool {
-        self.enabled == other.enabled &&
+        let header = self.enabled == other.enabled &&
             self.panning == other.panning &&
             self.master_volume == other.master_volume &&
-            self.frame_sequencer == other.frame_sequencer &&
-            self.channel1 == other.channel1 &&
-            self.channel2 == other.channel2 &&
-            self.channel3 == other.channel3 &&
-            self.channel4 == other.channel4
+            self.frame_sequencer == other.frame_sequencer;
+        if !header {
+            return false;
+        }
+        if self.pending == 0 && other.pending == 0 {
+            return self.channel1 == other.channel1 &&
+                self.channel2 == other.channel2 &&
+                self.channel3 == other.channel3 &&
+                self.channel4 == other.channel4;
+        }
+        self.settled() == other.settled()
     }
 }
 

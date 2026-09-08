@@ -257,6 +257,14 @@ the next turn rather than an interruption of this one. `SlowPolicy` in
 
 ## Benchmarking and the goldens
 
+- ⚠️ **`bench_core_throughput` measures two different machines, and `BENCH_AUDIO=off` picks the one
+  that matters.** It gates the APU's output side, which is what every agent tier and the deployment
+  run; the default is a listener attached, which is the desktop UI and a viewer who pressed the
+  speaker. Two of the optimisations in [emulator-performance](emulator-performance.md) §6 exist only
+  in the gated configuration, so a number quoted without saying which one it is is not a number.
+- ⚠️ **blargg's `dmg_sound` tests run the *un-batched* APU**, because they run with the output side
+  open. `game_boy::tests::deadline_driving_the_channels_is_invisible_to_the_game` is the one that
+  runs the same suite gated — do not let that be the test that gets deleted as a duplicate.
 - This machine has fast and slow states ~15% apart. Compare only adjacent paired runs, alternate
   which build runs first, and report both orders. `perf` works without sudo: build with
   `RUSTFLAGS="-C debuginfo=2"` into a scratch target dir and drive with
