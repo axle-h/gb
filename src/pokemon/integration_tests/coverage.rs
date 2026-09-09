@@ -894,7 +894,7 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
         // the walk arriving (nothing was chosen to get there), so all it did was leave the brain
         // with nothing to pick: the sweep reported **zero defects** and spent 20 059 of its 20 538
         // turns at the title screen. A terminus has to be *reported*, not made unreachable — the
-        // agent gap is a real finding and is logged open in `docs/coverage-plan.md` §5.2.6.
+        // agent gap was a real finding and is recorded in `docs/coverage-plan.md` §7.1.
         if request.location().as_deref() == Some("HallOfFame") {
             self.reached_the_end = true;
         }
@@ -1050,7 +1050,7 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
 ///
 /// Every sweep from `postgame-phase0.bin` settles in north-west Kanto plus Victory Road: Cerulean,
 /// Vermilion, Lavender, Celadon, Fuchsia, Saffron and Cinnabar are never entered at all. Two
-/// different things do that, and `docs/coverage-plan.md` §5.2.7 spent a while conflating them.
+/// different things do that, and `docs/coverage-plan.md` §7.2 records conflating them.
 ///
 /// ⭐ **The walk stops because it *wins*.** Seven of eight identical walks halt at exactly 38 maps
 /// on [`ExploringBrain::reached_the_end`]: the god party's way out of Viridian is Route 22 → Route
@@ -1282,7 +1282,7 @@ fn coverage_walk_of_the_finished_game() {
 }
 
 /// One walk, from one [`Start`]. Everything above it is knobs and arithmetic; this is the walk that
-/// every number in `docs/coverage-plan.md` §5.2 came out of.
+/// every number in `docs/coverage-plan.md` §2 came out of.
 #[cfg(feature = "coverage-tests")]
 fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> WalkOutcome {
     use crate::pokemon::integration_tests::cheats::Cheats;

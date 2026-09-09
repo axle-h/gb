@@ -30,17 +30,17 @@ cargo test --release --features godmode --bin gb -- godmode --nocapture
 
 # C3's walk: 90 game-minutes of exhaustive exploration through the deployed LlmPolicy, from a
 # *finished* save with a god party and every key item. Fails on any defect, writes the whole table
-# either way, and then prints §5.3's ROM cross-check — every warp and object in the headers of the
+# either way, and then prints the ROM cross-check — every warp and object in the headers of the
 # maps it entered that never once appeared as a row. ~95 s.
 # ⚠️ 90 game-minutes is a smoke budget. A coverage run wants GB_COVERAGE_MINUTES=360 and
 # GB_COVERAGE_PATIENCE high (patience, not the budget, is what has stopped every sweep), which
 # costs 3-7 min of wall clock. ⚠️ And two runs of identical code differ by more than noise on this
 # fixture — 38 maps and 30 maps on the same day — so a single pair of runs cannot A/B a change; see
-# coverage-plan §5.5.
+# coverage-plan §6.2.
 cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 
 # ⭐ The same walk from every region, and the union of what they reach. One start cannot reach
-# Kanto — see coverage-plan §5.2.7 W2 — so `GB_COVERAGE_START` picks one of eight committed
+# Kanto — see coverage-plan §2 and step 6 — so `GB_COVERAGE_START` picks one of eight committed
 # finished-game fixtures (`phase0` cerulean vermilion lavender celadon saffron fuchsia cinnabar) and
 # `all` walks each in turn and prints the union. ⚠️ `all` spends GB_COVERAGE_MINUTES **per region**,
 # so the coverage budget above is 40 min of wall clock rather than 5; for a measurement run the eight
