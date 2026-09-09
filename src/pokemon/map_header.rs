@@ -73,6 +73,30 @@ impl TileSetId {
         }
     }
 
+    /// Tiles that warp the player the moment they **step onto** them by a second mechanism
+    /// entirely — `data/tilesets/warp_pad_hole_tile_ids.asm`, read by
+    /// `IsPlayerStandingOnWarpPadOrHole` (`engine/overworld/player_animations.asm`).
+    ///
+    /// ⚠️ **A hole is not in [`Self::warp_tile_ids`] and the game does not care.** That table is
+    /// `IsPlayerStandingOnDoorTileOrWarpTile`'s; this one is a different four-row table with its own
+    /// reader, and between them they are every way the cartridge opens a warp on the step onto it.
+    /// The overlap is almost total — FACILITY `$20`, CAVERN `$22` and INTERIOR `$55` are in both —
+    /// which is exactly why the one entry that is *not* went unnoticed: **FACILITY `$11`, the floor
+    /// holes on Pokémon Mansion 3F.** Those three are the only way onto 1F's right side and thus to
+    /// the Secret Key, and `MetaTileMap::warp_trigger` called all three `Impossible`.
+    ///
+    /// Nothing was broken by that, because `actions()` used to keep an `Impossible` warp whenever no
+    /// sibling on the map opened onto the same place — and it was those three holes that the guard
+    /// was really protecting. Naming the mechanism is what let the guard go; see `actions()`.
+    pub fn warp_pad_and_hole_tile_ids(&self) -> &'static [u8] {
+        match self {
+            Self::Facility => &[0x20, 0x11],
+            Self::Cavern   => &[0x22],
+            Self::Interior => &[0x55],
+            _ => &[],
+        }
+    }
+
     /// The tiles that make `ExtraWarpCheck`'s "function 2" pass, per direction faced.
     ///
     /// ⚠️ **Not the same table as [`Self::warp_tile_ids`], and the difference is the whole of W5.**

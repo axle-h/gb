@@ -98,6 +98,12 @@ price.
 
 ## What the map layer will and will not offer
 
+- ⚠️ **A cut tree grows back, and anything that remembers having cut one has to know that.**
+  `PokemonAgent` does — `cut_tiles.clear()` on every map change — but a *frontier* that marks the row
+  done does not, and the coverage walk sealed itself into Route 16's west pocket that way for 86% of
+  a whole sweep: the way out to Celadon City was one regrown tree away and the row had been ticked
+  off. Anything keeping a once-only list of rows needs the Pokémon Mansion statue rule —
+  `ExploringBrain`'s `re_takeable` is the walk's version.
 - **A warp entry is not a door.** `MetaTileMap::warp_trigger` is a transcription of
   `home/overworld.asm`: a tile in the tileset's `warp_tile_ids` fires on the step onto it
   (`StepOn`), anything else needs `ExtraWarpCheck` — a warp carpet in front for the way you face
@@ -106,6 +112,35 @@ price.
   door the cartridge will not open from any approach. `actions()` gives a dud row up only when
   another warp to the same map is known to work, and standing on a `HoldDirection` entry emits a
   **one-button** route rather than a step off and back.
+- ⭐ **…unless the player is surfing, and then it is the step off and back after all.** The held
+  button works because a collision on a warp entry falls through `ExtraWarpCheck` into
+  `CheckWarpsCollision`, and `home/overworld.asm`'s `.noDirectionChange` puts that whole path on the
+  *walking* side of its `wWalkBikeSurfState` test — `.surfing` calls `CollisionCheckOnWater` and then
+  `jp c, OverworldLoop`. So a water entry can only be fired by `CheckWarpsNoCollision`, i.e. by a
+  completed step, and the step has to be the one `IsPlayerFacingEdgeOfMap` accepts:
+  `[opposite(dir), dir]`. ⚠️ **The condition lives in two places and fixing one changes nothing** —
+  `MetaTileMap::actions` builds the route and `AgentState::OverworldMovement` tests for a border warp
+  *before* it consults one. Seafoam Islands' `B3F:21,17` and `B4F:21,17` are the case;
+  `a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on` fails if either half is removed.
+- ⭐ **A teleport pad is a warp that never changes the map, and both halves of that had to be
+  taught.** `bfs_from_player` records the edge from the square beside a pad to the pad's **landing**,
+  so routes cross Saffron Gym's maze for free — but the guard that skips an already-settled neighbour
+  ran *before* it asked what the neighbour was, and the search's own root is settled, so standing on
+  a pad threw away the only edge out of the room. Every room in that gym is entered by exactly one
+  pad. And nothing could report such a row finished: every `Warp` completion the agent had was the
+  map changing. `OverworldMovement` completes an intra-map warp on `player_position == to_position`,
+  which is exact because a pad's landing is reached by that pad and nothing else; `actions()`
+  withholds the one row whose landing is already underfoot, so an arrival cannot be claimed for a
+  walk that never happened. 37 defects and 239 of 454 turns in one room, before.
+- ⭐ **`actions()` drops a warp `warp_trigger` calls `Impossible`, and the whole list is a test.**
+  It used to keep one whenever no sibling on the map opened onto the same place. That guard was
+  covering a real false negative: **Pokémon Mansion 3F's floor holes** are `FACILITY $11`, which
+  lives in `data/tilesets/warp_pad_hole_tile_ids.asm` — the cartridge's *other* step-on table, read
+  by `IsPlayerStandingOnWarpPadOrHole` — and they are the only way onto 1F's right side.
+  `TileSetId::warp_pad_and_hole_tile_ids` names it; `an_impossible_warp_is_one_the_cartridge_really_will_not_open`
+  walks all 248 maps and pins the list at four, every one a dud (Silph Co 1F's is labelled
+  `; inaccessible` in pokered's own warp table). ⚠️ `Unknown` is still never dropped: unsure is not
+  the same as no, and an earlier draft left Cerulean's badge house with no exit that way.
 - ⚠️ `WarpTrigger::Unknown` exists because `_GetTileAndCoordsInFrontOfPlayer` reads the *screen*,
   so a tile on the map edge faces the border block, which `raw_tile_ids` does not hold. Three real
   doors sit there (the S.S. Anne gangway, Rock Tunnel's north mouth, Cerulean's badge house, whose
@@ -459,8 +494,26 @@ price.
   is a fact rather than a fault.
 - `BattleActionStarted` carries the nickname and the opponent's species, read at the decision point
   (a trainer's lead is not loaded at `BattleStarted`).
-- ⭐ **`MetaTileMap::position_settled` is false for one tick per northward or westward connection,
-  and nothing may draw a conclusion from `player_position` while it is.** Crossing north or west
+- ⭐ **`MetaTileMap::position_settled` is false while a map transition is in flight, and nothing may
+  draw a conclusion from `player_position` while it is.** There are two of these. The longer one is
+  every warp in the game: `WarpFound2` writes the destination into `wCurMap` and only then loads the
+  map, so for **26 agent ticks** (94 at the Safari Zone gate, where a script auto-walks the player
+  through the door) the coordinates, the sprite slots and the map's own dimensions still belong to
+  the map being left, while `read_current_map` is already taking its metadata from the new one.
+  `map_metadata::map_header_is_loaded` is the test — the ten bytes `LoadMapHeader` copies, minus
+  `wCurMapTextPtr`, which Viridian Mart's and Oak's Lab's scripts repoint and keep. ⚠️ **It cannot
+  see an intra-map teleport**, which reloads the map without ever changing `wCurMap`, so
+  `map_sprites_are_loaded` stands beside it: `.loadSpriteData` writes `wNumSprites` first, zeroes all
+  fifteen slots, then fills them, and the walk minted a Saffron Gym menu off five of nine. ⚠️ It
+  counts the cartridge's slots, not what `read_sprites` returns — that reader stops at the *named*
+  object list, which is shorter for several maps, and comparing the two called Cinnabar Island a map
+  mid-load for ever. ⚠️ **`actions()`
+  answers with no rows at all while this is false**, because every row is a route from where the
+  player is standing: the coverage walk of 2026-09-09 was offered the Nugget across the Safari Zone's
+  pond and two warps beyond it, from the gate's `(4, 0)`, and failed on the first of them.
+  ⚰️ Holding the agent's *turn* as well was tried and reverted — see `MetaTileMap::actions` — because
+  a wait on every door in the game re-rolled a leg's wild encounter.
+  The shorter one is one tick per northward or westward *connection*: crossing north or west
   leaves `wYCoord`/`wXCoord` at **255** (the ROM's −1) with `wCurMap` still the *old* map, until
   `CheckMapConnections` runs; `MetaTileMap::new`'s bounds clamp — which has to stay, it is what keeps
   `meta_tiles` indexing in range — turns that into `(255 + north_extra).min(height - 1)`, a plausible

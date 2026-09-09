@@ -3168,6 +3168,26 @@ CascadeBadge; not cutting".to_string(),
                             None,
                         );
                     }
+                } else if let MetaTile::Warp { to_map, to_position } = destination
+                    && to_map == game_state.map.map
+                    && game_state.map.player_position == to_position
+                {
+                    // ⭐ **A teleport pad does not change the map, so arriving is the only thing
+                    // that says it worked.** Saffron Gym's 30 pads and Silph Co's lifts all warp
+                    // within one map, so the `expected_map` test above can never fire for them and
+                    // nothing else here was ever going to: `player_tile()` on arrival is the
+                    // *partner* pad, not this row's, and the border arm below would hold a direction
+                    // against a wall. Before this, no intra-map warp row in the game had ever been
+                    // reported as completed — the coverage walk of 2026-09-09 scored all thirty of
+                    // the gym's as defects and spent 239 of its 454 turns in the room.
+                    //
+                    // ⚠️ **Exact rather than approximate, because the landing identifies the pad.**
+                    // A pad's `to_position` is reached by that pad and by nothing else, so standing
+                    // there means this row's warp fired. The one hole — being asked for a pad whose
+                    // landing is already underfoot — is closed where the row is minted, in
+                    // `MetaTileMap::actions`, rather than by guessing here.
+                    new_events.push(AgentEvent::OverworldActionCompleted { destination });
+                    self.set_state(AgentState::Idle);
                 } else if matches!(destination, MetaTile::Warp { .. })
                     && game_state.map.player_tile() == destination
                     && is_on_map_border(&game_state.map)
@@ -3177,6 +3197,22 @@ CascadeBadge; not cutting".to_string(),
                     // there for the whole budget. Those go to the route branch below, which builds the
                     // step-off/step-on pair that re-fires them.
                     && !game_state.map.is_step_on_warp(game_state.map.player_position)
+                    // ⚠️ **…and the player is on foot.** The outward press works because a collision
+                    // while standing on a warp entry runs `ExtraWarpCheck` and `CheckWarpsCollision`,
+                    // and `home/overworld.asm` puts that whole path on the *walking* side of its
+                    // `wWalkBikeSurfState` test: `.surfing` calls `CollisionCheckOnWater` and then
+                    // `jp c, OverworldLoop`. Seafoam Islands has two of these — `B3F:21,17` and
+                    // `B4F:21,17`, water at the bottom edge of a current channel — and the coverage
+                    // walk of 2026-09-09 held Down on each of them for 60 s of game time and gave up
+                    // "without getting there" while standing exactly there.
+                    //
+                    // ⚠️ **This condition duplicates `MetaTileMap::actions`'s and had to be fixed in
+                    // both.** Teaching `actions()` the surfing rule changed nothing on its own,
+                    // because this arm is tested first and never consulted the route it built. What
+                    // sends a surfing player down to the route branch is this line; the pair it gets
+                    // there is `[opposite(dir), dir]`, whose step back is the arrival
+                    // `CheckWarpsNoCollision` fires on.
+                    && !game_state.map.surfing
                 {
                     // Player is standing on an EDGE warp tile (at y=0, y=max, x=0, or x=max).
                     // These only fire when the player presses the outward direction off the map

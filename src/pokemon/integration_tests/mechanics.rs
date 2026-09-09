@@ -2733,6 +2733,9 @@ fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
             closed_doors: Vec::new(),
             grass_encounter_rate: 0,
             card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
         })
     };
 
@@ -2756,6 +2759,110 @@ fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
         "and this is the fiction the flag exists to catch: the clamp puts a player who stepped off \
          the *top* of the map on its bottom row",
     );
+}
+
+/// ⭐ **The other half of `position_settled`: a map-load earlier, and 26 agent ticks long on an
+/// ordinary warp.**
+///
+/// `WarpFound2` writes the destination into `wCurMap` and only then loads the map, so until
+/// `LoadMapHeader` runs, the coordinates, the sprite slots and the map's own dimensions all still
+/// belong to the map being left — and unlike the 255 above, a stale coordinate from a *small* map is
+/// an ordinary-looking square well inside a big one. Nothing about it looks wrong.
+///
+/// The coverage walk of 2026-09-09 paid the Safari Zone's fee and was auto-walked through the gate.
+/// For 94 agent ticks `wCurMap` read `SafariZoneCenter` while `wCurMapWidth`/`wCurMapHeight` still
+/// read the gate's 4x3 and the coordinate still read the gate's `(4, 0)` — which in the Centre is the
+/// wall along the top, on the far side of a pond. It was offered three rows over there, chose one,
+/// arrived at `(15, 25)` where it had never been offered, and failed on "there is no route to
+/// Nugget".
+///
+/// ⚠️ **Surf being refused is not the bug and must not be read as one.** `can_surf` is false on
+/// every Safari Zone map (`PokemonApi::observe_state`, and it is the cartridge's own rule), so the
+/// pond is a wall and the far side is genuinely another region. The bug is being asked to route
+/// from a square the player is not standing on.
+#[test]
+fn a_map_the_cartridge_has_not_finished_loading_offers_no_rows() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let metadata = Arc::new(mmu.read_map_metadata(Map::SafariZoneCenter).unwrap());
+    let at = |x: u8, y: u8, header_loaded: bool| {
+        MetaTileMap::new(&CurrentMap {
+            player_position: Point8 { x, y },
+            player_direction: PlayerFacingDirection::Up,
+            sprites: Vec::new(),
+            metadata: Arc::clone(&metadata),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            card_key_locked: false,
+            header_loaded,
+            surfing: false,
+            sprites_loaded: true,
+        })
+    };
+    let ids = |map: &MetaTileMap| -> Vec<String> {
+        map.actions().iter().map(|a| a.id()).collect()
+    };
+
+    // The gate's square, before the Centre has loaded.
+    let in_flight = at(4, 0, false);
+    assert!(!in_flight.position_settled, "wCurMap has changed and the map has not");
+    assert!(in_flight.actions().is_empty(), "a route has to start somewhere real: {:?}", ids(&in_flight));
+
+    // The same square with the check told the map is loaded, which is what the walk was offered
+    // before there was a check. The west shore of the pond is a region the entrance cannot reach,
+    // and here it is a row.
+    let fiction = at(4, 0, true);
+    assert!(ids(&fiction).iter().any(|id| id == "SafariZoneCenter:0,10:Warp"),
+        "the fiction this test exists to describe: {:?}", ids(&fiction));
+
+    // Where the player actually was one map-load later, offered the same menu the walk then failed
+    // against. Same map, same pond, and the west shore is not on it.
+    let landed = at(15, 25, true);
+    assert!(landed.position_settled);
+    assert!(!ids(&landed).iter().any(|id| id == "SafariZoneCenter:0,10:Warp"),
+        "the entrance cannot reach the far shore: {:?}", ids(&landed));
+    assert!(ids(&landed).iter().any(|id| id == "SafariZoneCenter:29,10:Warp"),
+        "and it can reach the east one: {:?}", ids(&landed));
+}
+
+/// The ten bytes `LoadMapHeader` copies are the test, and they discriminate: on a settled save the
+/// header in WRAM is `wCurMap`'s and no other map's.
+#[test]
+fn the_header_in_wram_says_which_map_has_actually_been_loaded() {
+    use crate::pokemon::map_metadata::map_header_is_loaded;
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/viridian-city-north-of-bush.bin"),
+        Duration::from_secs(10),
+        vec![],
+    );
+    let standing_on = fixture.game_state().map.map;
+    assert_eq!(standing_on, Map::ViridianCity);
+    let api = fixture.api();
+    let mmu = api.mmu();
+
+    assert!(map_header_is_loaded(mmu, standing_on), "the map the save is standing on");
+    for other in [Map::PalletTown, Map::Route1, Map::ViridianMart, Map::SafariZoneCenter] {
+        assert!(!map_header_is_loaded(mmu, other),
+            "{other:?} is not loaded and the comparison has to say so");
+    }
+    drop(api);
+
+    // ⚠️ **And the field that had to come out of the comparison.** Viridian Mart's script repoints
+    // `wCurMapTextPtr` at a list of its own and leaves it there, so a save taken inside the shop has
+    // a header that differs from the ROM's in exactly those two bytes while being entirely loaded.
+    // Comparing all ten withheld the clerk for the rest of the visit; see [`MAP_HEADER_TEXT_PTR`].
+    let mut shopping = TestFixture::new(
+        include_bytes!("../data/viridian-city-pokemart-shopping.bin"),
+        Duration::from_secs(10),
+        vec![],
+    );
+    assert_eq!(shopping.game_state().map.map, Map::ViridianMart);
+    let api = shopping.api();
+    assert!(map_header_is_loaded(api.mmu(), Map::ViridianMart),
+        "a shop whose script has moved its own text pointer is still a loaded map");
 }
 
 
@@ -2807,3 +2914,166 @@ fn every_fixture_plays_at_the_fastest_game_options() {
 }
 
 
+
+
+/// ⭐ **Every committed fixture's sprite table is complete**, which is the assertion
+/// [`map_sprites_are_loaded`](crate::pokemon::map_metadata::map_sprites_are_loaded) makes on every
+/// tick of every run: `wNumSprites` against the number of slots the cartridge has actually filled.
+///
+/// The check exists because an intra-map teleport reloads the map without changing `wCurMap`, so
+/// `map_header_is_loaded` cannot see it — but `.loadSpriteData` writes `wNumSprites` first, zeroes
+/// all fifteen slots, and then fills them, and the coverage walk of 2026-09-09 minted a Saffron Gym
+/// menu off five of nine.
+///
+/// ⚠️ **It is the slots that are counted, not what `read_sprites` returns**, and the first attempt
+/// counted the latter. That reader stops at [`Map::sprites`], the *named* object list, which is
+/// shorter than the cartridge's for several maps — Cinnabar Island loads nine objects and names two
+/// — so the beach came out permanently "mid-load", `position_settled` went false, and `actions()`
+/// answered with nothing at all. This walks the whole fixture directory rather than a list, so a
+/// map added to the chain is covered without anyone remembering to add it here.
+#[test]
+fn every_committed_fixture_has_a_complete_sprite_table() {
+    use crate::pokemon::map_metadata::map_sprites_are_loaded;
+
+    let mut files: Vec<_> = std::fs::read_dir("src/pokemon/data").expect("the fixture directory")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "bin"))
+        .collect();
+    files.sort();
+    assert!(files.len() > 100, "expected the whole fixture chain, found {}", files.len());
+
+    let mut checked = 0;
+    for path in files {
+        // A fixture that has never been regenerated is a zero-byte placeholder; `print_coverage`
+        // says the same thing about them.
+        let bytes = std::fs::read(&path).expect("readable");
+        if bytes.is_empty() { continue }
+        let mut fixture = TestFixture::new(&bytes, Duration::from_secs(10), vec![]);
+        let api = fixture.api();
+        assert!(map_sprites_are_loaded(api.mmu()),
+            "{}: the sprite table disagrees with wNumSprites, so every tick of this state would \
+             read as a map still loading and be offered no actions at all", path.display());
+        checked += 1;
+    }
+    println!("{checked} fixtures, every sprite table complete");
+}
+
+/// ⭐ **A warp on the water is not taken the way a warp on land is, and the cartridge is explicit
+/// about it.** `home/overworld.asm`'s `.noDirectionChange` tests `wWalkBikeSurfState` for `$02`
+/// before it looks at anything else: on foot, walking into the wall in front while standing on a
+/// warp entry runs `ExtraWarpCheck` and then `CheckWarpsCollision`, and the warp fires; surfing,
+/// the branch goes to `CollisionCheckOnWater` and `jp c, OverworldLoop`, and `CheckWarpsCollision`
+/// is never reached. The only door left is `CheckWarpsNoCollision`, which runs on a completed step.
+///
+/// The coverage walk of 2026-09-09 found both of them. `SeafoamIslandsB3F:21,17:Warp` and
+/// `SeafoamIslandsB4F:21,17:Warp` are water at the bottom edge of a current channel, and the walk
+/// sat on each holding Down for 60 s of game time before giving up "without getting there" while
+/// standing exactly there. Measured on the dropped state: 120 ticks of Down move nothing; Up and
+/// then Down warps. The `20,17` entry beside each of them passed every sweep, because the walk
+/// happened to arrive from above and the arrival fired it — which is the same fact from the other
+/// side.
+#[test]
+fn a_warp_reached_by_surfing_is_entered_rather_than_leant_on() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::tile_map::WarpTrigger;
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    for (map, to_map) in [
+        (Map::SeafoamIslandsB3F, Map::SeafoamIslandsB4F),
+        (Map::SeafoamIslandsB4F, Map::SeafoamIslandsB3F),
+    ] {
+        let metadata = Arc::new(mmu.read_map_metadata(map).unwrap());
+        let on_the_warp = Point8 { x: 21, y: 17 };
+        let build = |surfing: bool| {
+            let mut tm = MetaTileMap::new(&CurrentMap {
+                player_position: on_the_warp,
+                player_direction: PlayerFacingDirection::Down,
+                sprites: Vec::new(),
+                metadata: Arc::clone(&metadata),
+                closed_doors: Vec::new(),
+                grass_encounter_rate: 0,
+                card_key_locked: false,
+                header_loaded: true,
+                surfing,
+                sprites_loaded: true,
+            });
+            tm.can_surf = true;
+            tm
+        };
+
+        // The entry itself: the bottom row of the map, and water, which is why it can only be
+        // stood on by a player who is surfing.
+        let afloat = build(true);
+        assert_eq!(afloat.warp_trigger(on_the_warp), WarpTrigger::HoldDirection(JoypadButton::Down),
+            "{map:?} (21, 17) is the map-edge kind");
+        assert_eq!(afloat.tile_at(on_the_warp),
+            MetaTile::Warp { to_map, to_position: on_the_warp });
+
+        let id = format!("{map:?}:21,17:Warp");
+        let route = |tm: &MetaTileMap| -> Vec<JoypadButton> {
+            tm.actions().into_iter().find(|a| a.id() == id)
+                .unwrap_or_else(|| panic!("{id} should be a row"))
+                .route
+        };
+
+        assert_eq!(route(&afloat), vec![JoypadButton::Up, JoypadButton::Down],
+            "{id}: off the way it came and back the way `IsPlayerFacingEdgeOfMap` wants");
+
+        // ⚠️ And the same square on foot is still one held button — this must not become the
+        // answer everywhere, because the step-off dance on a *land* warp is the 60 s shuffle a
+        // deployed run did at the Route 8 gate. Nothing but the surfing flag differs here.
+        assert_eq!(route(&build(false)), vec![JoypadButton::Down],
+            "{id}: on foot the collision path fires it and no step is needed");
+    }
+}
+
+#[test]
+fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::tile::MetaTile;
+    use crate::pokemon::tile_map::WarpTrigger;
+    use std::sync::Arc;
+    use strum::IntoEnumIterator;
+
+    // Three gate entries whose sibling is the way in (Route 8's east gate is W5's own case), and one
+    // that pokered's source labels `; inaccessible` in the warp table itself.
+    const KNOWN: &[(Map, u8, u8, &str)] = &[
+        (Map::Route7, 19, 9, "Route 7's gate: raw $23, and (19, 10) beside it is the door"),
+        (Map::Route8, 2, 9, "Route 8's west gate: raw $39, sibling at (2, 10)"),
+        (Map::Route8, 9, 9, "Route 8's east gate: raw $2c, sibling at (9, 10) — W5's case"),
+        (Map::SilphCo1F, 16, 10, "`warp_event 16, 10, SILPH_CO_3F, 7 ; inaccessible` — plain floor"),
+    ];
+
+    let mmu = crate::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let mut found: Vec<(Map, u8, u8)> = vec![];
+    for map in Map::iter() {
+        let Ok(metadata) = mmu.read_map_metadata(map) else { continue };
+        let tile_map = MetaTileMap::new(&CurrentMap {
+            player_position: Point8 { x: 0, y: 0 },
+            player_direction: PlayerFacingDirection::Down,
+            sprites: Vec::new(),
+            metadata: Arc::new(metadata),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
+        });
+        for (i, tile) in tile_map.meta_tiles.iter().enumerate() {
+            if !matches!(tile, MetaTile::Warp { .. }) { continue }
+            let at = Point8 { x: (i % tile_map.width) as u8, y: (i / tile_map.width) as u8 };
+            if tile_map.warp_trigger(at) == WarpTrigger::Impossible {
+                found.push((map, at.x, at.y));
+            }
+        }
+    }
+
+    let want: Vec<(Map, u8, u8)> = KNOWN.iter().map(|&(m, x, y, _)| (m, x, y)).collect();
+    assert_eq!(found, want,
+        "the set of warps the cartridge will not open has changed, and `actions()` drops every one \
+         of them.\n  known:\n{}",
+        KNOWN.iter().map(|(m, x, y, why)| format!("    {m:?} ({x}, {y}) — {why}\n"))
+            .collect::<String>());
+}

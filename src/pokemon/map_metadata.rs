@@ -642,6 +642,100 @@ fn is_water_tile_id(tile_id: u8, is_water_tileset: bool, tileset: TileSetId) -> 
     tile_id == WATER
 }
 
+/// The `wCurMapHeader` block: tileset, height, width, and the data/text/script pointers, ending
+/// with the connection flags. `LoadMapHeader` copies exactly these bytes out of the ROM's
+/// `MapHeaderPointers[wCurMap]` (`home/overworld.asm`, `.copyFixedHeaderLoop`), verbatim.
+const MAP_HEADER_BYTES: usize = 10;
+
+/// Bytes 5 and 6 of that block — `wCurMapTextPtr`, the only field in it the game rewrites while a
+/// map is loaded, so the only one [`map_header_is_loaded`] cannot compare.
+///
+/// ⚠️ **Two of the three writers are ordinary play and one of them is a shop.** `SetMapTextPointer`
+/// (`home/predef_text.asm`) swaps the list out for any predef text and swaps it back; Viridian
+/// Mart's and Oak's Lab's scripts each repoint it permanently for a stretch of the game
+/// (`scripts/ViridianMart.asm`, `scripts/OaksLab.asm`). Comparing all ten bytes made every mart
+/// visit look like a map transition in flight, which withheld the clerk and failed three tests in
+/// the default tier — the two `mechanics` mart legs and `can_navigate_to_pewter_city`, which shops
+/// on the way.
+const MAP_HEADER_TEXT_PTR: std::ops::Range<usize> = 5..7;
+
+/// True once the sprite table has been filled for the map that is being loaded.
+///
+/// ⭐ **The companion to [`map_header_is_loaded`], for the reload it cannot see.** A teleport pad
+/// warps the player *within* one map, so `wCurMap` never changes and the header never stops
+/// matching — but `EnterMap` runs all the same, and `LoadMapHeader`'s `.loadSpriteData`
+/// (`home/overworld.asm`) writes `wNumSprites` **first**, then zeroes all fifteen slots, then fills
+/// them one at a time. So for the length of that loop the map has fewer people on it than it has.
+///
+/// The coverage walk of 2026-09-09 was standing in Saffron Gym mid-teleport with five of the gym's
+/// nine sprites written, and `actions()` minted a menu off it — one tick later there were nine and
+/// the player was three rooms away. `SaffronGym:Youngster4` was chosen from that menu and came back
+/// as "there is no route to Youngster 4".
+///
+/// ⚠️ **`wNumSprites` is the count of *objects*, not of what is visible**, which is exactly why it
+/// is the right number to compare against. `HideObject` only sets a flag in
+/// `wToggleableObjectFlags` and redraws (`engine/overworld/toggleable_objects.asm`) — it never
+/// empties a slot — so a settled map always has every one of its objects in the table whether or
+/// not the player can see them, and [`MapMetadataReader::read_sprites`] reports hiddenness from the
+/// flags rather than from a hole in the table.
+///
+/// ⚠️ **Counted off the cartridge's own slots, not off `read_sprites`.** That reader is capped by
+/// [`Map::sprites`], the *named* object list, which is shorter than the cartridge's for several
+/// maps — Cinnabar Island loads nine and names two — so comparing what it returns against
+/// `wNumSprites` calls a perfectly settled beach a map mid-load and blanks its action menu. Four of
+/// the committed fixtures said so on the first attempt.
+pub fn map_sprites_are_loaded(mmu: &impl DmgPointerRead) -> bool {
+    // Slot 0 is the player and is not in `wNumSprites`; the loader fills 1..=15.
+    let filled = (1..=0xFu16)
+        .filter(|i| mmu.read_pointer(&(pokered_symbols::wSpriteDataStart + (i << 4))) != 0)
+        .count();
+    filled == mmu.read_pointer(&pokered_symbols::wNumSprites) as usize
+}
+
+/// `wWalkBikeSurfState`'s surfing value — `cp $02` in `home/overworld.asm`'s `.noDirectionChange`.
+const SURFING: u8 = 2;
+
+/// True once the header in WRAM is the header of `map` — i.e. the cartridge has finished loading
+/// the map that `wCurMap` already names.
+///
+/// ⭐ **`wCurMap` changes before the map does, and until it has, nothing else in WRAM agrees.**
+/// `WarpFound2` writes the destination into `wCurMap` and only then falls into `EnterMap` →
+/// `LoadMapData` → `LoadMapHeader`, so in between, everything read out of WRAM — the player's
+/// coordinates, the sprite slots, the map's own width and height — still belongs to the map that
+/// was left. [`MapMetadataCache::read_current_map`] takes its *metadata* from the ROM under
+/// `wCurMap` and everything else from WRAM, so what it builds in that window is a chimera: the new
+/// map's walls with the old map's player standing somewhere in them.
+///
+/// Measured on 2026-09-09, that window is **26 agent ticks** on an ordinary warp — half a second of
+/// game time, an eighth of the [`DelayContext::long`](crate::pokemon::delay::DelayContext::long) a
+/// settled agent waits before it asks anything, which is why it took a coverage walk to find. The
+/// Safari Zone gate is four times that at **94 ticks**, because the fee script auto-walks the player
+/// through the door while the agent is already part-way through a countdown.
+///
+/// Either is long enough to mint an action menu and have one of its rows chosen: the
+/// coverage walk was offered `SafariZoneCenter:Nugget` and the two warps on the far side of the
+/// pond, because the coordinates it was routing from were the gate's `(4, 0)` — the top-left wall
+/// of the Centre, on the wrong side of water Surf is refused on. It then failed the walk with
+/// "there is no route to Nugget" from `(15, 25)`, a square from which that row was never offered.
+///
+/// ⚠️ **The dimensions alone are not the test, and neither is `wJoyIgnore`.** `wJoyIgnore` is
+/// `$ff` on both sides of the window (`IgnoreInputForHalfSecond` runs before the load and outlasts
+/// it), and two maps of the same size warping into each other would agree on width and height. What
+/// is compared is the header the cartridge copies, minus [`MAP_HEADER_TEXT_PTR`] — so tileset,
+/// height, width, the map's block-data pointer, its script pointer and its connection flags. The
+/// block-data pointer alone separates every pair of maps in the game that this could otherwise
+/// confuse.
+///
+/// A map with no header pointer — the `UnusedMap*` padding and the link-cable rooms — is answered
+/// `true`: there is nothing to compare it against and nothing plays there.
+pub fn map_header_is_loaded(mmu: &impl DmgPointerRead, map: Map) -> bool {
+    let Some(rom) = map.header_pointer() else { return true };
+    let live = mmu.read_pointer_vec(&pokered_symbols::wCurMapHeader, MAP_HEADER_BYTES);
+    let rom = &crate::pokemon::rom_gfx::rom_slice(rom)[..MAP_HEADER_BYTES];
+    live.iter().zip(rom).enumerate()
+        .all(|(i, (live, rom))| MAP_HEADER_TEXT_PTR.contains(&i) || live == rom)
+}
+
 pub trait MapMetadataReader {
     fn read_map_metadata(&self, map: Map) -> Result<MapMetadata, String>;
 
@@ -665,6 +759,8 @@ impl MapMetadataCache {
             .ok_or_else(|| "Invalid map number".to_string())?;
         let player_direction_raw = mmu.read_pointer(&pokered_symbols::wPlayerDirection);
         Ok(CurrentMap {
+            sprites_loaded: map_sprites_are_loaded(mmu),
+            sprites: mmu.read_sprites()?,
             metadata: if map_uses_runtime_blocks(map) {
                 Arc::new(mmu.read_map_metadata_runtime(map)?)
             } else {
@@ -676,10 +772,11 @@ impl MapMetadataCache {
             },
             player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                 .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
-            sprites: mmu.read_sprites()?,
             grass_encounter_rate: mmu.read_pointer(&pokered_symbols::wGrassRate),
             closed_doors: closed_door_blocks(mmu, map),
             card_key_locked: map_has_card_key_doors(map) && !mmu.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
+            header_loaded: map_header_is_loaded(mmu, map),
+            surfing: mmu.read_pointer(&pokered_symbols::wWalkBikeSurfState) == SURFING,
         })
     }
 
@@ -708,6 +805,8 @@ impl MapMetadataReader for MMU {
 
         Ok(
             CurrentMap {
+                sprites_loaded: map_sprites_are_loaded(self),
+                sprites: self.read_sprites()?,
                 metadata: if map_uses_runtime_blocks(map) {
                     Arc::new(self.read_map_metadata_runtime(map)?)
                 } else {
@@ -719,10 +818,11 @@ impl MapMetadataReader for MMU {
                 },
                 player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                     .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
-                sprites: self.read_sprites()?,
                 grass_encounter_rate: self.read_pointer(&pokered_symbols::wGrassRate),
                 closed_doors: closed_door_blocks(self, map),
             card_key_locked: map_has_card_key_doors(map) && !self.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
+                header_loaded: map_header_is_loaded(self, map),
+                surfing: self.read_pointer(&pokered_symbols::wWalkBikeSurfState) == SURFING,
             }
         )
     }
@@ -1279,6 +1379,20 @@ pub struct CurrentMap {
     /// ($18/$24) are then impassable walls (the game refuses to open them without the key), so BFS
     /// must route around them. Once the key is held they open on approach and become passable.
     pub card_key_locked: bool,
+    /// False while a map transition is in flight — `wCurMap` is the map being entered and everything
+    /// else here still belongs to the one being left. See [`map_header_is_loaded`] for the window
+    /// and for what was offered inside it; [`crate::pokemon::tile_map::MetaTileMap::position_settled`]
+    /// is where it lands.
+    pub header_loaded: bool,
+    /// `wWalkBikeSurfState == 2`. The cartridge branches on this byte before it decides anything
+    /// about a collision, and one of the things down the surfing side is a warp that will not fire:
+    /// see [`crate::pokemon::tile_map::MetaTileMap::surfing`].
+    pub surfing: bool,
+    /// False while the sprite table is being filled — see [`map_sprites_are_loaded`]. Lands in
+    /// `position_settled` beside [`Self::header_loaded`], because the two are the same statement
+    /// about different halves of a map load: an intra-map teleport reloads the map without ever
+    /// changing `wCurMap`, so only this one sees it.
+    pub sprites_loaded: bool,
 }
 
 impl CurrentMap {
@@ -1533,6 +1647,9 @@ mod test {
             closed_doors: vec![],
             grass_encounter_rate: 0,
             card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
         };
         let tile_map = MetaTileMap::new(&current_map);
         println!("{}", tile_map);
@@ -1651,6 +1768,9 @@ mod test {
             closed_doors: vec![],
             grass_encounter_rate: 0,
             card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
         };
         let tile_map = MetaTileMap::new(&current_map);
         println!("{tile_map}");
