@@ -267,7 +267,7 @@ model asked mid-battle sees a fight in which its own last decision was silently 
 ## A turn that failed outright
 
 ⛔ The 402 death loop of 2026-09-05, and the three faults it needed at once. `docs/coverage-plan.md`
-§2.2.1 is the evidence; `worker::TurnOpen` carries the argument.
+§2.2.1 of the 2026-09-06 draft (git `7343616`) is the evidence; `worker::TurnOpen` carries the argument.
 
 - **A failed turn is rolled back whole.** `Worker::run_one` records `history.len()` **and**
   `turns_since_plan` before `sync_plan` runs, and `roll_back_failed_turn` puts both back when the

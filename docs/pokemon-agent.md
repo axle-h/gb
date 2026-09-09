@@ -286,7 +286,7 @@ price.
 ## The coverage oracle
 
 `integration_tests/coverage.rs`, over the event stream, so it works under any driver. See
-[test-suite](test-suite.md) for the tier and [coverage-plan](coverage-plan.md) §5 for the plan.
+[test-suite](test-suite.md) for the tier and [coverage-plan](coverage-plan.md) for the plan.
 
 - Four verdicts and a fifth that was not in the plan: `Completed`, `Blocked { times, message }`,
   `Defect { reason }`, `Unreached`, and `Silent` — chosen, outcome never reported (the finding
@@ -503,7 +503,7 @@ price.
   is the cartridge's voice used for the agent's own account. A **boulder push is still silent and
   deliberately so** — see `AgentState::PushingBoulder`'s ⚠️, where the shove runs as a script that
   takes the state away before it can report. `coverage::Verdict::Silent` stays as the guard that
-  finds the next one; [coverage-plan](coverage-plan.md) §5.2.2.
+  finds the next one; [coverage-plan](coverage-plan.md) §7.1.
 - `OverworldActionAbortedReason::NothingAppeared` is an abort the oracle scores a **completion**: the
   pace ran its whole `PACING_BUDGET_TICKS` and the game's own 8-in-256 roll came up empty, which is
   the action done rather than the action failed. ⚠️ Its sentence quotes the budget in seconds

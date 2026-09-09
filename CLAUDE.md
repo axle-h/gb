@@ -20,20 +20,19 @@ shipped**. Read it before touching routing, map connections, `use_field_move` ta
 tools — every item carries the save state or the fixture that reproduces it, and the rules they left
 behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
 [llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third and the only one that is
-still ahead of the code. It replaces the soak tier's random walk with an exhaustive one, driven
-through `LlmPolicy` against a mock endpoint so the thing under test is the deployed stack, and it
-cheats past the game's gates with the debug tier rather than around them. **C0, C1 and C3's frontier
-walk are built; the god run is not** — its status table says exactly what, and §0.4 records the four
-places the plan itself turned out to be wrong. ⭐ **§5.2.6 and §5.2.8 are the faults the sweeps found
-and §5.2.9 is the 42 the regional sweep found next**, written up to be picked up cold; most of the
-fixed ones were agent bugs rather than harness ones. ⚠️ **§5.2.8 is the one to read before filing a
-coverage defect**: the row that had been on the open list longest was sound, and what was actually
-wrong was that a sprite's action id moved with the player — a quarter of the frontier was one object
-counted many times. ⚠️ **And §5.5 before running one**: the walk's start is `GB_COVERAGE_START` now
-(one walk is 38 maps, eight regions union to 159), and a single run's totals are a coin flip between
-two different walks rather than a measurement. Read it before touching the soak tier,
-`postgame/debug.rs`, `integration_tests/llm*.rs` or anything under
-`integration_tests/{cheats,coverage,godmode}.rs`.
+still ahead of the code: every action in the game taken once through the deployed `LlmPolicy`
+against a mock endpoint, with a verdict on each and every defect fixed, until a sweep of Kanto comes
+back clean. It was rewritten on 2026-09-09 as **a numbered step list (§4), from the red tier of today
+to the fixpoint**; the harness, the cheats, the oracle and the walk are built, and §2 is the baseline
+sweep of that same day — 153 maps of 248, 106 defects and 41 silences nobody has fixed, and 82% of
+every turn it took spent in Route 16's gate. Steps 1 to 5 are those. ⚠️ **§3 is the rules and §6.2 is
+how to read a number** — the walk's totals are a coin flip between several different walks, and CPU
+load is an input to it, so never build while measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**,
+because a walk's run directory defaults into `/tmp` and writes hundreds of megabytes of RAM there.
+§7 is the record: the faults the sweeps found and the seven places the plan was wrong, and **§7.3
+maps the old section numbers that code comments still cite** onto where each argument lives now. Read it before
+touching the soak tier, `postgame/debug.rs`, `postgame/fishing.rs`, `integration_tests/llm*.rs` or
+anything under `integration_tests/{cheats,coverage,godmode}.rs`.
 
 ## Rules of the road
 
