@@ -241,7 +241,16 @@ a real run directory. Default tier; the whole of `llm.rs` runs in about two seco
   `target/test-artifacts/coverage/defect-<id>_state.bin`, taken by `TestFixture::observe_coverage`
   on the tick the verdict turns. ⚠️ **It cannot be taken at the end of the run.** Exploration is
   destructive and mostly one-shot — a sprite talked to is gone, an item picked up is gone — so by
-  the time a walk ends the square that failed cannot be stood on again.
+  the time a walk ends the square that failed cannot be stood on again. A dropped state that turns
+  out to be the only way to reach a case gets **committed**, exactly as a `soak` jam does:
+  `data/seafoam-b3f-on-the-water-warp.bin` is the first, and
+  `cinnabar::a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on` is its two-tick test
+  in the default tier. `target/` is swept, so copy one out before it is.
+- ⚠️ **Read the `cheats` line before believing a coverage gap.** Gen 1's bag holds twenty *kinds* and
+  every finished-game start arrives with all twenty used, so `Cheats` cannot always hand the walk the
+  key items it needs and says which it could not: no S.S. Ticket is the S.S. Anne's nine rooms, no
+  Lift Key is Rocket Hideout's four floors, no rods is every `Fish` row in the game. It reports
+  rather than failing, so a sweep looks healthy while a tenth of Kanto is unreachable.
 - ⚠️ **The walk is not reproducible, and that is `step_coarse` rather than a bug.** `LlmRun` hands
   the agent however long the driver's last loop iteration took, with a worker thread and a real
   socket in that loop, so three runs from the same fixture gave 352, 355 and 360 ids (always 28
