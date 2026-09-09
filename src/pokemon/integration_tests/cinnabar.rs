@@ -24,6 +24,9 @@ fn seafoam_articuno_is_reachable_offline() {
             sprites: vec![], metadata, closed_doors: vec![], card_key_locked: false,
             // Seafoam is surf routing; grass never enters into it.
             grass_encounter_rate: 0,
+            header_loaded: true,
+            surfing: true,
+            sprites_loaded: true,
         };
         let mut tm = MetaTileMap::new(&current);
         tm.can_surf = true;
@@ -244,4 +247,53 @@ fn a_boulder_floors_action_menu_is_not_a_search_per_tick() {
             "{name}'s menu costs {cost:?} against {plain:?} on a map with nothing to search; \
              a goal row is re-running its layout search every tick");
     }
+}
+
+/// ⭐ **A warp on the water is taken by stepping onto it, and the agent used to lean on it.**
+///
+/// `SeafoamIslandsB3F:21,17` is the bottom-right hole down to B4F: water, on the map's last row,
+/// and reachable only by surfing. `home/overworld.asm`'s `.noDirectionChange` tests
+/// `wWalkBikeSurfState` for `$02` before it looks at anything else. On foot, walking into the wall
+/// in front while standing on a warp entry runs `ExtraWarpCheck` and then `CheckWarpsCollision`, and
+/// the warp fires — that is how every map-edge ladder in the game is taken. Surfing, the branch goes
+/// to `CollisionCheckOnWater` and the next instruction is `jp c, OverworldLoop`;
+/// `CheckWarpsCollision` is not on that path at all. What is left is `CheckWarpsNoCollision`, which
+/// runs on a completed **step**, so the entry has to be arrived at rather than pressed against.
+///
+/// The coverage walk of 2026-09-09 hit it twice a sweep — here and at the identical `B4F:21,17`
+/// going back up — holding Down for 60 s of game time each time and then reporting that it "did not
+/// arrive" while standing exactly there. Measured on this state: 120 ticks of Down move nothing, Up
+/// and then Down warps.
+///
+/// ⚠️ **Two places had to learn it, and fixing the first alone changed nothing.**
+/// [`MetaTileMap::actions`](crate::pokemon::tile_map::MetaTileMap::actions) builds
+/// `[opposite(dir), dir]` for a surfing player standing on the entry — but `OverworldMovement` tests
+/// for a border warp *before* it consults the route, and pressed the outward direction itself. Both
+/// carry the `surfing` condition now and this test fails if either is taken away.
+///
+/// The fixture is the save state the walk dropped at the moment the verdict turned
+/// (`TestFixture::observe_coverage`), which is the only moment it exists: the square is on the far
+/// side of a current-swept channel and cannot be stood on again by replaying anything.
+// Default tier, unlike everything else in this file that drives the agent: the fixture is dropped
+// two ticks from the answer, so the whole test is 30 ms and there is no reason to make anyone opt in
+// to a routing regression this narrow.
+#[test]
+fn a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on() {
+    use crate::geometry::Point8;
+    const HOLE: Point8 = Point8 { x: 21, y: 17 };
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/seafoam-b3f-on-the-water-warp.bin"), Duration::from_mins(2),
+        vec![PolicyStep::EnterMap { to_map: Map::SeafoamIslandsB4F, to_position: Some(HOLE) }]);
+    let start = fixture.game_state();
+    println!("from {} @ {} surfing={}", start.map.map, start.map.player_position, start.map.surfing);
+    assert_eq!(start.map.map, Map::SeafoamIslandsB3F);
+    assert_eq!(start.map.player_position, HOLE, "the state is dropped standing on the entry itself");
+    assert!(start.map.surfing, "and on the water, which is the whole of it");
+
+    fixture.step_until_exhausted();
+    let end = fixture.game_state();
+    println!("ended on {} @ {}", end.map.map, end.map.player_position);
+    assert_eq!(end.map.map, Map::SeafoamIslandsB4F,
+        "the entry has to fire, and holding the outward direction on it never will");
 }

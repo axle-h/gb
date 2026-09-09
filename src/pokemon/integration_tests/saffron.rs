@@ -172,3 +172,153 @@ fn can_get_marsh_badge() {
         s.pokemon.get(0).map(|p| p.level).unwrap_or(0));
     fixture.save_state_named("src/pokemon/data/post-marsh-badge.bin").unwrap();
 }
+
+/// ⭐ **Every teleport pad in Saffron Gym is a row, named by its own square.**
+///
+/// The gym is nine rooms joined only by intra-map warps, and `bfs_from_player` treats a pad the way
+/// it treats a spinner: stepping onto it hands control to the game, so the edge it records runs from
+/// the square *beside* the pad to the pad's **landing**, and the pad itself never gets a `dist`
+/// entry. That is right for crossing the maze and wrong for naming a pad as a destination — and
+/// `actions()` used to require exactly that `dist` entry, so a pad was offered only while it
+/// happened to be some other pad's landing. The coverage walk of 2026-09-09 was offered a handful
+/// that way, chose one, and the moment it moved the row stopped existing: **37 defects, every one
+/// of them "there is no route to the warp to SaffronGym", and 239 of the walk's 454 turns spent in
+/// this room.**
+///
+/// So a pad is priced by the square you step onto it *from* (`actions()`'s `pad_approach`), which is
+/// what `reconstruct` would have produced had it been an ordinary terminal.
+///
+/// ⚠️ **And the pad underfoot is the one that matters most.** `bfs_from_player` used to skip a
+/// settled neighbour before it looked at what the neighbour *was*, and the search's own root is
+/// settled at price 0 — so standing on a pad threw away the only edge out of the room. This state
+/// stands on the gym's centre-room pad; without that fix Sabrina, the Gym Guide and the door out
+/// are all "no route" from here, which is what the walk reported.
+#[test]
+fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
+    use crate::geometry::Point8;
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::tile::MetaTile;
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let metadata = Arc::new(mmu.read_map_metadata(Map::SaffronGym).unwrap());
+    // (1, 5) is a pad in the top-left room; its landing is (11, 11), the centre room's only pad,
+    // and the centre room is where Sabrina stands. (1, 10) is ordinary floor in the middle-left
+    // room, and is where the walk of 2026-09-09 was standing when it read back that eleven of these
+    // rows did not exist.
+    let standing_on: Point8 = match std::env::var("GB_PROBE_AT").ok().as_deref() {
+        Some("floor") => Point8 { x: 1, y: 10 },
+        _ => Point8 { x: 1, y: 5 },
+    };
+    let map = MetaTileMap::new(&CurrentMap {
+        player_position: standing_on,
+        player_direction: PlayerFacingDirection::Down,
+        sprites: Vec::new(),
+        metadata: Arc::clone(&metadata),
+        closed_doors: Vec::new(),
+        grass_encounter_rate: 0,
+        card_key_locked: false,
+        header_loaded: true,
+        surfing: false,
+        sprites_loaded: true,
+    });
+
+    let pads: Vec<Point8> = map.meta_tiles.iter().enumerate()
+        .filter(|(_, t)| matches!(t, MetaTile::Warp { to_map, .. } if *to_map == Map::SaffronGym))
+        .map(|(i, _)| Point8 { x: (i % map.width) as u8, y: (i / map.width) as u8 })
+        .collect();
+    assert_eq!(pads.len(), 30, "the gym's 32 warps are 30 pads and the two halves of its door");
+
+    let ids: Vec<String> = map.actions().iter().map(|a| a.id()).collect();
+    // ⚠️ One row is deliberately missing: the pad whose landing is the square the player is standing
+    // on. `actions()` withholds it because there is nothing to go to — and because the agent's
+    // arrival test is `player_position == to_position`, so offering it would report a walk that
+    // never happened. Every other pad is here.
+    let landing_of = |p: Point8| match map.tile_at(p) {
+        MetaTile::Warp { to_position, .. } => to_position,
+        other => panic!("{p} is {other:?}, not a pad"),
+    };
+    let already_here: Vec<Point8> = pads.iter().copied()
+        .filter(|&p| landing_of(p) == standing_on).collect();
+    assert!(already_here.len() <= 1, "at most one pad lands where the player stands: {already_here:?}");
+
+    for pad in &pads {
+        let want = format!("SaffronGym:{},{}:Warp", pad.x, pad.y);
+        assert_eq!(ids.contains(&want), !already_here.contains(pad),
+            "{want} — offered when it should not be, or missing when it should be: {ids:?}");
+    }
+
+    // The pad underfoot re-fires with a step off and a step back on (`WarpTrigger::StepOn`), and
+    // everything behind it is reachable again.
+    if standing_on != (Point8 { x: 1, y: 5 }) { return }
+    let underfoot = map.actions().into_iter()
+        .find(|a| a.id() == format!("SaffronGym:{},{}:Warp", standing_on.x, standing_on.y))
+        .expect("the pad the player is standing on is still a way to go somewhere");
+    assert_eq!(underfoot.route.len(), 2, "off and back on: {:?}", underfoot.route);
+    // …and the room it leads to comes back with it. The centre room is walled off from every other
+    // room and (11, 11) is the only pad in it, so the one edge this test is really about is the one
+    // that runs from a square beside the player's own into it. Sabrina stands at (9, 8); the map is
+    // built with no sprites, so what is asserted is her floor.
+    assert!(map.route_to(Point8 { x: 9, y: 9 }).is_some(),
+        "the centre room is behind the pad underfoot and nothing else");
+    assert!(ids.iter().any(|id| id == "SaffronGym:9,17:Warp"), "and the way out: {ids:?}");
+}
+
+/// ⭐ **An intra-map warp is finished by arriving, because nothing else can say so.**
+///
+/// Every completion the agent had for a `Warp` row was the map changing, and a teleport pad does not
+/// change the map. So no intra-map warp row in the game had ever been reported as completed: the
+/// coverage walk took thirty of them and scored every one a defect, and a model would have read
+/// thirty walks that went quiet. `player_position == to_position` is exact rather than approximate,
+/// because a pad's landing is reached by that pad and by nothing else.
+///
+/// This starts in the gym's centre room, whose only pad is (11, 11) → (1, 5).
+#[test]
+fn a_teleport_pad_reports_arriving_even_though_the_map_never_changed() {
+    use crate::geometry::Point8;
+    use crate::pokemon::tile::MetaTile;
+    const PAD: Point8 = Point8 { x: 11, y: 11 };
+    const LANDING: Point8 = Point8 { x: 1, y: 5 };
+
+    struct TakeThePad;
+    impl crate::pokemon::policy::Policy for TakeThePad {
+        fn name(&self) -> &'static str { "take-the-pad" }
+        fn pick_overworld_action(&mut self, state: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction> {
+            // Once only: a re-issued row would hide a completion that never came.
+            (state.map.player_position != LANDING).then(|| state.map.actions().into_iter()
+                .find(|a| a.destination == PAD))?
+        }
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
+        fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> { None }
+    }
+
+    let mut fixture = TestFixture::with_policy(
+        include_bytes!("../data/post-marsh-badge.bin"), Duration::from_mins(3), Box::new(TakeThePad));
+    let start = fixture.game_state();
+    assert_eq!(start.map.map, Map::SaffronGym);
+    assert_eq!(start.map.tile_at(PAD),
+        MetaTile::Warp { to_map: Map::SaffronGym, to_position: LANDING });
+    println!("from {} ", start.map.player_position);
+
+    // ⚠️ Arriving is not the assertion — being *told* is. The walk moves the player either way; what
+    // this test exists for is the `OverworldActionCompleted` that used to never come and turned,
+    // sixty seconds later, into "the walk was given up without getting there".
+    let mut reported = false;
+    for _ in 0..3_000 {
+        for event in fixture.agent.drain_events() {
+            if let crate::pokemon::agent::AgentEvent::OverworldActionCompleted {
+                destination: MetaTile::Warp { to_map: Map::SaffronGym, to_position } } = event
+                && to_position == LANDING
+            {
+                reported = true;
+            }
+        }
+        if reported { break }
+        fixture.step();
+    }
+    let end = fixture.game_state();
+    println!("landed on {} reported={reported}", end.map.player_position);
+    assert_eq!(end.map.player_position, LANDING, "the pad puts the player in the top-left room");
+    assert!(reported, "the pad has to report that it arrived");
+}

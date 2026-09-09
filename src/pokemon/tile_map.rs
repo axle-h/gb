@@ -13,8 +13,14 @@ use crate::pokemon::tile::{HiddenObject, MetaTile};
 #[derive(Debug, Clone, Default)]
 pub struct MetaTileMap {
     pub player_position: Point8,
-    /// ⚠️ **False on the one tick a map transition is in flight, and everything that draws a
-    /// conclusion from [`Self::player_position`] has to check it.**
+    /// ⚠️ **False while a map transition is in flight, and everything that draws a conclusion from
+    /// [`Self::player_position`] has to check it.**
+    ///
+    /// There are two of these and they are the same lie told at different lengths. The longer one is
+    /// a map-load earlier and runs for 26 agent ticks on an ordinary warp, four times that at the
+    /// Safari Zone gate: [`map_header_is_loaded`](crate::pokemon::map_metadata::map_header_is_loaded)
+    /// carries its argument and why the ten-byte header comparison is the test. The shorter one is
+    /// the single tick below.
     ///
     /// Crossing a map connection *northward* or *westward* leaves `wYCoord`/`wXCoord` holding
     /// **255** — the ROM's own −1 — for one agent tick, before `CheckMapConnections` switches
@@ -37,6 +43,15 @@ pub struct MetaTileMap {
     /// the coordinate goes one *past* the last row, which lands on the connection strip and is a
     /// real, reachable tile. Only the underflow lies.
     pub position_settled: bool,
+    /// The player is on the water rather than on foot (`wWalkBikeSurfState == 2`).
+    ///
+    /// ⚠️ **It changes which warps can be fired, and that is the whole reason it is here.**
+    /// `home/overworld.asm`'s `.noDirectionChange` branches on this byte *before* it looks at a
+    /// collision: on foot, walking into a wall while standing on a warp entry falls through
+    /// `ExtraWarpCheck` into `CheckWarpsCollision` and warps; surfing, `CollisionCheckOnWater`
+    /// answers and the next instruction is `jp c, OverworldLoop`. `CheckWarpsCollision` is not on
+    /// the surfing path at all. See the `route.is_empty()` arm of [`Self::actions`].
+    pub surfing: bool,
     pub player_direction: PlayerFacingDirection,
     pub map: Map,
     pub width: usize,
@@ -384,7 +399,9 @@ impl MetaTileMap {
         let meta_tiles = map.meta_tiles();
         Self {
             walkable_cache: std::cell::OnceCell::new(),
-            position_settled: unclamped_x < width && unclamped_y < height,
+            position_settled: map.header_loaded && map.sprites_loaded
+                && unclamped_x < width && unclamped_y < height,
+            surfing: map.surfing,
             player_position: Point8 { x: px, y: py },
             player_direction: map.player_direction,
             map: map.metadata.map,
@@ -1252,6 +1269,43 @@ impl MetaTileMap {
                 let here = self.meta_tiles[pos.x as usize + pos.y as usize * self.width];
                 for (dir, nb) in neighbors {
                     if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }
+
+                    // Intra-map teleporter (the Saffron Gym warp maze): stepping onto `nb` warps the
+                    // player to `to_position` on *this same map*. Like a spinner, the player never stops
+                    // on the pad — record an edge from `pos` (press `dir`) → the landing tile and continue
+                    // the search from there, so routes cross the maze automatically. Routes are recomputed
+                    // each tick, so after the warp the follower simply re-plans from the new room. (Regular
+                    // inter-map warps stay terminal — handled in the `else` branch below.)
+                    //
+                    // ⚠️ **Tested *before* the `settled` guard, and that ordering is the whole of
+                    // Saffron Gym.** For every other tile, a settled neighbour has nothing left to
+                    // teach: it has been expanded and its own price is final. A pad is different,
+                    // because the node the edge leads to is not the pad but its landing — so skipping
+                    // a settled pad throws away the only way out of the room. The case that made it
+                    // matter is the pad the player is **standing on**: it is settled at price 0 as
+                    // the search's own root, so the coverage walk of 2026-09-09 stood on Saffron
+                    // Gym's (1, 5) — whose landing is the centre room, the only way to Sabrina — and
+                    // read back that there was no route to her, to the Gym Guide, or to the door
+                    // out. Every room in that gym is entered by exactly one pad, so one skipped edge
+                    // takes a ninth of the map away.
+                    if let MetaTile::Warp { to_map, to_position }
+                        = self.meta_tiles[nb.x as usize + nb.y as usize * self.width]
+                        && to_map == self.map
+                    {
+                        if (to_position.x as usize) < self.width && (to_position.y as usize) < self.height
+                            && relax!(pos, to_position, dir, 1)
+                        {
+                            push(&mut buckets, dist[&to_position], to_position);
+                        }
+                        // ⚠️ **The pad itself is deliberately *not* relaxed**, so it never gets a
+                        // `dist` entry of its own and never becomes a place a route may end. It is
+                        // one square with two meanings — "step on it and be taken away" and "be put
+                        // here by its partner" — and one `Point8` key cannot hold both prices. See
+                        // `actions()`'s `pad_approach`, which prices a pad row by the square you step
+                        // onto it *from* rather than by the pad.
+                        continue;
+                    }
+
                     if settled.contains(&nb) { continue; }
 
                     // Arrow (spinner) tile: stepping onto `nb` hands control to the game, which slides the
@@ -1264,24 +1318,6 @@ impl MetaTileMap {
                     }
 
                     let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
-
-                    // Intra-map teleporter (the Saffron Gym warp maze): stepping onto `nb` warps the
-                    // player to `to_position` on *this same map*. Like a spinner, the player never stops
-                    // on the pad — record an edge from `pos` (press `dir`) → the landing tile and continue
-                    // the search from there, so routes cross the maze automatically. Routes are recomputed
-                    // each tick, so after the warp the follower simply re-plans from the new room. (Regular
-                    // inter-map warps stay terminal — handled in the `else` branch below.)
-                    if let MetaTile::Warp { to_map, to_position } = tile {
-                        if *to_map == self.map {
-                            let dest = *to_position;
-                            if (dest.x as usize) < self.width && (dest.y as usize) < self.height
-                                && relax!(pos, dest, dir, 1)
-                            {
-                                push(&mut buckets, dist[&dest], dest);
-                            }
-                            continue;
-                        }
-                    }
 
                     if let MetaTile::Jump(jump_dir) = tile {
                         // The player never stands on a Jump tile — they either jump over it
@@ -1346,12 +1382,7 @@ impl MetaTileMap {
                         // becomes a pass-through node so routes can cross it (the agent mounts Surf at the
                         // land→water boundary). `ConnectionWater` stays terminal: stepping onto it while
                         // surfing crosses to the connected map (a crossing target, like `Connection`).
-                        let surfable_water = self.can_surf && matches!(tile, MetaTile::Water);
-                        if surfable_water || !matches!(tile,
-                            MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water
-                            | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree
-                            | MetaTile::Warp { .. } | MetaTile::Connection { .. })
-                        {
+                        if self.is_pass_through(*tile) {
                             push(&mut buckets, dist[&nb], nb);
                         }
                     }
@@ -1360,6 +1391,22 @@ impl MetaTileMap {
             bucket += 1;
         }
         (dist, steps, came_from)
+    }
+
+    /// True if the player can stand on this tile **and walk on from it** — the predicate
+    /// [`Self::bfs_from_player`] queues a relaxed neighbour on.
+    ///
+    /// The complement is a *terminal*: a wall, a person, a door, a counter. Those are still given a
+    /// `dist` entry, because a route may end at one — the whole of `actions()` is routes that end at
+    /// terminals — they are simply never expanded from. Water is the one that moves between the two
+    /// lists: it is a wall on foot and a corridor with Surf up.
+    ///
+    fn is_pass_through(&self, tile: MetaTile) -> bool {
+        let surfable_water = self.can_surf && matches!(tile, MetaTile::Water);
+        surfable_water || !matches!(tile,
+            MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water
+            | MetaTile::ConnectionWater(_) | MetaTile::Counter | MetaTile::CutTree
+            | MetaTile::Warp { .. } | MetaTile::Connection { .. })
     }
 
     /// Fixed PC-tile coordinates on this map — see [`pc_locations_for`]. `actions()` emits a
@@ -1385,7 +1432,34 @@ impl MetaTileMap {
         hidden_objects_for(self.map)
     }
 
+    /// Every row this map offers, from where the player is standing.
+    ///
+    /// ⚠️ **No rows at all while the player's square is a fiction.** Every row here is a *route*
+    /// from [`Self::player_position`], so a position that is not a position mints a menu of walks
+    /// from nowhere — see [`Self::position_settled`]. On the 255-underflow tick that came out empty
+    /// anyway, because the BFS from the far edge of the map reaches nothing; on the map-load tick it
+    /// did not, because the stale coordinate is an ordinary-looking square well inside the new map's
+    /// walls, and the coverage walk of 2026-09-09 was offered three rows on the far side of the
+    /// Safari Zone's pond and failed on the first of them.
+    ///
+    /// An empty menu is a case the turn already handles: `llm::prompt` answers it with "nothing —
+    /// the agent can reach no action from here, `wait` and look again", which is exactly true for
+    /// the tick it is said on.
+    ///
+    /// ⚰️ **Holding the agent's turn instead was tried and reverted, and the reason is worth
+    /// keeping.** Not polling the policy at all while
+    /// [`map_header_is_loaded`](crate::pokemon::map_metadata::map_header_is_loaded) is false is
+    /// tidier — no wasted request, not even an empty one — and it is what `blackout_in_flight`
+    /// does one state over. But a black-out is a rare event and this is **every door in the game**:
+    /// the window is 26 ticks on an ordinary warp, and deferring the poll by that much re-rolled
+    /// the wild encounter in `postgame::items::can_use_the_stat_items_and_a_poke_doll_in_battle`
+    /// from a Pidgey to a Rattata, whose Tail Whip held the Defense stage the leg asserts on at
+    /// neutral. `full_playthrough` is the same replay over a whole game. The rows are what was
+    /// wrong; the timing was not.
     pub fn actions(&self) -> Vec<OverworldAction> {
+        if !self.position_settled {
+            return vec![];
+        }
         let (full_dist,     full_from)     = self.bfs_from_player();
 
         // Reconstruct the step sequence from the given came_from back-pointers.
@@ -1424,37 +1498,49 @@ impl MetaTileMap {
 
         let mut actions = vec![];
 
-        // ⚠️ **W5 — a warp entry the cartridge will not open is worse than no row.** See
-        // [`Self::warp_trigger`]: Route 8's east gate has two entries and only one of them is a way
-        // in. The dud is dropped **only when another warp on this map leads to the same place**, and
-        // that guard is not caution for its own sake: `warp_trigger` is a transcription of
-        // `home/overworld.asm` and a false negative in it would take away the only door out of
-        // somewhere and strand the run for good. With the guard the worst a mistake can cost is a
-        // row that was already useless.
-        // ⚠️ **Counted over warps that can actually be *opened*, not over warps that exist.** The
-        // first draft counted entries, and Cerulean's badge house has two: a front door and a back
-        // door. Both looked impossible (its SHIP tileset sends a house down the tile-in-front arm,
-        // and both are on the map's edge where this model cannot see the tile in front), so each one
-        // was dropped because the other existed and the house had no exit at all. A warp is only
-        // ever given up in favour of one that is known to work.
-        let ways_to: HashMap<Map, usize> = self.meta_tiles.iter().enumerate()
-            .filter_map(|(index, tile)| match tile {
-                MetaTile::Warp { to_map, .. } => {
-                    let at = Point8 { x: (index % self.width) as u8, y: (index / self.width) as u8 };
-                    matches!(self.warp_trigger(at),
-                             WarpTrigger::StepOn | WarpTrigger::HoldDirection(_)).then_some(*to_map)
-                }
-                _ => None,
-            })
-            .fold(HashMap::new(), |mut counts, to_map| {
-                *counts.entry(to_map).or_default() += 1;
-                counts
-            });
         for (warp_to_map, warp_to_pos) in &self.warp_targets {
-            let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Warp { to_map, to_position } if to_map == warp_to_map && to_position == warp_to_pos)) else { continue };
+            // ⚠️ **A teleport pad whose landing is underfoot is not a row.** There is nothing to go
+            // to, and the agent's arrival test for an intra-map warp is `player_position ==
+            // to_position` — so offering it would report a walk that never happened. Every landing
+            // in Saffron Gym is itself a pad, so a player standing on one always has exactly one of
+            // these to withhold.
+            //
+            // ⚰️ **Pricing a pad by the square you step onto it *from* was written here and taken
+            // out again.** It reads better than what the BFS does — a pad has no `dist` entry of its
+            // own, only its landing does, so the route to a pad is "be teleported onto it" and then
+            // the `route.is_empty()` arm below re-fires it with a step off and back. But no map in
+            // the game needs it: all three that carry intra-map warps (`SaffronGym` 30,
+            // `SilphCo3F` 2, `SilphCo8F` 2) pair their pads one-to-one, so every pad is some pad's
+            // landing and is in `dist` already. A second pricing path that nothing can reach is a
+            // second pricing path that nothing can test.
+            if *warp_to_map == self.map && self.player_position == *warp_to_pos { continue }
+
+            let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Warp { to_map, to_position }
+                if to_map == warp_to_map && to_position == warp_to_pos)) else { continue };
+            // ⚠️ **W5 — a warp entry the cartridge will not open is worse than no row.** See
+            // [`Self::warp_trigger`]: Route 8's east gate has two entries and only one of them is a
+            // way in, and Silph Co 1F carries one that pokered's own source labels
+            // `; inaccessible` — plain floor, no warp tile, nothing to press. Offering one costs
+            // sixty seconds of holding a direction at a wall; the coverage walk of 2026-09-09 spent
+            // exactly that on Silph Co 1F in all three of the regions that reach it.
+            //
+            // ⚰️ **This used to drop a dud only when another warp on the map led to the same
+            // place**, on the argument that `warp_trigger` is a transcription and a false negative
+            // in it would take away the only door out of somewhere. That was the right caution and
+            // it was hiding a real false negative: what the guard was actually protecting was
+            // **Pokémon Mansion 3F's three floor holes**, the only way onto 1F's right side and so
+            // to the Secret Key. They are `FACILITY $11`, which is in the cartridge's *other*
+            // step-on table (`TileSetId::warp_pad_and_hole_tile_ids`) and not the one this model
+            // read. Naming that table moved them to `StepOn` and left the guard with nothing to
+            // guard: `an_impossible_warp_is_one_the_cartridge_really_will_not_open` walks all 248
+            // maps and pins the whole list at four, every one of them a dud.
+            //
+            // ⚠️ `WarpTrigger::Unknown` is **not** dropped and that distinction is load-bearing.
+            // Cerulean's badge house has a front and a back door, both on the map edge where this
+            // model cannot see the tile in front; an earlier draft called them impossible and left
+            // the house with no exit at all. Unsure is not the same as no.
             let trigger = self.warp_trigger(dest);
-            if trigger == WarpTrigger::Impossible
-                && ways_to.get(warp_to_map).copied().unwrap_or(0) > 0 { continue }
+            if trigger == WarpTrigger::Impossible { continue }
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
 
@@ -1471,6 +1557,33 @@ impl MetaTileMap {
 
             if route.is_empty() {
                 match trigger {
+                    // ⚠️ **Surfing, the held button does nothing, and this is the cartridge's own
+                    // branch rather than a guess.** `home/overworld.asm`'s `.noDirectionChange`
+                    // tests `wWalkBikeSurfState` for `$02` *before* it checks anything: on foot a
+                    // collision on a warp entry runs `ExtraWarpCheck` and `CheckWarpsCollision`,
+                    // while `.surfing` calls `CollisionCheckOnWater` and the very next instruction
+                    // is `jp c, OverworldLoop`. So the only route left is `CheckWarpsNoCollision`,
+                    // which runs on a completed *step*, and for a `HoldDirection` entry the step
+                    // has to be the one `IsPlayerFacingEdgeOfMap` accepts — i.e. in `dir`. Off the
+                    // way you came, then back the way the cartridge wants.
+                    //
+                    // ⭐ Seafoam Islands is the whole of this: `SeafoamIslandsB3F:21,17:Warp` and
+                    // `B4F:21,17` are water at the bottom edge of a current channel, and the
+                    // coverage walk of 2026-09-09 sat on one of them holding Down for 60 s of game
+                    // time. Measured on the dropped state: Down for 120 ticks moves nothing, and
+                    // Up-then-Down warps. The neighbouring `20,17` entry passed every sweep because
+                    // the walk happened to surf *onto* it from above and the arrival fired it.
+                    //
+                    // ⚠️ Unlike the `StepOn` dance below this cannot pick any walkable neighbour:
+                    // the square behind the entry is the only one a step in `dir` can come from. If
+                    // it is not water the entry cannot be fired from the water at all, which is the
+                    // cartridge's rule and not this function's — the row stays, and it stays
+                    // honest, because a `HoldDirection` row that is silently dropped is how a floor
+                    // loses its only way out (see the `ways_to` ⚠️ above).
+                    WarpTrigger::HoldDirection(dir) if self.surfing => {
+                        route.push(opposite_dir(dir));
+                        route.push(dir);
+                    }
                     // ⚠️ **One held button, not a step off and a step back.** Standing on the entry
                     // with `BIT_STANDING_ON_WARP` already set, walking into the wall in front is a
                     // *collision* on a warp tile, which `home/overworld.asm` sends straight to
@@ -1478,6 +1591,8 @@ impl MetaTileMap {
                     // it survives the route being re-derived every tick — which the step-off dance
                     // did not, because each tick recomputed a two-step route and only ever pressed
                     // its head. That is the shuffle a deployed run did for 60 s at the Route 8 gate.
+                    // The surfing arm above does not have that problem: its step back *is* the
+                    // trigger, so the warp fires on arrival and there is no second lap.
                     WarpTrigger::HoldDirection(dir) => route.push(dir),
                     // A door tile warps on the step onto it and needs no direction, so step off to a
                     // genuinely walkable neighbour and step back. A real `Empty` neighbour, because
@@ -1898,11 +2013,21 @@ impl MetaTileMap {
     ///
     /// ⚠️ **This is a *sufficient* condition for the trigger, not for arriving.** It says nothing
     /// about whether the player can walk to `at`; that is the BFS's job.
+    ///
+    /// ⚠️ **Nor does it know whether the player is on foot.** `HoldDirection` is the tile's answer,
+    /// and a surfing player cannot use it — the collision path it names is not on the surfing side
+    /// of `home/overworld.asm`'s branch. [`Self::surfing`] carries that, and [`Self::actions`]
+    /// builds the different route.
     pub fn warp_trigger(&self, at: Point8) -> WarpTrigger {
         let Some(&here) = self.raw_tile_ids.get(at.x as usize + at.y as usize * self.width) else {
             return WarpTrigger::Impossible;
         };
-        if self.tileset.warp_tile_ids().contains(&here) {
+        if self.tileset.warp_tile_ids().contains(&here)
+            // …or the other table that does the same job: warp pads and floor holes, read by
+            // `IsPlayerStandingOnWarpPadOrHole` rather than by
+            // `IsPlayerStandingOnDoorTileOrWarpTile`. See `TileSetId::warp_pad_and_hole_tile_ids`.
+            || self.tileset.warp_pad_and_hole_tile_ids().contains(&here)
+        {
             return WarpTrigger::StepOn;
         }
         // `ExtraWarpCheck`'s dispatch, in its own order: SS Anne 3F takes function 1 whatever its
@@ -2672,7 +2797,7 @@ mod boulder_solver_tests {
         }
         (MetaTileMap {
             walkable_cache: std::cell::OnceCell::new(),
-            player_position: player, position_settled: true,
+            player_position: player, position_settled: true, surfing: false,
             player_direction: PlayerFacingDirection::Down,
             map: Map::VictoryRoad1F, width: w, height: h, meta_tiles: meta,
             raw_tile_ids: vec![0; w * h], tileset: crate::pokemon::map_header::TileSetId::Cavern,
