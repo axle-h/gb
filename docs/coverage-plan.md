@@ -5,11 +5,12 @@ as it is deployed — `LlmPolicy`, the worker and the wire, against a mock endpo
 a verdict on each, and every defect that turns up fixed, until a sweep of the whole of Kanto comes
 back clean and finds nothing new.
 
-**Status.** Rewritten 2026-09-09 as a step list, from a review of the first three days' work, and
-**step 0 taken the same day**. The harness, the cheats, the oracle and the frontier walk are all
-**built**; the baseline sweep reaches **153 maps of 248** and comes back **red with 106 defects and
-41 silences, none fixed**, with **82% of every turn it took spent in Route 16's gate**. §2 is that
-baseline and every later step measures against it. The steps in §4 are the path from there to a
+**Status.** Rewritten 2026-09-09 as a step list, from a review of the first three days' work;
+**steps 0 and 1 taken the same day**. The harness, the cheats, the oracle and the frontier walk are
+all **built**; the baseline sweep reaches **153 maps of 248** and came back **red with 106 defects
+and 41 silences**, with **82% of every turn it took spent in Route 16's gate**. §2 is that baseline
+and every later step measures against it. **The 41 silences are now 0 and a silence fails the tier**
+(step 1); the 106 defects and the gate are untouched, and are steps 2 to 4. The steps in §4 are the path from there to a
 clean fixpoint, in the order to take them. §7 keeps what the first draft got wrong and what the
 sweeps have found, condensed, because most of that was agent bugs a paying run would have met.
 
@@ -57,12 +58,15 @@ frontier still open, so every one of these numbers is a floor rather than a plat
   and the Safari Zone pond is step 2, both reproduced exactly as those steps describe. ⭐ **Silph
   Co 1F is new** and was in no earlier sweep; it has warp pads of the same family as the gym's, so
   step 3's fix is expected to take it, and if it does not it is a finding of its own.
-- **Silent: 41, and they are no longer only fishing.** `Fish` 35, `Grass` 3
+- **Silent: 41, and they were no longer only fishing.** `Fish` 35, `Grass` 3
   (`Route18:39,13`, `Route24:5,18`), `Warp` 3 (`SeafoamIslandsB3F:20,17`, `:21,17`, `:25,14`).
-  ⚠️ **Step 1 is written on the assumption that fishing is the whole list, and it is not.** The two
-  `Grass` rows are the pacing driver going quiet again on a path the 2026-09-07 fix did not cover,
-  and the three Seafoam warps are the rows §7 filed as "undiagnosed defects" now scoring `Silent`
-  instead. Step 1's third item, failing the walk on any silence, is blocked behind all three.
+  ✅ **All of it closed by step 1 the same day, and the count is 0 in all eight regions**; a silence
+  now fails the tier. Two of the three families were one bug each and the third was not a family at
+  all: the fishing walk mounted Surf on the *turn* that faces the water, the `Grass` pair is a
+  trainer noticing the player mid-pace through a door `PacingForEncounters` does not own, and the
+  three Seafoam warps score `Defect` on every walk that reaches them (step 2's ⚠️), the `Silent` here
+  being the variance in §6.2 rather than a third thing. ⚠️ **Step 1 was written believing fishing was
+  the whole list**, which is why the assertion was its last item and not its first.
 - **Where the turns went: Route 16's gate, and it is worse than the last table said.** The
   `Route16` / `Route16Gate1F` / `Route16FlyHouse` triangle took **26 573 of the sweep's 32 519
   turns, 82%**, and in six of the eight regions it is between 57% and **97%** of everything that
@@ -156,13 +160,13 @@ of §6.1's recipe and the reason is a paragraph of its own; §6.2's "two modes" 
 "several"; and steps 1 and 3 each carry a correction the baseline forced, because both were written
 against numbers this run disagrees with.
 
-### Step 1 — Make silence a failure, and stop fishing from a surf
+### Step 1 — Make silence a failure, and stop fishing from a surf ✅ done 2026-09-09
 
-**What is wrong.** A `Fish` row's walk to "the water's edge" surfs onto the water to get there, so
-`postgame/fishing.rs` refuses with *"cannot fish while surfing"* and drops to `Idle`. That refusal
-and its two siblings (the tick budget, unreachable water) emit a text box the agent made up and no
-terminal event, so the oracle scores the id `Silent` and the walk does not fail. It is the shape
-the grass pace and the cut tree were fixed for, one driver over. Reproduce:
+**What was wrong.** A `Fish` row's walk to "the water's edge" surfed onto the water to get there, so
+`postgame/fishing.rs` refused with *"cannot fish while surfing"* and dropped to `Idle`. That refusal
+and its two siblings (the tick budget, unreachable water) emitted a text box the agent made up and no
+terminal event, so the oracle scored the id `Silent` and the walk did not fail. It was the shape the
+grass pace and the cut tree were fixed for, one driver over. Reproduce:
 
 ```shell
 GB_COVERAGE_MINUTES=6 GB_COVERAGE_PATIENCE=100000 \
@@ -170,25 +174,50 @@ GB_COVERAGE_MINUTES=6 GB_COVERAGE_PATIENCE=100000 \
 # silent     {"Fish": 1}     ViridianCity:8,25:Fish
 ```
 
-**What to do.**
-1. The route to a `Fish` row must end on land: either the row's approach square is chosen so the
-   walk never mounts Surf, or the row is withheld when every approach needs it.
-2. All three refusal exits in `fishing::tick` end in `OverworldActionAborted` with a reason the
-   oracle can score, and the message the agent prints stays.
-3. `coverage_walk_of_the_finished_game` fails on any `Silent` verdict exactly as it fails on a
-   `Defect`. ⚠️ **Fishing is not the whole list**, which is what this step was written believing.
-   The 2026-09-09 baseline has 41 silences: 35 `Fish`, and then `Route18:39,13:Grass` and
-   `Route24:5,18:Grass` — the pacing driver going quiet on a path the 2026-09-07 fix did not cover —
-   and `SeafoamIslandsB3F:20,17`, `:21,17` and `:25,14`, the three `Warp` rows §7 filed as
-   undiagnosed defects, now scoring `Silent` instead. So the assertion is the **last** item of this
-   step and all three families are in front of it; turning it on before then makes the tier red for
-   something the step has not fixed. ⚠️ A `PushBoulder*` row is silent by argument rather than by
-   fault (`Verdict::Silent`'s own note), so the assertion needs an exemption for it or that note
-   needs retiring — decide it here rather than discovering it from a red tier.
+✅ **Taken, and all three items are in.**
 
-**Done:** the command above prints `silent {}` and `0 defects`; `cargo test --release` green; the
-leg chain green (the postgame fishing tests drive this state). **Cost:** small. A deployed model
-choosing a `Fish` row today is told nothing, so this is worth more than its size.
+1. **The route to a `Fish` row ends on land, and the cause was not the one this step assumed.** The
+   step was written believing `actions()` picked a shore across the water, and it does not: the
+   Fish block is `route_to_face_within`'s body inlined over the same `bfs_from_player` prices in the
+   same order, so it always lands on the square `nearest_castable_water` had already validated a
+   land route to. What the walk actually mounted Surf on was **the last button**, which is the *turn*
+   toward the water, and `OverworldMovement`'s Surf-mount arm could not tell it from a step into it.
+   The arm now suppresses the mount for a `MetaTile::Fish` row outright. ⚰️ A first attempt filtered
+   the shore squares by `route_stays_on_land` and was provably a no-op; it was removed rather than
+   left in looking load-bearing.
+2. **All three refusal exits end in `OverworldActionAborted`** — `CastRefused(CastRefusal)` for the
+   three `blocked_by` reasons, `CastNeverFinished` for the tick budget, `NoRoute` for a shore it
+   cannot reach. ⚠️ **The words moved into the reason rather than staying in a `TextBox` beside it**,
+   which is what `NothingAppeared` did for the grass pace: a box the agent writes says the cartridge
+   said it. `PokemonAgent::abort_overworld` and `player_at` are `pub(crate)` for this.
+3. **`Silent` fails the walk** (`Verdict::fails_the_walk`, `CoverageLog::failures`, and the
+   `WalkOutcome` field is `failures` now). The counts stay apart in `summary()`: a defect is a row
+   the agent could not carry out, a silence is one it carried out and never spoke about.
+
+**And the other two families the baseline warned about:**
+
+- **The `Grass` pair was one bug and it was not in the pacing arm.** `Route18:39,13:Grass` and
+  `Route24:5,18:Grass` are a trainer noticing the player mid-pace: the walk-up runs as
+  `GameMode::Script`, commits past the rollback deadline, and drops the state into
+  `AwaitingOverworldAction`. `PacingForEncounters` reports all three of its *own* exits, but the two
+  that take the state away from outside — `assert_script_state`'s commit and `assert_text_box_state`
+  — knew only about `OverworldMovement`. `AgentState::open_overworld_action` is now the one list of
+  states that carry a row and both doors read it.
+- **The three Seafoam warps are not silences.** Six `fuchsia` walks scored
+  `SeafoamIslandsB3F:21,17:Warp` and `SeafoamIslandsB4F:21,17:Warp` `Defect` every time, on
+  `DidNotArrive`, which the walk already fails on. The baseline's `Silent` for them was the variance
+  §6.2 describes, not a third family. They are step 2's ⚠️ and stay there.
+- **No `PushBoulder*` exemption is needed and the note claiming one is retired.** The row is a
+  `BoulderGoal` now and the *goal* completes: 52 of them across six sweeps of 2026-09-09, none
+  silent. The shove itself is still invisible; that is a different sentence and it is on
+  `AgentState::PushingBoulder`.
+
+**Done, measured 2026-09-09** on the eight regional walks in parallel (§6.1): **`silent {}` in every
+one of the eight**, against 41 on the baseline the same day. Defects are unchanged in shape at 103
+(SaffronGym 95, SilphCo1F 3, Seafoam 2, SafariZoneCenter 1, and two one-off "no route to <person>"
+on a moving NPC in a mart and a Pokémon Centre); union 151 maps and 1 381 ids, inside the variance
+§6.2 describes. `cargo test --release` green (1 579), the leg chain green (215),
+`full_playthrough` green.
 
 ### Step 2 — The Safari Zone pond: rows minted before the map is the map
 
@@ -447,6 +476,9 @@ All in the agent or the oracle, none in the walk's own brain but the last two. E
 | 197 turns walking to exits after the credits | No agent state for the Hall of Fame's soft reset; `PokemonAgent::ending` latches on `wNumHoFTeams` | `phase0::the_agent_stops_playing_a_world_the_cartridge_has_reset` |
 | The oracle called a gate a defect for one try per pass | `REPEAT_IS_A_DEFECT` was 3; it is 10 | `being_stopped_by_the_same_thing_over_and_over_is_the_defect` |
 | The 402 death loop of 2026-09-05 | A failed turn's messages kept, the plan re-appended every turn, compaction with nothing to drop | `llm::an_undated_hard_failure_does_not_ratchet_the_history` |
+| 35 `Fish` rows scored `Silent`, and a cast refused "because you are surfing" one tile from dry land | A fishing route's last button *faces* the water, and the Surf-mount arm read it as a step onto water | `tile_map::a_fishing_rows_last_button_faces_the_water_rather_than_entering_it` |
+| The three ways a cast can fail said nothing the oracle could score | All three printed a `TextBox` the agent made up and closed no action | `agent::a_cast_that_could_not_be_made_says_why_rather_than_going_quiet` |
+| `Route18:39,13:Grass` chosen and never reported | A trainer's walk-up commits as `Script` and drops the pace; the script and text-box doors knew only about `OverworldMovement` | `agent::a_pace_is_an_open_overworld_action_like_the_walk_that_started_it` |
 
 ⚰️ Two of these were diagnosed wrongly before they were diagnosed rightly, and the lesson is the
 same both times: argue from the dropped save state, not from the sentence the agent printed.
@@ -468,6 +500,10 @@ Kept because the reasoning is the useful part.
 6. **"A couple of per cent of noise" was measuring the machine.** §6.2.
 7. **"Fishing is fixed" covered one of four exits.** Step 1. A fix to a driver's happy path is not
    a fix to the driver, and a silence the walk does not fail on is a silence nobody reads.
+8. **Step 1 named the wrong cause of its own headline bug, and the step list is not evidence.** It
+   said the walk picked a shore across the water; the shore was always right and it was the *turn*
+   at the end of the route that mounted Surf. The fix written from the plan's account was a provable
+   no-op. Argue from the log and the state, then from the step (§6.2's third rule, one layer up).
 
 ### 7.3 Where the old section numbers went
 

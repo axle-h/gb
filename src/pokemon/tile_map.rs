@@ -1613,6 +1613,19 @@ impl MetaTileMap {
             && crate::pokemon::postgame::fishing::tileset_holds_water(self.tileset)
             && let Some(water) = crate::pokemon::postgame::fishing::nearest_castable_water(self)
         {
+            // ⚠️ **This is [`Self::route_to_face_within`]'s body inlined, and that the two agree is
+            // load-bearing rather than incidental.** `fishing::nearest_castable_water` chose `water`
+            // by asking `route_to_face_within` for a route and keeping only the ones that stay on
+            // land; the shore square that route ends on is whatever this `min_by_key` picks, because
+            // it is the same `bfs_from_player` prices over the same `adj` in the same order, and a
+            // bucket queue's ties break the same way twice. So the walk to a fishing row never has a
+            // water tile under any button but its last.
+            //
+            // ⭐ **And the last button is a *turn*, not a step**, which is the whole of the fishing
+            // silence of 2026-09-09: the agent's Surf-mount arm could not tell one from the other,
+            // mounted on the face, and put the player on the pond it had been sent to cast into. See
+            // `tests::a_fishing_rows_last_button_faces_the_water_rather_than_entering_it` and the
+            // ⚠️ on that arm in `AgentState::OverworldMovement`.
             let adj: [(PlayerFacingDirection, Point8); 4] = [
                 (PlayerFacingDirection::Down,  Point8 { x: water.x,                   y: water.y.saturating_sub(1) }),
                 (PlayerFacingDirection::Up,    Point8 { x: water.x,                   y: water.y + 1               }),
@@ -2642,6 +2655,7 @@ mod boulder_solver_tests {
                     '#' => {}
                     '.' => meta[idx] = MetaTile::Empty,
                     'W' => meta[idx] = MetaTile::Warp { to_map: Map::Route23, to_position: Point8 { x: 0, y: 0 } },
+                    'w' => meta[idx] = MetaTile::Water,
                     '=' => meta[idx] = MetaTile::Counter,
                     'P' => { meta[idx] = MetaTile::Empty; player = p; }
                     'S' => { meta[idx] = MetaTile::Empty; switch = p; }
@@ -2701,6 +2715,61 @@ mod boulder_solver_tests {
         let (map, switch) = from_ascii(&["#####", "#.S.#", "#.1.#", "#PW.#", "#####"]);
         let sol = map.solve_boulder_push(switch).expect("must solve by standing on the warp tile");
         assert_eq!(sol.last().unwrap(), &(Point8 { x: 2, y: 2 }, JoypadButton::Up));
+    }
+
+    /// ⭐ **A fishing row's route ends by *facing* the water: the last button is a turn, and no
+    /// button before it steps onto water at all.**
+    ///
+    /// That is the fact `AgentState::OverworldMovement`'s Surf-mount arm has to know. It mounts when
+    /// the next step is onto water, it could not tell this turn from a crossing, and so it mounted on
+    /// the last button of every fishing walk that had to turn to face the shore. The player was put
+    /// on the pond and `FishingInit` then refused the cast for surfing: 35 `Fish` ids reporting
+    /// nothing at all on the 2026-09-09 coverage baseline. The arm now suppresses the mount for a
+    /// `Fish` row outright, which is only sound because of the shape below and because
+    /// `fishing::nearest_castable_water` will not name a shore that has to be surfed to.
+    #[test]
+    fn a_fishing_rows_last_button_faces_the_water_rather_than_entering_it() {
+        // One puddle with land all round it, the party able to Surf so the search is free to cross,
+        // and the player approaching from a direction that is not the one it will end up facing —
+        // which is what makes the turn a button of its own rather than the last walking step.
+        let (mut map, _) = from_ascii(&[
+            "#######",
+            "#....P#",
+            "#.w.###",
+            "#.....#",
+            "#######",
+        ]);
+        map.can_surf = true;
+        map.best_rod = Some(crate::pokemon::postgame::fishing::Rod::Super);
+        map.map = Map::ViridianCity;
+        map.tileset = crate::pokemon::map_header::TileSetId::Overworld;
+        let water = Point8 { x: 2, y: 2 };
+
+        let fish = map.actions().into_iter()
+            .find(|a| matches!(a.tile, MetaTile::Fish { .. }))
+            .expect("a rod, a water tileset and a reachable shore is a fishing row");
+
+        assert_eq!(map.tile_at(fish.destination), MetaTile::Empty,
+            "the row's destination is the shore square, never the water");
+
+        let step = |p: Point8, b: JoypadButton| match b {
+            JoypadButton::Up => Point8 { x: p.x, y: p.y - 1 },
+            JoypadButton::Down => Point8 { x: p.x, y: p.y + 1 },
+            JoypadButton::Left => Point8 { x: p.x - 1, y: p.y },
+            JoypadButton::Right => Point8 { x: p.x + 1, y: p.y },
+            other => panic!("a walk to a shore is directions only, got {other:?}"),
+        };
+        let (turn, walk) = fish.route.split_last().expect("a route with at least the turn on it");
+
+        let mut pos = map.player_position;
+        for &button in walk {
+            pos = step(pos, button);
+            assert_ne!(map.tile_at(pos), MetaTile::Water,
+                "no button but the last may touch water: {:?}", fish.route);
+        }
+        assert_eq!(pos, fish.destination, "the walk ends on the shore square");
+        assert_eq!(step(pos, *turn), water,
+            "and the last button is the turn toward the water, not a step into it: {:?}", fish.route);
     }
 
     /// ⚠️ **A nurse, a clerk and a receptionist are all talked to *over* something.** The route

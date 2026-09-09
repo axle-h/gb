@@ -16,10 +16,14 @@
 //! | completed, interaction completed | `Completed` |
 //! | `Battle`, `NamingScreen` | expected. The id is left open to be retried |
 //! | `Textbox`, `Script` | `Blocked` — expected **once**; a repeat is the signal |
-//! | `Unknown`, `DidNotArrive`, `NoRoute`, `WrongMap`, `NoAdjacentGrass` | `Defect` |
+//! | `Unknown`, `DidNotArrive`, `NoRoute`, `WrongMap`, `NoAdjacentGrass`, `CastRefused`, `CastNeverFinished` | `Defect` |
 //! | `WatchdogFired` | `Defect`, always |
 //! | `NothingAppeared` | `Completed` — the pace ran its budget; the empty roll is the game, not a fault |
 //! | a start with no terminal event before the next one | `Silent` — chosen, outcome never reported |
+//!
+//! ⭐ **`Defect` and `Silent` both make the tier red** ([`Verdict::fails_the_walk`],
+//! [`CoverageLog::failures`]); the counts stay apart because they are different faults, and only
+//! `Defect` is a row the agent could not carry out.
 //!
 //! ⚠️ **A repeat of `Textbox`/`Script` is the signal, not the first one.** Being stopped is how this
 //! game says almost everything — a guard, a locked door, an errand — so the first one is the game
@@ -82,29 +86,44 @@ pub enum Verdict {
     /// [`OverworldActionAbortedReason::NothingAppeared`], which is scored a completion above. A cut
     /// ended in a made-up `TextBox` too and now ends in `OverworldActionCompleted { Cut }`.
     ///
-    /// ⚠️ **A boulder push is still silent, and that one is argued rather than missed.** The shove
-    /// runs as `GameMode::Script` and `assert_script_state` takes the driver's state away before it
-    /// can report, so a completion written there fired zero times in an hour of deployed play; see
-    /// `AgentState::PushingBoulder`. So a `PushBoulder*` id scoring `Silent` in this table is the
-    /// known case, not a new one.
+    /// ✅ **And the fishing row and the trainer who notices you in tall grass are closed too**
+    /// (2026-09-09, `docs/coverage-plan.md` step 1), which were the whole of the 2026-09-09
+    /// baseline's 41 silences. A cast refused, wedged or sent to a shore it could not reach ended in
+    /// a `TextBox` the agent made up and nothing else; and a pace whose action was taken away from
+    /// outside — a trainer's walk-up commits as `GameMode::Script` — reported through neither the
+    /// script door nor the text-box one, because both knew only about `OverworldMovement`. See
+    /// `postgame::fishing::tick` and `AgentState::open_overworld_action`.
     ///
-    /// ⚠️ **Still not a defect, and it stays that way.** Nothing goes wrong in the game when an
-    /// action goes quiet; what is missing is the sentence. Failing a walk on it would make C3 red
-    /// for something C3 cannot fix from where it stands, and the number is more useful reported.
-    /// What this verdict is *for* is finding the next one of these, which is how the grass case was
-    /// found in the first place.
+    /// ⚠️ **A boulder push is no longer one of these, and the note that said so is retired.** The
+    /// shove is still invisible — it runs as `GameMode::Script` and the driver's state is taken away
+    /// before it can report — but the row is a `BoulderGoal` now and the *goal* completes, so a
+    /// `PushBoulder*` id scores `Completed`: 52 of them across six sweeps of 2026-09-09, none
+    /// silent. That is why the assertion below needs no exemption for it.
+    ///
+    /// ⭐ **It fails the walk** ([`Verdict::fails_the_walk`]), which it did not until step 1 closed
+    /// the last family. Nothing goes wrong in the *game* when an action goes quiet — what is missing
+    /// is the sentence — but the sentence is the whole product here: a model that chose a row and is
+    /// told nothing about it is the failure mode this tier exists to find, and a silence nobody
+    /// fails on is a silence nobody reads (`docs/coverage-plan.md` §7.2.7).
     Silent,
 }
 
 impl Verdict {
-    /// Whether this verdict fails a coverage run.
+    /// Whether this verdict is a defect *proper*: the agent could not do what the menu offered.
+    ///
+    /// ⚠️ **Not the same question as [`Self::fails_the_walk`]**, and keeping them apart is what
+    /// keeps [`CoverageLog::summary`]'s counts from double-counting a silence as a defect as well.
     pub fn is_defect(&self) -> bool {
         match self {
             Self::Defect { .. } => true,
             Self::Blocked { times, .. } => *times >= REPEAT_IS_A_DEFECT,
-            // See `Silent`'s own note for why it is reported rather than fatal.
             Self::Unreached | Self::Completed | Self::Silent => false,
         }
+    }
+
+    /// Whether this verdict makes the coverage tier red. A defect, or a silence.
+    pub fn fails_the_walk(&self) -> bool {
+        self.is_defect() || matches!(self, Self::Silent)
     }
 }
 
@@ -320,7 +339,8 @@ impl CoverageLog {
             .len()
     }
 
-    /// Everything that fails a coverage run, as one line each. Empty means the run is clean.
+    /// Every id the agent could not do what it offered on, as one line each, plus every watchdog
+    /// firing. ⚠️ **Not the whole of what makes a run red** — see [`Self::failures`].
     pub fn defects(&self) -> Vec<String> {
         let mut out: Vec<String> = self
             .entries
@@ -378,6 +398,26 @@ impl CoverageLog {
                 },
             ));
         }
+        out
+    }
+
+    /// Everything that makes the tier red: [`Self::defects`], and then every silence.
+    ///
+    /// ⭐ **The silences are here rather than in `defects` because they are a different fault and
+    /// the summary counts them separately.** A defect is the agent unable to do what it offered; a
+    /// silence is the agent doing it and never saying so. Both fail the walk — see
+    /// [`Verdict::Silent`] — and this is the list the test asserts on.
+    pub fn failures(&self) -> Vec<String> {
+        let mut out = self.defects();
+        out.extend(
+            self.entries
+                .values()
+                .filter(|entry| entry.verdict == Verdict::Silent)
+                .map(|entry| format!(
+                    "{}: chosen {} time(s) and the agent never said what became of any of them",
+                    entry.id, entry.attempts,
+                )),
+        );
         out
     }
 
@@ -594,6 +634,29 @@ mod tests {
         assert!(log.get(GATE).unwrap().verdict.is_defect(), "{REPEAT_IS_A_DEFECT} is too many");
         assert_eq!(log.defects().len(), 1, "{:?}", log.defects());
         assert!(log.defects()[0].contains(GATE));
+    }
+
+    /// ⭐ **A row taken and never reported makes the tier red**, as of `docs/coverage-plan.md`
+    /// step 1. It is not a `defect` — nothing about the world went wrong, the agent just never said
+    /// what became of the decision — so the two counts stay apart and only [`CoverageLog::failures`]
+    /// carries both.
+    #[test]
+    fn a_row_the_agent_never_said_what_became_of_fails_the_walk() {
+        let mut log = CoverageLog::new();
+        log.observe(&started("Route18:39,13:Grass"));
+        // Nothing closes it: the next decision opens on top of it, which is the whole tell.
+        log.observe(&started("Route18:39,14:Grass"));
+        log.observe(&aborted(OverworldActionAbortedReason::NothingAppeared));
+
+        let quiet = log.get("Route18:39,13:Grass").unwrap();
+        assert_eq!(quiet.verdict, Verdict::Silent);
+        assert!(quiet.verdict.fails_the_walk(), "a silence has to make the tier red");
+        assert!(!quiet.verdict.is_defect(), "and it is still not a defect: nothing failed to execute");
+
+        assert!(log.defects().is_empty(), "{:?}", log.defects());
+        assert_eq!(log.failures().len(), 1, "{:?}", log.failures());
+        assert!(log.failures()[0].contains("Route18:39,13:Grass"), "{:?}", log.failures());
+        assert!(log.summary().contains("1 silent, 0 defects"), "{}", log.summary());
     }
 
     /// The watchdog belongs to no id and is always a defect.
@@ -1144,7 +1207,8 @@ struct WalkOutcome {
     name: &'static str,
     ids: std::collections::BTreeSet<String>,
     maps: std::collections::BTreeSet<String>,
-    defects: Vec<String>,
+    /// Everything that makes this walk red — [`CoverageLog::failures`], so defects *and* silences.
+    failures: Vec<String>,
     turns: usize,
     game_time: std::time::Duration,
     wall: std::time::Duration,
@@ -1159,9 +1223,17 @@ struct WalkOutcome {
 /// shape of the curve (§5.6). The budget follows the measurement, so this prints its own and the
 /// caller decides whether to buy more.
 ///
-/// ⚠️ **It fails on any `defect`**, which is the whole point of the verdict oracle: a row the menu
-/// offered and the agent could not then execute, or a watchdog firing. A `blocked` is not a failure
-/// until it repeats — being stopped is how this game says almost everything.
+/// ⚠️ **It fails on any `defect` and on any `silent`**, which is the whole point of the verdict
+/// oracle: a row the menu offered and the agent could not then execute, a watchdog firing, or a row
+/// it took and never said what became of. A `blocked` is not a failure until it repeats — being
+/// stopped is how this game says almost everything.
+///
+/// ⭐ **The silence half is new (2026-09-09) and it is the last item of `docs/coverage-plan.md`
+/// step 1**, deliberately turned on only once all three families the baseline found had been fixed:
+/// a `Fish` row that surfed onto the water it was sent to cast into, a `Grass` pace whose action was
+/// taken away by a trainer's walk-up, and a `PushBoulder*` row that turned out not to be silent at
+/// all any more. Turning it on before those would have made the tier red for something the step had
+/// not fixed.
 ///
 /// ⭐ **`GB_COVERAGE_START` picks where it starts** — a name from [`COVERAGE_STARTS`], or `all` for
 /// one walk per region and the union of what they reached. See [`Start`] for why one walk is not
@@ -1272,11 +1344,12 @@ fn coverage_walk_of_the_finished_game() {
     // region would otherwise take the other seven's numbers with it, and those numbers are the
     // deliverable; a sweep is minutes long and re-running it to see the rest is not a trade worth
     // making. The failure below still names the region it came from.
-    let defects: Vec<String> = outcomes
+    let failures: Vec<String> = outcomes
         .iter()
-        .flat_map(|o| o.defects.iter().map(|d| format!("[{}] {d}", o.name)))
+        .flat_map(|o| o.failures.iter().map(|d| format!("[{}] {d}", o.name)))
         .collect();
-    assert!(defects.is_empty(), "the walk found {} defects:\n  {}", defects.len(), defects.join("\n  "));
+    assert!(failures.is_empty(), "the walk found {} failures:\n  {}",
+            failures.len(), failures.join("\n  "));
     let discovered: usize = outcomes.iter().map(|o| o.ids.len()).sum();
     assert!(discovered > 10, "only {discovered} ids were ever offered; the walk did not happen");
 }
@@ -1455,7 +1528,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     // below reaches back into the same run for its MMU.
     let ids: std::collections::BTreeSet<String> =
         log.entries().map(|entry| entry.id.clone()).collect();
-    let defects = log.defects();
+    let failures = log.failures();
 
     // §5.3, and it is printed rather than asserted on purpose: the ROM's tables are a cross-check,
     // not the universe (§0.1). ⚠️ Over the ids this run was offered, so it reports on the maps this
@@ -1471,7 +1544,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         name,
         ids,
         maps,
-        defects,
+        failures,
         turns,
         game_time,
         wall: elapsed,

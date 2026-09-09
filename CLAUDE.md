@@ -24,8 +24,9 @@ still ahead of the code: every action in the game taken once through the deploye
 against a mock endpoint, with a verdict on each and every defect fixed, until a sweep of Kanto comes
 back clean. It was rewritten on 2026-09-09 as **a numbered step list (§4), from the red tier of today
 to the fixpoint**; the harness, the cheats, the oracle and the walk are built, and §2 is the baseline
-sweep of that same day — 153 maps of 248, 106 defects and 41 silences nobody has fixed, and 82% of
-every turn it took spent in Route 16's gate. Steps 1 to 5 are those. ⚠️ **§3 is the rules and §6.2 is
+sweep of that same day — 153 maps of 248, 106 defects and 41 silences, and 82% of
+every turn it took spent in Route 16's gate. Steps 1 to 5 are those; **step 1 is done, the silences
+are 0 in all eight regions, and a `Silent` now fails the tier**. ⚠️ **§3 is the rules and §6.2 is
 how to read a number** — the walk's totals are a coin flip between several different walks, and CPU
 load is an input to it, so never build while measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**,
 because a walk's run directory defaults into `/tmp` and writes hundreds of megabytes of RAM there.

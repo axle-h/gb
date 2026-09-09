@@ -196,6 +196,8 @@ price.
   coverage walk scored every `Fish` row `Silent`. A miss now completes and says whether anything bit
   (and, on a Super Rod `wRodResponse` of 2, that the map has no fish at all, so casting again is
   pointless); a bite aborts with `Battle`, which is what `resume_after_battle` picks back up.
+  ⚠️ **That fixed the happy path and one of four exits** — the three failure exits went on saying
+  nothing until 2026-09-09; see "The fishing row" below.
   `postgame::fishing::the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag`.
 - ⚠️ **A hole goal and a switch goal are *done* differently, and writing one test for both stalled
   the Seafoam leg for its whole budget.** A switch keeps its boulder, so
@@ -291,6 +293,12 @@ price.
 - Four verdicts and a fifth that was not in the plan: `Completed`, `Blocked { times, message }`,
   `Defect { reason }`, `Unreached`, and `Silent` — chosen, outcome never reported (the finding
   above).
+- ⭐ **`Silent` makes the tier red as of 2026-09-09**, once the last family of them was fixed
+  (`Verdict::fails_the_walk`, `CoverageLog::failures`). It is still not a `Defect` and the two counts
+  stay apart: a defect is a row the agent could not carry out, a silence is one it carried out and
+  never spoke about. ⚠️ It was reported and not fatal for as long as there were known silences
+  nobody was fixing, and a silence nobody fails on is a silence nobody reads
+  ([coverage-plan](coverage-plan.md) §7.2.7).
 - ⚠️ **`REPEAT_IS_A_DEFECT` is 10 and was 3.** A gate is worth one try per pass over a map, because
   the thing that opens it may have happened since; three sweeps of Pewter City re-tried its east
   exit three times and were called a defect for diligence. Ten sits clearly above once-per-pass and
@@ -500,10 +508,17 @@ price.
   `NothingAppeared`, and a map change as `WrongMap`. `AgentState::CuttingTree` carries `from_row`
   and ends with `OverworldActionCompleted { Cut }`, whose sentence is "✓ cut down the tree at
   (5, 8)" rather than "✓ reached" it. ⚠️ Both replaced a `TextBox` **the agent had made up**, which
-  is the cartridge's voice used for the agent's own account. A **boulder push is still silent and
-  deliberately so** — see `AgentState::PushingBoulder`'s ⚠️, where the shove runs as a script that
-  takes the state away before it can report. `coverage::Verdict::Silent` stays as the guard that
-  finds the next one; [coverage-plan](coverage-plan.md) §7.1.
+  is the cartridge's voice used for the agent's own account. A **boulder push is still invisible** —
+  see `AgentState::PushingBoulder`'s ⚠️, where the shove runs as a script that takes the state away
+  before it can report — but the row is a `BoulderGoal` and the *goal* completes, so it no longer
+  scores `Silent`. [coverage-plan](coverage-plan.md) §7.1.
+- ⭐ **A pace is an open action too, so the doors that take the state away from *outside* have to
+  close it.** The three exits above are the ones inside `PacingForEncounters`; `assert_script_state`
+  and `assert_text_box_state` are two more, and both knew only about `OverworldMovement`. A trainer
+  noticing the player mid-pace runs its walk-up as `GameMode::Script`, the script commits, the state
+  is dropped into `AwaitingOverworldAction`, and `Route18:39,13:Grass` was chosen and never reported.
+  `AgentState::open_overworld_action` is the one list of states that carry a row, and both doors read
+  it. `agent::a_pace_is_an_open_overworld_action_like_the_walk_that_started_it`.
 - `OverworldActionAbortedReason::NothingAppeared` is an abort the oracle scores a **completion**: the
   pace ran its whole `PACING_BUDGET_TICKS` and the game's own 8-in-256 roll came up empty, which is
   the action done rather than the action failed. ⚠️ Its sentence quotes the budget in seconds
@@ -556,6 +571,20 @@ price.
 live bag, always the best rod. It is not a grind engine; the measurement is on
 `PolicyStep::gauntlet_grind_steps`.
 
+- ⭐ **The last button of a fishing route is a *turn*, and the walk to one never mounts Surf.**
+  `OverworldMovement`'s Surf-mount arm fires when the next step is onto water and could not tell that
+  turn from a crossing, so it mounted on the face, the cartridge's auto-step put the player on the
+  pond, and `FishingInit` then refused the cast for surfing: **35 `Fish` ids reported nothing at all**
+  on the 2026-09-09 coverage baseline, the largest group in the table. The arm now suppresses the
+  mount for a `Fish` row outright, which is sound because
+  `fishing::nearest_castable_water` only ever names water it validated a land route to and
+  `actions()` re-derives the shore square from the same search and the same tie-break.
+  `tile_map::a_fishing_rows_last_button_faces_the_water_rather_than_entering_it`.
+- ⭐ **All three of the driver's failure exits end the action, and their words are in the *reason*
+  rather than in a `TextBox`.** A refusal (`CastRefusal`: no rod, surfing, a dry tileset), the tick
+  budget (`CastNeverFinished`) and a shore it cannot reach (`NoRoute`) each printed a box the agent
+  had made up and left the row open, which is both halves of the fault `NothingAppeared` exists to
+  fix. `agent::a_cast_that_could_not_be_made_says_why_rather_than_going_quiet`.
 - ⚠️ **`nearest_castable_water` sweeps every water tile on the map, so it must run *one* search for
   the lot.** `route_to_face` is a whole Dijkstra, and `actions()` is re-derived on every 20 ms agent
   tick — one search per water tile put Route 23 at **117 ms a tick against a 20 ms budget**. Surf is

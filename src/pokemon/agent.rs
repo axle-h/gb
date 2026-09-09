@@ -239,6 +239,22 @@ pub enum OverworldActionAbortedReason {
     /// model chose ended in silence: `LlmPolicy` read it as `Dropped::Unreported` and threw away the
     /// rest of any chain behind it, and C3's frontier walk scored it `Verdict::Silent`.
     NothingAppeared,
+    /// ⭐ **The fishing row's walk arrived and the cast was refused before the bag was opened** —
+    /// see [`crate::pokemon::postgame::fishing::CastRefusal`] for the three ways.
+    ///
+    /// ⚠️ **Only `Surfing` is reachable from a row the menu was right to offer**, and it is here
+    /// because the walk to the shore used to mount Surf on the *facing* turn: the last button of a
+    /// fishing route points at water, the Surf-mount arm below could not tell that from a step onto
+    /// water, and the player arrived on the pond it had been sent to fish in.
+    CastRefused(crate::pokemon::postgame::fishing::CastRefusal),
+    /// A cast that opened the bag and never came back — [`fishing::TICK_BUDGET`] of driver ticks
+    /// spent without the rod leaving the water.
+    ///
+    /// ⚠️ **Not `DidNotArrive`, which is what a shared reason would have made it.** That sentence
+    /// says the *walk* was given up without getting there, and the walk had long since finished:
+    /// this is the bag chain wedged, which is a different bug in a different driver. That
+    /// distinction cost an evening once already ([`Self::PuzzleRanLong`]).
+    CastNeverFinished,
 }
 
 impl Display for OverworldActionAbortedReason {
@@ -295,6 +311,12 @@ impl Display for OverworldActionAbortedReason {
             // reading is "I did not walk far enough", and the number settles it.
             Self::NothingAppeared => write!(
                 f, "nothing appeared after {PACING_BUDGET_SECS} seconds of game time walking about in it"),
+            // ⚠️ **Names the cause and not the row**, for the same reason `Textbox` does: the row was
+            // legal when it was minted, and what a model needs is which half of `FishingInit` said no.
+            Self::CastRefused(why) => write!(f, "the cast was refused because {why}"),
+            Self::CastNeverFinished => write!(
+                f, "the cast never finished after {} seconds of game time",
+                crate::pokemon::postgame::fishing::CAST_BUDGET_SECS),
         }
     }
 }
@@ -1190,6 +1212,28 @@ impl Display for PokemartState {
     }
 }
 
+impl AgentState {
+    /// The [`MetaTile`] of the overworld action still open behind this state, if it is one of the
+    /// states that *is* one.
+    ///
+    /// ⭐ **Two states carry a walk, not one, and forgetting the second is a silence.**
+    /// `OverworldMovement` is the walk; `PacingForEncounters` is the tail of the same action — the
+    /// walk to the grass has already been reported as started and nothing closes it until the pace
+    /// does. So every door that takes the state away from *either* has to end the action, and the
+    /// two that steal it from outside (a script committing, a text box opening) only knew about the
+    /// first: a trainer noticing the player mid-pace runs its walk-up as `GameMode::Script`, the
+    /// script commits, and `Route18:39,13:Grass` was chosen and never reported. Found by the
+    /// coverage walk on 2026-09-09, one driver over from the fishing silence beside it
+    /// (`docs/coverage-plan.md` step 1).
+    fn open_overworld_action(&self) -> Option<MetaTile> {
+        match self {
+            AgentState::OverworldMovement { destination, .. }
+            | AgentState::PacingForEncounters { destination, .. } => Some(*destination),
+            _ => None,
+        }
+    }
+}
+
 impl Display for AgentState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2040,11 +2084,13 @@ impl PokemonAgent {
     /// stopping at a square the action ids and the map picture put somewhere else is worse than one
     /// that says nothing. Observing a whole `GameState` for two numbers is affordable because this
     /// runs once per abort, not once per tick.
-    fn player_at(&self, api: &PokemonApi) -> Option<Point8> {
+    pub(crate) fn player_at(&self, api: &PokemonApi) -> Option<Point8> {
         self.observe_state(api).ok().map(|state| state.map.player_position)
     }
 
-    fn abort_overworld(
+    /// ⚠️ **`pub(crate)` for the fishing driver**, which is the tail of an ordinary overworld action
+    /// and so has to be able to end one — see `postgame::fishing::tick`'s `give_up`.
+    pub(crate) fn abort_overworld(
         &mut self,
         destination: MetaTile,
         reason: OverworldActionAbortedReason,
@@ -2409,7 +2455,18 @@ impl PokemonAgent {
         if game_mode == GameMode::TextBox {
             if !matches!(self.state, AgentState::ReadingTextBox { .. }) {
                 // text box opened
-                if let AgentState::OverworldMovement { destination, .. } = self.state {
+                //
+                // ⚠️ **A pace is the tail of an open action and this is one of its doors**, but only
+                // the plain-abort half of what follows applies to it: a pace cannot be an
+                // interaction landing (it walks between two squares of grass, and nothing is being
+                // faced), and the turn-back watch is about a *walk* being shoved off a square it had
+                // just stepped onto — both of a pace's squares came out of `adjacent_pacing_pair`
+                // and it is re-issued as a fresh row anyway. So it takes the reason and nothing
+                // else. See [`AgentState::open_overworld_action`].
+                if let AgentState::PacingForEncounters { destination, .. } = self.state {
+                    let at = self.player_at(api);
+                    self.abort_overworld(destination, OverworldActionAbortedReason::Textbox, at);
+                } else if let AgentState::OverworldMovement { destination, .. } = self.state {
                     // Talking to someone *is* this action succeeding — see
                     // `AgentEvent::OverworldInteractionCompleted`. Either way the state is left
                     // behind: the `set_state(ReadingTextBox)` below is what clears it, exactly as
@@ -2792,8 +2849,14 @@ impl PokemonAgent {
                     api.release_all_buttons();
                     if crossed {
                         // script has just breached rollback deadline, commit to RunningScript so we can start mashing next cycle
-                        if let Some(AgentState::OverworldMovement { destination, .. }) = self.backup_state.as_ref() {
-                            let destination = *destination;
+                        //
+                        // ⚠️ **A pace is a walk here too** — see
+                        // [`AgentState::open_overworld_action`]. The state that is about to be
+                        // dropped may be `PacingForEncounters`, and a trainer noticing the player in
+                        // tall grass is exactly the script that gets this far.
+                        if let Some(destination) =
+                            self.backup_state.as_ref().and_then(AgentState::open_overworld_action)
+                        {
                             let at = self.player_at(api);
                             self.event(AgentEvent::OverworldActionAborted {
                                 destination,
@@ -3246,9 +3309,23 @@ CascadeBadge; not cutting".to_string(),
                                 // If this step would walk onto water while on foot, mount Surf first.
                                 // (The BFS only routes over water when the player can Surf, so a water
                                 // tile here means we intend to cross it.)
+                                //
+                                // ⚠️ **Except for a fishing row, whose route ends by *facing* the
+                                // water rather than stepping into it.** A cast is made from land and
+                                // `FishingInit` refuses outright while surfing, so the one thing a
+                                // fishing walk must never do is get on the water — and this arm could
+                                // not tell the row's final turn from a crossing. It mounted, the
+                                // auto-step put the player on the pond, and the driver refused the
+                                // cast it had just been walked to: on the 2026-09-09 baseline that was
+                                // 35 `Fish` ids reporting nothing at all. `MetaTileMap::actions` keeps
+                                // the other half of the bargain and only offers a shore it can be
+                                // walked to on land, so suppressing the mount for the whole route
+                                // costs no reachable row; a route that somehow needed water now bumps
+                                // and is reported rather than quietly surfing.
                                 let pos = game_state.map.player_position;
                                 let next = step_pos(pos, btn);
-                                let onto_water = matches!(
+                                let onto_water = !matches!(destination, MetaTile::Fish { .. })
+                                    && matches!(
                                     next.and_then(|n| game_state.map.tile_at_checked(n)),
                                     Some(MetaTile::Water) | Some(MetaTile::ConnectionWater(_))
                                 );
@@ -5839,6 +5916,103 @@ mod tests {
             at: None,
         };
         assert_eq!(format!("{met_something}"), "✗ gave up on tall grass: a battle started");
+    }
+
+    /// ⭐ **A cast that never happened says so, in the sentence that closes the row.**
+    ///
+    /// All three of the fishing driver's failure exits used to print an `AgentEvent::TextBox` and
+    /// leave the action open, which is both halves of the fault `NothingAppeared` was written to fix:
+    /// the words claimed the cartridge had said them, and the model was never told what became of the
+    /// decision it made. 35 `Fish` ids came back `Silent` on the 2026-09-09 coverage baseline, the
+    /// largest single group in the table. See `postgame::fishing::tick`.
+    #[test]
+    fn a_cast_that_could_not_be_made_says_why_rather_than_going_quiet() {
+        use crate::pokemon::postgame::fishing::{CastRefusal, Rod};
+        let edge = MetaTile::Fish { rod: Rod::Super };
+
+        let surfing = AgentEvent::OverworldActionAborted {
+            destination: edge,
+            reason: OverworldActionAbortedReason::CastRefused(CastRefusal::Surfing),
+            at: Some(Point8 { x: 9, y: 25 }),
+        };
+        assert_eq!(
+            format!("{surfing}"),
+            "✗ gave up on the water's edge, to fish with the Super Rod at (9, 25): \
+             the cast was refused because you are surfing, and a cast is made from land",
+        );
+
+        // The rod is named, because "there is no rod in the bag" is a different fact from "the rod
+        // this row was minted with has gone".
+        let no_rod = AgentEvent::OverworldActionAborted {
+            destination: edge,
+            reason: OverworldActionAbortedReason::CastRefused(CastRefusal::NoRod(Rod::Old)),
+            at: None,
+        };
+        assert!(format!("{no_rod}").ends_with("the cast was refused because there is no Old Rod in the bag"),
+                "{no_rod}");
+
+        // ⚠️ **The budget is quoted from the constant**, for the reason `NothingAppeared` quotes
+        // `PACING_BUDGET_SECS`: without a number "the cast never finished" reads as "I did not wait".
+        let wedged = AgentEvent::OverworldActionAborted {
+            destination: edge,
+            reason: OverworldActionAbortedReason::CastNeverFinished,
+            at: Some(Point8 { x: 8, y: 25 }),
+        };
+        assert_eq!(
+            format!("{wedged}"),
+            "✗ gave up on the water's edge, to fish with the Super Rod at (8, 25): \
+             the cast never finished after 30 seconds of game time",
+        );
+        assert!(format!("{wedged}").contains(&format!(
+            "{} seconds", crate::pokemon::postgame::fishing::CAST_BUDGET_SECS)));
+
+        // A shore the walk cannot get to is the sentence that already exists for exactly that, and it
+        // names the row rather than inventing a second phrasing.
+        let unreachable = AgentEvent::OverworldActionAborted {
+            destination: edge,
+            reason: OverworldActionAbortedReason::NoRoute(edge),
+            at: Some(Point8 { x: 8, y: 25 }),
+        };
+        assert_eq!(
+            format!("{unreachable}"),
+            "✗ gave up on the water's edge, to fish with the Super Rod at (8, 25): \
+             there is no route to the water's edge, to fish with the Super Rod",
+        );
+    }
+
+    /// ⭐ **A pace is a walk, so the two doors that take the state away from outside have to end its
+    /// action too.**
+    ///
+    /// `PacingForEncounters` is the tail of the row that walked to the grass: the start has been
+    /// published and nothing closes it until the pace does. `assert_script_state` and
+    /// `assert_text_box_state` both knew only about `OverworldMovement`, so a trainer noticing the
+    /// player mid-pace — a walk-up that commits as `GameMode::Script` — dropped the state into
+    /// `AwaitingOverworldAction` in silence. `Route18:39,13:Grass` was chosen and never reported, on
+    /// the 2026-09-09 coverage baseline and again on the sweep that reproduced it.
+    #[test]
+    fn a_pace_is_an_open_overworld_action_like_the_walk_that_started_it() {
+        let pacing = AgentState::PacingForEncounters {
+            destination: MetaTile::Grass,
+            map: Map::Route18,
+            tile_a: Point8 { x: 39, y: 13 },
+            tile_b: Point8 { x: 39, y: 14 },
+            heading_to_b: true,
+            stalled: 0,
+            paced: 0,
+        };
+        assert_eq!(pacing.open_overworld_action(), Some(MetaTile::Grass));
+
+        let walking = AgentState::OverworldMovement { destination: MetaTile::Grass, map: Map::Route18 };
+        assert_eq!(walking.open_overworld_action(), Some(MetaTile::Grass));
+
+        // ⚠️ **And nothing else is on the list.** Every other driver either owns its own reporting or
+        // was never an overworld row: a state added here would start closing actions that are not
+        // open, which the oracle reads as a completion of whatever *is*.
+        assert_eq!(AgentState::Idle.open_overworld_action(), None);
+        assert_eq!(
+            AgentState::ReadingTextBox { reader: PokemonTextReader::default() }.open_overworld_action(),
+            None,
+        );
     }
 
     /// A cut is a row that *does* something at the end of its walk, so its completion is of the deed
