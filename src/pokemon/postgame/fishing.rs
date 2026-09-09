@@ -25,7 +25,7 @@
 use crate::geometry::Point8;
 use crate::joypad::JoypadButton;
 use crate::mmu::MMU;
-use crate::pokemon::agent::{start_menu_row, AgentEvent, AgentState, PokemonAgent, StartMenuRow};
+use crate::pokemon::agent::{start_menu_row, AgentEvent, AgentState, OverworldActionAbortedReason, PokemonAgent, StartMenuRow};
 use crate::pokemon::menu::START_MENU_ORIGIN;
 use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::encoding::GameMode;
@@ -144,6 +144,16 @@ pub struct FishState {
 /// to police a slow cast.
 const TICK_BUDGET: u16 = 1500;
 
+/// [`TICK_BUDGET`] in whole seconds of game time, which is the number
+/// [`OverworldActionAbortedReason::CastNeverFinished`] puts in front of the model. Rounded rather
+/// than truncated for the reason `agent::PACING_BUDGET_SECS` gives: a tick is 19.9996 ms delivered,
+/// so a truncating division quietly loses a second per fifty.
+pub(crate) const CAST_BUDGET_SECS: u64 = {
+    let nanos = TICK_BUDGET as u64
+        * crate::pokemon::agent::AGENT_RESOLUTION.to_duration().as_nanos() as u64;
+    (nanos + 500_000_000) / 1_000_000_000
+};
+
 impl FishState {
     pub fn new(rod: Rod, at: Point8) -> Self {
         Self { rod, at, press: true, entered_menu: false, ticks: 0 }
@@ -153,19 +163,55 @@ impl FishState {
     /// of these fails silently from the driver's point of view. A missing rod leaves the bag cursor
     /// hunting a row that is not there; surfing and a dry tileset both answer with "Not the time to
     /// use that!", which looks exactly like a resolved cast, so the policy would re-issue for ever.
-    fn blocked_by(&self, api: &PokemonApi<'_>) -> Option<String> {
+    fn blocked_by(&self, api: &PokemonApi<'_>) -> Option<CastRefusal> {
         if api.bag_item_position(self.rod.item()).is_none() {
-            return Some(format!("{:?} is not in the bag", self.rod.item()));
+            return Some(CastRefusal::NoRod(self.rod));
         }
         let mmu = api.mmu();
         if mmu.read_pointer(&pokered_symbols::wWalkBikeSurfState) == WALK_BIKE_SURF_SURFING {
-            return Some("cannot fish while surfing".into());
+            return Some(CastRefusal::Surfing);
         }
         let tileset = mmu.read_pointer(&pokered_symbols::wCurMapTileset);
         if !WATER_TILESETS.contains(&tileset) {
-            return Some(format!("tileset {tileset} has no water (WaterTilesets)"));
+            return Some(CastRefusal::DryTileset(tileset));
         }
         None
+    }
+}
+
+/// Why [`FishState::blocked_by`] will not let a cast start.
+///
+/// ⚠️ **`Copy`, and that is not incidental**: it rides on
+/// [`OverworldActionAbortedReason::CastRefused`](crate::pokemon::agent::OverworldActionAbortedReason::CastRefused),
+/// which is the event that *ends* the fishing row, and that enum is `Copy` so an abort can be
+/// matched on and counted without allocating. It used to be a `String` formatted straight into a
+/// made-up `AgentEvent::TextBox`, which is exactly the shape
+/// [`OverworldActionAbortedReason::NothingAppeared`](crate::pokemon::agent::OverworldActionAbortedReason::NothingAppeared)
+/// was written to replace: the words claimed the cartridge had said them, and the action they
+/// belonged to was never closed at all.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CastRefusal {
+    /// The rod the row was minted with has left the bag. `FishingInit` needs the item.
+    NoRod(Rod),
+    /// `wWalkBikeSurfState == 2`. The one refusal that is reachable from a row the menu was right to
+    /// offer, because the walk to the shore can mount Surf under it — see
+    /// `AgentState::OverworldMovement`'s Surf-mount arm, which is why it does not do that for a
+    /// fishing row any more.
+    Surfing,
+    /// The map's tileset is not in `WaterTilesets`, so every cast on it answers "Not the time to use
+    /// that!" whatever is in front of the player. `MetaTileMap::actions` checks this before it offers
+    /// the row, so reaching it means the map changed under the walk.
+    DryTileset(u8),
+}
+
+impl std::fmt::Display for CastRefusal {
+    /// A clause, not a sentence: it is read inside "the cast was refused because ...".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRod(rod) => write!(f, "there is no {} in the bag", rod.name()),
+            Self::Surfing => write!(f, "you are surfing, and a cast is made from land"),
+            Self::DryTileset(tileset) => write!(f, "this map's tileset ({tileset}) has no water in it"),
+        }
     }
 }
 
@@ -243,6 +289,13 @@ pub fn nearest_castable_water(map: &MetaTileMap) -> Option<Point8> {
 /// The route is a button sequence, so this replays it over the tile grid. A step that lands somewhere
 /// unexpected (a ledge hop, a spinner) ends the replay and the route is accepted: this is a guard
 /// against the one failure mode above, not a second pathfinder.
+///
+/// ⚠️ **This is what makes "the walk to a fishing row never touches water except on its last button"
+/// true**, which is the property `AgentState::OverworldMovement`'s Surf-mount arm relies on to
+/// suppress the mount for a `MetaTile::Fish` row outright. The row's shore square is the one
+/// [`nearest_castable_water`] validated here — `MetaTileMap::actions` re-derives it from the same
+/// search and the same tie-break — so a route that would have needed Surf is a water tile this
+/// function has already rejected, and the row is not offered at all.
 fn route_stays_on_land(map: &MetaTileMap, route: &[JoypadButton]) -> bool {
     let mut pos = map.player_position;
     for (i, &button) in route.iter().enumerate() {
@@ -327,6 +380,25 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
         api.release_all_buttons();
         agent.set_state(AgentState::Idle);
     };
+    // ⭐ **The three ways a cast can fail all end the action they belong to, and none of them used
+    // to.** A fishing row is an ordinary overworld action — `StartedOverworldAction` has already
+    // been published and the driver is its tail — so a refusal, a wedge or a shore it cannot reach
+    // left the model holding a decision it was never told the outcome of. The coverage walk scored
+    // 35 `Fish` ids `Silent` on the 2026-09-09 baseline, the largest single group in the table, and
+    // a deployed model that chose one was told nothing whatsoever. Same fault and same fix as the
+    // grass pace and the cut tree before it (`docs/coverage-plan.md` step 1).
+    //
+    // ⚠️ **The words move into the reason rather than staying in a `TextBox` beside it.** All three
+    // exits printed `AgentEvent::TextBox { message: "Fishing: ..." }`, which says the *cartridge*
+    // said it and it never did; `OverworldActionAbortedReason::NothingAppeared` exists because that
+    // same shape was wrong for the grass pace. So the sentence survives, in the event that closes
+    // the action.
+    let give_up = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>,
+                   reason: OverworldActionAbortedReason| {
+        api.release_all_buttons();
+        let at = agent.player_at(api);
+        agent.abort_overworld(MetaTile::Fish { rod: s.rod }, reason, at);
+    };
 
     // ── The cast has resolved ────────────────────────────────────────────────────────────────────
     // Back in the overworld with the rod out of the water. A bite never reaches here — the wild battle
@@ -355,10 +427,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
     }
 
     if s.ticks > TICK_BUDGET {
-        agent.event(AgentEvent::TextBox {
-            message: format!("Fishing: no cast completed in {TICK_BUDGET} ticks at {}", s.at),
-        });
-        finish(agent, api);
+        give_up(agent, api, OverworldActionAbortedReason::CastNeverFinished);
         return Ok(());
     }
     let s = FishState { ticks: s.ticks + 1, ..s };
@@ -370,8 +439,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
     // there would be driving a player the game has frozen.
     if game_mode == GameMode::Overworld && !casting {
         if let Some(why) = s.blocked_by(api) {
-            agent.event(AgentEvent::TextBox { message: format!("Fishing: {why}") });
-            finish(agent, api);
+            give_up(agent, api, OverworldActionAbortedReason::CastRefused(why));
             return Ok(());
         }
         let gs = agent.observe_state(api)?;
@@ -386,10 +454,9 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
                 api.press_button(button);
                 agent.set_state(AgentState::Fishing(FishState { press: true, ..s }));
             }
-            _ => {
-                agent.event(AgentEvent::TextBox { message: format!("Fishing: can't reach the water at {}", s.at) });
-                finish(agent, api);
-            }
+            // `NoRoute`, which is the sentence for exactly this: the row named a shore and the
+            // walk cannot get to it. The rod is on the tile so the reason names it too.
+            _ => give_up(agent, api, OverworldActionAbortedReason::NoRoute(MetaTile::Fish { rod: s.rod })),
         }
         return Ok(());
     }

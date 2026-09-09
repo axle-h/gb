@@ -250,8 +250,13 @@ a real run directory. Default tier; the whole of `llm.rs` runs in about two seco
 - ⚠️ **A repeat is the signal, not the first block.** Being stopped is how this game says almost
   everything, so `Textbox`/`Script` is `Blocked` and only becomes a defect past
   `coverage::REPEAT_IS_A_DEFECT`. Everything that says the agent could not execute a row it had
-  already offered — `NoRoute`, `DidNotArrive`, `WrongMap`, `NoAdjacentGrass`, `Unknown` — is a defect
-  on the first one, and a watchdog firing always is.
+  already offered — `NoRoute`, `DidNotArrive`, `WrongMap`, `NoAdjacentGrass`, `Unknown`,
+  `CastRefused`, `CastNeverFinished` — is a defect on the first one, and a watchdog firing always is.
+- ⭐ **A `Silent` fails the walk too, as of 2026-09-09** (`Verdict::fails_the_walk`, and the list the
+  test asserts on is `CoverageLog::failures`, not `defects`). A row chosen and never reported is the
+  failure mode this tier exists to find; the two counts stay apart in `summary()` because a defect is
+  a row the agent could not carry out and a silence is one it did and never spoke about.
+  [coverage-plan](coverage-plan.md) step 1.
 - `cheats::Cheats` is applied by the **driver between ticks**, never from a policy, which is what
   keeps a finding from a cheated run trustworthy: `LlmPolicy` is byte-identical to the deployed one
   and sees the result only through an ordinary `GameState`.
