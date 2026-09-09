@@ -132,11 +132,17 @@ pub struct Cheats {
     pub key_items: Option<u32>,
     /// Whether the bag has been stocked yet.
     pub stocked: bool,
-    /// Key items that would not fit. ⚠️ **Reported rather than fatal**: the bag holds twenty *kinds*
-    /// and a finished save arrives nearly full, so a walk that cannot be handed a Bicycle is a walk
-    /// that cannot reach Cycling Road — a coverage gap worth printing, not a reason to fail before
-    /// the run has taken a single step.
-    pub bag_was_full: u32,
+    /// Key items that would not fit, by name. ⚠️ **Reported rather than fatal**: the bag holds
+    /// twenty *kinds* and a finished save arrives nearly full, so a walk that cannot be handed a
+    /// Bicycle is a walk that cannot reach Cycling Road — a coverage gap worth printing, not a
+    /// reason to fail before the run has taken a single step.
+    ///
+    /// ⭐ **It was a count, and a count is not actionable.** Nothing printed it at all until
+    /// 2026-09-09, and when the walk's summary finally did, every one of the eight starts turned
+    /// out to be refusing between **one and nine** of them — the rods, the S.S. Ticket, the Lift
+    /// Key, the Coin Case, the Silph Scope — which is most of `docs/coverage-plan.md` §2's list of
+    /// maps no walk has ever entered. Which ones is the whole of that finding, so it says which.
+    pub bag_was_full: Vec<crate::pokemon::item::ItemId>,
 }
 
 impl Default for Cheats {
@@ -150,7 +156,7 @@ impl Default for Cheats {
             refused_in_battle: 0,
             key_items: None,
             stocked: false,
-            bag_was_full: 0,
+            bag_was_full: Vec::new(),
         }
     }
 }
@@ -167,7 +173,7 @@ impl Cheats {
             refused_in_battle: 0,
             key_items: None,
             stocked: false,
-            bag_was_full: 0,
+            bag_was_full: Vec::new(),
         }
     }
 
@@ -237,7 +243,7 @@ impl Cheats {
                     continue;
                 }
                 if api.debug_give_item(item, 1).is_err() {
-                    self.bag_was_full += 1;
+                    self.bag_was_full.push(item);
                 }
             }
             api.debug_set_money(money);

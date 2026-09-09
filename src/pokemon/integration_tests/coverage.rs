@@ -726,6 +726,34 @@ pub struct ExploringBrain {
     seen: std::collections::BTreeMap<String, usize>,
     /// How many turns this brain has spent on each map, so leaving prefers somewhere new.
     maps: std::collections::BTreeMap<String, usize>,
+    /// ⭐ **Times a door from one map to another has been taken**, keyed `"{here}->{there}"` — the
+    /// same tally as [`Self::seen`] one level up, keyed by where a door goes rather than by which
+    /// door it is.
+    ///
+    /// Route 16 has eight squares facing its gate's doors, so `Route16` and `Route16Gate1F` carry
+    /// eight warp ids between them and every one works. Counted by id, each crossing makes the door
+    /// just used score one more than its siblings, so the walk goes through all four and comes back
+    /// through all four; counted by crossing they are two options — into the gate and out of it —
+    /// and one trip settles the group. The id count stays as the *last* key, so every door is still
+    /// taken eventually and coverage is unharmed: one option taken eight times, not eight options.
+    ///
+    /// ⚠️ **This is right on its own terms and it is *not* what freed Route 16, which is worth
+    /// knowing before trusting it too far.** `docs/coverage-plan.md` step 4 predicted it would, and
+    /// measured, the counters alternated exactly as intended while the walk ping-ponged just as
+    /// hard: `lavender` finished with two ids chosen **1 593 times each** on a menu of three rows.
+    /// What had sealed that map was a **cut tree that regrows** and a frontier that would not cut it
+    /// twice — see `re_takeable` in `respond`. Both changes are kept; only one of them mattered.
+    ///
+    /// ⚰️ **Keyed by the destination alone first, and that lost 22 maps.** A global tally makes a
+    /// *hub* repellent: Celadon City is entered from Route 16, Route 7, the mart, the gym and the
+    /// Game Corner, so by the time a walk is inside Celadon Mart every door leading back out to the
+    /// city has been "taken" a dozen times while the doors between the mart's own floors have not.
+    /// The walk was pushed away from the only way out and cycled the building: measured
+    /// 2026-09-09, five of the eight regions spent **4 400 to 5 000 turns** in
+    /// `CeladonMart{2..5}F`/`Elevator`/`Roof`, the union fell from **159 maps to 137**, and Route
+    /// 16's gate — which the change did fix — was simply replaced by a bigger trap. An option is a
+    /// decision available *here*, so the key has to say where "here" is.
+    exits: std::collections::BTreeMap<String, usize>,
     /// Turns since an id was seen for the first time. The fixpoint of (4).
     pub barren: usize,
     pub turns: usize,
@@ -800,6 +828,7 @@ impl ExploringBrain {
         Self {
             seen: std::collections::BTreeMap::new(),
             maps: std::collections::BTreeMap::new(),
+            exits: std::collections::BTreeMap::new(),
             barren: 0,
             reached_the_end: false,
             here: String::new(),
@@ -861,10 +890,7 @@ impl ExploringBrain {
     /// the brain reaching past the rendered situation for something a model does not have, and the
     /// property that makes every finding here worth reading is that it cannot.
     fn promise_of(&self, description: &str) -> u8 {
-        let known: Vec<&str> = description
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|word| self.seen.keys().any(|id| id.starts_with(&format!("{word}:"))))
-            .collect();
+        let known = self.maps_named(description);
         if known.is_empty() {
             return 0;
         }
@@ -877,6 +903,28 @@ impl ExploringBrain {
             true => 1,
             false => 2,
         }
+    }
+
+    /// Every word in a row's prose that names a map this walk has an id for — the one thing the
+    /// brain is allowed to know about where a door goes, and the same scan
+    /// [`Self::promise_of`] grades.
+    ///
+    /// ⚠️ **Strings, and no map table.** A hard-coded list of the 248 names would be the brain
+    /// reaching past the rendered situation for something a model does not have.
+    fn maps_named<'a>(&self, description: &'a str) -> Vec<&'a str> {
+        description
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| self.seen.keys().any(|id| id.starts_with(&format!("{word}:"))))
+            .collect()
+    }
+
+    /// The key into [`Self::exits`] for a way out of the map the walk is standing on: where it
+    /// goes, as far as its prose says, against where it goes *from*. `None` for a door into
+    /// somewhere this walk has never had an id — which is [`Self::promise_of`]'s `0`, the case the
+    /// ordering already prioritises on its own terms.
+    fn crossing(&self, description: &str) -> Option<String> {
+        let there = self.maps_named(description).first().map(|m| m.to_string())?;
+        Some(format!("{}->{there}", self.here))
     }
 }
 
@@ -985,6 +1033,27 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
         // (2) the first unvisited row that does not leave the map, so a map is exhausted before it
         // is left; then (3) the way out that most likely leads somewhere with work left.
         let unvisited = |id: &String| self.seen.get(id).copied() == Some(0);
+
+        // ⭐ **A row the world puts back, and the walk has to be willing to take again.**
+        //
+        // Route 16's east half is cut in two by a tree, and the way out to Celadon City is on the
+        // far side of it. The walk cut it, crossed, marked `Route16:34,10:CutTree` done — and cut
+        // trees **regrow when a map reloads** (`PokemonAgent`'s `cut_tiles.clear()` says so). Every
+        // time it came back the tree was standing and the row was "visited", so the only rows left
+        // were the gate and the Fly House. Measured on 2026-09-09: `lavender` spent **6 266 of its
+        // 6 427 turns** in that three-map pocket and `Route16:40,10:Connection` — the way out, one
+        // tree away — finished the run **offered and never once chosen**. Five of the eight regions
+        // did the same, 80% to 97.5% of every turn the sweep took.
+        //
+        // ⚠️ **This is the Pokémon Mansion statue again**, and the fallback written for that only
+        // fires when the menu has *no exit at all* (see below). Route 16 has three, so it never
+        // fired; the walk had somewhere to go and went there fifteen hundred times.
+        //
+        // ⚠️ **Not `Grass` or `Empty`.** Those are a request for an *encounter*, and a second pace
+        // discovers nothing while costing a 60 s budget — the same distinction `resume` makes below
+        // and for the same reason: the grind is the right answer for a model playing the game and
+        // the wrong one for a walk whose whole job is breadth.
+        let re_takeable = |id: &String| !matches!(id.rsplit(':').next(), Some("Grass" | "Empty"));
         let chosen = rows
             .iter()
             .map(|(id, _)| id)
@@ -992,7 +1061,9 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             .cloned()
             .or_else(|| {
                 rows.iter()
-                    .filter(|(id, _)| is_a_way_out(id))
+                    // Exits are never `Grass` or `Empty`, so the one test covers both halves:
+                    // every way out, plus every other row the world might have put back.
+                    .filter(|(id, _)| re_takeable(id))
                     // ⚠️ **How often it has already been taken comes *first*, and the promise of
                     // where it goes second.** The other order looks obviously right and loops for
                     // ever: an exit into a map the walk has never reached scores best on promise,
@@ -1026,16 +1097,42 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                     // attempts. Priority that expires cannot do that, and it still cannot help an
                     // exit whose promise is merely "there is work left there" (score 1), which is
                     // the case the `min(times, 1)` experiment lost 20 maps on.
+                    // ⭐ **Taken-ness is counted per *crossing* — this map to that one — rather
+                    // than per id.** See [`Self::exits`]. The id count stays as the last key: it
+                    // decides *which* of a group of doors to take when the group's turn comes
+                    // round, so all eight of Route 16's are still taken and the frontier loses
+                    // nothing.
+                    //
+                    // ⚠️ **A door into a map with no name the walk knows falls back to its id
+                    // count**, which is what it had before. That is the `promise == 0` case, and it
+                    // is already the one the two-try priority above is for; once the door has been
+                    // through once the walk has ids on the other side and the name resolves.
                     .min_by_key(|(id, description)| {
-                        let times = self.seen.get(id).copied().unwrap_or(0);
-                        let promise = self.promise_of(description);
-                        let new_map_worth_a_try = promise == 0 && times < 2;
-                        (!new_map_worth_a_try, times, promise)
+                        let id_times = self.seen.get(id).copied().unwrap_or(0);
+                        let exit = is_a_way_out(id);
+                        let map_times = match exit {
+                            true => self.crossing(description)
+                                .and_then(|crossing| self.exits.get(&crossing).copied())
+                                .unwrap_or(id_times),
+                            false => id_times,
+                        };
+                        // ⚠️ **A row that is not a way out scores *worse* than any exit that ties
+                        // with it, and that is the line that keeps this from being the
+                        // promise-first ordering that lost 20 maps.** `promise_of` reads map names
+                        // out of the prose, so a `CutTree` or a person names nothing and would come
+                        // back `0` — the best score there is. Ranking it below `2` means a
+                        // re-takeable row is chosen only when it has been taken **strictly fewer**
+                        // times than every way out, which on a map passed through once is never.
+                        let promise = match exit { true => self.promise_of(description), false => 3 };
+                        let new_map_worth_a_try = exit && promise == 0 && id_times < 2;
+                        (!new_map_worth_a_try, map_times, promise, id_times)
                     })
                     .map(|(id, _)| id.clone())
             });
 
-        // ⭐ **Nothing unvisited and no way out: take the least-taken row again rather than wait.**
+        // ⭐ **Nothing at all above: take the least-taken row again rather than wait.** With the
+        // widened ordering this is now only reached when every row is a `Grass` or an `Empty` that
+        // has already been paced, which is the one case the arm above declines to answer.**
         //
         // ⚠️ **A once-only frontier cannot solve a puzzle whose pieces toggle**, and that is not a
         // hypothetical: a 15-game-hour walk spent **80 636 consecutive turns** on
@@ -1057,6 +1154,15 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             Some(id) => {
                 self.stalled_turns = 0;
                 *self.seen.entry(id.clone()).or_insert(0) += 1;
+                // …and the same crossing against the map it leads to, whichever branch chose it.
+                // The fallback below can pick an exit too, and a tally that missed those would
+                // undercount exactly the rows this is for.
+                if is_a_way_out(&id)
+                    && let Some(description) = rows.iter().find(|(i, _)| *i == id).map(|(_, d)| d)
+                    && let Some(crossing) = self.crossing(description)
+                {
+                    *self.exits.entry(crossing).or_insert(0) += 1;
+                }
                 // ⚠️ `resume_after_battle` everywhere **except** the two rows that exist to *start*
                 // a battle, and that exception is measured. A wild encounter says nothing about a
                 // walk across a route, so resuming one is a whole turn saved. But a `Grass` or an
@@ -1329,7 +1435,8 @@ fn coverage_walk_of_the_finished_game() {
             "\n════ C3: the regional sweep ════\n{}\n\
              union      ⭐ {} maps of 248, {} ids, over {} walks\n\
              only here  {}\n\
-             cost       {:?} of game time, {:?} of wall clock in total\n",
+             cost       {:?} of game time, {:?} of wall clock in total\n\
+             {}\n",
             rows.join("\n"),
             maps.len(),
             ids.len(),
@@ -1337,6 +1444,7 @@ fn coverage_walk_of_the_finished_game() {
             only.join(" "),
             outcomes.iter().map(|o| o.game_time).sum::<std::time::Duration>(),
             outcomes.iter().map(|o| o.wall).sum::<std::time::Duration>(),
+            unreached_report(&maps),
         );
     }
 
@@ -1352,6 +1460,46 @@ fn coverage_walk_of_the_finished_game() {
             failures.len(), failures.join("\n  "));
     let discovered: usize = outcomes.iter().map(|o| o.ids.len()).sum();
     assert!(discovered > 10, "only {discovered} ids were ever offered; the walk did not happen");
+}
+
+/// ⭐ **The maps no walk entered, which is the other half of the union and the input to
+/// `docs/coverage-plan.md`'s step 6.**
+///
+/// A sweep that prints "186 maps of 248" says nothing about the 62, and the 62 are the only thing
+/// left to act on: a gate doing its job and a walk that never arrived look identical from a count.
+/// Before this the list was assembled by hand — `Map::iter()` diffed against a shell union of the
+/// tsvs — which is exactly the sort of arithmetic that gets done once and then quoted for a week
+/// after it stopped being true.
+///
+/// ⚠️ **Two thirds of what is "missing" is not missing.** 44 of the 248 are the ROM's `UnusedMap*`
+/// padding — map numbers with no header, which `Map::iter()` yields because the enum is the byte —
+/// and `Colosseum` and `TradeCenter` are the link-cable rooms, which need a second Game Boy. They
+/// are counted and then set aside, so the list that is left is the one worth reading.
+fn unreached_report(entered: &std::collections::BTreeSet<&String>) -> String {
+    use crate::pokemon::map::Map;
+    use strum::IntoEnumIterator;
+    let (mut padding, mut cable, mut real) = (0usize, 0usize, Vec::new());
+    for map in Map::iter() {
+        let name = format!("{map:?}");
+        if entered.contains(&name) {
+            continue;
+        }
+        match map {
+            _ if name.starts_with("UnusedMap") => padding += 1,
+            Map::Colosseum | Map::TradeCenter => cable += 1,
+            _ => real.push(name),
+        }
+    }
+    real.sort();
+    // Wrapped rather than one per line: this is a list to scan for a cluster — the S.S. Anne's nine
+    // rooms, Rocket Hideout's four floors — and a column of sixty names hides one.
+    let mut lines: Vec<String> = vec![format!(
+        "unreached  ⭐ {} real maps, plus {padding} UnusedMap* and {cable} link-cable rooms",
+        real.len())];
+    for chunk in real.chunks(6) {
+        lines.push(format!("           {}", chunk.join(" ")));
+    }
+    lines.join("\n")
 }
 
 /// One walk, from one [`Start`]. Everything above it is knobs and arithmetic; this is the walk that
@@ -1467,6 +1615,19 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         by_turns.iter().map(|(m, n)| format!("{m}:{n}")).collect::<Vec<_>>().join(" ")
     };
     let game_time = run.fixture().total_cycles.to_duration();
+    // ⚠️ **The one cheat that can silently fail, said out loud.** Gen 1's bag holds twenty *kinds*
+    // and a finished save arrives nearly full, so `Cheats` reports rather than panics when a key
+    // item will not fit — and its own comment calls that "a coverage gap worth printing", which
+    // nothing printed. A walk with no Bicycle cannot reach Cycling Road, and it took a probe to
+    // rule that out as the reason five regions could not leave Route 16.
+    let refused: Vec<String> = run.cheats.as_ref()
+        .map(|c| c.bag_was_full.iter().map(|i| format!("{i:?}")).collect())
+        .unwrap_or_default();
+    let bag = match refused.is_empty() {
+        true => "every key item fit the bag".to_string(),
+        false => format!("⚠️ the bag was full and refused {} — whatever they gate is unreachable: {}",
+            refused.len(), refused.join(", ")),
+    };
     {
         let log = run.fixture().coverage.as_mut().expect("coverage was asked for");
         for id in &offered {
@@ -1512,6 +1673,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
          silent     {:?}\n\
          busiest    {busiest}\n\
          stuck      {stalled_worst} consecutive turns choosing nothing; {rowless} turn(s) had no rows at all\n\
+         cheats     {bag}\n\
          where      {boxed_at}\n\
          table      {written:?}\n",
         start.map,
@@ -1522,6 +1684,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         stalled_worst = stalled_worst,
         rowless = rowless,
         boxed_at = boxed_at.join("\n            "),
+        bag = bag,
     );
 
     // Both taken as owned values here, so the borrow of the run's log ends before the cross-check

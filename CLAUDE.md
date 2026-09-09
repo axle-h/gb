@@ -25,12 +25,16 @@ against a mock endpoint, with a verdict on each and every defect fixed, until a 
 back clean. It was rewritten on 2026-09-09 as **a numbered step list (§4), from the red tier of today
 to the fixpoint**; the harness, the cheats, the oracle and the walk are built, and §2 is the baseline
 sweep of that same day — 153 maps of 248, 106 defects and 41 silences, and 82% of
-every turn it took spent in Route 16's gate. Steps 1 to 5 are those; **step 1 is done, the silences
-are 0 in all eight regions, and a `Silent` now fails the tier**. ⚠️ **§3 is the rules and §6.2 is
+every turn it took spent in Route 16's gate. Steps 1 to 5 are those; **steps 1 to 5 are done — the
+silences are 0, all 106 defects are closed, the gate is closed (by a cut tree that regrows, not by
+the scoring change step 4 predicted), and the union has gone from 159 maps to 186 and 1 410 ids to
+1 813, with §2.1 the state to measure against now. What a sweep finds is that every start's bag is
+full and refuses the key items that gate the S.S. Anne and every `Fish` row — step 6's first job —
+and that five of the eight starts no longer reach anything the others do not**. ⚠️ **§3 is the rules and §6.2 is
 how to read a number** — the walk's totals are a coin flip between several different walks, and CPU
 load is an input to it, so never build while measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**,
 because a walk's run directory defaults into `/tmp` and writes hundreds of megabytes of RAM there.
-§7 is the record: the faults the sweeps found and the seven places the plan was wrong, and **§7.3
+§7 is the record: the faults the sweeps found and the fourteen places the plan was wrong, and **§7.3
 maps the old section numbers that code comments still cite** onto where each argument lives now. Read it before
 touching the soak tier, `postgame/debug.rs`, `postgame/fishing.rs`, `integration_tests/llm*.rs` or
 anything under `integration_tests/{cheats,coverage,godmode}.rs`.

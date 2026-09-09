@@ -6,11 +6,16 @@ a verdict on each, and every defect that turns up fixed, until a sweep of the wh
 back clean and finds nothing new.
 
 **Status.** Rewritten 2026-09-09 as a step list, from a review of the first three days' work;
-**steps 0 and 1 taken the same day**. The harness, the cheats, the oracle and the frontier walk are
+**steps 0 to 5 taken the same day**. The harness, the cheats, the oracle and the frontier walk are
 all **built**; the baseline sweep reaches **153 maps of 248** and came back **red with 106 defects
 and 41 silences**, with **82% of every turn it took spent in Route 16's gate**. §2 is that baseline
 and every later step measures against it. **The 41 silences are now 0 and a silence fails the tier**
-(step 1); the 106 defects and the gate are untouched, and are steps 2 to 4. The steps in §4 are the path from there to a
+(step 1); `fuchsia`'s four defects are 0 at the full budget (step 2), and so are **Saffron Gym's 99
+and Silph Co 1F's 3** (step 3), which leaves the 106 at **one** — a wandering shopper, and step 6's.
+Route 16's gate is closed too (step 4) — not by the scoring change the step predicted but by a cut
+tree that regrows — and the sweep prints what it did *not* reach (step 5). **§2.1 is where the sweep
+stands now**: 186 maps of 248 and 1 813 ids, with 38 real maps unreached and six defects left, most
+of both traceable to a full bag. The steps in §4 are the path from there to a
 clean fixpoint, in the order to take them. §7 keeps what the first draft got wrong and what the
 sweeps have found, condensed, because most of that was agent bugs a paying run would have met.
 
@@ -57,7 +62,11 @@ frontier still open, so every one of these numbers is a floor rather than a plat
   `SafariZoneCenter` 2. Every one of them reads *"there is no route to …"*. Saffron Gym is step 3
   and the Safari Zone pond is step 2, both reproduced exactly as those steps describe. ⭐ **Silph
   Co 1F is new** and was in no earlier sweep; it has warp pads of the same family as the gym's, so
-  step 3's fix is expected to take it, and if it does not it is a finding of its own.
+  step 3's fix is expected to take it, and if it does not it is a finding of its own — **which is
+  what happened**; see step 3. ✅ **All 106 are closed.** Step 2 took `fuchsia`'s four (the two
+  `SafariZoneCenter` rows and the two `SeafoamIslandsB*F` warps) and step 3 took Saffron Gym's 99 and
+  Silph Co 1F's 3. What a sweep now finds instead is one intermittent *"no route to <person>"* on an
+  NPC who walks about — the shape step 1 recorded twice — which is step 6's.
 - **Silent: 41, and they were no longer only fishing.** `Fish` 35, `Grass` 3
   (`Route18:39,13`, `Route24:5,18`), `Warp` 3 (`SeafoamIslandsB3F:20,17`, `:21,17`, `:25,14`).
   ✅ **All of it closed by step 1 the same day, and the count is 0 in all eight regions**; a silence
@@ -67,7 +76,8 @@ frontier still open, so every one of these numbers is a floor rather than a plat
   three Seafoam warps score `Defect` on every walk that reaches them (step 2's ⚠️), the `Silent` here
   being the variance in §6.2 rather than a third thing. ⚠️ **Step 1 was written believing fishing was
   the whole list**, which is why the assertion was its last item and not its first.
-- **Where the turns went: Route 16's gate, and it is worse than the last table said.** The
+- **Where the turns went: Route 16's gate, and it is worse than the last table said.** ✅ **Closed by
+  step 4**, which found the cause was not the one this bullet or the step assumed. The
   `Route16` / `Route16Gate1F` / `Route16FlyHouse` triangle took **26 573 of the sweep's 32 519
   turns, 82%**, and in six of the eight regions it is between 57% and **97%** of everything that
   region did. `lavender` spent 6 265 of 6 427 turns there and reached 34 maps. Step 4.
@@ -80,29 +90,54 @@ frontier still open, so every one of these numbers is a floor rather than a plat
 spread is not noise: see §6.2. The union here is 153 against the previous sweep's 159 while the id
 count rose from 1 409 to 1 445, which is what that variance looks like from outside.
 
-**The 95 maps no walk entered** (step 5 makes the walk print this itself; this list is the diff of
-`Map::iter()` against the union). 22 of them are the ROM's `UnusedMap*` padding and two are the
-link-cable rooms `Colosseum` and `TradeCenter`, which leaves **71 real maps**:
+### 2.1 Where the sweep stands after steps 1 to 5 — 2026-09-09
 
-`BluesHouse` `OaksLab` `RedsHouse1F` `RedsHouse2F` `ViridianMart` `Route2TradeHouse`
-`DiglettsCave` `DiglettsCaveRoute2` `DiglettsCaveRoute11` `Route11` `Route11Gate1F`
-`Route11Gate2F` `Route17` `Route12SuperRodHouse` `Route16Gate2F` `VermilionDock` `VermilionGym`
-`VermilionMart` `VermilionPokecenter` `VermilionOldRodHouse` `VermilionPidgeyHouse`
-`VermilionTradeHouse` `SSAnne1F` `SSAnne1FRooms` `SSAnne2F` `SSAnne2FRooms` `SSAnne3F`
-`SSAnneB1F` `SSAnneB1FRooms` `SSAnneBow` `SSAnneCaptainsRoom` `SSAnneKitchen` `CeladonGym`
-`CeladonDiner` `CeladonHotel` `CeladonChiefHouse` `GameCorner` `GameCornerPrizeRoom`
-`RocketHideoutB1F` `RocketHideoutB2F` `RocketHideoutB3F` `RocketHideoutB4F`
-`RocketHideoutElevator` `PokemonFanClub` `CinnabarGym` `CinnabarLab` `CinnabarLabFossilRoom`
-`CinnabarLabMetronomeRoom` `CinnabarLabTradeRoom` `CinnabarMart` `CinnabarMartCopy`
-`CinnabarPokecenter` `PokemonMansion1F` `PokemonMansion2F` `PokemonMansion3F` `PokemonMansionB1F`
-`CeruleanCave1F` `CeruleanCave2F` `CeruleanCaveB1F` `SafariZoneWestRestHouse` `IndigoPlateau`
-`IndigoPlateauLobby` `LoreleisRoom` `BrunosRoom` `AgathasRoom` `LancesRoom` `ChampionsRoom`
-`HallOfFame` `CeruleanTrashedHouseCopy` `UndergroundPathRoute6Copy` `UndergroundPathRoute7Copy`
+Taken with `GB_COVERAGE_START=all` on an idle machine, 6 game-hours per region, 40 minutes of wall
+clock. This is the state every remaining step measures against; §2's table above stays as the
+**baseline**, which is what the closures in it are relative to.
 
-⚠️ **A cluster in that list is a start that is missing, not necessarily a gate doing its job.**
-Vermilion's seven maps and the whole S.S. Anne sit next to a `vermilion` start that reached 58
-maps without entering any of them, and the Elite Four's six rooms are behind a walk that no longer
-gets there. Step 6.3's first tool is another start, and this list is its input.
+| | | | |
+|---|---|---|---|
+| **start** | **maps** | **ids** | **only it reached** |
+| `phase0` | 38 ⭐ Hall of Fame | 367 | 1 |
+| `cerulean` | 119 | 996 | **0** |
+| `vermilion` | 133 | 1 158 | **0** |
+| `lavender` | 133 | 1 155 | **0** |
+| `celadon` | 132 | 1 268 | **0** |
+| `saffron` | 129 | 1 128 | **0** |
+| `fuchsia` | ⭐ **163** | 1 416 | ⭐ **30** |
+| `cinnabar` | 41 ⭐ Hall of Fame | 371 | 4 |
+| **union** | ⭐ **186 of 248** | ⭐ **1 813** | |
+
+⚠️ **Five of the eight starts now contribute nothing no other start reaches.** That column used to
+be the argument for having eight; after step 4 a single walk from `fuchsia` reaches 163 of the 186
+on its own, and `cerulean`, `vermilion`, `lavender`, `celadon` and `saffron` between them add none.
+Five minutes of wall clock each, for nothing. ⭐ **Step 6.3's first tool is "another start", and this
+says the ones to replace** — a start is worth having only where it stands in a cluster nothing else
+reaches, which is what `phase0` (1) and `cinnabar` (4) still do and the middle five no longer do.
+
+**The 62 maps no walk entered**, printed by the sweep itself (step 5). 22 are the ROM's `UnusedMap*`
+padding and two are the link-cable rooms `Colosseum` and `TradeCenter`, which leaves **38 real
+maps** — and they are almost entirely four clusters and a handful of doors:
+
+- ⭐ **The S.S. Anne, all of it** (10) and `VermilionDock`: `SSAnne1F` `SSAnne1FRooms` `SSAnne2F`
+  `SSAnne2FRooms` `SSAnne3F` `SSAnneB1F` `SSAnneB1FRooms` `SSAnneBow` `SSAnneCaptainsRoom`
+  `SSAnneKitchen`. **The bag refuses the S.S. Ticket** — see the `cheats` line in §6.1.
+- **Cinnabar Island's buildings** (8): `CinnabarGym` `CinnabarLab` `CinnabarLabFossilRoom`
+  `CinnabarLabMetronomeRoom` `CinnabarLabTradeRoom` `CinnabarMart` `CinnabarMartCopy`
+  `CinnabarPokecenter`. The `cinnabar` start stands on the island and wins the game instead.
+- **Pokémon Mansion** (4): `PokemonMansion1F` `2F` `3F` `B1F`.
+- **Cerulean Cave** (3): `CeruleanCave1F` `2F` `B1F`.
+- **Pallet Town's interiors** (4): `BluesHouse` `OaksLab` `RedsHouse1F` `RedsHouse2F`.
+- **Three `*Copy` duplicates** the ROM never warps to: `CeruleanTrashedHouseCopy`
+  `UndergroundPathRoute6Copy` `UndergroundPathRoute7Copy`.
+- **Six doors on their own**: `CeladonGym` `ViridianMart` `Route17` `Route16Gate2F`
+  `SafariZoneWestRestHouse`. ⚠️ `Route17` is **Cycling Road**, and the Bicycle is one of the few key
+  items that *does* fit every start's bag — so that one is not the bag, and is worth a look.
+
+⚠️ **A cluster in that list is a gate, a missing start or a full bag — never "the walk is bad".**
+Rocket Hideout and the Game Corner prize room came off this list between the baseline and now
+without anyone touching them; the S.S. Anne will come off it the moment the ticket fits.
 
 ## 3. Rules that hold for every step
 
@@ -219,85 +254,238 @@ on a moving NPC in a mart and a Pokémon Centre); union 151 maps and 1 381 ids, 
 §6.2 describes. `cargo test --release` green (1 579), the leg chain green (215),
 `full_playthrough` green.
 
-### Step 2 — The Safari Zone pond: rows minted before the map is the map
+### Step 2 — The Safari Zone pond, and the two warps on the water ✅ done 2026-09-09
 
-**What is wrong.** From the `fuchsia` start, the gate script takes the fee and auto-walks the player
-into `SafariZoneCenter`; on that tick `actions()` minted `SafariZoneCenter:Nugget` and
-`SafariZoneCenter:0,10:Warp`, both across a pond Surf is refused on, and the walk aborted with
-*"there is no route"* on the next tick. The screenshot beside the dropped state is black. It is the
-`position_settled` family (`MetaTileMap`'s own ⚠️) one map-load earlier. Reproduce in 30 seconds:
+**What was wrong, and it was two unrelated things on one map cluster.**
 
-```shell
-GB_COVERAGE_START=fuchsia GB_COVERAGE_MINUTES=3 \
-  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
-```
+**(a) Rows minted before the map is the map.** From the `fuchsia` start, the gate script takes the
+fee and auto-walks the player into `SafariZoneCenter`; on that tick `actions()` minted
+`SafariZoneCenter:Nugget` and the two warps on the far side of a pond Surf is refused on, and the
+walk aborted with *"there is no route"* on the next tick. The screenshot beside the dropped state is
+black.
 
-**What to do.** Do not mint rows while a map transition is in flight; pin it with a `mechanics` test
-off the dropped state, next to `a_coordinate_that_underflows_a_map_edge_is_not_a_position`.
+✅ **Taken, and the diagnosis in the paragraph above was half right.** It is the `position_settled`
+family, but the flag itself was *true*: `(4, 0)` — the gate's square — is in bounds for the Centre,
+so the clamp told no lie the bounds check could catch. What is stale is everything else.
+`WarpFound2` writes the destination into `wCurMap` and only then falls into `EnterMap` →
+`LoadMapData` → `LoadMapHeader`, so `read_current_map` spends that window taking its *metadata* from
+the ROM under the new `wCurMap` and its coordinates, sprite slots and dimensions from the WRAM of the
+old one. Measured: **26 agent ticks** on an ordinary warp and **94** at the Safari gate, against the
+1 000 ms a settled agent waits before it asks anything, which is why only a walk ever found it.
 
-⚠️ The same region has two rows this is *not*: `SeafoamIslandsB3F:21,17:Warp` and
-`SeafoamIslandsB4F:21,17:Warp` give up after 60 s standing on the square they were walking to.
-Undiagnosed. Cut the state fresh from a `fuchsia` walk and argue from it.
+1. `map_metadata::map_header_is_loaded` compares the ten bytes `LoadMapHeader` copies out of
+   `MapHeaderPointers[wCurMap]` against `wCurMapHeader`. ⚠️ **Minus `wCurMapTextPtr`**, which
+   `SetMapTextPointer` swaps and Viridian Mart's and Oak's Lab's scripts repoint and keep — comparing
+   all ten made every mart visit look like a transition, withheld the clerk, and failed three
+   default-tier tests. `CurrentMap::header_loaded` carries it into `MetaTileMap::position_settled`.
+2. **`actions()` answers with no rows at all while the position is a fiction.** Every row is a route
+   from where the player is standing. On the 255-underflow tick that was already the outcome (the BFS
+   from the far edge reaches nothing); on this one it was not.
+3. ⚰️ **Holding the agent's turn as well was tried and reverted.** Not polling the policy while the
+   header is stale is tidier — `blackout_in_flight` does exactly that one state over — but a
+   black-out is rare and this is every door in the game. Deferring the poll by the window re-rolled
+   `postgame::items`' wild encounter from a Pidgey to a Rattata, whose Tail Whip held the Defense
+   stage that leg asserts on at neutral. An empty menu is a case `llm::prompt` already answers
+   ("nothing — the agent can reach no action from here. `wait` and look again").
 
-**Done:** the `fuchsia` walk at the full budget has 0 defects; `cargo test --release` green;
-`full_playthrough` green. **Cost:** small to medium.
+**(b) The two warps the step said it was *not*.** `SeafoamIslandsB3F:21,17:Warp` and
+`SeafoamIslandsB4F:21,17:Warp` are water at the bottom edge of a current channel, and they gave up
+after 60 s standing on the square they were walking to.
 
-### Step 3 — Saffron Gym's teleport pads
+✅ **Taken.** `home/overworld.asm`'s `.noDirectionChange` tests `wWalkBikeSurfState` for `$02` before
+it looks at anything else. On foot, a collision while standing on a warp entry runs `ExtraWarpCheck`
+and then `CheckWarpsCollision` and the warp fires — that is how every map-edge ladder in the game is
+taken. Surfing, the branch goes to `CollisionCheckOnWater` and the next instruction is
+`jp c, OverworldLoop`; `CheckWarpsCollision` is not on that path. So a water entry only fires from
+`CheckWarpsNoCollision`, on a completed **step**, in the direction `IsPlayerFacingEdgeOfMap` accepts.
+Measured on the dropped state: 120 ticks of Down move nothing, Up-then-Down warps.
 
-**What is wrong.** 30 of the gym's 32 warps lead back into the same map. The route to one pad
-crosses others, stepping on one relocates the player, and the row is gone by the time the walk
-looks for it: 37 to 40 defects, and `celadon` spent 3849 of its 4592 turns in the room. The agent
-already has the model for this shape — `spinners`, the Rocket Hideout arrow tiles, where the BFS
-treats stepping onto an arrow as landing at its destination — and does not apply it here.
+⚠️ **The condition lives in two places and fixing one changed nothing.** `MetaTileMap::actions`
+builds `[opposite(dir), dir]` for a surfing player standing on the entry, and
+`AgentState::OverworldMovement` tests for a border warp **before** it consults the route and pressed
+the outward direction itself. Both carry it now.
+⚠️ The sibling `20,17` entry passed every sweep because the walk happened to arrive from above and
+the arrival fired it, which is the same fact from the other side.
 
-```shell
-GB_COVERAGE_START=celadon GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
-  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
-```
+**Done, measured 2026-09-09:** the `fuchsia` walk at the full budget, **0 defects and 0 silences**
+across 558 ids on 63 maps. `cargo test --release` green (1 583), the leg chain green (219),
+`full_playthrough` green, `hall_of_fame` green. Tests:
+`mechanics::a_map_the_cartridge_has_not_finished_loading_offers_no_rows`,
+`mechanics::the_header_in_wram_says_which_map_has_actually_been_loaded`,
+`mechanics::a_warp_reached_by_surfing_is_entered_rather_than_leant_on`,
+`cinnabar::a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on` — the last off the
+walk's own dropped state, committed as `data/seafoam-b3f-on-the-water-warp.bin`, and it fails if
+either half of (b) is removed.
 
-**What to do.** Treat a teleport pad as the spinners are treated: a square you cannot walk across,
-whose landing is its destination. Then a route to a pad is a route that ends at the pad, and a route
-that would cross one is not a route.
+### Step 3 — Saffron Gym's teleport pads ✅ done 2026-09-09
 
-⭐ **And Silph Co 1F is the same shape.** The 2026-09-09 baseline put 3 defects on `SilphCo1F`,
-which no earlier sweep had ever reached; its warp pads are the same family as the gym's, so the fix
-here is expected to take them. If it does not, that is a second finding and not this step's.
+**What was wrong.** 30 of the gym's 32 warps lead back into the same map. The route to one pad
+crosses others, stepping on one relocates the player, and the row is gone by the time the walk looks
+for it: 37 defects on `celadon` at the 60-minute budget, every one of them *"there is no route to the
+warp to SaffronGym"*, and **239 of the walk's 454 turns** in that one room.
 
-**Done:** `celadon`, `cerulean` and `saffron` walks with 0 defects in the gym **or on Silph Co 1F**
-and the gym no longer their busiest map; the leg chain, `full_playthrough` **and** `hall_of_fame`
-green, because the scripted route walks this gym for the Marsh Badge. **Cost:** medium, and all of
-it in the routing and its verification.
+✅ **Taken, and the step's own account of it was wrong about where the fix goes.** The agent already
+treats a pad the way it treats a spinner — `bfs_from_player` records the edge from the square beside
+the pad to the pad's **landing**, so routes cross the maze for free. Three things were missing.
 
-### Step 4 — Route 16's gate, in the brain
+1. ⭐ **The `settled` guard skipped the pad the player was standing on.** The neighbour loop dropped
+   a settled neighbour before it looked at what the neighbour *was*, and the search's own root is
+   settled at price 0 — so standing on a pad threw away the one edge out of the room. Every room in
+   that gym is entered by exactly one pad, so that is a ninth of the map: standing on `(1, 5)`, whose
+   landing is the centre room, the walk read back that there was no route to **Sabrina**, the Gym
+   Guide, or the door out. The intra-map arm is tested before the guard now.
+2. ⭐ **No intra-map warp row in the game had ever completed.** Every completion the agent had for a
+   `Warp` was the map changing, and a teleport pad does not change the map — so all thirty scored
+   `Defect` after sixty seconds of silence. `player_position == to_position` is exact rather than
+   approximate: a pad's landing is reached by that pad and by nothing else. The one hole, being
+   offered a pad whose landing is already underfoot, is closed where the row is minted.
+3. **Silph Co 1F was not the same family and the step's ⭐ was right to hedge.** `SilphCo1F:16,10` is
+   `warp_event 16, 10, SILPH_CO_3F, 7 ; inaccessible` — pokered's own comment. Plain floor, no warp
+   tile, nothing to press, and `warp_trigger` says `Impossible` correctly. The row survived only
+   because `actions()` kept a dud whenever no sibling on the map opened onto the same place, and it
+   cost sixty seconds every time any run reached that floor.
 
-**What is wrong.** Route 16 has four squares facing the gate's four doors, so the pair of maps
-carries eight warp ids and every one works. Once a map's other rows are done the brain takes the
-least-taken exit, and on a two-map ping-pong that is always the door back. Four walks spent 60% to
-97.6% of their turns there, and the two worst were two of the three lowest map counts. `times` is
-per **id** and the thing being oscillated over is a **pair of maps**.
+   ⭐ **That guard was quietly load-bearing, and finding out what it was protecting is the useful
+   part.** A scan of all 248 maps found **7** `Impossible` warps, 4 of them the only way to their
+   target — and three of those four are **Pokémon Mansion 3F's floor holes**, the only way onto 1F's
+   right side and so to the Secret Key. They are `FACILITY $11`, which lives in
+   `data/tilesets/warp_pad_hole_tile_ids.asm`: the cartridge's *other* step-on table, read by
+   `IsPlayerStandingOnWarpPadOrHole` rather than by `IsPlayerStandingOnDoorTileOrWarpTile`. Naming
+   that table moved the holes to `StepOn`, left the guard with nothing to guard, and let the dud
+   rows go. ⚠️ `WarpTrigger::Unknown` is still never dropped — unsure is not the same as no.
 
-**What to do.** Count exits by the map they lead to rather than by id, so eight doors into one gate
-are one option taken eight times. `ExploringBrain::maps` already tallies turns per map and nothing
-in the ordering reads it. ⚠️ This is not promise-first ordering, which is the fix that looks obvious
-and lost 20 maps twice.
+⚰️ **Pricing a pad by the square you step onto it from was written and taken out.** It reads better
+than what the BFS does, but no map needs it: all three that carry intra-map warps (`SaffronGym` 30,
+`SilphCo3F` 2, `SilphCo8F` 2) pair their pads one-to-one, so every pad is already in `dist` as some
+pad's landing. A second pricing path nothing can reach is a second pricing path nothing can test.
 
-**Done:** measured as §6.2 says — eight regional walks a side on an idle machine — the four affected
-regions' `busiest` line is no longer the gate and the union has not fallen. **Cost:** small to
-write; the whole cost is the measurement. The brain is a test file, so nothing that ships is behind
-it.
+**Done, measured 2026-09-09** on the three regions at the full budget, in parallel on an idle
+machine: **0 defects in the gym and 0 on Silph Co 1F in all three**, and Saffron Gym is **38 turns**
+in each — one per row, for a room with 30 pads, 9 people and a door — against 239 of 454 before.
+`celadon` 86 maps / 723 ids / 0 defects, `saffron` 49 / 373 / 0, `cerulean` 86 / 685 / 1 (below).
+The busiest map everywhere is now Route 16's gate, which is step 4. `cargo test --release` green
+(1 587), the leg chain green (223), `full_playthrough` green, `hall_of_fame` green. Tests:
+`saffron::every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot`,
+`saffron::a_teleport_pad_reports_arriving_even_though_the_map_never_changed`,
+`mechanics::an_impossible_warp_is_one_the_cartridge_really_will_not_open` (the whole-ROM list that
+replaced the guard), and `mechanics::every_committed_fixture_has_a_complete_sprite_table`.
 
-### Step 5 — Print the maps never entered
+⚠️ **`cerulean`'s one remaining defect is not this step's and is on the record already.**
+`CeruleanMart:CooltrainerFemale: there is no route to Cooltrainer Female` — a shopper who wanders,
+so the row is minted with a route and the route is gone a tick later. Step 1 saw the same shape twice
+("two one-off *no route to <person>* on a moving NPC in a mart and a Pokémon Centre"); it appeared in
+one of the three regions this sweep and none of the last. It belongs to step 6's loop: a `NoRoute` to
+a **sprite that is still on the map** is a sprite that moved, not a row the agent could not carry out.
 
-The sweep prints a union of 159 and nothing about the 89. `Map::iter()` minus the union, printed by
-the multi-region summary, is what tells a gate doing its job from a walk that never arrived, and it
-is the input to step 6.
+### Step 4 — Route 16's gate, in the brain ✅ done 2026-09-09
 
-**Done:** `GB_COVERAGE_START=all` prints the unreached maps sorted, and §2 carries the list from
-the next baseline. **Cost:** small.
+**What was wrong.** Route 16 has eight squares facing its gate's doors, so the pair of maps carries
+eight warp ids and every one works. Four walks spent 60% to 97.6% of their turns there, and the two
+worst were two of the three lowest map counts. The step's diagnosis was that `times` is per **id**
+while the thing being oscillated over is a **pair of maps**.
+
+⚠️ **That diagnosis was wrong, and counting by map alone proves it.** Counting exits by destination
+was written and measured: the eight doors did collapse into two options, the counters alternated
+exactly as intended — and the walk ping-ponged just as hard, because it has *nowhere else to go*.
+`lavender` finished with `Route16:7,5:Warp` and `Route16FlyHouse:2,7:Warp` chosen **1 593 times
+each**, on a menu of three rows.
+
+⭐ **What actually sealed it was a cut tree that regrows.** Route 16's east half is split in two by
+a tree, and the way out to Celadon City is on the far side of it. The walk cut it, crossed, and
+marked `Route16:34,10:CutTree` done — and cut trees grow back when a map reloads, which
+`PokemonAgent`'s `cut_tiles.clear()` says in as many words. Every return found the tree standing and
+the row "visited", so the only rows left were the gate and the Fly House.
+`Route16:40,10:Connection` — the way out, one tree away — ended the run **offered and never once
+chosen**. It is the Pokémon Mansion statue again, and the fallback written for *that* only fires when
+the menu has no exit at all; Route 16 has three, so it never fired.
+
+**Two changes, and both are in the brain's ordering** (`ExploringBrain::respond`):
+
+1. **Once nothing on the menu is unvisited, the least-taken row wins whatever kind it is** — not the
+   least-taken *exit*. ⚠️ A row that is not a way out is ranked below every exit that ties with it
+   (`promise` 3 against 0–2), which is what keeps this from being the promise-first ordering that
+   lost 20 maps twice: a re-takeable row is chosen only when it has been taken **strictly fewer**
+   times than every way out, which on a map passed through once is never. ⚠️ `Grass` and `Empty` are
+   excluded — those are a request for an *encounter*, and a second pace discovers nothing while
+   costing a 60 s budget; it is the same line `resume_after_battle` draws two arms down.
+2. **Exits are still counted per crossing** — `"{here}->{there}"` rather than per id. It is not what
+   fixed the gate, but it is right on its own terms (eight doors into one building are one decision)
+   and it costs nothing. ⚰️ Keyed by the destination **alone** it lost 22 maps: a global tally makes
+   a *hub* repellent, so a walk inside Celadon Mart found every door back out to the city already
+   "taken" a dozen times and cycled the building instead — 4 400 to 5 000 turns in five regions. An
+   option is a decision available *here*, so the key has to say where here is.
+
+**Done, measured 2026-09-09** — eight regional walks a side, in parallel on an idle machine:
+
+| | union maps | union ids | Route 16's gate |
+|---|---|---|---|
+| before | 159 | 1 410 | **23 099 of 26 870 turns (86%)** |
+| after | ⭐ **186** | ⭐ **1 752** | **not in any region's `busiest` line** |
+
+Per region the map counts went 30→38, 86→100, 58→**133**, 34→**133**, 86→120, 49→119, 71→71,
+41→**132**, and the turn counts collapsed with them (`lavender` 6 427→1 522, `saffron`
+6 219→1 020). Every `busiest` line is now an ordinary city or route at 30 to 100 turns. `cargo test
+--release` green (1 587); nothing that ships is behind this — the whole change is in a test file.
+
+⭐ **And the reach it bought found the next thing, which is a cheat rather than a walk.** Hunting the
+Bicycle down as a suspect turned up `Cheats::bag_was_full`, a counter whose own comment calls it "a
+coverage gap worth printing" and which **nothing had ever printed**. The walk's summary now carries a
+`cheats` line, and it says that **every one of the eight starts arrives with a full bag** — twenty
+kinds is Gen 1's limit — and refuses between one and nine key items:
+
+    ⚠️ the bag was full and refused 8: OldRod, GoodRod, SuperRod, SilphScope, LiftKey, SSTicket,
+    CoinCase, GoldTeeth
+
+That is most of §2's list of maps no walk has ever entered: no S.S. Ticket is the whole of the S.S.
+Anne's nine rooms, no Lift Key is Rocket Hideout's four floors, no Coin Case is the prize room, no
+rods are every `Fish` row on the map. The Bicycle fits in all eight, so Cycling Road was never the
+blocker. **Making room in the bag is step 6's cheapest tool by a distance** and is now the first
+thing to try there.
+
+### Step 5 — Print the maps never entered ✅ done 2026-09-09
+
+The sweep printed a union and nothing about its complement, and the complement is the only thing
+left to act on: from a count, a gate doing its job and a walk that never arrived look identical.
+`Map::iter()` minus the union was being assembled by hand with a shell diff, which is exactly the
+sort of arithmetic that gets done once and then quoted for a week after it stopped being true —
+§2's list below was.
+
+✅ **Taken.** `unreached_report` prints it from the multi-region summary, sorted and wrapped six to a
+line so a *cluster* is visible — the S.S. Anne's nine rooms, Rocket Hideout's four floors — which a
+column of sixty names hides. ⚠️ It counts the ROM's `UnusedMap*` padding and the two link-cable
+rooms and then sets them aside: 24 of the 62 that look missing are neither.
+
+**Done:** `GB_COVERAGE_START=all` prints `unreached` under `union`, and §2 carries the list from the
+sweep of 2026-09-09. **Cost:** small, as billed.
 
 ### Step 6 — The loop, until the fixpoint
 
-Everything above is one pass. The goal is a fixpoint, and this is the loop:
+Everything above is one pass. The goal is a fixpoint, and this is the loop.
+
+⭐ **Start with the bag.** Step 4's `cheats` line says every one of the eight starts arrives with all
+twenty of Gen 1's bag kinds used and refuses between one and nine key items — the rods, the S.S.
+Ticket, the Lift Key, the Coin Case, the Silph Scope, the Itemfinder. That is most of the unreached
+list above and it is one `Cheats` change, not a walk: shed what a finished save is carrying that the
+walk does not need (or put it in the PC) before handing over `COVERAGE_KEY_ITEMS`. Nothing else in
+this section buys as many maps per line.
+
+⚠️ **The `all` sweep of 2026-09-09 (§2.1) came back with 6 defects and 2 silences, and they are the
+queue.** Every one is a row the earlier sweeps never reached — the union went 159 maps to 186 and
+1 410 ids to 1 813 — so this is the loop working rather than a regression:
+
+- **`Route11:13,6:Grass`, three regions** — *"it stopped making progress (standing at (14, 6))"*.
+  New, reproducible across starts, and the only one of these that is not a warp.
+- **`SeafoamIslandsB4F:20,17:Warp` and `:21,17:Warp`** — `DidNotArrive` at (21, 15), with
+  `SeafoamIslandsB3F:20,17` and `:25,14` `Silent` beside them. ⚠️ **This may be the cartridge rather
+  than the agent**: `SeafoamIslandsB4FDefaultScript` force-walks the player off those staircases,
+  `res BIT_FORCED_WARP` cancelling the warp, until `SEAFOAM3` is set (`policy.rs` carries the whole
+  argument). Argue it from the dropped state; if it is the script, it is a `Blocked`, not a fix.
+- **`SilphCoElevator:1,3:Warp`** — `DidNotArrive` standing on the square. An elevator door.
+- **`CeruleanMart:CooltrainerFemale`**, intermittent (in the step-3 sweep, not this one) — a shopper
+  who wanders, so a `NoRoute` to a **sprite still on the map** is a sprite that moved rather than a
+  row the agent could not carry out.
+
+The loop:
 
 1. Sweep (§6.1). Nothing else building.
 2. Every `defect` and every `silent` is fixed in the agent, or argued into `Blocked` with a comment
@@ -391,6 +579,8 @@ GB_COVERAGE_START=celadon GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 
 # Every region in one process, serially, with the union printed at the end (8x the wall clock).
+# ⭐ This is the only form that prints `unreached` — the maps no walk entered, which is step 6's
+# input. The parallel recipe below is faster and cannot: the diff needs `Map::iter()`.
 GB_COVERAGE_START=all GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 ```
@@ -433,6 +623,11 @@ blaming the next run's numbers on the machine.
 | `GB_COVERAGE_PATIENCE` | barren turns before the frontier is called settled. Patience, not the budget, is what stopped every early sweep; set it high |
 | `GB_COVERAGE_WALL_SECS` | a wall-clock stop, so a wedged sweep fails instead of running all night |
 
+Every walk's own summary carries a **`cheats`** line saying which key items would not fit the bag.
+⚠️ **Read it before believing a coverage gap**: Gen 1 holds twenty *kinds* and every finished-game
+start arrives with all twenty used, so a sweep can look healthy while the S.S. Anne, Rocket Hideout
+and every `Fish` row are unreachable for want of a ticket, a lift key and three rods.
+
 Artifacts go to `target/test-artifacts/coverage/`: `walk-<region>.tsv` with every id and its
 verdict, and `defect-<id>_state.bin` plus a screenshot taken **at the moment the verdict turned**,
 because the square cannot be stood on again by the end of the walk. ⚠️ `target/` is swept; cut
@@ -472,6 +667,7 @@ All in the agent or the oracle, none in the walk's own brain but the last two. E
 | A Strength floor abandoned three pushes from the end | A total push cap on a 27-push floor; it now bounds pushes without progress and has its own `PuzzleRanLong` | `endgame::victory_roads_hardest_switch_is_one_decision_however_many_shoves_it_takes` |
 | A wedged floor blamed the pathfinder | `PuzzleUnsolvable` names the cure: leave and come back | `endgame::a_wedged_strength_floor_is_reported_as_a_reset_rather_than_a_missing_route` |
 | Every solved puzzle scored `Silent` | Completion fired in `GameMode::Script` and an early `return` skipped the event drain | same |
+| 86% of a whole sweep's turns in one three-map pocket | Route 16's way east is behind a cut tree, cut trees regrow on a map reload, and a once-only frontier will not cut it twice — the exits it *could* take were a ping-pong | `ExploringBrain`'s `re_takeable`, and the union going 159 maps to 186 |
 | A quarter of the frontier was one object many times | A sprite id carried the player's approach square; it is `{map}:{name}` now | `actions::tests::a_sprite_name_is_unique_within_its_map` |
 | 197 turns walking to exits after the credits | No agent state for the Hall of Fame's soft reset; `PokemonAgent::ending` latches on `wNumHoFTeams` | `phase0::the_agent_stops_playing_a_world_the_cartridge_has_reset` |
 | The oracle called a gate a defect for one try per pass | `REPEAT_IS_A_DEFECT` was 3; it is 10 | `being_stopped_by_the_same_thing_over_and_over_is_the_defect` |
@@ -479,6 +675,12 @@ All in the agent or the oracle, none in the walk's own brain but the last two. E
 | 35 `Fish` rows scored `Silent`, and a cast refused "because you are surfing" one tile from dry land | A fishing route's last button *faces* the water, and the Surf-mount arm read it as a step onto water | `tile_map::a_fishing_rows_last_button_faces_the_water_rather_than_entering_it` |
 | The three ways a cast can fail said nothing the oracle could score | All three printed a `TextBox` the agent made up and closed no action | `agent::a_cast_that_could_not_be_made_says_why_rather_than_going_quiet` |
 | `Route18:39,13:Grass` chosen and never reported | A trainer's walk-up commits as `Script` and drops the pace; the script and text-box doors knew only about `OverworldMovement` | `agent::a_pace_is_an_open_overworld_action_like_the_walk_that_started_it` |
+| A menu of walks across a pond, minted from the square in the gate one map back | `wCurMap` names the new map for 26 ticks before `LoadMapHeader` loads it, and `position_settled`'s bounds check cannot see a stale coordinate that happens to be in range | `mechanics::a_map_the_cartridge_has_not_finished_loading_offers_no_rows`, `the_header_in_wram_says_which_map_has_actually_been_loaded` |
+| 37 "there is no route to the warp to SaffronGym", and 239 of 454 turns in one room | The `settled` guard skipped a teleport pad before asking what it was, and the search's own root is settled — so standing on a pad threw away the only edge out of the room | `saffron::every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot` |
+| No intra-map warp row in the game had ever completed | Every `Warp` completion was the map changing, and a teleport pad does not change the map | `saffron::a_teleport_pad_reports_arriving_even_though_the_map_never_changed` |
+| 60 s at a Silph Co 1F warp pokered labels `; inaccessible` | `actions()` kept a dud when no sibling led to the same place — and what that guard was really protecting was Pokémon Mansion 3F's holes, whose tile is in the cartridge's *other* step-on table | `mechanics::an_impossible_warp_is_one_the_cartridge_really_will_not_open` |
+| A Saffron Gym menu minted off five of nine sprites | An intra-map teleport reloads the map without changing `wCurMap`, so the header check cannot see it; `.loadSpriteData` writes `wNumSprites`, zeroes the slots, then fills them | `mechanics::every_committed_fixture_has_a_complete_sprite_table` |
+| 60 s holding Down on a warp the player was standing on, twice a sweep | A warp on water: `CheckWarpsCollision` is on the *walking* side of `home/overworld.asm`'s surf branch, so the entry has to be stepped onto rather than pressed against — in two places, and one of them ignored the route | `cinnabar::a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on`, `mechanics::a_warp_reached_by_surfing_is_entered_rather_than_leant_on` |
 
 ⚰️ Two of these were diagnosed wrongly before they were diagnosed rightly, and the lesson is the
 same both times: argue from the dropped save state, not from the sentence the agent printed.
@@ -504,6 +706,33 @@ Kept because the reasoning is the useful part.
    said the walk picked a shore across the water; the shore was always right and it was the *turn*
    at the end of the route that mounted Surf. The fix written from the plan's account was a provable
    no-op. Argue from the log and the state, then from the step (§6.2's third rule, one layer up).
+9. **Step 2 did it again, in the other direction: its ⚠️ said the Seafoam pair was "not this", and
+   it was not — but it was the same step's work.** A step's ⚠️ can be right about the diagnosis and
+   wrong about the scope; the "Done" line is what binds, and step 2's was "the walk has 0 defects".
+10. **A rule the agent and the map layer both encode has to be fixed in both, and the second one is
+   invisible from a unit test.** `MetaTileMap::actions` learned that a surfing player cannot lean on
+   a border warp and the walk did not change at all, because `OverworldMovement` tests for that shape
+   before it ever reads the route. The route test passed the whole time. Only an agent-level test off
+   the dropped state caught it.
+11. **A guard kept "just in case" is a guard nobody has priced, and the price is the finding.**
+   `actions()` kept a warp the cartridge will not open whenever no sibling led to the same place,
+   on the honest argument that a false negative would strand a run. Asking *which* rows it was
+   actually keeping — 7 in the whole game, 4 of them load-bearing-looking — turned up a real false
+   negative it had been covering for since it was written: Pokémon Mansion's floor holes read from a
+   tileset table this code had never heard of. The guard went; the scan became the test.
+12. **A step's ⭐ hedge is worth reading before its Done line.** Step 3 predicted Silph Co 1F would
+   fall out of the gym fix and said, if it does not, that is a second finding. It did not, and it
+   was.
+13. **Step 4's diagnosis was wrong and implementing it was still how that was found out.** "Count
+   exits by the map they lead to" is a good rule and it changed the ping-pong not at all — the
+   counters alternated perfectly while the walk went round fifteen hundred more times. What sealed
+   Route 16 was a **cut tree that regrows**, one row the frontier had marked done. Building the
+   step's own fix and watching it not work is what made the menu worth printing, and the menu had
+   three rows on it where the plan assumed eight.
+14. **A counter nobody prints is a fact nobody has.** `Cheats::bag_was_full` had been counting
+   refused key items since it was written, with a comment calling it "a coverage gap worth
+   printing". Printing it took two lines and immediately said that every one of the eight starts is
+   missing key items that gate whole clusters of §2's unreached maps.
 
 ### 7.3 Where the old section numbers went
 
