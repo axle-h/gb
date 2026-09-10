@@ -75,7 +75,7 @@ hall-of-fame = []
 # endpoint, with the battles won by a god party and decided by a battle script. It is gated because
 # it is a *measurement* as much as a test: `godmode_turn_cost` prints milliseconds per request and
 # requests per game-minute, and that number is what decides whether the god run can ever replace
-# `full_playthrough` as the pre-push gate (`docs/coverage-plan.md` §5, where it is parked). The machinery under it —
+# `full_playthrough` as the pre-push gate (`docs/coverage-plan.md` step 2). The machinery under it —
 # `Intent`, `ScriptedBrain`, the cheat sidecar, the coverage log — is all default tier.
 #   cargo test --release --features godmode --bin gb -- godmode --nocapture
 godmode = []

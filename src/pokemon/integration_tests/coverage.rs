@@ -1435,7 +1435,7 @@ fn coverage_walk_of_the_finished_game() {
     /// so an hour of wall clock buys about 56 game-hours. Set `GB_COVERAGE_MINUTES` for a real
     /// sweep; the committed default stays small so the tier is runnable.
     ///
-    /// ⚠️ **It is per walk, not per run.** `GB_COVERAGE_START=all` spends it eight times over.
+    /// ⚠️ **It is per walk, not per run.** `GB_COVERAGE_START=all` spends it ten times over.
     let minutes: u64 = std::env::var("GB_COVERAGE_MINUTES").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90);
@@ -1538,7 +1538,7 @@ fn coverage_walk_of_the_finished_game() {
 }
 
 /// ⭐ **The maps no walk entered, which is the other half of the union and the input to
-/// `docs/coverage-plan.md`'s step 6.**
+/// `docs/coverage-plan.md`'s step 1.4.**
 ///
 /// A sweep that prints "186 maps of 248" says nothing about the 62, and the 62 are the only thing
 /// left to act on: a gate doing its job and a walk that never arrived look identical from a count.
@@ -1546,7 +1546,7 @@ fn coverage_walk_of_the_finished_game() {
 /// tsvs — which is exactly the sort of arithmetic that gets done once and then quoted for a week
 /// after it stopped being true.
 ///
-/// ⚠️ **Two thirds of what is "missing" is not missing.** 44 of the 248 are the ROM's `UnusedMap*`
+/// ⚠️ **Some of what is "missing" is not missing.** 22 of the 248 are the ROM's `UnusedMap*`
 /// padding — map numbers with no header, which `Map::iter()` yields because the enum is the byte —
 /// and `Colosseum` and `TradeCenter` are the link-cable rooms, which need a second Game Boy. They
 /// are counted and then set aside, so the list that is left is the one worth reading.
