@@ -21,37 +21,11 @@ tools — every item carries the save state or the fixture that reproduces it, a
 behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
 [llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third and the only one that is
 still ahead of the code: every action in the game taken once through the deployed `LlmPolicy`
-against a mock endpoint, with a verdict on each and every defect fixed, until a sweep of Kanto comes
-back clean. **Rewritten 2026-09-10 down to two steps**; the nine that got there are one line each in
-§7.4 and their findings are §7.1's thirty-odd rows, every one with a test. The harness, the cheats,
-the oracle and the walk are all built, and the sweep has been to a fixpoint.
-
-⚠️ **A clean sweep is not the goal, and the file used to imply it was.** The walk asserts on two
-things — defects and silences — and prints everything else, so "clean" has been true while 25 real
-maps went unentered, 2 124 offered ids went untaken, and a ROM cross-check that covers three action
-kinds of nine went unread. **§2.1 is the state to measure against**: the sweep of 2026-09-10, one
-outstanding defect (a Victory Road 3F boulder given up after 34 pushes, state committed as
-`vr3f-boulder-given-up.bin`), and the three groups the missing maps fall into. ⭐ The largest single
-cause is that **three of the ten walks win the game and stop**, at 40-60% of their budget.
-
-**§4's two steps are the whole of what is left.** Step 1 closes the gap between clean and complete —
-the boulder, the `*Copy` maps that have inflated every map count this file ever printed, the walks
-that spend half their budget on the credits, the maps that are genuinely shut, and a cross-check
-widened to every `MetaTile` kind **and asserted**. Step 2 unparks the god run: Pallet Town to the
-Hall of Fame through `LlmPolicy`, to replace `full_playthrough` **if it is not much slower** — the
-end-to-end coverage of the deployed policy is what buys the slack — with the table saying what covers
-everything it stops covering written first. ⭐ It should be *faster* (a god party skips the grind
-that is most of the scripted route), so if it is not, that is a finding about turn count or prompt
-build rather than a verdict.
-
-⚠️ **§3 is the rules and §6.2 is how to read a number** — the walk's totals
-are a coin flip between several different walks, and CPU load is an input to it, so never build while
-measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**, because a walk's run directory defaults into
-`/tmp` and writes hundreds of megabytes of RAM there. §7 is the record: the faults the sweeps found
-and the seventeen places the plan was wrong, and **§7.3 maps the old section numbers that code
-comments still cite** onto where each argument lives now. Read it before
-touching the soak tier, `postgame/debug.rs`, `postgame/fishing.rs`, `integration_tests/llm*.rs` or
-anything under `integration_tests/{cheats,coverage,godmode,branch_points}.rs`.
+against a mock endpoint, with a verdict on each and every defect fixed. **It is self-contained** —
+its status, its rules, how to run a sweep and read its numbers, and its record are all in the file,
+and nothing about it is repeated here. Read it before touching the soak tier, `postgame/debug.rs`,
+`postgame/fishing.rs`, `integration_tests/llm*.rs` or anything under
+`integration_tests/{cheats,coverage,godmode,branch_points}.rs`.
 
 ## Rules of the road
 

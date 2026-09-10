@@ -119,8 +119,8 @@ lives in the code.
   `ItemUsePtrTable`.** The Bicycle has no tile to aim at, and neither does a Repel or the
   Itemfinder — so `FieldMove::UseBagItem` and the whole of `UseTarget::Nothing` had a driver
   (`postgame::items`), a refusal table and a test that rides a bike, with **no way in from any
-  turn**. It surfaced as a coverage gap rather than as a tool bug: Route 17 is Cycling Road and
-  `Route16Gate2F` is the gate onto it, and both were `unreached` on every sweep. A `slot` rides
+  turn**. It surfaced as a coverage gap rather than as a tool bug: Route 17 is Cycling Road, its
+  gate's guard stops a walker without the Bicycle, and it was `unreached` on every sweep. A `slot` rides
   along for the party items, so a Potion or a vitamin out of battle is reachable too;
   `UseTarget::Move` is deliberately still not, because it would need a `move_index` on the schema
   and nothing in the game is gated behind an Ether. ⚠️ A `target` that *is* given is checked exactly
