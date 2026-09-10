@@ -180,3 +180,37 @@ fn lt_surge_is_not_a_row_while_his_doors_are_shut() {
         "the front room has to be reachable: {rows:?}",
     );
 }
+
+/// **Cut a coverage start that is standing *on* the ship**: `on-the-ss-anne.bin`.
+///
+/// ⭐ **Eleven maps depend on one walk out of Vermilion turning south, and it usually does not.**
+/// `EVENT_SS_ANNE_LEFT` is set the moment the captain hands over HM01 — before the third badge — and
+/// `VermilionCityLeftSSAnneCallbackScript` then shuts the dock for good, so `SSAnne1F`, `1FRooms`,
+/// `2F`, `2FRooms`, `3F`, `B1F`, `B1FRooms`, `Bow`, `CaptainsRoom`, `Kitchen` and `VermilionDock`
+/// are unreachable from every finished save. The `ssanne` start exists for exactly that and stands
+/// in Vermilion City, one warp away — and the frontier's least-taken exit out of Vermilion goes
+/// *north*, so its first attempt on 2026-09-10 spent a whole 6-hour budget without ever boarding,
+/// and only its second found the ship. A start that is already aboard makes eleven maps a certainty
+/// rather than a coin flip, and the walk keeps its budget for the ship instead of spending it on the
+/// way there.
+///
+/// ⚠️ **Two warps and nothing else**, which is the whole point: a coverage start contributes *where
+/// the player is standing* and nothing else (`Start`'s own note — the party and the bag come from
+/// `Cheats`). So this does not sail, fight or collect anything; it walks aboard and stops.
+///
+/// Only under `regen-fixtures`. Cut from `at-vermilion.bin`, the same pre-credits save the `ssanne`
+/// start uses, so both come from the playthrough's own state one leg before it boards.
+#[test]
+#[cfg(feature = "regen-fixtures")]
+fn regen_on_the_ss_anne_fixture() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/at-vermilion.bin"),
+        Duration::from_mins(20),
+        vec![PolicyStep::enter(Map::VermilionDock), PolicyStep::enter(Map::SSAnne1F)],
+    );
+    fixture.step_until_exhausted();
+    let s = fixture.game_state();
+    println!("ended {} @ {}", s.map.map, s.map.player_position);
+    assert_eq!(s.map.map, Map::SSAnne1F, "the start has to be standing on the ship");
+    fixture.save_state_named("src/pokemon/data/on-the-ss-anne.bin").unwrap();
+}

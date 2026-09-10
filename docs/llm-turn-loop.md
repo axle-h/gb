@@ -84,6 +84,19 @@ lives in the code.
   beside it. Only those rows carry both coordinates: a person the agent walks to needs no number. A
   `MetaTile::Boulder` row carries them for the same reason — a Sokoban puzzle is reasoned about in
   the boulder's coordinates and walked in the player's.
+- ⭐ **`use_item`'s `target` is optional since 2026-09-10, and requiring it had shut off half of
+  `ItemUsePtrTable`.** The Bicycle has no tile to aim at, and neither does a Repel or the
+  Itemfinder — so `FieldMove::UseBagItem` and the whole of `UseTarget::Nothing` had a driver
+  (`postgame::items`), a refusal table and a test that rides a bike, with **no way in from any
+  turn**. It surfaced as a coverage gap rather than as a tool bug: Route 17 is Cycling Road and
+  `Route16Gate2F` is the gate onto it, and both were `unreached` on every sweep. A `slot` rides
+  along for the party items, so a Potion or a vitamin out of battle is reachable too;
+  `UseTarget::Move` is deliberately still not, because it would need a `move_index` on the schema
+  and nothing in the game is gated behind an Ether. ⚠️ A `target` that *is* given is checked exactly
+  as before — a mistyped one must never read as "use it on myself" — and `items::blocked` is asked
+  up front, because `ItemUseNotTime` consumes nothing and prints a box that reads like success.
+  Costed at **+189 bytes** on the Overworld catalogue; the ledger is in
+  `tools::tests::the_tool_array_stays_within_its_budget`.
 - **`resolve_overworld` falls back to `connection_action`** for an id naming a `Connection` tile
   `actions()` did not mint, and a connection row lists the other reachable landing groups by id
   (`MetaTileMap::crossings`). Without it the model could not say "same map, different door", and one

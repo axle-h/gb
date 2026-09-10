@@ -80,6 +80,10 @@ pub struct MetaTileMap {
     /// tile, never straight off a plain cave floor.
     pub tile_pair_collisions_water: Vec<(u8, u8)>,
     pub sprites: Vec<Sprite>,
+    /// Each person's square and the tile they are standing on top of — see
+    /// [`CurrentMap::underfoot`](crate::pokemon::map_metadata::CurrentMap::underfoot). Read only by
+    /// [`Self::row_blocked_by_people`].
+    pub underfoot: Vec<(Point8, MetaTile)>,
     /// Unique `(destination_map, destination_position)` pairs reachable via warp tiles.
     /// Keyed on destination position so that two staircase/door warps that lead to
     /// *different* positions within the same destination map (e.g. Mt Moon B1F) each
@@ -398,6 +402,26 @@ thread_local! {
 /// contributes about a dozen per distinct layout, and a puzzle is a few dozen layouts.
 const PLAN_CACHE_CAP: usize = 4_096;
 
+/// Every `(map, landing)` a warp tile in `tiles` leads to. Two staircases into the same map at
+/// different landings are two targets; see [`MetaTileMap::warp_targets`].
+fn warp_targets_of(tiles: &[MetaTile]) -> HashSet<(Map, Point8)> {
+    tiles.iter()
+        .filter_map(|t| if let MetaTile::Warp { to_map, to_position } = t { Some((*to_map, *to_position)) } else { None })
+        .collect()
+}
+
+/// Every adjacent map `tiles` touches, by land or by water. Water connections (a surfable map edge)
+/// are crossings too — surfacing them is what lets `actions()` produce a route to surf across.
+fn connection_targets_of(tiles: &[MetaTile]) -> HashSet<Map> {
+    tiles.iter()
+        .filter_map(|t| match t {
+            MetaTile::Connection { to_map, .. } => Some(*to_map),
+            MetaTile::ConnectionWater(to_map) => Some(*to_map),
+            _ => None,
+        })
+        .collect()
+}
+
 impl MetaTileMap {
     pub fn new(map: &CurrentMap) -> Self {
         let dimensions = map.metadata.dimensions();
@@ -431,18 +455,9 @@ impl MetaTileMap {
                 s.position.y += dimensions.north_extra as u8;
                 s
             }).collect(),
-            warp_targets: meta_tiles.iter()
-                .filter_map(|t| if let MetaTile::Warp { to_map, to_position } = t { Some((*to_map, *to_position)) } else { None })
-                .collect(),
-            connection_targets: meta_tiles.iter()
-                .filter_map(|t| match t {
-                    MetaTile::Connection { to_map, .. } => Some(*to_map),
-                    // Water connections (a surfable map edge) are crossings too — surface them so
-                    // `actions()` produces a route the agent can surf across to the connected map.
-                    MetaTile::ConnectionWater(to_map) => Some(*to_map),
-                    _ => None,
-                })
-                .collect(),
+            underfoot: map.underfoot(),
+            warp_targets: warp_targets_of(&meta_tiles),
+            connection_targets: connection_targets_of(&meta_tiles),
             has_grass_encounters: map.grass_encounter_rate != 0,
             raw_tile_ids: map.metadata.raw_tile_ids.clone(),
             tileset: map.metadata.map_header.tileset,
@@ -1709,27 +1724,43 @@ impl MetaTileMap {
         //    reachable from the shore whether or not anything in the party can mount it — the BFS
         //    records it as a terminal neighbour — so without Surf the row is a walk to the water's
         //    edge and a bump into the sea. Same rule as the cut trees below, for the same reason.
+        //    ⭐ **One row per *kind*, not one per map, and the difference is Cerulean Cave.** This
+        //    used to take the nearest crossing of either kind, so wherever a land bridge and a
+        //    surfable edge both lead to the same neighbour the bridge always won and the water was
+        //    unaskable. Route 24 → Cerulean is the case: the footbridge is two steps away, and the
+        //    river seam beside it is the **only** way into the half of Cerulean that holds the cave
+        //    — the Fly landing, the gym and the marts are all east of a lake and a solid wall at
+        //    x=8, the door is west of it, and no land route joins them. Three maps sat `unreached`
+        //    on every sweep in this plan's history for want of this row, and the ROM cross-check
+        //    named it every time: `CeruleanCity (5, 12) → CeruleanCave1F: on the grid, no sibling,
+        //    and never a row`. `Self::water_connection_action` has said so in its own doc comment
+        //    since it was written; what it lacked was a caller in the menu.
         for to_map in &self.connection_targets {
-            let Some((tile, dest)) = nearest(&|t| match t {
+            let by_land = nearest(&|t| match t {
                 MetaTile::Connection { to_map: m, .. } => m == to_map,
+                _ => false,
+            });
+            let by_water = nearest(&|t| match t {
                 MetaTile::ConnectionWater(m) => self.can_surf && m == to_map,
                 _ => false,
-            }) else { continue };
-            let (_, came_from) = best_dist_from(&dest).unwrap();
-            let mut route = reconstruct(dest, came_from);
-
-            let enter_dir = if dest.y == 0 { JoypadButton::Up }
-                else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
-                else if dest.x == 0 { JoypadButton::Left }
-                else { JoypadButton::Right };
-            route.push(enter_dir);
-            actions.push(OverworldAction {
-                map: self.map,
-                origin: self.player_position,
-                destination: dest,
-                tile,
-                route
             });
+            for (tile, dest) in [by_land, by_water].into_iter().flatten() {
+                let (_, came_from) = best_dist_from(&dest).unwrap();
+                let mut route = reconstruct(dest, came_from);
+
+                let enter_dir = if dest.y == 0 { JoypadButton::Up }
+                    else if dest.y == (self.height - 1) as u8 { JoypadButton::Down }
+                    else if dest.x == 0 { JoypadButton::Left }
+                    else { JoypadButton::Right };
+                route.push(enter_dir);
+                actions.push(OverworldAction {
+                    map: self.map,
+                    origin: self.player_position,
+                    destination: dest,
+                    tile,
+                    route
+                });
+            }
         }
 
         // 4. Walk-in-grass (nearest reachable grass tile).
@@ -2118,6 +2149,59 @@ impl MetaTileMap {
             true => WarpTrigger::Unknown,
             false => WarpTrigger::Impossible,
         }
+    }
+
+    /// True when `row` is missing from [`Self::actions`] **only because somebody is standing in the
+    /// way**: put everybody except the row's own subject back where the map says the floor is, and
+    /// the row comes back.
+    ///
+    /// ⭐ **"There is no route" and "there is a person on it" are opposite claims and the walk acts
+    /// on them differently.** A route is what people stand on, and Gen 1 fills its one-tile
+    /// corridors with wanderers — so a row can vanish for a second or two and return untouched. The
+    /// sweep of 2026-09-10 scored two defects in `CeladonChiefHouse` alone, a room whose two
+    /// corridors are one tile wide with a Rocket in one and the Chief in the other: it said *"there
+    /// is no route to Sailor"*, then *"there is no route to the warp to CeladonCity"*, and then took
+    /// that same warp on the very next turn. Meanwhile a warp pokered's own table labels
+    /// `; inaccessible` is a real absence and should still say so at once, which is why this is a
+    /// question rather than a bigger number: see [`MAX_ROUTE_BLOCKED_TICKS`] in `agent.rs`.
+    ///
+    /// ⚠️ **The subject stays where they are.** A walk *to* a person is a walk to that person, so
+    /// lifting them off the map would delete the row rather than restore it, and every sprite row
+    /// would answer "yes, blocked" for ever.
+    ///
+    /// ⚠️ **Not `Empty` under them — [`Self::underfoot`]'s actual tile.** A doormat with a shopper
+    /// on it is the case this exists for, and a warp written over with floor is a door the
+    /// counterfactual cannot find either. `warp_targets` and `connection_targets` are derived from
+    /// the tiles, so they are recomputed with them.
+    pub fn row_blocked_by_people(&self, row: MetaTile) -> bool {
+        let subject = match row {
+            MetaTile::Sprite(name) => Some(name),
+            _ => None,
+        };
+        let lift: Vec<(Point8, MetaTile)> = self.underfoot.iter().copied()
+            .filter(|(p, _)| match self.tile_at(*p) {
+                // ⚠️ **A boulder is a sprite and is not a person.** It is standing exactly where it
+                // was left and will still be there in thirty seconds, so a row behind one is a real
+                // absence — buying it the long bound would spend half a minute of a walk's budget
+                // waiting for a rock to move. `Boulder …` is the same name test
+                // `MetaTileMap::actions` uses to decide whether to offer a Strength goal.
+                MetaTile::Sprite(who) => Some(who) != subject && !who.starts_with("Boulder"),
+                _ => true,
+            })
+            .collect();
+        if lift.is_empty() {
+            return false;
+        }
+        let mut cleared = self.clone();
+        // ⚠️ The cache is `walkable_bits`' answer for *this* map, and the whole point here is a
+        // different one. A clone carries it, so it has to go.
+        cleared.walkable_cache = std::cell::OnceCell::new();
+        for (at, was) in lift {
+            cleared.meta_tiles[at.x as usize + at.y as usize * cleared.width] = was;
+        }
+        cleared.warp_targets = warp_targets_of(&cleared.meta_tiles);
+        cleared.connection_targets = connection_targets_of(&cleared.meta_tiles);
+        cleared.actions().iter().any(|action| action.tile.is_same_row_as(&row))
     }
 
     /// Every distinct way off this map into `to_map`, one [`Crossing`] per run of touching edge
@@ -2847,6 +2931,9 @@ mod boulder_solver_tests {
             raw_tile_ids: vec![0; w * h], tileset: crate::pokemon::map_header::TileSetId::Cavern,
             tile_pair_collisions: vec![],
             tile_pair_collisions_water: vec![], sprites,
+            // Nobody is standing on anything in a hand-drawn fixture: the boulders this builder
+            // paints are `MetaTile::Sprite` in `meta_tiles` and are meant to stay there.
+            underfoot: vec![],
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
             spinners: HashMap::new(), script_cancelled_warps: vec![], standing_on_warp: true,
             can_surf: false, best_rod: None, can_cut: false,

@@ -3170,3 +3170,174 @@ fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
         KNOWN.iter().map(|(m, x, y, why)| format!("    {m:?} ({x}, {y}) — {why}\n"))
             .collect::<String>());
 }
+
+/// **A doormat somebody is standing on is not a row, and the map used to say it was.**
+///
+/// A mart's exit is two tiles wide and the shoppers wander over both of them. `meta_tiles` used to
+/// keep the `Warp` visible *underneath* a sprite, so an occupied doormat read as open floor: the BFS
+/// routed straight through the person, `actions()` minted the row, and the walk held Down against a
+/// Cooltrainer for the whole 60 s of `MAX_MOVEMENT_SILENCE` before reporting `DidNotArrive` from the
+/// square right beside it. The sweep of 2026-09-10 scored `CeruleanMart:3,7:Warp` a defect in
+/// **three regions at once** and then walked out through `4,7` on the next turn without trouble.
+///
+/// The state below is the one the `celadon` walk dropped at that moment: the player at (3, 6) and
+/// the Cooltrainer Male standing on (3, 7). Two assertions, because the fix has two halves and only
+/// the pair is the behaviour — the occupied tile is **not** offered, and the other half of the same
+/// doormat still is, so being blocked costs a different row rather than the room.
+// Default tier: the state is standing on the answer and the walk out is a couple of seconds.
+#[test]
+fn a_door_with_somebody_standing_in_it_is_not_a_row_until_they_move() {
+    use crate::geometry::Point8;
+    const OCCUPIED: Point8 = Point8 { x: 3, y: 7 };
+    const BESIDE_IT: Point8 = Point8 { x: 4, y: 7 };
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/cerulean-mart-shopper-in-the-doorway.bin"),
+        Duration::from_mins(2),
+        vec![PolicyStep::EnterMap { to_map: Map::CeruleanCity, to_position: None }]);
+    let start = fixture.game_state();
+    assert_eq!(start.map.map, Map::CeruleanMart);
+    assert_eq!(start.map.tile_at(OCCUPIED), MetaTile::Sprite("Cooltrainer Male"),
+        "the state has to be dropped on a tick with somebody actually in the doorway, or it proves \
+         nothing");
+
+    let rows: Vec<Point8> = start.map.actions().iter().map(|action| action.destination).collect();
+    assert!(!rows.contains(&OCCUPIED),
+        "the occupied half of the doormat is a person, not a door: {rows:?}");
+    assert!(rows.contains(&BESIDE_IT),
+        "the free half of the same doormat is still the way out: {rows:?}");
+
+    let end = fixture.run_until(|state| state.map.map == Map::CeruleanCity);
+    println!("left through ({}, {})", end.map.player_position.x, end.map.player_position.y);
+}
+
+/// **A pacing pair is chosen once and the map moves under it.**
+///
+/// A `Grass` row ends by pacing between two squares, because the ROM rolls for an encounter on the
+/// tile being stepped *onto*. The pair comes out of `adjacent_grass` at the moment the walk arrives
+/// and is then held for the whole pace — so a Youngster who steps onto one half of it leaves the
+/// agent bumping into a person, and bumping is not a step: the counter never advances, the ROM never
+/// rolls, and 60 ticks later the row was aborted as `Unknown`, which the oracle scores a defect. It
+/// is the one `Route11:13,6:Grass` has been reported under intermittently since 2026-09-09, and the
+/// `ssanne` walk of 2026-09-10 is the run that finally dropped a state for it.
+///
+/// Re-picking is what the fix does, and it is free: `adjacent_grass` skips a square somebody is
+/// standing on all by itself, because a person is a `MetaTile::Sprite` and not `Grass`.
+// Default tier: `PACING_BUDGET_TICKS` bounds it and an encounter arrives long before that.
+#[test]
+fn a_pacing_pair_somebody_steps_onto_is_re_picked_rather_than_bumped_into() {
+    use crate::geometry::Point8;
+    use crate::pokemon::agent::AgentState;
+    const PLAYER: Point8 = Point8 { x: 14, y: 6 };
+    const BLOCKED: Point8 = Point8 { x: 14, y: 5 };
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/route-11-youngster-on-the-pacing-tile.bin"),
+        Duration::from_mins(3),
+        vec![]);
+    let start = fixture.game_state();
+    assert_eq!(start.map.map, Map::Route11);
+    assert_eq!(start.map.player_position, PLAYER);
+    assert_eq!(start.map.tile_at(BLOCKED), MetaTile::Sprite("Youngster 1"),
+        "the state has to be dropped with somebody on the square the pace walks into");
+
+    // ⚠️ **The pair is installed rather than asked for, and it has to be.** `adjacent_grass` skips a
+    // square somebody is standing on, so starting a *fresh* pace on this state simply picks the
+    // other neighbour and proves nothing — the defect is a pair chosen while (14, 5) was empty and
+    // held after the Youngster stepped onto it, which is the order the coverage walk met and the
+    // only order that reaches the bug.
+    fixture.agent.set_state(AgentState::PacingForEncounters {
+        destination: MetaTile::Grass,
+        map: Map::Route11,
+        tile_a: PLAYER,
+        tile_b: BLOCKED,
+        heading_to_b: true,
+        stalled: 0,
+        paced: 0,
+    });
+
+    // What the defect looked like: `Unknown` after `STALL_TICKS` of bumping, from the square it
+    // started on. What it should look like is the row keeping its promise — and the promise of a
+    // `Grass` row is an encounter, not a particular pair of squares, so the pace succeeding here is
+    // a wild Pokémon rather than a step. It comes on the first move onto (14, 7), which is why the
+    // player is still on (14, 6) when it does.
+    let mut stalled = false;
+    let mut paced = false;
+    for _ in 0..9000 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::OverworldActionAborted {
+                reason: OverworldActionAbortedReason::Unknown, .. } = &event {
+                stalled = true;
+            }
+        }
+        let now = fixture.game_state();
+        if now.mode == GameMode::WildBattle
+            || (now.map.map == Map::Route11 && now.map.player_position != PLAYER) {
+            paced = true;
+        }
+        if paced || stalled { break }
+    }
+    assert!(!stalled, "the pace reported a malfunction instead of pacing somewhere else");
+    assert!(paced, "the pace neither moved nor turned anything up");
+}
+
+/// **A land bridge and a water seam to the same neighbour are two crossings, and only one of them
+/// used to be a row.**
+///
+/// `actions()` emitted the *nearest* crossing per adjacent map, land or water, so wherever both
+/// exist the bridge always wins and the seam is unaskable. Route 24 → Cerulean is the case that
+/// matters: the footbridge is two steps from where the river seam starts, and the seam is the only
+/// way into the half of Cerulean that holds Cerulean Cave — the Fly landing, the gym and the marts
+/// are all east of a lake and a solid wall at x=8, the cave door is west of it, and no land route
+/// joins them. `CeruleanCave1F`, `2F` and `B1F` were `unreached` on every sweep this repo has taken,
+/// and the ROM cross-check named the cause every time: `CeruleanCity (5, 12) → CeruleanCave1F: on
+/// the grid, no sibling, and never a row`.
+///
+/// ⚠️ **Both halves are asserted.** Without Surf the water edge is scenery rather than a way out —
+/// the row would be a walk to the shore and a bump into the sea, which is the rule the cut trees and
+/// the fishing rows keep — so it appears only when the party can mount.
+#[test]
+fn a_water_crossing_is_a_row_of_its_own_beside_the_bridge_to_the_same_map() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::tile::MetaTile;
+    use std::sync::Arc;
+
+    let mmu = crate::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let metadata = Arc::new(mmu.read_map_metadata(Map::Route24).expect("Route 24's header"));
+    let route_24 = |can_surf: bool| {
+        let mut map = MetaTileMap::new(&CurrentMap {
+            // The south end of Route 24, where the footbridge and the river seam are neighbours.
+            player_position: Point8 { x: 6, y: 30 },
+            player_direction: PlayerFacingDirection::Down,
+            sprites: Vec::new(),
+            metadata: Arc::clone(&metadata),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: false,
+        });
+        // `can_surf` is written on after construction by `game_state()`, which has the party; the
+        // map builder does not.
+        map.can_surf = can_surf;
+        map.actions().into_iter().map(|action| action.tile).collect::<Vec<_>>()
+    };
+
+    let on_foot = route_24(false);
+    assert!(on_foot.iter().any(|t| matches!(t, MetaTile::Connection { to_map: Map::CeruleanCity, .. })),
+        "the footbridge into Cerulean is a row whatever the party knows: {on_foot:?}");
+    assert!(!on_foot.iter().any(|t| matches!(t, MetaTile::ConnectionWater(Map::CeruleanCity))),
+        "a water edge nothing can mount is scenery, not a way out: {on_foot:?}");
+
+    let surfing = route_24(true);
+    assert!(surfing.iter().any(|t| matches!(t, MetaTile::Connection { to_map: Map::CeruleanCity, .. })),
+        "the bridge does not go away when the party can Surf: {surfing:?}");
+    assert!(surfing.iter().any(|t| matches!(t, MetaTile::ConnectionWater(Map::CeruleanCity))),
+        "the river seam is the only way to the Cerulean Cave side, and it has to be its own row: \
+         {surfing:?}");
+}
+

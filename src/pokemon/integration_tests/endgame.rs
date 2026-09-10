@@ -429,6 +429,10 @@ fn probe_stall_actions() {
     }
     println!("  bag: {:?}", s.bag.iter().map(|i| (i.id, i.quantity)).collect::<Vec<_>>());
     println!("tile under player: {:?}", s.map.tile_at_checked(s.map.player_position));
+    // ⚠️ **The grid, because a missing row is usually a tile rather than a bug in `actions()`.**
+    // `MetaTileMap`'s own `Display` legend: `P` player, `_` floor, `O` wall, `S` sprite, `W` warp,
+    // `C`/`~` land/water connection, `g` grass, `=` counter, `t` cut tree, `p` PC, `s` switch.
+    println!("{}", s.map);
     for sprite in &s.map.sprites {
         println!("  sprite {:?} hidden={} @ {}", sprite.name, sprite.hidden, sprite.position);
     }
