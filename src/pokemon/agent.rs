@@ -156,6 +156,17 @@ fn blackout_in_flight(api: &PokemonApi) -> bool {
 /// to Route8Gate" while standing two tiles from that warp, and filed an issue about it.
 const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
 
+/// Consecutive agent ticks on which the chosen row is absent from `actions()` before the walk gives
+/// up on it with [`OverworldActionAbortedReason::NoRoute`]. At [`AGENT_RESOLUTION`]'s 20 ms a tick,
+/// 250 is **5 s of game time**.
+///
+/// ⚠️ **It is sized against a wandering NPC, not against the pathfinder.** The route is what people
+/// stand on, so the honest reading of one missing tick is "somebody is in the way", and 5 s outlasts
+/// a Gen-1 wanderer's step-and-pause several times over. It is deliberately nowhere near
+/// [`MAX_MOVEMENT_SILENCE`]: a warp pokered's own table labels `; inaccessible` is a real `NoRoute`
+/// and should say so while the model can still act on it.
+const MAX_ROUTE_LOST_TICKS: u16 = 250;
+
 /// Total ticks of *successful* pacing in tall grass or on cave floor before giving up on the
 /// encounter ever coming. 3000 ticks is 60 s of game time.
 ///
@@ -1216,19 +1227,30 @@ impl AgentState {
     /// The [`MetaTile`] of the overworld action still open behind this state, if it is one of the
     /// states that *is* one.
     ///
-    /// ⭐ **Two states carry a walk, not one, and forgetting the second is a silence.**
+    /// ⭐ **Three states carry a walk, not one, and forgetting any of them is a silence.**
     /// `OverworldMovement` is the walk; `PacingForEncounters` is the tail of the same action — the
     /// walk to the grass has already been reported as started and nothing closes it until the pace
-    /// does. So every door that takes the state away from *either* has to end the action, and the
-    /// two that steal it from outside (a script committing, a text box opening) only knew about the
-    /// first: a trainer noticing the player mid-pace runs its walk-up as `GameMode::Script`, the
-    /// script commits, and `Route18:39,13:Grass` was chosen and never reported. Found by the
-    /// coverage walk on 2026-09-09, one driver over from the fishing silence beside it
-    /// (`docs/coverage-plan.md` step 1).
+    /// does; and `Surfing` with a `resume` is the *middle* of one, a mount the walk rides through
+    /// that nobody was asked about. So every door that takes the state away from any of them has to
+    /// end the action.
+    ///
+    /// ⚠️ **Each of the three was found the same way and none of them from the code.** A script
+    /// committing and a text box opening knew only about the first, so a trainer noticing the
+    /// player mid-pace left `Route18:39,13:Grass` chosen and never reported (`docs/coverage-plan.md`
+    /// step 1). And a wild Pokémon appearing while the party menu is open to mount Surf left
+    /// `Route21:Fisher1` the same way, because `assert_battle_state`'s `_` arm says a battle started
+    /// and nothing about what it interrupted — the coverage walk of 2026-09-10, one state further
+    /// along the same walk. The lesson each time is that "the walk" is not one state, and a new
+    /// state that borrows one belongs in this list on the day it is written.
     fn open_overworld_action(&self) -> Option<MetaTile> {
         match self {
             AgentState::OverworldMovement { destination, .. }
             | AgentState::PacingForEncounters { destination, .. } => Some(*destination),
+            // ⚠️ **`resume` is the whole test.** A Surf mount with nothing to resume is a
+            // `use_field_move` in its own right — the model asked to get on the water and that is
+            // the decision — and reporting *that* as an interrupted walk would be a sentence about
+            // an action nobody took.
+            AgentState::Surfing { resume: Some((destination, _)), .. } => Some(*destination),
             _ => None,
         }
     }
@@ -1304,6 +1326,34 @@ pub struct PokemonAgent {
     /// See `MAX_PUSHES_WITHOUT_PROGRESS`.
     boulder_goal_best: usize,
     boulder_goal_stale: u8,
+    /// Shoves this goal has made that the game **never answered at all** — the 60 s
+    /// [`DRIVER_ESCAPE_SILENCE`] hatch firing while `AgentState::PushingBoulder` held the walk.
+    ///
+    /// ⭐ **The hole under both of the bounds beside it, and the biggest single sink the coverage
+    /// walk has ever measured.** `boulder_goal_pushes` and `boulder_goal_stale` are both counted
+    /// *after a shove lands* — the boulder moved, so re-plan and compare. A shove the cartridge
+    /// silently refuses never lands, so neither counter moves; the hatch drops the agent to `Idle`,
+    /// `Idle` picks the goal straight back up with the same numbers, and the identical shove is
+    /// issued against the identical layout for ever. The `cinnabar` walk of 2026-09-10 issued
+    /// `push-boulder:(6, 2)Left` **two hundred and thirty times** on Victory Road 3F and spent
+    /// 14 000 of its 21 600 game-seconds — two thirds of the whole budget — doing it, finishing on
+    /// 33 maps where its siblings reached 130.
+    ///
+    /// ⚠️ **Three, not twelve, because this is a different fact from "that shove did not help".**
+    /// A refusal is a property of the layout and the layout has not changed, so the second attempt
+    /// is already known to fail; the allowance is for the interruptions that look the same from
+    /// here (a wild battle mid-shove, an arming that did not take). See `MAX_SILENT_SHOVES`.
+    boulder_goal_silences: u8,
+    /// Consecutive `OverworldMovement` ticks on which the chosen row was **absent from
+    /// `actions()`**. See [`MAX_ROUTE_LOST_TICKS`] for why that is not the same as there being no
+    /// route.
+    ///
+    /// ⚠️ **On the agent rather than in `AgentState::OverworldMovement`, for the same reason
+    /// `boulder_goal_*` above are**: a walk detours through `UsingFieldMove` to mount Surf and comes
+    /// back, and threading a counter through every construction of a state four other features also
+    /// build would be the larger change. Reset when the row is found and when a new action starts,
+    /// so nothing carries between actions.
+    route_lost_ticks: u16,
     /// The map the agent was last on, to detect map changes (warp/connection landings).
     last_map: Option<Map>,
     /// Trees the agent has cut down, by `(map, expanded tile position)`. The `MetaTileMap` is decoded
@@ -1508,6 +1558,8 @@ impl PokemonAgent {
             boulder_goal_pushes: 0,
             boulder_goal_best: usize::MAX,
             boulder_goal_stale: 0,
+            boulder_goal_silences: 0,
+            route_lost_ticks: 0,
             last_map: None,
             cut_tiles: std::collections::HashSet::new(),
             blocked_tiles: std::collections::HashSet::new(),
@@ -2109,6 +2161,8 @@ impl PokemonAgent {
         // pair up with the last square of the *previous* one, and a walk stopped immediately would
         // arm the turn-back watch on somewhere the player never stepped from.
         self.walk_squares = None;
+        // Likewise: the previous walk's missing-row streak says nothing about this one.
+        self.route_lost_ticks = 0;
         self.set_state(AgentState::OverworldMovement { destination: action.tile, map: action.map });
     }
 
@@ -2120,25 +2174,24 @@ impl PokemonAgent {
                 // The nickname screen after a catch runs while wIsInBattle is still 1, so
                 // game_mode stays WildBattle even though we're already in the naming flow.
                 AgentState::NamingPokemon { .. } => {}
-                AgentState::OverworldMovement { destination, .. } => {
-                    // entering battle from the overworld
-                    let d = destination;
-                    // ⚠️ No position, and this arm takes no `PokemonApi` to read one from. It is
-                    // also the one abort that needs none: "a battle started" is a complete account
-                    // of why the walk stopped and says nothing about the route being wrong.
+                // ⭐ **Every state that carries a walk, in one arm** — the walk itself, the pace
+                // that is its tail, and the Surf mount it rides through. See
+                // [`AgentState::open_overworld_action`], which is the single list all three doors
+                // out of a walk read.
+                //
+                // A pace ending at an encounter is the *success* of walking in grass, and it is
+                // still reported the same way an interrupted walk is, because it is the same fact
+                // from the agent's side: the action is over and the policy will be asked again.
+                // What that buys is `resume_after_battle` picking the pace back up by itself, so
+                // grinding a patch of grass costs one decision rather than one per wild Pokémon,
+                // and the oracle stops scoring the id `Silent`.
+                //
+                // ⚠️ No position, and this arm takes no `PokemonApi` to read one from. It is also
+                // the one abort that needs none: "a battle started" is a complete account of why
+                // the walk stopped and says nothing about the route being wrong.
+                _ if self.state.open_overworld_action().is_some() => {
+                    let d = self.state.open_overworld_action().expect("just checked");
                     self.abort_overworld(d, OverworldActionAbortedReason::Battle, None);
-                    self.event(AgentEvent::BattleStarted);
-                    self.set_battle_state(BattleState::default());
-                }
-                // ⭐ **A pace ends at an encounter, and that is the *success* of walking in grass.**
-                // It is still reported the same way an interrupted walk is, because it is the same
-                // fact from the agent's side: the action is over and the policy will be asked
-                // again. What it buys is that `resume_after_battle` picks the pace back up by
-                // itself, so grinding a patch of grass costs one decision rather than one per wild
-                // Pokémon, and the oracle stops scoring the id `Silent`. This arm used to fall
-                // through to the `_` below, which emits `BattleStarted` and nothing else.
-                AgentState::PacingForEncounters { destination, .. } => {
-                    self.abort_overworld(destination, OverworldActionAbortedReason::Battle, None);
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
@@ -2765,6 +2818,13 @@ impl PokemonAgent {
             && self.cycles_since_poll.to_duration() >= DRIVER_ESCAPE_SILENCE {
             let abandoned = format!("{} got no answer from the game for {:?}; starting over",
                                     self.state, DRIVER_ESCAPE_SILENCE);
+            // ⚠️ **"Starting over" is only harmless where something else is counting.** A boulder
+            // goal picks itself back up in `Idle` below, and neither of its bounds can see a shove
+            // that never landed — so without this the hatch is a 60 s loop with no exit. See
+            // [`Self::boulder_goal_silences`].
+            if self.boulder_goal.is_some() && matches!(self.state, AgentState::PushingBoulder { .. }) {
+                self.boulder_goal_silences = self.boulder_goal_silences.saturating_add(1);
+            }
             api.release_all_buttons();
             self.set_state(AgentState::Idle);
             self.event(AgentEvent::TextBox { message: abandoned });
@@ -3213,6 +3273,17 @@ CascadeBadge; not cutting".to_string(),
                     // there is `[opposite(dir), dir]`, whose step back is the arrival
                     // `CheckWarpsNoCollision` fires on.
                     && !game_state.map.surfing
+                    // ⚠️ **…and the collision path is actually armed.** One instruction *before*
+                    // `ExtraWarpCheck`, `.noDirectionChange` tests `bit BIT_STANDING_ON_WARP` and
+                    // returns to `OverworldLoop` if it is clear — and it is clear for a player who
+                    // arrived by **warping** onto the entry rather than by stepping onto it. Every
+                    // elevator in the game lands you on exactly such a square: the coverage walk of
+                    // 2026-09-10 held Down on `SilphCoElevator:1,3` for 60 s of game time with
+                    // `wMovementFlags` reading `$00` the whole way, and Up-then-Down warps out on
+                    // the first step. Same shape and same cure as the surfing line above, and — for
+                    // the third time — the same rule had to go into `MetaTileMap::actions` *and*
+                    // here, because this arm is tested first and never consults the route.
+                    && game_state.map.standing_on_warp
                 {
                     // Player is standing on an EDGE warp tile (at y=0, y=max, x=0, or x=max).
                     // These only fire when the player presses the outward direction off the map
@@ -3304,6 +3375,11 @@ CascadeBadge; not cutting".to_string(),
                                 game_state.map.water_connection_action(to_map),
                             _ => None,
                         });
+                    // The counter behind `MAX_ROUTE_LOST_TICKS`: reset the moment the row is back,
+                    // so what it counts is *consecutive* ticks without it rather than a total.
+                    if action.is_some() {
+                        self.route_lost_ticks = 0;
+                    }
                     match action {
                         // ⭐ **"There is no route" is a lie while a map transition is in flight, and
                         // this is the only tick on which it was ever told.** Crossing a connection
@@ -3330,6 +3406,43 @@ CascadeBadge; not cutting".to_string(),
                         // direction it already had, and one tick later `wCurMap` is the new map and
                         // the map-change arm above reports the arrival.
                         None if !game_state.map.position_settled => {}
+                        // ⭐ **A route that has just gone is not a route that was never there, and
+                        // the difference is people.** Every row is a BFS from where the player is
+                        // standing, and a person standing anywhere on it makes the square
+                        // unreachable — so a shopper taking one step can delete the row for a tick
+                        // or two and put it back. A sprite row is the worst case, because both ends
+                        // move: `MetaTileMap::actions` mints it for the nearest `Empty` square
+                        // beside the object with a route to it, and a wanderer who steps into their
+                        // own only approach leaves no candidate at all.
+                        //
+                        // C3's sweeps of 2026-09-09 and 2026-09-10 scored four of these, never
+                        // twice in the same region: `CeruleanMart:CooltrainerFemale` and a Pokémon
+                        // Centre's chatter, both *"no route to <person>"*, and
+                        // `CeladonMansion1F:7,1:Warp` — the stairs to 2F, behind a room whose
+                        // Meowths and their owner wander across the one corridor to them. Every one
+                        // read as a pathfinder fault and none of them was: the row came back on its
+                        // own, and the phase0 walk of 2026-09-10 dropped a state for the mart
+                        // shopper and then finished with **zero** defects, having simply been
+                        // offered her again.
+                        //
+                        // ⚠️ **So the abort is what waits, not the route.** This is the oracle's own
+                        // `REPEAT_IS_A_DEFECT` rule one layer down: a claim about the map is only
+                        // worth making once it has held still for longer than a person does. A Gen-1
+                        // wanderer takes 16 frames to step and pauses for up to a second or so
+                        // between steps, so the bound is a few seconds of game time — long enough
+                        // to outlast one, short enough that a row the cartridge really will not open
+                        // (a `; inaccessible` warp) still says so almost at once instead of costing
+                        // the 60 s that `MAX_MOVEMENT_SILENCE` would.
+                        None if self.route_lost_ticks < MAX_ROUTE_LOST_TICKS => {
+                            self.route_lost_ticks += 1;
+                            // ⚠️ **Released, unlike the `position_settled` arm above.** That one
+                            // keeps the direction it had because the walk has *already arrived* and
+                            // the map is one tick from catching up. Here the route the walk was
+                            // following does not exist on this tick, so pressing on walks into
+                            // whatever is now in front of it — which is usually the person who
+                            // deleted the route.
+                            api.release_all_buttons();
+                        }
                         None => self.abort_overworld(
                             destination,
                             OverworldActionAbortedReason::NoRoute(destination),
@@ -3442,6 +3555,7 @@ CascadeBadge; not cutting".to_string(),
                                     self.boulder_goal_pushes = 0;
                                     self.boulder_goal_best = usize::MAX;
                                     self.boulder_goal_stale = 0;
+                                    self.boulder_goal_silences = 0;
                                     self.set_state(AgentState::SolvingBoulderPuzzle {
                                         boulder, target: at, hole, pushes: 0, settle: 0 });
                                     return Ok(());
@@ -4771,13 +4885,42 @@ CascadeBadge; not cutting".to_string(),
                     // ⚠️ **Back to the walk, not to the policy** — see `Surfing::resume`. Only on a
                     // mount that took, and only on the map the walk was on: a mount that did not take
                     // has nothing to resume onto (the route's next step is still into water and the
-                    // follower would re-enter this state for ever), and a changed map means the walk's
-                    // destination is a tile on somewhere else — the mount's own step can cross a
-                    // `ConnectionWater` seam, which is the walk arriving rather than being interrupted.
+                    // follower would re-enter this state for ever).
+                    //
+                    // ⭐ **And a changed map is the walk *arriving*, which this used to know and not
+                    // say.** The mount ends in `.makePlayerMoveForward`, one simulated step onto the
+                    // water — and that step can be the whole of the action: a `ConnectionWater` seam
+                    // crossed, or a warp entry on the water stepped onto. So the state was dropped to
+                    // `Idle` with the row still open, and the oracle scored it `Silent`. The sweep of
+                    // 2026-09-10 found four of them in one pass — `CinnabarIsland:20,5` and `:20,14`
+                    // `ConnectionWater`, `Route13:52,0:Connection` and `SeafoamIslandsB3F:20,17:Warp`
+                    // — and every one is a decision a paying model would never have been told the
+                    // outcome of.
+                    //
+                    // ⚠️ **The completion rule is `OverworldMovement`'s own**, deliberately: a map
+                    // change completes a warp or a connection and is `WrongMap` for anything else,
+                    // and there is no reason for the mount to have a second opinion about which.
                     let same_map = api.game_state().map(|g| g.map.map);
                     match resume {
                         Some((destination, map)) if mounted && same_map == Ok(map) =>
                             self.set_state(AgentState::OverworldMovement { destination, map }),
+                        Some((destination, map)) if mounted && same_map.is_ok() => {
+                            let arrived = matches!(destination,
+                                MetaTile::Warp { .. } | MetaTile::Connection { .. }
+                                | MetaTile::ConnectionWater(_));
+                            match arrived {
+                                true => self.event(AgentEvent::OverworldActionCompleted { destination }),
+                                // ⚠️ No position: the player is on a different map from the one the
+                                // destination is named against, so a coordinate would mean nothing.
+                                false => self.abort_overworld(
+                                    destination,
+                                    OverworldActionAbortedReason::WrongMap(
+                                        same_map.unwrap_or(map)),
+                                    None,
+                                ),
+                            }
+                            self.set_state(AgentState::Idle);
+                        }
                         _ => self.set_state(AgentState::Idle),
                     }
                     return Ok(());
@@ -4984,6 +5127,11 @@ CascadeBadge; not cutting".to_string(),
                 /// catches a loop in a dozen pushes where a total cap either fires on a hard
                 /// puzzle or lets a stuck one run for a hundred.
                 const MAX_PUSHES_WITHOUT_PROGRESS: u8 = 12;
+                /// ⭐ **And the bound for the shoves that never happen at all.** Both counters above
+                /// are read off a boulder that moved, so a shove the cartridge refuses in silence is
+                /// invisible to them: see [`PokemonAgent::boulder_goal_silences`] for the two thirds
+                /// of a sweep's budget that cost.
+                const MAX_SILENT_SHOVES: u8 = 3;
                 /// Ticks to let a shove's script and its dust settle before re-planning. A boulder
                 /// read mid-animation is still on its old square, and re-planning off that asks for
                 /// the push that has just been made.
@@ -5076,7 +5224,10 @@ CascadeBadge; not cutting".to_string(),
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
-                if pushes >= MAX_PUSHES || self.boulder_goal_stale >= MAX_PUSHES_WITHOUT_PROGRESS {
+                if pushes >= MAX_PUSHES
+                    || self.boulder_goal_stale >= MAX_PUSHES_WITHOUT_PROGRESS
+                    || self.boulder_goal_silences >= MAX_SILENT_SHOVES
+                {
                     self.boulder_goal = None;
                     self.abort_overworld(
                         MetaTile::BoulderGoal { boulder: which, at: target, hole },
@@ -6040,6 +6191,28 @@ mod tests {
 
         let walking = AgentState::OverworldMovement { destination: MetaTile::Grass, map: Map::Route18 };
         assert_eq!(walking.open_overworld_action(), Some(MetaTile::Grass));
+
+        // ⭐ **And the third: a Surf mount the walk rides through.** The coverage walk of
+        // 2026-09-10 scored `Route21:Fisher1` silent on exactly this — `move→Fisher 1@Route21`,
+        // `surf`, and then a wild Pidgey, with `assert_battle_state`'s `_` arm saying a battle
+        // started and nothing about the walk it had just eaten. The mount is not a decision anybody
+        // made, so the row behind it is still the open action.
+        let mounting = AgentState::Surfing {
+            press: true, entered_menu: false,
+            water_pos: Point8 { x: 5, y: 24 }, slot: 1, move_index: 0,
+            resume: Some((MetaTile::Sprite("Fisher 1"), Map::Route21)), settle: 0,
+        };
+        assert_eq!(mounting.open_overworld_action(), Some(MetaTile::Sprite("Fisher 1")));
+
+        // ⚠️ **A mount with nothing to resume is not one.** `use_field_move` with Surf is a decision
+        // in its own right; reporting it as an interrupted walk would be a sentence about an action
+        // nobody took.
+        let asked_for = AgentState::Surfing {
+            press: true, entered_menu: false,
+            water_pos: Point8 { x: 5, y: 24 }, slot: 1, move_index: 0,
+            resume: None, settle: 0,
+        };
+        assert_eq!(asked_for.open_overworld_action(), None);
 
         // ⚠️ **And nothing else is on the list.** Every other driver either owns its own reporting or
         // was never an overworld row: a state added here would start closing actions that are not

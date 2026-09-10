@@ -114,3 +114,44 @@ fn can_get_silph_scope() {
     assert!(s.bag.contains(&ItemId::LiftKey), "should have picked up the Lift Key on the way");
     fixture.save_state_named("src/pokemon/data/post-silph-scope.bin").unwrap();
 }
+
+/// ⭐ **"There is no route" about a route four pets are standing on is a claim about the wrong
+/// thing.**
+///
+/// Every row is a BFS from where the player is standing, so a person anywhere on the path makes the
+/// square unreachable and the row is simply not in `actions()` on that tick. Celadon Mansion 1F is
+/// the sharpest case in the game: a room barely two squares wide with a Meowth, a Clefairy, a
+/// Nidoran and their owner all wandering across the one corridor to the stairs. The coverage walk of
+/// 2026-09-10 took `CeladonMansion1F:7,1:Warp`, one of them stepped into the gap, and the walk was
+/// abandoned with *"there is no route to the warp to CeladonMansion2F"* — from a square where, two
+/// ticks later, there was.
+///
+/// The state below is the one the walk dropped at that moment, and the action list on it holds four
+/// sprites and **neither** the stairs nor the door out, which is what says this is a blocked
+/// corridor rather than anything about stairs. `MAX_ROUTE_LOST_TICKS` is what waits it out; the
+/// abort still happens, five seconds of game time later, for a row that really has gone.
+///
+/// ⚠️ The same shape scored `CeruleanMart:CooltrainerFemale` on three earlier sweeps and never twice
+/// in the same region, which is the signature of a wanderer rather than of a pathfinder.
+// Default tier: the state is a few ticks from the answer and the whole test is milliseconds.
+#[test]
+fn a_route_a_wandering_pet_is_standing_on_is_waited_out_rather_than_disputed() {
+    use crate::geometry::Point8;
+    const STAIRS: Point8 = Point8 { x: 7, y: 1 };
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/celadon-mansion-pets-in-the-way.bin"), Duration::from_mins(2),
+        vec![PolicyStep::EnterMap { to_map: Map::CeladonMansion2F, to_position: None }]);
+    let start = fixture.game_state();
+    assert_eq!(start.map.map, Map::CeladonMansion1F);
+    assert!(
+        !start.map.actions().iter().any(|action| action.destination == STAIRS),
+        "the state has to be dropped on a tick where the stairs are *not* a row, or it proves \
+         nothing: {:?}",
+        start.map.actions().iter().map(|a| a.tile).collect::<Vec<_>>(),
+    );
+
+    let end = fixture.run_until(|state| state.map.map == Map::CeladonMansion2F);
+    println!("ended on {} @ {}", end.map.map, end.map.player_position);
+    assert_eq!(end.map.map, Map::CeladonMansion2F);
+}

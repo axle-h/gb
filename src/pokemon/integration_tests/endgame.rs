@@ -344,6 +344,64 @@ fn can_grind_for_the_gauntlet() {
     }
 }
 
+/// Hold a plan of buttons against a dropped save state and print the map, the position, the game
+/// mode and `wMovementFlags` as it goes, plus the map's raw tile ids up front.
+///
+/// ⭐ **This is `docs/coverage-plan.md` §6.2's third rule with a command line: "which id fails is
+/// not reproducible by re-running; the dropped save state is."** Every warp finding so far has been
+/// settled by exactly this measurement and misdiagnosed without it — Seafoam's water entries (120
+/// ticks of Down move nothing, Up-then-Down warps) and the Silph Co elevator (60 ticks of Down move
+/// nothing and `wMovementFlags` reads `$00` throughout, which is the answer). Reading the ROM and
+/// arguing is what produced the wrong causes in §7.2's items 8 and 13.
+///
+/// ```text
+/// GB_PROBE_STATE=target/test-artifacts/coverage/defect-X_state.bin GB_PROBE_BUTTONS=down:60,up:40,down:120 \
+/// cargo test --release --features diagnostics --bin gb -- probe_button_at_state --ignored --nocapture
+/// ```
+#[test]
+#[cfg(feature = "diagnostics")]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_button_at_state() {
+    use crate::joypad::JoypadButton;
+    let path = std::env::var("GB_PROBE_STATE").expect("GB_PROBE_STATE");
+    let plan = std::env::var("GB_PROBE_BUTTONS").unwrap_or_else(|_| "down:600".into());
+    let bytes = std::fs::read(&path).expect("state");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_secs(600), Vec::new());
+    let s = fixture.game_state();
+    println!("start: {} @ {} facing {:?}", s.map.map, s.map.player_position, s.map.player_direction);
+    println!("raw ids:");
+    for y in 0..s.map.height {
+        let row: Vec<String> = (0..s.map.width)
+            .map(|x| format!("{:02x}", s.map.raw_tile_ids[x + y * s.map.width])).collect();
+        println!("   {y:>2}: {}", row.join(" "));
+    }
+    for leg in plan.split(',') {
+        let (name, n) = leg.split_once(':').expect("button:ticks");
+        let button = match name {
+            "up" => Some(JoypadButton::Up), "left" => Some(JoypadButton::Left),
+            "right" => Some(JoypadButton::Right), "a" => Some(JoypadButton::A),
+            "down" => Some(JoypadButton::Down), _ => None,
+        };
+        for tick in 0..n.parse::<usize>().expect("ticks") {
+            fixture.api().release_all_buttons();
+            if let Some(button) = button { fixture.api().press_button(button); }
+            fixture.gb.run(crate::pokemon::agent::AGENT_RESOLUTION);
+            if tick % 25 == 0 {
+                let flags = {
+                    use crate::ram::RAM;
+                    fixture.gb.core().mmu().read(
+                        crate::pokemon::symbols::pokered_symbols::wMovementFlags.address)
+                };
+                match fixture.try_game_state() {
+                    Ok(s) => println!("  {name} t{tick:>3}: {:?} @ {} mode {:?} movementFlags {flags:#04x}",
+                        s.map.map, s.map.player_position, s.mode),
+                    Err(why) => println!("  {name} t{tick:>3}: unreadable: {why}"),
+                }
+            }
+        }
+    }
+}
+
 /// Dump what the agent can see and reach from a save — map, position, money, party, bag, tile under
 /// foot, sprites and every action. Instant; the point is to answer "why did that `EnterMap` have
 /// nowhere to go" without re-running the leg that produced it.

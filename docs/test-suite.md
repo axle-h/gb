@@ -245,12 +245,25 @@ a real run directory. Default tier; the whole of `llm.rs` runs in about two seco
   out to be the only way to reach a case gets **committed**, exactly as a `soak` jam does:
   `data/seafoam-b3f-on-the-water-warp.bin` is the first, and
   `cinnabar::a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on` is its two-tick test
-  in the default tier. `target/` is swept, so copy one out before it is.
-- ⚠️ **Read the `cheats` line before believing a coverage gap.** Gen 1's bag holds twenty *kinds* and
-  every finished-game start arrives with all twenty used, so `Cheats` cannot always hand the walk the
-  key items it needs and says which it could not: no S.S. Ticket is the S.S. Anne's nine rooms, no
-  Lift Key is Rocket Hideout's four floors, no rods is every `Fish` row in the game. It reports
-  rather than failing, so a sweep looks healthy while a tenth of Kanto is unreachable.
+  in the default tier. `target/` is swept, so copy one out before it is. Three more have been
+  committed the same way since: `silph-elevator-warped-in.bin`
+  (`saffron::an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on`) and
+  `celadon-mansion-pets-in-the-way.bin`
+  (`celadon::a_route_a_wandering_pet_is_standing_on_is_waited_out_rather_than_disputed`), both from
+  the sweep of 2026-09-10.
+- ⭐ **`probe_button_at_state` is how a dropped state is argued from**, and every warp finding so far
+  was misdiagnosed without it: `GB_PROBE_STATE=…_state.bin GB_PROBE_BUTTONS=down:60,up:40,down:120`
+  prints the map, the position, the mode and `wMovementFlags` per 25 ticks, plus the map's raw tile
+  ids. Reading the ROM and reasoning is what produced the wrong causes in
+  [coverage-plan](coverage-plan.md) §7.2's items 8 and 13.
+- ⚠️ **The `cheats` line says what was *shed* as well as what would not fit, and both matter.** Gen
+  1's bag holds twenty *kinds* and a finished save arrives with fourteen to twenty used, so until
+  2026-09-10 the walk was refused between one and nine of its key items, differently per start, and
+  the refusal was reported rather than fatal — a sweep looking healthy while Rocket Hideout's four
+  floors, the Game Corner prize room and every `Fish` row in the game were unreachable. Room is now
+  made first (`debug_keep_only_items`), `every_coverage_start_can_be_handed_all_of_the_key_items`
+  asserts it in the default tier, and the line prints the junk that went so a walk that turns out to
+  have needed one of them can see which start dropped it.
 - ⚠️ **The walk is not reproducible, and that is `step_coarse` rather than a bug.** `LlmRun` hands
   the agent however long the driver's last loop iteration took, with a worker thread and a real
   socket in that loop, so three runs from the same fixture gave 352, 355 and 360 ids (always 28

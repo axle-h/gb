@@ -91,6 +91,24 @@ pub struct MetaTileMap {
     /// the ROM `RocketHideout{2,3}ArrowTilePlayerMovement` tables). The BFS treats stepping onto an
     /// arrow as landing at its destination. Empty for maps without arrow tiles.
     pub spinners: HashMap<Point8, Point8>,
+    /// `wMovementFlags`' `BIT_STANDING_ON_WARP`: whether the player's last completed **step** landed
+    /// on a warp entry.
+    ///
+    /// ⭐ **The one thing that says whether leaning on a wall can fire the warp underfoot.** See
+    /// [`CurrentMap::standing_on_warp`](crate::pokemon::map_metadata::CurrentMap::standing_on_warp)
+    /// for the cartridge's side. It is the third of these live bits, beside [`Self::surfing`] and
+    /// `is_step_on_warp`, and all three answer the same question — *how does this entry actually
+    /// fire from here* — which is why they are tested together in one place.
+    pub standing_on_warp: bool,
+    /// Squares on this map whose warp the map's own **script** cancels, in this map's padded
+    /// coordinates. See [`map_warp_gate_specs`](crate::pokemon::map_metadata) for the argument;
+    /// [`Self::warp_trigger`] answers `Impossible` for them, which is what keeps the row out of
+    /// [`Self::actions`] and out of `OverworldMovement`'s border-warp arm at the same time.
+    ///
+    /// ⚠️ **It has to be `warp_trigger` and not `actions`, and that is lesson 10 of
+    /// `docs/coverage-plan.md` §7.2**: a rule the map layer and the agent both encode has to be
+    /// fixed where both of them read it, or the second one is invisible from a unit test.
+    pub script_cancelled_warps: Vec<Point8>,
     /// True when the player can Surf **here**: Soul Badge, a party mon that knows Surf, and not being
     /// force-ridden on the bike (`IsSurfingAllowed` refuses Surf on Cycling Road, and Routes 16–18 run
     /// along the sea, so believing otherwise routes the BFS straight down the water). When set, the BFS
@@ -436,6 +454,11 @@ impl MetaTileMap {
                     y: py + dimensions.north_extra as u8,
                 };
                 (off(x, y), off(tx, ty))
+            }).collect(),
+            standing_on_warp: map.standing_on_warp,
+            script_cancelled_warps: map.script_cancelled_warps.iter().map(|p| Point8 {
+                x: p.x + dimensions.west_extra as u8,
+                y: p.y + dimensions.north_extra as u8,
             }).collect(),
             meta_tiles,
             can_surf: false,
@@ -1580,7 +1603,22 @@ impl MetaTileMap {
                     // cartridge's rule and not this function's — the row stays, and it stays
                     // honest, because a `HoldDirection` row that is silently dropped is how a floor
                     // loses its only way out (see the `ways_to` ⚠️ above).
-                    WarpTrigger::HoldDirection(dir) if self.surfing => {
+                    // ⚠️ **Two different reasons the outward press cannot work, and both end in
+                    // the same step off and step back.** A surfing player never reaches
+                    // `CheckWarpsCollision` at all (the ⚠️ below); a player standing on an entry
+                    // with `BIT_STANDING_ON_WARP` **clear** does reach `.noDirectionChange` and is
+                    // turned away by its `bit BIT_STANDING_ON_WARP` test one instruction earlier.
+                    // The second is how a player who **warped** onto the square got there rather
+                    // than walking onto it, which is every elevator in the game: the Silph Co
+                    // elevator's (1, 3) and (2, 3) are exactly the squares you land on coming in,
+                    // and the coverage walk of 2026-09-10 leaned Down on one for 60 s of game time
+                    // while `wMovementFlags` read `$00` throughout.
+                    //
+                    // Stepping back on is a completed step, which is `CheckWarpsNoCollision`'s own
+                    // path: it sets the bit, `ExtraWarpCheck` passes because the step arrived facing
+                    // outward, and the held direction satisfies the `PAD_CTRL_PAD` test. Measured on
+                    // the walk's dropped state: 60 ticks of Down move nothing, Up then Down warps.
+                    WarpTrigger::HoldDirection(dir) if self.surfing || !self.standing_on_warp => {
                         route.push(opposite_dir(dir));
                         route.push(dir);
                     }
@@ -2019,6 +2057,12 @@ impl MetaTileMap {
     /// of `home/overworld.asm`'s branch. [`Self::surfing`] carries that, and [`Self::actions`]
     /// builds the different route.
     pub fn warp_trigger(&self, at: Point8) -> WarpTrigger {
+        // ⭐ **A script that cancels the warp beats every tile test below**, because it runs after
+        // them: the staircase really is a step-on warp and the cartridge really does undo it. See
+        // [`Self::script_cancelled_warps`].
+        if self.script_cancelled_warps.contains(&at) {
+            return WarpTrigger::Impossible;
+        }
         let Some(&here) = self.raw_tile_ids.get(at.x as usize + at.y as usize * self.width) else {
             return WarpTrigger::Impossible;
         };
@@ -2804,7 +2848,8 @@ mod boulder_solver_tests {
             tile_pair_collisions: vec![],
             tile_pair_collisions_water: vec![], sprites,
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
-            spinners: HashMap::new(), can_surf: false, best_rod: None, can_cut: false,
+            spinners: HashMap::new(), script_cancelled_warps: vec![], standing_on_warp: true,
+            can_surf: false, best_rod: None, can_cut: false,
             can_strength: false, bill_cell_separator: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
             has_grass_encounters: false,

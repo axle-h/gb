@@ -140,9 +140,18 @@ pub struct Cheats {
     /// ⭐ **It was a count, and a count is not actionable.** Nothing printed it at all until
     /// 2026-09-09, and when the walk's summary finally did, every one of the eight starts turned
     /// out to be refusing between **one and nine** of them — the rods, the S.S. Ticket, the Lift
-    /// Key, the Coin Case, the Silph Scope — which is most of `docs/coverage-plan.md` §2's list of
-    /// maps no walk has ever entered. Which ones is the whole of that finding, so it says which.
+    /// Key, the Coin Case, the Silph Scope — which was most of `docs/coverage-plan.md`'s list of
+    /// maps no walk had ever entered. Room is made for them now; see [`Cheats::bag_was_shed`]. Which ones is the whole of that finding, so it says which.
     pub bag_was_full: Vec<crate::pokemon::item::ItemId>,
+    /// What was dropped from the bag to make room for [`COVERAGE_KEY_ITEMS`], as raw ids.
+    ///
+    /// ⭐ **The other half of `bag_was_full`, and the reason that counter finally reads zero.** A
+    /// finished save carries fourteen to twenty of Gen 1's twenty bag *kinds* — the five HMs, four
+    /// junk TMs, a fossil, the stat items, spare Revives — none of which a cheated walk can use,
+    /// because the god party is written straight into the party struct and never teaches anything.
+    /// So the junk is shed before the key items go in, and this says what went: a walk that later
+    /// turns out to have needed one of these can see which start dropped it.
+    pub bag_was_shed: Vec<u8>,
 }
 
 impl Default for Cheats {
@@ -157,6 +166,7 @@ impl Default for Cheats {
             key_items: None,
             stocked: false,
             bag_was_full: Vec::new(),
+            bag_was_shed: Vec::new(),
         }
     }
 }
@@ -174,6 +184,7 @@ impl Cheats {
             key_items: None,
             stocked: false,
             bag_was_full: Vec::new(),
+            bag_was_shed: Vec::new(),
         }
     }
 
@@ -233,11 +244,26 @@ impl Cheats {
             && !self.stocked
             && state.pokemon.len() > 0
         {
-            // ⚠️ **Only what is missing, and a full bag is not a panic.** A finished save already
-            // carries most of these — `postgame-phase0.bin` has the Poké Flute, Silph Scope, Card
-            // Key, Secret Key, S.S. Ticket, Lift Key and Town Map — and Gen 1's bag holds twenty
-            // *kinds*, so adding them again both wastes slots and overflows. What such a save is
-            // actually missing is the rods and the Bicycle.
+            // ⭐ **Room first, and it is the whole of `docs/coverage-plan.md` step 6's first
+            // job.** Gen 1's bag holds twenty *kinds* and every one of the eight coverage starts
+            // arrives with fourteen to twenty of them used, so the loop below used to have between
+            // one and nine of its fourteen key items refused — and *which* ones depended on which
+            // finished save the walk started from, which is the worst possible shape for a
+            // coverage gap: no S.S. Ticket is the whole of the S.S. Anne, no Lift Key is the
+            // Rocket Hideout's four floors, no rod is every `Fish` row in the game, and nothing
+            // said so until `bag_was_full` was finally printed.
+            //
+            // ⚠️ **What is shed is everything the *walk* cannot use, which is not the same as
+            // everything the player earned.** The god party is written into the party struct
+            // directly, so the five HMs teach nothing; a walk never uses a TM, a stat item, a
+            // Revive or a fossil. What is left is a bag of exactly [`COVERAGE_KEY_ITEMS`], the
+            // same fourteen from all eight starts — which also leaves six slots free, and a walk
+            // with no free slot cannot pick an item up off the floor.
+            self.bag_was_shed = api.debug_keep_only_items(&COVERAGE_KEY_ITEMS);
+
+            // ⚠️ **Only what is missing, and a full bag is still not a panic.** The line above
+            // makes room rather than guaranteeing it: a start whose bag holds twenty key items
+            // would still refuse, and `bag_was_full` is what would say so.
             for item in COVERAGE_KEY_ITEMS {
                 if state.bag.iter().any(|held| held.id == item) {
                     continue;
@@ -381,6 +407,59 @@ mod tests {
         // believed a field move was available and was wrong has no way to find out otherwise.
         assert!(fixture.api().debug_teach_move(9, 0, PokemonMoveName::Cut).is_err());
         assert!(fixture.api().debug_teach_move(0, 9, PokemonMoveName::Cut).is_err());
+    }
+
+    /// ⭐ **Step 6's first job, as an assertion rather than as a line in a sweep's summary.**
+    ///
+    /// Every coverage start is a real save the cartridge played to, so every one of them arrives
+    /// with fourteen to twenty of Gen 1's twenty bag *kinds* already used — and
+    /// [`COVERAGE_KEY_ITEMS`] is fourteen more. Before the shed in [`Cheats::apply`]
+    /// that meant between one and nine of them were refused, differently per start, and what they
+    /// gate is whole clusters of the map: the S.S. Anne's nine rooms, the Rocket Hideout's four
+    /// floors, the Game Corner's prize room, every `Fish` row in the game.
+    ///
+    /// ⚠️ **It asserts on the bag rather than on the shed list**, because the shed list is a
+    /// property of the fixtures and the fixtures get regenerated. What has to hold is that all
+    /// fourteen are in hand afterwards and that there is room left over — a walk with no free slot
+    /// cannot pick an item up off the floor, and a refused pickup reads from outside exactly like
+    /// a pickup that worked.
+    #[test]
+    fn every_coverage_start_can_be_handed_all_of_the_key_items() {
+        use crate::pokemon::integration_tests::coverage::COVERAGE_STARTS;
+
+        for start in COVERAGE_STARTS {
+            let mut fixture = TestFixture::with_policy(
+                start.state,
+                Duration::from_secs(10),
+                Box::new(crate::pokemon::policy::RandomPolicy::seeded(0)),
+            );
+            let mut cheats = Cheats::default().with_key_items(999_999);
+            let state = fixture.game_state();
+            // ⚠️ The gate `Cheats::apply` waits on: a fresh save has no bag until Oak's script has
+            // run, so a start with no party would silently never be stocked at all.
+            assert!(state.pokemon.len() > 0, "{}: a start has to have a party", start.name);
+            cheats.apply(&mut fixture.api(), &state);
+            assert!(cheats.stocked, "{}: the bag was never stocked", start.name);
+
+            assert!(
+                cheats.bag_was_full.is_empty(),
+                "{}: the bag refused {:?}; it shed {:?} to make room",
+                start.name, cheats.bag_was_full, cheats.bag_was_shed,
+            );
+            let bag = fixture.game_state().bag;
+            for item in COVERAGE_KEY_ITEMS {
+                assert!(
+                    bag.iter().any(|held| held.id == item),
+                    "{}: {item:?} is not in the bag after stocking", start.name,
+                );
+            }
+            // Room left for what the walk finds on the floor. Fourteen kinds of twenty, so six.
+            let used = bag.iter().count();
+            assert!(
+                used < crate::pokemon::bag::Bag::MAX_ITEMS,
+                "{}: the bag came out full at {used} kinds, so no pickup can land", start.name,
+            );
+        }
     }
 
     /// **The gate in [`Cheats::apply`] is what keeps a cheated run honest**, so it gets its own test:
