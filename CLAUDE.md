@@ -28,13 +28,22 @@ baseline sweep of that same day — 153 maps of 248, 106 defects and 41 silences
 it took spent in Route 16's gate. **Steps 1 to 5 closed all of that, and step 6's first turn
 (2026-09-10) closed six more defects and five silences and made room in the bag** — Gen 1 holds
 twenty *kinds*, every start arrived with all twenty used, and the key items the walk needs were being
-refused in silence, which was worth more than the five steps before it. **Two sweeps of that day
-came back with 201 and 197 maps of 248, 19 real maps neither entered, and — on the second — zero
-silences in all nine regions and eight of the nine completely clean.** ⭐ **A ninth start that has
-*not* beaten the Elite Four is what finally boarded the S.S. Anne**, eleven maps no finished save can
-reach. **§2.1 is the state to measure against**, and it says which of the 19 are a Bicycle nothing in
-the stack can ride, which are `*Copy` maps the ROM never warps to, and which are Cerulean Cave's
-door — a row `actions()` never mints and the ROM cross-check names.
+refused in silence, which was worth more than the five steps before it. ⭐ **Turn 2 closed the
+three defects that turn's sweep found and all three were the same sentence — *somebody is standing
+there*.** A person on a doormat left the door showing underneath her; a room with two one-wide
+corridors and a wanderer in each was called routeless and walked out of one turn later; a pacing pair
+chosen while a square was empty was held after a Youngster stepped onto it. It then closed the three
+unreached clusters step 6 had queued: **Cerulean Cave** (`actions()` emitted the nearest crossing per
+map of *either* kind, so Route 24's footbridge always beat the river seam that is the only way to the
+cave's side of the city), **the Bicycle** (`use_item` required a `target` tile, so `UseTarget::Nothing`
+had a driver and no caller — and with it went every out-of-battle Potion, Repel and Itemfinder), and
+**a tenth start standing on the S.S. Anne**. ⭐ **Step 6 then reached its fixpoint: two consecutive
+sweeps of ten starts, zero defects and zero silences in all twenty walks, and a union of 215 maps of
+248 and 2 114 ids that did not grow between them** — against 153 maps, 106 defects and 41 silences
+at the 2026-09-09 baseline. **§2.1 is the state to measure against** and names the five real maps
+still out (Cerulean Cave B1F's ladder chain, Cycling Road and its gate, and two single doors); §6's
+turn 2 entry has the argument for each fix and §7.1 the row and the test. **Steps 7 to 9 are what is
+left, and none of them is the walk.**
 ⚠️ **§3 is the rules and §6.2 is how to read a number** — the walk's totals
 are a coin flip between several different walks, and CPU load is an input to it, so never build while
 measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**, because a walk's run directory defaults into

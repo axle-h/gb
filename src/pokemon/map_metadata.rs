@@ -116,15 +116,47 @@ impl MapMetadata {
             let my = sprite.position.y as usize + dimensions.north_extra;
             if mx < exp_width && my < exp_height {
                 let idx = mx + my * exp_width;
-                // Warps are already in the base and take priority over sprites,
-                // matching the original ordering where warps were applied after sprites.
-                if !matches!(result[idx], MetaTile::Warp { .. }) {
-                    result[idx] = MetaTile::Sprite(sprite.name);
-                }
+                // ⚠️ **A person standing on a door is standing on it, and a warp used to win here.**
+                // The rule this replaces kept the `Warp` visible underneath a sprite — "matching the
+                // original ordering", which was a refactor's compatibility note rather than an
+                // argument — and it made an occupied doormat look like open floor: the BFS routed
+                // through the person, `actions()` minted the row, and the walk held Down against a
+                // shopper for the whole of `MAX_MOVEMENT_SILENCE`. A mart's exit is two tiles wide,
+                // so the sweep of 2026-09-10 scored `CeruleanMart:3,7:Warp` a defect in three
+                // regions at once and then took `4,7` on the next turn without trouble.
+                //
+                // ⚠️ **Withholding the row is the point, and it is only ever withheld while it is
+                // true.** These are wandering NPCs: the tile is free again a second or two later and
+                // the row comes straight back, which is why the abort that used to follow now waits
+                // (`MAX_ROUTE_BLOCKED_TICKS` in `agent.rs`) instead of disputing the map.
+                result[idx] = MetaTile::Sprite(sprite.name);
             }
         }
 
         result
+    }
+
+    /// What each person is standing **on** — their square and the tile the overlay above painted
+    /// over. One entry per non-hidden sprite that is on the map.
+    ///
+    /// ⭐ **The counterfactual [`MetaTileMap::row_blocked_by_people`] asks its question with.**
+    /// Lifting a person off the map by writing `Empty` where they stood is right for every square
+    /// but the one that matters most: a doormat. Somebody standing in a doorway erases the `Warp`
+    /// from `meta_tiles` *and* from `warp_targets`, so a map "with the people taken out" that used
+    /// `Empty` would still have no door to find, and the one row the walk actually wants to wait for
+    /// would read as a row that was never there.
+    pub fn underfoot(&self, sprites: &[Sprite]) -> Vec<(Point8, MetaTile)> {
+        let dimensions = self.dimensions();
+        let exp_width = dimensions.full_width();
+        let exp_height = dimensions.full_height();
+        sprites.iter().filter(|s| !s.hidden).filter_map(|sprite| {
+            let mx = sprite.position.x as usize + dimensions.west_extra;
+            let my = sprite.position.y as usize + dimensions.north_extra;
+            (mx < exp_width && my < exp_height).then(|| (
+                Point8 { x: mx as u8, y: my as u8 },
+                self.meta_tiles_base[mx + my * exp_width],
+            ))
+        }).collect()
     }
 
     pub fn build_meta_tiles_base(&self) -> Vec<MetaTile> {
@@ -1516,6 +1548,16 @@ impl CurrentMap {
         // Seafoam Islands B3F strong-current trap tile → impassable (inert on every other map).
         self.metadata.apply_seafoam_currents(&mut result);
         result
+    }
+
+    /// [`MapMetadata::underfoot`], for the people on this map.
+    ///
+    /// ⚠️ **The base tile, so the overlays above are not applied to it.** Every one of them is a
+    /// cave floor, a Silph Co door or a hole, and none of those is a square a Gen-1 sprite is ever
+    /// placed on or wanders onto — the squares people share with something are doormats, and a
+    /// doormat is in the base.
+    pub fn underfoot(&self) -> Vec<(Point8, MetaTile)> {
+        self.metadata.underfoot(&self.sprites)
     }
 }
 

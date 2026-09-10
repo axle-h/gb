@@ -1354,6 +1354,28 @@ pub const COVERAGE_STARTS: &[Start] = &[
             "the S.S. Anne has not sailed yet, and `EVENT_SS_ANNE_LEFT` is what makes its ten \
              rooms and VermilionDock unreachable from every finished game"),
     },
+    // ⭐ **The tenth, and the only start whose whole job is to remove a coin flip.** `ssanne` above
+    // stands in Vermilion City one warp from the dock, and the frontier's least-taken exit out of
+    // Vermilion goes *north*: its first walk of 2026-09-10 never took `VermilionCity:18,32:Warp`
+    // at all and spent a whole 6-hour budget without boarding, while its second found the ship and
+    // came back with eleven maps no sweep in this plan's history had entered. A start already
+    // aboard makes those eleven a certainty and hands the budget to the ship instead of to the way
+    // there. `regen_on_the_ss_anne_fixture` cuts it, from the same `at-vermilion.bin` its sibling
+    // uses.
+    //
+    // ⚠️ **Both are kept, and the pair is not a duplicate.** `ssanne` earns its place twice over —
+    // §2.1 — because a start that has *not* beaten the Elite Four is never funnelled into Victory
+    // Road, so it is also the only walk that reaches Pokémon Mansion, Cinnabar's buildings, Pallet
+    // Town's interiors and Viridian Mart. That half is about the south-west and has nothing to do
+    // with the ship.
+    Start {
+        name: "ssanneship",
+        state: include_bytes!("../data/on-the-ss-anne.bin"),
+        map: crate::pokemon::map::Map::SSAnne1F,
+        before_the_credits: Some(
+            "it is standing on the S.S. Anne, which sails before the third badge and never comes \
+             back, so no finished save can be cut here at all"),
+    },
 ];
 
 /// What one walk came back with, so a run of several can be summed without keeping eight logs alive.

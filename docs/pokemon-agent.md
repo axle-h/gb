@@ -45,6 +45,24 @@ below is a comment on the function or constant it names; this is the index of th
   layer down. Four sweeps scored one of these as a defect and never twice in the same region:
   `CeruleanMart:CooltrainerFemale`, a Pokémon Centre's chatter, and Celadon Mansion 1F's stairs
   behind a corridor three pets and their owner wander across.
+- ⭐ **Past those 5 s the question is asked rather than the number raised.**
+  `MetaTileMap::row_blocked_by_people` puts everybody except the row's own subject back on the tile
+  `underfoot` says they are standing on and asks whether the row comes back; only a `yes` buys
+  `MAX_ROUTE_BLOCKED_TICKS` (1 500 ticks, 30 s). A row that is genuinely gone — a `; inaccessible`
+  warp — is still answered at 5 s, which is why this is a predicate and not a bigger bound. Sized
+  against `CeladonChiefHouse`, two corridors one tile wide with a person in each, where the walk of
+  2026-09-10 said "there is no route to the warp to CeladonCity" and took that warp on the next turn.
+  ⚠️ **Boulders are sprites and are excluded**: a rock will still be there in thirty seconds.
+- ⭐ **A person standing on a warp hides it, and the warp used to win.** `MapMetadata::meta_tiles`
+  kept the `Warp` visible underneath a sprite, so an occupied doormat read as open floor: the BFS
+  routed through the person and the walk held Down against a shopper for the whole 60 s.
+  `CeruleanMart:3,7:Warp` was a defect in three regions of one sweep, and `4,7` — the other half of
+  the same two-tile doormat — was taken on the next turn without trouble.
+- ⚠️ **A pacing pair is chosen once and the map moves under it.** `PacingForEncounters` holds the
+  pair `adjacent_grass` gave it, so somebody stepping onto one half leaves the agent bumping — and
+  bumping is not a step, so the ROM never rolls for an encounter. On a stall it re-picks and only
+  reports `Unknown` when there is no other pair at all; `paced` carries over, or the budget would
+  refill for ever.
 - ⭐ **Three agent states carry an open overworld action, and every door out of any of them has to
   end it.** `AgentState::open_overworld_action` is the one list: `OverworldMovement` is the walk,
   `PacingForEncounters` is its tail, and `Surfing` **with a `resume`** is its middle. Each was found
@@ -205,9 +223,15 @@ price.
   `tools::a_fenced_in_map_names_the_neighbours_it_cannot_reach` now asserts the menu's silences are
   *exactly* the fences, in both directions. A crossing wrongly dropped from `actions()` is no longer
   a row the model can miss, it is the whole answer.
-- `actions()` still emits **one** crossing per adjacent map, the nearest, because emitting one per
+- `actions()` emits **one crossing per adjacent map per kind** — the nearest land `Connection` and,
+  when the party can Surf, the nearest `ConnectionWater` — rather than one per edge, because one per
   edge perturbs `route_toward` and the scripted run's timing. The others are named in the row's own
   prose and resolved by `tools::resolve_overworld`'s `connection_action` fallback.
+  ⭐ **The second kind is Cerulean Cave.** It used to be the nearest of *either* kind, so wherever a
+  bridge and a surfable edge lead to the same neighbour the bridge always won: Route 24's footbridge
+  is two steps from the river seam, and that seam is the only way into the half of Cerulean the cave
+  door is on. Three floors sat `unreached` on every sweep, with the ROM cross-check naming it each
+  time — `CeruleanCity (5, 12) → CeruleanCave1F: on the grid, no sibling, and never a row`.
 - **A step from land onto water costs `SURF_MOUNT_COST` extra, and `bfs_from_player`'s `dist` is
   therefore a price rather than a step count.** Everything that asks "which of these is nearest"
   wants the price; `wander_action` is the one caller that means steps and takes them from

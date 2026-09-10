@@ -261,9 +261,21 @@ pub enum FieldMoveRequest {
     Teach { item: ItemId, slot: u8 },
     /// Use an evolution stone from the bag on a party member.
     Evolve { stone: ItemId, slot: u8 },
-    /// Face `target` and use a bag item on it — the Poké Flute on a sleeping Snorlax, the Card Key
-    /// on a door.
-    UseItem { item: ItemId, target: Point8 },
+    /// Use a bag item: on `target` if there is one — the Poké Flute on a sleeping Snorlax, the Card
+    /// Key on a door — and otherwise on the player, or on the party member in `slot`.
+    ///
+    /// ⭐ **The two target-less forms were unreachable from any tool until 2026-09-10, and with them
+    /// went every out-of-battle use of an item that acts on nobody.** `target` was required, and the
+    /// Bicycle, the Repels and the Itemfinder have no tile to aim at — so `FieldMove::UseBagItem`
+    /// and the whole of `UseTarget::Nothing` had a driver, a refusal table and tests, and no way in.
+    /// The coverage sweep found it as two maps: Route 17 is Cycling Road and `Route16Gate2F` is the
+    /// gate onto it, and nothing in the deployed stack could mount a bike to reach either.
+    ///
+    /// ⚠️ **`UseTarget::Move` is deliberately still not reachable**, which costs the PP restores and
+    /// PP Up. They would need a `move_index` on the schema, nothing in the game is gated behind one,
+    /// and `postgame::items::blocked` refuses them by name so the model is told rather than left to
+    /// retry.
+    UseItem { item: ItemId, target: Option<Point8>, slot: Option<u8> },
     /// Throw an item away to free one of the bag's 20 slots.
     TossItem { item: ItemId },
     /// Rearrange the party so `slot` leads. Instant — the agent writes it straight to RAM.
@@ -440,7 +452,38 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                 .ok_or_else(|| format!("Slot {slot} is empty."))?;
             FieldMove::EvolveWithStone { stone: held(*stone)?, target_slot: slot, evolve_from }
         }
-        FieldMoveRequest::UseItem { item, target } => {
+        FieldMoveRequest::UseItem { item, target: None, slot } => {
+            // ⭐ **The half of `ItemUsePtrTable` no LLM turn could reach.** With no tile to aim at
+            // the chain is START → ITEM → the row → USE and, for a party item, one menu more —
+            // which is exactly `FieldMove::UseBagItem`, a driver workstream I built and shipped
+            // with nothing calling it from here. The Bicycle is what the coverage sweep noticed
+            // (Cycling Road and its gate were `unreached` on every sweep), but the same door opens
+            // a Potion, a vitamin, a Repel and the Itemfinder out of battle.
+            let item = held(*item)?;
+            if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
+                return Err(refusal);
+            }
+            let target = match slot {
+                Some(slot) => crate::pokemon::postgame::items::UseTarget::Party {
+                    slot: party_slot(*slot)?,
+                },
+                None => crate::pokemon::postgame::items::UseTarget::Nothing,
+            };
+            // ⚠️ **The game's own refusals, asked before a button is pressed**, exactly as the PC
+            // menus below do it. Every branch of `items::blocked` is an effect that prints a text
+            // box, declines and keeps the item — a Potion at full HP, an Ether on a full move, and
+            // above all `IsBikeRidingAllowed`, which refuses everywhere but Route 23, the Indigo
+            // Plateau and the five `BikeRidingTilesets`. The driver would retry all of them until
+            // its budget ran out, and the reason is one only this layer can give.
+            if let Some(refusal) = crate::pokemon::postgame::items::blocked(state, item, target) {
+                return Err(format!("The game will not do that: {refusal}."));
+            }
+            FieldMove::UseBagItem { item, target }
+        }
+        // ⚠️ A `slot` alongside a `target` is ignored rather than refused: the target is the more
+        // specific of the two and the items that take one take no party member at all, so there is
+        // nothing for a slot to mean here.
+        FieldMoveRequest::UseItem { item, target: Some(target), slot: _ } => {
             // ⚠️ **`CutTree`'s gate and `Teach`'s, for an item the game will not use at all.**
             // `UnusableItem` is `jp ItemUseNotTime` — "This isn't the time to use that!" and back to
             // the bag list, cursor untouched — and `UsingFieldItem`'s only completion is "we are in
@@ -1293,8 +1336,9 @@ fn use_field_move_spec() -> ToolSpec {
              Center.\n\
              - `teach` — teach the HM or TM `item` to the Pokémon in `slot`.\n\
              - `evolve` — use the evolution stone `item` on the Pokémon in `slot`.\n\
-             - `use_item` — face `target` and use bag `item` on it (the Poké Flute on Snorlax, the \
-             Card Key on a door).\n\
+             - `use_item` — use bag `item`: on `target`, facing it (the Poké Flute on Snorlax, the \
+             Card Key on a door); on the party member in `slot` (a Potion, a vitamin); or on \
+             neither, for the Bicycle, a Repel or the Itemfinder.\n\
              - `toss_item` — throw `item` away to free a bag slot. The bag holds only 20 kinds.\n\
              - `reorder_party` — make the Pokémon in `slot` the party leader.\n\
              - `pc_pokemon` — at a PC: `op` is `deposit` (party `slot` → box), `withdraw` or \
@@ -1330,7 +1374,7 @@ fn use_field_move_spec() -> ToolSpec {
                     "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
                     "required": ["x", "y"],
                     "additionalProperties": false,
-                    "description": "A tile on the current map, in the coordinates `read_map` uses.",
+                    "description": "A tile on the current map, in the coordinates `read_map` uses.                                     For `use_item`, the square the *thing* is on; omit it for an                                     item used on nobody.",
                 },
                 "op": {
                     "type": "string",
@@ -1924,7 +1968,21 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
         }
         "teach" => Ok(FieldMoveRequest::Teach { item: item("item")?, slot: slot()? }),
         "evolve" => Ok(FieldMoveRequest::Evolve { stone: item("item")?, slot: slot()? }),
-        "use_item" => Ok(FieldMoveRequest::UseItem { item: item("item")?, target: target()? }),
+        // ⚠️ **Both optional, and a `target` that is present is still checked.** An absent one is
+        // "use it on nobody" (the Bicycle, a Repel, the Itemfinder); a malformed one is still the
+        // complaint it always was, because a model that meant to aim somewhere and typed the
+        // coordinates wrong must not have that silently read as using the item on itself.
+        "use_item" => Ok(FieldMoveRequest::UseItem {
+            item: item("item")?,
+            target: match arguments.get("target") {
+                Some(Value::Null) | None => None,
+                Some(_) => Some(target()?),
+            },
+            slot: match arguments.get("slot") {
+                Some(Value::Null) | None => None,
+                Some(_) => Some(slot()?),
+            },
+        }),
         "toss_item" => Ok(FieldMoveRequest::TossItem { item: item("item")? }),
         "pc_pokemon" => {
             use crate::pokemon::postgame::pc_box::{PcBoxOp, BOX_CAPACITY, BOX_COUNT};
@@ -3303,7 +3361,17 @@ mod tests {
             // removed. That is the largest single reclaim this budget has seen, and it is not why
             // the tool went — see `FieldMoveRequest`'s note — but it is worth writing down that the
             // one verb nothing needed was also the most expensive line in the catalogue.
-            (DecisionKind::Overworld, 12_775),
+            //
+            // ── 2026-09-10: `use_item` without a `target`, +189 bytes on Overworld only ──
+            // 12 775 → 12 964, and it is the cheapest map in this file's history: **two maps and
+            // half of `ItemUsePtrTable`.** `target` was required, so `UseTarget::Nothing` — the
+            // Bicycle, the Repels, the Itemfinder — had a driver, a refusal table and tests and no
+            // way in from any turn; `use_field_move use_item Bicycle` was unexpressible, and with it
+            // Route 17 (Cycling Road) and `Route16Gate2F`, which sat `unreached` on every coverage
+            // sweep this repo has taken. `slot` rides along for the party items, so a Potion out of
+            // battle is reachable too. Nothing else moved: the property already existed on the
+            // schema and only its description and one bullet grew.
+            (DecisionKind::Overworld, 12_975),
             (DecisionKind::Battle, 5_575),
             (DecisionKind::Nickname, 4_075),
             (DecisionKind::MartPurchase, 4_825),
@@ -4097,7 +4165,18 @@ mod tests {
         );
         assert_eq!(
             request(r#"{"move":"use_item","item":"PokeFlute","target":{"x":12,"y":9}}"#),
-            FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Point8 { x: 12, y: 9 } },
+            FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(Point8 { x: 12, y: 9 }), slot: None },
+        );
+        // ⭐ **And the two target-less forms, which no call could express until 2026-09-10.** The
+        // Bicycle has no tile to aim at, and neither does a Potion; requiring one put the whole of
+        // `UseTarget::Nothing` — and with it Cycling Road — out of reach of every LLM turn.
+        assert_eq!(
+            request(r#"{"move":"use_item","item":"Bicycle"}"#),
+            FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None },
+        );
+        assert_eq!(
+            request(r#"{"move":"use_item","item":"Potion","slot":1}"#),
+            FieldMoveRequest::UseItem { item: ItemId::Potion, target: None, slot: Some(1) },
         );
         assert_eq!(request(r#"{"move":"reorder_party","slot":3}"#), FieldMoveRequest::ReorderParty { slot: 3 });
 
@@ -4108,7 +4187,9 @@ mod tests {
             (r#"{"move":"fly","map":"Atlantis"}"#, "is not a map"),
             (r#"{"move":"teach","item":"Hm03Surf"}"#, "needs a `slot`"),
             (r#"{"move":"toss_item","item":"Sandwich"}"#, "is not an item"),
-            (r#"{"move":"use_item","item":"PokeFlute"}"#, "needs a `target`"),
+            // ⚠️ A `target` that is *present* is still checked; what changed is that leaving it out
+            // is now a use on nobody rather than a complaint.
+            (r#"{"move":"use_item","item":"PokeFlute","target":{"x":"here"}}"#, "must be a tile coordinate"),
             // ⚠️ **`cut`, `push_boulder` and `strength` are gone and have to stay gone**, for the
             // reason `interact` below does: a resumed run replays its own history, and a model that
             // called one before the deploy will call it again. Each is refused by name, and the
@@ -4321,7 +4402,7 @@ mod tests {
         // standing beside the player.
         let at = Point8 { x: 8, y: 4 };
         let complaint = |state: &GameState, item: ItemId| {
-            match resolve_field_move(state, &FieldMoveRequest::UseItem { item, target: at }) {
+            match resolve_field_move(state, &FieldMoveRequest::UseItem { item, target: Some(at), slot: None }) {
                 Err(complaint) => complaint,
                 Ok(resolved) => panic!("{item} should not have resolved to {resolved:?}"),
             }
@@ -4347,7 +4428,7 @@ mod tests {
         // refused it would break Snorlax.
         assert!(ItemId::PokeFlute.is_key_item(), "the point of the case");
         assert_eq!(
-            resolve_field_move(&holding(ItemId::PokeFlute), &FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: at }),
+            resolve_field_move(&holding(ItemId::PokeFlute), &FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(at), slot: None }),
             Ok(FieldMove::UseFieldItem { item: ItemId::PokeFlute, target: at }),
         );
 
@@ -4380,6 +4461,49 @@ mod tests {
         assert_eq!(door_side(&map, Point8 { x: 3, y: 3 }), None);
     }
 
+    /// **The Bicycle, and the half of the item table no turn could reach.**
+    ///
+    /// ⭐ `use_item` required a `target` tile, and the Bicycle has none — nor does a Repel, nor the
+    /// Itemfinder. So `FieldMove::UseBagItem` and the whole of `UseTarget::Nothing` had a driver
+    /// (`postgame::items`, with `Effect::TogglesBicycle` and a test that rides one), a refusal table
+    /// and an `IsBikeRidingAllowed` decode, and **no way in from any LLM turn at all**. The coverage
+    /// sweep found it as a coverage gap rather than as a tool bug: Route 17 is Cycling Road and
+    /// `Route16Gate2F` is the gate onto it, and both sat `unreached` on every sweep this repo has
+    /// taken, because nothing in the deployed stack could mount a bike to ride down it.
+    ///
+    /// ⚠️ **And the refusal is asked here rather than discovered by the driver.** `ItemUseNotTime`
+    /// consumes nothing and prints a box that reads like something happened, so a bike used indoors
+    /// is an endless retry — the same shape as every other branch of `items::blocked`.
+    #[test]
+    fn a_bag_item_with_nothing_to_aim_at_is_a_call_that_can_be_made() {
+        use crate::pokemon::policy::FieldMove;
+        use crate::pokemon::postgame::items::UseTarget;
+
+        // Route 11: outdoors, in `BikeRidingTilesets`, and the walk that dropped this state was
+        // carrying the Bicycle along with every other key item.
+        let outdoors = {
+            let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+            gb.load_state(include_bytes!("../pokemon/data/route-11-youngster-on-the-pacing-tile.bin"))
+                .expect("the committed fixture loads");
+            { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+                .expect("a readable state")
+        };
+        assert!(outdoors.bag.iter().any(|item| item.id == ItemId::Bicycle),
+            "the fixture has to be carrying the bike or this proves nothing");
+
+        let ride = FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None };
+        assert_eq!(resolve_field_move(&outdoors, &ride).expect("a bike outdoors is a legal call"),
+                   FieldMove::UseBagItem { item: ItemId::Bicycle, target: UseTarget::Nothing });
+
+        // Oak's lab: indoors, so `IsBikeRidingAllowed` refuses, and the answer says so before a
+        // button is pressed rather than after 60 s of A-mashing.
+        let mut indoors = fixture_state();
+        indoors.bag.push(BagItem { id: ItemId::Bicycle, quantity: 1 }).expect("room in the bag");
+        let refusal = resolve_field_move(&indoors, &ride).expect_err("a bike indoors is refused");
+        assert!(refusal.contains("cycling is not allowed"), "{refusal}");
+        assert!(refusal.contains("OaksLab"), "it names where it is refusing: {refusal}");
+    }
+
     /// **W6 — a field item aimed at nothing is refused, and told what is beside it.**
     ///
     /// Two coordinate conventions meet on this turn and nothing said so: an action id's coordinate
@@ -4393,7 +4517,7 @@ mod tests {
         let mut state = fixture_state();
         state.bag.push(BagItem { id: ItemId::PokeFlute, quantity: 1 }).expect("room in the bag");
         let flute = |target| resolve_field_move(&state, &FieldMoveRequest::UseItem {
-            item: ItemId::PokeFlute, target });
+            item: ItemId::PokeFlute, target: Some(target), slot: None });
 
         // Oak's lab: the rival stands on (8, 4) and (7, 5) is bare floor beneath the player.
         let empty = flute(Point8 { x: 7, y: 5 }).expect_err("open ground is not a target");

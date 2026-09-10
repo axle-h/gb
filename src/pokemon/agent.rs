@@ -167,6 +167,22 @@ const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
 /// and should say so while the model can still act on it.
 const MAX_ROUTE_LOST_TICKS: u16 = 250;
 
+/// The same bound for a route that is missing **because somebody is standing on it**, which
+/// [`MetaTileMap::row_blocked_by_people`] is asked once the bound above runs out. 1 500 ticks is
+/// **30 s of game time**.
+///
+/// ⚠️ **Sized against the worst room in the game rather than against one wanderer, which is what
+/// 5 s was.** `CeladonChiefHouse` is two corridors one tile wide with a person in each, and a row
+/// there needs *both* of them to step aside at once; the sweep of 2026-09-10 scored two defects in
+/// it and disproved the second one on the next turn by taking the warp it had just called
+/// unreachable. Nothing is lost by waiting: the walk is standing still either way, and a row that
+/// really is gone is answered at the 5 s bound as before, because that is the branch this one is
+/// not on.
+///
+/// ⚠️ **Still half of [`MAX_MOVEMENT_SILENCE`] and a tenth of the watchdog**, so a jam that never
+/// clears is a report rather than a hang.
+const MAX_ROUTE_BLOCKED_TICKS: u16 = 1500;
+
 /// Total ticks of *successful* pacing in tall grass or on cave floor before giving up on the
 /// encounter ever coming. 3000 ticks is 60 s of game time.
 ///
@@ -1354,6 +1370,11 @@ pub struct PokemonAgent {
     /// build would be the larger change. Reset when the row is found and when a new action starts,
     /// so nothing carries between actions.
     route_lost_ticks: u16,
+    /// [`MetaTileMap::row_blocked_by_people`]'s answer for the row this walk is following, asked
+    /// **once** on the tick [`MAX_ROUTE_LOST_TICKS`] runs out and remembered until the row comes
+    /// back. See [`Self::wait_for_the_route`]; it is meaningless while `route_lost_ticks` is under
+    /// that bound, and reset with it.
+    route_lost_to_people: bool,
     /// The map the agent was last on, to detect map changes (warp/connection landings).
     last_map: Option<Map>,
     /// Trees the agent has cut down, by `(map, expanded tile position)`. The `MetaTileMap` is decoded
@@ -1560,6 +1581,7 @@ impl PokemonAgent {
             boulder_goal_stale: 0,
             boulder_goal_silences: 0,
             route_lost_ticks: 0,
+            route_lost_to_people: false,
             last_map: None,
             cut_tiles: std::collections::HashSet::new(),
             blocked_tiles: std::collections::HashSet::new(),
@@ -2163,7 +2185,54 @@ impl PokemonAgent {
         self.walk_squares = None;
         // Likewise: the previous walk's missing-row streak says nothing about this one.
         self.route_lost_ticks = 0;
+        self.route_lost_to_people = false;
         self.set_state(AgentState::OverworldMovement { destination: action.tile, map: action.map });
+    }
+
+    /// Hold still for another tick rather than saying there is no route, and count this one.
+    ///
+    /// Two bounds, because "the row is gone" and "somebody is on it" deserve different patience.
+    /// Under [`MAX_ROUTE_LOST_TICKS`] every lost row waits, which is what outlasts a wanderer taking
+    /// a step. Past it the question is put to the map once — would this row be here if everybody
+    /// else were standing on the floor the map says is under them? — and only a `yes` buys the
+    /// longer [`MAX_ROUTE_BLOCKED_TICKS`].
+    ///
+    /// ⚠️ **Asked once and remembered, because `actions()` is several BFS passes.** This runs on the
+    /// agent's own tick, and asking every tick for 25 s of game time would put a map-wide search on
+    /// the hot path a thousand times over for one walk. The answer cannot change while the row
+    /// stays missing: whoever is in the way at 5 s is in the way, and the moment they step aside the
+    /// row is back and the counter is reset by the caller instead.
+    fn wait_for_the_route(&mut self, map: &crate::pokemon::tile_map::MetaTileMap, row: MetaTile) -> bool {
+        self.route_lost_ticks = self.route_lost_ticks.saturating_add(1);
+        if self.route_lost_ticks <= MAX_ROUTE_LOST_TICKS {
+            return true;
+        }
+        if self.route_lost_ticks == MAX_ROUTE_LOST_TICKS + 1 {
+            self.route_lost_to_people = map.row_blocked_by_people(row);
+        }
+        self.route_lost_to_people && self.route_lost_ticks <= MAX_ROUTE_BLOCKED_TICKS
+    }
+
+    /// Close the walk a Surf mount was carrying when the mount has ended on a **different map**.
+    ///
+    /// The mount ends in `.makePlayerMoveForward`, one simulated step onto the water, and that step
+    /// can be the whole of the action: a `ConnectionWater` seam crossed, or a warp entry on the
+    /// water stepped onto. So a changed map is the walk *arriving*.
+    ///
+    /// ⚠️ **The completion rule is `OverworldMovement`'s own**, deliberately — a map change
+    /// completes a warp or a connection and is `WrongMap` for anything else, and there is no reason
+    /// for the mount to have a second opinion about which. ⚠️ **No position** either: the player is
+    /// on a different map from the one the destination is named against, so a coordinate would mean
+    /// nothing.
+    fn surf_crossed_into(&mut self, destination: MetaTile, now: Map) {
+        let arrived = matches!(destination,
+            MetaTile::Warp { .. } | MetaTile::Connection { .. } | MetaTile::ConnectionWater(_));
+        match arrived {
+            true => self.event(AgentEvent::OverworldActionCompleted { destination }),
+            false => self.abort_overworld(
+                destination, OverworldActionAbortedReason::WrongMap(now), None),
+        }
+        self.set_state(AgentState::Idle);
     }
 
     /// Checks if a battle has just started or finished
@@ -3379,6 +3448,7 @@ CascadeBadge; not cutting".to_string(),
                     // so what it counts is *consecutive* ticks without it rather than a total.
                     if action.is_some() {
                         self.route_lost_ticks = 0;
+                        self.route_lost_to_people = false;
                     }
                     match action {
                         // ⭐ **"There is no route" is a lie while a map transition is in flight, and
@@ -3433,8 +3503,9 @@ CascadeBadge; not cutting".to_string(),
                         // to outlast one, short enough that a row the cartridge really will not open
                         // (a `; inaccessible` warp) still says so almost at once instead of costing
                         // the 60 s that `MAX_MOVEMENT_SILENCE` would.
-                        None if self.route_lost_ticks < MAX_ROUTE_LOST_TICKS => {
-                            self.route_lost_ticks += 1;
+                        // ⭐ **And past 5 s the question is asked rather than the number raised** —
+                        // see [`Self::wait_for_the_route`].
+                        None if self.wait_for_the_route(&game_state.map, destination) => {
                             // ⚠️ **Released, unlike the `position_settled` arm above.** That one
                             // keeps the direction it had because the walk has *already arrived* and
                             // the map is one tick from catching up. Here the route the walk was
@@ -4423,7 +4494,7 @@ CascadeBadge; not cutting".to_string(),
                     }
                 }
             }
-            AgentState::PacingForEncounters { destination, map, tile_a, tile_b, ref mut heading_to_b, ref mut stalled, ref mut paced } => {
+            AgentState::PacingForEncounters { destination, map, ref mut tile_a, ref mut tile_b, ref mut heading_to_b, ref mut stalled, ref mut paced } => {
                 /// Overworld ticks on the same tile before the pair is declared unwalkable. One tile
                 /// step is ~13 ticks at `AGENT_RESOLUTION`, so this is several steps' worth of slack —
                 /// long enough never to fire on healthy pacing, short enough to cost nothing.
@@ -4457,7 +4528,7 @@ CascadeBadge; not cutting".to_string(),
                         return Ok(());
                     }
                     let pos = game_state.map.player_position;
-                    let target = if *heading_to_b { tile_b } else { tile_a };
+                    let target = if *heading_to_b { *tile_b } else { *tile_a };
                     if pos == target {
                         *heading_to_b = !*heading_to_b;
                         *stalled = 0;
@@ -4465,21 +4536,46 @@ CascadeBadge; not cutting".to_string(),
                         // Not there yet. Either we are mid-walk, or we are walking into something.
                         *stalled += 1;
                         if *stalled >= STALL_TICKS {
-                            // ⚠️ **`Unknown`, which the oracle scores as a defect, and rightly.**
-                            // The pair came out of `adjacent_grass`/`adjacent_pacing_pair` and one
-                            // half of it turned out not to be walkable, so the agent offered a row
-                            // it could not then carry out. Bumping is not a step, so the ROM never
-                            // rolls: this is the agent doing nothing at all for a minute.
-                            api.release_all_buttons();
-                            self.abort_overworld(
-                                destination,
-                                OverworldActionAbortedReason::Unknown,
-                                Some(pos),
-                            );
-                            return Ok(());
+                            // ⭐ **A pair is chosen once and the map moves under it, so ask for
+                            // another one before calling this a malfunction.** The half being
+                            // walked into is a tile, and in Gen 1 a tile is only free until
+                            // somebody steps onto it: the `ssanne` walk of 2026-09-10 paced
+                            // `Route11:13,6:Grass` with a Youngster standing on the square directly
+                            // north of it and bumped into him until this bound fired. Re-picking
+                            // costs nothing — `adjacent_grass` skips a square somebody is standing
+                            // on, because a person is a `MetaTile::Sprite` and not `Grass` — and it
+                            // keeps the promise the row made, which was an encounter rather than a
+                            // particular pair of squares.
+                            //
+                            // ⚠️ **`paced` is carried over rather than reset.** The budget is what
+                            // stops a pace that will never fire, and a pair that re-picks itself
+                            // every 60 ticks would refill it for ever.
+                            let repicked = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
+                                .or_else(|| adjacent_pacing_pair(&game_state.map, pos))
+                                .filter(|&(a, b)| (a, b) != (*tile_a, *tile_b));
+                            if let Some((a, b)) = repicked {
+                                *tile_a = a;
+                                *tile_b = b;
+                                *heading_to_b = true;
+                                *stalled = 0;
+                            } else {
+                                // ⚠️ **`Unknown`, which the oracle scores as a defect, and rightly.**
+                                // The pair came out of `adjacent_grass`/`adjacent_pacing_pair`, one
+                                // half of it turned out not to be walkable, and there is no other
+                                // pair to move to — so the agent offered a row it cannot carry out.
+                                // Bumping is not a step, so the ROM never rolls: this is the agent
+                                // doing nothing at all for a minute.
+                                api.release_all_buttons();
+                                self.abort_overworld(
+                                    destination,
+                                    OverworldActionAbortedReason::Unknown,
+                                    Some(pos),
+                                );
+                                return Ok(());
+                            }
                         }
                     }
-                    let next = if *heading_to_b { tile_b } else { tile_a };
+                    let next = if *heading_to_b { *tile_b } else { *tile_a };
                     if let Some(dir) = dir_to(pos, next) {
                         api.release_all_buttons();
                         api.press_button(dir);
@@ -4904,23 +5000,8 @@ CascadeBadge; not cutting".to_string(),
                     match resume {
                         Some((destination, map)) if mounted && same_map == Ok(map) =>
                             self.set_state(AgentState::OverworldMovement { destination, map }),
-                        Some((destination, map)) if mounted && same_map.is_ok() => {
-                            let arrived = matches!(destination,
-                                MetaTile::Warp { .. } | MetaTile::Connection { .. }
-                                | MetaTile::ConnectionWater(_));
-                            match arrived {
-                                true => self.event(AgentEvent::OverworldActionCompleted { destination }),
-                                // ⚠️ No position: the player is on a different map from the one the
-                                // destination is named against, so a coordinate would mean nothing.
-                                false => self.abort_overworld(
-                                    destination,
-                                    OverworldActionAbortedReason::WrongMap(
-                                        same_map.unwrap_or(map)),
-                                    None,
-                                ),
-                            }
-                            self.set_state(AgentState::Idle);
-                        }
+                        Some((destination, map)) if mounted && same_map.is_ok() =>
+                            self.surf_crossed_into(destination, same_map.unwrap_or(map)),
                         _ => self.set_state(AgentState::Idle),
                     }
                     return Ok(());
@@ -4940,10 +5021,36 @@ CascadeBadge; not cutting".to_string(),
                 // lesson again, and without it the only thing that ends the attempt is
                 // `DRIVER_ESCAPE_SILENCE`, a minute later.
                 if api.on_screen_text(false).map_or(false, |t| t.contains("No SURFing")) {
-                    let map = api.game_state().map(|g| g.map.map).unwrap_or(self.last_map.unwrap_or(Map::PalletTown));
+                    let now = api.game_state().map(|g| g.map.map).ok();
+                    let map = now.unwrap_or(self.last_map.unwrap_or(Map::PalletTown));
                     self.blocked_tiles.insert((map, water_pos));
                     api.toggle_button(JoypadButton::B);
-                    self.set_state(AgentState::Idle);
+                    // ⭐ **And the walk this mount was carrying is closed here too, which it was
+                    // not.** `Surfing` with a `resume` is one of the three states that hold an open
+                    // overworld action (`AgentState::open_overworld_action`), and this arm dropped
+                    // straight to `Idle` — so the row the walk was following was never reported at
+                    // all. The `celadon` walk of 2026-09-10 scored `Route12:0,63:Connection` silent
+                    // on exactly this: it surfed south out of Route 12, **crossed into Route 11**,
+                    // and the mount the follower then tried on the far side was refused — so the
+                    // crossing had happened, the row was finished, and nobody said so. The very
+                    // next thing the walk did was choose a row on Route 11.
+                    //
+                    // ⚠️ **A refusal on the *same* map is `Textbox`, and that is exact rather than
+                    // convenient**: the cartridge stopped the player to say "No SURFing on <mon>
+                    // here!", which is the whole of what happened, and the oracle scores that
+                    // `Blocked` and hangs the quote on it — the sentence below, which is emitted
+                    // after the abort so it lands on this id. It keeps its teeth, because
+                    // `REPEAT_IS_A_DEFECT` still fires on a row that keeps being refused.
+                    match resume {
+                        Some((destination, from)) if now.is_some_and(|now| now != from) =>
+                            self.surf_crossed_into(destination, map),
+                        Some((destination, _)) => self.abort_overworld(
+                            destination,
+                            OverworldActionAbortedReason::Textbox,
+                            api.game_state().map(|g| g.map.player_position).ok(),
+                        ),
+                        None => self.set_state(AgentState::Idle),
+                    }
                     self.event(AgentEvent::TextBox {
                         message: format!("the game refused SURF at {water_pos}; treating it as land") });
                     return Ok(());
