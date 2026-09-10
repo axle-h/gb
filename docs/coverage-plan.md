@@ -5,27 +5,19 @@ as it is deployed — `LlmPolicy`, the worker and the wire, against a mock endpo
 a verdict on each, and every defect that turns up fixed, until a sweep of the whole of Kanto comes
 back clean and finds nothing new.
 
-**Status.** Rewritten 2026-09-09 as a step list; **steps 0 to 5 taken that day, step 6 — the loop —
-reached its fixpoint on 2026-09-10 after two turns, and steps 7 and 8 were taken the same day.** The harness, the cheats, the oracle and
-the frontier walk are all **built**. §2 is the 2026-09-09 baseline every closure is measured
-against — 153 maps, 106 defects, 41 silences, 82% of every turn in Route 16's gate — and all of that
-is closed. ⭐ **§2.1 is where the sweep stands: two consecutive sweeps of ten starts with zero
-defects and zero silences in all twenty walks, a union of 215 maps of 248 and 2 114 ids that did not
-grow between them, and five real maps left**, each with a line saying why.
+**Status.** The 2026-09-09 draft's **steps 0 to 8 are all taken** and step 9 is folded into what is
+left; §7.4 has one line each. The harness, the cheats, the oracle and the frontier walk are built,
+and the sweep has been to a fixpoint: two consecutive clean sweeps on 2026-09-10 whose union did not
+grow. ⚠️ **That is not the goal, and this file said so too quietly.** A clean sweep means *nothing
+the walk asserts on went wrong*, and the walk asserts on two things — defects and silences. It does
+not assert that every map was entered, that every action offered was taken, or that the ROM's own
+tables were exhausted; all three are printed and were going unread. §2.1 is what happened when they
+were read.
 
-The two turns cost nine defects and six silences, and the two biggest closures were neither of them
-a change to the walk. **Gen 1's bag holds twenty kinds, every start arrived with all twenty used, and
-the key items the walk needs were being refused in silence** (turn 1) — making room moved `phase0`
-from 38 maps to 143 and took the Rocket Hideout, the Game Corner's prize room and every `Fish` row
-off the unreached list. And **`actions()` emitted the nearest crossing per adjacent map of either
-kind, so a footbridge always beat the water beside it** (turn 2) — one row per *kind* opened Cerulean
-Cave, which no sweep in this plan's history had entered.
-
-⭐ **Step 7 — the battle refusals — was taken the same day and is done**: all seven cells that
-existed nowhere in the suite are now tests through the deployed stack, in the default tier, and they
-found three defects, the largest of them that the outcome of *any* bag item used in a battle was
-never reported to the model. §4's **steps 8 and 9** are what is left, and neither is the walk; §7
-keeps what the first draft got wrong and what the sweeps have found.
+**What is left is §4's two steps.** Step 1 closes the gap between "clean" and "complete": one
+defect outstanding, 25 real maps missed by the last sweep, a cross-check that covers three action
+kinds of nine, and 2 124 ids offered and never chosen. Step 2 is the god run — Pallet Town to the
+Hall of Fame through `LlmPolicy` — unparked, to replace `full_playthrough` if it is much faster.
 
 ⚠️ **Code comments cite section numbers from the first draft** (`§2.2.1`, `§3.3`, `§5.2.6`, …).
 Those refer to the 2026-09-06 plan, which is in git history at commit `7343616`; §7.3 says where
@@ -42,7 +34,7 @@ each one's argument lives now.
 | The oracle | `integration_tests/coverage.rs` `CoverageLog` | Every action id the agent starts gets `Completed`, `Blocked`, `Defect`, `Silent` or `Unreached`, folded from `AgentEvent`s so it works under any driver. Drops a save state where a defect happened |
 | The walk | `coverage.rs` `ExploringBrain`, `coverage_walk_of_the_finished_game` | Takes every unvisited row on the map, then the least-taken exit. Starts from one of ten fixtures (`GB_COVERAGE_START`), eight of them **finished games** so every gate is open because the cartridge opened it; the other two are argued on `Start::before_the_credits`. Behind `--features coverage-tests` |
 | The cross-check | `coverage.rs` `rom_cross_check` | Warps and objects in the ROM's tables for the maps entered that never once appeared as a row. Printed, never asserted |
-| The god run's machinery | `integration_tests/godmode.rs` | `Intent`, `ScriptedBrain`, `godmode_turn_cost`. The run is parked (§5); the machinery is not, and step 8 is its first customer |
+| The god run's machinery | `integration_tests/godmode.rs` | `Intent`, `ScriptedBrain`, `godmode_turn_cost`. The machinery is default tier and drives step 8's branch arms; the **run** is §4's step 2 |
 | The branch points | `integration_tests/branch_points.rs` | Four snapshots cut one decision before a choice that is **exclusive per save**, and twelve arms after them, driven by `Intent` against the rendered menu. Step 8 |
 
 ## 2. Where we are
@@ -99,74 +91,76 @@ frontier still open, so every one of these numbers is a floor rather than a plat
 spread is not noise: see §6.2. The union here is 153 against the previous sweep's 159 while the id
 count rose from 1 409 to 1 445, which is what that variance looks like from outside.
 
-### 2.1 Where the sweep stands — 2026-09-10, and step 6 is done
+### 2.1 Where the sweep stands — 2026-09-10, after step 8
 
-Ten walks in parallel on an idle machine, 6 game-hours each, about 7 minutes of wall clock for the
-set (§6.1). ⭐ **Two consecutive sweeps taken the same way came back with zero defects and zero
-silences in all ten regions, and the second added nothing the first had not already reached** — which
-is step 6's termination condition, measured as §5.1 said it would have to be.
+Ten walks in parallel on an idle machine, 6 game-hours each, about 7 minutes for the set (§6.1).
 
-| | **sweep A** | | | **sweep B** | | |
-|---|---|---|---|---|---|---|
-| **start** | **maps** | **ids** | **only it** | **maps** | **ids** | **only it** |
-| `phase0` | 137 | 1 304 | 0 | 143 | 1 341 | 1 |
-| `cerulean` | 132 | 1 218 | 0 | 118 | 999 | 0 |
-| `vermilion` | 135 | 1 255 | 0 | 138 | 1 295 | 0 |
-| `lavender` | 135 | 1 259 | 0 | 135 | 1 265 | 0 |
-| `celadon` | 128 | 1 154 | 0 | 134 | 1 293 | 0 |
-| `saffron` | 134 | 1 251 | 0 | 134 | 1 258 | 0 |
-| `fuchsia` | 152 | 1 346 | ⭐ **29** | 70 | 654 | ⭐ **29** |
-| `cinnabar` | 41 ⭐ Hall of Fame | 408 | 12 | 41 ⭐ Hall of Fame | 405 | 0 |
-| `ssanne` | 99 | 954 | **25** | 63 | 646 | 0 |
-| `ssanneship` | 69 | 737 | 0 | 69 | 744 | 2 |
-| **union** | ⭐ **215 of 248** | ⭐ **2 114** | | 189 | 1 895 | |
-| **failures** | **0 defects, 0 silent** | | | **0 defects, 0 silent** | | |
+| **start** | **maps** | **ids** | **defects** | **silent** |
+|---|---|---|---|---|
+| `phase0` | 38 ⭐ Hall of Fame | 365 | 0 | 0 |
+| `cerulean` | 120 | 1 039 | 0 | 0 |
+| `vermilion` | 135 | 1 267 | 0 | 0 |
+| `lavender` | 135 | 1 249 | 0 | 0 |
+| `celadon` | 134 | 1 287 | 0 | 0 |
+| `saffron` | 134 | 1 265 | 0 | 0 |
+| `fuchsia` | 70 ⭐ Hall of Fame | 663 | ⛔ **1** | 0 |
+| `cinnabar` | 41 ⭐ Hall of Fame | 412 | 0 | 0 |
+| `ssanne` | 119 | 1 036 | 0 | 0 |
+| `ssanneship` | 82 | 751 | 0 | 0 |
+| **union** | **199 of 224 real** | **1 973** | **1** | **0** |
 
-⭐ **215 maps and 2 114 ids is the high-water mark of this plan by a wide margin** — the baseline of
-2026-09-09 was 153 maps with 106 defects and 41 silences, and turn 1 finished on 197. **Sweep B is
-a strict subset of sweep A**: every one of its 189 maps was already in A, so the union across the
-pair is 215 and did not grow. That is what "a full pass that discovers no id not already seen" comes
-to when the thing being measured is a random walk.
+⚠️ **Read the pair, never the row** (§6.2). This is one sweep, not a pair: 199 sits inside the
+189–215 band the 2026-09-10 fixpoint pair measured, so it is not a regression. What it *is* good for
+is the list below, which is stable across all ten walks.
 
-⚠️ **Read the pair, never the row** (§6.2), and this pair is a textbook of it. `fuchsia` came back
-with 152 maps and then 70; `ssanne` with 99 and then 63; `cinnabar` is 41 both times because it wins
-the game at 40% of its budget and stops. Not one of those is a regression — they are different walks.
+**The arithmetic, which was wrong in this file until now.** `Map::iter()` yields **248** because the
+enum is the map *byte*: 22 `UnusedMap*` have no header at all and 2 are link-cable rooms, so the game
+has **224 real maps**. ⚠️ **And four more are unreachable and are counted as real**:
+`CeruleanTrashedHouseCopy`, `CinnabarMartCopy`, `UndergroundPathRoute6Copy` and
+`UndergroundPathRoute7Copy` are duplicate headers that **no warp from any map targets** (checked
+against `pokered/data/maps/objects/`), so `unreached_report` has been over-reporting by four every
+sweep it has ever printed.
 
-**The five real maps neither sweep entered**, which is the whole of what is left:
+**The 25 real maps this sweep missed, in three groups:**
 
-- ⭐ **Cerulean Cave B1F, and the ROM cross-check names the exact ladder.** 1F and 2F are *in* now —
-  six of the ten walks reached them, against never once in this plan's history — because a water
-  crossing is a row of its own beside the bridge to the same map (§6 turn 2). What is still shut is
-  the way down: `CeruleanCave1F (0, 6) → CeruleanCaveB1F`, `1F (3, 11) → 2F` and `2F (1, 3) → 1F`
-  all print *"on the grid, no sibling, and never a row"*. `probe_route_to_cerulean_cave` already has
-  the cause written down — the strip in front of the B1F ladder is raw tile 32 and the room below is
-  tile 5, and `(32, 5)` is in the Cavern tileset's `TilePairCollisions`, so the floor is entered by
-  going up at 1F (3, 11) and back down at 2F (1, 3). **All three rungs of that chain are unmintable,
-  so the route exists and cannot be asked for.** It is the sharpest remaining item and it is a
-  routing fault rather than a gate.
-- ⭐ **Route 17 (Cycling Road) and `Route16Gate2F`. The stack can ride a bike now; the *walk* still
-  cannot ask for one.** Turn 2 made `use_field_move`'s `target` optional, so `UseTarget::Nothing` is
-  reachable from every LLM turn — which was the real hole, and it took the Potions, the Repels and
-  the Itemfinder with it. But the coverage walk chooses `actions()` rows, and there is no row that
-  means "ride the Bicycle": the gate refuses a walker, so the two maps stay out. ⚠️ **The fix was
-  still the right one** — it is about the deployed tool surface, not about two maps — but the maps
-  need something else, and it is a `MetaTile` rather than a tool.
-- **`CeladonGym` and `SafariZoneWestRestHouse`, one door each.** `SafariZoneWestRestHouse` has its
-  own cross-check line (`(11, 11)`, never a row); `CeladonGym` does not and has been in a union
-  before, so it is the variance rather than a gate.
+- ⭐ **Twelve are ordinary maps that three walks simply stopped short of** — the Pallet cluster
+  (`RedsHouse1F`, `RedsHouse2F`, `OaksLab`, `BluesHouse`, `ViridianMart`), the Cinnabar cluster
+  (`CinnabarGym`, `CinnabarLab` + its three rooms, `CinnabarMart`, `CinnabarPokecenter`) and the four
+  Pokémon Mansion floors. Every one has been in a union before. **The cause is in the table above:
+  `phase0`, `fuchsia` and `cinnabar` all `settled` by reaching the Hall of Fame**, at 42%, 60% and
+  40% of their game-time budget, and then stopped with the rest unwalked. Half of three walks is
+  being spent playing the game to the credits rather than exploring it.
+- **Four are the `*Copy` duplicates above.** Not real, wrongly counted.
+- **Nine are structural, and each needs a different tool:** `CeruleanCaveB1F` (the ladder chain
+  below), `Route17` and `Route16Gate2F` (no row means "ride the Bicycle"), `SafariZoneWestRestHouse`
+  and `SafariZoneNorthRestHouse` (one door each), and the rest are the cluster edges above.
 
-⚠️ **`ssanneship` did not do what it was added for, and that is worth writing down.** It stands on
-`SSAnne1F` so that the ship is not a coin flip — and on both sweeps it walked straight off, taking
-`SSAnne1F` and `VermilionDock` and never going back, because Kanto's frontier is enormous next to
-eleven rooms. What actually covered the ship was `ssanne` on sweep A (all eleven, 25 maps nobody else
-reached). So the tenth start buys **two** guaranteed maps rather than eleven, and the other nine are
-still down to which way a walk turns. Keeping it is cheap; the real answer is something about the
-frontier, and §3's "promise-first exit ordering loses" says what not to try.
+⛔ **One defect, and it is a boulder.** `VictoryRoad3F:3,5:PushBoulderOntoSwitch`, hit **5 times** on
+the `fuchsia` walk: *"the boulder was pushed 34 times without reaching its target, so it was given
+up"*. The state it happened in is committed as **`src/pokemon/data/vr3f-boulder-given-up.bin`**. This
+is the third boulder finding in §7.1 and the second about a *bound* — `MAX_PUSHES_WITHOUT_PROGRESS`
+counts off a boulder that moved, and `MAX_SILENT_SHOVES` off one the cartridge refused, so a solver
+that is *making* progress toward the wrong target is bounded by neither.
 
-⚠️ **And the old warning still holds: `cerulean`, `vermilion`, `lavender`, `celadon` and `saffron`
-contribute nothing no other start reaches, on both sweeps.** What earns a place is a start that
-stands somewhere the others cannot get to — `fuchsia` (the south-east, 29 maps both times),
-`cinnabar` (the Indigo Plateau) and `ssanne` (the ship, and the south-west by not having won).
+⚠️ **The ROM cross-check is printed and never read, and it is saying things.** Across the ten walks:
+
+- ⭐ **`CeladonMansion3F (6, 1) → CeladonMansion2F: on the grid, no sibling, and never a row`, in
+  10 of 10 walks.** That is the exact sentence that turned out to be Cerulean Cave. The ROM gives
+  that floor four warps, two into 2F at *different* arrival points, so a sibling should not be
+  suppressing it. ⚠️ **Not a diagnosis** — every warp finding in this file that was argued from the
+  ROM was wrong; it needs `probe_button_at_state` on a dropped state first (§7.1's ⚰️).
+- **41 people never a row** on the `vermilion` walk alone, and **59 of 499 warps**, of which 25 are a
+  sibling door and 4 are not on the grid. Nobody has audited the remainder.
+- ⭐ **2 124 ids were *offered and never chosen* across the sweep** (`unreached`), against 6 984
+  completed. That is the real shape of "every action taken once", and no number in this file has ever
+  tracked it.
+
+**The ladder chain, still shut.** `CeruleanCave1F (0, 6) → B1F`, `1F (3, 11) → 2F` and
+`2F (1, 3) → 1F` all print *"on the grid, no sibling, and never a row"*.
+`probe_route_to_cerulean_cave` has the cause written down: the strip in front of the B1F ladder is
+raw tile 32 and the room below is tile 5, and `(32, 5)` is in the Cavern tileset's
+`TilePairCollisions`, so the floor is entered by going *up* at 1F (3, 11) and back down at 2F (1, 3).
+All three rungs are unmintable, so the route exists and cannot be asked for.
 
 ## 3. Rules that hold for every step
 
@@ -207,701 +201,129 @@ Each one is argued in full in a code comment; this is the index.
 
 ## 4. The steps
 
-In order. Each says what "done" is as something checkable, and roughly what it costs. Steps 1 to 5
-are the ones that turn the tier green; step 6 is the loop that runs until the goal is met; 7 to 9
-are what the walk cannot reach.
-
-### Step 0 — Take the baseline ✅ done 2026-09-09
-
-Run the eight regional walks in parallel on an idle machine (§6.1) and write the per-region table
-and the union into §2, replacing the 2026-09-08 numbers. Every later step measures against this.
-
-**Done:** §2 holds today's numbers and the date. **Cost:** 10 minutes of wall clock, and nothing
-else may be building during it.
-
-✅ **Taken.** §2 is the result. Three things it changed elsewhere in this file: `TMPDIR` is now part
-of §6.1's recipe and the reason is a paragraph of its own; §6.2's "two modes" for `phase0` is
-"several"; and steps 1 and 3 each carry a correction the baseline forced, because both were written
-against numbers this run disagrees with.
-
-### Step 1 — Make silence a failure, and stop fishing from a surf ✅ done 2026-09-09
-
-**What was wrong.** A `Fish` row's walk to "the water's edge" surfed onto the water to get there, so
-`postgame/fishing.rs` refused with *"cannot fish while surfing"* and dropped to `Idle`. That refusal
-and its two siblings (the tick budget, unreachable water) emitted a text box the agent made up and no
-terminal event, so the oracle scored the id `Silent` and the walk did not fail. It was the shape the
-grass pace and the cut tree were fixed for, one driver over. Reproduce:
-
-```shell
-GB_COVERAGE_MINUTES=6 GB_COVERAGE_PATIENCE=100000 \
-  cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
-# silent     {"Fish": 1}     ViridianCity:8,25:Fish
-```
-
-✅ **Taken, and all three items are in.**
-
-1. **The route to a `Fish` row ends on land, and the cause was not the one this step assumed.** The
-   step was written believing `actions()` picked a shore across the water, and it does not: the
-   Fish block is `route_to_face_within`'s body inlined over the same `bfs_from_player` prices in the
-   same order, so it always lands on the square `nearest_castable_water` had already validated a
-   land route to. What the walk actually mounted Surf on was **the last button**, which is the *turn*
-   toward the water, and `OverworldMovement`'s Surf-mount arm could not tell it from a step into it.
-   The arm now suppresses the mount for a `MetaTile::Fish` row outright. ⚰️ A first attempt filtered
-   the shore squares by `route_stays_on_land` and was provably a no-op; it was removed rather than
-   left in looking load-bearing.
-2. **All three refusal exits end in `OverworldActionAborted`** — `CastRefused(CastRefusal)` for the
-   three `blocked_by` reasons, `CastNeverFinished` for the tick budget, `NoRoute` for a shore it
-   cannot reach. ⚠️ **The words moved into the reason rather than staying in a `TextBox` beside it**,
-   which is what `NothingAppeared` did for the grass pace: a box the agent writes says the cartridge
-   said it. `PokemonAgent::abort_overworld` and `player_at` are `pub(crate)` for this.
-3. **`Silent` fails the walk** (`Verdict::fails_the_walk`, `CoverageLog::failures`, and the
-   `WalkOutcome` field is `failures` now). The counts stay apart in `summary()`: a defect is a row
-   the agent could not carry out, a silence is one it carried out and never spoke about.
-
-**And the other two families the baseline warned about:**
-
-- **The `Grass` pair was one bug and it was not in the pacing arm.** `Route18:39,13:Grass` and
-  `Route24:5,18:Grass` are a trainer noticing the player mid-pace: the walk-up runs as
-  `GameMode::Script`, commits past the rollback deadline, and drops the state into
-  `AwaitingOverworldAction`. `PacingForEncounters` reports all three of its *own* exits, but the two
-  that take the state away from outside — `assert_script_state`'s commit and `assert_text_box_state`
-  — knew only about `OverworldMovement`. `AgentState::open_overworld_action` is now the one list of
-  states that carry a row and both doors read it.
-- **The three Seafoam warps are not silences.** Six `fuchsia` walks scored
-  `SeafoamIslandsB3F:21,17:Warp` and `SeafoamIslandsB4F:21,17:Warp` `Defect` every time, on
-  `DidNotArrive`, which the walk already fails on. The baseline's `Silent` for them was the variance
-  §6.2 describes, not a third family. They are step 2's ⚠️ and stay there.
-- **No `PushBoulder*` exemption is needed and the note claiming one is retired.** The row is a
-  `BoulderGoal` now and the *goal* completes: 52 of them across six sweeps of 2026-09-09, none
-  silent. The shove itself is still invisible; that is a different sentence and it is on
-  `AgentState::PushingBoulder`.
-
-**Done, measured 2026-09-09** on the eight regional walks in parallel (§6.1): **`silent {}` in every
-one of the eight**, against 41 on the baseline the same day. Defects are unchanged in shape at 103
-(SaffronGym 95, SilphCo1F 3, Seafoam 2, SafariZoneCenter 1, and two one-off "no route to <person>"
-on a moving NPC in a mart and a Pokémon Centre); union 151 maps and 1 381 ids, inside the variance
-§6.2 describes. `cargo test --release` green (1 579), the leg chain green (215),
-`full_playthrough` green.
-
-### Step 2 — The Safari Zone pond, and the two warps on the water ✅ done 2026-09-09
-
-**What was wrong, and it was two unrelated things on one map cluster.**
-
-**(a) Rows minted before the map is the map.** From the `fuchsia` start, the gate script takes the
-fee and auto-walks the player into `SafariZoneCenter`; on that tick `actions()` minted
-`SafariZoneCenter:Nugget` and the two warps on the far side of a pond Surf is refused on, and the
-walk aborted with *"there is no route"* on the next tick. The screenshot beside the dropped state is
-black.
-
-✅ **Taken, and the diagnosis in the paragraph above was half right.** It is the `position_settled`
-family, but the flag itself was *true*: `(4, 0)` — the gate's square — is in bounds for the Centre,
-so the clamp told no lie the bounds check could catch. What is stale is everything else.
-`WarpFound2` writes the destination into `wCurMap` and only then falls into `EnterMap` →
-`LoadMapData` → `LoadMapHeader`, so `read_current_map` spends that window taking its *metadata* from
-the ROM under the new `wCurMap` and its coordinates, sprite slots and dimensions from the WRAM of the
-old one. Measured: **26 agent ticks** on an ordinary warp and **94** at the Safari gate, against the
-1 000 ms a settled agent waits before it asks anything, which is why only a walk ever found it.
-
-1. `map_metadata::map_header_is_loaded` compares the ten bytes `LoadMapHeader` copies out of
-   `MapHeaderPointers[wCurMap]` against `wCurMapHeader`. ⚠️ **Minus `wCurMapTextPtr`**, which
-   `SetMapTextPointer` swaps and Viridian Mart's and Oak's Lab's scripts repoint and keep — comparing
-   all ten made every mart visit look like a transition, withheld the clerk, and failed three
-   default-tier tests. `CurrentMap::header_loaded` carries it into `MetaTileMap::position_settled`.
-2. **`actions()` answers with no rows at all while the position is a fiction.** Every row is a route
-   from where the player is standing. On the 255-underflow tick that was already the outcome (the BFS
-   from the far edge reaches nothing); on this one it was not.
-3. ⚰️ **Holding the agent's turn as well was tried and reverted.** Not polling the policy while the
-   header is stale is tidier — `blackout_in_flight` does exactly that one state over — but a
-   black-out is rare and this is every door in the game. Deferring the poll by the window re-rolled
-   `postgame::items`' wild encounter from a Pidgey to a Rattata, whose Tail Whip held the Defense
-   stage that leg asserts on at neutral. An empty menu is a case `llm::prompt` already answers
-   ("nothing — the agent can reach no action from here. `wait` and look again").
-
-**(b) The two warps the step said it was *not*.** `SeafoamIslandsB3F:21,17:Warp` and
-`SeafoamIslandsB4F:21,17:Warp` are water at the bottom edge of a current channel, and they gave up
-after 60 s standing on the square they were walking to.
-
-✅ **Taken.** `home/overworld.asm`'s `.noDirectionChange` tests `wWalkBikeSurfState` for `$02` before
-it looks at anything else. On foot, a collision while standing on a warp entry runs `ExtraWarpCheck`
-and then `CheckWarpsCollision` and the warp fires — that is how every map-edge ladder in the game is
-taken. Surfing, the branch goes to `CollisionCheckOnWater` and the next instruction is
-`jp c, OverworldLoop`; `CheckWarpsCollision` is not on that path. So a water entry only fires from
-`CheckWarpsNoCollision`, on a completed **step**, in the direction `IsPlayerFacingEdgeOfMap` accepts.
-Measured on the dropped state: 120 ticks of Down move nothing, Up-then-Down warps.
-
-⚠️ **The condition lives in two places and fixing one changed nothing.** `MetaTileMap::actions`
-builds `[opposite(dir), dir]` for a surfing player standing on the entry, and
-`AgentState::OverworldMovement` tests for a border warp **before** it consults the route and pressed
-the outward direction itself. Both carry it now.
-⚠️ The sibling `20,17` entry passed every sweep because the walk happened to arrive from above and
-the arrival fired it, which is the same fact from the other side.
-
-**Done, measured 2026-09-09:** the `fuchsia` walk at the full budget, **0 defects and 0 silences**
-across 558 ids on 63 maps. `cargo test --release` green (1 583), the leg chain green (219),
-`full_playthrough` green, `hall_of_fame` green. Tests:
-`mechanics::a_map_the_cartridge_has_not_finished_loading_offers_no_rows`,
-`mechanics::the_header_in_wram_says_which_map_has_actually_been_loaded`,
-`mechanics::a_warp_reached_by_surfing_is_entered_rather_than_leant_on`,
-`cinnabar::a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on` — the last off the
-walk's own dropped state, committed as `data/seafoam-b3f-on-the-water-warp.bin`, and it fails if
-either half of (b) is removed.
-
-### Step 3 — Saffron Gym's teleport pads ✅ done 2026-09-09
-
-**What was wrong.** 30 of the gym's 32 warps lead back into the same map. The route to one pad
-crosses others, stepping on one relocates the player, and the row is gone by the time the walk looks
-for it: 37 defects on `celadon` at the 60-minute budget, every one of them *"there is no route to the
-warp to SaffronGym"*, and **239 of the walk's 454 turns** in that one room.
-
-✅ **Taken, and the step's own account of it was wrong about where the fix goes.** The agent already
-treats a pad the way it treats a spinner — `bfs_from_player` records the edge from the square beside
-the pad to the pad's **landing**, so routes cross the maze for free. Three things were missing.
-
-1. ⭐ **The `settled` guard skipped the pad the player was standing on.** The neighbour loop dropped
-   a settled neighbour before it looked at what the neighbour *was*, and the search's own root is
-   settled at price 0 — so standing on a pad threw away the one edge out of the room. Every room in
-   that gym is entered by exactly one pad, so that is a ninth of the map: standing on `(1, 5)`, whose
-   landing is the centre room, the walk read back that there was no route to **Sabrina**, the Gym
-   Guide, or the door out. The intra-map arm is tested before the guard now.
-2. ⭐ **No intra-map warp row in the game had ever completed.** Every completion the agent had for a
-   `Warp` was the map changing, and a teleport pad does not change the map — so all thirty scored
-   `Defect` after sixty seconds of silence. `player_position == to_position` is exact rather than
-   approximate: a pad's landing is reached by that pad and by nothing else. The one hole, being
-   offered a pad whose landing is already underfoot, is closed where the row is minted.
-3. **Silph Co 1F was not the same family and the step's ⭐ was right to hedge.** `SilphCo1F:16,10` is
-   `warp_event 16, 10, SILPH_CO_3F, 7 ; inaccessible` — pokered's own comment. Plain floor, no warp
-   tile, nothing to press, and `warp_trigger` says `Impossible` correctly. The row survived only
-   because `actions()` kept a dud whenever no sibling on the map opened onto the same place, and it
-   cost sixty seconds every time any run reached that floor.
-
-   ⭐ **That guard was quietly load-bearing, and finding out what it was protecting is the useful
-   part.** A scan of all 248 maps found **7** `Impossible` warps, 4 of them the only way to their
-   target — and three of those four are **Pokémon Mansion 3F's floor holes**, the only way onto 1F's
-   right side and so to the Secret Key. They are `FACILITY $11`, which lives in
-   `data/tilesets/warp_pad_hole_tile_ids.asm`: the cartridge's *other* step-on table, read by
-   `IsPlayerStandingOnWarpPadOrHole` rather than by `IsPlayerStandingOnDoorTileOrWarpTile`. Naming
-   that table moved the holes to `StepOn`, left the guard with nothing to guard, and let the dud
-   rows go. ⚠️ `WarpTrigger::Unknown` is still never dropped — unsure is not the same as no.
-
-⚰️ **Pricing a pad by the square you step onto it from was written and taken out.** It reads better
-than what the BFS does, but no map needs it: all three that carry intra-map warps (`SaffronGym` 30,
-`SilphCo3F` 2, `SilphCo8F` 2) pair their pads one-to-one, so every pad is already in `dist` as some
-pad's landing. A second pricing path nothing can reach is a second pricing path nothing can test.
-
-**Done, measured 2026-09-09** on the three regions at the full budget, in parallel on an idle
-machine: **0 defects in the gym and 0 on Silph Co 1F in all three**, and Saffron Gym is **38 turns**
-in each — one per row, for a room with 30 pads, 9 people and a door — against 239 of 454 before.
-`celadon` 86 maps / 723 ids / 0 defects, `saffron` 49 / 373 / 0, `cerulean` 86 / 685 / 1 (below).
-The busiest map everywhere is now Route 16's gate, which is step 4. `cargo test --release` green
-(1 587), the leg chain green (223), `full_playthrough` green, `hall_of_fame` green. Tests:
-`saffron::every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot`,
-`saffron::a_teleport_pad_reports_arriving_even_though_the_map_never_changed`,
-`mechanics::an_impossible_warp_is_one_the_cartridge_really_will_not_open` (the whole-ROM list that
-replaced the guard), and `mechanics::every_committed_fixture_has_a_complete_sprite_table`.
-
-⚠️ **`cerulean`'s one remaining defect is not this step's and is on the record already.**
-`CeruleanMart:CooltrainerFemale: there is no route to Cooltrainer Female` — a shopper who wanders,
-so the row is minted with a route and the route is gone a tick later. Step 1 saw the same shape twice
-("two one-off *no route to <person>* on a moving NPC in a mart and a Pokémon Centre"); it appeared in
-one of the three regions this sweep and none of the last. It belongs to step 6's loop: a `NoRoute` to
-a **sprite that is still on the map** is a sprite that moved, not a row the agent could not carry out.
-
-### Step 4 — Route 16's gate, in the brain ✅ done 2026-09-09
-
-**What was wrong.** Route 16 has eight squares facing its gate's doors, so the pair of maps carries
-eight warp ids and every one works. Four walks spent 60% to 97.6% of their turns there, and the two
-worst were two of the three lowest map counts. The step's diagnosis was that `times` is per **id**
-while the thing being oscillated over is a **pair of maps**.
-
-⚠️ **That diagnosis was wrong, and counting by map alone proves it.** Counting exits by destination
-was written and measured: the eight doors did collapse into two options, the counters alternated
-exactly as intended — and the walk ping-ponged just as hard, because it has *nowhere else to go*.
-`lavender` finished with `Route16:7,5:Warp` and `Route16FlyHouse:2,7:Warp` chosen **1 593 times
-each**, on a menu of three rows.
-
-⭐ **What actually sealed it was a cut tree that regrows.** Route 16's east half is split in two by
-a tree, and the way out to Celadon City is on the far side of it. The walk cut it, crossed, and
-marked `Route16:34,10:CutTree` done — and cut trees grow back when a map reloads, which
-`PokemonAgent`'s `cut_tiles.clear()` says in as many words. Every return found the tree standing and
-the row "visited", so the only rows left were the gate and the Fly House.
-`Route16:40,10:Connection` — the way out, one tree away — ended the run **offered and never once
-chosen**. It is the Pokémon Mansion statue again, and the fallback written for *that* only fires when
-the menu has no exit at all; Route 16 has three, so it never fired.
-
-**Two changes, and both are in the brain's ordering** (`ExploringBrain::respond`):
-
-1. **Once nothing on the menu is unvisited, the least-taken row wins whatever kind it is** — not the
-   least-taken *exit*. ⚠️ A row that is not a way out is ranked below every exit that ties with it
-   (`promise` 3 against 0–2), which is what keeps this from being the promise-first ordering that
-   lost 20 maps twice: a re-takeable row is chosen only when it has been taken **strictly fewer**
-   times than every way out, which on a map passed through once is never. ⚠️ `Grass` and `Empty` are
-   excluded — those are a request for an *encounter*, and a second pace discovers nothing while
-   costing a 60 s budget; it is the same line `resume_after_battle` draws two arms down.
-2. **Exits are still counted per crossing** — `"{here}->{there}"` rather than per id. It is not what
-   fixed the gate, but it is right on its own terms (eight doors into one building are one decision)
-   and it costs nothing. ⚰️ Keyed by the destination **alone** it lost 22 maps: a global tally makes
-   a *hub* repellent, so a walk inside Celadon Mart found every door back out to the city already
-   "taken" a dozen times and cycled the building instead — 4 400 to 5 000 turns in five regions. An
-   option is a decision available *here*, so the key has to say where here is.
-
-**Done, measured 2026-09-09** — eight regional walks a side, in parallel on an idle machine:
-
-| | union maps | union ids | Route 16's gate |
-|---|---|---|---|
-| before | 159 | 1 410 | **23 099 of 26 870 turns (86%)** |
-| after | ⭐ **186** | ⭐ **1 752** | **not in any region's `busiest` line** |
-
-Per region the map counts went 30→38, 86→100, 58→**133**, 34→**133**, 86→120, 49→119, 71→71,
-41→**132**, and the turn counts collapsed with them (`lavender` 6 427→1 522, `saffron`
-6 219→1 020). Every `busiest` line is now an ordinary city or route at 30 to 100 turns. `cargo test
---release` green (1 587); nothing that ships is behind this — the whole change is in a test file.
-
-⭐ **And the reach it bought found the next thing, which is a cheat rather than a walk.** Hunting the
-Bicycle down as a suspect turned up `Cheats::bag_was_full`, a counter whose own comment calls it "a
-coverage gap worth printing" and which **nothing had ever printed**. The walk's summary now carries a
-`cheats` line, and it says that **every one of the eight starts arrives with a full bag** — twenty
-kinds is Gen 1's limit — and refuses between one and nine key items:
-
-    ⚠️ the bag was full and refused 8: OldRod, GoodRod, SuperRod, SilphScope, LiftKey, SSTicket,
-    CoinCase, GoldTeeth
-
-That is most of the list of maps no walk had ever entered (now §2.1's): no S.S. Ticket is the whole of the S.S.
-Anne's nine rooms, no Lift Key is Rocket Hideout's four floors, no Coin Case is the prize room, no
-rods are every `Fish` row on the map. The Bicycle fits in all eight, so Cycling Road was never the
-blocker. **Making room in the bag is step 6's cheapest tool by a distance** and is now the first
-thing to try there.
-
-### Step 5 — Print the maps never entered ✅ done 2026-09-09
-
-The sweep printed a union and nothing about its complement, and the complement is the only thing
-left to act on: from a count, a gate doing its job and a walk that never arrived look identical.
-`Map::iter()` minus the union was being assembled by hand with a shell diff, which is exactly the
-sort of arithmetic that gets done once and then quoted for a week after it stopped being true —
-the list this file carried was.
-
-✅ **Taken.** `unreached_report` prints it from the multi-region summary, sorted and wrapped six to a
-line so a *cluster* is visible — the S.S. Anne's nine rooms, Rocket Hideout's four floors — which a
-column of sixty names hides. ⚠️ It counts the ROM's `UnusedMap*` padding and the two link-cable
-rooms and then sets them aside: 24 of the 62 that look missing are neither.
-
-**Done:** `GB_COVERAGE_START=all` prints `unreached` under `union`, and §2.1 carries the list from the
-latest sweep. **Cost:** small, as billed.
-
-### Step 6 — The loop, until the fixpoint ✅ done 2026-09-10
-
-Everything above is one pass. The goal is a fixpoint, and this is the loop. ⭐ **It reached one on
-turn 2**: two consecutive sweeps of ten regions, zero defects and zero silences in all twenty walks,
-and a union that did not grow — 215 maps of 248 and 2 114 ids, with five real maps left and a line
-each in §2.1 saying why. Turns 1 and 2 are below, and the loop stays written down because the
-condition is a measurement rather than a promise: a change to routing or to the agent puts the tier
-back where turn 1 started, and this is how it is checked.
-
-#### Turn 1 — 2026-09-10 ✅ taken
-
-⭐ **The bag, and it was worth more than steps 1 to 5 put together.** `Cheats::apply` now calls
-`debug_keep_only_items(&COVERAGE_KEY_ITEMS)` before it hands anything over: the five HMs teach
-nothing when the party is written straight into the struct, and a walk never uses a TM, a Revive, a
-fossil or a stat item — so the junk goes, all fourteen key items fit in every start, and six slots
-are left free, which matters because **a walk with no free slot cannot pick an item up off the
-floor**. `cheats::every_coverage_start_can_be_handed_all_of_the_key_items` pins it in the default
-tier and the walk's `cheats` line prints what went.
-
-What one line bought, per start, 2026-09-09 against 2026-09-10 on the same recipe:
-
-| | phase0 | cerulean | vermilion | lavender | celadon | saffron | fuchsia | cinnabar |
-|---|---|---|---|---|---|---|---|---|
-| before | 38 | 119 | 133 | 133 | 132 | 129 | **163** | 41 |
-| after | **143** | 124 | 132 | 130 | 120 | 122 | 147 | 41 |
-
-⚠️ **Read the union rather than the row.** Per-start counts move by ±15 between sweeps of the same
-tree (§6.2), and `fuchsia`'s 163 was one long walk that happened not to win the game. What the turn
-actually did is in the **union: 185 maps → 201, and 38 real maps unreached → 23**. ⚠️ **The bag and
-the ninth start take different halves of that credit**: the bag is the Rocket Hideout's four floors,
-the Game Corner's prize room and every `Fish` row in the game; `ssanne` is Pokémon Mansion's four,
-Cinnabar's buildings, Pallet Town's interiors and Viridian Mart (see §2.1 — it earned those by *not*
-having won the game, which is not what it was added for).
-
-**Six defects and five silences closed with it**, each in the agent and each with a test — see §7.1
-for the row and the cause. In order of what they cost: a boulder goal that reissued one refused
-shove **230 times** and ate two thirds of `cinnabar`'s budget; the Silph Co elevator's door, which
-cannot be leaned on because the player *warped* onto it; Seafoam B4F's two staircases, which the
-cartridge's own script cancels and which are now withheld rather than tried; Vermilion Gym's
-double doors, which the static ROM blocks say are open and the cartridge draws shut; a `NoRoute`
-said about a corridor three wandering pets were standing in; a walk eaten by a wild Pokémon while
-the party menu was open to mount Surf; and the four the same mount ate by *finishing* the walk and
-not saying so.
-
-⚠️ **Three of the six are the same shape, and it is worth naming**: a rule the cartridge enforces
-live — a flag on `wMovementFlags`, a script that undoes a warp, a block it redraws — that **no tile
-in the static map can express**. `MetaTileMap` is a transcription of the ROM, so every one of them
-looked like a pathfinder fault and none was, and each cost 60 s of game time per attempt. When a
-sweep reports `DidNotArrive` while standing exactly where it wanted to be, that family is the first
-thing to check.
-
-**A ninth start**, `ssanne`, added for a cluster no finished game can reach and earning its keep for
-a different reason — §2.1 has both halves.
-
-**Where it left the tier:** `cargo test --release` green (1 591), the leg chain green (229),
-`full_playthrough` green, `hall_of_fame` green. ⚠️ **`hall_of_fame` is not optional for this turn**,
-whatever §3's "where the scripted route walks there" might suggest at a glance: the elevator rule
-lands on `PolicyStep::UseElevator`, the silent-shove bound lands on both Victory Road boulder
-puzzles, and the mount-arrival report lands on the Seafoam legs — three of the four fixes are on the
-scripted route's own path, and the Vermilion Gym block map is a fourth. **Two sweeps were taken**:
-the first came back with one defect and four silences, the second — after the last two fixes — with
-**zero silences in all nine regions and one defect, which was then closed**. §2.1 is the second one,
-and turn 2 is the sweep that has to agree with it.
-
-#### Turn 2 — 2026-09-10 ✅ taken
-
-⭐ **The sweep came back with zero silences again and three defects, and all three were the same
-sentence the cartridge had been saying all along: somebody is standing there.** Turn 1 named that
-family — "a rule the cartridge enforces live that no tile in the static map can express" — and
-guessed it would show up as flags and scripts. It showed up as *people*. `MetaTileMap` is a
-transcription of the ROM with the sprite table painted on top, and every one of the three was a place
-where the paint had been applied wrongly, thrown away, or read once and cached:
-
-- **`CeruleanMart:3,7:Warp`, a defect in three regions at once.** A warp beat a sprite in
-  `meta_tiles`, so a shopper standing on a doormat left the door showing underneath her; the walk
-  routed through a person and held Down for 60 s. It then left through `4,7`, the other half of the
-  same two-tile mat, on its very next turn.
-- **`CeladonChiefHouse`, twice.** Two corridors one tile wide with a Rocket in one and the Chief in
-  the other. `MAX_ROUTE_LOST_TICKS` waits 5 s for a lost row, which outlasts one wanderer and not
-  two; the walk said there was no route out of a room it walked out of one turn later.
-- **`Route11:13,6:Grass`**, the `PacingForEncounters` stall §2.1 predicted would close on the next
-  sweep that dropped a state for it. A Youngster stepped onto the far half of a pacing pair that had
-  been chosen while it was empty, and bumping is not a step.
-
-§7.1 has the row and the test for each. ⭐ **The fix for the second one is a question rather than a
-bigger number**, and that is the part worth keeping: past 5 s the agent asks
-`row_blocked_by_people` — put everybody but the row's own subject back on the floor `underfoot` says
-is beneath them, and does the row come back? — and only a `yes` buys 30 s. A warp pokered labels
-`; inaccessible` still says so at five seconds, because it is on the other branch. ⚠️ **Boulders are
-sprites and are excluded**: a rock will still be there in thirty seconds, and waiting for one would
-spend half a minute of a walk's budget.
-
-⚠️ **And one of the three could not be reproduced from its own dropped state**, which is §6.2's
-"which id fails is not reproducible by re-running" reaching a layer deeper than it ever had to
-before. Restoring a save re-rolls how the NPCs wander, so `CeladonChiefHouse`'s five-second jam
-clears in well under one on a replay; what the state *does* carry, exactly as the walk met it, is a
-room where the row is missing and the reason is two people. So the test pins the predicate in both
-directions rather than the bound, and says so.
-
-**Then the three unreached clusters step 6's loop had queued, all closed:**
-
-- ⭐ **Cerulean Cave, and it was one line in `actions()`.** The menu emitted the nearest crossing per
-  adjacent map of *either* kind, so wherever a land bridge and a surfable edge lead to the same
-  neighbour the bridge always won — and Route 24's footbridge is two steps from the river seam that
-  is the **only** way into the half of Cerulean the cave door is on. One row per kind now.
-  `MetaTileMap::water_connection_action` had said this in its own doc comment since the day it was
-  written; what it lacked was a caller in the menu. Three floors, and the ROM cross-check had printed
-  the cause on every sweep in this plan's history.
-- ⭐ **The Bicycle, which was never really about two maps.** `use_field_move`'s `use_item` required a
-  `target` tile and a bike has none, so `FieldMove::UseBagItem` and the whole of `UseTarget::Nothing`
-  had a driver, a refusal table, an `IsBikeRidingAllowed` decode and a test that rides one — and no
-  way in from any LLM turn at all. Route 17 and `Route16Gate2F` are what the sweep could see; what
-  went with them was every out-of-battle use of a Potion, a vitamin, a Repel and the Itemfinder.
-  `target` is optional now and a `slot` rides along for the party items, at +189 bytes of catalogue.
-  ⚠️ `UseTarget::Move` is still unreachable on purpose — it would want a `move_index` on the schema
-  and nothing in the game is gated behind an Ether.
-- **A tenth start, `ssanneship`, standing on `SSAnne1F`**, cut by `vermilion::regen_on_the_ss_anne_fixture`
-  from the same `at-vermilion.bin` its sibling uses. ⚠️ **Both are kept and the pair is not a
-  duplicate**: `ssanne` reaches the ship only if a frontier walk out of Vermilion happens to turn
-  south, which it did not on its first attempt and did on its second — and it separately earns its
-  place as the only start that has *not* beaten the Elite Four, which is what puts Pokémon Mansion,
-  Cinnabar's buildings, Pallet Town's interiors and Viridian Mart in the union. One start removes the
-  coin flip; the other is about the south-west and has nothing to do with the ship.
-
-**And then a fourth sweep found one silence, which is what a re-sweep is for.**
-`Route12:0,63:Connection` — a walk that surfed south out of Route 12, crossed into Route 11, and had
-the mount its follower tried on the far side refused: `Surfing` **with a `resume`** is one of the
-three states that carry an open overworld action, and the refusal arm dropped straight to `Idle`
-with the row still open. The arrival rule is a shared helper now and a refusal on the same map is
-`Textbox`, which is exactly what happened. ⚠️ **It is the one fix this turn with no test of its
-own** — the refusal needs the cartridge's own terrain check reached from inside the party menu, and
-the tile-reader disagreement that produces one is by definition a tile nothing can look up. §7.1
-says so in the row.
-
-**Where it left the tier:** `cargo test --release` green (1 596), the leg chain green (233),
-`full_playthrough` green, `hall_of_fame` green — all four re-run after the last fix. ⚠️
-**`hall_of_fame` is not optional here either**: the sprite-over-warp flip is a routing change on
-every map in the game, and the pacing re-pick lands on the ~840 wild battles the scripted grind is
-made of.
-
-**Where it left the sweep:** the two clean sweeps in §2.1, which are the ones the loop's stopping
-rule is about. **Four sweeps were taken in all** — one to find the three defects, one to confirm them
-closed (which found the silence), and then the pair.
-
-#### The loop
-
-1. Sweep (§6.1). Nothing else building.
-2. Every `defect` and every `silent` is fixed in the agent, or argued into `Blocked` with a comment
-   on the code and a line in [pokemon-agent](pokemon-agent.md). Every fix is behind the gates in §3.
-   ⭐ **Argue it from the dropped state and from `probe_button_at_state`, never from the sentence the
-   agent printed** — every warp finding so far was misdiagnosed the other way round (§7.2's 8 and 13).
-   A silence drops no state, so its evidence is the walk's own log: `grep` the id and read the events
-   either side of it, which is how all four of §2.1's were traced to one arm in half an hour.
-3. For the maps the sweep did not enter, take the cheapest tool that reaches them, in this order:
-   - **Another start.** ⚠️ **And "finished game" is the *usual* rule rather than the whole one now.**
-     A finished save has every gate open, which is why eight of the nine are one — but it has also
-     sailed the S.S. Anne, and it wins the game rather than exploring. `Start::before_the_credits`
-     is the admitted exception and carries the argument; `ssanne` is worth 17 maps for the second
-     reason and nothing yet for the first, because a frontier walk out of Vermilion goes north. **A
-     start inside `SSAnne1F` is the next thing to cut** (`vermilion::can_clear_ss_anne` walks the
-     ship, so the route exists and `--features regen-fixtures` is all it needs).
-   - **The Bicycle** — ✅ **the tool half was done on turn 2**: `use_item`'s `target` is optional,
-     `UseTarget::Nothing` is reachable, and a `slot` carries the party items. ⚠️ **It did not move
-     the two maps and was never going to**: the walk chooses `actions()` rows, and there is no row
-     that means "ride the Bicycle". Route 17 needs a `MetaTile`, not a tool.
-   - **Fly.** The god party carries it, `use_field_move` takes a destination, and the brain already
-     issues non-menu field moves for the PC. Outdoors only (`Map::is_overworld`); a complement to
-     the frontier, not a replacement.
-   - **Connection ids that move with the player.** A `Connection` row's coordinate is the nearest
-     crossing and re-picks as the player moves, so Viridian carries 6 ids for 3 neighbours. The
-     answer is to carry the `MetaTile` on the log entry rather than to drop the number.
-   - **Whatever the ROM cross-check prints as *"on the grid, no sibling, and never a row"***, which
-     is the one part of a sweep's output that names a missing row rather than a missing map. It is
-     printed and never asserted on purpose (§5.3), so it has to be read. ✅ Turn 2 closed the entry
-     it named all through turn 1 — `CeruleanCity (5, 12) → CeruleanCave1F`, which was Cerulean Cave
-     1F and 2F, both reached now. ⭐ **What it names today is the floor below**: `CeruleanCave1F
-     (0, 6) → B1F`, `1F (3, 11) → 2F` and `2F (1, 3) → 1F` are all "never a row", so the whole
-     ladder chain is unmintable — see §2.1. Mt Moon B1F's entry-dependent regions are the other
-     standing entry.
-4. Re-sweep. Stop when two sweeps taken the same way agree: **zero defects, zero silent, and a
-   union that has not grown.** That is §5.1's original termination condition — a full pass that
-   discovers no id not already seen — measured as the only thing that can be measured.
-
-**Done:** ✅ **met on 2026-09-10, on turn 2.** Two consecutive clean sweeps whose union did not
-grow — 215 maps of 248 and 2 114 ids — written into §2.1 with a line each for the five real maps
-still out. **Cost, for the record rather than as a forecast:** two turns, four sweeps, nine defects
-and six silences.
-
-### Step 7 — The battle refusals ✅ done 2026-09-10
-
-A walk scores overworld ids only; nothing above touches a battle decision. **Seven** cells existed
-nowhere in the suite — the audit's summary said six and its table listed seven — and every one is a
-refusal, which is where the findings in a battle were always going to be: a ball that fails, a run
-that fails, a run the cartridge will not allow, a ball thrown at a trainer, an item the bag has run
-out of, the Safari game ending mid-battle, and the old man's tutorial (`wBattleType == 1`, which
-`read_battle_state` reads as `Wild`).
-
-**Done:** ✅ all seven, as `integration_tests/battle_refusals.rs` — one test each through `LlmPolicy`,
-the worker, a real socket and the real agent, **all of it default tier**, because every cell starts
-*inside* the battle it is about from a committed mid-battle save. Four of the five fixtures are
-`soak` jam states read a second time (`stall-battle-key-item.bin` is a wild Oddish with five Poké
-Balls, `stall-battle-key-item-trainer.bin` a Bug Catcher's Weedle with eight Great Balls,
-`stall-safari-menu.bin` a Safari Rhyhorn) and the fifth is `postgame-sold.bin`, which stands in
-Viridian City with the old man awake. **Cost:** one afternoon, and it found three defects.
-
-⭐ **The one that was worth the whole step: the outcome of a bag item used in a battle was never
-reported.** `BattleState::UsingItem` walks six menus deep on its own two-tick cadence, and its
-fallback arm advanced the game's own text with a bare `press_button(A)` — so every word
-`ItemUseBall` prints was dismissed unread. A model that threw a Poké Ball at a full-health Oddish
-was told *"Enemy ODDISH used ABSORB!"* and nothing else: no way to tell a failed catch from a lost
-turn, on the one action in the game a player repeats until it works. A trainer blocking a Great Ball
-charged for the ball and said nothing at all. Fixed by separating the reader's *read* from its
-*press* (`PokemonTextReader::accumulate`) so the driver keeps its own cadence unchanged — the change
-is timing-neutral by construction, which matters because `full_playthrough` is a golden RNG replay —
-and by carrying the reader **out** of `UsingItem` into whatever replaces it, including the refusal
-net, so the existing emit in `WaitingForMenu` reports it beside the enemy's reply.
-
-⛔ **The second is a sentence, and it is the family this repo keeps finding.** `not_on_the_menu`'s
-"that id is for another map" clause fired on *every* battle refusal, because `fight:Peck` and
-`item:PokeBall` split on a colon too: the commonest refusal there is in a battle — an item the bag
-has just run out of — was answered with *"That id is for `item` and you are in `fight`; ids are
-minted for the map you are standing on"*. Three false statements about maps, to a model standing in
-a fight. The clause is guarded on the name being a real `Map` now.
-
-◐ **The third is the other half of the same sentence.** A refused battle id was told it was not
-offered and never *why*, and the turn's own `### On screen` line reads `FIGHT Pokémon ITEM RUN`. The
-system prompt forbids the model from filling that gap out of what it knows about Pokémon Red, so
-`tools::battle_rule_behind` now adds the cartridge's rule where the menu can settle which one it is
-— there is no running from a trainer battle, and a bag row goes the moment the last of an item is
-used. The *sandbox* has said the first of those since `battle.run` existed; the model answering by
-hand was the half that got nothing.
-
-⚠️ **Two cells need a `debug_` write to make the outcome a fact rather than a roll, and Gen 1 allows
-no better.** `debug_set_catch_rate(0)` fails a throw unless `Rand1` is itself 0 — about **one throw
-in 720** catches anyway — and `debug_set_battle_speeds(1, 255)` fails a first escape unless
-`BattleRandom` returns 0, **one attempt in 256**, which is the cartridge making sure a player is
-never trapped. Both residues are named on the primitive and in the test that carries it. The only
-truly deterministic uncatchable is the ghost Marowak on Pokémon Tower 6F once the Scope makes it
-fightable, and it costs a mid-battle cut of a scripted fight to reach.
-
-⚠️ **The cell the audit asked for does not exist.** "The Safari step counter running out mid-battle"
-cannot happen: `SafariZoneCheckSteps` is called from the overworld's step block *above* the
-`wIsInBattle` test and warps the player out on the very step that exhausts it, before the encounter
-roll that step would otherwise make. What does end a Safari game from inside a fight is the
-**balls** — `ItemUseBall` decrements `wNumSafariBalls` and `SafariZoneCheck` ends the game the moment
-the overworld loop sees zero — so that is the cell that was written, and it is the only one in the
-file that takes the map out from under the model mid-battle.
-
-⚠️ **And the old man's tutorial is answered by a row rather than by a test of the battle**, because
-the agent cannot reach it. `ViridianCityOldManText` asks "Are you in a hurry?" and starts the
-tutorial on **NO**; the agent answers every yes/no box in the game with A, which is YES, so the old
-man says "Time is money... Go along then." and no battle happens. That is what the test pins. ⚠️ **A
-change that lets the agent answer NO re-opens the cell**: `wBattleType == 1` is a battle whose menu
-`DisplayBattleMenu` does not read the joypad for at all, `read_battle_state` reports it as
-`BattleType::Wild`, and the model would be asked a question its answer could not affect — the shape
-`battle::LOST_BATTLE` already has an arm for.
-
-⭐ **And an eighth test, for a cell the audit had ticked.** The fix above un-silenced *every*
-refusal `ItemUseNotTime` prints, so `a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_
-going_quiet` pins it: `stalls::a_key_item_used_in_battle_does_not_trap_the_bag` was cut from this
-very fixture and only ever asked whether the agent *escaped* the bag list, never whether the model
-was told why its action did nothing. It was not. Worth its own test because every bag in the game
-holds something the cartridge declines, and eleven of `soak`'s thirteen starts wedged on this one.
-
-**What is still only proved under `DeterministicPolicy`** is §5's long tail: sixteen of the audit's
-twenty-three cells, one of them promoted above. Nothing else here changes that, and none of it is on
-the path to this plan's goal.
-
-### Step 8 — Branch-point snapshots ✅ done 2026-09-10
-
-Content that is exclusive per save: the starter (3), the fossil (2), Hitmonlee or Hitmonchan (2),
-the Bike Voucher against buying (2), and each in-game trade. One save state before the branch, N
-tests after it, cut under `--features regen-fixtures`. Exploration is destructive and mostly
-one-shot, so a branch costs a resume rather than a replay.
-
-⚠️ This is the one place an event-flag write might be argued for, and none is admitted yet. Argue
-the specific flag on the specific branch. ✅ **None was needed, and none was written.** Every
-snapshot below is a state the leg chain plays to and then stops one decision short of, so the story
-ran for all of it.
-
-⭐ **And it had a first customer that is not a branch at all.** ✅ Closed on step 6's turn 2: the
-S.S. Anne needed a save cut *before* `EVENT_SS_ANNE_LEFT`, `vermilion::regen_on_the_ss_anne_fixture`
-cuts it from `at-vermilion.bin`, and `ssanneship` has been a coverage start since — worth two
-guaranteed maps rather than eleven (§2.1), but the machinery is the machinery.
-
-**Done:** ✅ **`integration_tests/branch_points.rs`** — **twelve arms over four new snapshots**, all of
-it **default tier** (under three seconds for the whole file, because every arm starts one decision from its branch)
-and all of it on `LlmRun`: a real socket, the real worker, the real `LlmPolicy`, the real agent, with
-only the model standing in. Two more tests live where their subject does — the nine-trade sweep in
-`postgame::trades` and the Day Care in `postgame::gifts`, both `slow-tests`, because both are walks
-rather than branches. The arms are driven by `godmode`'s parked `Intent` /
-`ScriptedBrain` against the **rendered menu**, which is what makes each a claim about what a model is
-offered rather than about what the agent can do — and is the first customer that machinery has had
-outside the god run §5 parks.
-
-| Branch | Snapshot | Arms |
-|---|---|---|
-| the starter | `branch-oaks-lab.bin` — Oak's speech over, three balls on the table | Bulbasaur / Charmander / Squirtle, each checked against **the rival's** counter-starter |
-| the fossil | `branch-mt-moon-fossils.bin` — B2F, both fossils down, the Super Nerd still there | Dome / Helix, each checked against the other **vanishing** |
-| the dojo prize | `branch-dojo-prize.bin` — Karate Master beaten, both balls, one party slot free | Hitmonlee / Hitmonchan, each then going back for the other |
-| the Bicycle | `branch-bike-shop.bin` — inside the shop, voucher in the bag | with the voucher (a gift) / without it (a shop at ¥1,000,000) |
-| an in-game trade | the same bike-shop snapshot, one warp from `CeruleanTradeHouse` | give-species leading / benched at slot 3 / not held at all — and all **nine** trades in `postgame::trades` |
-
-**What it found.** ⛔ **One defect, and it is the trades.** The four *branches* needed nothing — three
-of them were already two or three rows in one menu, told apart by name, and the fourth's second arm
-is a text box the cartridge settles by itself — but the fifth item on step 8's list turned out to be
-broken on the deployed path, and closing it is most of what this step cost:
-
-- ⛔ **An in-game trade handed over whatever the party-menu cursor was left on, and nothing asked the
-  model which.** ✅ **Fixed** (`PokemonAgent::party_menu`). `InGameTrade_DoTrade` calls
-  `DisplayPartyMenu` **without resetting `wCurrentMenuItem`** — the same missing instruction
-  `postgame::gifts::tick` exists for — so the agent's ordinary A-mash offered the trader an arbitrary
-  party member. Measured: the give-species in slot 0 traded, the same Pokémon one slot back traded
-  nothing at all and was answered *"Hmmm? This isn't POLIWHIRL."*
-  ⭐ **No policy callback, and that is the argument rather than a shortcut.** The cartridge compares
-  the selected species against `wInGameTradeGiveMonSpecies` and refuses anything else, so the menu
-  has exactly **one legal row** and the game itself is what says which — asking a model to choose
-  from a list of one buys nothing and costs a round trip, and what a model *does* decide (whether to
-  talk to the trader) has always been an ordinary menu row. Detection is the NPC:
-  `trades::trade_at(map, name)`, because the trade's own bytes are written once and then persist for
-  the rest of the run. ⚠️ The **Day Care** and the **Name Rater** open the same menu with no right
-  answer, so they are declined; see below.
-- ⛔ **And underneath it, a party menu a conversation opened was confirmed or bounced by *timing*.**
-  ✅ Fixed by the same driver. With it removed, the identical menu in the identical agent state was
-  **confirmed** at the Cerulean trader and **bounced** at the Day Care ("All right then, come
-  again.") — because the hand-over rule that catches a stray menu only looks in a window after a box
-  opens, and whether a conversation reaches its party list inside that window depends on how long
-  the conversation took. Boarding a Pokémon at the Day Care is irreversible and can cost a run its
-  only Cut or Surf carrier, so a coin flip is the wrong shape whichever way it lands. Answered on the
-  tick the menu appears now, with the hand-over rule's own sentence.
-- ⚠️ **The dojo's second ball stays a row, and the menu is right to keep offering it.** The first
-  draft of that test asserted the other ball disappeared, as Mt Moon's fossil does, and was wrong
-  about the cartridge: `FightingDojoHitmonchanPokeBallText` `HideObject`s only the ball that was
-  *taken*. The other object stands there and answers *"Better not get greedy..."*, which is a
-  refusal rather than a gift — so what the arms assert is that the model is **told**, which is the
-  family every deployed-run defect in this repo has belonged to.
-- ⚠️ **The bike shop without a voucher is not a mart.** `BikeShopClerkText`'s `.dontHaveVoucher`
-  branch is a hand-rolled `TextBoxBorder` + `HandleMenuInput` list, not `DisplayPokemartDialogue`,
-  so the agent never enters `PokemartShopping` and there is no `buy_item` turn: it reads as one long
-  text box ending in *"Sorry! You can't afford it!"*. ⭐ **And the A-mash inside it costs nothing on
-  any save**, because ¥1,000,000 is above Gen 1's money cap of ¥999,999 — this shop can never sell
-  to anybody, so the only decision in it has one outcome.
-- ⚠️ **The first rival battle is a coordinate trigger on the lab door.** Not a wait and not a talk:
-  `OaksLabScript` hands Gary the counter-starter and stops, and talking to him answers *"GARY: My
-  POKéMON looks a lot stronger."* This is Red, not Yellow. Two versions of the starter arm spent an
-  hour of game time each watching him hold a Charmander before the arm was written as *walk for the
-  door*, which is an ordinary menu row.
-
-⚠️ **A default-tier `LlmRun` test has two deadlines, and step 7's file was short on both.** Found
-while validating this step by running the tier twelve times back to back: one run lost two of
-`battle_refusals`' eight at once, one on the 30 s wall-clock `PATIENCE` and one on the 180 s
-*emulated* budget — which is a panic from `step_coarse` rather than the readable assertion the test
-was built around. Both are now minutes clear (120 s and 15 game-minutes), and both are deadlines, so
-a passing run spends neither. ⚠️ **A single green run proves nothing about this class**;
-[test-suite](test-suite.md) carries the rule.
-
-⚠️ **A Pokédex bit and a party count are never true on the same tick**, which cost an afternoon of
-looking for a flake in the wrong place. `_AddPartyMon` increments `wPartyCount` first and sets
-`wPokedexOwned` about eighty lines later (`engine/pokemon/add_mon.asm`), so a wait for the party
-followed by an assertion about the dex fails whenever the poll lands between them — roughly **one
-default-tier run in five**, on a different test each time, which reads as load or as an `LlmRun`
-race and is neither. `branch_points::assert_owned` waits for each separately;
-[test-suite](test-suite.md) carries the rule.
-
-⚠️ **A snapshot cut inside a trainer's line of sight restores into a battle**, which is a rule about
-cutting fixtures rather than about branches, and cost two re-cuts of the Mt Moon one. A trainer walks
-up to the player on the map's own tick rather than on a step, so the arm's first turn came back
-`choose_battle_action` instead of the menu the branch lives in. Mt Moon B2F's landing is inside
-`ROCKET1`'s: the cutter walks past him and fights him before it saves.
-
-⭐ **All nine in-game trades are covered now**, which the first pass of this step had left at five.
-`postgame::trades::every_in_game_trade_can_be_made_by_talking_to_the_trader` walks each of the nine
-from its own copy of `postgame-fly-bike.bin` — the last snapshot with every trade unspent — with the
-give-species seeded at party slot **3**, and it ends in a plain `Interact` rather than a
-`PolicyStep::PartyScript`, so what answers the menu is the agent and not a `DeterministicPolicy`-only
-driver. 14 minutes of game time, ~10 s of wall clock, `slow-tests`. It needed three routes
-`to_trade_npc` did not have: `CeruleanTradeHouse`, and the two trades that live on a **gate's upper
-floor** (`Route11Gate2F`, `Route18Gate2F`), which are two warps deep rather than one.
-
-⚠️ **The give-species are seeded by the driver** ([`debug_set_party`]) and there is no honest
-alternative: a Nidorino, a Slowbro, a Poliwhirl and a Raichu are none of them catchable as themselves
-anywhere these fixtures have been, so *playing* them costs an evolution grind and a Thunder Stone
-apiece and proves nothing about a trade. That is §3's line, and the same seam `battle_refusals` uses
-for a catch rate.
-
-[`debug_set_party`]: ../src/pokemon/postgame/debug.rs
-
-**Cost:** one day. The branch half was cheap — every snapshot cuts from a fixture the leg chain
-already produces — and the trades were most of it.
-
-### Step 9 — Decide the soak tier on evidence
-
-Halve `soak::SOAK_GAME_TIME` now (it is one constant, still 40 minutes) rather than cutting states.
-After two clean sweeps from step 6, compare what the soak found in the same period that the walk
-did not. Its only remaining value is state-space randomness — a jam that needs a particular action
-in a particular state — so if that column is empty, drop it.
-
-**Done:** the constant halved now; a row in this file with the comparison and the decision, later.
+**Two, and they are what is left of this plan.** Steps **0 to 8** of the 2026-09-09 draft are taken
+and their arguments live in §7 and in the code comments they point at; §7.4 is the one-line-each
+record, kept because several code comments still name them by number. Step 9 was never taken and is
+folded into step 2 below.
+
+Each step below says what "done" is as something a fresh agent can check by running one command.
+⚠️ **§3's rules hold for both**, and the two that bite hardest here are *fix the driver, not the
+walk* and *argue a defect from the dropped save state, never from the sentence the agent printed*.
+
+---
+
+### Step 1 — Nothing unreached, and nothing unexplained
+
+**The goal in one sentence: one sweep in which every real map is entered, every action offered is
+either taken or explained, and the cross-check that says so is an assertion rather than a
+paragraph.** Today the sweep is clean on the two things it asserts (defects, silences) and quiet on
+everything it merely prints, which is where all six items below were hiding. §2.1 is the evidence for
+each; none of this is speculative.
+
+**1.1 ⛔ Fix the boulder defect.** `VictoryRoad3F:3,5:PushBoulderOntoSwitch` gave up after 34 pushes,
+five times, on the `fuchsia` walk. The state is committed: `src/pokemon/data/vr3f-boulder-given-up.bin`.
+Neither existing bound catches it — `MAX_PUSHES_WITHOUT_PROGRESS` counts off a boulder that *moved*
+and `MAX_SILENT_SHOVES` off one the cartridge refused, and this solver is moving a boulder that is
+not getting closer. ⚠️ Start from the state, not from the sentence. **Done:** a default-tier test
+off that fixture, and the row `completed` on a sweep.
+
+**1.2 Make `unreached_report` honest.** It sets aside `UnusedMap*` and the two link-cable rooms but
+not the four `*Copy` duplicates, which no warp targets, so every map count this file has ever printed
+was four too pessimistic. **Done:** the report's "real maps" number is 224, and the four are counted
+in their own bucket with the reason.
+
+**1.3 ⭐ Stop three walks spending half their budget on the credits.** `phase0`, `fuchsia` and
+`cinnabar` all `settled` by winning the game at 40-60% of budget and then stopped, which is where
+twelve of §2.1's twenty-five missing maps went. ⚠️ **§3's rule is that a terminus is *reported*,
+never made unreachable** — that rule came from filtering the Hall of Fame out of the menu and leaving
+the walk at the title screen for 20 000 turns, and it is not this. Report it and then carry on from
+the checkpoint the run took before the ceremony, so the remaining budget is spent walking. **Done:**
+no walk reports `settled` with more than 20% of its budget unspent.
+
+**1.4 Close the maps that are genuinely shut.** Three tools for three groups, and §2.1 says which is
+which: the **Cerulean Cave ladder chain** (a routing fault, cause already written down in
+`probe_route_to_cerulean_cave` — all three rungs are unmintable because of the Cavern tileset's
+`TilePairCollisions`); **Route 17 and `Route16Gate2F`** (there is no row meaning *ride the Bicycle*,
+so it is a `MetaTile` rather than a tool — `use_item`'s target was made optional on step 6 and that
+correctly did not move these two); and the **two Safari rest houses** plus the
+`CeladonMansion3F (6, 1)` warp that ten walks in ten called *"on the grid, no sibling, and never a
+row"*. ⚠️ Take the last one to `probe_button_at_state` before believing the ROM about it.
+**Done:** the union is 224 of 224.
+
+**1.5 ⭐ Widen the cross-check to every action kind, then assert it.** `rom_cross_check` compares the
+ROM's tables against what was offered for **warps, objects and connections** and for nothing else —
+so `Fish`, `Grass`, `CutTree`, `PushBoulder*`, `Switch`, `Pc`, `Water` and `ConnectionWater` have no
+"was this ever offered anywhere" check at all. Fishing was **35 of the 41** silences at the 2026-09-09
+baseline, so this is not a hypothetical gap. Every kind is enumerable: `MetaTile::id_kind` is the
+list. **Done:** the report covers every kind `id_kind` can return, and it **fails the tier** rather
+than printing, with an allow-list of things argued to be expected (a toggleable item ball already in
+the bag, a boulder that is offered as a goal instead).
+
+**1.6 Drive `unreached` to zero or to a reason.** 2 124 ids were offered and never chosen against
+6 984 completed, and no number in this file has ever tracked that ratio. It is the literal reading of
+this plan's goal sentence. ⚠️ It will not go to zero by walking longer — a person who paces is a new
+id every time they move — so the deliverable is the *ratio* plus a named reason for each family that
+stays. **Done:** the sweep prints `unreached` broken down by kind, and every family above a threshold
+has a line in this file saying why.
+
+**Cost:** the largest step left. 1.1, 1.2 and 1.3 are a day between them; 1.5 is the one that changes
+what the tier means.
+
+---
+
+### Step 2 — The god run, and the tier it replaces
+
+⭐ **Unparked deliberately** (it was §5's first entry, "Alex's call"): a fresh save at Pallet Town
+played to the **Hall of Fame** through `LlmPolicy`, the worker and the wire, as the pre-push gate
+instead of `full_playthrough`. The machinery is built and is no longer speculative — `Intent`,
+`ScriptedBrain` and `Cheats` are default tier and drive step 8's twelve branch arms — and
+`godmode_turn_cost` (`--features godmode`) is the measurement that was supposed to decide it.
+
+**Why it is worth taking now.** `full_playthrough` proves the *scripted route* still works, which is
+a `DeterministicPolicy` fact; the thing actually deployed is `LlmPolicy`, and no test plays it end to
+end. A god run would cover chaining, `resume_after_battle`, compaction, a restart mid-game and the
+whole turn loop across a real game, which is the list §5 said was "worth having".
+
+⚠️ **It replaces `full_playthrough` only if it is much faster, and that is a measurement rather than
+a hope.** `full_playthrough` is **234 s** and `hall_of_fame` is **904 s**. A god party wins every
+battle on the first move and needs none of the grind that is most of the scripted route's length, so
+the target is well under 234 s — but the turn cost is a round trip per decision, and
+`godmode_turn_cost` exists to price exactly that. **Take the number first.** If it lands above
+`full_playthrough`, it goes behind its own feature and `full_playthrough` stays the gate, which is
+what §4.2 of the first draft already said.
+
+**And check what stops being covered before retiring anything.** `full_playthrough` is a golden RNG
+replay of a route that *catches Pokémon, teaches HMs, buys, sells, grinds and solves both boulder
+floors with a real party*. A god run does none of that: the party is installed, so catching, move
+management and the whole "can this party win" question go with it. Most of it is covered elsewhere —
+the leg chain, `postgame::*`, `branch_points`, `battle_refusals` — and the deliverable here is **the
+table that says which test covers each**, written before the gate changes and not after.
+
+**Fold in, because both are one-liners next to the above:**
+
+- **The soak tier's decision** (the old step 9, never taken). Halve `soak::SOAK_GAME_TIME` — one
+  constant, still 40 minutes — then compare what the soak finds that the sweep does not. Its only
+  remaining value is state-space randomness, so if that column is empty, drop the tier.
+- **The sixteen battle cells proved under `DeterministicPolicy` only** (§5). What they prove is that
+  the *agent* can carry the action out, not what a model is offered in each. None is a refusal, which
+  is why step 7 left them; a god run that fights its way to the credits through `LlmPolicy` takes
+  most of them for free, so re-audit the list *after* step 2 rather than before it.
+
+**Done:** a number for the god run beside `full_playthrough`'s 234 s; a table mapping everything
+`full_playthrough` uniquely covers to the test that covers it; and then either the gate changes or
+this file records why it did not.
+
+**Cost:** medium, and mostly the intent list. §4.1 of the first draft is still right that
+`PolicyStep::complete_game_steps()` has variants with **no menu row behind them** — `UseBagItem`,
+`Fish`, `UsePcBox`, `UseItemsInBattle` — and that **where a step does not map, that is the finding**.
 
 ---
 
 ## 5. Parked, and why
 
-- **The god run (C2).** A fresh save to the Hall of Fame through `LlmPolicy`, meant to replace
-  `full_playthrough`. The walk no longer needs it: it starts from finished-game fixtures the
-  scripted route already produces, and the god party's turn cost was measured at about a
-  millisecond, so the only unknown was game time. What it would prove — chaining, resumes,
-  compaction and a restart across a whole game — is worth having, but it is not on the path to the
-  goal above, and `full_playthrough` stays the pre-push gate. The machinery (`Intent`,
-  `ScriptedBrain`, `godmode_turn_cost`) stays default tier and is not to be removed. ⚠️ It is
-  Alex's call to unpark it.
-- **The sixteen battle cells proved under `DeterministicPolicy` only.** Promoting each to the LLM
-  path is the long tail behind step 7, and step 7 closing does not close it: what those sixteen
-  prove is that the *agent* can carry the action out, not what a model is offered in each. None of
-  them is a refusal, which is why step 7 left them here.
+- **Nothing, for the first time.** The god run was the entry here and is now §4's step 2; the sixteen
+  battle cells are folded into it. This section is kept because the *reasons* something gets parked
+  are worth having, and because §7.2 and several code comments point at it.
 
 ---
 
@@ -1160,3 +582,21 @@ argument lives now:
 | §5.5 | acceptance and the variance | §6.2 |
 | §6, §6.0 | the battle matrix audit | step 7 and §5 |
 | §7 | the soak decision | step 9 |
+
+### 7.4 The nine steps that got here
+
+Kept as one line each, because code comments name them by number and because the shape of the work
+is the useful part. All were taken on 2026-09-09 and 2026-09-10; the arguments are in §7.1 and in the
+comments those rows point at.
+
+| Step | What it did |
+|---|---|
+| 0 | The baseline: eight walks, **153 maps, 106 defects, 41 silences**, 82% of every turn in Route 16's gate |
+| 1 | Made a silence fail the tier, and fixed the fishing walk that mounted Surf on the turn that faces the water |
+| 2 | The Safari Zone pond and the two Seafoam warps a script cancels |
+| 3 | Saffron Gym's teleport pads: 99 defects, and the intra-map warp that never reported arriving |
+| 4 | Route 16's gate: a cut tree grows back on a map reload and a once-only frontier will not cut it twice |
+| 5 | Printed the maps never entered, which is what made steps 6 and 8 possible |
+| 6 | **The loop, to its fixpoint** — two clean sweeps whose union did not grow. Nine defects and six silences over two turns; the two biggest were a bag with no room for the key items, and one crossing per adjacent map when a bridge and a river seam lead to the same place |
+| 7 | The battle refusals: seven cells that existed nowhere, three defects, the largest being that **no bag item used in a battle ever reported its outcome** |
+| 8 | The branch points: content that is exclusive per save, and the trade that **handed over whatever the party-menu cursor was left on** |
