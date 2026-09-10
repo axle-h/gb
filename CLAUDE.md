@@ -22,41 +22,25 @@ behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
 [llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third and the only one that is
 still ahead of the code: every action in the game taken once through the deployed `LlmPolicy`
 against a mock endpoint, with a verdict on each and every defect fixed, until a sweep of Kanto comes
-back clean. It was rewritten on 2026-09-09 as **a numbered step list (§4), from the red tier of that
-day to the fixpoint**; the harness, the cheats, the oracle and the walk are built, and §2 is the
-baseline sweep of that same day — 153 maps of 248, 106 defects and 41 silences, and 82% of every turn
-it took spent in Route 16's gate. **Steps 1 to 5 closed all of that, and step 6's first turn
-(2026-09-10) closed six more defects and five silences and made room in the bag** — Gen 1 holds
-twenty *kinds*, every start arrived with all twenty used, and the key items the walk needs were being
-refused in silence, which was worth more than the five steps before it. ⭐ **Turn 2 closed the
-three defects that turn's sweep found and all three were the same sentence — *somebody is standing
-there*.** A person on a doormat left the door showing underneath her; a room with two one-wide
-corridors and a wanderer in each was called routeless and walked out of one turn later; a pacing pair
-chosen while a square was empty was held after a Youngster stepped onto it. It then closed the three
-unreached clusters step 6 had queued: **Cerulean Cave** (`actions()` emitted the nearest crossing per
-map of *either* kind, so Route 24's footbridge always beat the river seam that is the only way to the
-cave's side of the city), **the Bicycle** (`use_item` required a `target` tile, so `UseTarget::Nothing`
-had a driver and no caller — and with it went every out-of-battle Potion, Repel and Itemfinder), and
-**a tenth start standing on the S.S. Anne**. ⭐ **Step 6 then reached its fixpoint: two consecutive
-sweeps of ten starts, zero defects and zero silences in all twenty walks, and a union of 215 maps of
-248 and 2 114 ids that did not grow between them** — against 153 maps, 106 defects and 41 silences
-at the 2026-09-09 baseline. **§2.1 is the state to measure against** and names the five real maps
-still out (Cerulean Cave B1F's ladder chain, Cycling Road and its gate, and two single doors); §6's
-turn 2 entry has the argument for each fix and §7.1 the row and the test. ⭐ **Step 7 — the battle
-refusals — was taken the same day**: the seven cells that existed nowhere in the suite are all
-default-tier tests through the deployed stack now (`integration_tests/battle_refusals.rs`), and they
-found three defects, the largest of them that the outcome of *any* bag item used in a battle was
-never reported to the model at all. ⭐ **Step 8 — the branch points — went the same way**
-(`integration_tests/branch_points.rs`): eleven default-tier arms over four new snapshots, for the
-content that is exclusive per save — the starter, the fossil, the dojo prize, the Bicycle and a
-trade — none of which the walk can reach, because nine of its ten starts have already spent every
-one of those choices. The four branches needed no fix; the fifth item on its list did. ⛔ **An in-game trade handed over
-whatever the party-menu cursor was left on** — every conversation that opens a party menu (a trade,
-the Day Care, the Name Rater) calls `DisplayPartyMenu` without resetting it — and worse, whether
-that menu was confirmed at all came down to a timing window. `PokemonAgent::party_menu` navigates to
-the one row a trade will accept and declines the other two; **all nine trades work now**, and no
-policy callback was needed, because the cartridge is what says which row is legal. **Step 9 is what
-is left, and it is not the walk.**
+back clean. **Rewritten 2026-09-10 down to two steps**; the nine that got there are one line each in
+§7.4 and their findings are §7.1's thirty-odd rows, every one with a test. The harness, the cheats,
+the oracle and the walk are all built, and the sweep has been to a fixpoint.
+
+⚠️ **A clean sweep is not the goal, and the file used to imply it was.** The walk asserts on two
+things — defects and silences — and prints everything else, so "clean" has been true while 25 real
+maps went unentered, 2 124 offered ids went untaken, and a ROM cross-check that covers three action
+kinds of nine went unread. **§2.1 is the state to measure against**: the sweep of 2026-09-10, one
+outstanding defect (a Victory Road 3F boulder given up after 34 pushes, state committed as
+`vr3f-boulder-given-up.bin`), and the three groups the missing maps fall into. ⭐ The largest single
+cause is that **three of the ten walks win the game and stop**, at 40-60% of their budget.
+
+**§4's two steps are the whole of what is left.** Step 1 closes the gap between clean and complete —
+the boulder, the `*Copy` maps that have inflated every map count this file ever printed, the walks
+that spend half their budget on the credits, the maps that are genuinely shut, and a cross-check
+widened to every `MetaTile` kind **and asserted**. Step 2 unparks the god run: Pallet Town to the
+Hall of Fame through `LlmPolicy`, to replace `full_playthrough` **if it is much faster**, with the
+table saying what covers everything it stops covering written first.
+
 ⚠️ **§3 is the rules and §6.2 is how to read a number** — the walk's totals
 are a coin flip between several different walks, and CPU load is an input to it, so never build while
 measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**, because a walk's run directory defaults into

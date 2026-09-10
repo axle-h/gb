@@ -169,6 +169,11 @@ make it pass, say so in the hand-off.
   rather than on a step, so such a state restores straight into a battle and the arm's first turn is
   a battle turn instead of the menu the branch lives in. Mt Moon B2F's landing is inside `ROCKET1`'s,
   and the cutter fights him on the way past for exactly that reason.
+- `vr3f-boulder-given-up.bin` is the same kind of thing and the newest: the coverage sweep of
+  2026-09-10 dropped it where `VictoryRoad3F:3,5:PushBoulderOntoSwitch` gave up after 34 pushes
+  without reaching its target, five times on one walk. It has **no producing leg** and is not in the
+  chain, so it must not be re-cut; its property is *which puzzle, mid-solve*. See
+  `docs/coverage-plan.md` step 1.1, which is the work it is evidence for.
 - `route21-islands.bin` is the same kind of thing: the deployed run of 2026-09-03's own checkpoint,
   at Route 21 (7, 72) mid-crossing and mid-battle, read by
   `stalls::a_water_route_does_not_climb_out_onto_route_21s_islands`. Its property is *which map*, so
