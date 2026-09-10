@@ -72,6 +72,8 @@ cargo test --release --bin gb -- game_boy::tests::ppu
 #   probe_stall_actions prints a save's map, money, party, bag and every reachable action. Defaults to
 #                      the last test_stall_state.bin; GB_PROBE_STATE picks another. First thing to
 #                      reach for on a stalled leg: it tells "the route is wrong" from "there is no route".
+#                      On a save cut mid-battle it prints the fight and its menu instead of the grid,
+#                      which is how the battle_refusals fixtures were picked.
 cargo test --release --features diagnostics --bin gb -- llm::map_image::tests::probe_map_images --exact --ignored --nocapture
 cargo test --release --features diagnostics --bin gb -- llm::prompt::tests::probe_turn_requests --exact --ignored --nocapture
 cargo test --release --features diagnostics --bin gb -- pokemon::wild::tests::probe_grind_sites --exact --ignored --nocapture
@@ -156,6 +158,16 @@ make it pass, say so in the hand-off.
   fixture it is ten seconds. It is not something the chain reads — `post-articuno.bin` still comes
   from the full leg — so it can be re-cut freely, but it must keep landing on B3F with Strength
   armed and all four boulders untouched, which the cutter asserts.
+- ⭐ **The four battle fixtures are read twice over**, by `stalls` for the jam each was cut in and by
+  `integration_tests/battle_refusals.rs` for the refusal each one *contains*:
+  `stall-battle-key-item.bin` is a wild Oddish with five Poké Balls (a ball that fails, an item the
+  bag runs out of), `stall-battle-key-item-trainer.bin` a trainer's Weedle with eight Great Balls (a
+  run withheld, a ball a trainer blocks), `stall-safari-menu.bin` a Safari Rhyhorn (the game ending
+  around a battle), and `postgame-sold.bin` stands in Viridian City with the old man **awake**.
+  ⚠️ **A pre-Pokédex Viridian fixture is the wrong one and looks right**: `EVENT_GOT_POKEDEX` is what
+  hides the sleepy old man in the road and shows the one who offers the tutorial. A mid-battle save
+  is expensive to cut, so re-reading these is deliberate — but it means a re-cut has to keep *which
+  battle* as well as which jam.
 - `soak-*.bin` are **not** part of the chain: nothing reads one as the input to a route, so the
   rules above about cutting where the mainline stands and where the party is healed do not apply to
   them. They are re-cut wholesale by `regen_soak_checkpoints`, never by hand.
@@ -288,6 +300,29 @@ a real run directory. Default tier; the whole of `llm.rs` runs in about two seco
   active member out on send-out and back on switch-out — so the sidecar gates its top-up on
   `!in_battle` *and* on the black-out window (`wIsInBattle == $ff`) being closed. Both refusals are
   counted and both have a test.
+
+## The battle refusals
+
+`integration_tests/battle_refusals.rs` is `docs/coverage-plan.md` step 7: the seven cells the battle
+matrix audit found nowhere, every one of them a refusal, each as one default-tier test through
+`LlmRun`. Read it before touching `BattleState::UsingItem`, `PokemonTextReader` or
+`tools::not_on_the_menu`.
+
+- ⚠️ **Two of the seven need a `debug_` write, because Gen 1 has no state in which a ball certainly
+  fails or an escape certainly does.** `debug_set_catch_rate(0)` leaves about **one throw in 720**
+  catching anyway and `debug_set_battle_speeds(1, 255)` leaves **one first escape in 256** working;
+  both residues are on the primitive in `postgame/debug.rs` and in the test that carries one. Written
+  once before the first tick rather than held every tick: the cartridge only moves either value on a
+  send-out or a Safari BAIT/ROCK.
+- ⚠️ **Assert on the *front* of a quoted sentence, never a phrase from the middle.** The reader
+  samples the screen once per agent tick and the item driver dismisses the box a tick or two later,
+  so a quoted line arrives a character or two short — measured over eight runs as "The trainer
+  blocked the BA" and "…BAL", never the closing "BALL!".
+- ⚠️ **A refused id is answered *inside* the turn**, so the request that proves the model was told
+  anything is the one *after* the refusal. A test that stops at two battle turns sees the acceptance
+  and not the rejection.
+- ⚠️ **Take the brain's lock inside a `tick_until` predicate, never across it.** The brain writes to
+  the same log from the worker thread.
 
 ## Turns the game takes back
 

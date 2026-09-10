@@ -72,6 +72,24 @@ lives in the code.
   the Mansion statues and the Game Corner poster are the same mechanic and are progression gates.
   Removing the verb and the `facing` property only it used gave the Overworld tool array **370
   bytes** back, its largest single reclaim.
+- ⚠️ **`not_on_the_menu`'s "that id is for another map" clause fires only where the name really is a
+  `Map`.** It used to test "the menu's first id contains a colon", and a battle row does:
+  `fight:Peck`, `item:PokeBall`, `switch:1`. So the commonest refusal in a battle — an item the bag
+  has just run out of — was answered with *"That id is for `item` and you are in `fight`; ids are
+  minted for the map you are standing on"*, three false statements about maps to a model standing in
+  a fight. Checking against `Map::iter()` also stops an id the model invented being reported as
+  another map's.
+- ⭐ **A refused *battle* id carries the cartridge's rule, because the prompt forbids the model from
+  knowing it.** The turn's own `### On screen` line reads `FIGHT Pokémon ITEM RUN`, so "`run` is not
+  one of this turn's actions" is a contradiction with no way out of it — the shape behind the
+  ViridianGym and Route 22 issue reports. `tools::battle_rule_behind` appends the reason where the
+  *menu* can settle which one it is (no `run` row beside `fight:` rows can only be a trainer battle;
+  a missing `item:` row means the bag is out) and **nothing** where it cannot — the Safari menu gets
+  neither, and the ghost battle has no arm because `prompt` already says on the turn that no move,
+  ball or switch does anything until the Silph Scope. Read off the menu rather than the game, because
+  `classify` does not touch the game and that is worth keeping.
+  `tools::a_refused_battle_id_carries_the_rule_and_says_nothing_about_maps`, and
+  `docs/coverage-plan.md` step 7 for how both were found.
 - **A row that leads to a coordinate being asked for names both squares.** An id's coordinate is
   where the *player stands*; `use_field_move`'s `target` is where the *thing is*.
   `Route16:27,10:Snorlax` with the Snorlax on (26, 10) had a run play the Poké Flute at open

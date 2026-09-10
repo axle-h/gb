@@ -695,6 +695,21 @@ price.
   Red prints a message and then runs a script. `take` reports the open page too and clears rather
   than replaces. `PokemonAgent::event` drops empty boxes. `### On screen` is a rolling fragment and
   not a substitute for the `TextBox` event.
+- ⭐ **A driver that presses its own buttons still has to read, and `PokemonTextReader::accumulate`
+  is how without re-timing anything.** `BattleState::UsingItem` walks six menus deep on a two-tick
+  press/release cadence and advanced the game's own text with a bare `press_button(A)`, so every
+  word `ItemUseBall` prints was dismissed unread: a model that threw a Poké Ball was told what the
+  *enemy* then did and nothing about its own throw, and a trainer blocking a ball charged for it in
+  silence. `accumulate` is `update_with` without the toggle, called **before** the driver's own press
+  (a button toggled this tick does not reach the emulator until the next `run`, so that is the same
+  screen every other reader sees) and gated on `TextBoxId::MessageBox`, because an in-battle bag list
+  is drawn in the very rows a `message_box_only` reader reads.
+  `docs/coverage-plan.md` step 7.
+- **A battle sub-state's reader is carried out of it, not rebuilt.** `WaitingForMenu` is the only
+  place a battle's text is ever emitted (`AgentEvent::text_box_from_reader`, on the tick the main
+  menu comes back), so `BattleState::{carrying, backing_out_carrying}` and `take_reader` hand it on
+  — the refusal net included, because "This isn't the time to use that!" is exactly the sentence a
+  policy needs out of that net. Same rule as `flush_text_reader`, one level down.
 
 ## The page's copy
 

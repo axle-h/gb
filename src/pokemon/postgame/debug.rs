@@ -215,6 +215,69 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write(battle_hp + 1, 0);
     }
 
+    /// **Step 7** — hold the enemy's live catch rate, so a Poké Ball's outcome stops being a
+    /// coin flip.
+    ///
+    /// `docs/coverage-plan.md` step 7 needs *a ball that fails*, and Gen 1 gives no state in which
+    /// one certainly does outside the two hard-coded uncatchables (an unidentified ghost, and the
+    /// Marowak on Pokémon Tower 6F once the Scope makes it fightable). `ItemUseBall`'s first test is
+    /// `Rand1 - Status > CatchRate → failedToCapture`, so a rate of **0** fails every throw whose
+    /// `Rand1` is not itself 0: one throw in 256 gets past it and then has to beat a second roll
+    /// against `X ≈ 85`, which leaves about **one throw in 720** catching anyway. The tests that call
+    /// this say so and assert loudly rather than pretending the residue is not there.
+    ///
+    /// ⚠️ **The live byte, not the species' base rate, and it is written once rather than held.**
+    /// `wEnemyMonActualCatchRate` is set by `LoadEnemyMonData` on send-out and afterwards only ever
+    /// moved by a Safari ROCK or BAIT, so a single write before the first tick lasts the battle —
+    /// which is also why holding it every tick would fight the Safari Zone's own arithmetic. A rate
+    /// of 0 is a state the cartridge produces for itself; see [`BattleState::enemy_catch_rate`].
+    ///
+    /// [`BattleState::enemy_catch_rate`]: crate::pokemon::battle::BattleState::enemy_catch_rate
+    pub fn debug_set_catch_rate(&mut self, rate: u8) {
+        self.mmu_mut().write(pokered_symbols::wEnemyMonActualCatchRate.address, rate);
+    }
+
+    /// **Step 7** — hold both sides' battle speed, so a *failed* escape can be arranged.
+    ///
+    /// `TryRunningFromBattle` leaves the battle outright when the player's speed is greater than or
+    /// equal to the enemy's, and every committed mid-battle fixture is that way round: `run` on them
+    /// always works, which is why nothing in the suite had ever seen "Can't escape!". With the
+    /// player at 1 and the enemy at 255 the quotient the random roll is compared against is 0 on the
+    /// first attempt, so it fails unless `BattleRandom` returns exactly 0 — **one attempt in 256** —
+    /// and each further attempt adds 30 to the quotient, which is the cartridge's own way of making
+    /// sure a player is never trapped.
+    ///
+    /// ⚠️ **The battle's copies, which is the only place a speed matters mid-fight.** Gen 1 reads
+    /// `wBattleMonSpeed`/`wEnemyMonSpeed` for turn order and for this check, and both are re-derived
+    /// from the party struct on send-out — so this is written once, mid-battle, and a switch would
+    /// undo it. A slow lead against a fast wild Pokémon is the most ordinary situation in the game;
+    /// nothing here is a state the cartridge could not produce.
+    pub fn debug_set_battle_speeds(&mut self, player: u16, enemy: u16) {
+        for (ptr, value) in [
+            (&pokered_symbols::wBattleMonSpeed, player),
+            (&pokered_symbols::wEnemyMonSpeed, enemy),
+        ] {
+            // Big-endian, like every other 16-bit battle stat — see `read_pointer_u16_be`.
+            self.mmu_mut().write(ptr.address, (value >> 8) as u8);
+            self.mmu_mut().write(ptr.address + 1, (value & 0xff) as u8);
+        }
+    }
+
+    /// **Step 7** — how many Safari Balls are left, so the last one can be thrown on demand.
+    ///
+    /// A Safari game ends the moment the overworld loop sees `wNumSafariBalls == 0`
+    /// (`SafariZoneCheck`, `engine/events/hidden_events/safari_game.asm`), and the ball that takes it
+    /// to zero is thrown **inside a battle** — so this is the one way the Safari game really does
+    /// end around a fight. ⚠️ The *step* counter cannot: `SafariZoneCheckSteps` runs in the
+    /// overworld's step block above the `wIsInBattle` test and warps the player out on the step that
+    /// exhausts it, before the encounter roll that step would otherwise make. See the test.
+    ///
+    /// Walking the count down legitimately means thirty throws, which is thirty paid turns of a
+    /// default-tier test to reach the one that matters.
+    pub fn debug_set_safari_balls(&mut self, count: u8) {
+        self.mmu_mut().write(pokered_symbols::wNumSafariBalls.address, count);
+    }
+
     /// **C1** — hand the player a set of gym badges outright.
     ///
     /// `docs/coverage-plan.md` §3.1. Every HM field move is gated on a badge *and* on a party member

@@ -5,8 +5,8 @@ as it is deployed — `LlmPolicy`, the worker and the wire, against a mock endpo
 a verdict on each, and every defect that turns up fixed, until a sweep of the whole of Kanto comes
 back clean and finds nothing new.
 
-**Status.** Rewritten 2026-09-09 as a step list; **steps 0 to 5 taken that day, and step 6 — the
-loop — reached its fixpoint on 2026-09-10 after two turns.** The harness, the cheats, the oracle and
+**Status.** Rewritten 2026-09-09 as a step list; **steps 0 to 5 taken that day, step 6 — the loop —
+reached its fixpoint on 2026-09-10 after two turns, and step 7 was taken the same day.** The harness, the cheats, the oracle and
 the frontier walk are all **built**. §2 is the 2026-09-09 baseline every closure is measured
 against — 153 maps, 106 defects, 41 silences, 82% of every turn in Route 16's gate — and all of that
 is closed. ⭐ **§2.1 is where the sweep stands: two consecutive sweeps of ten starts with zero
@@ -21,8 +21,11 @@ off the unreached list. And **`actions()` emitted the nearest crossing per adjac
 kind, so a footbridge always beat the water beside it** (turn 2) — one row per *kind* opened Cerulean
 Cave, which no sweep in this plan's history had entered.
 
-§4's steps 7 to 9 are what is left, and none of them is the walk; §7 keeps what the first draft got
-wrong and what the sweeps have found.
+⭐ **Step 7 — the battle refusals — was taken the same day and is done**: all seven cells that
+existed nowhere in the suite are now tests through the deployed stack, in the default tier, and they
+found three defects, the largest of them that the outcome of *any* bag item used in a battle was
+never reported to the model. §4's **steps 8 and 9** are what is left, and neither is the walk; §7
+keeps what the first draft got wrong and what the sweeps have found.
 
 ⚠️ **Code comments cite section numbers from the first draft** (`§2.2.1`, `§3.3`, `§5.2.6`, …).
 Those refer to the 2026-09-06 plan, which is in git history at commit `7343616`; §7.3 says where
@@ -671,17 +674,85 @@ grow — 215 maps of 248 and 2 114 ids — written into §2.1 with a line each f
 still out. **Cost, for the record rather than as a forecast:** two turns, four sweeps, nine defects
 and six silences.
 
-### Step 7 — The battle refusals
+### Step 7 — The battle refusals ✅ done 2026-09-10
 
-A walk scores overworld ids only; nothing above touches a battle decision. Six cells exist nowhere
-in the suite and every one is a refusal, which is where the findings in a battle were always going
-to be: a ball that fails, a run that fails, a run from something that cannot flee, a ball thrown at
-a trainer, an item with none left, the Safari step counter expiring mid-battle, and the old man's
-tutorial (`wBattleType == 1`, which `read_battle_state` reads as `Wild`).
+A walk scores overworld ids only; nothing above touches a battle decision. **Seven** cells existed
+nowhere in the suite — the audit's summary said six and its table listed seven — and every one is a
+refusal, which is where the findings in a battle were always going to be: a ball that fails, a run
+that fails, a run the cartridge will not allow, a ball thrown at a trainer, an item the bag has run
+out of, the Safari game ending mid-battle, and the old man's tutorial (`wBattleType == 1`, which
+`read_battle_state` reads as `Wild`).
 
-**Done:** one test each through `LlmPolicy` and the worker, default tier where the state is cheap
-and `slow-tests` where it needs a walk. **Cost:** medium. Self-contained; can be taken in parallel
-with anything above.
+**Done:** ✅ all seven, as `integration_tests/battle_refusals.rs` — one test each through `LlmPolicy`,
+the worker, a real socket and the real agent, **all of it default tier**, because every cell starts
+*inside* the battle it is about from a committed mid-battle save. Four of the five fixtures are
+`soak` jam states read a second time (`stall-battle-key-item.bin` is a wild Oddish with five Poké
+Balls, `stall-battle-key-item-trainer.bin` a Bug Catcher's Weedle with eight Great Balls,
+`stall-safari-menu.bin` a Safari Rhyhorn) and the fifth is `postgame-sold.bin`, which stands in
+Viridian City with the old man awake. **Cost:** one afternoon, and it found three defects.
+
+⭐ **The one that was worth the whole step: the outcome of a bag item used in a battle was never
+reported.** `BattleState::UsingItem` walks six menus deep on its own two-tick cadence, and its
+fallback arm advanced the game's own text with a bare `press_button(A)` — so every word
+`ItemUseBall` prints was dismissed unread. A model that threw a Poké Ball at a full-health Oddish
+was told *"Enemy ODDISH used ABSORB!"* and nothing else: no way to tell a failed catch from a lost
+turn, on the one action in the game a player repeats until it works. A trainer blocking a Great Ball
+charged for the ball and said nothing at all. Fixed by separating the reader's *read* from its
+*press* (`PokemonTextReader::accumulate`) so the driver keeps its own cadence unchanged — the change
+is timing-neutral by construction, which matters because `full_playthrough` is a golden RNG replay —
+and by carrying the reader **out** of `UsingItem` into whatever replaces it, including the refusal
+net, so the existing emit in `WaitingForMenu` reports it beside the enemy's reply.
+
+⛔ **The second is a sentence, and it is the family this repo keeps finding.** `not_on_the_menu`'s
+"that id is for another map" clause fired on *every* battle refusal, because `fight:Peck` and
+`item:PokeBall` split on a colon too: the commonest refusal there is in a battle — an item the bag
+has just run out of — was answered with *"That id is for `item` and you are in `fight`; ids are
+minted for the map you are standing on"*. Three false statements about maps, to a model standing in
+a fight. The clause is guarded on the name being a real `Map` now.
+
+◐ **The third is the other half of the same sentence.** A refused battle id was told it was not
+offered and never *why*, and the turn's own `### On screen` line reads `FIGHT Pokémon ITEM RUN`. The
+system prompt forbids the model from filling that gap out of what it knows about Pokémon Red, so
+`tools::battle_rule_behind` now adds the cartridge's rule where the menu can settle which one it is
+— there is no running from a trainer battle, and a bag row goes the moment the last of an item is
+used. The *sandbox* has said the first of those since `battle.run` existed; the model answering by
+hand was the half that got nothing.
+
+⚠️ **Two cells need a `debug_` write to make the outcome a fact rather than a roll, and Gen 1 allows
+no better.** `debug_set_catch_rate(0)` fails a throw unless `Rand1` is itself 0 — about **one throw
+in 720** catches anyway — and `debug_set_battle_speeds(1, 255)` fails a first escape unless
+`BattleRandom` returns 0, **one attempt in 256**, which is the cartridge making sure a player is
+never trapped. Both residues are named on the primitive and in the test that carries it. The only
+truly deterministic uncatchable is the ghost Marowak on Pokémon Tower 6F once the Scope makes it
+fightable, and it costs a mid-battle cut of a scripted fight to reach.
+
+⚠️ **The cell the audit asked for does not exist.** "The Safari step counter running out mid-battle"
+cannot happen: `SafariZoneCheckSteps` is called from the overworld's step block *above* the
+`wIsInBattle` test and warps the player out on the very step that exhausts it, before the encounter
+roll that step would otherwise make. What does end a Safari game from inside a fight is the
+**balls** — `ItemUseBall` decrements `wNumSafariBalls` and `SafariZoneCheck` ends the game the moment
+the overworld loop sees zero — so that is the cell that was written, and it is the only one in the
+file that takes the map out from under the model mid-battle.
+
+⚠️ **And the old man's tutorial is answered by a row rather than by a test of the battle**, because
+the agent cannot reach it. `ViridianCityOldManText` asks "Are you in a hurry?" and starts the
+tutorial on **NO**; the agent answers every yes/no box in the game with A, which is YES, so the old
+man says "Time is money... Go along then." and no battle happens. That is what the test pins. ⚠️ **A
+change that lets the agent answer NO re-opens the cell**: `wBattleType == 1` is a battle whose menu
+`DisplayBattleMenu` does not read the joypad for at all, `read_battle_state` reports it as
+`BattleType::Wild`, and the model would be asked a question its answer could not affect — the shape
+`battle::LOST_BATTLE` already has an arm for.
+
+⭐ **And an eighth test, for a cell the audit had ticked.** The fix above un-silenced *every*
+refusal `ItemUseNotTime` prints, so `a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_
+going_quiet` pins it: `stalls::a_key_item_used_in_battle_does_not_trap_the_bag` was cut from this
+very fixture and only ever asked whether the agent *escaped* the bag list, never whether the model
+was told why its action did nothing. It was not. Worth its own test because every bag in the game
+holds something the cartridge declines, and eleven of `soak`'s thirteen starts wedged on this one.
+
+**What is still only proved under `DeterministicPolicy`** is §5's long tail: sixteen of the audit's
+twenty-three cells, one of them promoted above. Nothing else here changes that, and none of it is on
+the path to this plan's goal.
 
 ### Step 8 — Branch-point snapshots
 
@@ -723,7 +794,9 @@ in a particular state — so if that column is empty, drop it.
   `ScriptedBrain`, `godmode_turn_cost`) stays default tier and is not to be removed. ⚠️ It is
   Alex's call to unpark it.
 - **The sixteen battle cells proved under `DeterministicPolicy` only.** Promoting each to the LLM
-  path is a long tail behind step 7.
+  path is the long tail behind step 7, and step 7 closing does not close it: what those sixteen
+  prove is that the *agent* can carry the action out, not what a model is offered in each. None of
+  them is a refusal, which is why step 7 left them here.
 
 ---
 
@@ -877,6 +950,9 @@ in a driver rather than in routing. Each has a test.
 | `Route11:13,6:Grass` *"it stopped making progress"*, intermittent since 2026-09-09 and closed at last | A pacing pair is chosen once from `adjacent_grass` and then held for the whole pace, so a Youngster stepping onto one half of it leaves the agent bumping into a person — and bumping is not a step, so the ROM never rolls and the row aborts as `Unknown`. It re-picks now, and reports only when there is no other pair at all | `mechanics::a_pacing_pair_somebody_steps_onto_is_re_picked_rather_than_bumped_into` |
 | **Cerulean Cave's three floors**, `unreached` on every sweep this plan has taken | `actions()` emitted the nearest crossing per adjacent map of *either* kind, so wherever a land bridge and a surfable edge lead to the same neighbour the bridge always won — and Route 24's footbridge is two steps from the river seam that is the only way into the half of Cerulean the cave door is on. One row per *kind* now. The ROM cross-check had printed the cause every sweep: `CeruleanCity (5, 12) → CeruleanCave1F: on the grid, no sibling, and never a row` | `mechanics::a_water_crossing_is_a_row_of_its_own_beside_the_bridge_to_the_same_map` |
 | `Route12:0,63:Connection` chosen and never reported, on the re-sweep | `Surfing` **with a `resume`** is one of the three states that carry an open overworld action, and the refused-mount arm dropped straight to `Idle` with the row still open: the walk surfed south out of Route 12, crossed into Route 11, had the mount its follower tried on the far side refused, and chose its next row on Route 11 with the crossing never reported. The arrival rule is now a helper (`surf_crossed_into`) that both doors out of the mount use, and a refusal on the *same* map is `Textbox` — which is exact, since the cartridge stopped the player to say "No SURFing on <mon> here!" | ⚠️ **No test of its own**, as `MAX_HEAL_HOPS` has none: the refusal needs the cartridge's own terrain check reached from inside the party menu, and the disagreement that produces one is by definition a tile the reader gets wrong. The arrival half is `cinnabar::a_walk_the_surf_mount_itself_finishes_says_that_it_arrived`, which now covers the shared helper; the rest is the next sweep |
+| **The outcome of every bag item used in a battle, never reported** (step 7, not a sweep) | `BattleState::UsingItem` advanced the game's own text with a bare `press_button(A)`, so `ItemUseBall`'s five sentences, `ThrowBallAtTrainerMon`'s two and `ItemUseNotTime`'s refusal were all dismissed unread. A model that threw a ball was told only what the *enemy* then did. The read is separated from the press (`PokemonTextReader::accumulate`, timing-neutral) and the reader is carried out of the state, refusal net included | `battle_refusals::a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it`, `a_ball_thrown_at_a_trainer_is_blocked_and_the_ball_is_spent_saying_so` |
+| **Every battle refusal claimed the id belonged to another map** (step 7) | `not_on_the_menu`'s map clause tested "the menu's first id contains a colon", and `fight:Peck` / `item:PokeBall` / `switch:1` all do — so an item the bag had run out of was answered with three false statements about maps. Guarded on the name being a real `Map`, which also stops a made-up id being reported as another map's | `tools::a_refused_battle_id_carries_the_rule_and_says_nothing_about_maps`, `battle_refusals::an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name` |
+| **A refused battle id was never told which rule kept it off the menu** (step 7) | The turn's own `### On screen` line reads `FIGHT Pokémon ITEM RUN` and the system prompt forbids prior knowledge of Red, so "that id is not one of this turn's actions" is a contradiction with no way out — the shape behind the ViridianGym and Route 22 issue reports. `tools::battle_rule_behind` adds the cartridge's rule where the menu can settle it, and says nothing where it cannot | same test |
 | **Route 17 and `Route16Gate2F`**, ditto — and a hole in the deployed tool surface behind them | `use_field_move`'s `use_item` required a `target` tile and the Bicycle has none, so `FieldMove::UseBagItem` and the whole of `UseTarget::Nothing` had a driver, a refusal table and a test that rides a bike, with no way in from any LLM turn. With it went every out-of-battle Potion, vitamin, Repel and Itemfinder. +189 bytes of catalogue | `tools::a_bag_item_with_nothing_to_aim_at_is_a_call_that_can_be_made` |
 
 ⚰️ **Four of these were diagnosed wrongly before they were diagnosed rightly, and the lesson is the

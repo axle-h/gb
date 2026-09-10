@@ -1582,11 +1582,24 @@ fn not_on_the_menu(id: &str, menu: &[String]) -> Option<String> {
     // nothing has to carry it here separately — which is also what stops the complaint and the
     // situation disagreeing about where the player is. What follows the prefix is `{x},{y}:{kind}`
     // for everything except a sprite, which is keyed on the object alone; both are taken apart from
-    // the ends rather than by counting fields. A battle menu's ids have no prefix, and then this
-    // says nothing about maps at all: a battle id going stale is a different mistake.
-    let here = menu[0].contains(':').then(|| menu[0].split(':').next()).flatten();
+    // the ends rather than by counting fields.
+    //
+    // ⚠️ **Both halves have to be a real map, and the old test was "there is a colon in it".** This
+    // used to claim "a battle menu's ids have no prefix", and they do: `fight:Peck`, `item:PokeBall`
+    // and `switch:1` all split on a colon. So the commonest refusal in a battle — an item the bag
+    // has just run out of — was answered with *"That id is for `item` and you are in `fight`; ids
+    // are minted for the map you are standing on"*, which is three false statements about maps to a
+    // model that is standing in a fight. Found by `battle_refusals::an_item_the_bag_has_run_out_of…`
+    // (`docs/coverage-plan.md` step 7). Checking the name against `Map` costs an iteration of 248
+    // variants on a path that only runs when a call has already been refused, and it also stops a
+    // typo the model invented being reported as another map's id.
+    let a_map = |name: &str| {
+        use strum::IntoEnumIterator;
+        Map::iter().any(|map| map.to_string() == name)
+    };
+    let here = menu[0].split(':').next().filter(|name| a_map(name));
     let elsewhere = match (here, id.split_once(':')) {
-        (Some(here), Some((named, _))) if named != here => format!(
+        (Some(here), Some((named, _))) if named != here && a_map(named) => format!(
             " That id is for `{named}` and you are in `{here}`; ids are minted for the map you are \
              standing on, so one you read on an earlier turn never resolves."
         ),
@@ -1597,6 +1610,40 @@ fn not_on_the_menu(id: &str, menu: &[String]) -> Option<String> {
          list you were given: {}. Pick one of those.",
         menu.iter().map(|offered| format!("`{offered}`")).collect::<Vec<_>>().join(", "),
     ))
+}
+
+/// The **cartridge's own rule** behind a battle id the menu did not offer, or `""` where the menu
+/// cannot say what it is.
+///
+/// ⚠️ **`not_on_the_menu` says an id was not offered and never why, and in a battle that is not
+/// enough.** The system prompt says in as many words that prior knowledge of Pokémon Red is not
+/// evidence, so a model told only "`run` is not one of this turn's actions" on a turn whose own
+/// screen line reads `FIGHT Pokémon ITEM RUN` has been handed a contradiction and no way out of it —
+/// which is the shape that produced the ViridianGym bug report and the Route 22 one. The *sandbox*
+/// has said this for as long as `battle.run` has existed ("there is no running from one"); the model
+/// answering a turn by hand was the half that got nothing.
+///
+/// ⚠️ **Read off the menu rather than out of the game, because [`classify`] does not touch the
+/// game.** That is a property worth keeping, and the menu is enough for the two cases that matter:
+/// [`crate::pokemon::policy::battle_options`] offers `Run` in a wild battle, in a Safari one and in
+/// a ghost one (where it is the *only* row), so a menu with `fight:` rows and no `run` can only be a
+/// trainer battle. Everything the menu cannot settle gets nothing added rather than a guess.
+///
+/// The ghost battle deliberately has no arm here: `prompt`'s own ⚠️ line already says on the turn
+/// that no move, ball or switch does anything until the Silph Scope, and a second copy in a refusal
+/// would be the duplication `read_screen_text` died of.
+fn battle_rule_behind(id: &str, menu: &[String]) -> &'static str {
+    let has = |prefix: &str| menu.iter().any(|offered| offered.starts_with(prefix));
+    if id == "run" && has("fight:") {
+        return " There is no running from a trainer battle: the cartridge answers a RUN there by \
+                printing so and putting the same menu straight back, which is why it is not \
+                offered. Win the fight, or switch to something that can.";
+    }
+    if id.starts_with("item:") && has("fight:") {
+        return " That item is not in the bag. A bag row goes the moment the last one is used, so an \
+                id you read on an earlier turn stops resolving; `read_bag` says what is left.";
+    }
+    ""
 }
 
 /// Decide what a call is, without touching the game.
@@ -1708,7 +1755,9 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
                     id,
                     take_over: arguments.get("take_over").and_then(Value::as_bool).unwrap_or(false),
                 }),
-                Some(complaint) => CallKind::Rejected(complaint),
+                Some(complaint) => {
+                    CallKind::Rejected(format!("{complaint}{}", battle_rule_behind(&id, menu)))
+                }
             },
             Err(complaint) => CallKind::Rejected(complaint),
         },
@@ -3149,6 +3198,53 @@ mod tests {
             let name = item.to_string();
             assert_eq!(item_by_name(&name), Some(item), "{name} does not resolve back to ${id:02X}");
         }
+    }
+
+    /// **A battle id that was not offered is told which rule kept it off the menu, and nothing
+    /// about maps.**
+    ///
+    /// Two halves, and both were found by `docs/coverage-plan.md` step 7's
+    /// `battle_refusals::an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name`.
+    ///
+    /// ⛔ The map clause fired on every battle refusal, because `fight:Peck` and `item:PokeBall`
+    /// both split on a colon: the model was told `item` was a map, that it was standing in `fight`,
+    /// and that ids are minted for the map you are on. It is guarded on the name being a real
+    /// [`Map`] now, which also keeps a made-up id from being reported as another map's.
+    ///
+    /// ◐ And the complaint said only that the id was not offered. The turn's own `### On screen`
+    /// line reads `FIGHT Pokémon ITEM RUN`, and the system prompt forbids the model from filling the
+    /// gap out of what it knows about Pokémon Red, so the cartridge's rule has to be in the
+    /// sentence — see [`battle_rule_behind`].
+    #[test]
+    fn a_refused_battle_id_carries_the_rule_and_says_nothing_about_maps() {
+        let trainer: Vec<String> = ["fight:Peck", "item:GreatBall", "switch:1"]
+            .iter().map(|id| id.to_string()).collect();
+
+        let run = not_on_the_menu("run", &trainer).expect("`run` is not on a trainer menu");
+        assert!(!run.contains("map"), "a battle refusal talked about maps: {run}");
+        let run = format!("{run}{}", battle_rule_behind("run", &trainer));
+        assert!(run.contains("no running from a trainer battle"), "no rule was given: {run}");
+
+        let gone = not_on_the_menu("item:PokeBall", &trainer).expect("no Poké Balls on this menu");
+        assert!(!gone.contains("map"), "a battle refusal talked about maps: {gone}");
+        let gone = format!("{gone}{}", battle_rule_behind("item:PokeBall", &trainer));
+        assert!(gone.contains("not in the bag"), "no rule was given: {gone}");
+
+        // ⚠️ **The Safari menu gets neither**, because neither rule is true there: `run` *is*
+        // offered and there is no bag. Saying nothing is the answer where the menu cannot settle it.
+        let safari: Vec<String> =
+            ["ball", "bait", "rock", "run"].iter().map(|id| id.to_string()).collect();
+        assert_eq!(battle_rule_behind("item:Potion", &safari), "");
+        assert_eq!(battle_rule_behind("fight:Tackle", &safari), "");
+
+        // And an overworld id still gets the map clause it was written for.
+        let here: Vec<String> = vec!["ViridianCity:18,6:Sprite".to_string()];
+        let stale = not_on_the_menu("ViridianForest:17,47:Warp", &here)
+            .expect("an id from another map is not on this menu");
+        assert!(stale.contains("ids are minted for the map"), "the map clause went missing: {stale}");
+        // ⚠️ A prefix that is not a map is not reported as one — `foo` is a typo, not a place.
+        let typo = not_on_the_menu("foo:bar", &here).expect("not on this menu either");
+        assert!(!typo.contains("ids are minted for the map"), "`foo` was called a map: {typo}");
     }
 
     /// **What the `tools` array costs, per kind, with a ceiling on each.**
