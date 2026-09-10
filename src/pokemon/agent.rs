@@ -639,7 +639,11 @@ const MENU_HANDOVER_TICKS: u16 = 50;
 /// 60 s matches the walk's bound and leaves the slowest legitimate driver — a multi-item mart trip, a
 /// PC deposit, a Fly — far inside it; the leg chain and `full_playthrough` are what say so. It is a
 /// *net*, not a schedule: anything that needs it has already failed to notice something.
-const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
+///
+/// ⚠️ **Measured against [`PokemonAgent::cycles_since_driver_answer`], not `cycles_since_poll`.**
+/// One decision is not one action, and the difference cost a boulder goal three shoves from the end
+/// of the game's hardest Strength puzzle — see that field.
+pub(crate) const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
 
 /// Consecutive overworld ticks a finished Surf mount waits for before handing the walk back.
 ///
@@ -1595,6 +1599,31 @@ pub struct PokemonAgent {
     /// `cycles_since_poll` as of the last [`AgentEvent::WatchdogFired`], so a jam is reported when it
     /// starts and once per timeout after that rather than fifty times a second.
     stuck_reported_at: MachineCycles,
+    /// Emulated time since the game last **answered a driver**, in cycles. What
+    /// [`DRIVER_ESCAPE_SILENCE`] is measured against.
+    ///
+    /// ⭐ **A separate clock from `cycles_since_poll`, because one decision is not one action.** The
+    /// hatch used to read `cycles_since_poll`, on the reading that "nothing is happening" and "the
+    /// policy has not been asked anything" are the same fact. They are, for every driver that is a
+    /// conversation with one menu — and they are not for [`AgentState::PushingBoulder`], which is
+    /// carried out dozens of times inside a *single* `BoulderGoal` decision. A goal that runs longer
+    /// than 60 s of game time without a wild battle to poll the policy therefore crosses the bound
+    /// while it is working perfectly, and from that tick on **every** entry into `PushingBoulder` is
+    /// escaped on its first tick: three of them is `MAX_SILENT_SHOVES` and the goal is abandoned
+    /// with a sentence saying the game went quiet when it had just moved a boulder fourteen tiles.
+    ///
+    /// The `fuchsia` walk of 2026-09-10 is the measurement. Victory Road 3F's switch at (3, 5) was
+    /// solved twice from the same floor in about 30 shoves each — under the bound — and lost the
+    /// third time at 34, three shoves from the end, having taken 100 s of uninterrupted game time to
+    /// get there. Neither `MAX_PUSHES_WITHOUT_PROGRESS` nor `MAX_SILENT_SHOVES` can see that,
+    /// because the shoves were *landing*: the plan got shorter on every one of them.
+    ///
+    /// So this is reset by two things rather than one — [`Self::poll_policy`], and a shove that
+    /// lands. Both are the game answering. ⚠️ **Not by entering a driver state**, which would be the
+    /// obvious rule and would hand each of the 230 identical refused shoves of
+    /// `docs/coverage-plan.md` §7.1's largest sink
+    /// a fresh 60 s of its own.
+    cycles_since_driver_answer: MachineCycles,
 
     /// The slot the policy chose at the "Which move should be forgotten?" menu, held for as long as
     /// that menu is on screen.
@@ -1689,6 +1718,7 @@ impl PokemonAgent {
             .map(MachineCycles::from_duration);
         Self {
             cycles_since_poll: MachineCycles::ZERO,
+            cycles_since_driver_answer: MachineCycles::ZERO,
             ending: None,
             stuck_after,
             stuck_reported_at: MachineCycles::ZERO,
@@ -1756,6 +1786,7 @@ impl PokemonAgent {
         self.manual_input.clear();
         self.manual_input_held = 0;
         self.cycles_since_poll = MachineCycles::ZERO;
+        self.cycles_since_driver_answer = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
         self.blackout_ticks = 0;
         // Back to `None`, not to `Some(0)`: the next tick re-seeds from whatever the freshly loaded
@@ -1849,6 +1880,9 @@ impl PokemonAgent {
     /// would look like a jam forever. One seam, and the compiler finds anything that bypasses it.
     fn poll_policy(&mut self, game_state: &GameState, api: &mut PokemonApi) {
         self.cycles_since_poll = MachineCycles::ZERO;
+        // A decision point is the strongest possible evidence that a driver is not wedged: there is
+        // no driver. See [`Self::cycles_since_driver_answer`].
+        self.cycles_since_driver_answer = MachineCycles::ZERO;
         // Reaching a decision point is what "out of the menus" means — see the ⚠️ in `ReadingTextBox`.
         self.escaping_menus = false;
         self.stuck_reported_at = MachineCycles::ZERO;
@@ -1874,6 +1908,30 @@ impl PokemonAgent {
     /// tick that polled the policy.
     pub fn since_last_policy_poll(&self) -> Duration {
         self.cycles_since_poll.to_duration()
+    }
+
+    /// **A shove of a boulder goal landed**: count it, and record that the game answered.
+    ///
+    /// ⭐ **Two call sites, because a push resolves two ways and the common one is not the obvious
+    /// one.** `AgentState::PushingBoulder` has its own "the boulder left its tile" arm, and in
+    /// practice `assert_script_state` gets there first: the shove and its dust animation run as
+    /// `GameMode::Script`, so the driver is replaced by `RunningScript` on the tick the boulder
+    /// starts moving. Putting the bookkeeping in one place is what stops the two disagreeing —
+    /// which they did, and the first version of the [`Self::cycles_since_driver_answer`] fix was
+    /// written into the arm that almost never runs.
+    fn boulder_shove_landed(&mut self) {
+        // The game moved a boulder, which is the only answer this driver ever gets. See
+        // [`Self::cycles_since_driver_answer`].
+        self.cycles_since_driver_answer = MachineCycles::ZERO;
+        self.boulder_goal_pushes = self.boulder_goal_pushes.saturating_add(1);
+        self.boulder_goal_stale = self.boulder_goal_stale.saturating_add(1);
+    }
+
+    /// Emulated time since the game last answered a driver — what [`DRIVER_ESCAPE_SILENCE`] is
+    /// measured against, and **not** the same clock as [`Self::since_last_policy_poll`]. See
+    /// [`Self::cycles_since_driver_answer`].
+    pub fn since_driver_answer(&self) -> Duration {
+        self.cycles_since_driver_answer.to_duration()
     }
 
     /// **W9 / §14** — the watchdog: ask the policy for a nudge when nothing has asked it anything.
@@ -2494,8 +2552,7 @@ impl PokemonAgent {
                 // would drop to `AwaitingOverworldAction` and ask for a whole new decision, which is
                 // the N-decisions-per-puzzle this feature exists to end.
                 if let Some((_, boulder, target, hole)) = self.boulder_goal {
-                    self.boulder_goal_pushes = self.boulder_goal_pushes.saturating_add(1);
-                    self.boulder_goal_stale = self.boulder_goal_stale.saturating_add(1);
+                    self.boulder_shove_landed();
                     let pushes = self.boulder_goal_pushes;
                     self.set_state(AgentState::SolvingBoulderPuzzle { boulder, target, hole, pushes, settle: 0 });
                     return;
@@ -2872,6 +2929,7 @@ impl PokemonAgent {
         // **W9.** Counted here rather than at the bottom, because every early return below is a tick
         // that did not ask the policy anything — which is exactly what the watchdog measures.
         self.cycles_since_poll += delta_cycles;
+        self.cycles_since_driver_answer += delta_cycles;
 
         // ── Manual input ──────────────────────────────────────────────────────────
         // The policy's escape hatch (`queue_manual_input`). It pre-empts everything below, including
@@ -3026,7 +3084,7 @@ impl PokemonAgent {
         // an elevator ride all run without a poll. 60 s is several times the slowest of those at the
         // cartridge's own text speed, and still well inside the watchdog's 300 s.
         if drives_its_own_menus(&self.state)
-            && self.cycles_since_poll.to_duration() >= DRIVER_ESCAPE_SILENCE {
+            && self.cycles_since_driver_answer.to_duration() >= DRIVER_ESCAPE_SILENCE {
             let abandoned = format!("{} got no answer from the game for {:?}; starting over",
                                     self.state, DRIVER_ESCAPE_SILENCE);
             // ⚠️ **"Starting over" is only harmless where something else is counting.** A boulder
@@ -5679,8 +5737,7 @@ CascadeBadge; not cutting".to_string(),
                     // puzzle back to the model.
                     match self.boulder_goal {
                         Some((_, boulder, target, hole)) => {
-                            self.boulder_goal_pushes = self.boulder_goal_pushes.saturating_add(1);
-                            self.boulder_goal_stale = self.boulder_goal_stale.saturating_add(1);
+                            self.boulder_shove_landed();
                             let pushes = self.boulder_goal_pushes;
                             self.set_state(AgentState::SolvingBoulderPuzzle { boulder, target, hole, pushes, settle: 0 });
                         }

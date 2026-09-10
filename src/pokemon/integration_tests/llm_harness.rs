@@ -645,6 +645,8 @@ pub struct LlmRun {
     seen: Mutex<Vec<UiEvent>>,
     fixture_state: &'static [u8],
     want_coverage: bool,
+    /// The coverage log, held across a restart. See `bring_up`.
+    coverage_log: Option<crate::pokemon::integration_tests::coverage::CoverageLog>,
     max_game_time: Duration,
     stuck_timeout: Option<Duration>,
     /// How many processes this run has had. `1` until the first [`Self::restart`].
@@ -772,6 +774,7 @@ impl LlmRunBuilder {
             events,
             seen: Mutex::new(Vec::new()),
             want_coverage: self.coverage,
+            coverage_log: None,
             fixture_state: self.fixture,
             max_game_time: self.max_game_time,
             stuck_timeout: self.stuck_timeout,
@@ -832,6 +835,15 @@ impl LlmRun {
             fixture = fixture.with_coverage();
         }
         fixture.total_cycles = carry.unwrap_or(MachineCycles::ZERO);
+        // ⚠️ **The coverage log belongs to the *run*, not to the process.** A restart hangs a fresh
+        // fixture off a fresh policy, and `with_coverage` above gives that fixture an empty log — so
+        // without this every verdict taken before a restart is thrown away. Nothing needed it until
+        // the coverage walk started restarting itself past the Hall of Fame
+        // (`docs/coverage-plan.md` step 1.3), which is a restart in the middle of the very run whose
+        // log is the deliverable.
+        if let Some(carried) = self.coverage_log.take() {
+            fixture.coverage = Some(carried);
+        }
         self.fixture = Some(fixture);
         self.processes += 1;
     }
@@ -841,8 +853,26 @@ impl LlmRun {
     /// ⚠️ **This is the only way `GB_RESTORE_HISTORY`, the re-minted system prompt and the
     /// "conversation is a little ahead of the save" line are ever exercised.**
     pub fn restart(&mut self) {
-        let carry = self.fixture().total_cycles;
         self.checkpoint();
+        self.restart_from_last_checkpoint();
+    }
+
+    /// Restart **without** checkpointing first, so the process comes back up on whatever
+    /// [`Self::checkpoint`] last wrote rather than on where the game has since got to.
+    ///
+    /// ⭐ **This is a rewind, and the coverage walk is what it is for.** Three of the ten walks win
+    /// the game at 42-60% of their budget and then have no world left to walk
+    /// (`docs/coverage-plan.md` step 1.3); the answer is to checkpoint at the Indigo Plateau lobby,
+    /// report the Hall of Fame when it happens, and then come back up before the gauntlet and spend
+    /// the rest of the budget exploring. [`Self::restart`] cannot do it — it checkpoints on the way
+    /// out, which is the deployed order and would save the title screen.
+    ///
+    /// The emulated time already spent carries across, so a rewind buys **budget** for nothing: the
+    /// walk's bound is `TestFixture::total_cycles`, and the cartridge clock going backwards under it
+    /// is exactly what makes this a rewind rather than a second life.
+    pub fn restart_from_last_checkpoint(&mut self) {
+        let carry = self.fixture().total_cycles;
+        self.coverage_log = self.fixture().coverage.take();
         self.tear_down();
         self.bring_up(Some(carry));
     }
@@ -1045,6 +1075,16 @@ impl LlmRun {
 
     pub fn map(&mut self) -> crate::pokemon::map::Map {
         self.fixture().game_state().map.map
+    }
+
+    /// The map, or `None` where the game has no readable state — mid-warp, mid-transition, or on the
+    /// tick a starter is being written into an empty party.
+    ///
+    /// ⚠️ **A long-running predicate has to use this rather than [`Self::map`].** `game_state()`
+    /// unwraps, and over a whole playthrough it *will* be called on a tick that has no map: the god
+    /// run panicked with "Invalid Pokemon species" the instant it picked Squirtle out of Oak's ball.
+    pub fn map_if_readable(&mut self) -> Option<crate::pokemon::map::Map> {
+        self.fixture().try_game_state().ok().map(|state| state.map.map)
     }
 }
 

@@ -426,8 +426,18 @@ fn full_playthrough() {
     // list plus whatever the agent does on its own eventually gets there" — and that is precisely the
     // hole the Poké Flute fell through for a long time (see `TestFixture::run_leg`). Everything below
     // has to be true the instant the last step pops.
+    let started = std::time::Instant::now();
     fixture.step_until_exhausted();
+    let elapsed = started.elapsed();
     let state = fixture.game_state();
+
+    // ⭐ **The rate, because the bar for `docs/coverage-plan.md`'s god run is this test measured on
+    // the same machine on the same day** — and until this line you had to time the whole cargo
+    // invocation from outside, which folds a compile into the number. Game time over wall clock is
+    // what makes it comparable with `godmode_turn_cost`'s own figure.
+    println!("\nplayed {:?} of game time in {elapsed:?} of wall clock ({:.0}x realtime)",
+             fixture.total_cycles.to_duration(), elapsed.as_secs_f64().max(0.001).recip()
+                 * fixture.total_cycles.to_duration().as_secs_f64());
 
     for pokemon in state.pokemon.iter() {
         println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);

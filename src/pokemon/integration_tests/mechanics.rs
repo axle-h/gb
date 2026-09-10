@@ -3341,3 +3341,128 @@ fn a_water_crossing_is_a_row_of_its_own_beside_the_bridge_to_the_same_map() {
          {surfing:?}");
 }
 
+/// **The four duplicate map headers no warp in the game targets** —
+/// `docs/coverage-plan.md` step 1.2.
+///
+/// ⚠️ **Every map count that plan has ever printed was four too pessimistic**, because
+/// `unreached_report` set aside the 22 `UnusedMap*` and the two link-cable rooms and not these. They
+/// are real map numbers with real dimensions — `Map::iter()` yields them and nothing marks them as
+/// different — and no walk can ever enter one, so a sweep that reached absolutely everything would
+/// still have looked like 216 of 220.
+///
+/// This is what keeps [`coverage::UNREACHABLE_DUPLICATES`] honest against the ROM rather than
+/// against a `grep`: **nothing anywhere warps to any of the four**, and every *other* interior is
+/// warped to by something. A duplicate that stops being one upstream, or a new one that starts,
+/// fails here rather than quietly moving the denominator.
+///
+/// ⚠️ **Warps only, and interiors only.** An outdoor map is entered by a *connection*, so a
+/// warp scan has nothing to say about one; all four of these are interiors, which have no
+/// connections at all.
+///
+/// ⚠️ **Three of the four have no header symbol for the reader to reach** (`map.rs` answers `None`),
+/// so they never appear in the second half's scan — which is why the first half tests them by name.
+/// That is a second, independent way of saying the same thing about the same four maps.
+#[test]
+fn a_duplicate_map_is_not_a_coverage_gap() {
+    use crate::pokemon::map_metadata::MapMetadataReader;
+    use strum::IntoEnumIterator;
+
+    let mmu = crate::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let mut targeted: std::collections::BTreeSet<Map> = Default::default();
+    let mut readable: Vec<Map> = vec![];
+    for map in Map::iter() {
+        let Ok(metadata) = mmu.read_map_metadata(map) else { continue };
+        readable.push(map);
+        for warp in &metadata.warp_events {
+            targeted.insert(warp.destination_map);
+        }
+    }
+
+    const DUPLICATES: [Map; 4] = [
+        Map::CeruleanTrashedHouseCopy,
+        Map::CinnabarMartCopy,
+        Map::UndergroundPathRoute6Copy,
+        Map::UndergroundPathRoute7Copy,
+    ];
+    for map in DUPLICATES {
+        assert!(!targeted.contains(&map),
+            "{map:?} is warped to after all, so it is not an unreachable duplicate");
+    }
+
+    // And nothing else that the reader can see is orphaned. `UnusedMap*` have no header, the two
+    // link-cable rooms are their own bucket, and an outdoor map is entered by a connection.
+    let orphans: Vec<Map> = readable.into_iter()
+        .filter(|map| !targeted.contains(map))
+        .filter(|map| !format!("{map:?}").starts_with("UnusedMap"))
+        .filter(|map| !matches!(map, Map::Colosseum | Map::TradeCenter))
+        .filter(|map| !map.is_overworld())
+        .collect();
+    println!("interiors no warp anywhere targets: {orphans:?}");
+    assert!(orphans.iter().all(|map| DUPLICATES.contains(map)),
+        "an interior nothing warps to that is not one of the known duplicates: {orphans:?} — \
+         coverage::UNREACHABLE_DUPLICATES and every map count in docs/coverage-plan.md are \
+         derived from that list");
+}
+
+/// **Probe — `docs/coverage-plan.md` step 1.4: the maps a sweep never enters.**
+///
+/// Walks to each map named in `GB_PROBE_MAPS` (comma-separated, default the step 1.4 list) and dumps
+/// what `MetaTileMap::actions` offers from where it lands, plus the reachable grid. The question is
+/// always the same one: *is the row missing because the game withholds it, or because the square it
+/// is on cannot be reached from where the walk stood?*
+///
+/// ```text
+/// GB_PROBE_MAPS=Route16Gate1F,SafariZoneWest \
+/// cargo test --release --features diagnostics,slow-tests --bin gb -- probe_unreached_maps --ignored --nocapture
+/// ```
+#[test]
+#[cfg(feature = "diagnostics")]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_unreached_maps() {
+    use crate::pokemon::item::ItemId;
+    let wanted = std::env::var("GB_PROBE_MAPS")
+        .unwrap_or_else(|_| "Route16Gate1F".to_string());
+    for name in wanted.split(',') {
+        let map = <Map as strum::IntoEnumIterator>::iter()
+            .find(|m| format!("{m:?}") == name)
+            .unwrap_or_else(|| panic!("no map named {name:?}"));
+        let mut fixture = TestFixture::new(
+            include_bytes!("../data/postgame-fly-bike.bin"), Duration::from_mins(90),
+            vec![PolicyStep::goto(map)]);
+        // Every key item, so nothing here is a gate the walk would not also have open.
+        for item in crate::pokemon::integration_tests::cheats::COVERAGE_KEY_ITEMS {
+            let _ = fixture.api().debug_give_item(item, 1);
+        }
+        let _ = ItemId::Bicycle;
+        let arrived = fixture.try_run_until(|s| s.map.map == map);
+        match arrived {
+            Some(_) => {}
+            None => { println!("== {name}: never arrived"); continue }
+        }
+        for _ in 0..50 { fixture.step() }
+        let s = fixture.game_state();
+        println!("== {name}: standing at {} facing {:?}", s.map.player_position, s.map.player_direction);
+        for y in 0..s.map.height as u8 {
+            let row: String = (0..s.map.width as u8).map(|x| match s.map.tile_at(Point8 { x, y }) {
+                MetaTile::Empty => '.',
+                MetaTile::Obstacle => '#',
+                MetaTile::Water => '~',
+                MetaTile::Warp { .. } => 'W',
+                MetaTile::Connection { .. } => 'C',
+                MetaTile::ConnectionWater(_) => 'c',
+                MetaTile::Counter => 'n',
+                MetaTile::Sprite(_) => 'S',
+                MetaTile::Grass => 'g',
+                MetaTile::Jump(_) => 'J',
+                MetaTile::CutTree => 'T',
+                other => format!("{other:?}").chars().next().unwrap(),
+            }).collect();
+            println!("   {y:>2} {row}");
+        }
+        println!("   sprites: {:?}", s.map.sprites.iter()
+            .map(|sp| (sp.name, sp.position, sp.hidden)).collect::<Vec<_>>());
+        for a in s.map.actions() {
+            println!("   row {} -> {} ({} steps)", a.id(), a.destination, a.route.len());
+        }
+    }
+}

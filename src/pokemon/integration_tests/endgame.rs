@@ -932,3 +932,83 @@ fn a_wedged_strength_floor_is_reported_as_a_reset_rather_than_a_missing_route() 
     assert!(line.contains("(9, 16)"), "the target belongs in the line: {line}");
     println!("{line}");
 }
+
+/// **A boulder goal that is landing shoves is not a driver the game has gone quiet on** — and for
+/// as long as there have been boulder goals, it was one as soon as it passed a minute.
+///
+/// ⚠️ **`docs/coverage-plan.md` step 1.1, and the third boulder finding in its §7.1.** The `fuchsia`
+/// walk of 2026-09-10 gave up on `VictoryRoad3F:3,5:PushBoulderOntoSwitch` after 34 pushes — three
+/// shoves from the end of a puzzle it had already solved twice from the same floor, and with the
+/// plan getting shorter on every one of them. Nothing was wrong with the puzzle, the planner or the
+/// pathfinder. [`DRIVER_ESCAPE_SILENCE`] was measured against `cycles_since_poll`, the clock only a
+/// **decision point** resets, and a `BoulderGoal` is one decision that walks a boulder across a
+/// whole floor. Past 60 s of game time with no wild battle to poll the policy, every entry into
+/// `AgentState::PushingBoulder` was escaped on its first tick, and three of those is
+/// `MAX_SILENT_SHOVES`. Neither of the goal's own bounds can see it: both are counted off a shove
+/// that *landed*.
+///
+/// ⚠️ **The Repel is what makes this a test rather than a coin flip, and it is also the diagnosis.**
+/// Victory Road throws a wild Pokémon about every 30 s and each one polls the policy, so the sibling
+/// test above passes with a peak silence of 32 s against an 85 s goal — and the walk lost the third
+/// attempt rather than the first two. Holding the counter up removes the only thing that was hiding
+/// the bug: this floor's hardest puzzle then runs 27 shoves without the policy being asked anything.
+///
+/// ⚠️ **What is asserted is the *pair of clocks*, not the abort.** Uninterrupted, this puzzle costs
+/// about three quarters of the bound — the walk exceeded it because it also had to shift a boulder
+/// out of the corridor and arm Strength on a floor it had just entered — so a test that waited for
+/// the hatch to fire would be a test about how long a floor happens to take. What the fix says is
+/// that the two clocks are different facts: the policy goes unasked for the whole goal, and the game
+/// answers on every shove.
+#[test]
+fn a_boulder_goal_that_keeps_shoving_is_not_a_driver_the_game_has_gone_quiet_on() {
+    use crate::pokemon::agent::DRIVER_ESCAPE_SILENCE;
+    use crate::pokemon::tile::MetaTile;
+    const SWITCH: Point8 = Point8 { x: 3, y: 5 };
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/vr3f-strength.bin"), Duration::from_mins(10), vec![]);
+    let state = fixture.game_state();
+    let goal = state.map.actions().into_iter()
+        .find(|a| matches!(a.tile, MetaTile::BoulderGoal { at, .. } if at == SWITCH))
+        .expect("the menu offers VictoryRoad3F's switch as a goal");
+    fixture.agent.take_overworld_action(goal);
+
+    let start = fixture.total_cycles;
+    let mut ended: Option<String> = None;
+    let mut silences: Vec<String> = Vec::new();
+    let (mut peak_poll, mut peak_answer) = (Duration::ZERO, Duration::ZERO);
+    while fixture.total_cycles < fixture.max_cycles && ended.is_none() {
+        // Held up rather than set once: the counter is spent one per overworld step and this goal
+        // walks further than the byte can count. See `debug_set_repel_steps`.
+        fixture.api().debug_set_repel_steps(u8::MAX);
+        fixture.step();
+        peak_poll = peak_poll.max(fixture.agent.since_last_policy_poll());
+        peak_answer = peak_answer.max(fixture.agent.since_driver_answer());
+        for event in fixture.agent.drain_events() {
+            match &event {
+                AgentEvent::OverworldActionCompleted { destination: MetaTile::BoulderGoal { .. } } =>
+                    ended = Some("completed".to_string()),
+                AgentEvent::OverworldActionAborted { destination: MetaTile::BoulderGoal { .. }, reason, .. } =>
+                    ended = Some(format!("aborted: {reason}")),
+                AgentEvent::TextBox { message } if message.contains("no answer") =>
+                    silences.push(message.clone()),
+                _ => {}
+            }
+        }
+    }
+    let took = (fixture.total_cycles - start).to_duration();
+    println!("one decision: {ended:?} after {took:?}; policy unasked for {peak_poll:?}, \
+              longest the game went without answering the driver {peak_answer:?}");
+
+    assert!(silences.is_empty(), "the game answered every shove: {silences:?}");
+    assert_eq!(ended.as_deref(), Some("completed"),
+        "a {took:?} boulder goal that lands every shove has to finish");
+    // ⚠️ **This is the line the fix is about.** Before it the two were one field, so the hatch was
+    // reading `peak_poll` — and a floor that needed a third longer than this one crossed the bound
+    // while it was working perfectly.
+    assert!(peak_poll > DRIVER_ESCAPE_SILENCE / 2,
+        "the goal has to spend a good part of the bound with the policy unasked or this test proves \
+         nothing; it was only {peak_poll:?}. Is the Repel holding?");
+    assert!(peak_answer < DRIVER_ESCAPE_SILENCE / 2,
+        "the game answered a shove every {peak_answer:?}, which the hatch must be measuring instead \
+         of the {peak_poll:?} the policy went unasked");
+}

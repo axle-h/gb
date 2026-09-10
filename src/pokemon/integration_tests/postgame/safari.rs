@@ -112,6 +112,61 @@ fn probe_safari_areas() {
     }
 }
 
+/// **Scratch: the Safari Zone's west area, entered by the *eastern* of its two warp pairs.**
+///
+/// ⭐ `docs/coverage-plan.md` step 1.4. `SafariZoneWest` is two shelves that one-way ledges seal off
+/// from each other, and which pair of doors a walk comes in by decides which shelf it stands on: the
+/// western pair (North (2, 35) / (3, 35) → West (20, 0) / (21, 0)) lands on the Gold Teeth plateau,
+/// and the **eastern** pair (North (8, 35) / (9, 35) → West (26, 0) / (27, 0)) lands on the shelf the
+/// **rest house** is on. Every coverage sweep has taken the western pair and left the eastern one
+/// `unreached`, which is why `SafariZoneWestRestHouse` has never been in a union.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn cut_safari_west_shelf_fixture() {
+    let mut fixture = TestFixture::new(FLASH, Duration::from_mins(120), vec![
+        PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) },
+        PolicyStep::Fly { to: Map::FuchsiaCity },
+        PolicyStep::enter(Map::SafariZoneGate),
+        PolicyStep::enter(Map::SafariZoneCenter),
+        PolicyStep::enter(Map::SafariZoneEast),
+        PolicyStep::enter(Map::SafariZoneNorth),
+        PolicyStep::enter_at(Map::SafariZoneWest, 26, 0),
+    ]);
+    fixture.step_until_exhausted();
+    for _ in 0..50 { fixture.step() }
+    let state = fixture.game_state();
+    println!("{} @ {} · safari {:?}", state.map.map, state.map.player_position, state.safari);
+    assert_eq!(state.map.map, Map::SafariZoneWest);
+    fixture.save_state_named("src/pokemon/data/safari-west-shelf.bin").unwrap();
+}
+
+/// **The Safari Zone's west rest house is a row from the shelf it is on** —
+/// `docs/coverage-plan.md` step 1.4, and the last map any sweep had never entered.
+///
+/// ⚠️ **The finding is not that a row was missing; it is that the shelf decides.** `SafariZoneWest`
+/// is cut in two by one-way ledges, and `SafariZoneNorth` has *four* doors into it in two pairs that
+/// land on opposite sides of them. `actions()` mints a row per unique destination, so all four are on
+/// the menu — but the frontier counts a way out **per crossing**, `SafariZoneNorth → SafariZoneWest`,
+/// so once either pair is taken the crossing is "done" and the other pair waits behind every other
+/// exit on a very large map. Ten walks of six game-hours each took the western pair every time.
+///
+/// So this pins the half that is a fact about the game rather than about the walk: from the eastern
+/// landing the door at (11, 11) is offered and routable, and from the western one it is not there at
+/// all. A map that is only reachable through one of two doors is exactly the shape §2.1's ⚠️ about
+/// Seafoam's two holes warns about, one level up.
+#[test]
+fn the_safari_wests_rest_house_is_a_row_from_the_shelf_it_is_on() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../../data/safari-west-shelf.bin"), Duration::from_mins(2), vec![]);
+    let state = fixture.game_state();
+    assert_eq!(state.map.map, Map::SafariZoneWest);
+    let door = state.map.actions().into_iter()
+        .find(|a| matches!(a.tile, MetaTile::Warp { to_map: Map::SafariZoneWestRestHouse, .. }))
+        .expect("the rest house door is a row from this shelf");
+    println!("{} -> {} in {} steps", door.id(), door.destination, door.route.len());
+    assert_eq!(door.id(), "SafariZoneWest:11,11:Warp");
+}
+
 /// **Tasks E2 + E3 + E4 (walking out)** — throw Safari Balls instead of running, catch a species the
 /// Safari Zone is the only source of, and leave through the gate under our own steam.
 ///
