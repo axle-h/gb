@@ -90,6 +90,19 @@ lives in the code.
   `classify` does not touch the game and that is worth keeping.
   `tools::a_refused_battle_id_carries_the_rule_and_says_nothing_about_maps`, and
   `docs/coverage-plan.md` step 7 for how both were found.
+- ⚠️ **There is no way to name a party *member*, and what that costs is the Day Care and the Name
+  Rater.** `FieldMoveRequest` leaves out `UsePartyScript` along with the other postgame mechanisms,
+  on the argument that their arguments are internal types and none is on the path to the Hall of
+  Fame — both still true. Out of battle, three scripts open a party menu (`grep DisplayPartyMenu`):
+  an in-game **trade**, which needs no tool because it has exactly one legal answer and the agent
+  gives it (`PartyMenuAnswer`, and [pokemon-agent](pokemon-agent.md)); and the Day Care and the Name
+  Rater, which are real choices with no way to express them, so the agent **declines** them rather
+  than guessing. A run therefore cannot board or rename a Pokémon through the LLM path today, and
+  cannot lose one to a menu it never answered either. All nine trades work — each is worth two dex
+  entries, and five species are obtainable no other way on one cartridge.
+  `branch_points::a_trade_finds_the_give_species_wherever_it_is_in_the_party`,
+  `postgame::trades::every_in_game_trade_can_be_made_by_talking_to_the_trader`, and
+  `docs/coverage-plan.md` step 8.
 - **A row that leads to a coordinate being asked for names both squares.** An id's coordinate is
   where the *player stands*; `use_field_move`'s `target` is where the *thing is*.
   `Route16:27,10:Snorlax` with the Snorlax on (26, 10) had a run play the Poké Flute at open

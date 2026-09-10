@@ -1366,6 +1366,71 @@ impl Display for AgentState {
     }
 }
 
+/// The first party slot holding `species`, read from `wPartySpecies` — the `$ff`-terminated list at
+/// the head of the party struct, so this costs no `GameState` build and works with a menu on screen.
+///
+/// ⚠️ **First rather than best**, and there is nothing to choose between them: an in-game trade takes
+/// the species and never looks at the individual, so a party carrying two of them has two identical
+/// answers. See [`PartyMenuAnswer`].
+fn party_slot_of(api: &PokemonApi<'_>, species: PokemonSpecies) -> Option<u8> {
+    use crate::ram::ROM;
+    let count = api.mmu().read_pointer(&pokered_symbols::wPartyCount);
+    let base = pokered_symbols::wPartySpecies.address;
+    (0..count).find(|i| api.mmu().read(base + *i as u16) == species as u8)
+}
+
+/// A **party menu a conversation opened**, and what the agent answers it with.
+///
+/// Out of battle there are exactly three of them in the whole cartridge — `grep DisplayPartyMenu`:
+/// an in-game trade, the Day Care gentleman and the Name Rater — and every one of them calls
+/// `DisplayPartyMenu` **without resetting `wCurrentMenuItem`**, so the list opens wherever the last
+/// party menu left its cursor. The agent's ordinary A-mash therefore answers all three with an
+/// arbitrary party member, and each does something irreversible with it.
+///
+/// ⭐ **A trade is the one with a right answer, so it is the one the agent gives.**
+/// `InGameTrade_DoTrade` compares the selected mon's species against `wInGameTradeGiveMonSpecies`
+/// and says "Hmmm? This isn't POLIWHIRL." to anything else (`engine/events/in_game_trades.asm`), so
+/// the menu has exactly one acceptable row and the cartridge is the thing that says which. **That is
+/// why there is no policy callback for it**: asking a model to pick from a list with one legal entry
+/// buys nothing and costs a round trip, and what a model *does* decide — whether to talk to the
+/// trader at all — has always been an ordinary menu row. Measured before this existed: the
+/// give-species in slot 0 traded, the same Pokémon one slot back traded nothing.
+///
+/// ⚠️ **The other two have no right answer, so they are declined rather than guessed at.** Which mon
+/// to board or to rename is a real choice and nothing on the LLM path can express it —
+/// `FieldMoveRequest` deliberately carries no `UsePartyScript` — so an A-mash there is not the agent
+/// answering, it is the agent *choosing* on the model's behalf, permanently and silently. The Day
+/// Care keeps what it is given until it is paid for, so the mon a run loses that way can be its only
+/// Cut or Surf carrier.
+///
+/// ⚠️ **And what this replaces was not "always confirm", it was a coin flip, which is worse.**
+/// Measured with this driver removed: the *same* party menu, in the same `ReadingTextBox` state, was
+/// **confirmed** at the Cerulean trader (slot 0 handed over) and **bounced** at the Day Care ("All
+/// right then, come again.") — because the hand-over rule below only looks for a stray menu in a
+/// window after a box opens, and whether a conversation's party list falls inside that window is a
+/// matter of how long the conversation took to get there. So the sentence this arm emits is
+/// deliberately the hand-over rule's own: same answer, given every time rather than sometimes, and
+/// on the tick the menu appears rather than up to 30 s later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartyMenuAnswer {
+    /// The species an in-game trade asked for, or `None` for a conversation the agent cannot answer.
+    give: Option<PokemonSpecies>,
+    /// Press/release alternation, so every cursor step is a fresh rising edge. The reader running
+    /// beside this one only ever `accumulate`s, so the two do not fight over the joypad.
+    press: bool,
+    /// The button this menu has already been answered with, once it has been.
+    ///
+    /// ⚠️ **Latched, and the answer must not be re-derived after it.** Two ways round that were
+    /// wrong. Handing the menu straight back after one press does not work — a joypad edge takes a
+    /// tick or two to register, so the party list is still up when the ordinary A-mash resumes and
+    /// it selects whatever the cursor is on; measured, a `B` for want of the species was followed by
+    /// an `A` and the trader answered "Hmmm? This isn't POLIWHIRL." after all. And re-deriving the
+    /// answer each tick does not work either, because a successful `A` *removes the give-species
+    /// from the party* — so the next tick would find none left and start pressing `B` into the
+    /// trader's reply.
+    answered: Option<JoypadButton>,
+}
+
 pub struct PokemonAgent {
     state: AgentState,
     /// Tick counter for the post-Champion cutscene cadence — see `drive_post_champion_cutscene`.
@@ -1561,6 +1626,10 @@ pub struct PokemonAgent {
     /// worst possible way for this to be wrong, since it would put a false line under every item in
     /// the game.
     pending_pickup: Option<(MetaTile, u16)>,
+    /// The party menu the conversation in progress opened, if one has. Armed with the species when
+    /// the conversation is with an in-game trade's NPC, armed empty when a party list simply
+    /// appears, and cleared when the conversation ends. See [`PartyMenuAnswer`].
+    party_menu: Option<PartyMenuAnswer>,
 
     /// Overworld ticks spent so far waiting out a black-out warp — see [`blackout_in_flight`] for
     /// what is being waited for and [`MAX_BLACKOUT_WAIT_TICKS`] for the ceiling. Reset by
@@ -1650,6 +1719,7 @@ impl PokemonAgent {
             menu_handover_ticks: 0,
             forget_choice: None,
             pending_pickup: None,
+            party_menu: None,
             blackout_ticks: 0,
             hall_of_fame_teams: None,
         }
@@ -2656,6 +2726,19 @@ impl PokemonAgent {
                         if self.is_item_ball(destination, api) {
                             self.pending_pickup = Some((destination, PICKUP_SETTLE_TICKS));
                         }
+                        // ⭐ **Armed on *who*, because nothing else says a trade is happening.**
+                        // See [`PartyMenuAnswer`]: `wWhichTrade` and `wInGameTradeGiveMonSpecies` are
+                        // written once and then persist for the rest of the run, so the only live
+                        // fact that identifies the menu is the NPC this conversation was opened
+                        // with. Cleared when the box closes, a dozen lines below.
+                        if let MetaTile::Sprite(who) = destination
+                            && let Some(map) = self.last_map
+                            && let Some(trade) = crate::pokemon::postgame::trades::trade_at(map, who)
+                        {
+                            self.party_menu = Some(PartyMenuAnswer {
+                                give: Some(trade.give), press: true, answered: None,
+                            });
+                        }
                         self.event(AgentEvent::OverworldInteractionCompleted { target: destination });
                     } else {
                         let at = self.player_at(api);
@@ -2720,6 +2803,10 @@ impl PokemonAgent {
         } else if matches!(self.state, AgentState::ReadingTextBox { .. }) {
             // Text box closed. `set_state` flushes the reader on the way out, which is the same
             // funnel a script or a battle stealing the state now goes through.
+            //
+            // ⚠️ **And the party menu's answer goes with it**, because the next conversation may be
+            // with somebody else entirely and the geometry this one left behind reads the same.
+            self.party_menu = None;
             self.set_state(AgentState::Idle);
         }
     }
@@ -3797,6 +3884,77 @@ CascadeBadge; not cutting".to_string(),
                     }
                     self.escaping_menus = true;
                     self.menu_handover_ticks = 0;
+                }
+                // ⭐ **A party menu a *conversation* opened is answered here rather than A-mashed.**
+                // See [`PartyMenuAnswer`] for the three that exist, which one has a right answer and
+                // why the other two are declined; and [`is_normal_party_menu`] for why the
+                // recognition needs both the geometry and the sentence — the geometry lingers for
+                // the rest of the run and would otherwise match the trader's own greeting.
+                //
+                // ⚠️ **The reader keeps reading and this driver keeps its own presses**, which is the
+                // separation `PokemonTextReader::accumulate` exists for: the trader's sentences are
+                // the only account the model gets of what happened here, and `update_with` would
+                // re-time the cursor as well as read.
+                if !in_battle
+                    && let Some(screen) = api.on_screen_text(false)
+                    && let (x, y, cursor, _) = api.menu_geometry()
+                    && crate::pokemon::menu::is_normal_party_menu(x, y, &screen)
+                {
+                    reader.accumulate(api);
+                    // Armed here when nothing armed it earlier: a party list in a conversation the
+                    // agent has no answer for is the Day Care or the Name Rater.
+                    let choice = self.party_menu.unwrap_or(PartyMenuAnswer {
+                        give: None, press: true, answered: None,
+                    });
+                    let button = match (choice.answered, choice.give) {
+                        // Already answered: keep saying the same thing until the list goes. See
+                        // [`PartyMenuAnswer::answered`] — both alternatives were tried and both broke.
+                        (Some(button), _) => button,
+                        (None, Some(give)) => match party_slot_of(api, give) {
+                            // On it: hand this one over. The cartridge checks the species itself, so
+                            // the worst a wrong answer here could do is earn a refusal.
+                            Some(slot) if slot == cursor => {
+                                new_events.push(AgentEvent::TextBox { message: format!(
+                                    "handed over the {give:?} in party slot {}", slot + 1) });
+                                JoypadButton::A
+                            }
+                            Some(slot) if slot > cursor => JoypadButton::Down,
+                            Some(_) => JoypadButton::Up,
+                            // ⚠️ **Backed out rather than offered the wrong one.** Handing the trader
+                            // something it will not take costs a whole conversation to be told so,
+                            // and the turn already quotes it asking for the species by name; this
+                            // says the same thing in the agent's own voice, once.
+                            None => {
+                                new_events.push(AgentEvent::TextBox { message: format!(
+                                    "the trade wants a {give:?} and there is none in the party, so \
+                                     nothing was handed over") });
+                                JoypadButton::B
+                            }
+                        },
+                        // ⚠️ **The Day Care, the Name Rater, or a party list nobody opened.** Same
+                        // sentence as the hand-over rule below, because it is the same answer — a
+                        // menu with no answer behind it is closed, not confirmed. What this adds is
+                        // that it is now the answer *every* time: see [`PartyMenuAnswer`] for the
+                        // measurement, where the identical menu was confirmed in one conversation
+                        // and bounced in another.
+                        (None, None) => {
+                            new_events.push(AgentEvent::TextBox { message:
+                                "a party menu was left open with no way to answer it; closing it \
+                                 rather than confirming it".to_string() });
+                            JoypadButton::B
+                        }
+                    };
+                    api.release_all_buttons();
+                    if choice.press {
+                        api.press_button(button);
+                    }
+                    let answered = choice.answered
+                        .or_else(|| matches!(button, JoypadButton::A | JoypadButton::B).then_some(button));
+                    self.party_menu = Some(PartyMenuAnswer { press: !choice.press, answered, ..choice });
+                    for event in new_events {
+                        self.event(event);
+                    }
+                    return Ok(());
                 }
                 let button = if api.in_pc_menu() || self.escaping_menus { JoypadButton::B } else { JoypadButton::A };
                 reader.update_with(api, button);

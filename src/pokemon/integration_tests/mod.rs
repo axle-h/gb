@@ -91,6 +91,10 @@ pub(crate) mod llm_harness;
 /// `docs/coverage-plan.md` step 7.
 #[cfg(feature = "llm")]
 mod battle_refusals;
+/// **Step 8** — the branch points: content that is exclusive per save. One snapshot cut before
+/// each branch, N tests after it, all of them through `LlmPolicy`. See `docs/coverage-plan.md` step 8.
+#[cfg(feature = "llm")]
+mod branch_points;
 mod vermilion;
 mod celadon;
 mod fuchsia;
