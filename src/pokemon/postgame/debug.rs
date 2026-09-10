@@ -130,6 +130,45 @@ impl<'a> PokemonApi<'a> {
         Ok(())
     }
 
+    /// Rewrite the bag so that it holds only the kinds in `keep`, and answer with the raw ids that
+    /// were dropped.
+    ///
+    /// ⭐ **The counterpart to [`Self::debug_give_item`]'s failure mode, and it is the whole of
+    /// `docs/coverage-plan.md` step 6's first job.** Gen 1's bag is twenty *kinds*, and a save the
+    /// cartridge itself played to the credits arrives with between fourteen and twenty of them
+    /// used — five HMs, four TMs, a fossil, the stat items, the spare Revives. So a coverage walk
+    /// asking for its fourteen key items got between one and nine of them refused, silently, and
+    /// which ones depended on which finished save it started from: no S.S. Ticket is the whole of
+    /// the S.S. Anne, no Lift Key is the Rocket Hideout, no rod is every `Fish` row in the game.
+    ///
+    /// ⚠️ **Dropped rather than moved to the PC, deliberately.** The obvious alternative is to
+    /// deposit the junk, and it buys nothing: `wPCItems` is a *second* fifty-slot list that no
+    /// coverage row reads, so a walk cannot tell a deposited Calcium from a discarded one. What it
+    /// would cost is a second write path to get wrong.
+    ///
+    /// ⚠️ **Raw ids, because `ItemId` is not the bag.** [`crate::pokemon::bag`]'s reader drops an
+    /// entry it cannot name, so a `keep` list matched through `ItemId` would leave an unnameable id
+    /// in place and the slot with it. The returned ids are raw for the same reason: a caller that
+    /// wants to print them can, and one that cannot name them still knows how many there were.
+    pub fn debug_keep_only_items(&mut self, keep: &[ItemId]) -> Vec<u8> {
+        let count = self.mmu().read_pointer(&pokered_symbols::wNumBagItems) as usize;
+        let base = pokered_symbols::wBagItems.address;
+        let held: Vec<(u8, u8)> = (0..count)
+            .map(|i| (self.mmu().read(base + i as u16 * 2), self.mmu().read(base + i as u16 * 2 + 1)))
+            .collect();
+        let (kept, dropped): (Vec<(u8, u8)>, Vec<(u8, u8)>) = held
+            .into_iter()
+            .partition(|(id, _)| keep.iter().any(|wanted| *wanted as u8 == *id));
+        for (i, (id, qty)) in kept.iter().enumerate() {
+            self.mmu_mut().write(base + i as u16 * 2, *id);
+            self.mmu_mut().write(base + i as u16 * 2 + 1, *qty);
+        }
+        // The list is 0xFF-terminated after the last pair, exactly as `debug_give_item_id` leaves it.
+        self.mmu_mut().write(base + kept.len() as u16 * 2, 0xFF);
+        self.mmu_mut().write(pokered_symbols::wNumBagItems.address, kept.len() as u8);
+        dropped.into_iter().map(|(id, _)| id).collect()
+    }
+
     /// Mark `species` as owned **and** seen in the Pokédex. Used to seed the 10/30/50 gates the
     /// Oak's-aide items sit behind (workstream H) without playing through the catching first.
     pub fn debug_set_dex_owned(&mut self, species: PokemonSpecies) {

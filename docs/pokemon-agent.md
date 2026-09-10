@@ -37,6 +37,22 @@ below is a comment on the function or constant it names; this is the index of th
   diagnoses: `NoRoute` says choose something else, `DidNotArrive` says the route was there and the
   walk did not finish it. Reporting the bound as `NoRoute` sent a deployed run hunting a pathfinder
   bug while standing two tiles from the warp it wanted.
+- ⭐ **"There is no route" is a claim about the map, and people stand on maps.** Every row is a BFS
+  from where the player is standing, so anyone standing anywhere on the path deletes it for a tick or
+  two — and a sprite row is the worst case, because `actions()` mints it for the nearest empty square
+  *beside* the object. So `OverworldMovement` waits `MAX_ROUTE_LOST_TICKS` (250 ticks, 5 s of game
+  time) of the row being absent before it says `NoRoute`, which is `REPEAT_IS_A_DEFECT`'s rule one
+  layer down. Four sweeps scored one of these as a defect and never twice in the same region:
+  `CeruleanMart:CooltrainerFemale`, a Pokémon Centre's chatter, and Celadon Mansion 1F's stairs
+  behind a corridor three pets and their owner wander across.
+- ⭐ **Three agent states carry an open overworld action, and every door out of any of them has to
+  end it.** `AgentState::open_overworld_action` is the one list: `OverworldMovement` is the walk,
+  `PacingForEncounters` is its tail, and `Surfing` **with a `resume`** is its middle. Each was found
+  by a silence rather than by reading the code — a trainer's walk-up committing as `Script` took the
+  pace (`Route18:39,13:Grass`), and a wild Pokémon appearing while the party menu was open to mount
+  Surf took the walk (`Route21:Fisher1`), because `assert_battle_state`'s `_` arm says a battle
+  started and nothing about what it interrupted. A new state that borrows a walk belongs in that list
+  on the day it is written.
 - **The route is re-derived from `actions()` every tick and only `route[0]` is ever pressed**, so no
   recipe may depend on its own tail (the comment is on `AgentState::OverworldMovement`'s re-derive).
   A two-step plan only completes if the next recomputation independently picks step two first;
@@ -52,6 +68,15 @@ below is a comment on the function or constant it names; this is the index of th
   `settle` does. ⚠️ **Whether the hijack fires at all depends on the map's NPCs** —
   `read_game_mode` needs `wScriptedNPCWalkCounter` non-zero, which is true only where someone has
   walked — so Pallet Town cannot test it and Cinnabar Island can.
+- ⭐ **…and the fourth thing dropping it was that the mount can *finish* the walk.** The mount ends in
+  one simulated step onto the water, and for a `ConnectionWater` row or a warp on the water that step
+  is the whole of the action — so the map changes while the state is `Surfing`, the resume's map no
+  longer matches, and the row was dropped to `Idle` with nobody told. The comment on that arm already
+  said the crossing "is the walk arriving rather than being interrupted"; it just did not say so out
+  loud, and the coverage sweep of 2026-09-10 scored four silences on it in one pass. It reports with
+  `OverworldMovement`'s own rule — a map change completes a warp or a connection and is `WrongMap`
+  for anything else — because there is no reason for the mount to hold a second opinion about which.
+  `cinnabar::a_walk_the_surf_mount_itself_finishes_says_that_it_arrived`.
 - `GameMode::Script` during a walk is either a ledge hop (~660 ms, inside `DelayContext::long`'s
   rollback window) or an arrow-tile slide (up to 14 s). `wMovementFlags` bit 7 (`BIT_SPINNING`)
   says which, and the deadline is re-armed every tick while it is set. The guard asserts the abort
@@ -122,6 +147,32 @@ price.
   `MetaTileMap::actions` builds the route and `AgentState::OverworldMovement` tests for a border warp
   *before* it consults one. Seafoam Islands' `B3F:21,17` and `B4F:21,17` are the case;
   `a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on` fails if either half is removed.
+- ⭐ **…and unless the player *warped* onto it, which is the same rule for a third reason.** The held
+  button reaches `ExtraWarpCheck` only past `.noDirectionChange`'s `bit BIT_STANDING_ON_WARP` test,
+  and that flag (`wMovementFlags` bit 2) is set by `CheckWarpsNoCollision` on a completed **step**
+  onto a warp entry — so it is clear for a player the cartridge put there itself. Every elevator in
+  the game lands you on exactly such a square. `MetaTileMap::standing_on_warp` carries it and both
+  places test it, for the same reason and with the same failure mode as the surfing rule above;
+  `an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on` fails if either half goes.
+  ⚠️ The Silph Co elevator's row also names `UnusedMapEd`, and that is honest: its `warp_event`s are
+  written `UNUSED_MAP_ED, 1` and `SilphCoElevatorStoreWarpEntriesScript` overwrites the destination
+  in `wWarpEntries` at map load, so only the cartridge knows where the door goes.
+- ⭐ **A door the cartridge *redraws* is a wall the ROM's own blocks deny, and the answer is to read
+  what it drew.** `map_uses_runtime_blocks` builds the map from `wOverworldMap` instead of the cached
+  ROM path for every map whose layout `ReplaceTileBlock` rewrites — Pokémon Mansion's switch gates,
+  Victory Road's boulder barriers, the Elite Four's rooms, and both gyms whose door is a puzzle.
+  ⚠️ **Vermilion Gym was missing from it until 2026-09-10 and no finished-game fixture could show
+  that**: its double doors are shut until the trash-can puzzle sets `EVENT_2ND_LOCK_OPENED`, and
+  every postgame save has them open. A pre-credits coverage start walked in on three badges, was
+  offered a row to Lt. Surge through a closed door, and leaned on a wall for 60 s.
+  `vermilion::lt_surge_is_not_a_row_while_his_doors_are_shut`.
+- ⭐ **A map script can cancel a warp the tiles say is fine, and no tile test will ever see it.**
+  `warp_trigger` models `ExtraWarpCheck`; a script runs *after* it. `SeafoamIslandsB4FDefaultScript`
+  simulates a step north off (20, 17) and (21, 17) and clears `BIT_FORCED_WARP` until **both**
+  SEAFOAM3 boulders are down their holes — which no finished game has, because the scripted route
+  leaves the islands by Escape Rope. `map_metadata::map_warp_gate_specs` is the table, deliberately
+  tiny: only a refusal proved in the cartridge's own source goes in it, because withholding a real
+  door is how a floor loses its only way out. It opens by itself when the boulders land.
 - ⭐ **A teleport pad is a warp that never changes the map, and both halves of that had to be
   taught.** `bfs_from_player` records the edge from the square beside a pad to the pad's **landing**,
   so routes cross Saffron Gym's maze for free — but the guard that skips an already-settled neighbour
@@ -338,6 +389,14 @@ price.
   the thing that opens it may have happened since; three sweeps of Pewter City re-tried its east
   exit three times and were called a defect for diligence. Ten sits clearly above once-per-pass and
   clearly below the 143 aborts that made this a rule.
+- ⚠️ **"Starting over" is only safe where something else is counting.** `DRIVER_ESCAPE_SILENCE`
+  drops any self-driving driver to `Idle` after 60 s of silence, and `Idle` picks a boulder goal
+  straight back up — but both of the goal's bounds (`MAX_PUSHES`, `MAX_PUSHES_WITHOUT_PROGRESS`) are
+  counted off a boulder that *moved*, so a shove the cartridge silently refuses is invisible to
+  them. The `cinnabar` walk of 2026-09-10 issued `push-boulder:(6, 2)Left` on Victory Road 3F two
+  hundred and thirty times and spent two thirds of its whole 6-game-hour budget doing it, finishing
+  on 33 maps where its siblings reached 130. `PokemonAgent::boulder_goal_silences` counts it and
+  `MAX_SILENT_SHOVES` is 3, because a refusal is a property of a layout that has not changed.
 - ⚠️ **An exploring frontier must order its exits by how often it has already taken them, not by
   where they lead.** Being turned back at a gate changes nothing the brain can see, so an exit that
   scores best on promise stays best for ever: the first version took
@@ -363,6 +422,23 @@ price.
   write mid-battle un-heals on the next switch; and `wIsInBattle == LOST_BATTLE` is written by the
   overworld loop *before* `HandleBlackOut` heals and warps, so a write there is one the cartridge
   throws away. `Cheats::party_writes_are_safe` gates both, counts every refusal, and has a test.
+- ⭐ **Gen 1's bag is twenty *kinds* and a finished save arrives with fourteen to twenty of them
+  used, so the key items had to be made room for rather than merely asked for.** Every one of the
+  eight starts was refusing between one and nine of `COVERAGE_KEY_ITEMS`, differently per start, and
+  the refusal was reported and not fatal — so a sweep looked healthy while the Rocket Hideout's four
+  floors, the Game Corner prize room and every `Fish` row in the game were unreachable for want of a
+  lift key, a coin case and three rods. `debug_keep_only_items` sheds what a cheated walk cannot use
+  (the five HMs teach nothing when the party is written straight into the struct; a walk never uses a
+  TM, a Revive or a fossil), which also leaves six slots free — and a walk with no free slot cannot
+  pick an item up off the floor. `every_coverage_start_can_be_handed_all_of_the_key_items` is the
+  default-tier assertion; the walk's `cheats` line prints what went.
+- ⚠️ **A start does not have to be a finished game, but the exception has to be argued.** `Start`'s
+  rule is a save the cartridge itself finished, because a save whose scripts have not run walls its
+  walk in behind event-flag gates and every stall found in one is a false positive. The one admitted
+  exception is `before_the_credits`, and it exists for a cluster no finished game can ever stand in:
+  `EVENT_SS_ANNE_LEFT` is set before the third badge and `VermilionCityLeftSSAnneCallbackScript`
+  shuts the dock for good, so the S.S. Anne's ten rooms and `VermilionDock` are gone from every
+  postgame fixture — ticket in the bag or not.
 - ⚠️ **Five HMs do not fit in four move slots**, so the god party is three: a fighter with four
   attacks and no HM (an HM is the one move `pick_move_to_forget` will never drop), a slave with
   Cut/Surf/Strength/Flash — the four the action menu gates rows on — and a slave with Fly, which is

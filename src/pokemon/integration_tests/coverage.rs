@@ -506,14 +506,29 @@ mod tests {
                 "the {} start stands on {:?}, not the {:?} its row claims",
                 start.name, state.map.map, start.map,
             );
+            match start.before_the_credits {
+                None => assert!(
+                    state.hall_of_fame_teams > 0,
+                    "the {} start is not a finished game, so the event gates §5.2.5 is about are \
+                     shut. If that is deliberate, `before_the_credits` is where the reason goes",
+                    start.name,
+                ),
+                // ⚠️ **And the exception has to *be* one.** A `before_the_credits` start that turns
+                // out to have finished the game after all is a fixture that was regenerated further
+                // along the chain, which would silently make it a duplicate of an ordinary start.
+                Some(why) => assert!(
+                    state.hall_of_fame_teams == 0,
+                    "the {} start says it is before the credits ({why}), but this save has \
+                     finished the game",
+                    start.name,
+                ),
+            }
+            // ⚠️ **Keyed on the game as well as the map.** Two starts on `VermilionCity` are a
+            // wasted sweep when they are the same game and are the whole point when one of them is
+            // standing beside a ship the other cannot see.
             assert!(
-                state.hall_of_fame_teams > 0,
-                "the {} start is not a finished game, so the event gates §5.2.5 is about are shut",
-                start.name,
-            );
-            assert!(
-                maps.insert(state.map.map),
-                "two starts stand on {:?}, so one of them is a wasted sweep",
+                maps.insert((state.map.map, start.before_the_credits.is_some())),
+                "two starts stand on {:?} in the same game, so one of them is a wasted sweep",
                 state.map.map,
             );
         }
@@ -1232,7 +1247,9 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
 ///
 /// So the walk is given somewhere else to start. Each of these is a **finished game** — the credits
 /// have rolled, so every gate is open because the cartridge opened it, which is the whole reason
-/// §5.2.5 abandoned Pallet Town and §1.2 rules out writing the event flags by hand.
+/// §5.2.5 abandoned Pallet Town and §1.2 rules out writing the event flags by hand. The one
+/// exception is argued on [`Self::before_the_credits`], and it has to be argued there: nothing else
+/// in this file admits one.
 ///
 /// ⚠️ **The party and the bag do not come from the fixture and must not be read into this table.**
 /// `Cheats::default()` installs the god party (Cut/Surf/Strength/Flash and Fly) and
@@ -1253,6 +1270,21 @@ pub struct Start {
     /// in the **default** tier. The map is the entire content of a start, so a fixture regenerated
     /// onto a different square is a regional sweep quietly becoming a duplicate of another one.
     pub map: crate::pokemon::map::Map,
+    /// ⚠️ **Set only for a start taken *before* the credits, with the reason it has to be.**
+    ///
+    /// Every other start is a finished game on purpose (see this type's own note), and the rule is
+    /// load-bearing: a save whose scripts have not run walls its walk in behind gates that read
+    /// event flags, and every stall found in one is a false positive. This field is the one
+    /// admitted exception and it exists because of a place no finished game can ever stand.
+    ///
+    /// ⭐ **The S.S. Anne sails, and it takes eleven maps with it.** `EVENT_SS_ANNE_LEFT` is set the
+    /// moment the captain hands over HM01 — before the third badge — and
+    /// `VermilionCityLeftSSAnneCallbackScript` then shuts the dock for the rest of the game. So
+    /// `SSAnne1F`, `1FRooms`, `2F`, `2FRooms`, `3F`, `B1F`, `B1FRooms`, `Bow`, `CaptainsRoom`,
+    /// `Kitchen` and `VermilionDock` are unreachable from *every* finished save, and
+    /// `docs/coverage-plan.md` §2.1 was wrong to file them under "the bag was full and refused the
+    /// S.S. Ticket": the ticket now fits in every start's bag and the cluster did not move.
+    pub before_the_credits: Option<&'static str>,
 }
 
 /// The regional starts, one per region the `phase0` walk never reaches, plus `phase0` itself.
@@ -1265,41 +1297,62 @@ pub const COVERAGE_STARTS: &[Start] = &[
         name: "phase0",
         state: include_bytes!("../data/postgame-phase0.bin"),
         map: crate::pokemon::map::Map::ViridianPokecenter,
+        before_the_credits: None,
     },
     Start {
         name: "cerulean",
         state: include_bytes!("../data/postgame-daycare.bin"),
         map: crate::pokemon::map::Map::Route5,
+        before_the_credits: None,
     },
     Start {
         name: "vermilion",
         state: include_bytes!("../data/postgame-farfetchd.bin"),
         map: crate::pokemon::map::Map::VermilionCity,
+        before_the_credits: None,
     },
     Start {
         name: "lavender",
         state: include_bytes!("../data/postgame-sweep-lavender.bin"),
         map: crate::pokemon::map::Map::Route10,
+        before_the_credits: None,
     },
     Start {
         name: "celadon",
         state: include_bytes!("../data/postgame-game-corner.bin"),
         map: crate::pokemon::map::Map::CeladonCity,
+        before_the_credits: None,
     },
     Start {
         name: "saffron",
         state: include_bytes!("../data/postgame-silph-floors.bin"),
         map: crate::pokemon::map::Map::SaffronCity,
+        before_the_credits: None,
     },
     Start {
         name: "fuchsia",
         state: include_bytes!("../data/postgame-safari.bin"),
         map: crate::pokemon::map::Map::FuchsiaCity,
+        before_the_credits: None,
     },
     Start {
         name: "cinnabar",
         state: include_bytes!("../data/postgame-seel.bin"),
         map: crate::pokemon::map::Map::CinnabarIsland,
+        before_the_credits: None,
+    },
+    // ⭐ **The ninth, and the only one that is not a finished game.** See
+    // [`Start::before_the_credits`] for the whole argument: the ship sails before the third badge
+    // and never comes back, so eleven maps are unreachable from every save the other eight are cut
+    // from. `at-vermilion.bin` is the playthrough's own state one leg before it boards, S.S. Ticket
+    // already in the bag.
+    Start {
+        name: "ssanne",
+        state: include_bytes!("../data/at-vermilion.bin"),
+        map: crate::pokemon::map::Map::VermilionCity,
+        before_the_credits: Some(
+            "the S.S. Anne has not sailed yet, and `EVENT_SS_ANNE_LEFT` is what makes its ten \
+             rooms and VermilionDock unreachable from every finished game"),
     },
 ];
 
@@ -1623,10 +1676,22 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     let refused: Vec<String> = run.cheats.as_ref()
         .map(|c| c.bag_was_full.iter().map(|i| format!("{i:?}")).collect())
         .unwrap_or_default();
+    // ⭐ **And what it took out to make them fit.** Step 6's first job was that every one of the
+    // eight starts arrived with all twenty of Gen 1's bag kinds used and refused between one and
+    // nine key items; `debug_keep_only_items` sheds what a cheated walk cannot use, and this says
+    // what went, because a walk that turns out to have needed one of them has to be able to see it.
+    let shed: Vec<String> = run.cheats.as_ref()
+        .map(|c| c.bag_was_shed.iter().map(|id| match crate::pokemon::item::ItemId::from_repr(*id) {
+            Some(named) => format!("{named:?}"),
+            None => format!("${id:02x}"),
+        }).collect())
+        .unwrap_or_default();
     let bag = match refused.is_empty() {
-        true => "every key item fit the bag".to_string(),
-        false => format!("⚠️ the bag was full and refused {} — whatever they gate is unreachable: {}",
-            refused.len(), refused.join(", ")),
+        true => format!("every key item fit the bag; {} shed to make room: {}",
+            shed.len(), shed.join(", ")),
+        false => format!("⚠️ the bag was full and refused {} — whatever they gate is unreachable: {} \
+                          (⚠️ and {} were shed to make room, so this is not the junk: {})",
+            refused.len(), refused.join(", "), shed.len(), shed.join(", ")),
     };
     {
         let log = run.fixture().coverage.as_mut().expect("coverage was asked for");

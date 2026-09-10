@@ -22,20 +22,25 @@ behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
 [llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third and the only one that is
 still ahead of the code: every action in the game taken once through the deployed `LlmPolicy`
 against a mock endpoint, with a verdict on each and every defect fixed, until a sweep of Kanto comes
-back clean. It was rewritten on 2026-09-09 as **a numbered step list (§4), from the red tier of today
-to the fixpoint**; the harness, the cheats, the oracle and the walk are built, and §2 is the baseline
-sweep of that same day — 153 maps of 248, 106 defects and 41 silences, and 82% of
-every turn it took spent in Route 16's gate. Steps 1 to 5 are those; **steps 1 to 5 are done — the
-silences are 0, all 106 defects are closed, the gate is closed (by a cut tree that regrows, not by
-the scoring change step 4 predicted), and the union has gone from 159 maps to 186 and 1 410 ids to
-1 813, with §2.1 the state to measure against now. What a sweep finds is that every start's bag is
-full and refuses the key items that gate the S.S. Anne and every `Fish` row — step 6's first job —
-and that five of the eight starts no longer reach anything the others do not**. ⚠️ **§3 is the rules and §6.2 is
-how to read a number** — the walk's totals are a coin flip between several different walks, and CPU
-load is an input to it, so never build while measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**,
-because a walk's run directory defaults into `/tmp` and writes hundreds of megabytes of RAM there.
-§7 is the record: the faults the sweeps found and the fourteen places the plan was wrong, and **§7.3
-maps the old section numbers that code comments still cite** onto where each argument lives now. Read it before
+back clean. It was rewritten on 2026-09-09 as **a numbered step list (§4), from the red tier of that
+day to the fixpoint**; the harness, the cheats, the oracle and the walk are built, and §2 is the
+baseline sweep of that same day — 153 maps of 248, 106 defects and 41 silences, and 82% of every turn
+it took spent in Route 16's gate. **Steps 1 to 5 closed all of that, and step 6's first turn
+(2026-09-10) closed six more defects and five silences and made room in the bag** — Gen 1 holds
+twenty *kinds*, every start arrived with all twenty used, and the key items the walk needs were being
+refused in silence, which was worth more than the five steps before it. **Two sweeps of that day
+came back with 201 and 197 maps of 248, 19 real maps neither entered, and — on the second — zero
+silences in all nine regions and eight of the nine completely clean.** ⭐ **A ninth start that has
+*not* beaten the Elite Four is what finally boarded the S.S. Anne**, eleven maps no finished save can
+reach. **§2.1 is the state to measure against**, and it says which of the 19 are a Bicycle nothing in
+the stack can ride, which are `*Copy` maps the ROM never warps to, and which are Cerulean Cave's
+door — a row `actions()` never mints and the ROM cross-check names.
+⚠️ **§3 is the rules and §6.2 is how to read a number** — the walk's totals
+are a coin flip between several different walks, and CPU load is an input to it, so never build while
+measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**, because a walk's run directory defaults into
+`/tmp` and writes hundreds of megabytes of RAM there. §7 is the record: the faults the sweeps found
+and the seventeen places the plan was wrong, and **§7.3 maps the old section numbers that code
+comments still cite** onto where each argument lives now. Read it before
 touching the soak tier, `postgame/debug.rs`, `postgame/fishing.rs`, `integration_tests/llm*.rs` or
 anything under `integration_tests/{cheats,coverage,godmode}.rs`.
 

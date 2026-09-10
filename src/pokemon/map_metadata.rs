@@ -451,6 +451,72 @@ fn closed_door_blocks(mmu: &MMU, map: Map) -> Vec<DoorBlock> {
     }).collect()
 }
 
+/// `wMovementFlags` bit 2 (`constants/ram_constants.asm`). See [`CurrentMap::standing_on_warp`].
+const BIT_STANDING_ON_WARP: u8 = 0b100;
+
+/// A warp entry that a **map script cancels**, and the events that stop it cancelling.
+///
+/// ⭐ **The other half of [`crate::pokemon::tile_map::WarpTrigger::Impossible`], and it is not a
+/// property of the tile.** `warp_trigger` answers from `raw_tile_ids`, which is the right model of
+/// `ExtraWarpCheck` and cannot see a script that runs *after* the warp has been armed and turns it
+/// off again. `SeafoamIslandsB4FDefaultScript` is exactly that: standing on (20, 17) or (21, 17) it
+/// simulates a step north and clears `BIT_FORCED_WARP`, so the staircase is a perfectly ordinary
+/// step-on warp that the cartridge undoes on the same frame.
+///
+/// ⚠️ **A row nothing can carry out is a promise the menu should not make.** A coverage walk from
+/// `fuchsia` and one from `cinnabar` each spent 60 s a try leaning on those two squares and scored
+/// `DidNotArrive`, and `docs/coverage-plan.md` §2.1 lists them as defects; they are not. This is
+/// the same rule the cuttable trees and the boulder pushes are withheld under — the game would
+/// refuse, so it is not offered — and it opens by itself the moment the two boulders go down the
+/// holes, because that is the condition the script itself reads.
+struct WarpGateSpec {
+    /// The warp entry's square, in the map's **raw** coordinates (no connection padding). Every map
+    /// with one of these is an interior, so raw and padded agree, but the offset is applied anyway
+    /// where this is read.
+    at: Point8,
+    /// The warp is live once ALL of these `(wEventFlags byte offset, bit mask)` are set. Empty would
+    /// mean "always live", which is not a gate; every entry here has at least one.
+    live_when_all_set: &'static [(u16, u8)],
+}
+
+/// The warps a map's own script cancels, per map.
+///
+/// ⚠️ **Only what the cartridge is *proved* to cancel goes here.** The Seafoam pair is argued in
+/// full in `SeafoamIslandsB4F.asm` and in
+/// [`DeterministicPolicy`](crate::pokemon::policy)'s Articuno leg, which has to leave the islands
+/// by Escape Rope for exactly this reason. A warp that merely *looks* shut belongs in
+/// `warp_trigger`, where the tile can be read; a guess belongs nowhere, because withholding a real
+/// door is how a floor loses its only way out.
+fn map_warp_gate_specs(map: Map) -> &'static [WarpGateSpec] {
+    match map {
+        // The two staircases out of B4F's east pocket. `SeafoamIslandsB4FDefaultScript` force-walks
+        // the player north off (20, 17), (21, 17), (20, 16) and (21, 16) and clears
+        // `BIT_FORCED_WARP` until **both** SEAFOAM3 boulders are down their holes.
+        //
+        // EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE = $9C8 → byte $9C8/8 = 313, bit 0;
+        // EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE = $9C9 → byte 313, bit 1.
+        // `constants/event_constants.asm` puts SEAFOAM2 at `const_next $9C0` and skips 6 between
+        // each pair, and `the_seafoam_boulder_events_are_where_this_file_says_they_are` pins the
+        // arithmetic against two committed fixtures rather than against this comment.
+        Map::SeafoamIslandsB4F => &[
+            WarpGateSpec { at: Point8 { x: 20, y: 17 }, live_when_all_set: &[(313, 0x01), (313, 0x02)] },
+            WarpGateSpec { at: Point8 { x: 21, y: 17 }, live_when_all_set: &[(313, 0x01), (313, 0x02)] },
+        ],
+        _ => &[],
+    }
+}
+
+/// Read the event flags and return the squares on `map` whose warp is currently cancelled by a
+/// script. Raw coordinates; the caller pads them.
+pub(crate) fn script_cancelled_warps(mmu: &MMU, map: Map) -> Vec<Point8> {
+    let base = pokered_symbols::wEventFlags.address;
+    map_warp_gate_specs(map).iter().filter_map(|spec| {
+        let live = spec.live_when_all_set.iter()
+            .all(|&(byte, bit)| mmu.read(base + byte) & bit != 0);
+        (!live).then_some(spec.at)
+    }).collect()
+}
+
 /// Largest block ID referenced by any door spec for `map` (so the tileset load covers it).
 fn max_door_block_id(map: Map) -> usize {
     map_door_specs(map).iter().map(|d| d.closed_block_id as usize).max().unwrap_or(0)
@@ -774,6 +840,8 @@ impl MapMetadataCache {
                 .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
             grass_encounter_rate: mmu.read_pointer(&pokered_symbols::wGrassRate),
             closed_doors: closed_door_blocks(mmu, map),
+            script_cancelled_warps: script_cancelled_warps(mmu, map),
+            standing_on_warp: mmu.read_pointer(&pokered_symbols::wMovementFlags) & BIT_STANDING_ON_WARP != 0,
             card_key_locked: map_has_card_key_doors(map) && !mmu.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
             header_loaded: map_header_is_loaded(mmu, map),
             surfing: mmu.read_pointer(&pokered_symbols::wWalkBikeSurfState) == SURFING,
@@ -820,6 +888,8 @@ impl MapMetadataReader for MMU {
                     .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
                 grass_encounter_rate: self.read_pointer(&pokered_symbols::wGrassRate),
                 closed_doors: closed_door_blocks(self, map),
+                script_cancelled_warps: script_cancelled_warps(self, map),
+                standing_on_warp: self.read_pointer(&pokered_symbols::wMovementFlags) & BIT_STANDING_ON_WARP != 0,
             card_key_locked: map_has_card_key_doors(map) && !self.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
                 header_loaded: map_header_is_loaded(self, map),
                 surfing: self.read_pointer(&pokered_symbols::wWalkBikeSurfState) == SURFING,
@@ -829,7 +899,8 @@ impl MapMetadataReader for MMU {
 }
 
 /// Maps whose walkable layout is rewritten at runtime by `ReplaceTileBlock` in a way the static ROM
-/// blocks can't capture — Pokémon Mansion switch-gates and the Cinnabar Gym gate blocks. For these,
+/// blocks can't capture — Pokémon Mansion's switch-gates, the two gyms whose doors are a puzzle,
+/// Victory Road's boulder barriers and the Elite Four's rooms. For these,
 /// build metadata from the live `wOverworldMap` block buffer instead of ROM (see
 /// `MMU::read_map_metadata_runtime`). Everything else stays on the cached ROM path.
 pub fn map_uses_runtime_blocks(map: Map) -> bool {
@@ -840,7 +911,23 @@ pub fn map_uses_runtime_blocks(map: Map) -> bool {
         | Map::VictoryRoad1F | Map::VictoryRoad2F | Map::VictoryRoad3F
         // Elite Four rooms: beating each member runs a `ReplaceTileBlock` that opens the door up to the
         // next room, so the tile map must reflect the live block state to route to the (now-open) exit.
-        | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom)
+        | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom
+        // ⭐ **Vermilion Gym's double doors, which are shut until the trash-can puzzle opens them.**
+        // `VermilionGymSetDoorTile` writes block `$24` over `lb bc, 2, 2` while
+        // `EVENT_2ND_LOCK_OPENED` is clear and `$5` once it is set — the same shape as Cinnabar
+        // Gym's gate above and, for a *finished* save, invisible, because the doors are open in
+        // every postgame fixture. The coverage sweep of 2026-09-10 found it the moment a
+        // pre-credits start (`coverage::Start::before_the_credits`) walked in on three badges: the
+        // static ROM blocks say the doorway is floor, `actions()` offered a row to Lt. Surge behind
+        // it, and the walk held a direction against a wall for 60 s of game time. It is on the way
+        // to the third badge, so a paying run meets it.
+        //
+        // ⚠️ **The live block map rather than a `map_door_specs` entry, and that is the choice worth
+        // recording.** A `DoorSpec` would work — the flag is `wEventFlags[44]` bit 0, which
+        // `GameState` already reads for the trash cans — but it is a hand-transcribed block id, a
+        // hand-computed flag byte and a second thing to keep in step with the cartridge.
+        // `wOverworldMap` is what the cartridge actually drew.
+        | Map::VermilionGym)
 }
 
 impl MMU {
@@ -1393,6 +1480,23 @@ pub struct CurrentMap {
     /// about different halves of a map load: an intra-map teleport reloads the map without ever
     /// changing `wCurMap`, so only this one sees it.
     pub sprites_loaded: bool,
+    /// `wMovementFlags` bit 2, `BIT_STANDING_ON_WARP` — set by `CheckWarpsNoCollision` when a
+    /// completed **step** lands on a warp entry, and cleared on every step that does not.
+    ///
+    /// ⭐ **It is what arms the collision path, and nothing else does.** `home/overworld.asm`'s
+    /// `.noDirectionChange` runs `CheckWarpsCollision` only `bit BIT_STANDING_ON_WARP, [hl]` — so
+    /// leaning on the wall from a warp entry the player *walked* onto fires it, and leaning on the
+    /// wall from one they **warped** onto does nothing at all, for ever. The Silph Co elevator is
+    /// the case: its two entries at (1, 3) and (2, 3) are the square you land on coming in, the
+    /// coverage walk of 2026-09-10 held Down there for 60 s of game time, and the same 60 s of Up
+    /// followed by Down warps out on the first step. See
+    /// [`MetaTileMap::standing_on_warp`](crate::pokemon::tile_map::MetaTileMap::standing_on_warp).
+    pub standing_on_warp: bool,
+    /// Squares whose warp this map's own script is currently cancelling, in **raw** coordinates.
+    /// Empty for every map but the handful in [`map_warp_gate_specs`], which is where the argument
+    /// is. Padded and carried into
+    /// [`MetaTileMap::script_cancelled_warps`](crate::pokemon::tile_map::MetaTileMap::script_cancelled_warps).
+    pub script_cancelled_warps: Vec<Point8>,
 }
 
 impl CurrentMap {
@@ -1650,6 +1754,8 @@ mod test {
             header_loaded: true,
             surfing: false,
             sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: true,
         };
         let tile_map = MetaTileMap::new(&current_map);
         println!("{}", tile_map);
@@ -1771,6 +1877,8 @@ mod test {
             header_loaded: true,
             surfing: false,
             sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: true,
         };
         let tile_map = MetaTileMap::new(&current_map);
         println!("{tile_map}");

@@ -122,3 +122,61 @@ fn can_return_to_cerulean() {
     assert_eq!(s.map.map, Map::CeruleanCity, "should trek back to Cerulean City");
     fixture.save_state_named("src/pokemon/data/back-in-cerulean.bin").unwrap();
 }
+
+/// ⭐ **A door the cartridge draws shut is a wall, and Vermilion Gym's are the only ones a finished
+/// save can never show you.**
+///
+/// `VermilionGymSetDoorTile` writes block `$24` over `lb bc, 2, 2` while `EVENT_2ND_LOCK_OPENED` is
+/// clear and `$5` once the trash-can puzzle sets it. The static ROM blocks carry the *open* layout,
+/// so `MetaTileMap` routed straight through the closed doorway and `actions()` offered a row to
+/// Lt. Surge behind it — and the walk then held a direction against a wall until
+/// `MAX_MOVEMENT_SILENCE` gave up sixty seconds later.
+///
+/// ⚠️ **No sweep could find it until a start existed that had not won the game**, because the doors
+/// are open in every postgame fixture. `coverage::Start::before_the_credits`'s `ssanne` walked in on
+/// three badges on 2026-09-10 and scored `VermilionGym:LtSurge` a defect on the second sweep of the
+/// day, which is [coverage-plan](../../../docs/coverage-plan.md) §2.1's one remaining failure. It is
+/// on the way to the third badge, so a paying run meets it.
+///
+/// The cure is `map_uses_runtime_blocks`, which builds the map from `wOverworldMap` — what the
+/// cartridge actually drew — rather than from a second hand-transcribed table of block ids and event
+/// flags. This test fails if the map goes back on the cached ROM path.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn lt_surge_is_not_a_row_while_his_doors_are_shut() {
+    // ⚠️ **`post-teach-cut`, and the tree first.** Vermilion City's cuttable tree at (15, 19) is
+    // the only way from the city's north half to the gym, so an earlier state cannot walk there at
+    // all and the test would fail for the wrong reason — measured: without the `CutTree` the gym's
+    // warp is not in `actions()` either, and for a reason that has nothing to do with the doors.
+    // This state is the chain's own "in Vermilion, Cut in hand, gym not yet done", which is exactly
+    // the situation a run meets on three badges.
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/post-teach-cut.bin"), Duration::from_mins(10),
+        vec![
+            PolicyStep::CutTree { map: Map::VermilionCity },
+            PolicyStep::enter(Map::VermilionGym),
+        ],
+    );
+    fixture.step_until_exhausted();
+    let state = fixture.game_state();
+    assert_eq!(state.map.map, Map::VermilionGym);
+
+    let rows: Vec<String> = state.map.actions().iter().map(|a| format!("{:?}", a.tile)).collect();
+    println!("in the gym on {} badges: {}", state.badges.bits().count_ones(), rows.join(", "));
+    // He is on the map — the row is withheld because the doorway is a wall, not because the sprite
+    // is missing, and a test that could not tell those apart would pass on an empty sprite table.
+    assert!(
+        state.map.sprites.iter().any(|sprite| sprite.name.contains("Surge") && !sprite.hidden),
+        "Lt. Surge has to be on the map for this to mean anything: {:?}",
+        state.map.sprites.iter().map(|s| s.name).collect::<Vec<_>>(),
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("Surge")),
+        "the doors are shut, so there is no route to Lt. Surge and no row for him: {rows:?}",
+    );
+    // And the trash cans that open them *are* rows, so the floor is not simply unreachable.
+    assert!(
+        state.map.actions().len() > 1,
+        "the front room has to be reachable: {rows:?}",
+    );
+}

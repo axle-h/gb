@@ -193,6 +193,64 @@ fn can_get_marsh_badge() {
 /// settled at price 0 — so standing on a pad threw away the only edge out of the room. This state
 /// stands on the gym's centre-room pad; without that fix Sabrina, the Gym Guide and the door out
 /// are all "no route" from here, which is what the walk reported.
+/// ⭐ **A warp you *warped* onto is not one you can lean on, and every elevator in the game lands
+/// you on exactly such a square.**
+///
+/// `home/overworld.asm`'s `.noDirectionChange` reaches `ExtraWarpCheck` and `CheckWarpsCollision`
+/// only past `bit BIT_STANDING_ON_WARP, [hl]` — a flag `CheckWarpsNoCollision` sets when a completed
+/// **step** lands on a warp entry, and which is therefore clear for a player the cartridge put there
+/// itself. The Silph Co elevator's two entries at (1, 3) and (2, 3) are the squares you arrive on,
+/// its raw tile `$14` is not in LOBBY's door table, and its warp destination in the ROM is the
+/// placeholder `UNUSED_MAP_ED` that `SilphCoElevatorStoreWarpEntriesScript` overwrites at map load
+/// with wherever you came from.
+///
+/// The coverage walk of 2026-09-10 held Down there for 60 s of game time and reported that it "did
+/// not arrive" while standing exactly there. Measured on this state: 60 ticks of Down move nothing
+/// and `wMovementFlags` reads `$00` throughout; Up and then Down warps out on the first step.
+///
+/// ⚠️ **Two places had to learn it — the third time that has been true of a warp rule**, and the
+/// count is the point rather than the coincidence: `MetaTileMap::actions` builds the
+/// `[opposite(dir), dir]` pair, and `OverworldMovement` tests for a border warp *before* it consults
+/// the route and would otherwise press the outward direction itself. This test fails if either
+/// condition is removed.
+///
+/// The fixture is the save state the walk dropped at the moment the verdict turned, which is the
+/// only moment it exists.
+// Default tier for the same reason as its Seafoam sibling: the state is two ticks from the answer.
+#[test]
+fn an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on() {
+    use crate::geometry::Point8;
+    const DOOR: Point8 = Point8 { x: 1, y: 3 };
+
+    // ⚠️ **No `PolicyStep`, because there is no map to name.** `SilphCoElevator_Object`'s two
+    // `warp_event`s are written `UNUSED_MAP_ED, 1` and
+    // `SilphCoElevatorStoreWarpEntriesScript` overwrites the destination in `wWarpEntries` at map
+    // load with wherever the player came from — so the ROM table the map model reads honestly names
+    // a map that does not exist, and only the cartridge knows where the door goes. The row is taken
+    // the way the coverage walk takes one: straight off `actions()`.
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/silph-elevator-warped-in.bin"), Duration::from_mins(2), vec![]);
+    let start = fixture.game_state();
+    println!("from {} @ {} standing_on_warp={}",
+        start.map.map, start.map.player_position, start.map.standing_on_warp);
+    assert_eq!(start.map.map, Map::SilphCoElevator);
+    assert_eq!(start.map.player_position, DOOR, "the state is dropped standing on the entry itself");
+    assert!(!start.map.standing_on_warp,
+        "and it got there by warping, which is the whole of it: `wMovementFlags` bit 2 is clear");
+
+    let door = start.map.actions().into_iter()
+        .find(|action| action.destination == DOOR)
+        .expect("the door underfoot is a row");
+    // The step off and the step back on, rather than the one held button a walked-onto entry gets.
+    assert_eq!(door.route.len(), 2, "route was {:?}", door.route);
+    fixture.agent.take_overworld_action(door);
+
+    let end = fixture.run_until(|state| state.map.map != Map::SilphCoElevator);
+    println!("ended on {} @ {}", end.map.map, end.map.player_position);
+    assert_ne!(end.map.map, Map::SilphCoElevator,
+        "the door has to fire, and holding the outward direction on it never will");
+}
+
 #[test]
 fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
     use crate::geometry::Point8;
@@ -221,6 +279,8 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
         header_loaded: true,
         surfing: false,
         sprites_loaded: true,
+        script_cancelled_warps: Vec::new(),
+        standing_on_warp: true,
     });
 
     let pads: Vec<Point8> = map.meta_tiles.iter().enumerate()

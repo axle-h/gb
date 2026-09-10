@@ -2736,6 +2736,8 @@ fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
             header_loaded: true,
             surfing: false,
             sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: true,
         })
     };
 
@@ -2799,6 +2801,8 @@ fn a_map_the_cartridge_has_not_finished_loading_offers_no_rows() {
             header_loaded,
             surfing: false,
             sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: true,
         })
     };
     let ids = |map: &MetaTileMap| -> Vec<String> {
@@ -2965,6 +2969,91 @@ fn every_committed_fixture_has_a_complete_sprite_table() {
 /// the branch goes to `CollisionCheckOnWater` and `jp c, OverworldLoop`, and `CheckWarpsCollision`
 /// is never reached. The only door left is `CheckWarpsNoCollision`, which runs on a completed step.
 ///
+/// ⭐ **The two staircases out of Seafoam B4F are a warp the cartridge arms and then cancels, and
+/// no tile says so.** `SeafoamIslandsB4FDefaultScript` checks
+/// `EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE` and `EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE`, and while either is
+/// unset it simulates a step north off (20, 17)/(21, 17) and clears `BIT_FORCED_WARP` — so the
+/// entry is an ordinary step-on warp that never fires.
+///
+/// The coverage walks of 2026-09-09 and 2026-09-10 spent 60 s of game time on each of those two
+/// squares, twice a sweep, and scored `DidNotArrive` while standing on them. That is not an agent
+/// fault: it is the rule the cut trees and the boulder pushes are already withheld under, one
+/// script deeper. This pins **both halves** — that the flags are where the arithmetic in
+/// `map_warp_gate_specs` says they are, read off two committed fixtures the scripted route
+/// produced, and that the row goes away when they are clear and comes back when they are set.
+///
+/// ⚠️ **`post-articuno.bin` is the negative rather than the positive.** The Articuno leg pushes
+/// B3F's boulders, which is SEAFOAM**4**, and then leaves the islands by Escape Rope precisely
+/// because SEAFOAM3 is what would have reopened the east staircases and it never sets it
+/// (`policy.rs`'s Articuno leg carries the whole argument). So a save that has *beaten* Seafoam
+/// still has these two warps shut, which is the case the walk keeps meeting.
+#[test]
+fn a_seafoam_staircase_the_script_cancels_is_not_a_row() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection,
+                                       script_cancelled_warps};
+    use crate::pokemon::symbols::pokered_symbols;
+    use crate::pokemon::tile_map::WarpTrigger;
+    use crate::ram::RAM;
+    use std::sync::Arc;
+
+    // EVENT_SEAFOAM3_BOULDER1/2_DOWN_HOLE = $9C8/$9C9 → byte 313, bits 0 and 1;
+    // EVENT_SEAFOAM4_BOULDER1/2_DOWN_HOLE = $9D0/$9D1 → byte 314, bits 0 and 1.
+    const SEAFOAM3: (u16, u8) = (313, 0b11);
+    const SEAFOAM4: (u16, u8) = (314, 0b11);
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/post-articuno.bin"), Duration::from_secs(10), vec![]);
+    let base = pokered_symbols::wEventFlags.address;
+
+    // ⚠️ **The arithmetic is the risky half and this is what checks it.** An off-by-one byte would
+    // read some other pair of events, and the gate would then open or shut for reasons nothing in
+    // this file could explain. The Articuno leg's own two boulders are the positive control.
+    let flags = |f: &TestFixture, off: u16| f.gb.core().mmu().read(base + off);
+    assert_eq!(flags(&fixture, SEAFOAM4.0) & SEAFOAM4.1, SEAFOAM4.1,
+        "post-articuno pushed B3F's two boulders down their holes, so SEAFOAM4 must be set — if it \
+         is not, byte {} is not where SEAFOAM4 lives", SEAFOAM4.0);
+    assert_eq!(flags(&fixture, SEAFOAM3.0) & SEAFOAM3.1, 0,
+        "post-articuno leaves by Escape Rope *because* SEAFOAM3 is unset (policy.rs, the Articuno \
+         leg), so byte {} must be clear", SEAFOAM3.0);
+
+    let staircases = [Point8 { x: 20, y: 17 }, Point8 { x: 21, y: 17 }];
+    let b4f = |f: &TestFixture| {
+        let mmu = f.gb.core().mmu();
+        MetaTileMap::new(&CurrentMap {
+            player_position: Point8 { x: 20, y: 15 },
+            player_direction: PlayerFacingDirection::Down,
+            sprites: Vec::new(),
+            metadata: Arc::new(mmu.read_map_metadata(Map::SeafoamIslandsB4F).unwrap()),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
+            script_cancelled_warps: script_cancelled_warps(mmu, Map::SeafoamIslandsB4F),
+            standing_on_warp: true,
+        })
+    };
+
+    // Shut, on a save that has finished the islands: the two staircases are not rows.
+    let shut = b4f(&fixture);
+    for at in staircases {
+        assert_eq!(shut.warp_trigger(at), WarpTrigger::Impossible,
+            "({}, {}) is cancelled by the map script while SEAFOAM3 is clear", at.x, at.y);
+    }
+    assert!(!shut.actions().iter().any(|a| staircases.contains(&a.destination)),
+        "a warp the script cancels must not be a row either");
+
+    // And set: the script returns early, the warp is an ordinary one again, and the row is back.
+    let held = flags(&fixture, SEAFOAM3.0);
+    fixture.gb.core_mut().mmu_mut().write(base + SEAFOAM3.0, held | SEAFOAM3.1);
+    let open = b4f(&fixture);
+    for at in staircases {
+        assert_ne!(open.warp_trigger(at), WarpTrigger::Impossible,
+            "({}, {}) must come back the moment both boulders are down", at.x, at.y);
+    }
+}
+
 /// The coverage walk of 2026-09-09 found both of them. `SeafoamIslandsB3F:21,17:Warp` and
 /// `SeafoamIslandsB4F:21,17:Warp` are water at the bottom edge of a current channel, and the walk
 /// sat on each holding Down for 60 s of game time before giving up "without getting there" while
@@ -2997,6 +3086,8 @@ fn a_warp_reached_by_surfing_is_entered_rather_than_leant_on() {
                 header_loaded: true,
                 surfing,
                 sprites_loaded: true,
+                script_cancelled_warps: Vec::new(),
+                standing_on_warp: true,
             });
             tm.can_surf = true;
             tm
@@ -3060,6 +3151,8 @@ fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
             header_loaded: true,
             surfing: false,
             sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: true,
         });
         for (i, tile) in tile_map.meta_tiles.iter().enumerate() {
             if !matches!(tile, MetaTile::Warp { .. }) { continue }

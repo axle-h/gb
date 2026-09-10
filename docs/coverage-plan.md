@@ -5,19 +5,17 @@ as it is deployed — `LlmPolicy`, the worker and the wire, against a mock endpo
 a verdict on each, and every defect that turns up fixed, until a sweep of the whole of Kanto comes
 back clean and finds nothing new.
 
-**Status.** Rewritten 2026-09-09 as a step list, from a review of the first three days' work;
-**steps 0 to 5 taken the same day**. The harness, the cheats, the oracle and the frontier walk are
-all **built**; the baseline sweep reaches **153 maps of 248** and came back **red with 106 defects
-and 41 silences**, with **82% of every turn it took spent in Route 16's gate**. §2 is that baseline
-and every later step measures against it. **The 41 silences are now 0 and a silence fails the tier**
-(step 1); `fuchsia`'s four defects are 0 at the full budget (step 2), and so are **Saffron Gym's 99
-and Silph Co 1F's 3** (step 3), which leaves the 106 at **one** — a wandering shopper, and step 6's.
-Route 16's gate is closed too (step 4) — not by the scoring change the step predicted but by a cut
-tree that regrows — and the sweep prints what it did *not* reach (step 5). **§2.1 is where the sweep
-stands now**: 186 maps of 248 and 1 813 ids, with 38 real maps unreached and six defects left, most
-of both traceable to a full bag. The steps in §4 are the path from there to a
-clean fixpoint, in the order to take them. §7 keeps what the first draft got wrong and what the
-sweeps have found, condensed, because most of that was agent bugs a paying run would have met.
+**Status.** Rewritten 2026-09-09 as a step list; **steps 0 to 5 taken that day and step 6's first
+turn on 2026-09-10**. The harness, the cheats, the oracle and the frontier walk are all **built**.
+§2 is the 2026-09-09 baseline every closure is measured against — 153 maps, 106 defects, 41
+silences, 82% of every turn in Route 16's gate — and all of that is closed. **§2.1 is where the
+sweep stands now: 201 maps of 248 and 1 969 ids across nine starts, 23 real maps unreached, and
+one defect and four silences left**, against 185/1 790 and six failures the day before. The single
+biggest change was not a change to the walk: **Gen 1's bag holds twenty kinds, every start arrived
+with all twenty used, and the key items the walk needs were being refused in silence** — making room
+for them moved `phase0` from 38 maps to 143 and took the Rocket Hideout, the Game Corner's prize
+room, Pokémon Mansion and every `Fish` row in the game off the unreached list. §4's step 6 is the
+loop that runs from here; §7 keeps what the first draft got wrong and what the sweeps have found.
 
 ⚠️ **Code comments cite section numbers from the first draft** (`§2.2.1`, `§3.3`, `§5.2.6`, …).
 Those refer to the 2026-09-06 plan, which is in git history at commit `7343616`; §7.3 says where
@@ -32,7 +30,7 @@ each one's argument lives now.
 | The harness | `integration_tests/llm_harness.rs` | `MockEndpoint`, a `Brain` that is handed **strings and nothing else**, seven injectable faults, and `LlmRun`: the real worker, policy, agent and emulator with a run directory and a restart |
 | The cheats | `integration_tests/cheats.rs`, `postgame/debug.rs` | A god party (Mewtwo with four attacks, one slave with Cut/Surf/Strength/Flash, one with Fly), badges and key items, applied by the driver **between ticks**. `play_path_contains_no_debug_ram_writes` guards the line |
 | The oracle | `integration_tests/coverage.rs` `CoverageLog` | Every action id the agent starts gets `Completed`, `Blocked`, `Defect`, `Silent` or `Unreached`, folded from `AgentEvent`s so it works under any driver. Drops a save state where a defect happened |
-| The walk | `coverage.rs` `ExploringBrain`, `coverage_walk_of_the_finished_game` | Takes every unvisited row on the map, then the least-taken exit. Starts from one of eight **finished-game** fixtures (`GB_COVERAGE_START`) so every gate is open because the cartridge opened it. Behind `--features coverage-tests` |
+| The walk | `coverage.rs` `ExploringBrain`, `coverage_walk_of_the_finished_game` | Takes every unvisited row on the map, then the least-taken exit. Starts from one of nine fixtures (`GB_COVERAGE_START`), eight of them **finished games** so every gate is open because the cartridge opened it; the ninth is argued on `Start::before_the_credits`. Behind `--features coverage-tests` |
 | The cross-check | `coverage.rs` `rom_cross_check` | Warps and objects in the ROM's tables for the maps entered that never once appeared as a row. Printed, never asserted |
 | The god run's machinery | `integration_tests/godmode.rs` | `Intent`, `ScriptedBrain`, `godmode_turn_cost`. Parked — see §5 |
 
@@ -90,54 +88,103 @@ frontier still open, so every one of these numbers is a floor rather than a plat
 spread is not noise: see §6.2. The union here is 153 against the previous sweep's 159 while the id
 count rose from 1 409 to 1 445, which is what that variance looks like from outside.
 
-### 2.1 Where the sweep stands after steps 1 to 5 — 2026-09-09
+### 2.1 Where the sweep stands — 2026-09-10
 
-Taken with `GB_COVERAGE_START=all` on an idle machine, 6 game-hours per region, 40 minutes of wall
-clock. This is the state every remaining step measures against; §2's table above stays as the
-**baseline**, which is what the closures in it are relative to.
+Nine walks in parallel on an idle machine, 6 game-hours each, about 6.5 minutes of wall clock for
+the set (§6.1). This is the **second** sweep of the day and the one to measure against; the first,
+taken before the last two fixes, is in the table below it because the pair together is what §6.2 is
+about.
 
-| | | | |
-|---|---|---|---|
-| **start** | **maps** | **ids** | **only it reached** |
-| `phase0` | 38 ⭐ Hall of Fame | 367 | 1 |
-| `cerulean` | 119 | 996 | **0** |
-| `vermilion` | 133 | 1 158 | **0** |
-| `lavender` | 133 | 1 155 | **0** |
-| `celadon` | 132 | 1 268 | **0** |
-| `saffron` | 129 | 1 128 | **0** |
-| `fuchsia` | ⭐ **163** | 1 416 | ⭐ **30** |
-| `cinnabar` | 41 ⭐ Hall of Fame | 371 | 4 |
-| **union** | ⭐ **186 of 248** | ⭐ **1 813** | |
+| | | | | |
+|---|---|---|---|---|
+| **start** | **maps** | **ids** | **only it reached** | **failures** |
+| `phase0` | 140 | 1 235 | 1 | 0 |
+| `cerulean` | 122 | 1 055 | 0 | 0 |
+| `vermilion` | 132 | 1 238 | 0 | 0 |
+| `lavender` | 132 | 1 225 | 0 | 0 |
+| `celadon` | 126 | 1 112 | 0 | 0 |
+| `saffron` | 132 | 1 257 | 1 | 0 |
+| `fuchsia` | 71 ⭐ Hall of Fame | 652 | ⭐ **30** | 0 |
+| `cinnabar` | 41 ⭐ Hall of Fame | 406 | 0 | 0 |
+| `ssanne` | 97 | 879 | **11** ⭐ the S.S. Anne | 1 defect, closed below |
+| **union** | ⭐ **197 of 248** | ⭐ **1 919** | | **1 defect, 0 silent** |
 
-⚠️ **Five of the eight starts now contribute nothing no other start reaches.** That column used to
-be the argument for having eight; after step 4 a single walk from `fuchsia` reaches 163 of the 186
-on its own, and `cerulean`, `vermilion`, `lavender`, `celadon` and `saffron` between them add none.
-Five minutes of wall clock each, for nothing. ⭐ **Step 6.3's first tool is "another start", and this
-says the ones to replace** — a start is worth having only where it stands in a cluster nothing else
-reaches, which is what `phase0` (1) and `cinnabar` (4) still do and the middle five no longer do.
+✅ **Zero silences in all nine regions**, against four in the sweep six hours earlier — all of them
+one bug, and the last one closed. **Eight of the nine regions came back completely clean, and the
+ninth's one defect was closed after it.** So there is nothing left in a sweep's output to act on, and
+step 6's termination condition is now the only thing standing: **two consecutive sweeps agreeing on
+zero and on a union that has not grown.** The next sweep is turn 3.
 
-**The 62 maps no walk entered**, printed by the sweep itself (step 5). 22 are the ROM's `UnusedMap*`
-padding and two are the link-cable rooms `Colosseum` and `TradeCenter`, which leaves **38 real
-maps** — and they are almost entirely four clusters and a handful of doors:
+⭐ **And the ninth start boarded the ship.** `SSAnne1F`, `1FRooms`, `2F`, `2FRooms`, `3F`, `B1F`,
+`B1FRooms`, `Bow`, `CaptainsRoom`, `Kitchen` and `VermilionDock` — 59 ids across eleven maps that no
+sweep in this plan's history had ever entered, because `EVENT_SS_ANNE_LEFT` fires before the third
+badge and every other start is a finished game. ⚠️ **It took two attempts**, and that is §6.2 rather
+than luck: the first `ssanne` walk was offered `VermilionCity:18,32:Warp` and never chose it (the
+frontier's least-taken exit out of Vermilion goes north), so the row sat `unreached` for the whole
+budget. On the finished `vermilion` start the same row is `blocked` with *"the game stopped you to
+say something"* — the guard saying the ship has departed, which is the gate doing its job.
 
-- ⭐ **The S.S. Anne, all of it** (10) and `VermilionDock`: `SSAnne1F` `SSAnne1FRooms` `SSAnne2F`
-  `SSAnne2FRooms` `SSAnne3F` `SSAnneB1F` `SSAnneB1FRooms` `SSAnneBow` `SSAnneCaptainsRoom`
-  `SSAnneKitchen`. **The bag refuses the S.S. Ticket** — see the `cheats` line in §6.1.
-- **Cinnabar Island's buildings** (8): `CinnabarGym` `CinnabarLab` `CinnabarLabFossilRoom`
-  `CinnabarLabMetronomeRoom` `CinnabarLabTradeRoom` `CinnabarMart` `CinnabarMartCopy`
-  `CinnabarPokecenter`. The `cinnabar` start stands on the island and wins the game instead.
-- **Pokémon Mansion** (4): `PokemonMansion1F` `2F` `3F` `B1F`.
-- **Cerulean Cave** (3): `CeruleanCave1F` `2F` `B1F`.
-- **Pallet Town's interiors** (4): `BluesHouse` `OaksLab` `RedsHouse1F` `RedsHouse2F`.
-- **Three `*Copy` duplicates** the ROM never warps to: `CeruleanTrashedHouseCopy`
-  `UndergroundPathRoute6Copy` `UndergroundPathRoute7Copy`.
-- **Six doors on their own**: `CeladonGym` `ViridianMart` `Route17` `Route16Gate2F`
-  `SafariZoneWestRestHouse`. ⚠️ `Route17` is **Cycling Road**, and the Bicycle is one of the few key
-  items that *does* fit every start's bag — so that one is not the bag, and is worth a look.
+✅ **The one defect, `VermilionGym:LtSurge`, is closed too** — *"the walk was given up after 60
+seconds without getting there (standing at (4, 5))"* — and **only a pre-credits start could ever
+have found it**. `VermilionGymSetDoorTile` draws block `$24` over the gym's doorway while
+`EVENT_2ND_LOCK_OPENED` is clear and `$5` once the trash-can puzzle sets it; the static ROM blocks
+carry the *open* layout, so `MetaTileMap` routed straight through a closed door and `actions()`
+offered a row to Lt. Surge behind it. Every postgame fixture has those doors open, which is why
+three days of sweeps never saw it. `map_uses_runtime_blocks` now covers the map, so the layout comes
+from `wOverworldMap` — what the cartridge actually drew — rather than from a second hand-transcribed
+table of block ids and flags. `vermilion::lt_surge_is_not_a_row_while_his_doors_are_shut` is the
+test and it fails on the row being offered, not on a timeout. It is on the way to the third badge, so
+a paying run meets it.
 
-⚠️ **A cluster in that list is a gate, a missing start or a full bag — never "the walk is bad".**
-Rocket Hideout and the Game Corner prize room came off this list between the baseline and now
-without anyone touching them; the S.S. Anne will come off it the moment the ticket fits.
+**`Route11:13,6:Grass` did not reproduce**, having appeared on `phase0` and three regions the day
+before. It is the `PacingForEncounters` stall and it is intermittent; `adjacent_grass`'s doc comment
+already names Route 11's western grass as the map that taught it to test `pair_blocked`, so the next
+sweep that drops a state for it is the one that closes it.
+
+⚠️ **The union went 201 → 197 and the unreached list 23 → 27 across the two sweeps, and neither
+number is a regression** — §6.2, and this pair is the sharpest example of it in the file. `ssanne`
+spent this budget on the ship and Vermilion instead of the south-west, so Pokémon Mansion's four
+floors, Cinnabar's buildings, Pallet Town's interiors and Viridian Mart went back onto the list
+while the S.S. Anne's eleven came off it. **The right reading is the union of the two: 208 maps, and
+19 real maps that neither sweep entered.** Take a terminus, a per-start row or an unreached list off
+a *pair* of sweeps, never off one.
+
+**The first sweep of 2026-09-10**, for the comparison the pair is worth:
+
+| | phase0 | cerulean | vermilion | lavender | celadon | saffron | fuchsia | cinnabar | ssanne |
+|---|---|---|---|---|---|---|---|---|---|
+| maps | 143 | 124 | 132 | 130 | 120 | 122 | 147 | 41 | 102 |
+| failures | 1 defect | 0 | 1 silent | 0 | 0 | 0 | 1 silent | 0 | 2 silent |
+
+**The 19 real maps neither sweep entered**, from the sweeps' own `unreached` lines (step 5):
+
+- **Cerulean Cave** (3): `CeruleanCave1F` `2F` `B1F`, and the ROM cross-check already names the
+  cause — `CeruleanCity (5, 12) → CeruleanCave1F: on the grid, no sibling, and never a row`. Eight
+  of the nine starts have finished the game so the guard is gone, the door is
+  `warp_event 4, 11, CERULEAN_CAVE_1F` in the ROM, and `actions()` never mints it: it sits behind
+  water and something between `can_surf`, `no_surf_mount` and the BFS is not reaching it.
+  `postgame::legendaries::probe_route_to_cerulean_cave` is the tool for that one.
+- **Route 17 (Cycling Road) and `Route16Gate2F`.** ⭐ **Nothing in the stack can ride the Bicycle.**
+  The gate refuses a walker, `postgame::items` has the whole driver (`Effect::TogglesBicycle`,
+  `UseTarget::Nothing`, its own refusal for `IsBikeRidingAllowed`) — and the only route into it is
+  `PolicyStep::UseBagItem`, which no LLM tool builds: `use_field_move`'s `use_item` **requires** a
+  `target` tile, and the bike has none. So the deployed stack cannot mount a bike either, and step
+  4's "the Bicycle fits in all eight, so Cycling Road was never the blocker" was right about the bag
+  and wrong about the conclusion.
+- **Four `*Copy` duplicates the ROM never warps to**: `CeruleanTrashedHouseCopy`, `CinnabarMartCopy`,
+  `UndergroundPathRoute6Copy`, `UndergroundPathRoute7Copy`. Not reachable and not a gap.
+- **`SafariZoneWestRestHouse`, `CeladonGym` and `Route14`**, one door each. All three have been in a
+  union at some point, so they are the variance rather than a gate.
+- **And the nine that only one sweep reached**: Pokémon Mansion's four, Cinnabar's gym, lab (with
+  its three rooms), mart and Centre, Pallet Town's four interiors and Viridian Mart. Every one of
+  them is `ssanne`'s, and every one is behind the fact that a start which has *not* beaten the Elite
+  Four does not get funnelled into Victory Road. ⭐ **That is a reason to keep a pre-credits start
+  that has nothing to do with the ship**, and §6.2's "the walk stops because it wins" cuts both ways.
+
+⚠️ **Six of the nine starts contribute nothing no other start reaches**, in both sweeps. With the bag
+fixed any start can cross Kanto, so what is worth having is a start that stands somewhere the others
+*cannot get to*: `ssanne` (the ship, and the south-west by not having won), `fuchsia` (the
+south-east) and `cinnabar` (the Indigo Plateau).
 
 ## 3. Rules that hold for every step
 
@@ -436,7 +483,7 @@ kinds is Gen 1's limit — and refuses between one and nine key items:
     ⚠️ the bag was full and refused 8: OldRod, GoodRod, SuperRod, SilphScope, LiftKey, SSTicket,
     CoinCase, GoldTeeth
 
-That is most of §2's list of maps no walk has ever entered: no S.S. Ticket is the whole of the S.S.
+That is most of the list of maps no walk had ever entered (now §2.1's): no S.S. Ticket is the whole of the S.S.
 Anne's nine rooms, no Lift Key is Rocket Hideout's four floors, no Coin Case is the prize room, no
 rods are every `Fish` row on the map. The Bicycle fits in all eight, so Cycling Road was never the
 blocker. **Making room in the bag is step 6's cheapest tool by a distance** and is now the first
@@ -448,70 +495,116 @@ The sweep printed a union and nothing about its complement, and the complement i
 left to act on: from a count, a gate doing its job and a walk that never arrived look identical.
 `Map::iter()` minus the union was being assembled by hand with a shell diff, which is exactly the
 sort of arithmetic that gets done once and then quoted for a week after it stopped being true —
-§2's list below was.
+the list this file carried was.
 
 ✅ **Taken.** `unreached_report` prints it from the multi-region summary, sorted and wrapped six to a
 line so a *cluster* is visible — the S.S. Anne's nine rooms, Rocket Hideout's four floors — which a
 column of sixty names hides. ⚠️ It counts the ROM's `UnusedMap*` padding and the two link-cable
 rooms and then sets them aside: 24 of the 62 that look missing are neither.
 
-**Done:** `GB_COVERAGE_START=all` prints `unreached` under `union`, and §2 carries the list from the
-sweep of 2026-09-09. **Cost:** small, as billed.
+**Done:** `GB_COVERAGE_START=all` prints `unreached` under `union`, and §2.1 carries the list from the
+latest sweep. **Cost:** small, as billed.
 
 ### Step 6 — The loop, until the fixpoint
 
 Everything above is one pass. The goal is a fixpoint, and this is the loop.
 
-⭐ **Start with the bag.** Step 4's `cheats` line says every one of the eight starts arrives with all
-twenty of Gen 1's bag kinds used and refuses between one and nine key items — the rods, the S.S.
-Ticket, the Lift Key, the Coin Case, the Silph Scope, the Itemfinder. That is most of the unreached
-list above and it is one `Cheats` change, not a walk: shed what a finished save is carrying that the
-walk does not need (or put it in the PC) before handing over `COVERAGE_KEY_ITEMS`. Nothing else in
-this section buys as many maps per line.
+#### Turn 1 — 2026-09-10 ✅ taken
 
-⚠️ **The `all` sweep of 2026-09-09 (§2.1) came back with 6 defects and 2 silences, and they are the
-queue.** Every one is a row the earlier sweeps never reached — the union went 159 maps to 186 and
-1 410 ids to 1 813 — so this is the loop working rather than a regression:
+⭐ **The bag, and it was worth more than steps 1 to 5 put together.** `Cheats::apply` now calls
+`debug_keep_only_items(&COVERAGE_KEY_ITEMS)` before it hands anything over: the five HMs teach
+nothing when the party is written straight into the struct, and a walk never uses a TM, a Revive, a
+fossil or a stat item — so the junk goes, all fourteen key items fit in every start, and six slots
+are left free, which matters because **a walk with no free slot cannot pick an item up off the
+floor**. `cheats::every_coverage_start_can_be_handed_all_of_the_key_items` pins it in the default
+tier and the walk's `cheats` line prints what went.
 
-- **`Route11:13,6:Grass`, three regions** — *"it stopped making progress (standing at (14, 6))"*.
-  New, reproducible across starts, and the only one of these that is not a warp.
-- **`SeafoamIslandsB4F:20,17:Warp` and `:21,17:Warp`** — `DidNotArrive` at (21, 15), with
-  `SeafoamIslandsB3F:20,17` and `:25,14` `Silent` beside them. ⚠️ **This may be the cartridge rather
-  than the agent**: `SeafoamIslandsB4FDefaultScript` force-walks the player off those staircases,
-  `res BIT_FORCED_WARP` cancelling the warp, until `SEAFOAM3` is set (`policy.rs` carries the whole
-  argument). Argue it from the dropped state; if it is the script, it is a `Blocked`, not a fix.
-- **`SilphCoElevator:1,3:Warp`** — `DidNotArrive` standing on the square. An elevator door.
-- **`CeruleanMart:CooltrainerFemale`**, intermittent (in the step-3 sweep, not this one) — a shopper
-  who wanders, so a `NoRoute` to a **sprite still on the map** is a sprite that moved rather than a
-  row the agent could not carry out.
+What one line bought, per start, 2026-09-09 against 2026-09-10 on the same recipe:
 
-The loop:
+| | phase0 | cerulean | vermilion | lavender | celadon | saffron | fuchsia | cinnabar |
+|---|---|---|---|---|---|---|---|---|
+| before | 38 | 119 | 133 | 133 | 132 | 129 | **163** | 41 |
+| after | **143** | 124 | 132 | 130 | 120 | 122 | 147 | 41 |
+
+⚠️ **Read the union rather than the row.** Per-start counts move by ±15 between sweeps of the same
+tree (§6.2), and `fuchsia`'s 163 was one long walk that happened not to win the game. What the turn
+actually did is in the **union: 185 maps → 201, and 38 real maps unreached → 23**. ⚠️ **The bag and
+the ninth start take different halves of that credit**: the bag is the Rocket Hideout's four floors,
+the Game Corner's prize room and every `Fish` row in the game; `ssanne` is Pokémon Mansion's four,
+Cinnabar's buildings, Pallet Town's interiors and Viridian Mart (see §2.1 — it earned those by *not*
+having won the game, which is not what it was added for).
+
+**Six defects and five silences closed with it**, each in the agent and each with a test — see §7.1
+for the row and the cause. In order of what they cost: a boulder goal that reissued one refused
+shove **230 times** and ate two thirds of `cinnabar`'s budget; the Silph Co elevator's door, which
+cannot be leaned on because the player *warped* onto it; Seafoam B4F's two staircases, which the
+cartridge's own script cancels and which are now withheld rather than tried; Vermilion Gym's
+double doors, which the static ROM blocks say are open and the cartridge draws shut; a `NoRoute`
+said about a corridor three wandering pets were standing in; a walk eaten by a wild Pokémon while
+the party menu was open to mount Surf; and the four the same mount ate by *finishing* the walk and
+not saying so.
+
+⚠️ **Three of the six are the same shape, and it is worth naming**: a rule the cartridge enforces
+live — a flag on `wMovementFlags`, a script that undoes a warp, a block it redraws — that **no tile
+in the static map can express**. `MetaTileMap` is a transcription of the ROM, so every one of them
+looked like a pathfinder fault and none was, and each cost 60 s of game time per attempt. When a
+sweep reports `DidNotArrive` while standing exactly where it wanted to be, that family is the first
+thing to check.
+
+**A ninth start**, `ssanne`, added for a cluster no finished game can reach and earning its keep for
+a different reason — §2.1 has both halves.
+
+**Where it left the tier:** `cargo test --release` green (1 591), the leg chain green (229),
+`full_playthrough` green, `hall_of_fame` green. ⚠️ **`hall_of_fame` is not optional for this turn**,
+whatever §3's "where the scripted route walks there" might suggest at a glance: the elevator rule
+lands on `PolicyStep::UseElevator`, the silent-shove bound lands on both Victory Road boulder
+puzzles, and the mount-arrival report lands on the Seafoam legs — three of the four fixes are on the
+scripted route's own path, and the Vermilion Gym block map is a fourth. **Two sweeps were taken**:
+the first came back with one defect and four silences, the second — after the last two fixes — with
+**zero silences in all nine regions and one defect, which was then closed**. §2.1 is the second one,
+and turn 2 is the sweep that has to agree with it.
+
+#### The loop
 
 1. Sweep (§6.1). Nothing else building.
 2. Every `defect` and every `silent` is fixed in the agent, or argued into `Blocked` with a comment
    on the code and a line in [pokemon-agent](pokemon-agent.md). Every fix is behind the gates in §3.
+   ⭐ **Argue it from the dropped state and from `probe_button_at_state`, never from the sentence the
+   agent printed** — every warp finding so far was misdiagnosed the other way round (§7.2's 8 and 13).
+   A silence drops no state, so its evidence is the walk's own log: `grep` the id and read the events
+   either side of it, which is how all four of §2.1's were traced to one arm in half an hour.
 3. For the maps the sweep did not enter, take the cheapest tool that reaches them, in this order:
-   - **Another start.** A start is one square of a finished game and nothing else
-     (`coverage::Start`); any postgame fixture that stands in an unreached cluster will do, and
-     `every_coverage_start_stands_where_it_says_on_a_finished_game` pins it in the default tier.
+   - **Another start.** ⚠️ **And "finished game" is the *usual* rule rather than the whole one now.**
+     A finished save has every gate open, which is why eight of the nine are one — but it has also
+     sailed the S.S. Anne, and it wins the game rather than exploring. `Start::before_the_credits`
+     is the admitted exception and carries the argument; `ssanne` is worth 17 maps for the second
+     reason and nothing yet for the first, because a frontier walk out of Vermilion goes north. **A
+     start inside `SSAnne1F` is the next thing to cut** (`vermilion::can_clear_ss_anne` walks the
+     ship, so the route exists and `--features regen-fixtures` is all it needs).
+   - **The Bicycle, which nothing in the stack can ride** — §2.1's third bullet. It is two maps for
+     the walk and a real hole in the deployed tool surface: `use_field_move`'s `use_item` requires a
+     `target` tile, so no LLM turn can reach `FieldMove::UseBagItem` at all, and with it goes every
+     out-of-battle use of a Potion, a vitamin, a Repel and the Itemfinder as well. The narrow fix is
+     to make `target` optional and route a target-less `use_item` to `UseTarget::Nothing`; the wider
+     one is to carry `slot` through for the party-targeted items too.
    - **Fly.** The god party carries it, `use_field_move` takes a destination, and the brain already
-     issues non-menu field moves for the PC. A walk that can fly to a town it has no ids for can
-     cross Kanto on its own, which is what a sweep run by CI rather than by hand would want.
-     Outdoors only (`Map::is_overworld`); it is a complement to the frontier, not a replacement.
+     issues non-menu field moves for the PC. Outdoors only (`Map::is_overworld`); a complement to
+     the frontier, not a replacement.
    - **Connection ids that move with the player.** A `Connection` row's coordinate is the nearest
-     crossing and re-picks as the player moves, so Viridian carries 6 ids for 3 neighbours. Unlike
-     the sprite fix the coordinate is meaningful here (a model may ask for a specific landing), so
-     the answer is to carry the `MetaTile` on the log entry rather than to drop the number.
-   - **Mt Moon B1F's entry-dependent regions**, and whatever else the cross-check prints as *"on
-     the grid, no sibling, never a row"*.
+     crossing and re-picks as the player moves, so Viridian carries 6 ids for 3 neighbours. The
+     answer is to carry the `MetaTile` on the log entry rather than to drop the number.
+   - **Whatever the ROM cross-check prints as *"on the grid, no sibling, and never a row"***, which
+     is the one part of a sweep's output that names a missing row rather than a missing map. It is
+     printed and never asserted on purpose (§5.3), so it has to be read: 2026-09-10's says
+     `CeruleanCity (5, 12) → CeruleanCave1F`, which is three of the 23. Mt Moon B1F's
+     entry-dependent regions are the other standing entry.
 4. Re-sweep. Stop when two sweeps taken the same way agree: **zero defects, zero silent, and a
    union that has not grown.** That is §5.1's original termination condition — a full pass that
    discovers no id not already seen — measured as the only thing that can be measured.
 
 **Done:** two consecutive clean sweeps with the same union, and that union and date written into
-§2. Whatever is still unreached is listed there with one line each saying why it is gated.
-**Cost:** each turn of the loop is a sweep plus whatever it found. Do not guess the number of
-turns.
+§2.1. Whatever is still unreached is listed there with one line each saying why it is gated.
+**Cost:** each turn of the loop is a sweep plus whatever it found. Do not guess the number of turns.
 
 ### Step 7 — The battle refusals
 
@@ -534,6 +627,12 @@ one-shot, so a branch costs a resume rather than a replay.
 
 ⚠️ This is the one place an event-flag write might be argued for, and none is admitted yet. Argue
 the specific flag on the specific branch.
+
+⭐ **And it has a first customer that is not a branch at all.** The S.S. Anne is eleven maps behind a
+one-way door — `EVENT_SS_ANNE_LEFT`, set before the third badge — so it needs a save cut *before* the
+ship sails, which is the same machinery this step is about and none of the flag-writing it rules out.
+`Start::before_the_credits` admits such a save into the walk; what is still missing is a fixture that
+stands on the dock or on the ship itself. See step 6's loop.
 
 **Done:** each branch covered by snapshot × N. **Cost:** medium.
 
@@ -585,14 +684,14 @@ GB_COVERAGE_START=all GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 ```
 
-**For a measurement, run the eight in parallel** — same 7 minutes as one, and they agree with each
-other. Build once, then launch the test binary eight times, one directory each:
+**For a measurement, run the nine in parallel** — same 7 minutes as one, and they agree with each
+other. Build once, then launch the test binary nine times, one directory each:
 
 ```shell
 bin=$(cargo test --release --features coverage-tests --bin gb --no-run 2>&1 \
         | grep -o 'target/release/deps/gb-[0-9a-f]*')
 S=/var/tmp/gb-sweep; rm -rf $S; mkdir -p $S
-for r in phase0 cerulean vermilion lavender celadon saffron fuchsia cinnabar; do
+for r in phase0 cerulean vermilion lavender celadon saffron fuchsia cinnabar ssanne; do
   mkdir -p $S/$r $S/tmp/$r
   ( cd $S/$r && TMPDIR=$S/tmp/$r GB_COVERAGE_START=$r GB_COVERAGE_MINUTES=360 \
       GB_COVERAGE_PATIENCE=100000 GB_COVERAGE_WALL_SECS=2400 \
@@ -610,23 +709,33 @@ walk gets a real run directory from `run::tests::Scratch`, which is `std::env::t
 a box where `/tmp` is a tmpfs that directory is **RAM**. A walk appends to `transcript.jsonl` and
 `conversation.jsonl` on every one of its thousands of turns, so eight of them quietly write
 hundreds of megabytes apiece into memory that no `ps` column attributes to them: the walks' own RSS
-peaked near 1 GB for the set while the machine was being emptied underneath them, and all eight
-were killed twice at 60 to 180 seconds with the kernel reporting no pressure at all
+peaked near 1 GB for the set while the machine was being emptied underneath them, and every one of
+them was killed twice at 60 to 180 seconds with the kernel reporting no pressure at all
 (`/proc/pressure/memory` flat, no OOM in the journal). Point `TMPDIR` at real disk. ⚠️ A killed
 walk's `Scratch` never runs its `Drop`, so check for orphaned `/tmp/gb-coverage-walk-*` before
 blaming the next run's numbers on the machine.
 
 | Knob | |
 |---|---|
-| `GB_COVERAGE_START` | `phase0` (default) or one of `cerulean vermilion lavender celadon saffron fuchsia cinnabar`, or `all`. An unknown name panics rather than walking the default |
+| `GB_COVERAGE_START` | `phase0` (default) or one of `cerulean vermilion lavender celadon saffron fuchsia cinnabar ssanne`, or `all`. An unknown name panics rather than walking the default |
 | `GB_COVERAGE_MINUTES` | game-minutes **per walk**; 90 is a smoke budget, 360 a coverage one |
 | `GB_COVERAGE_PATIENCE` | barren turns before the frontier is called settled. Patience, not the budget, is what stopped every early sweep; set it high |
 | `GB_COVERAGE_WALL_SECS` | a wall-clock stop, so a wedged sweep fails instead of running all night |
 
-Every walk's own summary carries a **`cheats`** line saying which key items would not fit the bag.
-⚠️ **Read it before believing a coverage gap**: Gen 1 holds twenty *kinds* and every finished-game
-start arrives with all twenty used, so a sweep can look healthy while the S.S. Anne, Rocket Hideout
-and every `Fish` row are unreachable for want of a ticket, a lift key and three rods.
+⚠️ **Two more traps in the shell around it, both of which cost twenty minutes on 2026-09-10.**
+`until ! pgrep -f "full_playthrough"; do sleep 20; done` **never exits**, because the waiting shell's
+own command line contains the string it is grepping for — wait on `[ ! -d /proc/<pid> ]` or on a
+sentinel written to the output file instead. And two launchers that both `rm -rf $S` will happily
+give you eighteen walks in nine directories, which is a measurement of nothing: count
+`ps -eo args | grep "deps/gb-<hash> coverage_walk"` and see exactly nine before believing a number.
+
+Every walk's own summary carries a **`cheats`** line saying what was shed from the bag to make room
+and which key items still would not fit. ⚠️ **Read it before believing a coverage gap**: Gen 1 holds
+twenty *kinds* and every start arrives with fourteen to twenty used, and until 2026-09-10 a sweep
+could look healthy while Rocket Hideout, the prize room and every `Fish` row were unreachable for
+want of a lift key, a coin case and three rods. Room is made first now
+(`debug_keep_only_items`), so the line should read `every key item fit the bag` — and if it does not,
+whatever they gate is unreachable and nothing else will say so.
 
 Artifacts go to `target/test-artifacts/coverage/`: `walk-<region>.tsv` with every id and its
 verdict, and `defect-<id>_state.bin` plus a screenshot taken **at the moment the verdict turned**,
@@ -635,17 +744,25 @@ states fresh rather than looking for old ones.
 
 ### 6.2 How to read a number
 
-- **The `phase0` walk has several modes**, not a spread: 38 maps stopped on the Hall of Fame, about
-  61 having missed the Indigo Plateau and spent its budget in Victory Road, or — 2026-09-09 — **30**,
-  having spent 64% of its turns on Victory Road's three floors and never left. A single run is a
-  sample of which happened, and the list is open: `cinnabar` walked the same three floors to 33 maps
-  the same day, from a start on the other side of Kanto.
-- **Load is an input.** Three runs beside a `cargo build -j24` came out 30/30/38; eight on an idle
-  box came out 38 seven times. Never build while measuring, and prefer eight in parallel to one.
+- **A walk has several modes rather than a spread, and it is the *terminus* that varies.** `phase0`
+  has stopped on the Hall of Fame at 38 maps, spent its budget in Victory Road at 30 or 61, and —
+  once the bag was fixed — walked 123 and 143. `fuchsia` came back with 163, then 71, then 147; the
+  71 is the run that happened to win the game at 55% of its budget. A single row is a sample of
+  which happened. ⚠️ **A start that reaches the Indigo Plateau stops exploring**, and that cuts both
+  ways: it is why `cinnabar` is 41 maps and why `ssanne`, which cannot win, is worth 17 nobody else
+  reaches (§2.1).
+- **Load is an input.** Three runs beside a `cargo build -j24` came out 30/30/38; nine on an idle
+  box agree with each other. Never build while measuring, and prefer the nine in parallel to one.
 - **Which id fails is not reproducible by re-running**; the dropped save state is. Argue from the
-  state, as [deployed-run-defects](deployed-run-defects.md) does.
+  state and from `probe_button_at_state` (§6.1), as
+  [deployed-run-defects](deployed-run-defects.md) does. ⚠️ **A `silent` drops no state**, so its
+  evidence is the walk's own log: `grep -n` the id and read the agent-state lines after it. Every
+  driver prints its state every tick, so the trail names which one was holding the walk when it went
+  quiet — `move→X`, then `surf`, then `BattleStarted` with no abort between is the whole diagnosis.
 - **The union is the number for the goal**, and it is only meaningful across several starts: eight
-  identical `phase0` walks union to 86, eight different starts to 159.
+  identical `phase0` walks union to 86, nine different starts to 201. ⚠️ **And the complement is the
+  number to act on** — a count says nothing about whether a gate is doing its job or a walk never
+  arrived, which is what step 5's `unreached` line and the ROM cross-check are for.
 
 ---
 
@@ -653,7 +770,8 @@ states fresh rather than looking for old ones.
 
 ### 7.1 Faults the walk has found and fixed
 
-All in the agent or the oracle, none in the walk's own brain but the last two. Each has a test.
+All in the agent, the oracle or the cheats — only two are in the walk's own brain, and the newest is
+in a driver rather than in routing. Each has a test.
 
 | What the sweep showed | Root cause | Test |
 |---|---|---|
@@ -681,9 +799,22 @@ All in the agent or the oracle, none in the walk's own brain but the last two. E
 | 60 s at a Silph Co 1F warp pokered labels `; inaccessible` | `actions()` kept a dud when no sibling led to the same place — and what that guard was really protecting was Pokémon Mansion 3F's holes, whose tile is in the cartridge's *other* step-on table | `mechanics::an_impossible_warp_is_one_the_cartridge_really_will_not_open` |
 | A Saffron Gym menu minted off five of nine sprites | An intra-map teleport reloads the map without changing `wCurMap`, so the header check cannot see it; `.loadSpriteData` writes `wNumSprites`, zeroes the slots, then fills them | `mechanics::every_committed_fixture_has_a_complete_sprite_table` |
 | 60 s holding Down on a warp the player was standing on, twice a sweep | A warp on water: `CheckWarpsCollision` is on the *walking* side of `home/overworld.asm`'s surf branch, so the entry has to be stepped onto rather than pressed against — in two places, and one of them ignored the route | `cinnabar::a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on`, `mechanics::a_warp_reached_by_surfing_is_entered_rather_than_leant_on` |
+| Between one and nine key items refused, on all eight starts, for a whole month of sweeps | Gen 1's bag is twenty *kinds* and a finished save arrives with fourteen to twenty used; `Cheats` reported the refusal and carried on, so no S.S. Ticket, no Lift Key, no Coin Case and no rod were a *silent* coverage gap. Room is made first now | `cheats::every_coverage_start_can_be_handed_all_of_the_key_items`; the union's per-region map counts going 38→123, 86→130, 41→33…130 |
+| 60 s holding Down on `SilphCoElevator:1,3`, and it is not a water tile | `.noDirectionChange` reaches `CheckWarpsCollision` only past `bit BIT_STANDING_ON_WARP`, which `CheckWarpsNoCollision` sets on a completed **step** onto an entry — so it is clear for a player the cartridge *warped* onto one, which is every elevator in the game. Two places again | `saffron::an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on` |
+| `SeafoamIslandsB4F:20,17` and `:21,17` `DidNotArrive`, every sweep that reaches them | Not the agent: `SeafoamIslandsB4FDefaultScript` force-walks the player north off both and clears `BIT_FORCED_WARP` until both SEAFOAM3 boulders are down holes, which no finished game has. A row the game will refuse is now withheld, as a cut tree is | `mechanics::a_seafoam_staircase_the_script_cancels_is_not_a_row` |
+| *"There is no route to the warp to CeladonMansion2F"* from a square that had one two ticks later | A route is what people stand on, and that room has three wandering pets and their owner in a two-wide corridor. `NoRoute` now has to hold still for `MAX_ROUTE_LOST_TICKS` (5 s of game time) before it is said | `celadon::a_route_a_wandering_pet_is_standing_on_is_waited_out_rather_than_disputed` |
+| `Route21:Fisher1` chosen and never reported | A wild Pokémon appeared while the party menu was open to **mount Surf**, and `assert_battle_state`'s `_` arm says a battle started and nothing about the walk it interrupted. `Surfing { resume: Some(..) }` is the third state that carries a walk | `agent::a_pace_is_an_open_overworld_action_like_the_walk_that_started_it` (extended) |
+| `VermilionGym:LtSurge` `DidNotArrive`, and only from a start that had not won the game | `VermilionGymSetDoorTile` draws block `$24` over the doorway until the trash-can puzzle sets `EVENT_2ND_LOCK_OPENED`, and the static ROM blocks carry the *open* layout — so the BFS routed through a closed door and offered a row behind it. Every postgame fixture has the doors open, which is why three days of sweeps never saw it | `vermilion::lt_surge_is_not_a_row_while_his_doors_are_shut` |
+| Four ids chosen and never reported, in one sweep, all on water | A Surf mount ends in **one** simulated step onto the water, and for a `ConnectionWater` row or a warp on the water that step is the whole of the action — so the map changed while the state was `Surfing`, the resume's map no longer matched, and the row was dropped to `Idle`. The arm's own comment already said the crossing "is the walk arriving rather than being interrupted" | `cinnabar::a_walk_the_surf_mount_itself_finishes_says_that_it_arrived` |
+| Two thirds of one region's whole budget on a single boulder goal, 230 identical shoves | `MAX_PUSHES` and `MAX_PUSHES_WITHOUT_PROGRESS` are both counted off a boulder that *moved*, so a shove the cartridge refuses in silence is invisible to both; `DRIVER_ESCAPE_SILENCE` drops to `Idle` and `Idle` picks the goal back up unchanged | `PokemonAgent::boulder_goal_silences` and `MAX_SILENT_SHOVES` |
 
-⚰️ Two of these were diagnosed wrongly before they were diagnosed rightly, and the lesson is the
-same both times: argue from the dropped save state, not from the sentence the agent printed.
+⚰️ **Four of these were diagnosed wrongly before they were diagnosed rightly, and the lesson is the
+same every time: argue from the dropped save state, not from the sentence the agent printed.** Two
+of the four are §7.2's items 8 and 13; the other two are 2026-09-10's, and both were settled in
+minutes by `probe_button_at_state` after an hour of reading the ROM had settled neither. The Silph
+Co elevator's answer is one line of its output — `wMovementFlags` reads `$00` while the player leans
+on a warp entry — and no amount of `home/overworld.asm` was going to say so, because the flag is
+live state and the source is a program.
 
 ### 7.2 Where the first draft was wrong
 
@@ -732,7 +863,25 @@ Kept because the reasoning is the useful part.
 14. **A counter nobody prints is a fact nobody has.** `Cheats::bag_was_full` had been counting
    refused key items since it was written, with a comment calling it "a coverage gap worth
    printing". Printing it took two lines and immediately said that every one of the eight starts is
-   missing key items that gate whole clusters of §2's unreached maps.
+   missing key items that gate whole clusters of the maps no walk had entered.
+15. **…and a fact nobody has is worth more than any change to the walk.** Making room in the bag is
+   **one call** in the driver, and it moved `phase0` from 38 maps to 123, `saffron` from 129 to 131
+   with the Rocket Hideout in it, and every start onto the same fourteen key items. Four of the six
+   defects that remained were then somewhere no sweep had ever been. Steps 1 to 5 were each a day
+   of agent work for a handful of ids; step 6's first line was a line.
+16. **A cluster in the unreached list can be gated by the *fixture* rather than by the game, and
+   the plan's own ⚠️ said the opposite.** "A cluster is a gate, a missing start or a full bag — never 'the
+   walk is bad'" left out the fourth thing: the save. `EVENT_SS_ANNE_LEFT` is set before the third
+   badge, so the S.S. Anne's ten rooms and `VermilionDock` are unreachable from **every** finished
+   game — the plan predicted they would "come off the list the moment the ticket fits", the ticket
+   now fits in all nine bags, and they did not move. That is what `Start::before_the_credits` is
+   for, and it is the only exception to the finished-game rule admitted so far.
+17. **A "starting over" with nothing counting it is a livelock with a friendly sentence.**
+   `DRIVER_ESCAPE_SILENCE` was written as the net under every self-driving driver and it is one —
+   except where the state it drops to *restores* the thing that jammed. A boulder goal does exactly
+   that, and neither of its two bounds could see a shove that never landed, so the net became a 60 s
+   loop that ran for two thirds of a region's budget. **Every hatch needs to ask what picks the work
+   back up.**
 
 ### 7.3 Where the old section numbers went
 

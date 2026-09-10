@@ -27,6 +27,8 @@ fn seafoam_articuno_is_reachable_offline() {
             header_loaded: true,
             surfing: true,
             sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: true,
         };
         let mut tm = MetaTileMap::new(&current);
         tm.can_surf = true;
@@ -296,4 +298,47 @@ fn a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on() {
     println!("ended on {} @ {}", end.map.map, end.map.player_position);
     assert_eq!(end.map.map, Map::SeafoamIslandsB4F,
         "the entry has to fire, and holding the outward direction on it never will");
+}
+
+/// ⭐ **The mount's own step can be the whole of the action, and the agent used to go quiet on it.**
+///
+/// A Surf mount ends in `.makePlayerMoveForward` — one simulated step onto the water — and a
+/// `ConnectionWater` row's destination *is* that water. So the map changes while the state is
+/// `AgentState::Surfing`, the resume's `map` no longer matches, and the row was dropped to `Idle`
+/// with nobody told: the coverage sweep of 2026-09-10 scored four of these in a single pass
+/// (`CinnabarIsland:20,5` and `:20,14` `ConnectionWater`, `Route13:52,0:Connection`,
+/// `SeafoamIslandsB3F:20,17:Warp`). `Surfing`'s own comment already said the crossing "is the walk
+/// arriving rather than being interrupted"; what it did not do was say so out loud.
+///
+/// ⚠️ **Asserted through the oracle rather than on the map**, because the map was always right. The
+/// player did arrive on Route 20 before this change and the leg passed; what was missing was the
+/// `OverworldActionCompleted`, and `CoverageLog` is the thing that can tell a completion from a
+/// silence. `Verdict::Silent` is what this fails on.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn a_walk_the_surf_mount_itself_finishes_says_that_it_arrived() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/post-articuno.bin"), Duration::from_mins(4),
+        vec![PolicyStep::enter(Map::Route20)],
+    ).with_coverage();
+    assert_eq!(fixture.game_state().map.map, Map::CinnabarIsland);
+
+    fixture.step_until_exhausted();
+    assert_eq!(fixture.game_state().map.map, Map::Route20, "the walk has to cross the seam");
+
+    let log = fixture.coverage.as_ref().expect("coverage was asked for");
+    println!("[coverage] {}", log.summary());
+    let quiet: Vec<&str> = log.entries()
+        .filter(|entry| entry.verdict == crate::pokemon::integration_tests::coverage::Verdict::Silent)
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert!(quiet.is_empty(),
+        "the mount crossed the seam and nothing reported the arrival: {quiet:?}\n{}", log.report());
+    // …and it is a *completion*, not merely not-a-silence: the walk arrived.
+    assert!(
+        log.entries().any(|entry| entry.id.contains("ConnectionWater")
+            && entry.verdict == crate::pokemon::integration_tests::coverage::Verdict::Completed),
+        "no water crossing completed at all, so this leg did not exercise the arm:\n{}",
+        log.report(),
+    );
 }
