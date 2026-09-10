@@ -284,13 +284,28 @@ a `DeterministicPolicy` fact; the thing actually deployed is `LlmPolicy`, and no
 end. A god run would cover chaining, `resume_after_battle`, compaction, a restart mid-game and the
 whole turn loop across a real game, which is the list §5 said was "worth having".
 
-⚠️ **It replaces `full_playthrough` only if it is much faster, and that is a measurement rather than
-a hope.** `full_playthrough` is **234 s** and `hall_of_fame` is **904 s**. A god party wins every
-battle on the first move and needs none of the grind that is most of the scripted route's length, so
-the target is well under 234 s — but the turn cost is a round trip per decision, and
-`godmode_turn_cost` exists to price exactly that. **Take the number first.** If it lands above
-`full_playthrough`, it goes behind its own feature and `full_playthrough` stays the gate, which is
-what §4.2 of the first draft already said.
+⚠️ **The bar is "not much slower", not "much faster", and the difference is the coverage.** The
+first draft said a god run had to beat `full_playthrough` outright; that was written when the run
+would have bought only a second way to play the same route. It buys more than that — the deployed
+policy end to end, chaining, `resume_after_battle`, compaction and a restart mid-game, none of which
+any test covers today — so a gate that costs about the same and proves considerably more is a
+straight win. `full_playthrough` is **234 s**; `hall_of_fame` is **904 s**. Roughly 234 s is fine.
+
+⭐ **But it should be *faster*, and if it is not, that is the finding rather than the answer.** A god
+party wins every battle on the first move, and the grind is most of the scripted route's length —
+`full_playthrough` spends its time levelling a Squirtle to Blastoise, and a god run skips all of it.
+So a run that comes out slower is telling you something, and there are only two places it can be:
+
+- **Turn count.** An `Intent` is one hop per turn by construction (§4.1's correspondence with
+  `PolicyStep::enter`), so a route written as forty hops costs forty round trips. Chaining is the
+  lever the deployed policy already has — `choose_action`'s `then` takes three more ids — and a god
+  run that does not use it is not playing the way a model would either.
+- **Per-turn latency.** A round trip to a localhost mock is not the cost; building the prompt over a
+  growing history is, and it grows until compaction bounds it. `godmode_turn_cost` already prints
+  mean and worst latency beside the turn count, which is exactly the pair that tells these two apart.
+
+**Take the number first**, and if it is bad, take it apart with `godmode_turn_cost` before writing
+any more of the route.
 
 **And check what stops being covered before retiring anything.** `full_playthrough` is a golden RNG
 replay of a route that *catches Pokémon, teaches HMs, buys, sells, grinds and solves both boulder
@@ -309,9 +324,10 @@ table that says which test covers each**, written before the gate changes and no
   is why step 7 left them; a god run that fights its way to the credits through `LlmPolicy` takes
   most of them for free, so re-audit the list *after* step 2 rather than before it.
 
-**Done:** a number for the god run beside `full_playthrough`'s 234 s; a table mapping everything
-`full_playthrough` uniquely covers to the test that covers it; and then either the gate changes or
-this file records why it did not.
+**Done:** a number for the god run beside `full_playthrough`'s 234 s, **and, if it is the slower of
+the two, the reason** from the pair above; a table mapping everything `full_playthrough` uniquely
+covers to the test that covers it; and then either the gate changes or this file records why it did
+not.
 
 **Cost:** medium, and mostly the intent list. §4.1 of the first draft is still right that
 `PolicyStep::complete_game_steps()` has variants with **no menu row behind them** — `UseBagItem`,
