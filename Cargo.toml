@@ -5,112 +5,31 @@ edition = "2024"
 
 [features]
 default = ["sdl", "web", "llm"]
-# The SDL2 desktop UI (`src/sdl/`): window, audio device, keyboard. On by default, so a plain
-# `cargo build` is exactly what it always was. Off, the binary drops `libsdl2` and `fontdue`
-# entirely — which is the point: a server-only container should not need a native SDL2 to link
-# against, and `gb serve` never opens a window.
-#   cargo build --release --no-default-features
+# The SDL2 desktop UI (`src/sdl/`). Off, the binary drops `libsdl2` and `fontdue`.
 sdl = ["dep:sdl2", "dep:fontdue"]
-# Everything that leaves the process: the observation facade in `src/pokemon/observe.rs` serialised
-# as JSON, the headless emulator host (`src/host.rs`) and the axum server (`src/web/`). `serde` and
-# the server stack are optional because nothing in the emulator or the agent needs them — only the
-# things that talk to the outside.
-#
-# `tokio` is here for `axum` and for the sync→async bridge only: the emulator and (from W4) the LLM
-# worker are plain `std::thread`s and neither is ever inside a runtime.
-#
-# ⚠️ **On by default since W1**, which W0 deliberately did not do. The reason W0 gave — ~200 crates
-# nothing compiles against and no test exercises — expired the moment `src/host.rs` and `src/web/`
-# landed: the video codec, the late-joiner ordering and the host's publishing are all default-tier
-# tests, and behind an opt-in feature a plain `cargo test --release` would silently skip every one of
-# them. The cost is 57 extra crates on a build that already pulls 119. A server-only build still
-# drops SDL entirely:
-#   cargo build --release --no-default-features --features web
+# The headless host (`src/host.rs`) and the axum server (`src/web/`).
 web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed", "dep:flate2", "dep:opus-rs"]
-# **W4** — the LLM: the OpenAI-compatible client (`src/llm/`) and the policy that drives the game
-# from it (`src/pokemon/llm_policy.rs`). Implies `web`, because the turn loop publishes into the same
-# `Published` buffers the browser reads and there is no configuration in which one is wanted without
-# the other.
-#
-# ⚠️ **In `default` for the reason `web` is**, and it is the same argument a third time: every W4 test
-# — the SSE parser, the cancellation contract, the tool scoping, the mock-server playthrough — lives
-# in this module, and behind an opt-in feature a plain `cargo test --release` would run none of them.
-# The measured cost was **14 crates** — ureq and its rustls/ring TLS stack, most of whose transitive
-# dependencies the build already had — against the 175 without it, and **13 more** for `rhai` below
-# (236 → 249 in `Cargo.lock`). Neither needs a system library beyond a C compiler for `ring`. A
-# container build is still `--no-default-features --features llm`.
+# The OpenAI client (`src/llm/`) and the policy that drives the game from it.
 llm = ["web", "dep:ureq", "dep:rhai"]
-# The Pokémon integration tests are tiered by how much game time they emulate. The emulator runs at
-# ~23x realtime, so game time is the cost: a plain `cargo test --release` stays under a minute by
-# running only the mechanic tests and two navigation smoke tests.
-#
-# Every per-badge leg test (`can_reach_vermilion` … `can_enter_hall_of_fame`), each seeded from a
-# committed `src/pokemon/data/*.bin` snapshot.
-#   cargo test --release --features slow-tests
+# The per-badge leg tests, each seeded from a committed `src/pokemon/data/*.bin` snapshot.
 slow-tests = []
-# The legs that cost more game time than the rest of `slow-tests` combined, so one of them does not
-# silently become the tier's wall clock. Currently one: `postgame::safari::can_sweep_the_safari_zone`
-# at 381 s, against 65 s for the next slowest leg and ≤65 s for the other 114 — it emulates ~190 min
-# of game time buying 21 ¥500 Safari trips to chase 4.3 %-slot species, and there is no waste in it to
-# reclaim. Its siblings in `slow-tests` still cover every Safari *mechanism*; see the test's docs.
-#   cargo test --release --features very-slow-tests --bin gb -- can_sweep_the_safari_zone --exact
+# The legs costing more game time than the rest of `slow-tests` combined.
 very-slow-tests = []
-# `full_playthrough` alone — a fresh save played to all 8 badges and Victory Road 2F, ~5 min of wall
-# clock. Kept off the `slow-tests` gate so the leg chain can be run without paying for it. Run it after
-# every major work item and before pushing — it is the only test that proves the legs compose. See
-# CLAUDE.md.
-#   cargo test --release --features full-playthrough full_playthrough
+# `full_playthrough`: a fresh save played to all 8 badges. A pre-push gate.
 full-playthrough = []
-# The same run carried through to the **Hall of Fame**: the gauntlet grind, both Victory Road puzzles
-# and the Elite Four, measured at **~50 min** against the five above.
-#
-# ⚠️ **Its own flag rather than a longer `full-playthrough`, and the split is the point.** The route
-# `gb serve --policy deterministic` plays finishes the game, so something has to prove that end to
-# end — but the fast one is the pre-commit gate, and a 50-minute gate is one nobody runs, which is how
-# `full_playthrough` came to sit broken behind a doc comment claiming it was green. The grind is
-# essentially all of the difference: 2306 wild battles to bring three Pokémon to lv75.
-#   cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
+# `hall_of_fame`: the same run carried through the Elite Four.
 hall-of-fame = []
-# **C2** — a run played to a milestone through the deployed `LlmPolicy` against an in-process mock
-# endpoint, with the battles won by a god party and decided by a battle script. It is gated because
-# it is a *measurement* as much as a test: `godmode_turn_cost` prints milliseconds per request and
-# requests per game-minute, and that number is what decides whether the god run can ever replace
-# `full_playthrough` as the pre-push gate (`docs/coverage-plan.md` step 2). The machinery under it —
-# `Intent`, `ScriptedBrain`, the cheat sidecar, the coverage log — is all default tier.
-#   cargo test --release --features godmode --bin gb -- godmode --nocapture
+# `godmode_run`: `LlmPolicy` against a mock endpoint, from a fresh save to the credits. A pre-push gate.
 godmode = []
-# **C3** — every reachable action in the game, taken once, with a verdict on each. Driven through
-# the deployed `LlmPolicy` against an in-process mock endpoint by `coverage::ExploringBrain`, which
-# reads the rendered action menu and nothing else. It **fails on any defect** — a row the menu
-# offered that the agent could not then execute, or a watchdog firing — and writes the whole table
-# to `target/test-artifacts/coverage/` either way. Its first deliverable is a number: ids discovered
-# per game-minute. The oracle under it (`coverage::CoverageLog`) is default tier.
-#   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
+# `coverage_walk`: every reachable action in the game, taken once, with a verdict on each.
 coverage-tests = []
-# The stall hunt: hours of `RandomPolicy` play, failing if the agent ever goes longer than
-# `GB_STUCK_TIMEOUT_SECS` without reaching a decision point — i.e. exactly when a deployed
-# `LlmPolicy`'s watchdog would fire. A random decider explores the agent's state machine far more
-# widely than any scripted route, so this is where jams get *found*; `full_playthrough` proves one
-# route still works. Gated as a **module** rather than with `#[ignore]`, so it never appears in the
-# ignored list — that list is a backlog of blocked tests, and this is not one.
-#   cargo test --release --features soak-tests --bin gb -- soak --nocapture
+# The stall hunt: hours of `RandomPolicy` play. A module gate, so it never joins the ignored list.
 soak-tests = []
-# Diagnostics and probes: tools that print a report about the game or the agent, not assertions.
-# Compiled out by default so the ignored-test list stays a readable backlog of genuinely blocked
-# work. They keep `#[ignore]` on top of the gate because their pass/fail is not a signal — several
-# legitimately end by exhausting their cycle budget after printing what they were asked for.
-#   cargo test --release --features diagnostics,slow-tests --bin gb -- probe_ --ignored --nocapture
+# Probes: tools that print a report about the game or the agent, not assertions.
 diagnostics = []
-# Benchmarks. Compiled out entirely by default rather than `#[ignore]`d, so they do not show up
-# in the ignored count alongside genuinely blocked tests.
-#   cargo test --release --features bench --bin gb -- bench_ --nocapture
-#
-# `flate2` is here for the video bitrate bench only: it is the yardstick the codec is measured
-# against (what a generic compressor gets on top of it, and what `permessage-deflate` would).
+# Benchmarks. `flate2` is the yardstick the video codec is measured against.
 bench = ["dep:flate2"]
-# Let tests overwrite the committed fixtures they snapshot. Off by default: a normal test run must
-# leave the working tree clean, or every run silently changes the next run's inputs.
-#   cargo test --release --features regen-fixtures,slow-tests
+# Let tests overwrite the fixtures they snapshot. Off, so a test run leaves the tree clean.
 regen-fixtures = []
 
 [dependencies]
@@ -119,8 +38,6 @@ strum_macros = "0.27.2"
 paste = "1.0"
 sdl2 = { version = "0.38", optional = true }
 image = "0.25"
-# ⚠️ Not SDL-only, despite living next to it in an earlier survey: `src/ppu.rs`,
-# `src/pokemon/mod.rs` and `src/pokemon/map_header.rs` all use it, so it stays unconditional.
 itertools = "0.14"
 fontdue = { version = "0.9.3", optional = true }
 bitflags = "2.9.3"
@@ -131,57 +48,27 @@ rand = "0.10.0-rc.0"
 phf = { version = "0.13.1", features = ["macros"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
-# The HTTP server only. `rt-multi-thread` because axum's serve wants a reactor; the emulator thread
-# is spawned with `std::thread` and never enters it.
+# axum's reactor. The emulator thread is a `std::thread` and never enters it.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "signal"], optional = true }
-# `BroadcastStream` — the sync→async bridge in stream form, and the only thing that surfaces
-# `Lagged` so a viewer that fell out of the video ring buffer can be re-synced from a keyframe
-# instead of silently keeping a stale screen.
+# `BroadcastStream`: the sync→async bridge, and the only thing that surfaces `Lagged`.
 tokio-stream = { version = "0.1", features = ["sync", "time"], optional = true }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.22", optional = true }
-# The built SPA (`web/dist`), baked into the binary so the container is one file. ⚠️ The folder must
-# exist at compile time — `web/dist/.gitkeep` is committed for exactly that reason, and a checkout
-# that has not run `pnpm run build` compiles fine and serves a page saying so.
+# The built SPA (`web/dist`), baked into the binary.
 rust-embed = { version = "8.12", optional = true }
-# The chat completions client. **Blocking on purpose**: `Response::into_reader()` is a plain
-# `impl Read`, so streaming SSE is a `BufReader::lines()` loop on the worker's own `std::thread` and
-# there is no second async runtime in the process. `reqwest::blocking` would start one internally.
+# The chat completions client. Blocking, so streaming SSE needs no second async runtime.
 ureq = { version = "3.3", optional = true }
-# `/api/video`'s per-connection deflate stream (`src/web/mod.rs`), and the yardstick the codec
-# is measured against in `src/web/video/bench.rs`. Pure Rust — `miniz_oxide`, no C — so it adds
-# nothing to what the container has to link.
+# `/api/video`'s per-connection deflate stream, and the codec bench's yardstick.
 flate2 = { version = "1", optional = true }
-# `/api/audio`'s Opus encoder (`src/web/audio.rs`). **Pure Rust** — a port of libopus 1.6 with no
-# build script and no non-Rust dependency of its own — which is the whole reason it was chosen over
-# the mature `opus` bindings: the container's only C dependency stays `ring`'s.
-#
-# ⚠️ **Young, and it has a rate-specific correctness bug.** At 24 kHz its encoder produces packets
-# that decode — through its own decoder *and* through real libopus 1.6 — to roughly the right
-# loudness with the spectrum destroyed. At 48 kHz the same signal round-trips through real libopus
-# to within 0.3 dB on every tone. `audio::SAMPLE_RATE` is 48 kHz because of that measurement and
-# `the_packets_are_ones_a_browser_can_decode` is what pins it.
+# `/api/audio`'s Opus encoder. Pure Rust; see docs/web-streams.md for the 48 kHz constraint.
 opus-rs = { version = "0.1.32", optional = true }
-# The battle script sandbox (`src/llm/battle_script.rs`). **Pure Rust**, no build script and no
-# system library, so the container's only C dependency stays `ring`'s — the same bar `opus-rs`
-# above had to clear. Chosen over a Python-syntax runtime (`starlark`, 36 direct dependencies
-# including `blake3`, `dashmap`, `num-bigint` and `rustyline`) on weight alone.
-#
-# ⚠️ **The safety of this feature is the engine's limits, not the language.** A script is written
-# by the model and runs on the emulator thread, so `battle_script::engine` sets the operation,
-# string, array, map and call-depth caps and an `on_progress` wall-clock abort, and never enables
-# `unchecked`. `no_time` is on so a script cannot read a clock (nothing needs one, and a decision
-# that varies with wall time is one no test can pin); `no_custom_syntax` because the surface the
-# model writes against is smaller when the grammar cannot be extended.
+# The battle script sandbox; the engine's limits are the sandbox (docs/llm-turn-loop.md).
 rhai = { version = "1.26", features = ["no_time", "no_custom_syntax"], optional = true }
 
 [build-dependencies]
 regex = "1.12.2"
 
-# The integration tests are bound by raw emulation speed — the agent's observe/policy/input work is
-# only ~16% on top of it — so these two are the only knob that makes every test faster at once.
-# Re-measured 2026-08-05 after Phase A: 33.6x realtime raw, 28.3x with the agent. `-C
-# target-cpu=native` was tried on top of this and made it *slower*, so it is deliberately not set.
+# The integration tests are bound by raw emulation speed; these two make every test faster at once.
 [profile.release]
 lto = "thin"
 codegen-units = 1
