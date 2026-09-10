@@ -51,9 +51,14 @@ use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply,
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
 
-/// How long a test will wait on the wall clock. The same figure `llm.rs` uses and for the same
-/// reason: the worker is a real thread on a real socket and a loaded machine is not a failure.
-const PATIENCE: Duration = Duration::from_secs(30);
+/// How long a test will wait on the wall clock — a deadline rather than a wait, so a passing run
+/// spends none of it.
+///
+/// ⚠️ **Four times `llm.rs`' figure, because 30 s was measurably not enough.** The worker is a real
+/// thread on a real socket and a loaded machine is not a failure: running the default tier twelve
+/// times back to back turned up one run where this file lost two tests at once, and both were
+/// deadlines rather than defects. See [`run_on`] for the other half of the same measurement.
+const PATIENCE: Duration = Duration::from_secs(120);
 
 /// A wild battle on Route 6: Ivysaur lv29 against an Oddish lv13, five Poké Balls and a bag full of
 /// things the game will refuse. Cut by `soak` seed 1 from `at-vermilion` at 372 s, where the S.S.
@@ -191,9 +196,13 @@ fn run_on(fixture: &'static [u8], name: &'static str, plan: Vec<Call>) -> (LlmRu
     let brain = Refuser { plan: plan.into(), seen: Arc::clone(&seen) };
     let run = LlmRun::builder(fixture)
         .named(name)
-        // Enough emulated time for a battle with a refusal in it and no more. A test that runs out
-        // of game time reports whatever it has, which is what makes the assertions below readable.
-        .game_time(Duration::from_secs(180))
+        // ⚠️ **Fifteen game-minutes for a battle that takes seconds, and the margin is the point.**
+        // The emulator keeps running while the worker thinks — that is the property the whole policy
+        // is built on — so a mock round trip slowed by a loaded machine is paid for in *emulated*
+        // seconds, and this budget is a panic rather than a readable assertion when it runs out.
+        // Measured at three game-minutes: `a_run_the_game_refuses_hands_the_turn_back_rather_than_
+        // ending_the_battle` blew it once in twelve back-to-back runs of the default tier.
+        .game_time(Duration::from_secs(15 * 60))
         .start(Box::new(brain));
     (run, seen)
 }
@@ -659,7 +668,8 @@ fn the_old_mans_tutorial_is_a_battle_the_agent_cannot_walk_into() {
 
     let mut run = LlmRun::builder(VIRIDIAN)
         .named("refusal-old-man")
-        .game_time(Duration::from_secs(180))
+        // Same margin as [`run_on`]'s, and for the same reason.
+        .game_time(Duration::from_secs(15 * 60))
         .start(Box::new(brain));
 
     // ⚠️ **Read off the model's own turn rather than off the notices.** `LlmRun::said` reads

@@ -78,6 +78,31 @@ pub fn is_start_menu(top_menu_item_x: u8, top_menu_item_y: u8, on_screen_text: &
     (top_menu_item_x, top_menu_item_y) == START_MENU_ORIGIN && on_screen_text.contains("EXIT")
 }
 
+/// Where `PartyMenuInit` puts the party list: `wTopMenuItemX`/`Y` of (0, 1)
+/// (`engine/menus/party_menu.asm`). Shared with the **battle** PKMN list, which is the same menu.
+pub const PARTY_MENU_ORIGIN: (u8, u8) = (0, 1);
+
+/// True when the ordinary (`NORMAL_PARTY_MENU`) party list is on screen right now.
+///
+/// Both halves are required, for [`is_start_menu`]'s reason, and here the geometry half is the
+/// dangerous one: (0, 1) is written by every party menu the game has ever drawn and **lingers for
+/// the rest of the run**. Measured on an in-game trade: the party list closes, the player walks two
+/// rooms, talks to the trader again, and `wTopMenuItemX/Y` still read (0, 1) on the first tick of
+/// the greeting — so geometry alone would answer yes to a text box with no menu in it at all.
+///
+/// `Choose a POKéMON.` is the anchor because it is `_PartyMenuNormalText`, the message
+/// `PartyMenuMessagePointers` prints for `NORMAL_PARTY_MENU` and only for it: an item use says
+/// "Use item on which #MON?", a TM says its own thing, and the battle list says "Bring out which
+/// #MON?". So the pair is exactly "the list a *conversation* opened", which is the one a caller can
+/// answer for the player — a trade, the Day Care, the Name Rater.
+///
+/// ⚠️ **Matched from the front and without the `é`.** The screen reader renders `#` as `POKéMON`
+/// and a caller comparing the whole sentence is comparing against a charmap; a caller matching the
+/// tail is comparing against a full stop that arrives a tick after the rest of the line.
+pub fn is_normal_party_menu(top_menu_item_x: u8, top_menu_item_y: u8, on_screen_text: &str) -> bool {
+    (top_menu_item_x, top_menu_item_y) == PARTY_MENU_ORIGIN && on_screen_text.contains("Choose a POK")
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BattleMenuState {
     Fight,
@@ -320,6 +345,33 @@ mod tests {
         // A two-option menu writes its own origin and shows no EXIT, which is what keeps "never B on
         // a yes/no" true for this way in.
         assert!(!is_start_menu(15, 8, "YES NO"), "a yes/no can never match");
+    }
+
+    /// The party list a **conversation** opened, on both halves — and the strings are the real thing,
+    /// read off the tile map during an in-game trade and at the Day Care.
+    #[test]
+    fn a_conversation_s_party_list_is_matched_on_geometry_and_its_own_sentence() {
+        const TRADE: &str = "Celina 70 225/228 SWAPME 100 334/334 Leslee 73 259/259 Choose a POKéMON.";
+
+        assert!(is_normal_party_menu(0, 1, TRADE), "the list's own origin and its own sentence");
+
+        // ⚠️ **Geometry alone is not enough, and here it is the dangerous half.** (0, 1) is written
+        // by every party menu the game has ever drawn and lingers for the rest of the run: measured
+        // on an in-game trade, the list closes, the player walks two rooms, talks to the trader
+        // again, and it still reads (0, 1) on the first tick of the greeting.
+        assert!(!is_normal_party_menu(0, 1, "Hello there! Do you want to trade your POLIWHIRL for JYNX?"),
+                "stale geometry under the trader's greeting");
+        assert!(!is_normal_party_menu(0, 1, "Hmmm? This isn't POLIWHIRL. Think of me when you get one."),
+                "stale geometry under the trader's reply");
+
+        // ⚠️ And the sentence alone is not enough either, or a quoted line would match.
+        assert!(!is_normal_party_menu(11, 2, TRADE), "the START menu's origin is not the list's");
+
+        // The other party menus say something else, which is what keeps this to the three
+        // conversations `PartyMenuMessagePointers` prints `_PartyMenuNormalText` for.
+        assert!(!is_normal_party_menu(0, 1, "Use item on which POKéMON?"), "an item use is not this");
+        assert!(!is_normal_party_menu(0, 1, "Bring out which POKéMON?"), "the battle list is not this");
+        assert!(!is_normal_party_menu(0, 1, "Move POKéMON where?"), "a party swap is not this");
     }
 
     #[test]

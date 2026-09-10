@@ -367,6 +367,71 @@ fn can_leave_a_pokemon_at_the_day_care() {
     fixture.save_state_named("src/pokemon/data/postgame-daycare.bin").unwrap();
 }
 
+/// ⭐ **The Day Care does not board a Pokémon nobody chose — every time, rather than sometimes.**
+///
+/// The leg above hands the gentleman a mon through [`PolicyStep::PartyScript`], a
+/// `DeterministicPolicy`-only driver that navigates the party menu itself. That driver is not on the
+/// deployed path: a model takes a `talk to` row, and what then answers the menu is the agent.
+/// `DaycareGentlemanText` calls `DisplayPartyMenu` **without resetting `wCurrentMenuItem`**, so an
+/// A-mash boards whatever the cursor was left on — for good, on a choice the model never made and
+/// `FieldMoveRequest` has no way to express.
+///
+/// ⚠️ **What this replaces is a coin flip rather than a confirm, and that is the finding.** Measured
+/// with `PokemonAgent::party_menu` removed: this conversation's party list was **bounced** (the
+/// gentleman answers "All right then, come again.") while the Cerulean trader's, in the same agent
+/// state, was **confirmed** — the hand-over rule only looks for a stray menu in a window after a box
+/// opens, and whether a conversation gets to its party list inside that window is a matter of how
+/// long the conversation took. An irreversible action decided by timing is the thing being removed.
+///
+/// ⚠️ **Hitmonlee has to be in front or the test proves nothing**, and the constant below says why.
+///
+/// ⚠️ **And this test passes with the driver removed as well, which is the coin flip seen from the
+/// other side.** The hand-over rule happens to catch *this* conversation's party list, so what is
+/// pinned here is the **property** — the party comes back as it went in — rather than the mechanism
+/// that now guarantees it. The tests that fail without `PokemonAgent::party_menu` are the trades:
+/// `branch_points::a_trade_finds_the_give_species_wherever_it_is_in_the_party` and
+/// `trades::every_in_game_trade_can_be_made_by_talking_to_the_trader`. This one is here so that a
+/// future change to that driver cannot quietly start boarding Pokémon instead.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
+    /// Hitmonlee, the one party member with **no HM move**.
+    ///
+    /// ⚠️ **Leaving Venusaur in front proves nothing and looks like a pass.** The gentleman refuses a
+    /// mon that knows an HM outright (`scripts/Daycare.asm`), so a run whose lead carries Cut is
+    /// declined by the *cartridge* and the party comes back unchanged whatever the agent does. The
+    /// first version of this test did exactly that.
+    const HM_FREE_SLOT: u8 = 5;
+
+    let mut steps = PolicyStep::daycare_steps(HM_FREE_SLOT);
+    // Everything up to and including the shuffle, then the row a model would take instead of the
+    // `PartyScript` driver.
+    steps.truncate(1 + steps.iter().position(|step| matches!(step, PolicyStep::MovePokemonToFront { .. }))
+        .expect("daycare_steps arranges the party before it deposits"));
+    steps.extend(std::iter::repeat_n(PolicyStep::Interact(MapSprite::DAYCARE_GENTLEMAN), 3));
+
+    let mut fixture = TestFixture::new(GIFTS, Duration::from_mins(45), steps);
+    let money_before = fixture.game_state().money;
+    fixture.run_until(|s| s.map.map == Map::Daycare);
+    // ⚠️ **After the shuffle, not before it.** `MovePokemonToFront` is what puts the HM-free mon
+    // under the cursor, and the party this test says must not change is the one the gentleman is
+    // actually being shown.
+    let party_before: Vec<_> = fixture.run_until(|s| s.pokemon[0].species == PokemonSpecies::Hitmonlee)
+        .pokemon.iter().map(|mon| mon.species).collect();
+
+    fixture.step_until_exhausted();
+    // Long enough for a deposit to have shown up if one were going to.
+    for _ in 0..600 { fixture.step(); }
+
+    let state = fixture.game_state();
+    let party_after: Vec<_> = state.pokemon.iter().map(|mon| mon.species).collect();
+    assert_eq!(party_after, party_before,
+        "the gentleman was handed a Pokémon nobody chose: {party_before:?} → {party_after:?}");
+    assert_eq!(state.money, money_before, "nothing should have been paid for");
+    assert_eq!(state.map.map, Map::Daycare, "the leg ends where it was talking");
+    println!("day care declined · party {party_after:?} · ¥{}", state.money);
+}
+
 /// Diagnostic for **G8b**: Route 5's terraces. The Day Care door is at (10,21) and the walk in from
 /// Cerulean lands at (18,1); `enter(Daycare)` from there does nothing at all.
 #[test]

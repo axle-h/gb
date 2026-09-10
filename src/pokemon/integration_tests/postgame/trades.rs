@@ -275,3 +275,83 @@ fn probe_route2_trade_house() {
         println!("  y{y:>2} {row}");
     }
 }
+
+/// Workstream B's output (§9): Fuchsia City, Fly on Articuno, the Bicycle, party Venusaur /
+/// Articuno / Vaporeon / Slowpoke — and, the property this test needs, **all nine trades unspent**.
+/// Every fixture after `postgame-name-rater.bin` has G5 onwards already done.
+const FLY_BIKE: &[u8] = include_bytes!("../../data/postgame-fly-bike.bin");
+
+/// ⭐ **All nine in-game trades, each with the give-species deliberately *not* the party lead, and
+/// each answered by the agent rather than by a `PartyScript`.**
+///
+/// The four legs above prove a trade under `DeterministicPolicy`, whose `PolicyStep::PartyScript`
+/// navigates the party menu itself. That driver is not on the deployed path: a model takes a
+/// `talk to` row, and until 2026-09-10 the party menu the trader then opened was answered by the
+/// agent's ordinary A-mash — which selects whatever `wCurrentMenuItem` was left on, because
+/// `InGameTrade_DoTrade` calls `DisplayPartyMenu` without resetting it. So a trade went through
+/// only when the give-species happened to be sitting under the cursor, and `branch_points` measured
+/// exactly that. `PokemonAgent`'s `PartyMenuAnswer` is the fix and this is its breadth test.
+///
+/// Each trade gets its **own fixture** from the same snapshot rather than a chain: a trade is
+/// one-shot per save, and nine independent runs are also nine independent walks, so a route that
+/// breaks cannot take the eight after it with it.
+///
+/// ⚠️ **The give-species is seeded by the driver** ([`PokemonApi::debug_set_party`]) at slot 3, which
+/// is `docs/coverage-plan.md` §3's line — a cheat between ticks, reaching the policy only through an
+/// ordinary `GameState` — and the only affordable way to hold a Nidorino, a Slowbro, a Poliwhirl and
+/// a Raichu, none of which is catchable as itself anywhere this save has been. What is *not* cheated
+/// is the trade: the walk, the conversation and the menu are all played.
+///
+/// ⚠️ Slot 3 also keeps **Venusaur in front**, which the Route 2 leg needs for `CutTree` — and being
+/// off the front is the whole point, so the two constraints agree.
+///
+/// **14 min of emulated time, about 10 s of wall clock** — a walk apiece and no catching at all,
+/// which is why nine of them cost less than one of the legs above.
+///
+/// [`PokemonApi::debug_set_party`]: crate::pokemon::PokemonApi::debug_set_party
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
+fn every_in_game_trade_can_be_made_by_talking_to_the_trader() {
+    /// Where the give-species goes. ⚠️ **Not 0**: the whole question is whether the agent finds it.
+    const SEED_SLOT: usize = 3;
+
+    let mut done: Vec<(PokemonSpecies, PokemonSpecies)> = Vec::new();
+    for trade in crate::pokemon::postgame::trades::TRADES.iter().copied() {
+        let mut fixture = TestFixture::new(FLY_BIKE, Duration::from_mins(30),
+            PolicyStep::walk_up_and_trade_steps(trade));
+
+        // Seed before the first tick, exactly as `branch_points` does: the policy sees it only
+        // through an ordinary `GameState`.
+        let before = fixture.game_state();
+        assert!(!before.pokemon.iter().any(|mon| mon.species == trade.give),
+            "the snapshot already carries a {:?}; the seed below would be untestable", trade.give);
+        let mut party = crate::pokemon::party::PokemonParty::default();
+        let mut members: Vec<_> = before.pokemon.iter().cloned().collect();
+        members.insert(SEED_SLOT.min(members.len()), crate::pokemon::pokemon::Pokemon::maxed(
+            trade.give, "SWAPME",
+            [PokemonMoveName::WaterGun, PokemonMoveName::BodySlam,
+             PokemonMoveName::Psychic, PokemonMoveName::Blizzard],
+            before.name.clone(), before.player_id));
+        members.truncate(6);
+        for member in members { let _ = party.push(member); }
+        fixture.api().debug_set_party(&party).expect("a party can be installed");
+        assert_eq!(fixture.game_state().pokemon[0].species, PokemonSpecies::Venusaur,
+            "Venusaur has to lead: `CuttingTree` only ever asks slot 0, and Route 2 needs a cut");
+
+        let state = fixture.run_leg(|s| s.pokemon.iter().any(|mon| mon.species == trade.get));
+
+        assert!(!state.pokemon.iter().any(|mon| mon.species == trade.give),
+            "the {:?} was not handed over; a trade swaps rather than adds", trade.give);
+        // ⚠️ **Waited for rather than sampled beside the party.** `_AddPartyMon` increments
+        // `wPartyCount` before it sets the `wPokedexOwned` bit (`engine/pokemon/add_mon.asm`), so
+        // the two are not true on the same tick and asserting them together is a race.
+        assert!(fixture.try_run_until(|s| s.pokedex_owned.contains(&trade.get)).is_some(),
+            "{:?} never reached the Pokédex", trade.get);
+        assert_eq!(state.map.map, trade.at, "the leg ends where the trader is");
+        println!("[trade] {:?} → {:?} at {:?} ({:?} of game time)",
+            trade.give, trade.get, trade.at, fixture.total_cycles.to_duration());
+        done.push((trade.give, trade.get));
+    }
+
+    assert_eq!(done.len(), 9, "all nine trades: {done:?}");
+}

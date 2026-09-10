@@ -6,7 +6,7 @@ a verdict on each, and every defect that turns up fixed, until a sweep of the wh
 back clean and finds nothing new.
 
 **Status.** Rewritten 2026-09-09 as a step list; **steps 0 to 5 taken that day, step 6 — the loop —
-reached its fixpoint on 2026-09-10 after two turns, and step 7 was taken the same day.** The harness, the cheats, the oracle and
+reached its fixpoint on 2026-09-10 after two turns, and steps 7 and 8 were taken the same day.** The harness, the cheats, the oracle and
 the frontier walk are all **built**. §2 is the 2026-09-09 baseline every closure is measured
 against — 153 maps, 106 defects, 41 silences, 82% of every turn in Route 16's gate — and all of that
 is closed. ⭐ **§2.1 is where the sweep stands: two consecutive sweeps of ten starts with zero
@@ -42,7 +42,8 @@ each one's argument lives now.
 | The oracle | `integration_tests/coverage.rs` `CoverageLog` | Every action id the agent starts gets `Completed`, `Blocked`, `Defect`, `Silent` or `Unreached`, folded from `AgentEvent`s so it works under any driver. Drops a save state where a defect happened |
 | The walk | `coverage.rs` `ExploringBrain`, `coverage_walk_of_the_finished_game` | Takes every unvisited row on the map, then the least-taken exit. Starts from one of ten fixtures (`GB_COVERAGE_START`), eight of them **finished games** so every gate is open because the cartridge opened it; the other two are argued on `Start::before_the_credits`. Behind `--features coverage-tests` |
 | The cross-check | `coverage.rs` `rom_cross_check` | Warps and objects in the ROM's tables for the maps entered that never once appeared as a row. Printed, never asserted |
-| The god run's machinery | `integration_tests/godmode.rs` | `Intent`, `ScriptedBrain`, `godmode_turn_cost`. Parked — see §5 |
+| The god run's machinery | `integration_tests/godmode.rs` | `Intent`, `ScriptedBrain`, `godmode_turn_cost`. The run is parked (§5); the machinery is not, and step 8 is its first customer |
+| The branch points | `integration_tests/branch_points.rs` | Four snapshots cut one decision before a choice that is **exclusive per save**, and twelve arms after them, driven by `Intent` against the rendered menu. Step 8 |
 
 ## 2. Where we are
 
@@ -754,7 +755,7 @@ holds something the cartridge declines, and eleven of `soak`'s thirteen starts w
 twenty-three cells, one of them promoted above. Nothing else here changes that, and none of it is on
 the path to this plan's goal.
 
-### Step 8 — Branch-point snapshots
+### Step 8 — Branch-point snapshots ✅ done 2026-09-10
 
 Content that is exclusive per save: the starter (3), the fossil (2), Hitmonlee or Hitmonchan (2),
 the Bike Voucher against buying (2), and each in-game trade. One save state before the branch, N
@@ -762,15 +763,119 @@ tests after it, cut under `--features regen-fixtures`. Exploration is destructiv
 one-shot, so a branch costs a resume rather than a replay.
 
 ⚠️ This is the one place an event-flag write might be argued for, and none is admitted yet. Argue
-the specific flag on the specific branch.
+the specific flag on the specific branch. ✅ **None was needed, and none was written.** Every
+snapshot below is a state the leg chain plays to and then stops one decision short of, so the story
+ran for all of it.
 
-⭐ **And it has a first customer that is not a branch at all.** The S.S. Anne is eleven maps behind a
-one-way door — `EVENT_SS_ANNE_LEFT`, set before the third badge — so it needs a save cut *before* the
-ship sails, which is the same machinery this step is about and none of the flag-writing it rules out.
-`Start::before_the_credits` admits such a save into the walk; what is still missing is a fixture that
-stands on the dock or on the ship itself. See step 6's loop.
+⭐ **And it had a first customer that is not a branch at all.** ✅ Closed on step 6's turn 2: the
+S.S. Anne needed a save cut *before* `EVENT_SS_ANNE_LEFT`, `vermilion::regen_on_the_ss_anne_fixture`
+cuts it from `at-vermilion.bin`, and `ssanneship` has been a coverage start since — worth two
+guaranteed maps rather than eleven (§2.1), but the machinery is the machinery.
 
-**Done:** each branch covered by snapshot × N. **Cost:** medium.
+**Done:** ✅ **`integration_tests/branch_points.rs`** — **twelve arms over four new snapshots**, all of
+it **default tier** (under three seconds for the whole file, because every arm starts one decision from its branch)
+and all of it on `LlmRun`: a real socket, the real worker, the real `LlmPolicy`, the real agent, with
+only the model standing in. Two more tests live where their subject does — the nine-trade sweep in
+`postgame::trades` and the Day Care in `postgame::gifts`, both `slow-tests`, because both are walks
+rather than branches. The arms are driven by `godmode`'s parked `Intent` /
+`ScriptedBrain` against the **rendered menu**, which is what makes each a claim about what a model is
+offered rather than about what the agent can do — and is the first customer that machinery has had
+outside the god run §5 parks.
+
+| Branch | Snapshot | Arms |
+|---|---|---|
+| the starter | `branch-oaks-lab.bin` — Oak's speech over, three balls on the table | Bulbasaur / Charmander / Squirtle, each checked against **the rival's** counter-starter |
+| the fossil | `branch-mt-moon-fossils.bin` — B2F, both fossils down, the Super Nerd still there | Dome / Helix, each checked against the other **vanishing** |
+| the dojo prize | `branch-dojo-prize.bin` — Karate Master beaten, both balls, one party slot free | Hitmonlee / Hitmonchan, each then going back for the other |
+| the Bicycle | `branch-bike-shop.bin` — inside the shop, voucher in the bag | with the voucher (a gift) / without it (a shop at ¥1,000,000) |
+| an in-game trade | the same bike-shop snapshot, one warp from `CeruleanTradeHouse` | give-species leading / benched at slot 3 / not held at all — and all **nine** trades in `postgame::trades` |
+
+**What it found.** ⛔ **One defect, and it is the trades.** The four *branches* needed nothing — three
+of them were already two or three rows in one menu, told apart by name, and the fourth's second arm
+is a text box the cartridge settles by itself — but the fifth item on step 8's list turned out to be
+broken on the deployed path, and closing it is most of what this step cost:
+
+- ⛔ **An in-game trade handed over whatever the party-menu cursor was left on, and nothing asked the
+  model which.** ✅ **Fixed** (`PokemonAgent::party_menu`). `InGameTrade_DoTrade` calls
+  `DisplayPartyMenu` **without resetting `wCurrentMenuItem`** — the same missing instruction
+  `postgame::gifts::tick` exists for — so the agent's ordinary A-mash offered the trader an arbitrary
+  party member. Measured: the give-species in slot 0 traded, the same Pokémon one slot back traded
+  nothing at all and was answered *"Hmmm? This isn't POLIWHIRL."*
+  ⭐ **No policy callback, and that is the argument rather than a shortcut.** The cartridge compares
+  the selected species against `wInGameTradeGiveMonSpecies` and refuses anything else, so the menu
+  has exactly **one legal row** and the game itself is what says which — asking a model to choose
+  from a list of one buys nothing and costs a round trip, and what a model *does* decide (whether to
+  talk to the trader) has always been an ordinary menu row. Detection is the NPC:
+  `trades::trade_at(map, name)`, because the trade's own bytes are written once and then persist for
+  the rest of the run. ⚠️ The **Day Care** and the **Name Rater** open the same menu with no right
+  answer, so they are declined; see below.
+- ⛔ **And underneath it, a party menu a conversation opened was confirmed or bounced by *timing*.**
+  ✅ Fixed by the same driver. With it removed, the identical menu in the identical agent state was
+  **confirmed** at the Cerulean trader and **bounced** at the Day Care ("All right then, come
+  again.") — because the hand-over rule that catches a stray menu only looks in a window after a box
+  opens, and whether a conversation reaches its party list inside that window depends on how long
+  the conversation took. Boarding a Pokémon at the Day Care is irreversible and can cost a run its
+  only Cut or Surf carrier, so a coin flip is the wrong shape whichever way it lands. Answered on the
+  tick the menu appears now, with the hand-over rule's own sentence.
+- ⚠️ **The dojo's second ball stays a row, and the menu is right to keep offering it.** The first
+  draft of that test asserted the other ball disappeared, as Mt Moon's fossil does, and was wrong
+  about the cartridge: `FightingDojoHitmonchanPokeBallText` `HideObject`s only the ball that was
+  *taken*. The other object stands there and answers *"Better not get greedy..."*, which is a
+  refusal rather than a gift — so what the arms assert is that the model is **told**, which is the
+  family every deployed-run defect in this repo has belonged to.
+- ⚠️ **The bike shop without a voucher is not a mart.** `BikeShopClerkText`'s `.dontHaveVoucher`
+  branch is a hand-rolled `TextBoxBorder` + `HandleMenuInput` list, not `DisplayPokemartDialogue`,
+  so the agent never enters `PokemartShopping` and there is no `buy_item` turn: it reads as one long
+  text box ending in *"Sorry! You can't afford it!"*. ⭐ **And the A-mash inside it costs nothing on
+  any save**, because ¥1,000,000 is above Gen 1's money cap of ¥999,999 — this shop can never sell
+  to anybody, so the only decision in it has one outcome.
+- ⚠️ **The first rival battle is a coordinate trigger on the lab door.** Not a wait and not a talk:
+  `OaksLabScript` hands Gary the counter-starter and stops, and talking to him answers *"GARY: My
+  POKéMON looks a lot stronger."* This is Red, not Yellow. Two versions of the starter arm spent an
+  hour of game time each watching him hold a Charmander before the arm was written as *walk for the
+  door*, which is an ordinary menu row.
+
+⚠️ **A default-tier `LlmRun` test has two deadlines, and step 7's file was short on both.** Found
+while validating this step by running the tier twelve times back to back: one run lost two of
+`battle_refusals`' eight at once, one on the 30 s wall-clock `PATIENCE` and one on the 180 s
+*emulated* budget — which is a panic from `step_coarse` rather than the readable assertion the test
+was built around. Both are now minutes clear (120 s and 15 game-minutes), and both are deadlines, so
+a passing run spends neither. ⚠️ **A single green run proves nothing about this class**;
+[test-suite](test-suite.md) carries the rule.
+
+⚠️ **A Pokédex bit and a party count are never true on the same tick**, which cost an afternoon of
+looking for a flake in the wrong place. `_AddPartyMon` increments `wPartyCount` first and sets
+`wPokedexOwned` about eighty lines later (`engine/pokemon/add_mon.asm`), so a wait for the party
+followed by an assertion about the dex fails whenever the poll lands between them — roughly **one
+default-tier run in five**, on a different test each time, which reads as load or as an `LlmRun`
+race and is neither. `branch_points::assert_owned` waits for each separately;
+[test-suite](test-suite.md) carries the rule.
+
+⚠️ **A snapshot cut inside a trainer's line of sight restores into a battle**, which is a rule about
+cutting fixtures rather than about branches, and cost two re-cuts of the Mt Moon one. A trainer walks
+up to the player on the map's own tick rather than on a step, so the arm's first turn came back
+`choose_battle_action` instead of the menu the branch lives in. Mt Moon B2F's landing is inside
+`ROCKET1`'s: the cutter walks past him and fights him before it saves.
+
+⭐ **All nine in-game trades are covered now**, which the first pass of this step had left at five.
+`postgame::trades::every_in_game_trade_can_be_made_by_talking_to_the_trader` walks each of the nine
+from its own copy of `postgame-fly-bike.bin` — the last snapshot with every trade unspent — with the
+give-species seeded at party slot **3**, and it ends in a plain `Interact` rather than a
+`PolicyStep::PartyScript`, so what answers the menu is the agent and not a `DeterministicPolicy`-only
+driver. 14 minutes of game time, ~10 s of wall clock, `slow-tests`. It needed three routes
+`to_trade_npc` did not have: `CeruleanTradeHouse`, and the two trades that live on a **gate's upper
+floor** (`Route11Gate2F`, `Route18Gate2F`), which are two warps deep rather than one.
+
+⚠️ **The give-species are seeded by the driver** ([`debug_set_party`]) and there is no honest
+alternative: a Nidorino, a Slowbro, a Poliwhirl and a Raichu are none of them catchable as themselves
+anywhere these fixtures have been, so *playing* them costs an evolution grind and a Thunder Stone
+apiece and proves nothing about a trade. That is §3's line, and the same seam `battle_refusals` uses
+for a catch rate.
+
+[`debug_set_party`]: ../src/pokemon/postgame/debug.rs
+
+**Cost:** one day. The branch half was cheap — every snapshot cuts from a fixture the leg chain
+already produces — and the trades were most of it.
 
 ### Step 9 — Decide the soak tier on evidence
 
@@ -954,6 +1059,10 @@ in a driver rather than in routing. Each has a test.
 | **Every battle refusal claimed the id belonged to another map** (step 7) | `not_on_the_menu`'s map clause tested "the menu's first id contains a colon", and `fight:Peck` / `item:PokeBall` / `switch:1` all do — so an item the bag had run out of was answered with three false statements about maps. Guarded on the name being a real `Map`, which also stops a made-up id being reported as another map's | `tools::a_refused_battle_id_carries_the_rule_and_says_nothing_about_maps`, `battle_refusals::an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name` |
 | **A refused battle id was never told which rule kept it off the menu** (step 7) | The turn's own `### On screen` line reads `FIGHT Pokémon ITEM RUN` and the system prompt forbids prior knowledge of Red, so "that id is not one of this turn's actions" is a contradiction with no way out — the shape behind the ViridianGym and Route 22 issue reports. `tools::battle_rule_behind` adds the cartridge's rule where the menu can settle it, and says nothing where it cannot | same test |
 | **Route 17 and `Route16Gate2F`**, ditto — and a hole in the deployed tool surface behind them | `use_field_move`'s `use_item` required a `target` tile and the Bicycle has none, so `FieldMove::UseBagItem` and the whole of `UseTarget::Nothing` had a driver, a refusal table and a test that rides a bike, with no way in from any LLM turn. With it went every out-of-battle Potion, vitamin, Repel and Itemfinder. +189 bytes of catalogue | `tools::a_bag_item_with_nothing_to_aim_at_is_a_call_that_can_be_made` |
+| **An in-game trade handed over whatever the cursor was left on** (step 8, not a sweep) | Every party menu a *conversation* opens — a trade, the Day Care, the Name Rater — calls `DisplayPartyMenu` without resetting `wCurrentMenuItem`, so the agent's A-mash acted on an arbitrary party member: the give-species in slot 0 traded and the same Pokémon one slot back did not. A trade has **one** legal row and the cartridge says which (`wInGameTradeGiveMonSpecies`), so `PartyMenuAnswer` navigates to it — no policy callback, because a list of one is not a decision. The other two have no right answer and are declined | `branch_points::a_trade_finds_the_give_species_wherever_it_is_in_the_party`, `a_trade_with_nothing_to_give_backs_out_and_says_so`, `postgame::trades::every_in_game_trade_can_be_made_by_talking_to_the_trader` |
+| **…and whether that menu was confirmed at all was a matter of timing** (step 8) | Same root, and the worse half: with the driver removed the identical menu in the identical state was *confirmed* at the Cerulean trader and *bounced* at the Day Care, because `MENU_HANDOVER_TICKS` is a window after a box opens and a conversation may reach its party list outside it. Boarding a Pokémon at the Day Care is irreversible and can cost a run its only Cut carrier | `postgame::gifts::talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose` |
+| **The dojo's second Poké Ball stays a row** (step 8) | Not a fault, and the *test* was the thing that was wrong: `FightingDojoHitmonchanPokeBallText` `HideObject`s only the ball that was taken, where Mt Moon's Super Nerd hides the fossil you leave. The other object stands there and answers "Better not get greedy...", so the menu is right and what has to hold is that the model is told | `branch_points::the_dojo_branch_can_be_taken_to_hitmonlee`, `…_to_hitmonchan` |
+| **The bike shop without a voucher is not a mart** (step 8) | `BikeShopClerkText`'s `.dontHaveVoucher` branch is a hand-rolled `TextBoxBorder` + `HandleMenuInput` list rather than `DisplayPokemartDialogue`, so no `buy_item` turn is ever put to the model — it reads as one text box ending in "Sorry! You can't afford it!". ⭐ ¥1,000,000 is above Gen 1's ¥999,999 money cap, so the A-mash inside it can never buy anything on any save | `branch_points::the_bike_branch_can_be_taken_without_the_voucher` |
 
 ⚰️ **Four of these were diagnosed wrongly before they were diagnosed rightly, and the lesson is the
 same every time: argue from the dropped save state, not from the sentence the agent printed.** Two

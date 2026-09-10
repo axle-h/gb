@@ -75,6 +75,18 @@ pub const TRADES: &[InGameTrade] = &[
         at: Map::UndergroundPathRoute5, npc: MapSprite::UNDERGROUNDPATHROUTE5_LITTLE_GIRL },
 ];
 
+/// Look a trade up by **who is being talked to** — the map and the sprite's name.
+///
+/// ⭐ **This is what lets the agent answer a trade's party menu**, and it is the reason the `at`/`npc`
+/// columns above are worth keeping in a table the ROM does not have. `InGameTrade_DoTrade` opens
+/// `DisplayPartyMenu` with no marker of its own on any byte a reader can trust — `wWhichTrade` and
+/// `wInGameTradeGiveMonSpecies` are set once and then persist for the rest of the run — so *which
+/// NPC opened this conversation* is the only live fact that identifies the menu. See
+/// `PokemonAgent`'s `PartyMenuAnswer`.
+pub fn trade_at(map: Map, npc: &str) -> Option<InGameTrade> {
+    TRADES.iter().copied().find(|trade| trade.at == map && trade.npc.name == npc)
+}
+
 /// Look a trade up by what it wants. The nine give-species are distinct, so this is unambiguous.
 pub fn trade_for(give: PokemonSpecies) -> InGameTrade {
     *TRADES.iter().find(|t| t.give == give)
@@ -122,6 +134,24 @@ impl PolicyStep {
         // whole queue then discarded for want of a route. C and D each recorded this rule; it caught
         // this workstream too.
         s.extend(out_of(trade.at).into_iter().map(Self::enter));
+        s
+    }
+
+    /// **Step 8** — go to a trade's NPC and hand over whatever the party is carrying, with no
+    /// `PartyScript` in the queue at all.
+    ///
+    /// ⭐ **The difference from [`Self::trade_steps`] is the whole point of it.** `trade_steps` ends
+    /// in `PolicyStep::PartyScript`, a `DeterministicPolicy`-only driver that navigates the party
+    /// menu itself; this ends in a plain `Interact`, which is the row a *model* takes — so what
+    /// answers the party menu is `PokemonAgent`'s `PartyMenuAnswer`, the deployed path. Everything else is
+    /// identical, and the give-species is expected to be in the party already.
+    ///
+    /// Three `Interact`s for `fossil_revival_steps`' reason: only the first A press is guaranteed to
+    /// land on the script, and a repeat once the trade is done is inert (`wCompletedInGameTradeFlags`
+    /// short-circuits to the after-trade line).
+    pub fn walk_up_and_trade_steps(trade: InGameTrade) -> Vec<Self> {
+        let mut s = Self::to_trade_npc(trade);
+        s.extend(std::iter::repeat_n(Self::Interact(trade.npc), 3));
         s
     }
 
@@ -176,7 +206,7 @@ impl PolicyStep {
 
     /// The walk to a trade NPC's room. Each is a one-off; there is no general rule, so this is a
     /// lookup rather than a route.
-    fn to_trade_npc(trade: InGameTrade) -> Vec<Self> {
+    pub(crate) fn to_trade_npc(trade: InGameTrade) -> Vec<Self> {
         match trade.at {
             // ⚠️ Route 2 is **two halves** split by `Route2Gate` at y=35/39, and the trade house is
             // the *north* one, at (15,19). Flying to Viridian lands the agent at the south end (y=72)
@@ -222,6 +252,25 @@ impl PolicyStep {
                 Self::enter(Map::CinnabarLab),
                 Self::enter(Map::CinnabarLabFossilRoom),
             ],
+            // The gambler is in the main terrace, which is where a Fly lands.
+            Map::CeruleanTradeHouse => vec![
+                Self::Fly { to: Map::CeruleanCity }, Self::enter(Map::CeruleanTradeHouse),
+            ],
+            // ⚠️ **Both remaining trades are on a gate's *upper floor*, which is two warps rather
+            // than one.** `Route11Gate2F` and `Route18Gate2F` hang off their ground floors by stairs
+            // and off nothing else, so a `goto` that names the 2F finds no route from the road.
+            Map::Route11Gate2F => vec![
+                Self::Fly { to: Map::VermilionCity },
+                Self::enter(Map::Route11),
+                Self::enter(Map::Route11Gate1F),
+                Self::enter(Map::Route11Gate2F),
+            ],
+            Map::Route18Gate2F => vec![
+                Self::Fly { to: Map::FuchsiaCity },
+                Self::enter(Map::Route18),
+                Self::enter(Map::Route18Gate1F),
+                Self::enter(Map::Route18Gate2F),
+            ],
             other => panic!("no route recorded to the trade NPC on {other:?}"),
         }
     }
@@ -235,6 +284,10 @@ fn out_of(room: Map) -> Vec<Map> {
         Map::VermilionTradeHouse => vec![Map::VermilionCity],
         Map::UndergroundPathRoute5 => vec![Map::Route5],
         Map::CinnabarLabTradeRoom | Map::CinnabarLabFossilRoom => vec![Map::CinnabarLab, Map::CinnabarIsland],
+        Map::CeruleanTradeHouse => vec![Map::CeruleanCity],
+        // A gate's 2F is as deep on the way out as it was on the way in.
+        Map::Route11Gate2F => vec![Map::Route11Gate1F, Map::Route11],
+        Map::Route18Gate2F => vec![Map::Route18Gate1F, Map::Route18],
         other => panic!("no exit recorded from {other:?}"),
     }
 }

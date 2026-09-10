@@ -127,6 +127,16 @@ cover the class, each documented on its constant in `agent.rs`:
   `assert_text_box_state`; a short window, because `wFontLoaded` flips before the menu draws).
 - A rule that runs at every text box trusts only the screen, never the lingering `wTextBoxID`
   (`MenuEvidence`).
+- ⭐ **A party menu a *conversation* opened is answered on the tick it appears, and only an in-game
+  trade has an answer** (`PartyMenuAnswer`, `menu::is_normal_party_menu`). Out of battle exactly
+  three scripts open one — a trade, the Day Care, the Name Rater — and all three call
+  `DisplayPartyMenu` without resetting `wCurrentMenuItem`, so an A-mash acts on whatever the last
+  party menu left the cursor on. The trade has one legal row and the cartridge is what says which
+  (`wInGameTradeGiveMonSpecies`), so the agent navigates to it; the other two are declined with the
+  hand-over rule's own sentence. ⚠️ **What that replaced was a coin flip**: measured with the driver
+  removed, the identical menu was *confirmed* at the Cerulean trader and *bounced* at the Day Care,
+  because the hand-over window above is a window. ⚠️ Recognition needs the geometry **and**
+  `Choose a POKéMON` on screen — (0, 1) lingers for the rest of the run.
 
 Loops with a gate of their own: every PC menu (`in_pc_menu`, matched on `LOG OFF` too because the
 item PC sets no flag); the START menu, six rows before the Pokédex and seven after

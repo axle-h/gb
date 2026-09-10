@@ -117,6 +117,24 @@ while its own doc comment claimed it worked. When it fails it reports how far it
 artifacts, and `playthrough::probe_resume_playthrough` replays from there in seconds. If you cannot
 make it pass, say so in the hand-off.
 
+## Writing an assertion that polls
+
+- ⚠️ **An `LlmRun` test has two deadlines and the *emulated* one is the trap.** The emulator keeps
+  running while the worker thinks, so a mock round trip slowed by a loaded machine is paid for in
+  **game** seconds — and `game_time` running out is a panic from `step_coarse`, not the readable
+  assertion the test was written around. Size it minutes above what the test needs (`branch_points`
+  uses six game-hours, `battle_refusals` fifteen game-minutes) and let the wall-clock deadline bind.
+  Both are deadlines: a passing run spends neither. Found by running the default tier twelve times
+  back to back, which lost a different test on two of the twelve; a single green run proves nothing
+  about this class.
+- ⚠️ **A Pokédex bit and a party count are never true on the same tick.** `_AddPartyMon` increments
+  `wPartyCount` first and sets `wPokedexOwned` about eighty lines later
+  (`engine/pokemon/add_mon.asm`), so a test that waits for the party to grow and then asserts the dex
+  in the same sample is a race — one that fails roughly **one default-tier run in five**, on a
+  different test each time, which reads as a flake rather than as a bug in the test. Wait for each
+  separately (`branch_points::assert_owned`). The same shape applies to anything the cartridge writes
+  in two steps.
+
 ## Fixtures
 
 - Every leg snapshots its end state for the next leg, and the write is a no-op without
@@ -142,6 +160,15 @@ make it pass, say so in the hand-off.
   `postgame-itemfinder.bin`, its predecessor. A fixture whose producing leg is removed has to be
   re-pointed or deleted, never left in the list: `every_committed_fixture_decodes` would still load
   it and nothing would say it had stopped being reachable.
+- ⚠️ **The four `branch-*.bin` are cut one decision *before* a choice that is exclusive per save**,
+  by the `regen_*` tests in `integration_tests::branch_points` (`regen-fixtures`), each from a leg
+  fixture the chain already produces — `start-of-game-state`, `mt-moon`, `postgame-lapras`,
+  `postgame-bike-voucher`. Nothing reads them but that file, so they are free to re-cut; what they
+  have to keep is the branch still being *open*, which each cutter asserts. ⚠️ **And none of them may
+  be cut inside a trainer's line of sight**: a trainer walks up to the player on the map's own tick
+  rather than on a step, so such a state restores straight into a battle and the arm's first turn is
+  a battle turn instead of the menu the branch lives in. Mt Moon B2F's landing is inside `ROCKET1`'s,
+  and the cutter fights him on the way past for exactly that reason.
 - `route21-islands.bin` is the same kind of thing: the deployed run of 2026-09-03's own checkpoint,
   at Route 21 (7, 72) mid-crossing and mid-battle, read by
   `stalls::a_water_route_does_not_climb_out_onto_route_21s_islands`. Its property is *which map*, so

@@ -46,7 +46,17 @@ turn 2 entry has the argument for each fix and §7.1 the row and the test. ⭐ *
 refusals — was taken the same day**: the seven cells that existed nowhere in the suite are all
 default-tier tests through the deployed stack now (`integration_tests/battle_refusals.rs`), and they
 found three defects, the largest of them that the outcome of *any* bag item used in a battle was
-never reported to the model at all. **Steps 8 and 9 are what is left, and neither is the walk.**
+never reported to the model at all. ⭐ **Step 8 — the branch points — went the same way**
+(`integration_tests/branch_points.rs`): eleven default-tier arms over four new snapshots, for the
+content that is exclusive per save — the starter, the fossil, the dojo prize, the Bicycle and a
+trade — none of which the walk can reach, because nine of its ten starts have already spent every
+one of those choices. The four branches needed no fix; the fifth item on its list did. ⛔ **An in-game trade handed over
+whatever the party-menu cursor was left on** — every conversation that opens a party menu (a trade,
+the Day Care, the Name Rater) calls `DisplayPartyMenu` without resetting it — and worse, whether
+that menu was confirmed at all came down to a timing window. `PokemonAgent::party_menu` navigates to
+the one row a trade will accept and declines the other two; **all nine trades work now**, and no
+policy callback was needed, because the cartridge is what says which row is legal. **Step 9 is what
+is left, and it is not the walk.**
 ⚠️ **§3 is the rules and §6.2 is how to read a number** — the walk's totals
 are a coin flip between several different walks, and CPU load is an input to it, so never build while
 measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**, because a walk's run directory defaults into
@@ -54,7 +64,7 @@ measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**, because a walk's run d
 and the seventeen places the plan was wrong, and **§7.3 maps the old section numbers that code
 comments still cite** onto where each argument lives now. Read it before
 touching the soak tier, `postgame/debug.rs`, `postgame/fishing.rs`, `integration_tests/llm*.rs` or
-anything under `integration_tests/{cheats,coverage,godmode}.rs`.
+anything under `integration_tests/{cheats,coverage,godmode,branch_points}.rs`.
 
 ## Rules of the road
 
