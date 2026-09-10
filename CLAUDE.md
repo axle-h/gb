@@ -38,8 +38,11 @@ cause is that **three of the ten walks win the game and stop**, at 40-60% of the
 the boulder, the `*Copy` maps that have inflated every map count this file ever printed, the walks
 that spend half their budget on the credits, the maps that are genuinely shut, and a cross-check
 widened to every `MetaTile` kind **and asserted**. Step 2 unparks the god run: Pallet Town to the
-Hall of Fame through `LlmPolicy`, to replace `full_playthrough` **if it is much faster**, with the
-table saying what covers everything it stops covering written first.
+Hall of Fame through `LlmPolicy`, to replace `full_playthrough` **if it is not much slower** — the
+end-to-end coverage of the deployed policy is what buys the slack — with the table saying what covers
+everything it stops covering written first. ⭐ It should be *faster* (a god party skips the grind
+that is most of the scripted route), so if it is not, that is a finding about turn count or prompt
+build rather than a verdict.
 
 ⚠️ **§3 is the rules and §6.2 is how to read a number** — the walk's totals
 are a coin flip between several different walks, and CPU load is an input to it, so never build while
