@@ -1,0 +1,12 @@
+[package]
+name = "poke-agent-sdl"
+version = "1.0.0"
+edition = "2024"
+description = "The desktop window: SDL2 video, audio and keyboard over a gb emulator."
+
+[dependencies]
+gb = { path = "../gb" }
+poke-agent = { path = "../poke-agent" }
+fontdue = "0.9.3"
+itertools = "0.14"
+sdl2 = "0.38"

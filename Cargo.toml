@@ -1,74 +1,12 @@
-[package]
-name = "gb"
-version = "1.0.0"
-edition = "2024"
-
-[features]
-default = ["sdl", "web", "llm"]
-# The SDL2 desktop UI (`src/sdl/`). Off, the binary drops `libsdl2` and `fontdue`.
-sdl = ["dep:sdl2", "dep:fontdue"]
-# The headless host (`src/host.rs`) and the axum server (`src/web/`).
-web = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-stream", "dep:axum", "dep:base64", "dep:rust-embed", "dep:flate2", "dep:opus-rs"]
-# The OpenAI client (`src/llm/`) and the policy that drives the game from it.
-llm = ["web", "dep:ureq", "dep:rhai"]
-# The per-badge leg tests, each seeded from a committed `src/pokemon/data/*.bin` snapshot.
-slow-tests = []
-# The legs costing more game time than the rest of `slow-tests` combined.
-very-slow-tests = []
-# `full_playthrough`: a fresh save played to all 8 badges. A pre-push gate.
-full-playthrough = []
-# `hall_of_fame`: the same run carried through the Elite Four.
-hall-of-fame = []
-# `godmode_run`: `LlmPolicy` against a mock endpoint, from a fresh save to the credits. A pre-push gate.
-godmode = []
-# `coverage_walk`: every reachable action in the game, taken once, with a verdict on each.
-coverage-tests = []
-# The stall hunt: hours of `RandomPolicy` play. A module gate, so it never joins the ignored list.
-soak-tests = []
-# Probes: tools that print a report about the game or the agent, not assertions.
-diagnostics = []
-# Benchmarks. `flate2` is the yardstick the video codec is measured against.
-bench = ["dep:flate2"]
-# Let tests overwrite the fixtures they snapshot. Off, so a test run leaves the tree clean.
-regen-fixtures = []
-
-[dependencies]
-strum = "0.27"
-strum_macros = "0.27.2"
-paste = "1.0"
-sdl2 = { version = "0.38", optional = true }
-image = "0.25"
-itertools = "0.14"
-fontdue = { version = "0.9.3", optional = true }
-bitflags = "2.9.3"
-bincode = "2.0.1"
-lz4_flex = "0.11"
-unicode-segmentation = "1.12.0"
-rand = "0.10.0-rc.0"
-phf = { version = "0.13.1", features = ["macros"] }
-serde = { version = "1.0", features = ["derive"], optional = true }
-serde_json = { version = "1.0", optional = true }
-# axum's reactor. The emulator thread is a `std::thread` and never enters it.
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "signal"], optional = true }
-# `BroadcastStream`: the sync→async bridge, and the only thing that surfaces `Lagged`.
-tokio-stream = { version = "0.1", features = ["sync", "time"], optional = true }
-axum = { version = "0.8", optional = true }
-base64 = { version = "0.22", optional = true }
-# The built SPA (`web/dist`), baked into the binary.
-rust-embed = { version = "8.12", optional = true }
-# The chat completions client. Blocking, so streaming SSE needs no second async runtime.
-ureq = { version = "3.3", optional = true }
-# `/api/video`'s per-connection deflate stream, and the codec bench's yardstick.
-flate2 = { version = "1", optional = true }
-# `/api/audio`'s Opus encoder. Pure Rust; see docs/web-streams.md for the 48 kHz constraint.
-opus-rs = { version = "0.1.32", optional = true }
-# The battle script sandbox; the engine's limits are the sandbox (docs/llm-turn-loop.md).
-rhai = { version = "1.26", features = ["no_time", "no_custom_syntax"], optional = true }
-
-[build-dependencies]
-regex = "1.12.2"
+[workspace]
+members = ["gb", "poke-agent", "poke-agent-sdl", "poke-agent-web"]
+resolver = "3"
 
 # The integration tests are bound by raw emulation speed; these two make every test faster at once.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The default test tier has to be runnable in dev mode, and it emulates every frame.
+[profile.dev.package.gb]
+opt-level = 3
