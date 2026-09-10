@@ -7,6 +7,9 @@ This is an **evidence** doc, like [deployed-run-defects](deployed-run-defects.md
 Everything below was measured on 2026-09-07, on a Ryzen 9 7900X, `--release` (thin LTO,
 `codegen-units = 1`). Absolute numbers will move with the machine; the **ratios** are the point.
 
+Thin LTO and `codegen-units = 1` are the only build knobs that make every test faster at once.
+`-C target-cpu=native` was tried on top of them and measured *slower*, so it is deliberately unset.
+
 ## 1. The workload is a game standing still, and that is deliberate
 
 `game_boy::tests::bench_core_throughput` is the yardstick. It restores `at-celadon.bin`, presses
