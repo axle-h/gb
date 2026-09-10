@@ -173,15 +173,8 @@ impl WorldGraph {
     }
 
     /// Number of distinct maps in the graph.
-    #[allow(dead_code)]
     pub fn map_count(&self) -> usize {
         self.adjacency.keys().map(|(m, _)| *m).collect::<HashSet<_>>().len()
-    }
-
-    /// Total directed-edge count.
-    #[allow(dead_code)]
-    pub fn edge_count(&self) -> usize {
-        self.adjacency.values().map(Vec::len).sum()
     }
 
     /// BFS on the `(Map, Point8)` graph from a set of start nodes to the first node
@@ -279,22 +272,6 @@ impl WorldGraph {
         path_rev.reverse();
 
         Some(path_rev)
-    }
-
-    /// The `(map, raw_entry)` node sequence of the shortest path from the **specific** section
-    /// `(from, from_entry)` to `to`, or `None` if unreachable in the currently-observed graph.
-    /// Used to derive explicit `EnterMap` steps: each node after the first is
-    /// `EnterMap { to_map: node.0, to_position: Some(node.1) }`.
-    pub fn shortest_node_path_from(&self, from: Map, from_entry: Point8, to: Map) -> Option<Vec<(Map, Point8)>> {
-        if from == to {
-            return None;
-        }
-        self.bfs_nodes(&[(from, from_entry)], to).map(|nodes| nodes.into_iter().map(|(n, _)| n).collect())
-    }
-
-    /// True if the section landed at `(map, entry)` has already been observed.
-    pub fn has_node(&self, map: Map, entry: Point8) -> bool {
-        self.adjacency.contains_key(&(map, entry))
     }
 
     /// All observed `(map, entry)` section nodes with their outgoing edges.

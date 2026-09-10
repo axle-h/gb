@@ -187,17 +187,6 @@ impl ScriptedBrain {
         }
     }
 
-    /// Play without a battle script, so every battle turn is a paid request. The comparison that
-    /// says what the script is worth.
-    pub fn without_a_script(mut self) -> Self {
-        self.script = None;
-        self.armed = true;
-        self
-    }
-
-    pub fn finished(&self) -> bool {
-        self.at >= self.intents.len()
-    }
 }
 
 impl Brain for ScriptedBrain {
@@ -594,7 +583,6 @@ mod tests {
     fn request_with(situation: &str) -> TurnRequest {
         use crate::pokemon::integration_tests::llm_harness::SeenMessage;
         TurnRequest {
-            system: String::new(),
             messages: vec![SeenMessage {
                 role: "user".to_string(),
                 text: situation.to_string(),

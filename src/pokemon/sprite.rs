@@ -1,5 +1,4 @@
 use crate::geometry::Point8;
-use crate::pokemon::map::MapSprite;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Sprite {

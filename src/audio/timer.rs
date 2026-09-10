@@ -23,14 +23,6 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
         Self { phase: 0, counter: 2048, period: 2048, frequency: 0 }
     }
 
-    pub fn just_reloaded(self) -> bool {
-        self.counter == self.period
-    }
-
-    pub fn frequency(self) -> u16 {
-        self.frequency
-    }
-
     pub fn set_frequency(&mut self, value: u16) {
         self.frequency = value;
         self.period = 2048 - value;

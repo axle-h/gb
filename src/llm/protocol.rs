@@ -470,14 +470,6 @@ pub enum Fragment<'a> {
     Reasoning(&'a str),
 }
 
-impl<'a> Fragment<'a> {
-    pub fn text(self) -> &'a str {
-        match self {
-            Fragment::Content(text) | Fragment::Reasoning(text) => text,
-        }
-    }
-}
-
 /// Consume an SSE body to the end of the completion.
 ///
 /// `on_delta` is called with each fragment as it arrives — this is what makes the browser show the

@@ -735,38 +735,6 @@ fn manual_input_queue_is_capped() {
     assert_eq!(fixture.agent.manual_input_pending(), MANUAL_INPUT_CAPACITY);
 }
 
-/// The measurement behind [`MANUAL_INPUT_HOLD_TICKS`]: for each hold length, does one START press
-/// open the menu, at each of 16 successive agent-tick alignments?
-///
-/// A hold of 1 tick (20 ms — longer than a frame, which is why it looks like it should be enough)
-/// prints `.` at five of the sixteen. A hold of 2 prints `Y` at all of them. pokered does not sample
-/// the pad on every frame in the overworld, and a dropped press is the worst failure mode this
-/// feature has: the LLM cannot tell one from a button the game ignored deliberately.
-///
-/// `cargo test --release --features diagnostics --bin gb -- probe_manual_input_hold_length --ignored --nocapture`
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "probe — run with --ignored --nocapture"]
-fn probe_manual_input_hold_length() {
-    use crate::joypad::JoypadButton;
-
-    for align in 0..16usize {
-        let mut row = String::new();
-        for hold in 1..=4usize {
-            let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(60), vec![]);
-            for _ in 0..20 + align { fixture.step(); }
-            fixture.api().press_button(JoypadButton::Start);
-            // Driven straight, without the agent, so the probe measures the game's pad sampling and
-            // nothing about the queue that is built on top of it.
-            for _ in 0..hold { fixture.gb.run(AGENT_RESOLUTION); }
-            fixture.api().release_all_buttons();
-            for _ in 0..6 { fixture.gb.run(AGENT_RESOLUTION); }
-            row.push_str(if fixture.api().game_mode() == Some(GameMode::Overworld) { " ." } else { " Y" });
-        }
-        println!("alignment {align:>2}: holds 1..4 ={row}");
-    }
-}
-
 // ── W0.3 / W0.5b — the two policy seams ──────────────────────────────────────────────────────────
 
 /// What [`RecordingPolicy`] saw, shared with the test because the agent owns the policy.
@@ -3402,67 +3370,4 @@ fn a_duplicate_map_is_not_a_coverage_gap() {
         "an interior nothing warps to that is not one of the known duplicates: {orphans:?} — \
          coverage::UNREACHABLE_DUPLICATES and every map count in docs/coverage-plan.md are \
          derived from that list");
-}
-
-/// **Probe — `docs/coverage-plan.md` step 1.4: the maps a sweep never enters.**
-///
-/// Walks to each map named in `GB_PROBE_MAPS` (comma-separated, default the step 1.4 list) and dumps
-/// what `MetaTileMap::actions` offers from where it lands, plus the reachable grid. The question is
-/// always the same one: *is the row missing because the game withholds it, or because the square it
-/// is on cannot be reached from where the walk stood?*
-///
-/// ```text
-/// GB_PROBE_MAPS=Route16Gate1F,SafariZoneWest \
-/// cargo test --release --features diagnostics,slow-tests --bin gb -- probe_unreached_maps --ignored --nocapture
-/// ```
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
-fn probe_unreached_maps() {
-    use crate::pokemon::item::ItemId;
-    let wanted = std::env::var("GB_PROBE_MAPS")
-        .unwrap_or_else(|_| "Route16Gate1F".to_string());
-    for name in wanted.split(',') {
-        let map = <Map as strum::IntoEnumIterator>::iter()
-            .find(|m| format!("{m:?}") == name)
-            .unwrap_or_else(|| panic!("no map named {name:?}"));
-        let mut fixture = TestFixture::new(
-            include_bytes!("../data/postgame-fly-bike.bin"), Duration::from_mins(90),
-            vec![PolicyStep::goto(map)]);
-        // Every key item, so nothing here is a gate the walk would not also have open.
-        for item in crate::pokemon::integration_tests::cheats::COVERAGE_KEY_ITEMS {
-            let _ = fixture.api().debug_give_item(item, 1);
-        }
-        let _ = ItemId::Bicycle;
-        let arrived = fixture.try_run_until(|s| s.map.map == map);
-        match arrived {
-            Some(_) => {}
-            None => { println!("== {name}: never arrived"); continue }
-        }
-        for _ in 0..50 { fixture.step() }
-        let s = fixture.game_state();
-        println!("== {name}: standing at {} facing {:?}", s.map.player_position, s.map.player_direction);
-        for y in 0..s.map.height as u8 {
-            let row: String = (0..s.map.width as u8).map(|x| match s.map.tile_at(Point8 { x, y }) {
-                MetaTile::Empty => '.',
-                MetaTile::Obstacle => '#',
-                MetaTile::Water => '~',
-                MetaTile::Warp { .. } => 'W',
-                MetaTile::Connection { .. } => 'C',
-                MetaTile::ConnectionWater(_) => 'c',
-                MetaTile::Counter => 'n',
-                MetaTile::Sprite(_) => 'S',
-                MetaTile::Grass => 'g',
-                MetaTile::Jump(_) => 'J',
-                MetaTile::CutTree => 'T',
-                other => format!("{other:?}").chars().next().unwrap(),
-            }).collect();
-            println!("   {y:>2} {row}");
-        }
-        println!("   sprites: {:?}", s.map.sprites.iter()
-            .map(|sp| (sp.name, sp.position, sp.hidden)).collect::<Vec<_>>());
-        for a in s.map.actions() {
-            println!("   row {} -> {} ({} steps)", a.id(), a.destination, a.route.len());
-        }
-    }
 }

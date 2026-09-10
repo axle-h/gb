@@ -3169,7 +3169,7 @@ mod tests {
         use crate::pokemon::symbols::DmgPointerRead;
         let mut gb = crate::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
         gb.load_state(include_bytes!("../pokemon/data/post-ss-anne.bin")).expect("the committed fixture loads");
-        let mut api = crate::pokemon::PokemonApi::new(&mut gb);
+        let api = crate::pokemon::PokemonApi::new(&mut gb);
         let state = api.game_state().expect("readable");
         let view = crate::pokemon::observe::bag(&state, &api);
 

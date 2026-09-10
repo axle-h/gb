@@ -430,11 +430,6 @@ impl VideoDecoder {
         &self.pixels
     }
 
-    /// The `frame_seq` of the last message applied, as it appeared on the wire.
-    pub fn seq(&self) -> Option<u16> {
-        self.seq
-    }
-
     pub fn apply(&mut self, message: &[u8]) -> Result<(), String> {
         let mut reader = Reader { bytes: message, at: 0 };
         let version = reader.u8()?;

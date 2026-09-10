@@ -10,7 +10,6 @@
 //! (`data/items/marts.asm`), or lying on the floor as a hidden item — which turned out to be the
 //! cheapest source of all, and the one that makes I7 provable.
 
-#[allow(unused_imports)]
 use super::super::*;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::postgame::items;
@@ -397,34 +396,3 @@ fn can_use_the_stat_items_and_a_poke_doll_in_battle() {
 
     fixture.save_state_named("src/pokemon/data/postgame-items.bin").unwrap();
 }
-
-/// Diagnostic for **I7** — where does a Fly land in Vermilion, and is the hidden Max Ether inside the
-/// Itemfinder's ±5-tile window from there?
-///
-/// `HiddenItemNear` compares **raw** map coordinates, and `MetaTileMap` reports connection-offset
-/// ones, so "is it near?" is not a question to answer by eye. Run this before changing
-/// `vermilion_item_steps`' landing map.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_itemfinder_range() {
-    for approach in [None, Some(Map::VermilionTradeHouse), Some(Map::PokemonFanClub),
-                     Some(Map::VermilionMart), Some(Map::VermilionPokecenter)] {
-        let mut steps = vec![PolicyStep::Fly { to: Map::VermilionCity }];
-        if let Some(map) = approach {
-            steps.push(PolicyStep::enter(map));
-            steps.push(PolicyStep::enter(Map::VermilionCity));
-        }
-        let mut fixture = TestFixture::new(MEDICINE, Duration::from_mins(40), steps);
-        fixture.step_until_exhausted();
-        for _ in 0..60 { fixture.step(); }
-        let state = fixture.game_state();
-        let here = state.map.player_position;
-        // ⚠️ **The item list this used to print is gone with the decoder** (2026-09-03). What is
-        // left is the position, which is the half that actually varies: the Itemfinder answers on
-        // `HiddenItemNear`'s ±5 x, +5/−4 y box around the player, so where the approach leaves you
-        // is the whole question. Run `press_the_itemfinder_steps` to see which text it prints.
-        println!("== approach {approach:?}: at {here} on {}", state.map.map);
-    }
-}
-

@@ -82,10 +82,6 @@ impl Serial {
         self.data = data;
     }
 
-    pub fn get_data(&self) -> u8 {
-        self.data
-    }
-
     /// **D9.** `SB` as the guest sees it *during* a transfer.
     ///
     /// The byte shifts out a bit at a time, and with no link cable attached a `1` shifts in behind

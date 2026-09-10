@@ -102,7 +102,7 @@ const ADMIN_TOKEN_HEADER: &str = "x-gb-token";
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     published: Arc<Published>,
     started: Instant,
     /// **W7** — the run directory, read through rather than copied out, because `POST /api/new-run`

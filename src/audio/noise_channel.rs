@@ -2,7 +2,7 @@ use bincode::{Decode, Encode};
 use crate::audio::dac::dac_sample;
 use crate::audio::frame_sequencer::{FrameSequencer, FrameSequencerEvent};
 use crate::audio::length::{LengthTimer};
-use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
+use crate::audio::volume::EnvelopeFunction;
 use crate::cycles::MachineCycles;
 
 #[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
@@ -96,10 +96,6 @@ impl NoiseChannel {
 
     pub fn dac_enabled(&self) -> bool {
         self.envelope_function.dac_enabled()
-    }
-
-    pub fn output(&self) -> u8 {
-        self.output
     }
 
     pub fn output_f32(&self) -> f32 {

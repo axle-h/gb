@@ -1,17 +1,16 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 use bincode::{Decode, Encode};
 use crate::cgb_palette::{PaletteBank, PaletteBankState};
 use crate::cycles::MachineCycles;
 use crate::geometry::Point8;
 use crate::activation::Activation;
-use crate::lcd_control::{LcdControl, ObjectSizeMode, TileDataMode, TileMapMode};
+use crate::lcd_control::{LcdControl, TileDataMode, TileMapMode};
 use crate::lcd_dma::LcdDma;
 use crate::lcd_palette::{DMGColor, DMGPaletteRegister, LcdColor, LcdPalette};
 use crate::lcd_status::{LcdMode, LcdStatus};
 use crate::model::ColorMode;
 use crate::savestate::{labels, SectionReader, SectionWriter};
-use image::{ImageBuffer, Rgb, RgbImage};
-use itertools::Itertools;
+use image::{ImageBuffer, RgbImage};
 
 #[derive(Debug, Clone)]
 pub struct PPU {
@@ -291,12 +290,6 @@ impl Default for PPU {
 impl PPU {
     pub fn lcd(&self) -> &[LcdColor; LCD_WIDTH * LCD_HEIGHT] {
         &self.lcd
-    }
-
-    /// Which palette hardware drives the screen. Set once at construction from the console model
-    /// and the cartridge header; see [`ColorMode`].
-    pub fn color_mode(&self) -> ColorMode {
-        self.color_mode
     }
 
     pub fn set_color_mode(&mut self, color_mode: ColorMode) {
@@ -594,11 +587,7 @@ impl PPU {
         }
     }
 
-    fn tile(&self, mode: TileDataMode, index: u8) -> Tile {
-        self.banked_tile(mode, index, 0)
-    }
-
-    fn banked_tile(&self, mode: TileDataMode, index: u8, bank: usize) -> Tile {
+    fn banked_tile(&self, mode: TileDataMode, index: u8, bank: usize) -> Tile<'_> {
         // Masked for the same reason as `vram_offset`: a slice whose bounds the compiler cannot
         // prove costs a check per pixel here.
         let address = (bank * VRAM_BANK_SIZE + mode.tile_address(index) as usize - VRAM_BASE_ADDRESS)
@@ -606,42 +595,9 @@ impl PPU {
         Tile::new(&self.vram[address..address + TILE_BYTES])
     }
 
-    fn tile_map(&self, tilemap_mode: TileMapMode) -> TileMap {
+    fn tile_map(&self, tilemap_mode: TileMapMode) -> TileMap<'_> {
         let address = tilemap_mode.base_address() as usize - VRAM_BASE_ADDRESS;
         TileMap(&self.vram[address..address + TILE_MAP_BYTES])
-    }
-
-    /// After each pixel shifted out, the PPU checks if it has reached the window. It does this by checking the following conditions:
-    ///     Bit 5 of the LCDC register is set to 1
-    ///     The condition WY = LY has been true at any point in the currently rendered frame.
-    ///     The current X-position of the shifter is greater than or equal to WX - 7
-    ///
-    /// LCDC bit 0 gates the window on DMG but not on CGB, where it means something else entirely
-    /// — see [`LcdControl::background_enabled`].
-    fn in_window(&self, x: usize, _y: usize) -> bool {
-        self.window_enabled()
-            && self.window_state.is_active
-            && x >= self.window_position.x.saturating_sub(7) as usize
-    }
-
-    fn window_pixel(&self, x: usize) -> (u8, TileAttributes) {
-        self.map_pixel(
-            self.lcd_control.window_tile_map(),
-            self.lcd_control.tile_data_mode(),
-            // x+7 because window starts at x position - 7
-            x + 7 - self.window_position.x as usize,
-            // the y coordinate is derived from the total number of window lines rendered
-            self.window_state.window_y
-        )
-    }
-
-    fn bg_pixel(&self, x: usize, y: usize) -> (u8, TileAttributes) {
-        self.map_pixel(
-            self.lcd_control.background_tile_map(),
-            self.lcd_control.tile_data_mode(),
-            (x as u8).wrapping_add(self.scroll.x) as usize,
-            (y as u8).wrapping_add(self.scroll.y) as usize
-        )
     }
 
     /// LCDC's window-enable bit — which is a *different* bit on CGB. Split out of [`PPU::in_window`]
@@ -1059,10 +1015,6 @@ impl Activation for PPU {
 struct TileMap<'a>(&'a [u8]);
 
 impl<'a> TileMap<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        debug_assert!(data.len() == TILE_MAP_BYTES, "Tile map data must be exactly 1024 bytes");
-        Self(data)
-    }
 
     pub fn tile_index(&self, x: usize, y: usize) -> u8 {
         debug_assert!(x < TILE_MAP_SIZE && y < TILE_MAP_SIZE, "Coordinates out of bounds for tile map");
@@ -1227,6 +1179,7 @@ impl Sprite {
 mod tests {
     use DMGColor::*;
     use super::*;
+    use crate::lcd_control::ObjectSizeMode;
 
     /// A11: `current_ticks` is an absolute offset into mode 3, but the old x-advance re-added it
     /// on every call, so `current_x` went 1, 6, 15, 28, 45, 66, 91, 120, 153, 190 — every pixel

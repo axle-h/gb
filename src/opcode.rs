@@ -629,7 +629,6 @@ impl OpCode {
             OpCode::CallConditional { .. } => if condition_met { 6 } else { 3 },
             OpCode::Return | OpCode::ReturnInterrupt | OpCode::Restart { .. } => 4,
             OpCode::ReturnConditional { ..} => if condition_met { 5 } else { 2 },
-            _ => unreachable!("Machine cycles not defined for opcode: {:?}", self),
         }
     }
 
@@ -851,10 +850,6 @@ mod tests {
             StubFetch { data, index: 0 }
         }
 
-        fn from_u8(data: u8) -> Self {
-            StubFetch { data: vec![data], index: 0 }
-        }
-
         fn from_u8_imm16(data: u8, imm: u16) -> Self {
             let [lsb, msb] = imm.to_le_bytes();
             StubFetch { data: vec![data, lsb, msb], index: 0 }
@@ -864,13 +859,6 @@ mod tests {
             StubFetch { data: vec![data, imm], index: 0 }
         }
 
-        fn parses(&mut self, expected: OpCode) {
-            assert_eq!(OpCode::parse(self), expected);
-        }
-
-        fn reset(&mut self) {
-            self.index = 0;
-        }
     }
 
     impl Fetch for StubFetch {

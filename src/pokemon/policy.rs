@@ -97,7 +97,7 @@ pub trait Policy {
     /// - `None`       → not ready yet; will be called again next frame.
     /// - `Some(None)` → do not buy anything.
     /// - `Some(Some(item))` → buy the item.
-    fn pick_mart_purchase(&mut self, state: &GameState) -> Option<Option<BagItem>> {
+    fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
         Some(None) // default: open the mart but buy nothing
     }
 
@@ -1003,10 +1003,6 @@ pub enum PolicyStep {
     /// ⚠️ **Needs a box with room in it.** A catch with a full party goes to the open PC box, and a
     /// full box refuses it — which looks like a ball that keeps failing.
     SweepDex { on_map: Map, min_share: u8, ball: Option<ItemId> },
-    /// Enable/disable "train this slot" mode: while `Some(slot)`, the battle policy switches that party
-    /// member in at the start of each battle so it earns the XP (for levelling a bench mon on the
-    /// trainer gauntlet). `None` turns it off (e.g. before a hard fight where the lead must stay in).
-    SetTrainSlot(Option<u8>),
     /// Reorder the party so the member in `slot` becomes the lead (slot 0), written straight to RAM
     /// (no menu navigation). Makes a trained bench mon the battle lead so it fights — and earns XP —
     /// from the start of every battle, with no in-battle switch-in needed.
@@ -2461,30 +2457,6 @@ impl PolicyStep {
     /// what the old `machop_slot` argument was guessing at (and its two callers guessed differently).
     const MACHOP: PartyRef = PartyRef::Species(PokemonSpecies::Machop);
 
-    /// **The Psychic**, and the one place this route argues with the brief it was given.
-    ///
-    /// Gen 1 Psychic is the strongest attacking type in the game — resisted by nothing that matters,
-    /// 2× on the Poison and Fighting that Agatha and Bruno are made of — so a psychic in the gauntlet
-    /// is worth a party slot. **Abra is the wrong one, and it is wrong for a mechanical reason rather
-    /// than a stats one**: a wild Abra knows Teleport and nothing else, and Teleport *ends a wild
-    /// battle*. A trainee that leads a grind therefore escapes every encounter it is put into and
-    /// earns nothing, and the only way round it is the turn-one switch that halves the payout and
-    /// costs the turn — which is precisely what `pick_field_move`'s lead-with-the-trainee rule was
-    /// written to delete. Sixteen levels of that is not a saving.
-    ///
-    /// Drowzee is the same type from a mon that can fight the moment it is caught: Pound and
-    /// Hypnosis on arrival, Confusion at 17, **Psychic at 32** (Kadabra's is 38), Hypno at 26 with
-    /// 115 Special and far more bulk than Kadabra's 40 HP. And it is free: Route 11 is already on the
-    /// walk from Vermilion to Diglett's Cave in [`Self::saffron_to_cinnabar_steps`], so the catch is
-    /// a step rather than a detour.
-    const PSYCHIC_LINE: PartyRef = PartyRef::Line(&[PokemonSpecies::Drowzee, PokemonSpecies::Hypno]);
-
-    pub fn victory_road_1f_steps() -> Vec<Self> {
-        let mut steps = Self::victory_road_1f_approach_steps();
-        steps.extend(Self::victory_road_1f_climb_steps());
-        steps
-    }
-
     /// Viridian → the Route-22 rival → Route 23 → VR1F, ending with a Machop caught and taught
     /// Strength. Everything up to the point where the party is standing on the floor it grinds on.
     pub fn victory_road_1f_approach_steps() -> Vec<Self> {
@@ -2698,21 +2670,21 @@ impl PolicyStep {
     /// walks home over and over. `wild::poison_share` is the column that says so, and the
     /// `trip #` counter on the fainted-trainee line beside it is what a run actually costs.
     pub fn gauntlet_grind_steps() -> Vec<Self> {
-        /// What the two leads are taken to before the gauntlet.
-        ///
-        /// ⚠️ **Deliberately well over the fight rather than level with it, and the margin is the
-        /// feature.** The Elite Four tops out at Lance's lv62 Dragonite and the rival's lv65, and a
-        /// party that merely matches them makes the gauntlet a coin flip: two ungrinded attempts at
-        /// Venusaur lv60 / Articuno lv51 lost in different rooms, one to the rival's Exeggutor and
-        /// one to a Hyper Beam crit from Lance's Gyarados. A coin flip is not something
-        /// `full_playthrough` can assert on.
-        ///
-        /// ⚠️ **It is also what makes a re-entry story unnecessary.** A blackout inside the gauntlet
-        /// warps the player out to the Indigo Plateau, and the queue's next step is the *next room* —
-        /// which is only reachable back through the ones already beaten, and there are no steps left
-        /// to redo them. The run does not recover; it spun 29,915 polls on `EnterMap(ChampionsRoom)`
-        /// before the harness called it. Rather than teach the route to re-walk five rooms, the
-        /// cheaper and more honest fix is to not lose.
+        // What the two leads are taken to before the gauntlet.
+        //
+        // ⚠️ **Deliberately well over the fight rather than level with it, and the margin is the
+        // feature.** The Elite Four tops out at Lance's lv62 Dragonite and the rival's lv65, and a
+        // party that merely matches them makes the gauntlet a coin flip: two ungrinded attempts at
+        // Venusaur lv60 / Articuno lv51 lost in different rooms, one to the rival's Exeggutor and
+        // one to a Hyper Beam crit from Lance's Gyarados. A coin flip is not something
+        // `full_playthrough` can assert on.
+        //
+        // ⚠️ **It is also what makes a re-entry story unnecessary.** A blackout inside the gauntlet
+        // warps the player out to the Indigo Plateau, and the queue's next step is the *next room* —
+        // which is only reachable back through the ones already beaten, and there are no steps left
+        // to redo them. The run does not recover; it spun 29,915 polls on `EnterMap(ChampionsRoom)`
+        // before the harness called it. Rather than teach the route to re-walk five rooms, the
+        // cheaper and more honest fix is to not lose.
 
         vec![
             // ⚠️ **The heal is not a courtesy, it is what makes the grind survivable.** It sets
@@ -3284,7 +3256,7 @@ pub struct DeterministicPolicy {
     /// When `Some(slot)`, switch that party slot in at the start of every battle (wild *and* trainer)
     /// so it — not the lead — earns the XP. Used to train a bench mon (e.g. Vaporeon) on the trainer
     /// gauntlet. A safety cap skips the switch when the enemy out-levels the trainee by a wide margin,
-    /// so it won't suicide into a much stronger foe (e.g. the rival's ace). Toggle with `SetTrainSlot`.
+    /// so it won't suicide into a much stronger foe (e.g. the rival's ace).
     train_slot: Option<u8>,
     /// During a `GrindUntilLevel` grind: set once the trainee has been switched into / handed off from the
     /// CURRENT battle (reset each overworld tick). Stops train_slot re-switching a just-handed-off trainee
@@ -3664,9 +3636,6 @@ impl DeterministicPolicy {
         }).min_by_key(|a| a.route.len()).cloned()
     }
 
-    pub fn complete_game(seed: u64) -> Self {
-        Self::new(seed, PolicyStep::complete_game_steps())
-    }
 }
 
 impl Policy for DeterministicPolicy {
@@ -4741,12 +4710,6 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::UseRareCandy { .. } | PolicyStep::Dig { .. } | PolicyStep::TossItem { .. } => {
                     // Handled by `pick_field_move` (bag menu chain); wait without advancing.
                     None
-                }
-                PolicyStep::SetTrainSlot(slot) => {
-                    self.train_slot = slot;
-                    println!("[policy] train_slot = {slot:?}");
-                    self.queue.pop_front();
-                    continue;
                 }
                 PolicyStep::MovePokemonToFront { .. } | PolicyStep::Fly { .. } => {
                     // Handled by `pick_field_move` (a direct RAM reorder; the Fly menu chain and town
@@ -6389,7 +6352,7 @@ mod random_policy_tests {
             .iter().enumerate().map(|(i, to)| warp(Map::Route1, *to, i as u8, 0)).collect();
 
         // Picks until all four exits have been taken at least once, averaged over 400 attempts.
-        let mut cover = |explore: bool| -> f64 {
+        let cover = |explore: bool| -> f64 {
             let mut total = 0usize;
             for seed in 0..400u64 {
                 let mut policy = if explore { RandomPolicy::exploring(seed) }

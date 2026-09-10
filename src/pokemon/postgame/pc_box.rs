@@ -244,7 +244,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -
     let current = current_box_num(api.mmu());
 
     // Give up and hand back to the policy, leaving the reason on the event stream.
-    let mut abort = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, why: String| {
+    let abort = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, why: String| {
         api.release_all_buttons();
         agent.event(AgentEvent::TextBox { message: format!("PC box: {why}") });
         agent.set_state(AgentState::Idle);

@@ -6,7 +6,6 @@
 //! all three rods live in three different corners of Kanto and Fly turns each of those trips into one
 //! step — see the §11 entry.
 
-#[allow(unused_imports)]
 use super::super::*;
 
 use crate::pokemon::postgame::fishing::{FishGoal, Rod};

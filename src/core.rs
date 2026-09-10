@@ -69,10 +69,6 @@ impl Core {
         Self::new(cart, Model::Dmg)
     }
 
-    pub fn cgb(cart: &[u8]) -> Self {
-        Self::new(cart, Model::Cgb)
-    }
-
     /// Panics if the cartridge cannot be loaded. Use [`Core::try_new`] for anything that takes a
     /// ROM from a user rather than from `include_bytes!`.
     pub fn new(cart: &[u8], model: Model) -> Self {

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use sdl2::render::{BlendMode, Texture, TextureCreator, TextureQuery, WindowCanvas};
 use fontdue::{Font, FontSettings};
-use fontdue::layout::{Layout, LayoutSettings, TextStyle};
+use fontdue::layout::{Layout, TextStyle};
 use sdl2::pixels::{Color, PixelFormatEnum};
 use sdl2::rect::Rect;
 use sdl2::video::WindowContext;
@@ -79,7 +79,7 @@ impl<'a> FontTextures<'a> {
         self.layout.append(&self.fonts, &TextStyle::new(text, self.size, 0));
 
         for glyph in self.layout.glyphs() {
-            if let Some((texture, query)) = self.glyphs.get(&glyph.parent) {
+            if let Some((texture, _query)) = self.glyphs.get(&glyph.parent) {
                 canvas.copy(texture, None, Some(Rect::new(x + glyph.x as i32, y + glyph.y as i32, glyph.width as u32, glyph.height as u32)))
                     .map_err(|e| e.to_string())?;
             }

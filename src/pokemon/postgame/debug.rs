@@ -17,10 +17,8 @@
 //! `PolicyStep::MovePokemonToFront` is a pre-existing exception (it writes party order directly).
 //! It stays; nothing new joins it.
 
-use crate::mmu::MMU;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::party::PokemonParty;
-use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::encoding::PokemonEncoding;
 use crate::pokemon::PokemonApi;
@@ -65,15 +63,6 @@ impl<'a> PokemonApi<'a> {
     pub fn debug_set_money(&mut self, amount: u32) {
         let bytes = to_bcd(amount.min(999_999), 3);
         let base = pokered_symbols::wPlayerMoney.address;
-        for (i, b) in bytes.iter().enumerate() {
-            self.mmu_mut().write(base + i as u16, *b);
-        }
-    }
-
-    /// Overwrite the Game Corner coin count (capped at 9,999).
-    pub fn debug_set_coins(&mut self, coins: u16) {
-        let bytes = to_bcd(coins.min(9_999) as u32, 2);
-        let base = pokered_symbols::wPlayerCoins.address;
         for (i, b) in bytes.iter().enumerate() {
             self.mmu_mut().write(base + i as u16, *b);
         }
@@ -167,17 +156,6 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write(base + kept.len() as u16 * 2, 0xFF);
         self.mmu_mut().write(pokered_symbols::wNumBagItems.address, kept.len() as u8);
         dropped.into_iter().map(|(id, _)| id).collect()
-    }
-
-    /// Mark `species` as owned **and** seen in the Pokédex. Used to seed the 10/30/50 gates the
-    /// Oak's-aide items sit behind (workstream H) without playing through the catching first.
-    pub fn debug_set_dex_owned(&mut self, species: PokemonSpecies) {
-        for ptr in [&pokered_symbols::wPokedexOwned, &pokered_symbols::wPokedexSeen] {
-            let bit = species.metadata().pokedex_number - 1;
-            let addr = ptr.address + (bit / 8) as u16;
-            let byte = self.mmu().read(addr);
-            self.mmu_mut().write(addr, byte | (1 << (bit % 8)));
-        }
     }
 
     /// Replace the whole party. Build members with `Pokemon::maxed` or `Pokemon::new`.

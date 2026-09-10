@@ -49,7 +49,7 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn infer_bank(name: &str, bank_id: u8, address: u16) -> Option<String> {
+fn infer_bank(name: &str, bank_id: u8, _address: u16) -> Option<String> {
     let first_char = name.chars().next()?;
 
     match first_char {

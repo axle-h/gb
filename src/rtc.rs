@@ -141,10 +141,6 @@ impl Rtc {
         }
     }
 
-    pub fn time_source(&self) -> TimeSource {
-        self.source
-    }
-
     /// Seconds since the counter last read zero.
     fn counter(&self) -> u64 {
         if self.halted {

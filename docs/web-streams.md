@@ -25,6 +25,11 @@ almost nothing and was quoted as the stream's cost for a long time.
   so the palette caps at 255; the encoder tracks what the decoder holds and decides "changed" after
   interning, or the lossy path emits a keyframe every tick.
 - No keyframe goes on the wire in steady state, so a keyframe interval is not a lever.
+- A real video codec was measured, not assumed away: the same footage through x264 is 45 kbit/s at
+  `-crf 0` and 25 at `-crf 28`, which visibly mangles four-shade pixel art. Both lose to 21.
+- The block diff beats sending the whole 2bpp screen every frame by only about 2×, not the 60× its
+  uncompressed size suggests: most of what the diff earns, the connection's deflate window would
+  have earned anyway.
 
 ## Audio (`/api/audio`)
 
@@ -36,8 +41,10 @@ almost nothing and was quoted as the stream's cost for a long time.
   that is about the bitstream rather than the library.
 - No deflate, despite the page above it in `src/web/mod.rs` arguing for it on video: Opus is
   already range-coded and a per-message flush puts a block boundary round every ~60-byte packet.
-  `bench_audio_deflate_is_not_worth_a_byte` asserts the sign. 40 ms frames are not the fix either:
-  CELT-only, which the encoder picks at this bitrate, stops at 20 ms.
+  Measured at +16.6%. 40 ms frames are not the fix either: CELT-only, which the encoder picks at
+  this bitrate, stops at 20 ms, so the ~60 B of transport around a 60 B packet is a floor.
+- Silence is nearly free — the encoder is VBR — but nothing is encoded at all without a listener,
+  which is the bigger saving.
 - `set_output_sample_rate` and `set_emulation_speed` are derived state every `load_state` drops.
   `host::tune_audio` is called from both load sites on the emulator thread (`EmulatorHost::new`
   and `start_new_run`); the SDL UI's F9 handler in `src/sdl/render.rs` applies its own. Miss one

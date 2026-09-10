@@ -7,7 +7,6 @@ use battle::{BattleState, BattleStateReader};
 use encoding::{GameMode, PokemonEncoding};
 use party::PokemonParty;
 use tile_map::MetaTileMap;
-use std::rc::Rc;
 use crate::game_boy::GameBoy;
 use crate::geometry::Point8;
 use crate::joypad::{JoypadButton, JoypadButtonState};
@@ -20,7 +19,7 @@ use crate::pokemon::item::ItemId;
 use crate::pokemon::menu::{MenuState, MenuStateReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::move_name::PokemonMoveName;
-use crate::pokemon::options::{GameOptions, GameOptionsReader, GameOptionsWriter};
+use crate::pokemon::options::{GameOptions, GameOptionsReader};
 use crate::pokemon::pokedex::PokedexReader;
 use crate::pokemon::pokemon::Pokemon;
 use pokedex::Pokedex;
@@ -85,7 +84,6 @@ pub const MAX_PLAYER_NAME: usize = 7;
 pub trait PokemonApiTrait {
     fn release_all_buttons(&mut self);
     fn press_button(&mut self, button: JoypadButton);
-    fn release_button(&mut self, button: JoypadButton);
     fn toggle_button(&mut self, button: JoypadButton);
     fn read_joypad_state(&self) -> JoypadButtonState;
     fn game_mode(&self) -> Option<GameMode>;
@@ -209,7 +207,6 @@ pub trait PokemonApiTrait {
     fn write_player_name(&mut self, name: &str) -> Result<(), String>;
 
     fn read_game_options(&self) -> Result<GameOptions, String>;
-    fn write_game_options(&mut self, options: &GameOptions) -> Result<(), String>;
 }
 
 #[derive(Debug)]
@@ -373,10 +370,6 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     }
     fn press_button(&mut self, button: JoypadButton) {
         self.mmu_mut().joypad_mut().press_button(button);
-    }
-
-    fn release_button(&mut self, button: JoypadButton) {
-        self.mmu_mut().joypad_mut().release_button(button);
     }
 
     fn toggle_button(&mut self, button: JoypadButton) {
@@ -741,9 +734,6 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         self.mmu().read_game_options()
     }
 
-    fn write_game_options(&mut self, options: &GameOptions) -> Result<(), String> {
-        self.mmu_mut().write_game_options(options)
-    }
 }
 
 #[derive(Debug, Clone, Default)]

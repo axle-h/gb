@@ -6,7 +6,6 @@
 //! the prize room are all in Celadon and Fly turns that trip into one step — the same reasoning C's
 //! row gives for the three fishing rods.
 
-#[allow(unused_imports)]
 use super::super::*;
 
 /// Workstream B's output (§9): Fuchsia City, Fly on Articuno, the Bicycle in the bag (16/20), party

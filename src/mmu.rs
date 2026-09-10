@@ -1,7 +1,6 @@
 use bincode::{Decode, Encode};
 use crate::activation::Activation;
 use crate::audio::Audio;
-use crate::core::CoreMode;
 use crate::cycles::MachineCycles;
 use crate::divider::Divider;
 use crate::header::{CartHeader, LoadError};
@@ -460,10 +459,6 @@ impl MMU {
         self.ppu.set_object_priority_register(0x01);
     }
 
-    pub fn model(&self) -> Model {
-        self.model
-    }
-
     pub fn color_mode(&self) -> ColorMode {
         self.color_mode
     }
@@ -518,10 +513,6 @@ impl MMU {
 
     pub fn data(&self) -> &[u8] {
         &self.data
-    }
-
-    pub fn rom_bank_register(&self) -> usize {
-        self.rom_bank_register
     }
 
     /// Select the ROM bank at `0x4000..=0x7FFF` directly, bypassing the mapper.
@@ -698,11 +689,6 @@ impl MMU {
         // Bank 0 is fixed at 0xC000; SVBK selects what sits at 0xD000.
         let bank = if offset < WRAM_BANK_SIZE { 0 } else { self.work_ram_bank };
         (bank * WRAM_BANK_SIZE + (offset & (WRAM_BANK_SIZE - 1))) & (WRAM_BANK_SIZE * WRAM_BANKS - 1)
-    }
-
-    /// replace rom data, only intended for reloading save states without rom data
-    pub fn set_data(&mut self, data: &[u8]) {
-        self.data = pad_rom(data);
     }
 
     pub fn joypad(&self) -> &JoypadRegister {
@@ -1007,20 +993,6 @@ impl MMU {
         self.interrupt_request.clear_interrupt(interrupt);
     }
 
-    pub fn check_interrupts(&mut self, interrupt_master_enable: bool, core_mode: CoreMode) -> Option<InterruptType> {
-        if !interrupt_master_enable || core_mode == CoreMode::Crash {
-            return None;
-        }
-
-        // In STOP mode only the joypad is checked; otherwise, highest priority wins.
-        let mut enabled = self.interrupt_enable;
-        if core_mode == CoreMode::Stop {
-            enabled.set(enabled.get() & InterruptType::Joypad.mask());
-        }
-        let interrupt = self.interrupt_request.highest_priority(enabled)?;
-        self.interrupt_request.clear_interrupt(interrupt);
-        Some(interrupt)
-    }
 }
 
 impl ROM for MMU {
@@ -1498,7 +1470,7 @@ mod tests {
     /// ROM has locked the cartridge out of every CGB register.
     mod cgb {
         use super::*;
-        use crate::ppu::VRAM_BANK_SIZE;
+        
 
         fn cgb() -> MMU {
             MMU::new(crate::roms::cgb_acid::ROM, Model::Cgb).unwrap()

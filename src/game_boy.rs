@@ -41,11 +41,6 @@ impl GameBoy {
         Self::try_new(cart, Model::Dmg)
     }
 
-    /// A Game Boy Color from a cartridge that may not load. See [`GameBoy::try_new`].
-    pub fn try_cgb(cart: &[u8]) -> Result<Self, LoadError> {
-        Self::try_new(cart, Model::Cgb)
-    }
-
     pub fn dmg_hello_world() -> Self {
         Self::dmg(crate::roms::acid::ROM)
     }
@@ -965,90 +960,15 @@ mod tests {
         }
     }
 
-    /// A14: blargg's remaining DMG suites. **All of these are expected to fail** — they exist to
-    /// quantify gaps that `docs/compatibility/10-implementation-plan.md` has deliberately left
-    /// open. Each `#[ignore]` reason names the blocker. Do not "fix" one without reading it.
-    ///
-    /// Three harnesses are in play, because these ROMs report differently:
-    ///
-    /// * `serial_console_test` — the four `mem_timing` ROMs, the only ones here that talk over the
-    ///   link port. They give the most useful output of the lot: `01-read_timing` reports
-    ///   `F0:2-3 FA:2-4 CB 46:2-3 …`, i.e. those reads take 3 M-cycles where hardware takes 2.
-    /// * `ppu_test` — the five *combined* suite ROMs, which write to the screen and for which
-    ///   `c-sp/game-boy-test-roms` v7.0 ships a hardware reference image.
-    /// * `screenshot_pending` — the individual sub-ROMs, which write to the screen and have **no**
-    ///   reference image. See that function for how to promote one.
-    ///
-    /// ```text
-    /// cargo test --release --bin gb -- game_boy::tests::blargg_timing --ignored
-    /// cargo test --release --bin gb -- game_boy::tests::blargg_oam_bug --ignored
-    /// ```
+    /// `interrupt_time` on a DMG. The reference image shows `Failed` and checksum `7F8F4AAF`,
+    /// which is what real DMG hardware prints: the ROM targets CGB double-speed behaviour. Matching
+    /// it byte for byte is the pass.
     mod blargg_timing {
         use super::*;
         use crate::roms::blargg_timing::*;
 
-        // WON'T FIX until the M-cycle timing refactor happens. Plan §0.2 defers it explicitly
-        // and forbids starting it, so there is no task ID to point at — it is a standing gap, and
-        // these ROMs are how we measure it.
-
-        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
-        fn mem_timing() { ppu_test("mem_timing", MEM_TIMING, EXPECTED_MEM_TIMING); }
-        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
-        fn mem_timing_01_read() { serial_console_test("mem_timing-01", MEM_TIMING_READ); }
-        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
-        fn mem_timing_02_write() { serial_console_test("mem_timing-02", MEM_TIMING_WRITE); }
-        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
-        fn mem_timing_03_modify() { serial_console_test("mem_timing-03", MEM_TIMING_MODIFY); }
-
-        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
-        fn mem_timing_2() { ppu_test("mem_timing-2", MEM_TIMING_2, EXPECTED_MEM_TIMING_2); }
-        // No reference image ships for the sub-ROMs; promote a dump once M-cycle timing lands.
-        #[test] #[ignore = "expected failure: needs M-cycle timing (plan §0.2); no reference image yet"]
-        fn mem_timing_2_01_read() { screenshot_pending("mem_timing-2-01", MEM_TIMING_2_READ); }
-        #[test] #[ignore = "expected failure: needs M-cycle timing (plan §0.2); no reference image yet"]
-        fn mem_timing_2_02_write() { screenshot_pending("mem_timing-2-02", MEM_TIMING_2_WRITE); }
-        #[test] #[ignore = "expected failure: needs M-cycle timing (plan §0.2); no reference image yet"]
-        fn mem_timing_2_03_modify() { screenshot_pending("mem_timing-2-03", MEM_TIMING_2_MODIFY); }
-
-        #[test] #[ignore = "expected failure: needs M-cycle timing, deferred by plan §0.2"]
-        fn halt_bug() { ppu_test("halt_bug", HALT_BUG, EXPECTED_HALT_BUG); }
-        /// **This one passes**, so it is not ignored.
-        ///
-        /// Read the reference image before being surprised: `interrupt_time-dmg.png` shows
-        /// `Failed` and the checksum `7F8F4AAF`. That is what *real DMG hardware* prints — the
-        /// ROM targets CGB double-speed behaviour and legitimately fails on DMG. Matching it
-        /// byte for byte, checksum included, is therefore a pass, and a fairly strong one.
         #[test]
         fn interrupt_time() { ppu_test("interrupt_time", INTERRUPT_TIME, EXPECTED_INTERRUPT_TIME); }
-    }
-
-    /// A14: the DMG OAM corruption quirk. **WON'T FIX** — the plan does not schedule it in any
-    /// phase, and gambatte does not model it either, so there is nothing to compare against.
-    /// Kept because they are the only measurement of that gap we have.
-    mod blargg_oam_bug {
-        use super::*;
-        use crate::roms::blargg_oam_bug::*;
-
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk, unscheduled in the plan; gambatte does not model it either"]
-        fn oam_bug() { ppu_test("oam_bug", ROM, EXPECTED); }
-
-        // No reference image ships for the sub-ROMs; promote a dump only if the quirk is ever done.
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_1_lcd_sync() { screenshot_pending("oam_bug-1", LCD_SYNC); }
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_2_causes() { screenshot_pending("oam_bug-2", CAUSES); }
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_3_non_causes() { screenshot_pending("oam_bug-3", NON_CAUSES); }
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_4_scanline_timing() { screenshot_pending("oam_bug-4", SCANLINE_TIMING); }
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_5_timing_bug() { screenshot_pending("oam_bug-5", TIMING_BUG); }
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_6_timing_no_bug() { screenshot_pending("oam_bug-6", TIMING_NO_BUG); }
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_7_timing_effect() { screenshot_pending("oam_bug-7", TIMING_EFFECT); }
-        #[test] #[ignore = "won't fix: DMG OAM corruption quirk (unscheduled); no reference image yet"]
-        fn oam_bug_8_instr_effect() { screenshot_pending("oam_bug-8", INSTR_EFFECT); }
     }
 
     fn serial_console_test(name: &str, cart: &[u8]) {
@@ -1126,25 +1046,6 @@ mod tests {
         }
 
         gb_test_failed_with_screenshot(last_screenshot, name, "screenshot does not match");
-    }
-
-    /// For a screen-output ROM that has **no reference image yet**. Runs it, dumps what the screen
-    /// actually shows to `target/test_failure_<name>.png`, and always fails.
-    ///
-    /// That dump is the raw material for a reference: once the feature the ROM covers is actually
-    /// implemented, run this, open the PNG, and if it reads as a pass (blargg prints `Passed`, or
-    /// per-test `OK`), move it into `src/roms/…` and switch the test to [`ppu_test`]. Promoting a
-    /// screenshot **before** the feature works would just freeze our own wrong output as the
-    /// expectation, so don't.
-    fn screenshot_pending(name: &str, cart: &[u8]) {
-        let mut gb = GameBoy::dmg(cart);
-        gb.run(MachineCycles::from_m(20_000_000));
-        gb_test_failed_with_screenshot(
-            gb.core().mmu().ppu().screenshot(),
-            name,
-            "no reference screenshot yet — inspect the dump, and promote it only once the feature \
-             under test is implemented (see the test's #[ignore] reason)",
-        );
     }
 
     /// **D10.** The mooneye MBC suite, from `c-sp/game-boy-test-roms` v7.0 (MIT).

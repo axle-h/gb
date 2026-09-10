@@ -705,7 +705,7 @@ const MAX_BLACKOUT_WAIT_TICKS: u16 = 1500;
 /// bites only when the chosen slot differs from the previous one: **18 of 781 battle turns** across
 /// `full_playthrough`, gym fights among them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Confirm {
+pub(crate) struct Confirm {
     /// The action being confirmed, so a cursor that turns out not to be where `Navigating` believed
     /// can be handed straight back to it rather than wedging.
     action: BattleAction,
@@ -746,7 +746,7 @@ const CONFIRM_ACK_TICKS: u16 = 3;
 const CONFIRM_ATTEMPTS: u8 = 12;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum BattleState {
+pub(crate) enum BattleState {
     /// Waiting for the battle menu (TextBoxID 0x0B/0x1B) to appear.
     WaitingForMenu {
         reader: PokemonTextReader,
@@ -1004,7 +1004,7 @@ fn drives_its_own_menus(state: &AgentState) -> bool {
 
 /// State machine for navigating a Pokémart purchase sequence.
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum PokemartState {
+pub(crate) enum PokemartState {
     /// The Buy/Sell/Quit menu is up and the policy has not said what to buy yet.
     ///
     /// ⚠️ **Without this the shop is handed to the generic text reader, which mashes A through
@@ -1274,13 +1274,6 @@ pub(crate) enum AgentState {
 }
 
 impl AgentState {
-    pub fn battle_state_mut(&mut self) -> Result<&mut BattleState, String> {
-        if let AgentState::Battle(s) = self {
-            Ok(s)
-        } else {
-            Err("Not in battle".to_string())
-        }
-    }
 }
 
 impl Display for PokemartState {
@@ -5192,7 +5185,7 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0, evolve_from });
             }
             AgentState::CuttingTree { press, entered_menu, tree_pos, slot, move_index, from_row } => {
-                use crate::pokemon::menu::TextBoxId;
+                
                 // A successful Cut opens the Pokémon menu, plays a fade/animation, then returns to the
                 // overworld. So once we've entered a menu, the first return to the overworld means the
                 // cut is done: record the tile (the ROM map still shows the tree) and finish. A failed
@@ -5248,7 +5241,7 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos, slot, move_index, from_row });
             }
             AgentState::Surfing { press, entered_menu, water_pos, slot, move_index, resume, settle } => {
-                use crate::pokemon::menu::TextBoxId;
+                
                 // Mounting Surf opens the party menu, plays the field-move menu + a mount animation,
                 // then returns to the overworld now surfing (the game auto-steps onto the water tile).
                 // So once we've entered a menu, the first return to the overworld ends the mount: hand
@@ -5393,7 +5386,7 @@ CascadeBadge; not cutting".to_string(),
                     press: false, entered_menu, water_pos, slot, move_index, resume, settle: 0 });
             }
             AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map, resume, settle } => {
-                use crate::pokemon::menu::TextBoxId;
+                
                 // A field move opens the party menu → field-move menu → the move, shows a confirmation
                 // dialog ("… can now use STRENGTH!" / the Dig animation), then returns to the overworld
                 // with the effect applied. So once we've entered a menu, the first return to the
@@ -6317,11 +6310,6 @@ pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index:
         JoypadButton::A // transitional text ("used STRENGTH!", "can now use CUT!")
     }
 }
-
-fn surf_slot(state: &crate::pokemon::GameState) -> Option<u8> {
-    crate::pokemon::policy::field_move_carrier(state, crate::pokemon::move_name::PokemonMoveName::Surf).map(|(slot, _)| slot)
-}
-
 
 /// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.
 /// Two adjacent plain-floor tiles to pace between for cave encounters, the first of them next to

@@ -8,7 +8,6 @@
 //! Each leg is the same shape — bank, catch the give-species in grass, travel, trade — and each is
 //! worth **two** dex entries: the mon caught and the mon received.
 
-#[allow(unused_imports)]
 use super::super::*;
 
 use crate::pokemon::postgame::trades::trade_for;
@@ -208,72 +207,6 @@ fn can_trade_a_boxed_ponyta_for_a_seel() {
         state.pokedex_owned.species().len());
 
     fixture.save_state_named("src/pokemon/data/postgame-seel.bin").unwrap();
-}
-
-/// Diagnostic for **G6c**: is there grass where Fuchsia lets you onto Route 15?
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_route15_grass() {
-    let mut fixture = TestFixture::new(NIDORAN, Duration::from_mins(60), vec![
-        PolicyStep::Fly { to: Map::FuchsiaCity },
-        PolicyStep::goto(Map::Route15),
-    ]);
-    fixture.run_until(|s| s.map.map == Map::Route15);
-    for _ in 0..50 { fixture.step(); }
-    let state = fixture.game_state();
-    println!("== Route15 @ {} ({}x{})", state.map.player_position, state.map.width, state.map.height);
-    for action in state.map.actions() {
-        println!("   {:?} @ {} ({} steps)", action.tile, action.destination, action.route.len());
-    }
-    for y in 0..state.map.height.min(20) as u8 {
-        let row: String = (0..state.map.width.min(34) as u8).map(|x| match state.map.tile_at_checked(Point8 { x, y }) {
-            Some(MetaTile::Obstacle) => '#',
-            Some(MetaTile::Empty) => '.',
-            Some(MetaTile::Warp { .. }) => 'W',
-            Some(MetaTile::Connection { .. }) => 'C',
-            Some(MetaTile::Jump(_)) => 'J',
-            Some(MetaTile::Sprite(_)) => 'S',
-            Some(MetaTile::Grass) => 'g',
-            Some(MetaTile::CutTree) => 'T',
-            _ => '?',
-        }).collect();
-        println!("  y{y:>2} {row}");
-    }
-}
-
-/// Diagnostic for **G5**: Route 2's north half. The trade house door is at (15,19) and neither end of
-/// the route can reach it — the same "stands still" failure `postgame::gifts` records for Route 5.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_route2_trade_house() {
-    let mut fixture = TestFixture::new(NAME_RATER, Duration::from_mins(60), vec![
-        PolicyStep::Fly { to: Map::PewterCity },
-        PolicyStep::enter(Map::Route2),
-    ]);
-    fixture.run_until(|s| s.map.map == Map::Route2);
-    for _ in 0..50 { fixture.step(); }
-    let state = fixture.game_state();
-    println!("== Route2 @ {}", state.map.player_position);
-    for action in state.map.actions() {
-        println!("   {:?} @ {} ({} steps)", action.tile, action.destination, action.route.len());
-    }
-    for y in 0..26u8 {
-        let row: String = (0..20u8).map(|x| match state.map.tile_at_checked(Point8 { x, y }) {
-            Some(MetaTile::Water) => '~',
-            Some(MetaTile::Obstacle) => '#',
-            Some(MetaTile::Empty) => '.',
-            Some(MetaTile::Warp { .. }) => 'W',
-            Some(MetaTile::Connection { .. }) => 'C',
-            Some(MetaTile::Jump(_)) => 'J',
-            Some(MetaTile::Sprite(_)) => 'S',
-            Some(MetaTile::Grass) => 'g',
-            Some(MetaTile::CutTree) => 'T',
-            _ => '?',
-        }).collect();
-        println!("  y{y:>2} {row}");
-    }
 }
 
 /// Workstream B's output (§9): Fuchsia City, Fly on Articuno, the Bicycle, party Venusaur /

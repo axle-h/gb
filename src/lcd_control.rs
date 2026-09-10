@@ -1,5 +1,4 @@
 use bincode::{Decode, Encode};
-use crate::ppu::TILE_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct LcdControl {

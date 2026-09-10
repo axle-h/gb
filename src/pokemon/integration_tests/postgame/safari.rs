@@ -9,7 +9,6 @@
 //! out of, so every leg here opens with a `Dig` off Slowpoke (party slot 4). Silent if forgotten: the
 //! `Fly` pops with a reason and the rest of the queue is discarded for want of a route.
 
-#[allow(unused_imports)]
 use super::super::*;
 
 use crate::pokemon::postgame::safari;
@@ -34,83 +33,6 @@ const CHEAP_PAIR: &[PokemonSpecies] = &[PokemonSpecies::Rhyhorn, PokemonSpecies:
 /// (`data/wild/maps/SafariZoneCenter.asm`), so a centre hunt for it can only ever run the budget out
 /// — which is precisely what the ejection half of E4 needs to observe.
 const KANGASKHAN: &[PokemonSpecies] = &[PokemonSpecies::Kangaskhan];
-
-/// Diagnostic — what the centre looks like from the tile the entrance auto-walk drops you on.
-///
-/// Kept in the tree because this is the question that cost E its first run: with Surf in the party the
-/// BFS treats water as pass-through, so the nearest grass can sit **across the centre's pond** — and
-/// the mount is then refused ("No SURFing here!"), leaving the policy re-issuing the same walk for the
-/// whole budget. The dump prints the reachable action set and the meta-tile grid around the player, so
-/// "is the grass on our side of the water" is answerable in ~25 s instead of a 90-minute timeout.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_safari_centre_from_the_entrance() {
-    let mut fixture = TestFixture::new(FLASH, Duration::from_mins(60), vec![
-        PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) },
-        PolicyStep::Fly { to: Map::FuchsiaCity },
-        PolicyStep::enter(Map::SafariZoneGate),
-        PolicyStep::enter(Map::SafariZoneCenter),
-    ]);
-    fixture.run_until(|s| s.map.map == Map::SafariZoneCenter);
-    for _ in 0..50 { fixture.step(); } // let the entrance auto-walk and the sprite list settle
-    let state = fixture.game_state();
-
-    println!("== {} @ {} · can_surf {} · safari {:?}",
-        state.map.map, state.map.player_position, state.map.can_surf, state.safari);
-    for action in state.map.actions() {
-        println!("   {:?} @ {} ({} steps)", action.tile, action.destination, action.route.len());
-    }
-    for y in 0..state.map.height as u8 {
-        let row: String = (0..state.map.width as u8).map(|x| {
-            let p = Point8 { x, y };
-            if p == state.map.player_position { return '@'; }
-            match state.map.tile_at(p) {
-                MetaTile::Grass => ',',
-                MetaTile::Water => '~',
-                MetaTile::Empty => '.',
-                MetaTile::Warp { .. } => 'W',
-                MetaTile::Sprite(_) => 'S',
-                _ => '#',
-            }
-        }).collect();
-        println!("   {y:2} {row}");
-    }
-}
-
-/// Diagnostic — walk the zone's land chain and dump what each area can reach on foot.
-///
-/// The centre's own probe answers "which way out is walkable" (only east, once water is a wall); this
-/// one answers the same question for the rest of the chain, and in particular **which of the north's
-/// four west-warps a hunt should take**. They land on two shelves that one-way ledges seal off from
-/// each other, and only one has grass: switch the last step to `enter_at(SafariZoneWest, 21, 0)` and
-/// it reports `grass: None` — a Tauros hunt there would stand still on a bare shelf for its whole
-/// budget — against `grass: Some(((6, 20), 44))` from the (26,0) pair this drives.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_safari_areas() {
-    let mut fixture = TestFixture::new(FLASH, Duration::from_mins(120), vec![
-        PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) },
-        PolicyStep::Fly { to: Map::FuchsiaCity },
-        PolicyStep::enter(Map::SafariZoneGate),
-        PolicyStep::enter(Map::SafariZoneCenter),
-        PolicyStep::enter(Map::SafariZoneEast),
-        PolicyStep::enter(Map::SafariZoneNorth),
-        PolicyStep::enter_at(Map::SafariZoneWest, 26, 0),
-    ]);
-    for area in [Map::SafariZoneEast, Map::SafariZoneNorth, Map::SafariZoneWest] {
-        fixture.run_until(|s| s.map.map == area);
-        for _ in 0..50 { fixture.step(); }
-        let state = fixture.game_state();
-        let grass = state.map.actions().into_iter().find(|a| a.tile == MetaTile::Grass);
-        println!("== {} @ {} · safari {:?}", state.map.map, state.map.player_position, state.safari);
-        println!("   grass: {:?}", grass.map(|a| (a.destination, a.route.len())));
-        for action in state.map.actions().iter().filter(|a| !matches!(a.tile, MetaTile::Grass)) {
-            println!("   {:?} @ {} ({} steps)", action.tile, action.destination, action.route.len());
-        }
-    }
-}
 
 /// **Scratch: the Safari Zone's west area, entered by the *eastern* of its two warp pairs.**
 ///

@@ -1,4 +1,3 @@
-use strum::IntoEnumIterator;
 use crate::pokemon::pokemon::{PokemonStats, PokemonType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter)]

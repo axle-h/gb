@@ -1,6 +1,6 @@
 use rand::prelude::StdRng;
 use rand::seq::SliceRandom;
-use rand::{rng, SeedableRng};
+use rand::SeedableRng;
 
 static POKEMON_NAMES_CSV: &str = include_str!("pokemon-names.csv");
 

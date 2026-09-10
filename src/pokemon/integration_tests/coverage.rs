@@ -1513,20 +1513,20 @@ struct WalkOutcome {
 #[test]
 #[cfg(feature = "coverage-tests")]
 fn coverage_walk_of_the_finished_game() {
-    /// How much game time **each** walk may spend, in game-minutes, from `GB_COVERAGE_MINUTES`.
-    ///
-    /// ⚠️ **A bound, not a target, and it is `min`'d against the fixture's own cap deliberately.**
-    /// §9's last risk is that the fixpoint keeps discovering rows and the walk never terminates —
-    /// the answer is to *cap the passes and report a non-empty frontier as a result* rather than to
-    /// hang. The fixture's cycle budget is a panic; this is a stop.
-    ///
-    /// ⚠️ **The default is a *smoke* budget, not a coverage one.** 90 game-minutes reaches 28 maps
-    /// of 248 — the Pallet/Viridian/Pewter corner — and stops with the frontier wide open. Reaching
-    /// the rest of the world is a matter of game time and nothing else: the emulator runs at ~56x,
-    /// so an hour of wall clock buys about 56 game-hours. Set `GB_COVERAGE_MINUTES` for a real
-    /// sweep; the committed default stays small so the tier is runnable.
-    ///
-    /// ⚠️ **It is per walk, not per run.** `GB_COVERAGE_START=all` spends it ten times over.
+    // How much game time **each** walk may spend, in game-minutes, from `GB_COVERAGE_MINUTES`.
+    //
+    // ⚠️ **A bound, not a target, and it is `min`'d against the fixture's own cap deliberately.**
+    // §9's last risk is that the fixpoint keeps discovering rows and the walk never terminates —
+    // the answer is to *cap the passes and report a non-empty frontier as a result* rather than to
+    // hang. The fixture's cycle budget is a panic; this is a stop.
+    //
+    // ⚠️ **The default is a *smoke* budget, not a coverage one.** 90 game-minutes reaches 28 maps
+    // of 248 — the Pallet/Viridian/Pewter corner — and stops with the frontier wide open. Reaching
+    // the rest of the world is a matter of game time and nothing else: the emulator runs at ~56x,
+    // so an hour of wall clock buys about 56 game-hours. Set `GB_COVERAGE_MINUTES` for a real
+    // sweep; the committed default stays small so the tier is runnable.
+    //
+    // ⚠️ **It is per walk, not per run.** `GB_COVERAGE_START=all` spends it ten times over.
     let minutes: u64 = std::env::var("GB_COVERAGE_MINUTES").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90);
@@ -1913,7 +1913,6 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
             &mut self,
             request: &crate::pokemon::integration_tests::llm_harness::TurnRequest,
         ) -> crate::pokemon::integration_tests::llm_harness::Reply {
-            use crate::pokemon::integration_tests::llm_harness::Brain;
             self.0.lock().expect("not poisoned").respond(request)
         }
     }
@@ -2192,7 +2191,7 @@ pub fn rom_cross_check(
     offered: &std::collections::BTreeSet<String>,
 ) -> String {
     use crate::pokemon::map::Map;
-    use crate::pokemon::map_metadata::{MapMetadataCache, MapMetadataReader};
+    use crate::pokemon::map_metadata::MapMetadataCache;
     use crate::pokemon::tile::MetaTile;
     use strum::IntoEnumIterator;
 

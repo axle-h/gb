@@ -1982,30 +1982,6 @@ mod tests {
         assert!(answer.contains("set_battle_script"), "and what to do about it: {answer}");
     }
 
-    /// What `set_battle_script` actually answers with, printed rather than asserted.
-    ///
-    /// ⚠️ **The table is prose a model reads, and nothing but reading it catches prose.** It is the
-    /// only place the seven scenarios' names, the column widths and the rendering of a `BattleAction`
-    /// meet, and every one of those reads perfectly well while saying the wrong thing. Same reason
-    /// `prompt::probe_turn_requests` exists, and `#[ignore]`d on top of its feature gate for the
-    /// same reason: it asserts nothing.
-    #[cfg(feature = "diagnostics")]
-    #[test]
-    #[ignore]
-    fn probe_battle_script_answers() {
-        let example = DOCS.rsplit("```rhai").next().and_then(|t| t.split("```").next()).unwrap();
-        let mut script = BattleScript::open(None);
-        // First, because it is the answer every run gets before it has written anything and the one
-        // that used to be a wasted round trip saying "there is no battle script".
-        println!("── read_battle_script, on a fresh run ──\n{}\n", script.read());
-        println!("── set_battle_script, with the documented example ──\n{}\n", script.set(Some(example), Some("a test")));
-        println!("── read_battle_script ──\n{}\n", script.read());
-        script.disarm("`battle.fight` was given `Hydro Cannon`, which is not a move that can be used this turn.");
-        println!("── read_battle_script, after a failure ──\n{}\n", script.read());
-        println!("── set_battle_script, with one that only works sometimes ──\n{}\n",
-                 script.set(Some("battle.fight(battle.best_move);"), Some("a test")));
-    }
-
     /// ⚠️ **The bundled strategy is checked the way the docs' example is, and for a stronger
     /// reason**: it is the deterministic policy's own logic, so a change here that silently stops it
     /// arming has broken the one script known to finish this game.
@@ -2034,46 +2010,6 @@ mod tests {
         assert!(DETERMINISTIC.len() < MAX_SOURCE, "it is {} bytes against {MAX_SOURCE}", DETERMINISTIC.len());
     }
 
-
-    /// What the language actually does, printed rather than asserted, so `DOCS.md` can be written
-    /// from evidence instead of from memory.
-    #[cfg(feature = "diagnostics")]
-    #[test]
-    #[ignore]
-    fn probe_language_features() {
-        let state = wild();
-        let snippets: &[(&str, &str)] = &[
-            ("fn sees battle", "fn f() { battle.turn } let x = f(); battle.ask();"),
-            ("fn with param", "fn f(b) { b.turn } let x = f(battle); battle.ask();"),
-            ("array .len", "let n = battle.party.len; battle.ask();"),
-            ("array .len()", "let n = battle.party.len(); battle.ask();"),
-            ("filter closure", "let a = battle.party.filter(|p| !p.fainted); battle.ask();"),
-            ("map closure", "let a = battle.moves.map(|m| m.damage); battle.ask();"),
-            ("reduce", "let a = battle.moves.reduce(|s, m| s + m.damage, 0); battle.ask();"),
-            ("while loop", "let i = 0; while i < 3 { i += 1; } battle.ask();"),
-            ("loop+break", "let i = 0; loop { i += 1; if i > 2 { break; } } battle.ask();"),
-            ("string concat", r#"let s = "a" + battle.turn; battle.ask();"#),
-            ("string methods", r#"let s = "AB".to_lower(); let c = s.contains("a"); battle.ask();"#),
-            ("map literal", "let m = #{ a: 1 }; let v = m.a; battle.ask();"),
-            ("unit compare", "if battle.best_move != () { battle.ask(); } battle.ask();"),
-            ("float math", "let f = battle.me.hp_frac * 100.0; battle.ask();"),
-            ("int division", "let d = 7 / 2; battle.ask();"),
-            ("switch stmt", "let x = switch battle.turn { 1 => 10, _ => 20 }; battle.ask();"),
-            ("in operator", r#"let b = "a" in "abc"; battle.ask();"#),
-            ("array push", "let a = []; a.push(1); battle.ask();"),
-            ("sort_by", "let a = battle.moves; a.sort(|x, y| y.damage - x.damage); battle.ask();"),
-            ("index chain", "let d = battle.party[0].moves[0].damage; battle.ask();"),
-            ("early return", "fn f(n) { if n > 0 { return 1; } 0 } let x = f(1); battle.ask();"),
-        ];
-        for (name, code) in snippets {
-            let outcome = run(code, &state, 1).outcome;
-            let verdict = match &outcome {
-                Outcome::Failed(why) => format!("NO  — {}", why.lines().next().unwrap_or("")),
-                _ => "yes".to_string(),
-            };
-            println!("  {name:<18} {verdict}");
-        }
-    }
 
     /// The docs are carried in the context once the model reads them, so they are bounded the way a
     /// guide chapter is.
