@@ -19,9 +19,12 @@ the deployed run of 2026-09-02 walked into, six root causes and eleven work item
 shipped**. Read it before touching routing, map connections, `use_field_move` targets or the plan
 tools — every item carries the save state or the fixture that reproduces it, and the rules they left
 behind are indexed from [pokemon-agent](docs/pokemon-agent.md) and
-[llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third and the only one that is
-still ahead of the code: every action in the game taken once through the deployed `LlmPolicy`
-against a mock endpoint, with a verdict on each and every defect fixed. **It is self-contained** —
+[llm-turn-loop](docs/llm-turn-loop.md). `docs/coverage-plan.md` is the third: every action in the
+game taken once through the deployed `LlmPolicy` against a mock endpoint, with a verdict on each and
+every defect fixed. **Both of its steps are now taken** — the sweep reaches 215 of 220 maps with no
+defects and no silences, and `godmode_run` plays a fresh save to the Hall of Fame through
+`LlmPolicy` — so it reads as a record, with one bounded piece of future work named in step 2.
+**It is self-contained** —
 its status, its rules, how to run a sweep and read its numbers, and its record are all in the file,
 and nothing about it is repeated here. Read it before touching the soak tier, `postgame/debug.rs`,
 `postgame/fishing.rs`, `integration_tests/llm*.rs` or anything under
@@ -34,8 +37,11 @@ and nothing about it is repeated here. Read it before touching the soak tier, `p
   [docs/test-suite.md](docs/test-suite.md), and several of them are wrong in ways that pass.
 - The crate has **no lib target**: it is `--bin gb`, never `--lib`.
 - Agent and policy debugging goes to stdout, so add `--nocapture` when you care about it.
-- **Run `full_playthrough` after every major work item and before pushing.** The leg tier is not a
-  substitute; the test-suite doc says why.
+- **Run `full_playthrough` *and* `godmode_run` after every major work item and before pushing.** The
+  leg tier is not a substitute for either; the test-suite doc says why. They gate different halves:
+  `full_playthrough` (231 s) is the scripted route walking the whole of Kanto, and `godmode_run`
+  (~40 s, `--features godmode`) is the **deployed `LlmPolicy`** played from a fresh save to the Hall
+  of Fame. Neither replaces the other — `docs/coverage-plan.md` step 2 has the table.
 - **No em dashes in the strings the *agent* generates**: `AgentEvent`'s `Display`, `MetaTile`'s, a
   `Notice`, `learnset::teach_refusal`. Those go to the page as well as to the model and are assembled
   a fragment at a time, where a dash reads as punctuation the writer did not choose. The rule is

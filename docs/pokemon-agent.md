@@ -123,6 +123,13 @@ cover the class, each documented on its constant in `agent.rs`:
   CANCEL or the START menu (never a yes/no, never in battle), the reader presses B until a poll.
 - Silence bounds drivers (`DRIVER_ESCAPE_SILENCE`, `MAX_MOVEMENT_SILENCE`), not per-state tick
   counters, because a state torn down and rebuilt starts a counter over.
+- ⭐ **And the driver hatch's silence is measured from the *game's* last answer, not the policy's
+  last poll** (`PokemonAgent::cycles_since_driver_answer`). The two are the same fact for every
+  driver that is a conversation with one menu, and they are not for `AgentState::PushingBoulder`,
+  which is carried out dozens of times inside a single `BoulderGoal` decision: a goal that runs past
+  60 s with no wild battle to poll the policy was escaped on the **first tick** of every shove after
+  that. A landed shove resets it (`boulder_shove_landed`), and nothing else may — resetting it on
+  *entering* a driver hands each of a livelock's identical attempts a fresh 60 s.
 - A menu the agent did not open is closed, not confirmed (`MENU_HANDOVER_TICKS`, armed in
   `assert_text_box_state`; a short window, because `wFontLoaded` flips before the menu draws).
 - A rule that runs at every text box trusts only the screen, never the lingering `wTextBoxID`
@@ -431,6 +438,20 @@ price.
   hundred and thirty times and spent two thirds of its whole 6-game-hour budget doing it, finishing
   on 33 maps where its siblings reached 130. `PokemonAgent::boulder_goal_silences` counts it and
   `MAX_SILENT_SHOVES` is 3, because a refusal is a property of a layout that has not changed.
+- ⭐ **The walk reports the credits and is rewound past them, rather than stopping there.** A god
+  party beats the Elite Four and the cartridge then saves and soft-resets to the title screen, so
+  three of the ten starts used to `settle` at 42-60% of their budget with the rest of Kanto unwalked.
+  The driver checkpoints the first turn it is asked on `IndigoPlateauLobby` and restores that
+  checkpoint on the Hall of Fame (`LlmRun::restart_from_last_checkpoint`), carrying the emulated time
+  across so the rewind buys no budget. ⚠️ **The Lorelei door has to be barred afterwards**: an exit is
+  re-takeable by least-taken count, and a door taken once in a lobby whose other two have been taken
+  never is the best-scoring row in the room.
+- ⚠️ **A map no walk ever entered is not evidence that anything is shut**, and a whole step of the
+  plan was written on the assumption that it was. Every one of the five the sweep of 2026-09-10
+  missed was behind a row that *was* offered and never chosen — including `SafariZoneWest`'s rest
+  house, whose area is two shelves one-way ledges seal off from each other with four doors into it
+  landing on opposite sides. The frontier counts a way out **per crossing**, so taking either pair
+  marks the crossing done and the other pair waits behind every exit on a very large map.
 - ⚠️ **An exploring frontier must order its exits by how often it has already taken them, not by
   where they lead.** Being turned back at a gate changes nothing the brain can see, so an exit that
   scores best on promise stays best for ever: the first version took

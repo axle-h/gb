@@ -19,14 +19,21 @@ cargo test --release --features slow-tests,very-slow-tests --bin gb -- can_sweep
 
 # The whole game to 8 badges from a fresh save, ~7 min. Run it after every major work item and
 # before pushing; nothing else proves the legs compose.
+# ⭐ It prints its own game time, wall clock and rate: 18 322 s of game time in 231.3 s (79x) on
+# 2026-09-10. The bar for coverage-plan's god run is this figure measured the same day, so take it
+# from a run rather than from here.
 cargo test --release --features full-playthrough full_playthrough
 
 # The same run carried on to the credits, ~26 min.
 cargo test --release --features hall-of-fame --bin gb -- hall_of_fame
 
-# C2's measurement: a stretch of route played through the deployed LlmPolicy against an in-process
-# mock, with a god party and a battle script. Prints ms per turn and turns per game-minute. ~5 s.
-cargo test --release --features godmode --bin gb -- godmode --nocapture
+# ⭐ THE GOD RUN: a fresh save at Pallet Town played to the Hall of Fame through the deployed
+# LlmPolicy, the worker and the wire, against an in-process mock — with a god party and a battle
+# script, so no battle costs a request. 33-41 s, 46-47 requests, 18 maps. The only test that plays
+# the policy people actually watch over a whole game; run it before pushing beside full_playthrough.
+# ⚠️ It is NOT a replacement for full_playthrough: it never touches PolicyStep, so that tier is what
+# keeps `--policy deterministic` honest. See docs/coverage-plan.md step 2 for the coverage table.
+cargo test --release --features godmode --bin gb -- godmode_run --nocapture
 
 # C3's walk: 90 game-minutes of exhaustive exploration through the deployed LlmPolicy, from a
 # *finished* save with a god party and every key item. Fails on any defect, writes the whole table
@@ -46,6 +53,10 @@ cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocap
 # prints the union. ⚠️ `all` spends GB_COVERAGE_MINUTES **per region**, so the coverage budget above
 # is an hour of wall clock rather than 5 min; for a measurement run the ten in parallel, one per
 # directory, and union the walk-*.tsv files (the recipe is coverage-plan §6.1).
+# ⚠️ `all` is also the ONLY form that asserts the two union-wide checks — every kind of row was
+# offered somewhere (`kind_cross_check`) and the maps nobody entered — because a single walk cannot
+# be expected to see either. A one-region run prints its own figures and asserts defects and
+# silences only.
 GB_COVERAGE_START=all cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 
 # The stall hunt: 40 min of game time under RandomPolicy from each of 26 starting states, in
@@ -99,7 +110,7 @@ cargo test --release --features bench --bin gb -- web::audio::bench --nocapture
 | `bench` | the two throughput benches and `web::{video,audio}::bench` |
 | `soak-tests` | `integration_tests::soak`, gated as a module so it never appears in the ignored list |
 | `regen-fixtures` | lets a leg test overwrite the snapshot the next leg reads |
-| `godmode` | C2's measured run. The machinery under it — `Intent`, `ScriptedBrain`, `cheats::Cheats`, `coverage::CoverageLog` — is all default tier; only the run that spends game time is gated |
+| `godmode` | The god run, Pallet Town to the Hall of Fame through `LlmPolicy` (~40 s). The machinery under it — `Intent`, `ScriptedBrain`, `cheats::Cheats`, `coverage::CoverageLog` — is all default tier; only the run that spends game time is gated |
 | `coverage-tests` | C3's frontier walk, the one test that spends game time going *everywhere*. Same split: the oracle is default tier and only the walk is gated |
 
 A test that is `#[ignore]`d should be blocked, not merely slow; everything else goes behind a
@@ -174,7 +185,15 @@ make it pass, say so in the hand-off.
   2026-09-10 dropped it where `VictoryRoad3F:3,5:PushBoulderOntoSwitch` gave up after 34 pushes
   without reaching its target, five times on one walk. It has **no producing leg** and is not in the
   chain, so it must not be re-cut; its property is *which puzzle, mid-solve*. See
-  `docs/coverage-plan.md` step 1.1, which is the work it is evidence for.
+  `docs/coverage-plan.md` step 1.1, which is the work it is evidence for. ⚠️ **And it does not
+  reproduce what it was dropped for**, which is the one case a dropped state cannot cover: the cause
+  was a clock on the *agent* that a restore sets back to zero. It is still the right evidence for the
+  layout and the plan length; the walk's own log is what named the fault.
+- `safari-west-shelf.bin` is cut by `postgame::safari::cut_safari_west_shelf_fixture` and its
+  property is **which shelf**: `SafariZoneWest` is split by one-way ledges and this is the eastern
+  landing, the only side the rest house can be reached from. Not in the chain, free to re-cut, but a
+  re-cut that comes in by `SafariZoneNorth`'s *western* pair silently makes
+  `the_safari_wests_rest_house_is_a_row_from_the_shelf_it_is_on` a test of nothing.
 - `route21-islands.bin` is the same kind of thing: the deployed run of 2026-09-03's own checkpoint,
   at Route 21 (7, 72) mid-crossing and mid-battle, read by
   `stalls::a_water_route_does_not_climb_out_onto_route_21s_islands`. Its property is *which map*, so
@@ -309,6 +328,11 @@ a real run directory. Default tier; the whole of `llm.rs` runs in about two seco
   made first (`debug_keep_only_items`), `every_coverage_start_can_be_handed_all_of_the_key_items`
   asserts it in the default tier, and the line prints the junk that went so a walk that turns out to
   have needed one of them can see which start dropped it.
+- ⭐ **The walk plays the game to the credits and is rewound past them.** A god party wins, and the
+  cartridge then saves and soft-resets to the title screen — so `phase0`, `fuchsia` and `cinnabar`
+  used to stop at 42-60% of their budget with the rest of Kanto unwalked. The terminus is still
+  reported; the driver then restores a checkpoint taken at the Indigo Plateau lobby and hands the
+  walk the rest of its budget. The emulated time carries across, so it buys none.
 - ⚠️ **The walk is not reproducible, and that is `step_coarse` rather than a bug.** `LlmRun` hands
   the agent however long the driver's last loop iteration took, with a worker thread and a real
   socket in that loop, so three runs from the same fixture gave 352, 355 and 360 ids (always 28
@@ -319,6 +343,12 @@ a real run directory. Default tier; the whole of `llm.rs` runs in about two seco
   `coverage::REPEAT_IS_A_DEFECT`. Everything that says the agent could not execute a row it had
   already offered — `NoRoute`, `DidNotArrive`, `WrongMap`, `NoAdjacentGrass`, `Unknown`,
   `CastRefused`, `CastNeverFinished` — is a defect on the first one, and a watchdog firing always is.
+- ⭐ **And a *kind* of row nobody was ever offered fails the walk, as of 2026-09-10**
+  (`coverage::kind_cross_check`, asserted only over a multi-region sweep). `rom_cross_check` covers
+  warps, objects and connections and is printed rather than asserted; this covers every kind
+  `MetaTile::id_kind` can return, as a `match` on `MetaTile` so a new variant is a compile error. Its
+  first run said `Pc`, `Statue` and `CellSeparator` had never appeared once in ten walks. The
+  allow-list is two entries and each carries its argument — see the doc comment.
 - ⭐ **A `Silent` fails the walk too, as of 2026-09-09** (`Verdict::fails_the_walk`, and the list the
   test asserts on is `CoverageLog::failures`, not `defects`). A row chosen and never reported is the
   failure mode this tier exists to find; the two counts stay apart in `summary()` because a defect is

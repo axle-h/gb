@@ -5,21 +5,28 @@ as it is deployed — `LlmPolicy`, the worker and the wire, against a mock endpo
 a verdict on each, and every defect that turns up fixed, until a sweep of the whole of Kanto comes
 back clean and finds nothing new.
 
-**Status.** The harness, the cheats, the oracle and the frontier walk are built, and the sweep has
-been to a fixpoint: two consecutive clean sweeps on 2026-09-10 whose union did not grow. The nine
-steps that got there are one line each in §7.4 and their findings are §7.1's rows, every one with a
-test. ⚠️ **That is not the goal, and this file said so too quietly.** A clean sweep means *nothing
-the walk asserts on went wrong*, and the walk asserts on two things — defects and silences. It does
-not assert that every map was entered, that every action offered was taken, or that the ROM's own
-tables were exhausted; all three are printed and were going unread. §2.1 is what happened when they
-were read, and it is the state to measure against.
+**Status.** The harness, the cheats, the oracle and the frontier walk are built, and **step 1 is
+taken but for one map**: the sweep of 2026-09-10 that §2.1 tables is **215 of 220 maps, 2 170 ids, 0
+defects and 0 silences**, with every one of its ten walks spending its whole game-time budget and
+none of them stopping on the credits. Four of the five maps it missed are behind a row that was
+*offered and not chosen*, which is a property of the frontier rather than a fault; the fifth,
+`SafariZoneWestRestHouse`, is the whole of what §4's step 1.4 has left. The nine steps that got here
+are one line each in §7.4 and their findings are §7.1's rows, every one with a test.
 
-**What is left is §4's two steps.** Step 1 closes the gap between "clean" and "complete": one
-defect outstanding, 21 reachable maps missed by the last sweep, a cross-check that covers three
-action kinds of nine, and 2 124 ids offered and never chosen — ⭐ the largest single cause being that
-**three of the ten walks win the game and stop** at 42-60% of their budget. Step 2 is the god run —
-Pallet Town to the Hall of Fame through `LlmPolicy` — unparked, to replace `full_playthrough` if it
-is not much slower.
+⚠️ **A clean sweep was never the goal, and this file used to say so too quietly.** The walk asserts on
+defects and silences; it does **not** assert that every map was entered, that every action offered was
+taken, or that the ROM's own tables were exhausted. All three used to be printed and going unread. Two
+of them are assertions now — the map denominator is honest (1.2) and every kind of row the game can
+offer has to have been offered somewhere or the tier fails (1.5) — and the third, `unreached`, is
+printed by kind with a reason per family (1.6).
+
+⭐ **Step 2 is built too.** `godmode_run` plays a fresh save at Pallet Town to the **Hall of Fame**
+through `LlmPolicy`, the worker and the wire, in **33-41 s** against `full_playthrough`'s 231 —
+about six times faster, on 46 requests, none of them battle turns. ⛔ **It does not replace
+`full_playthrough` and the reason is not speed**: it never touches `PolicyStep`, so retiring that
+tier would leave `--policy deterministic` — a shipped feature — with no end-to-end test, and it walks
+18 maps against the whole of Kanto. It joins the pre-push tier instead. §4's step 2 has the table,
+the measurement and the four faults building it turned up.
 
 **This file is self-contained.** `CLAUDE.md` points here and says nothing about the plan that this
 file does not: §3 is the rules, §6 is how to run a sweep and how to read its numbers, §7 is the
@@ -40,7 +47,8 @@ each one's argument lives now.
 | The oracle | `integration_tests/coverage.rs` `CoverageLog` | Every action id the agent starts gets `Completed`, `Blocked`, `Defect`, `Silent` or `Unreached`, folded from `AgentEvent`s so it works under any driver. Drops a save state where a defect happened |
 | The walk | `coverage.rs` `ExploringBrain`, `coverage_walk_of_the_finished_game` | Takes every unvisited row on the map, then the least-taken exit. Starts from one of ten fixtures (`GB_COVERAGE_START`), eight of them **finished games** so every gate is open because the cartridge opened it; the other two are argued on `Start::before_the_credits`. Behind `--features coverage-tests` |
 | The cross-check | `coverage.rs` `rom_cross_check` | Warps and objects in the ROM's tables for the maps entered that never once appeared as a row. Printed, never asserted |
-| The god run's machinery | `integration_tests/godmode.rs` | `Intent`, `ScriptedBrain`, `godmode_turn_cost`. The machinery is default tier and drives step 8's branch arms; the **run** is §4's step 2 |
+| The kind check | `coverage.rs` `kind_cross_check` | ⭐ Every kind of row `MetaTile::id_kind` can return, against the kinds a sweep was offered — a `match` on `MetaTile`, so a new variant is a compile error. **Asserted**, over the union of a coverage-budget sweep, with a two-entry allow-list. Step 1.5 |
+| The god run | `integration_tests/godmode.rs` | `Intent`, `ScriptedBrain`, and `godmode_run` — Pallet Town to the Hall of Fame through `LlmPolicy` in ~40 s (`--features godmode`). The machinery is default tier and also drives step 8's branch arms |
 | The branch points | `integration_tests/branch_points.rs` | Four snapshots cut one decision before a choice that is **exclusive per save**, nine arms after them and three trade tests, driven by `Intent` against the rendered menu. Step 8 |
 
 ## 2. Where we are
@@ -50,92 +58,84 @@ silences, 82% of every turn in Route 16's gate — is §7.4's row 0, and every b
 closed by a step in that table. ⚠️ **Take every baseline from a run, never from a table in this
 file.** The walk is not deterministic and its spread is not noise (§6.2).
 
-### 2.1 Where the sweep stands — 2026-09-10, after step 8
+### 2.1 Where the sweep stands — 2026-09-10, after step 1
 
-Ten walks in parallel on an idle machine, 6 game-hours each, about 7 minutes for the set (§6.1).
+Ten walks in parallel on an idle machine, 6 game-hours each, about 14 minutes for the set (§6.1).
 Every number here was re-derived from the walk logs and `walk-*.tsv` files the §6.1 recipe leaves
 behind, and the map list is the diff of `Map::iter()` against their union.
 
-| **start** | **maps** | **ids** | **defects** | **silent** |
-|---|---|---|---|---|
-| `phase0` | 38 ⭐ Hall of Fame at 45% of budget | 365 | 0 | 0 |
-| `cerulean` | 120 | 1 039 | 0 | 0 |
-| `vermilion` | 135 | 1 267 | 0 | 0 |
-| `lavender` | 135 | 1 249 | 0 | 0 |
-| `celadon` | 134 | 1 287 | 0 | 0 |
-| `saffron` | 134 | 1 265 | 0 | 0 |
-| `fuchsia` | 70 ⭐ Hall of Fame at 60% | 663 | ⛔ **1** | 0 |
-| `cinnabar` | 41 ⭐ Hall of Fame at 42% | 412 | 0 | 0 |
-| `ssanne` | 119 | 1 036 | 0 | 0 |
-| `ssanneship` | 82 | 751 | 0 | 0 |
-| **union** | **199 of 220 reachable** | **1 973** | **1** | **0** |
+| **start** | **maps** | **ids** | **defects** | **silent** | **before step 1** |
+|---|---|---|---|---|---|
+| `phase0` | 136 | 1 302 | 0 | 0 | 38 ⭐ stopped on the Hall of Fame |
+| `cerulean` | 135 | 1 263 | 0 | 0 | 120 |
+| `vermilion` | 135 | 1 274 | 0 | 0 | 135 |
+| `lavender` | 135 | 1 257 | 0 | 0 | 135 |
+| `celadon` | 134 | 1 299 | 0 | 0 | 134 |
+| `saffron` | 135 | 1 251 | 0 | 0 | 134 |
+| `fuchsia` | 105 | 993 | 0 | 0 | 70 ⭐ stopped, and ⛔ 1 defect |
+| `cinnabar` | 131 | 1 151 | 0 | 0 | 41 ⭐ stopped |
+| `ssanne` | 106 | 1 025 | 0 | 0 | 119 |
+| `ssanneship` | 111 | 1 001 | 0 | 0 | 82 |
+| **union** | **215 of 220** | **2 170** | **0** | **0** | 199 of 220, 1 defect |
 
-⚠️ **Read the pair, never the row** (§6.2). This is one sweep, not a pair: 199 sits inside the
-189–215 band the 2026-09-10 fixpoint pair measured, so it is not a regression. What it *is* good for
-is the list below, which is stable across all ten walks.
+⚠️ **Read the pair, never the row** (§6.2). This is one sweep. What it is good for is the list below,
+and the two facts the right-hand column is there for: **no walk stopped on the credits** — `cinnabar`
+and `fuchsia` both reached the Hall of Fame (at 45% and 55% of budget), reported it, and were rewound
+to the Indigo Plateau lobby to spend the rest — and **every one of the ten spent its whole game-time
+budget with the frontier still open**, where three used to settle at under half of it.
 
-**The arithmetic, which was wrong in this file until now.** `Map::iter()` yields **248** because the
-enum is the map *byte*: 22 `UnusedMap*` have no header at all and 2 are link-cable rooms, so the game
-has **224 real maps**. ⚠️ **And four of those are unreachable and were counted as real**:
-`CeruleanTrashedHouseCopy`, `CinnabarMartCopy`, `UndergroundPathRoute6Copy` and
-`UndergroundPathRoute7Copy` are duplicate headers that **no warp from any map targets** (checked
-against `pokered/data/maps/objects/`), so the denominator is **220** and `unreached_report` has been
-over-reporting by four every sweep it has ever printed.
+**The five maps this sweep missed, and ⭐ four of them are behind a row that was offered and not
+taken.** That is a different fact from the last sweep's twenty-one and it moves them out of step 1.4
+and into step 1.6: nothing is withholding these rows, the frontier simply spent its budget elsewhere.
 
-**The 21 reachable maps this sweep missed, in two groups.** (This paragraph once said twelve, four
-and nine, and named sixteen; a count that does not add up to the list under it is how a plan is
-wrong.)
+- `CeruleanCaveB1F` — behind **`CeruleanCave1F:3,11:Warp`, offered and `unreached`**. The ladder chain
+  is no longer shut: the row that `probe_route_to_cerulean_cave` says is the only way onto the B1F
+  half of 1F is on the menu, and no walk chose it.
+- `Route17` and `Route16Gate2F` — both behind **`Route16:24,10:Warp`, offered and `unreached`**, the
+  south door of the Route 16 gate. ⚠️ **The guard is not the reason and this file said he was.**
+  `Route16Gate1FDefaultScript` stops a player only when the Bicycle is **not in the bag**
+  (`Route16Gate1FIsBicycleInBagScript` → `IsItemInBag`), and every walk carries it — being *on* the
+  bike is not required. Route 18 and both of its gate floors are in the union, reached from the
+  Fuchsia side, so Cycling Road is walled at one end only.
+- `CeladonGym` — behind **`CeladonCity:13,27:Warp`**, the sibling of the gym door at (12, 27), which
+  the sweep of 2026-09-10 `completed` and this one left `unreached`. Pure walk-to-walk variance
+  (§6.2).
+- ⭐ `SafariZoneWestRestHouse` — behind **`SafariZoneNorth:8,35:Warp` and `:9,35:Warp`, both offered
+  and `unreached` in both sweeps**, and this one is worth the paragraph because it is the only
+  interesting shape in the list. `SafariZoneWest` is **two shelves that one-way ledges seal off from
+  each other**, and `SafariZoneNorth` has four doors into it in two pairs that land on opposite
+  sides: the western pair lands on the Gold Teeth plateau and the eastern pair on the shelf the rest
+  house is on. All four are rows — `actions()` mints one per unique destination — but the frontier
+  counts a way out **per crossing** (`SafariZoneNorth → SafariZoneWest`), so the moment either pair
+  is taken the crossing is "done" and the other pair waits behind every other exit on a very large
+  map. Twenty walks took the western pair twenty times. ⚠️ **`SafariZoneWest:11,11:Warp` is a row
+  from the eastern landing and simply is not on the menu from the western one**, which is the same
+  shape as Seafoam's two holes one level up: two doors that look interchangeable and are not.
 
-- ⭐ **Sixteen are ordinary maps that three walks simply stopped short of** — the Pallet cluster
-  (`RedsHouse1F`, `RedsHouse2F`, `OaksLab`, `BluesHouse`, `ViridianMart`), the Cinnabar cluster
-  (`CinnabarGym`, `CinnabarLab` and its three rooms, `CinnabarMart`, `CinnabarPokecenter`) and the
-  four Pokémon Mansion floors. Every one has been in a union before. **The cause is in the table
-  above: `phase0`, `fuchsia` and `cinnabar` all `settled` by reaching the Hall of Fame**, at 45%,
-  60% and 42% of their game-time budget, and then stopped with the rest unwalked. Half of three
-  walks is being spent playing the game to the credits rather than exploring it.
-- **Five were listed as structural, and four are:** `CeruleanCaveB1F` (the ladder chain below),
-  `Route17` (the Route 16 gate's guard stops a walker without the Bicycle at column 4 of the south
-  corridor, and no row means *ride the Bicycle*), and `SafariZoneWestRestHouse` and
-  `SafariZoneNorthRestHouse` (one door each). The fifth, `Route16Gate2F`, **is not**: the stairs at
-  (6, 12) are reached from the gate's Celadon-side south door without crossing the guard's column —
-  the gate's collision map says so — and `Route16:24,10:Warp`, that door, was **offered and never
-  chosen in five walks**. It is one of the 2 124 below, and it sat here as bike-gated until the ROM
-  and the TSVs were read.
+⚠️ **And the Safari Zone's own clock is what bounds exploration inside it**, which nothing in this
+file said before: `SafariZoneWest:20,0:Warp` and `SafariZoneNorth:35,3:Warp` are both scored
+`blocked` with the cartridge's own sentence quoted — *"PA: Ding-dong! Time's up! PA: Your SAFARI GAME
+is over!"*. 500 steps is the budget the game gives, the walk spends it wandering, and the North rest
+house is reached only when the frontier happens to spend the steps in that direction.
 
-⛔ **One defect, and it is a boulder.** `VictoryRoad3F:3,5:PushBoulderOntoSwitch`, hit **5 times** on
-the `fuchsia` walk: *"the boulder was pushed 34 times without reaching its target, so it was given
-up"*. The state it happened in is committed as **`src/pokemon/data/vr3f-boulder-given-up.bin`**. This
-is the third boulder finding in §7.1 and the second about a *bound* — `MAX_PUSHES_WITHOUT_PROGRESS`
-counts off a boulder that moved, and `MAX_SILENT_SHOVES` off one the cartridge refused, so a solver
-that is *making* progress toward the wrong target is bounded by neither.
+**The arithmetic.** `Map::iter()` yields **248** because the enum is the map *byte*: 22 `UnusedMap*`
+have no header at all, 2 are link-cable rooms, and 4 are duplicate headers **no warp from any map
+targets** (`CeruleanTrashedHouseCopy`, `CinnabarMartCopy`, `UndergroundPathRoute6Copy`,
+`UndergroundPathRoute7Copy`, checked against `pokered/data/maps/objects/`). So the denominator is
+**220**, and `unreached_report` prints it beside the count rather than leaving it to be worked out.
 
-⚠️ **The ROM cross-check is printed and never read, and it is saying things.** Across the ten walks:
+⭐ **2 170 ids were offered across the sweep and 1 018 of them were never chosen by any walk.** That
+is step 1.6's number and the sweep prints it broken down by kind now, per walk and over the union.
+The shape is stable and it is the same one the first count showed: **exits and grass**, on maps a
+walk left by one door before it had finished the others. It will not go to zero by walking longer —
+a frontier that leaves a map by its least-taken exit leaves that map's other exits behind by
+construction, and a `Grass` row is deliberately not re-takeable — so what is tracked is the ratio and
+the shape.
 
-- ⭐ **`(6, 1) → CeladonMansion3F` under `CeladonMansion2F`, and `(6, 1) → CeladonMansion2F` under
-  `CeladonMansion3F`, both "on the grid, no sibling, and never a row", in five walks of ten.** One
-  line each per walk — which this file first counted as ten walks of ten. ⚠️ **And it is not
-  shut:** in two other walks `CeladonMansion2F:6,1:Warp`, `CeladonMansion3F:6,1:Warp` and
-  `CeladonMansionRoof:6,1:Warp` all `completed`, while the other door between the same two floors
-  (`4,1`) was the row taken in the remaining seven. So the sentence that turned out to be Cerulean
-  Cave is describing here a door the frontier reaches only sometimes, and the first question is why
-  the cross-check calls a door with a same-destination neighbour "no sibling". ⚠️ **Not a
-  diagnosis** — every warp finding in this file that was argued from the ROM was wrong; it needs
-  `probe_button_at_state` on a dropped state first (§7.1's ⚰️).
-- **41 people never a row** on the `vermilion` walk alone, and **59 of 499 warps**, of which 25 are a
-  sibling door and 4 are not on the grid. Nobody has audited the remainder.
-- ⭐ **2 124 ids were *offered and never chosen* across the sweep** (`unreached`), against 6 984
-  completed and 225 blocked. By kind: **Warp 960, Grass 702, Connection 269, ConnectionWater 76,
-  Fish 53, Sprite 16**, and the rest toggleable objects (trash cans, vending machines). That is the
-  real shape of "every action taken once", and no number in this file tracked it until now. The shape
-  also says what it is: exits and grass on maps the walk left through another exit before it had
-  finished them — not people who pace, since a sprite id has carried no coordinate since §7.1's fix.
-
-**The ladder chain, still shut.** `CeruleanCave1F (0, 6) → B1F`, `1F (3, 11) → 2F` and
-`2F (1, 3) → 1F` all print *"on the grid, no sibling, and never a row"*.
-`probe_route_to_cerulean_cave` has the cause written down: the strip in front of the B1F ladder is
-raw tile 32 and the room below is tile 5, and `(32, 5)` is in the Cavern tileset's
-`TilePairCollisions`, so the floor is entered by going *up* at 1F (3, 11) and back down at 2F (1, 3).
-All three rungs are unmintable, so the route exists and cannot be asked for.
+⚠️ **The ROM cross-check is printed and still worth reading.** Across the sweep: the
+`CeladonMansion` `(6, 1)` doors, the `CeruleanCave` ladders and ~40 people per walk who were never a
+row. ⚠️ **Not a diagnosis** — every warp finding in this file that was argued from the ROM was wrong;
+it needs `probe_button_at_state` on a dropped state first (§7.1's ⚰️).
 
 ## 3. Rules that hold for every step
 
@@ -176,140 +176,187 @@ Each one is argued in full in a code comment; this is the index.
 
 ## 4. The steps
 
-**Two, and they are what is left of this plan.** Steps **0 to 8** of the 2026-09-09 draft are §7.4,
-one line each, kept because code comments still name them by number; their arguments are §7.1 and
-the comments those rows point at. Step 9 was never taken and is folded into step 2 below.
+**Both are taken.** Steps **0 to 8** of the 2026-09-09 draft
+are §7.4, one line each, kept because code comments still name them by number; their arguments are
+§7.1 and the comments those rows point at. Step 9 was never taken and is folded into step 2 below.
+Steps 1 and 2 below are both **done** and are kept in full rather than shortened to a line, because
+three of step 1's six items and one of step 2's assumptions were misdiagnosed in writing, and the
+corrections are the useful part.
 
 Each step below says what "done" is as something a fresh agent can check by running one command.
 ⚠️ **§3's rules hold for both**, and the two that bite hardest here are *fix the driver, not the
-walk* and *argue a defect from the dropped save state, never from the sentence the agent printed*.
+walk* and *argue a defect from the dropped save state, never from the sentence the agent printed* —
+to which step 1 added a third: ⚠️ **a state dropped at a defect cannot reproduce a fault in a clock
+the agent carries**, because restoring sets it to zero. The walk's own log is what settles those.
 
 ---
 
-### Step 1 — Nothing unreached, and nothing unexplained
+### Step 1 — Nothing unreached, and nothing unexplained ✅ **done**
 
 **The goal in one sentence: one sweep in which every real map is entered, every action offered is
 either taken or explained, and the cross-check that says so is an assertion rather than a
-paragraph.** Today the sweep is clean on the two things it asserts (defects, silences) and quiet on
-everything it merely prints, which is where all six items below were hiding. §2.1 is the evidence for
-each; none of this is speculative.
+paragraph.** §2.1 is where that stands after the six items below: **215 of 220 maps, 0 defects, 0
+silences, and no walk stopping short of its budget** — and every one of the five maps it missed
+behind a row that *was* offered and not taken, which is the frontier's shape rather than a fault.
 
-**1.1 ⛔ Fix the boulder defect.** `VictoryRoad3F:3,5:PushBoulderOntoSwitch` gave up after 34 pushes,
-five times, on the `fuchsia` walk. The state is committed: `src/pokemon/data/vr3f-boulder-given-up.bin`.
-Neither existing bound catches it — `MAX_PUSHES_WITHOUT_PROGRESS` counts off a boulder that *moved*
-and `MAX_SILENT_SHOVES` off one the cartridge refused, and this solver is moving a boulder that is
-not getting closer. ⚠️ Start from the state, not from the sentence. **Done:** a default-tier test
-off that fixture, and the row `completed` on a sweep.
+**1.1 ✅ The boulder defect, and it was not a boulder.** `VictoryRoad3F:3,5:PushBoulderOntoSwitch`
+gave up after 34 pushes, five times, on the `fuchsia` walk — three shoves from the end of a puzzle it
+had already solved twice from the same floor, with the plan getting shorter on every one of them.
+`DRIVER_ESCAPE_SILENCE` was measured against `cycles_since_poll`, the clock only a **decision
+point** resets, and a `BoulderGoal` is one decision that walks a boulder across a whole floor: past
+60 s of game time with no wild battle to poll the policy, every entry into `PushingBoulder` was
+escaped on its first tick and three of those is `MAX_SILENT_SHOVES`. ⚠️ The dropped state does not
+reproduce it — a restored agent starts the clock at zero — which is the one case §6.2's third rule
+does not cover; the walk's own log does, and the tell is three escapes in a row with no 60 s between
+them. Fixed with a second clock a landed shove also resets
+(`PokemonAgent::cycles_since_driver_answer`), and the test holds a Repel up so VictoryRoad3F's
+hardest puzzle runs 45 s of game time with the policy unasked.
+**Done:** `endgame::a_boulder_goal_that_keeps_shoving_is_not_a_driver_the_game_has_gone_quiet_on`,
+default tier; and the row `completed` on the sweep above.
 
-**1.2 Make `unreached_report` honest.** It sets aside `UnusedMap*` and the two link-cable rooms but
-not the four `*Copy` duplicates, which no warp targets, so every map count this file has ever printed
-was four too pessimistic. **Done:** the report's denominator is 220, and the four are counted in
-their own bucket with the reason.
+**1.2 ✅ `unreached_report` is honest.** The four `*Copy` duplicates are their own bucket with the
+reason, and the denominator — 220 — is printed beside the count.
+**Done:** `coverage::UNREACHABLE_DUPLICATES`, the report's `N of 220 reachable maps`, and
+`mechanics::a_duplicate_map_is_not_a_coverage_gap` — which reads the four out of the ROM's own warp
+tables rather than trusting the list, so a duplicate that moves upstream fails a test instead of
+quietly moving the denominator.
 
-**1.3 ⭐ Stop three walks spending half their budget on the credits.** `phase0`, `fuchsia` and
-`cinnabar` all `settled` by winning the game at 42-60% of budget and then stopped, which is where
-sixteen of §2.1's twenty-one missing maps went. ⚠️ **§3's rule is that a terminus is *reported*,
-never made unreachable** — that rule came from filtering the Hall of Fame out of the menu and leaving
-the walk at the title screen for 20 000 turns, and it is not this. Report it and then carry on from a
-checkpoint taken before the ceremony, so the remaining budget is spent walking. The pieces exist:
-`LlmRun::checkpoint` writes `state.gbst` and `LlmRun::restart` tears down and resumes from it, so
-the driver checkpoints when the brain first reports `IndigoPlateauLobby` and restarts on
-`reached_the_end`. Nothing that matters is disturbed by the restore — the brain is a string parser
-whose frontier lives in its own memory, and the conversation the restart resumes is read by nobody
-(a ranking of the Elite Four door *last* was considered instead, and rejected: it keeps the Elite
-Four rooms and the Hall of Fame out of the union unless the walk happens to go barren). ⚠️ **Two
-things it must do as well.** The door into Lorelei's room is an exit, and exits are re-takeable by
-least-taken count, so after the restore it must be marked taken for good or the walk plays the
-gauntlet a second time. And if `total_cycles` comes back with the state, the restore hands back the
-game time the gauntlet spent; either carry the spent time across the restart or accept a few per
-cent of extra budget on those three walks and print that it happened. **Done:** no walk reports
-`settled` on the Hall of Fame with more than 20% of its budget unspent, and the Elite Four rooms are
-still in the union.
+**1.3 ✅ No walk spends half its budget on the credits.** `phase0`, `fuchsia` and `cinnabar` used to
+`settle` by winning the game at 42-60% of budget and stop. The driver now checkpoints the first time
+the brain is asked a turn on `IndigoPlateauLobby`, reports the Hall of Fame exactly as before — §3's
+rule — and then rewinds the emulator to that checkpoint and hands the walk the rest of its budget.
+The emulated time carries across, so the rewind buys no extra budget; the Lorelei door is barred
+afterwards, because an exit is re-takeable by least-taken count and a door taken once in a lobby
+whose other two have been taken never is the *best*-scoring row in the room.
+**Done:** `LlmRun::restart_from_last_checkpoint`, `ExploringBrain::carry_on_after_the_credits`; and
+the sweep above, in which two walks reached the Hall of Fame, neither stopped there, and every one of
+the ten spent its whole budget. `phase0` went 38 maps to 136 and `cinnabar` 41 to 131.
 
-**1.4 Close the maps that are genuinely shut.** Four of §2.1's five, and three tools: the
-**Cerulean Cave ladder chain** (a routing fault, cause already written down in
-`probe_route_to_cerulean_cave` — all three rungs are unmintable because of the Cavern tileset's
-`TilePairCollisions`); **Route 17** (there is no row meaning *ride the Bicycle*, so it is a
-`MetaTile` for the gate's guard rather than a tool — `use_item`'s target was made optional by §7.1's
-bag-item row and that correctly did not move it, because the walk's brain takes rows); and the
-**two Safari rest houses**. `Route16Gate2F` is not on this list (§2.1), and the `CeladonMansion`
-`(6, 1)` doors are a row in some walks and not others, which makes them 1.6's question until a
-dropped state says otherwise. **Done:** a default-tier test per map that its row is minted off a
-committed fixture, as the boulder has — because which map a walk reaches is not reproducible by
-re-running (§6.2) — and then a sweep whose union is 220 of 220 as the confirmation rather than the
-proof.
+**1.4 ✅ There is no map the agent shuts out.** ⚠️ **All five of the maps this step was written for
+have come off the list, and three of them were misdiagnosed here.** The Cerulean Cave ladder chain is
+not a routing fault — `CeruleanCave1F:3,11:Warp` is on the menu and no walk chose it. Route 17 is not
+the gate guard, who stops a player only when the **Bicycle is not in the bag**
+(`Route16Gate1FIsBicycleInBagScript` → `IsItemInBag`) and never asks whether it is being ridden; it is
+behind `Route16:24,10:Warp`, offered and `unreached`. And the Safari rest houses are not one door
+each: `SafariZoneNorth` has **four** doors into `SafariZoneWest`, in two pairs landing on opposite
+sides of one-way ledges, and all four are rows. Every one of the five is §2.1's `unreached`, which is
+step 1.6.
 
-**1.5 ⭐ Widen the cross-check to every action kind, then assert it.** `rom_cross_check` compares the
-ROM's tables against what was offered for **warps, objects and connections** and for nothing else —
-so `Fish`, `Grass`, `CutTree`, `PushBoulder*`, `Switch`, `Pc`, `Water` and `ConnectionWater` have no
-"was this ever offered anywhere" check at all. Fishing was **35 of the 41** silences at the 2026-09-09
-baseline, so this is not a hypothetical gap. Every kind is enumerable: `MetaTile::id_kind` is the
-list. **Done:** the report covers every kind `id_kind` can return, and it **fails the tier** rather
-than printing — asserted over the union of a sweep, or per kind as "offered at least once
-anywhere", never per map per walk, because which maps one walk enters is a coin flip (§6.2) — with
-an allow-list of things argued to be expected (a toggleable item ball already in
-the bag, a boulder that is offered as a goal instead).
+⚠️ **A cluster that is "unreachable" can be a door the frontier ranks last rather than a row the
+agent withholds, and this step assumed the second for a month.** §7.2's item 16 already said a cluster
+can be gated by the *fixture* rather than by the game; this is the fourth thing again — it can be
+gated by the walk's own exit ordering, and a count of maps cannot tell the two apart. What can is the
+`unreached` column, which is why 1.6 exists.
 
-**1.6 Drive `unreached` to zero or to a reason.** 2 124 ids were offered and never chosen against
-6 984 completed, and §2.1 has the breakdown by kind: exits and grass, on maps the walk left before it
-had finished them. It is the literal reading of this plan's goal sentence. ⚠️ It will not go to zero
-by walking longer — a frontier that leaves a map by its least-taken exit leaves that map's other
-exits behind, and `Grass` rows are deliberately not re-takeable — so the deliverable is the *ratio*
-plus a named reason for each family that stays. The breakdown is one `awk` over the `walk-*.tsv`
-files (§6.1) rather than a feature. **Done:** the sweep prints `unreached` broken down by kind, and
-every family above 50 ids has a line in this file saying why.
+**Done:** `postgame::safari::the_safari_wests_rest_house_is_a_row_from_the_shelf_it_is_on`, off a
+committed fixture cut at the eastern landing (`safari-west-shelf.bin`), because which shelf a walk
+stands on is not reproducible by re-running (§6.2). The rest is 1.6's ratio.
 
-**Cost:** the largest step left. 1.1 is a fixture and a test, 1.2 is arithmetic, 1.3 is a checkpoint
-and a restart in the driver plus one exclusion in the brain; 1.5 is the one that changes what the
-tier means, and 1.6 is reading rather than building.
+**1.5 ✅ Every kind of row, asserted.** `rom_cross_check` covers warps, objects and connections and
+nothing else, so `Fish`, `Grass`, `CutTree`, both boulder goals, every `Switch` and `Pc` had no "was
+this ever offered anywhere" check at all — and the first run of the new one said that **`Pc`,
+`Statue` and `CellSeparator` had never appeared once in a ten-walk sweep**. `Statue` came back the
+moment 1.3 let a walk reach the Pokémon Mansion. The other two are the allow-list, and both carry
+their argument: `llm::tools` withholds `MetaTile::Pc` on purpose (a PC operation is a
+`use_field_move`, and "one way in, not two"), and Bill's cell separator is offered only before Bill
+has been turned back into a person, which every `COVERAGE_STARTS` save is long past.
+**Done:** `coverage::kind_cross_check` — a `match` on `MetaTile`, so a new variant is a compile error
+— asserted over the union of a sweep and never per map per walk, with the `Pc` allow-list checked
+against the PC-operation count rather than merely described.
+
+**1.6 ⭐ `unreached`, with a reason per family.** 1 018 of the sweep's 2 170 ids were offered
+somewhere and chosen nowhere. The sweep prints the breakdown by kind, per walk and over the union;
+the families and why each stays:
+
+| kind | why it stays |
+|---|---|
+| `Warp`, `Connection`, `ConnectionWater` | ⭐ **The frontier's own shape.** A walk leaves a map by its least-taken exit, which by construction leaves that map's other exits behind. Every one of §2.1's five missing maps but `SafariZoneWestRestHouse` is one of these. |
+| `Grass` | Deliberately not re-takeable (`ExploringBrain`'s `re_takeable`): a second pace discovers nothing and costs a 60 s budget, and the grind is the right answer for a model playing the game and the wrong one for a walk whose job is breadth. |
+| `Fish` | One row per rod per water's edge, and a map's edge carries many; taking one is enough to prove the mechanism, which `postgame::fishing` also pins. |
+| `Sprite`, toggleable objects | A person already talked to and an item ball already in the bag. `rom_cross_check`'s object scan is what reports these per map. |
+
+**Done:** the sweep prints `unreached` by kind and this table is the reason for every family above
+50 ids.
+
+**Cost:** taken. 1.4 is what is left, and it is one map.
 
 ---
 
-### Step 2 — The god run, and the tier it replaces
+### Step 2 — The god run ✅ **built**, and the tier it does *not* replace
 
-⭐ **Unparked deliberately** (it was §5's first entry, "Alex's call"): a fresh save at Pallet Town
-played to the **Hall of Fame** through `LlmPolicy`, the worker and the wire, as the pre-push gate
-instead of `full_playthrough`. The machinery is built and is no longer speculative — `Intent`,
-`ScriptedBrain` and `Cheats` are default tier and drive step 8's twelve branch arms — and
-`godmode_turn_cost` (`--features godmode`) is the measurement that was supposed to decide it.
+⭐ **A fresh save at Pallet Town played to the Hall of Fame through `LlmPolicy`, the worker and the
+wire.** `godmode_run`, `--features godmode`. It is the first test that plays the *deployed* policy
+over a real game: 46-47 requests from the title save to the credits, chaining,
+`resume_after_battle`, the battle script, the agent's boulder goals and the Elite Four.
 
-**Why it is worth taking now.** `full_playthrough` proves the *scripted route* still works, which is
-a `DeterministicPolicy` fact; the thing actually deployed is `LlmPolicy`, and no test plays it end to
-end. A god run would cover chaining, `resume_after_battle`, compaction, a restart mid-game and the
-whole turn loop across a real game, which is the list the first draft's §4 said was worth having.
+**What it costs, measured 2026-09-10 on this machine, three consecutive runs:**
 
-⚠️ **The bar is "not much slower", not "much faster", and the difference is the coverage.** The
-first draft said a god run had to beat `full_playthrough` outright; that was written when the run
-would have bought only a second way to play the same route. It buys more than that — the deployed
-policy end to end, chaining, `resume_after_battle`, compaction and a restart mid-game, none of which
-any test covers today — so a gate that costs about the same and proves considerably more is a
-straight win. `full_playthrough` measured **234 s** and `hall_of_fame` **904 s** on this machine on
-2026-09-10; the README and `docs/test-suite.md` still say about 7 and 26 minutes, from an older
-build or an older box. ⚠️ The bar is `full_playthrough` measured on the same machine on the same
-day, never either figure.
+| | game time | wall clock | rate | requests |
+|---|---|---|---|---|
+| `godmode_run` | 1 457 – 2 104 s | **32.7 / 38.0 / 41.2 s** | 45-51× | 46-47, **0 of them battle turns** |
+| `full_playthrough` | 18 322 s | **231.3 s** | 79× | — |
 
-⭐ **But it should be *faster*, and if it is not, that is the finding rather than the answer.** A god
-party wins every battle on the first move, and the grind is most of the scripted route's length —
-`full_playthrough` spends its time levelling a Squirtle to Blastoise, and a god run skips all of it.
-So a run that comes out slower is telling you something, and there are only two places it can be:
+⭐ **It is about six times faster**, which settles §4.2's question with room to spare. The reason is
+the one the first draft predicted: `full_playthrough` spends its 18 322 game-seconds levelling a
+Squirtle into a Blastoise, and a god party skips all of it. The battle script does the rest — every
+battle on the route, the rival in Oak's lab and all twenty-six Pokémon of the Elite Four included,
+is decided on the emulator thread and costs no request at all, which the run asserts rather than
+hopes.
 
-- **Turn count.** An `Intent` is one hop per turn by construction (the first draft's §4.1, the
-  correspondence with `PolicyStep::enter`), so a route written as forty hops costs forty round trips. Chaining is the
-  lever the deployed policy already has — `choose_action`'s `then` takes three more ids — and a god
-  run that does not use it is not playing the way a model would either.
-- **Per-turn latency.** A round trip to a localhost mock is not the cost; building the prompt over a
-  growing history is, and it grows until compaction bounds it. `godmode_turn_cost` already prints
-  mean and worst latency beside the turn count, which is exactly the pair that tells these two apart.
+**It does not play the scripted route, and the cartridge is why it does not have to.** The badges are
+cheated, so the only question is which gates read the **badge byte** and which read an **event
+flag** — and both gates on the west road read the byte: `Route22GateGuardText` is
+`ld a, [wObtainedBadges] / bit BIT_BOULDERBADGE`, and `Route23CheckForBadgeScript` is
+`ld hl, wObtainedBadges` for all seven of its guards (the `EVENT_PASSED_*_CHECK` flags it also
+touches are only a memo that the guard has already asked). So the run is Pallet → Viridian →
+Route 22 → Route 23 → Victory Road → the Elite Four, 18 maps. ⚠️ **Pewter is the counter-example**:
+its east exit reads the *event flag* for having beaten Brock, which is why the coverage walk starts
+from a finished game instead.
 
-**Take the number first**, and if it is bad, take it apart with `godmode_turn_cost` before writing
-any more of the route.
+#### ⛔ It is not a replacement for `full_playthrough`, and the reason is not speed
 
-**And check what stops being covered before retiring anything.** `full_playthrough` is a golden RNG
-replay of a route that *catches Pokémon, teaches HMs, buys, sells, grinds and solves both boulder
-floors with a real party*. A god run does none of that: the party is installed, so catching, move
-management and the whole "can this party win" question go with it. Most of it is covered elsewhere —
-the leg chain, `postgame::*`, `branch_points`, `battle_refusals` — and the deliverable here is **the
-table that says which test covers each**, written before the gate changes and not after.
+The bar was "not much slower" and it is six times faster. It still should not take that tier's place:
+
+| what `full_playthrough` gates | does the god run? |
+|---|---|
+| `PolicyStep` — **the scripted route itself** | ⛔ **No.** It uses `Intent`, not `PolicyStep`, so nothing would be left testing `DeterministicPolicy` end to end — and that is a *shipped* feature (`--policy deterministic`, the README's free-to-watch mode). |
+| The whole of Kanto | ⛔ 18 maps against ~120. |
+| Catching, teaching an HM, buying, selling, the PC | ⛔ The party is installed and the badges are given. |
+| ⛔ **"Can a party the run *earned* actually win?"** | ⛔ Nothing else covers this either; `hall_of_fame_playthrough` is the only test that ever has. |
+| The deployed `LlmPolicy` over a real game | ⭐ **Only the god run**, and nothing else ever has. |
+
+⭐ **So the two gate different things and both are cheap.** `godmode_run` joins the pre-push tier
+rather than replacing anything: 40 seconds beside `full_playthrough`'s 231 buys the first end-to-end
+proof that the policy people actually watch can play the game.
+
+**What would make it a replacement** is the full-route intent list — all eight gyms and the whole of
+Kanto, mirroring `complete_game_steps` — and that is now a bounded job rather than a gamble, because
+the machinery is proven over a whole game. §4.1 of the first draft is still right that
+`PolicyStep::complete_game_steps()` has variants with **no menu row behind them** — `UseBagItem`,
+`Fish`, `UsePcBox`, `UseItemsInBattle` — and that **where a step does not map, that is the finding**.
+
+#### What building it found
+
+Four faults, none of them in the product and all of them in the harness or in this file's own
+assumptions — which is itself the useful result, because it says the deployed surface carried
+everything the run needed.
+
+| What went wrong | Root cause |
+|---|---|
+| The run panicked with *"Invalid Pokemon species"* the instant it took Squirtle out of Oak's ball | `LlmRun::map()` unwraps `game_state()`, and over a whole playthrough that **will** be called on a tick with no readable state. `map_if_readable()` is the seam a long-running predicate uses. |
+| It ping-ponged between VictoryRoad2F and 3F for the rest of its budget | `Intent::Row(kind)` and `Intent::Enter(map)` both take whichever row sorts first, and Victory Road's top two floors are joined by **four** ladder pairs landing in four different pockets, with two `PushBoulderOntoSwitch` rows on one floor. ⭐ The rendered menu already distinguishes them — a goal names its target square, a warp names its landing and its side of the map — so `Says` expresses it and **a model has enough to choose correctly**. |
+| It gave up on the first turn a row was missing | Rows come and go: a person stands on a doormat, a route is lost to a wandering pet for `MAX_ROUTE_LOST_TICKS`, a sprite table is incomplete for a couple of dozen ticks after a warp. The agent is patient about all three; `ScriptedBrain::PATIENCE` is 20 turns. |
+| ⭐ It passed, then failed the next run with the boulder still on the floor | **`Says` confused *asking* with *arriving*.** VictoryRoad3F's hole goal was interrupted by wild encounters **six** times, `resume_after_battle` gives up after five, and the intent had advanced on the turn it was *chosen* — so the list moved on and then waited for a row the cartridge had no reason to mint. `Intent::Repeat` re-issues until the row stops being offered, which for a boulder goal is exactly "finished". |
+
+⚠️ **The one thing that looked like a product fault and was not.** `enter_at(VictoryRoad2F, 27, 7)`
+names a landing no VR3F row offered, which is the shape of §3's forbidden private seam — the scripted
+route reaching a warp the model is never shown. It is not: `enter_map_action` filters the same
+`actions()` list the menu is built from, and a probe from the leg's own fixture found
+`VictoryRoad2F:9,16:PushBoulderOntoSwitch` and the (26, 8) ladder both present from the right
+pocket. The difference was which pocket, and `PolicyStep::enter` picks the **nearest** matching row
+by route length where `Intent::Enter` takes the first in menu order. ⭐ **That is the one place the
+two are not one for one**, and it is a fact about the harness rather than about the prompt: the menu
+carries no step counts, and it does not need to, because it carries the landings.
 
 **Fold in, because both are one-liners next to the above:**
 
@@ -317,19 +364,10 @@ table that says which test covers each**, written before the gate changes and no
   constant, 40 minutes today — then compare what the soak finds that the sweep does not. Its only
   remaining value is state-space randomness, so if that column is empty, drop the tier.
 - **The battle cells proved under `DeterministicPolicy` only** (the first draft's §6.0 audit, at
-  `7343616`). What they prove is that
-  the *agent* can carry the action out, not what a model is offered in each. None is a refusal, which
-  is why step 7 left them; a god run that fights its way to the credits through `LlmPolicy` takes
-  most of them for free, so re-audit the list *after* step 2 rather than before it.
-
-**Done:** a number for the god run beside `full_playthrough`'s, measured the same day, **and, if it
-is the slower of the two, the reason** from the pair above; a table mapping everything `full_playthrough` uniquely
-covers to the test that covers it; and then either the gate changes or this file records why it did
-not.
-
-**Cost:** medium, and mostly the intent list. §4.1 of the first draft is still right that
-`PolicyStep::complete_game_steps()` has variants with **no menu row behind them** — `UseBagItem`,
-`Fish`, `UsePcBox`, `UseItemsInBattle` — and that **where a step does not map, that is the finding**.
+  `7343616`). What they prove is that the *agent* can carry the action out, not what a model is
+  offered in each. ⭐ The god run now fights its way to the credits through `LlmPolicy` and takes
+  none of them, because its battle script decides every turn — so that re-audit is still owed and
+  the god run does **not** discharge it.
 
 ---
 
@@ -356,14 +394,18 @@ GB_COVERAGE_START=celadon GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 
 # Every region in one process, serially, with the union printed at the end (10x the wall clock).
-# ⭐ This is the only form that prints `unreached` — the maps no walk entered, which is step 1.4's
-# input. The parallel recipe below is faster and cannot: the diff needs `Map::iter()`.
+# ⭐ This is the only form that does the three union-wide things: the maps no walk entered (the diff
+# needs `Map::iter()`), the ids offered somewhere and chosen nowhere, and the kind cross-check —
+# which is the only one of the three that is an *assertion*, and only on a coverage budget
+# (`COVERAGE_BUDGET_MINUTES`; a shorter run prints it and says it was not asserted).
 GB_COVERAGE_START=all GB_COVERAGE_MINUTES=360 GB_COVERAGE_PATIENCE=100000 \
   cargo test --release --features coverage-tests --bin gb -- coverage_walk --nocapture
 ```
 
-**For a measurement, run the ten in parallel** — same 7 minutes as one, and they agree with each
-other. Build once, then launch the test binary ten times, one directory each:
+**For a measurement, run the ten in parallel** — about 14 minutes for the set on an idle box, and
+they agree with each other. ⚠️ **It was 7 before step 1.1**: a Victory Road Strength floor now runs
+to the end rather than being abandoned, and the two walks that go through one early emulate at
+**26×** against the other eight's 53–58× (§6.2), so they are the last out by a factor of two. Build once, then launch the test binary ten times, one directory each:
 
 ```shell
 bin=$(cargo test --release --features coverage-tests --bin gb --no-run 2>&1 \
@@ -420,13 +462,23 @@ states fresh rather than looking for old ones.
 
 ### 6.2 How to read a number
 
-- **A walk has several modes rather than a spread, and it is the *terminus* that varies.** `phase0`
-  has stopped on the Hall of Fame at 38 maps, spent its budget in Victory Road at 30 or 61, and —
-  once the bag was fixed — walked 123 and 143. `fuchsia` came back with 163, then 71, then 147; the
-  71 is the run that happened to win the game at 55% of its budget. A single row is a sample of
-  which happened. ⚠️ **A start that reaches the Indigo Plateau stops exploring**, and that cuts both
-  ways: it is why `cinnabar` is 41 maps and why `ssanne`, which cannot win, is worth 17 nobody else
-  reaches (§2.1).
+- **A walk has several modes rather than a spread, and it used to be the *terminus* that varied.**
+  `phase0` stopped on the Hall of Fame at 38 maps, spent its budget in Victory Road at 30 or 61, and
+  — once the bag was fixed — walked 123 and 143; `fuchsia` came back with 163, then 71, then 147,
+  the 71 being the run that won the game at 55% of its budget. ⭐ **Step 1.3 removed that mode**: a
+  walk that reaches the Hall of Fame is now rewound to the Indigo Plateau lobby and spends the rest
+  of its budget, so `phase0` went 38 → 136 and `cinnabar` 41 → 131. What is left of the spread is
+  ordinary: where a walk's budget happened to go. ⚠️ **Victory Road is the big one, and it costs
+  *rate* rather than only budget** — its Strength floors are legitimately expensive now that a goal
+  runs to the end rather than being abandoned. The 2026-09-10 sweep measured it exactly: eight walks
+  emulated at **53–58×** realtime and the two that solved those floors at **26×**, finishing on 131
+  and 105 maps where their siblings reached 135. `solve_boulder_push` and `route_to_push_tile` are
+  per-tick costs on a floor with four boulders, so a walk inside one runs at half speed. ⚠️ **A
+  `NOT MOVING` heartbeat on `VictoryRoad3F` is that, and it is healthy**: a boulder goal is **one
+  turn**, so the turns/min counter cannot move while one is being solved.
+- ⚠️ **A start that cannot win is worth keeping for what it alone reaches**: `ssanne` and
+  `ssanneship` are cut before the S.S. Anne sails and are the only two that can enter its ten rooms
+  (§7.2's item 16).
 - **Load is an input.** Three runs beside a `cargo build -j24` came out 30/30/38; ten on an idle
   box agree with each other. Never build while measuring, and prefer the ten in parallel to one.
 - **Which id fails is not reproducible by re-running**; the dropped save state is. Argue from the
@@ -436,7 +488,8 @@ states fresh rather than looking for old ones.
   driver prints its state every tick, so the trail names which one was holding the walk when it went
   quiet — `move→X`, then `surf`, then `BattleStarted` with no abort between is the whole diagnosis.
 - **The union is the number for the goal**, and it is only meaningful across several starts: eight
-  identical `phase0` walks union to 86, ten different starts to 189–215. ⚠️ **And the complement is the
+  identical `phase0` walks union to 86, ten different starts to 215 of 220 (2026-09-10, after step
+  1; 189–215 before it). ⚠️ **And the complement is the
   number to act on** — a count says nothing about whether a gate is doing its job or a walk never
   arrived, which is what the `unreached` line and the ROM cross-check are for.
 
@@ -496,6 +549,12 @@ in a driver rather than in routing. Each has a test.
 | **…and whether that menu was confirmed at all was a matter of timing** (step 8) | Same root, and the worse half: with the driver removed the identical menu in the identical state was *confirmed* at the Cerulean trader and *bounced* at the Day Care, because `MENU_HANDOVER_TICKS` is a window after a box opens and a conversation may reach its party list outside it. Boarding a Pokémon at the Day Care is irreversible and can cost a run its only Cut carrier | `postgame::gifts::talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose` |
 | **The dojo's second Poké Ball stays a row** (step 8) | Not a fault, and the *test* was the thing that was wrong: `FightingDojoHitmonchanPokeBallText` `HideObject`s only the ball that was taken, where Mt Moon's Super Nerd hides the fossil you leave. The other object stands there and answers "Better not get greedy...", so the menu is right and what has to hold is that the model is told | `branch_points::the_dojo_branch_can_be_taken_to_hitmonlee`, `…_to_hitmonchan` |
 | **The bike shop without a voucher is not a mart** (step 8) | `BikeShopClerkText`'s `.dontHaveVoucher` branch is a hand-rolled `TextBoxBorder` + `HandleMenuInput` list rather than `DisplayPokemartDialogue`, so no `buy_item` turn is ever put to the model — it reads as one text box ending in "Sorry! You can't afford it!". ⭐ ¥1,000,000 is above Gen 1's ¥999,999 money cap, so the A-mash inside it can never buy anything on any save | `branch_points::the_bike_branch_can_be_taken_without_the_voucher` |
+
+| **A boulder goal abandoned three shoves from the end, five times, on one floor** (step 1.1) | Not the boulder and not either of its bounds. `DRIVER_ESCAPE_SILENCE` was measured against `cycles_since_poll` — the clock only a **decision point** resets — and a `BoulderGoal` is one decision that walks a boulder across a whole floor. Past 60 s of game time with no wild battle to poll the policy, every entry into `PushingBoulder` was escaped on its **first tick**, and three of those is `MAX_SILENT_SHOVES`. The `fuchsia` walk solved VictoryRoad3F's switch twice from the same floor in about 30 shoves each and lost the third at 34. `cycles_since_driver_answer` is a second clock that a landed shove also resets | `endgame::a_boulder_goal_that_keeps_shoving_is_not_a_driver_the_game_has_gone_quiet_on` |
+| **Every map count this file ever printed was four too pessimistic** (step 1.2) | `unreached_report` set aside the 22 `UnusedMap*` and the two link-cable rooms and not the four `*Copy` duplicates, which **no warp in any map targets**. The denominator is 220 and it is printed beside the count now | `coverage::UNREACHABLE_DUPLICATES`, and the report's own `N of 220` |
+| **Half of three walks spent playing the game rather than exploring it** (step 1.3) | `phase0`, `fuchsia` and `cinnabar` reached the Hall of Fame at 42-60% of their budget and stopped, because there is no world left to walk after the cartridge soft-resets. The terminus is still *reported* — §3's rule — and the driver now rewinds the emulator to a checkpoint taken at the Indigo Plateau lobby and spends the rest of the budget walking. The Lorelei door is barred afterwards, because an exit is re-takeable by least-taken count and that door is the best-scoring row in the room | `LlmRun::restart_from_last_checkpoint`, `ExploringBrain::carry_on_after_the_credits`; `phase0` going 38 maps to 136 |
+| **Five maps no sweep had ever entered, and none of them was withheld by the agent** (step 1.4) | The step assumed a shut door and every one was a door the *frontier* ranked last. The sharpest is the Safari Zone's west area: it is two shelves one-way ledges seal off from each other, `SafariZoneNorth` has **four** doors into it landing on opposite sides, and all four are rows — but the frontier counts a way out **per crossing**, so the moment either pair is taken the crossing is "done" and the other pair waits behind every exit on a very large map. Twenty walks took the western pair twenty times, which is why `SafariZoneWestRestHouse` had never been in a union | `postgame::safari::the_safari_wests_rest_house_is_a_row_from_the_shelf_it_is_on`, off `safari-west-shelf.bin` |
+| **`Pc`, `Statue` and `CellSeparator` had never been offered once in a ten-walk sweep, and nothing could see it** (step 1.5) | `rom_cross_check` covers warps, objects and connections and nothing else, so eight of the kinds `MetaTile::id_kind` can return had no "was this ever offered anywhere" check at all. `kind_cross_check` is a `match` on `MetaTile` — a new variant is a compile error — and it **fails the tier** rather than printing, with an argued allow-list of two | `coverage::kind_cross_check` |
 
 ⚰️ **Four of these were diagnosed wrongly before they were diagnosed rightly, and the lesson is the
 same every time: argue from the dropped save state, not from the sentence the agent printed.** Two
@@ -571,6 +630,22 @@ Kept because the reasoning is the useful part.
    that, and neither of its two bounds could see a shove that never landed, so the net became a 60 s
    loop that ran for two thirds of a region's budget. **Every hatch needs to ask what picks the work
    back up.**
+18. **…and it needs to ask what its own clock measures.** The same hatch was read against
+   `cycles_since_poll`, on the reading that "nothing is happening" and "the policy has not been asked
+   anything" are the same fact. They are for every driver that is a conversation with one menu, and
+   they are not for the one driver that is carried out dozens of times inside a *single* decision. A
+   boulder goal that ran past 60 s was then escaped on the first tick of every shove, and the
+   sentence it printed said the game had gone quiet about a game that had just moved a boulder
+   fourteen tiles. ⚠️ **The dropped state does not reproduce it**, because a restored agent starts
+   the clock at zero — the one case §6.2's third rule does not cover, and the walk's own log is what
+   settles it.
+19. **A map nothing ever reached is not evidence that anything is shut.** Step 1.4 was written as
+   five gates to open and every one of them turned out to be a door the *frontier* ranked last —
+   including `SafariZoneWest`'s rest house, whose door is a row from one of the two shelves the area
+   is cut into and not from the other. §7.2's item 16 said a cluster can be gated by the fixture
+   rather than by the game; it can also be gated by the walk's own exit ordering, and **a count of
+   maps cannot tell any of the three apart**. The `unreached` column can, which is why step 1.6 is
+   the one that stayed.
 
 ### 7.3 Where the old section numbers went
 
@@ -594,11 +669,12 @@ argument lives now:
 | §6, §6.0 | the battle matrix audit | §7.4 row 7, `battle_refusals.rs`; the cells still under `DeterministicPolicy` only are step 2's fold-in |
 | §7 | the soak decision | step 2's fold-in |
 
-### 7.4 The nine steps that got here
+### 7.4 The ten steps that got here
 
 Kept as one line each, because code comments name them by number and because the shape of the work
-is the useful part. All were taken on 2026-09-09 and 2026-09-10; the arguments are in §7.1 and in the
-comments those rows point at.
+is the useful part. Steps 0-8 were taken on 2026-09-09 and 2026-09-10 and are numbered from the
+2026-09-09 draft; step 1 is §4's, and the two numbering schemes overlap because code comments already
+name the old ones. The arguments are in §7.1 and in the comments those rows point at.
 
 | Step | What it did |
 |---|---|
@@ -611,3 +687,4 @@ comments those rows point at.
 | 6 | **The loop, to its fixpoint** — two clean sweeps whose union did not grow. Nine defects and six silences over two turns; the two biggest were a bag with no room for the key items, and one crossing per adjacent map when a bridge and a river seam lead to the same place |
 | 7 | The battle refusals: seven cells that existed nowhere, three defects, the largest being that **no bag item used in a battle ever reported its outcome** |
 | 8 | The branch points: content that is exclusive per save, and the trade that **handed over whatever the party-menu cursor was left on** |
+| 1 | **Nothing unreached, and nothing unexplained** — 199 maps to **215 of 220**, one defect to none, and three walks that used to stop on the credits now spending their whole budget. The two largest were a driver-escape hatch reading the *policy's* clock while a boulder goal ran for minutes, and a terminus that ended the walk rather than being rewound past |

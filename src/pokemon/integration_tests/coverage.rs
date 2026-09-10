@@ -436,6 +436,29 @@ impl CoverageLog {
         out
     }
 
+    /// ⭐ **Every id the menu offered and the walk never chose, by kind** —
+    /// `docs/coverage-plan.md` step 1.6, and the number the plan's own goal sentence turns on.
+    ///
+    /// "Every action the game offers, taken once" is what this file is for, and until 2026-09-10
+    /// nothing tracked it: a sweep printed defects and silences, both of which are about ids that
+    /// *were* chosen. The first time it was counted it was **2 124 against 6 984 completed**, which
+    /// is a quarter of the frontier, and the shape of it is the answer — 960 `Warp`, 702 `Grass`,
+    /// 269 `Connection` — exits and grass on maps the walk left by one door before it had finished
+    /// the others.
+    ///
+    /// ⚠️ **It will not go to zero and it is not meant to.** A frontier that leaves a map by its
+    /// least-taken exit leaves that map's other exits behind by construction, and a `Grass` row is
+    /// deliberately not re-takeable (a second pace discovers nothing and costs a 60 s budget). What
+    /// this is for is the *ratio* and the shape: a family that grows, or one that appears where no
+    /// family was before, is the finding.
+    pub fn unreached_kinds(&self) -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        for entry in self.entries.values().filter(|entry| entry.verdict == Verdict::Unreached) {
+            *out.entry(kind_of(&entry.id)).or_insert(0) += 1;
+        }
+        out
+    }
+
     /// One line for a test to print: how much of the world this driver touched.
     pub fn summary(&self) -> String {
         format!(
@@ -775,6 +798,21 @@ pub struct ExploringBrain {
     /// Set once the walk has played the game to its end, which is a terminus rather than a fault.
     /// See the note where it is set.
     pub reached_the_end: bool,
+    /// Set the first time a turn is asked on `IndigoPlateauLobby` — the last room before the Elite
+    /// Four, and the square the driver rewinds to. See [`Self::carry_on_after_the_credits`].
+    pub reached_the_lobby: bool,
+    /// How many times the walk has been rewound past the credits. See
+    /// [`Self::carry_on_after_the_credits`].
+    pub rewound: usize,
+    /// ⭐ **Rows the walk must never choose again, whatever the frontier thinks of them.**
+    ///
+    /// One entry, and it is the door into Lorelei's room. Everything else about the frontier is a
+    /// *preference* — least-taken first, then promise — because a row that looks finished can be
+    /// put back by the world (a tree regrows, a statue toggles), and refusing to re-take one is how
+    /// this walk lost 80 636 turns on `PokemonMansionB1F`. The Elite Four door is the one row where
+    /// that argument runs the other way: taking it a second time replays the whole gauntlet and
+    /// wins the game again, which is where the walk had just been rewound *from*.
+    barred: std::collections::BTreeSet<String>,
     /// The map the last turn was asked on, for the progress heartbeat. Nothing reads it but the
     /// `[walk]` line, and that line is the only way to tell a slow sweep from a wedged one.
     pub here: String,
@@ -846,6 +884,9 @@ impl ExploringBrain {
             exits: std::collections::BTreeMap::new(),
             barren: 0,
             reached_the_end: false,
+            reached_the_lobby: false,
+            rewound: 0,
+            barred: std::collections::BTreeSet::new(),
             here: String::new(),
             turns: 0,
             pc_ops_tried: std::collections::BTreeSet::new(),
@@ -854,6 +895,37 @@ impl ExploringBrain {
             stalled_worst: 0,
             boxed_in_at: Vec::new(),
         }
+    }
+
+    /// ⭐ **The credits are reported and then walked away from** — `docs/coverage-plan.md` step 1.3.
+    ///
+    /// Three of the ten walks (`phase0`, `fuchsia`, `cinnabar`) beat the Elite Four at 42-60% of
+    /// their game-time budget and then stopped with the rest unwalked, which is where **sixteen of
+    /// the twenty-one** maps the sweep of 2026-09-10 missed went: the whole Pallet cluster, the
+    /// whole Cinnabar cluster and all four Pokémon Mansion floors. Half of three walks was being
+    /// spent playing the game rather than exploring it.
+    ///
+    /// ⚠️ **This is not "filter the Hall of Fame out of the menu", which §3's rule forbids and
+    /// which was tried and was strictly worse.** Nothing is withheld: the walk plays the gauntlet,
+    /// reaches the Hall of Fame, and the terminus is reported exactly as before. The *driver* then
+    /// rewinds the emulator to the checkpoint it took at the Indigo Plateau lobby
+    /// (`LlmRun::restart_from_last_checkpoint`) and hands the walk its remaining budget. Nothing the
+    /// brain holds is disturbed by the rewind — the frontier is its own memory and the maps it
+    /// reached stay reached, so the Elite Four rooms stay in the union.
+    ///
+    /// ⚠️ **The door has to be barred, and once is not enough by itself.** An exit is re-takeable by
+    /// least-taken count, so `IndigoPlateauLobby`'s Lorelei door — taken once, in a lobby whose
+    /// other two doors have been taken never — is the *best*-scoring row in the room the moment the
+    /// walk comes back to it. See [`Self::barred`].
+    pub fn carry_on_after_the_credits(&mut self, door: &str) {
+        self.reached_the_end = false;
+        self.rewound += 1;
+        self.barred.insert(door.to_string());
+        // The rewind puts the player back before the gauntlet, so "nothing new for N turns" has to
+        // start again from there: the barren count at the Hall of Fame is about a world that no
+        // longer exists.
+        self.barren = 0;
+        self.stalled_turns = 0;
     }
 
     /// How many distinct PC operations the walk has taken, across all maps.
@@ -1024,7 +1096,19 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
         if request.location().as_deref() == Some("HallOfFame") {
             self.reached_the_end = true;
         }
-        let rows = request.menu_rows();
+        // ⭐ **The last room before the gauntlet, and the square the driver rewinds to.** Recorded
+        // here rather than watched for by the driver because the brain is the only thing that knows
+        // where the player is: `LlmRun` sees turns, not `GameState`. See
+        // [`Self::carry_on_after_the_credits`].
+        if request.location().as_deref() == Some("IndigoPlateauLobby") {
+            self.reached_the_lobby = true;
+        }
+        // ⚠️ **Barred rows are dropped before anything counts them**, so a barred door is not
+        // "offered and never chosen" either: it *was* chosen, once, and the walk was rewound out of
+        // where it led.
+        let rows: Vec<(String, String)> = request.menu_rows().into_iter()
+            .filter(|(id, _)| !self.barred.contains(id))
+            .collect();
         // Counted before anything is chosen, so "the menu was empty" is a fact rather than an
         // inference from the brain having done nothing.
         if rows.is_empty() {
@@ -1387,6 +1471,13 @@ pub const COVERAGE_STARTS: &[Start] = &[
 struct WalkOutcome {
     name: &'static str,
     ids: std::collections::BTreeSet<String>,
+    /// The ids this walk was **offered and never chose** — step 1.6. Carried per walk rather than
+    /// summed, because the union's question is different: an id unreached here may have been taken
+    /// by another region, and only one nobody took is unreached for the sweep.
+    unreached: std::collections::BTreeSet<String>,
+    /// PC operations this walk took. `MetaTile::Pc` is allow-listed out of the kind cross-check on
+    /// the grounds that this is how the walk covers it, so the number has to travel with it.
+    pc_ops: usize,
     maps: std::collections::BTreeSet<String>,
     /// Everything that makes this walk red — [`CoverageLog::failures`], so defects *and* silences.
     failures: Vec<String>,
@@ -1508,7 +1599,7 @@ fn coverage_walk_of_the_finished_game() {
             .collect();
         println!(
             "\n════ C3: the regional sweep ════\n{}\n\
-             union      ⭐ {} maps of 248, {} ids, over {} walks\n\
+             union      ⭐ {} maps, {} ids, over {} walks\n\
              only here  {}\n\
              cost       {:?} of game time, {:?} of wall clock in total\n\
              {}\n",
@@ -1521,6 +1612,50 @@ fn coverage_walk_of_the_finished_game() {
             outcomes.iter().map(|o| o.wall).sum::<std::time::Duration>(),
             unreached_report(&maps),
         );
+
+        // ⭐ **Step 1.6: what was offered everywhere and taken nowhere.** An id unreached on one
+        // walk may have been taken on another, so the sweep's `unreached` is the ids no walk chose
+        // — not the sum of the columns, which double-counts every route two regions both crossed.
+        let taken: std::collections::BTreeSet<&String> = outcomes
+            .iter()
+            .flat_map(|o| o.ids.difference(&o.unreached))
+            .collect();
+        let never: std::collections::BTreeSet<&String> = outcomes
+            .iter()
+            .flat_map(|o| o.unreached.iter())
+            .filter(|id| !taken.contains(id))
+            .collect();
+        let mut by_kind: std::collections::BTreeMap<String, usize> = Default::default();
+        for id in &never { *by_kind.entry(kind_of(id)).or_insert(0) += 1 }
+        let mut ranked: Vec<(String, usize)> = by_kind.into_iter().collect();
+        ranked.sort_by_key(|(kind, n)| (std::cmp::Reverse(*n), kind.clone()));
+        println!(
+            "unreached  ⭐ {} of {} ids were offered somewhere and chosen nowhere ({:.0}%)\n\
+             by kind    {}\n",
+            never.len(), ids.len(),
+            100.0 * never.len() as f64 / ids.len().max(1) as f64,
+            ranked.iter().map(|(kind, n)| format!("{kind}:{n}")).collect::<Vec<_>>().join(" "));
+
+        // ⭐ **Step 1.5, and it is an assertion rather than a paragraph.** Over the union, because
+        // which maps one walk enters is a coin flip (§6.2); only when more than one region ran, for
+        // the same reason.
+        //
+        // ⚠️ **And only on a coverage budget.** A smoke run of `all` walks ten regions for twenty
+        // minutes of game time apiece and gets nowhere near the Pokémon Mansion or a Strength floor,
+        // so asserting on it would fail for the one reason that is not a finding. The report is
+        // still printed, and it says which of the two it is.
+        let (report, kind_failures) =
+            kind_cross_check(&ids, outcomes.iter().map(|o| o.pc_ops).sum());
+        println!("{report}");
+        match minutes >= COVERAGE_BUDGET_MINUTES {
+            true => assert!(kind_failures.is_empty(),
+                "the sweep was never offered {} kind(s) of row the game has:\n  {}",
+                kind_failures.len(), kind_failures.join("\n  ")),
+            false => println!(
+                "           ⚠️ not asserted: {minutes} game-minutes per walk is below the \
+                 {COVERAGE_BUDGET_MINUTES} a coverage sweep spends, and a short walk cannot be \
+                 expected to have seen every kind"),
+        }
     }
 
     // ⚠️ **Every region walks before any assertion, and that is deliberate.** A defect in the first
@@ -1550,31 +1685,212 @@ fn coverage_walk_of_the_finished_game() {
 /// padding — map numbers with no header, which `Map::iter()` yields because the enum is the byte —
 /// and `Colosseum` and `TradeCenter` are the link-cable rooms, which need a second Game Boy. They
 /// are counted and then set aside, so the list that is left is the one worth reading.
+///
+/// ⚠️ **And four more that this report called real for every sweep it ever printed.**
+/// [`UNREACHABLE_DUPLICATES`] are headers the ROM carries that **no warp in any map targets**, so
+/// no walk can enter one and every map count here was four too pessimistic. `docs/coverage-plan.md`
+/// step 1.2. The denominator is printed beside the count for the same reason: "199 maps" is a
+/// number nobody can check, and "199 of 220" is one anybody can.
 fn unreached_report(entered: &std::collections::BTreeSet<&String>) -> String {
     use crate::pokemon::map::Map;
     use strum::IntoEnumIterator;
-    let (mut padding, mut cable, mut real) = (0usize, 0usize, Vec::new());
+    let (mut padding, mut cable, mut duplicates, mut real) = (0usize, 0usize, 0usize, Vec::new());
+    let mut reachable = 0usize;
     for map in Map::iter() {
         let name = format!("{map:?}");
+        let bucket = classify(map, &name);
+        if bucket == MapBucket::Reachable { reachable += 1 }
         if entered.contains(&name) {
             continue;
         }
-        match map {
-            _ if name.starts_with("UnusedMap") => padding += 1,
-            Map::Colosseum | Map::TradeCenter => cable += 1,
-            _ => real.push(name),
+        match bucket {
+            MapBucket::Padding => padding += 1,
+            MapBucket::LinkCable => cable += 1,
+            MapBucket::Duplicate => duplicates += 1,
+            MapBucket::Reachable => real.push(name),
         }
     }
     real.sort();
     // Wrapped rather than one per line: this is a list to scan for a cluster — the S.S. Anne's nine
     // rooms, Rocket Hideout's four floors — and a column of sixty names hides one.
     let mut lines: Vec<String> = vec![format!(
-        "unreached  ⭐ {} real maps, plus {padding} UnusedMap* and {cable} link-cable rooms",
+        "unreached  ⭐ {} of {reachable} reachable maps, plus {padding} UnusedMap*, \
+         {cable} link-cable rooms and {duplicates} unreachable duplicates",
         real.len())];
     for chunk in real.chunks(6) {
         lines.push(format!("           {}", chunk.join(" ")));
     }
     lines.join("\n")
+}
+
+/// **Headers the ROM carries that no warp in any map targets**, so nothing can walk into one.
+///
+/// ⚠️ **Checked against `pokered/data/maps/objects/` rather than assumed**: `grep -rl warp_event.*
+/// <MAP>_COPY` finds nothing for any of the four, and `a_duplicate_map_is_not_a_coverage_gap` keeps
+/// that honest against the world graph the emulator builds from the ROM's own headers. They were
+/// counted as reachable by every sweep this plan has taken, which is where
+/// `docs/coverage-plan.md`'s "four too pessimistic" comes from.
+const UNREACHABLE_DUPLICATES: [crate::pokemon::map::Map; 4] = [
+    crate::pokemon::map::Map::CeruleanTrashedHouseCopy,
+    crate::pokemon::map::Map::CinnabarMartCopy,
+    crate::pokemon::map::Map::UndergroundPathRoute6Copy,
+    crate::pokemon::map::Map::UndergroundPathRoute7Copy,
+];
+
+/// Why a map number is or is not something a walk could have entered. See [`unreached_report`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MapBucket { Padding, LinkCable, Duplicate, Reachable }
+
+fn classify(map: crate::pokemon::map::Map, name: &str) -> MapBucket {
+    use crate::pokemon::map::Map;
+    match map {
+        _ if name.starts_with("UnusedMap") => MapBucket::Padding,
+        Map::Colosseum | Map::TradeCenter => MapBucket::LinkCable,
+        _ if UNREACHABLE_DUPLICATES.contains(&map) => MapBucket::Duplicate,
+        _ => MapBucket::Reachable,
+    }
+}
+
+/// Game-minutes per walk below which a sweep is a smoke run rather than a measurement, and the
+/// union-wide checks are printed rather than asserted.
+///
+/// Half of §6.1's coverage budget. The number is not delicate — what it separates is "ten walks of
+/// twenty minutes that never left north-west Kanto" from "ten walks that spent six game-hours each"
+/// — and the report says which side of it a run was on.
+const COVERAGE_BUDGET_MINUTES: u64 = 180;
+
+/// **What an id ends in**, which is [`MetaTile::id_kind`] and therefore the one name a family of
+/// rows shares.
+///
+/// ⚠️ **A sprite row has two segments and everything else has three** — `{map}:{Name}` against
+/// `{map}:{x},{y}:{Kind}` — so the last segment of a sprite id is the object's own name, of which
+/// there are 919. They are folded into one family here: "was a person ever a row" is the question
+/// this answers, and *which* person is what `rom_cross_check`'s per-map object scan is for.
+pub fn kind_of(id: &str) -> String {
+    match id.split(':').count() {
+        0 | 1 | 2 => "Sprite".to_string(),
+        _ => id.rsplit(':').next().unwrap_or("?").to_string(),
+    }
+}
+
+/// ⭐ **Every kind of row the game can offer, against the kinds the sweep was actually offered** —
+/// `docs/coverage-plan.md` step 1.5.
+///
+/// ⚠️ **[`rom_cross_check`] covers warps, objects and connections and nothing else**, so `Fish`,
+/// `Grass`, `CutTree`, both boulder goals, every `Switch` and `Pc` had no "was this ever offered
+/// anywhere" check at all. That is not a hypothetical gap: fishing was 35 of the 41 silences at the
+/// 2026-09-09 baseline, and the first run of *this* check said that `Pc`, `Statue` and
+/// `CellSeparator` had never appeared once in a ten-walk sweep.
+///
+/// ⚠️ **Per kind, over the union, and never per map per walk.** Which maps one walk enters is a
+/// coin flip (§6.2), so the only honest question is whether a kind was offered *somewhere*.
+///
+/// ⚠️ **The list is a `match` on [`MetaTile`] rather than a list of strings**, so a new variant is
+/// a compile error here rather than a silent hole. [`Expect::Absent`] is the allow-list, and every
+/// entry in it carries the argument for why the absence is the agent working.
+fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize)
+    -> (String, Vec<String>) {
+    use crate::pokemon::tile::{HiddenObject, JumpDirection, MetaTile};
+    use crate::pokemon::postgame::fishing::Rod;
+    use crate::pokemon::map::Map;
+    use crate::geometry::Point8;
+
+    /// Whether a `MetaTile` is something `MetaTileMap::actions` can put on the menu, and if not,
+    /// why the sweep will never see one.
+    enum Expect {
+        /// `actions()` mints this, so a sweep of the whole of Kanto has to have been offered one.
+        Row,
+        /// Terrain, not a decision: it classifies a square and is never a row of its own.
+        Terrain,
+        /// A row that exists and that this harness is expected not to see, with the argument.
+        Absent(&'static str),
+    }
+
+    let here = Point8 { x: 0, y: 0 };
+    let every = [
+        MetaTile::Empty, MetaTile::Obstacle, MetaTile::Water, MetaTile::Counter,
+        MetaTile::Jump(JumpDirection::South),
+        MetaTile::Sprite("Youngster"),
+        MetaTile::Warp { to_map: Map::PalletTown, to_position: here },
+        MetaTile::Connection { to_map: Map::PalletTown, to_position: here },
+        MetaTile::ConnectionWater(Map::PalletTown),
+        MetaTile::CutTree, MetaTile::Cut { at: here },
+        MetaTile::BoulderGoal { boulder: here, at: here, hole: false },
+        MetaTile::BoulderGoal { boulder: here, at: here, hole: true },
+        MetaTile::Pc, MetaTile::Grass, MetaTile::Fish { rod: Rod::Old },
+        MetaTile::Switch { object: HiddenObject::TrashCan, ordinal: 1 },
+        MetaTile::Switch { object: HiddenObject::VendingMachine, ordinal: 1 },
+        MetaTile::Switch { object: HiddenObject::Poster, ordinal: 1 },
+        MetaTile::Switch { object: HiddenObject::Statue, ordinal: 1 },
+        MetaTile::Switch { object: HiddenObject::CellSeparator, ordinal: 1 },
+    ];
+    let expectation = |tile: &MetaTile| match tile {
+        // Terrain. `actions()` reads these to decide where the player may walk and never offers one.
+        MetaTile::Empty | MetaTile::Obstacle | MetaTile::Counter | MetaTile::Jump(_) => Expect::Terrain,
+        // Water is crossed rather than chosen: the row for it is `ConnectionWater`, or a `Fish`
+        // square at its edge, or a walk whose route happens to mount Surf.
+        MetaTile::Water => Expect::Terrain,
+        // ⚠️ **Withheld from the action menu on purpose, and covered the other way.** `llm::tools`
+        // does not offer `MetaTile::Pc`, because every PC operation is a `use_field_move` that walks
+        // to the PC itself and a row that only walked there would leave the agent holding an open
+        // storage menu with nothing chosen. "One way in, not two." `ExploringBrain`'s `PC_OPS`
+        // drives that other way in, and the count is asserted beside this rather than the row.
+        MetaTile::Pc => Expect::Absent(
+            "withheld from the action menu on purpose (llm::tools); the walk drives it through \
+             use_field_move instead, and pc ops are counted separately"),
+        // ⚠️ **Bill's cell separator is offered only while pressing it would still do something** —
+        // `MetaTileMap::bill_cell_separator` — and every `COVERAGE_STARTS` save is a game that got
+        // past Bill to reach where it starts. There is no start this can appear on, which is a fact
+        // about the fixtures rather than about the row.
+        MetaTile::Switch { object: HiddenObject::CellSeparator, .. } => Expect::Absent(
+            "only offered before Bill has been turned back into a person, which every coverage \
+             start is long past"),
+        _ => Expect::Row,
+    };
+
+    let sprite_seen = offered.iter().any(|id| id.split(':').count() == 2);
+    let mut lines: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    let (mut covered, mut expected) = (0usize, 0usize);
+    // `CutTree` is two variants — the terrain and the whole cut — and one kind. Reporting it twice
+    // would make the ratio below wrong in a way nobody could check.
+    let mut said_already: std::collections::BTreeSet<String> = Default::default();
+    for tile in &every {
+        let kind = tile.id_kind().to_string();
+        if !said_already.insert(kind.clone()) { continue }
+        let seen = match tile {
+            MetaTile::Sprite(_) => sprite_seen,
+            _ => offered.iter().any(|id| kind_of(id) == kind
+                // A `Switch` id is the object plus an ordinal, so the family is a prefix.
+                || (matches!(tile, MetaTile::Switch { .. })
+                    && kind_of(id).trim_end_matches(|c: char| c.is_ascii_digit()) == kind.trim_end_matches(|c: char| c.is_ascii_digit()))),
+        };
+        match expectation(tile) {
+            Expect::Terrain => {}
+            Expect::Absent(why) => lines.push(format!(
+                "  {kind:<24} {} — expected: {why}",
+                if seen { "offered ⭐ (and it was not expected to be)" } else { "never offered" })),
+            Expect::Row => {
+                expected += 1;
+                if seen { covered += 1; continue }
+                failures.push(format!(
+                    "no row of kind {kind:?} was offered anywhere in the sweep"));
+                lines.push(format!("  {kind:<24} ⛔ never offered, and it is not on the allow-list"));
+            }
+        }
+    }
+    // ⚠️ **The allow-list entry for `Pc` is only honest while the other way in is being taken**, so
+    // the count it points at is checked rather than described.
+    if pc_ops == 0 {
+        failures.push("no PC operation was taken anywhere in the sweep, and `MetaTile::Pc` is \
+                       allow-listed on the grounds that the walk covers it that way instead".into());
+    }
+    let report = format!(
+        "\n──── step 1.5: every kind of row, against what was offered ────\n\
+         kinds      {covered} of {expected} offered somewhere in the sweep; {pc_ops} PC operations\n\
+         {}\n",
+        if lines.is_empty() { "  every kind was offered".to_string() } else { lines.join("\n") });
+    (report, failures)
 }
 
 /// One walk, from one [`Start`]. Everything above it is knobs and arithmetic; this is the walk that
@@ -1637,6 +1953,19 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
 
     let started = std::time::Instant::now();
     let mut spent_the_budget = false;
+    /// ⭐ **The door out of the Indigo Plateau lobby and into Lorelei's room**, which is the one row
+    /// a rewound walk must never take again.
+    ///
+    /// `IndigoPlateauLobby_Object`'s third warp, `warp_event 8, 0, LORELEIS_ROOM, 1`; the lobby has
+    /// no connection strips, so the ROM's square and the row's are the same. Its two siblings at
+    /// (7, 11) and (8, 11) are the way back out to Route 23 and were `unreached` on every walk that
+    /// won the game — because the walk stopped before it could take them.
+    const ELITE_FOUR_DOOR: &str = "IndigoPlateauLobby:8,0:Warp";
+    /// A walk is rewound past the credits **once**. A second win means the frontier chose its way
+    /// back through the gauntlet by some route the bar above does not cover, and going round again
+    /// would be a loop rather than coverage; the walk stops and the outcome says it happened.
+    const MAX_REWINDS: usize = 1;
+    let mut checkpointed = false;
     let mut beat = started;
     let mut beat_turns = 0usize;
     let mut beat_visited = 0usize;
@@ -1664,14 +1993,36 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
                 new_ids = visited - beat_visited);
             (beat_turns, beat_visited) = (turns, visited);
         }
+        // ⭐ **Checkpoint at the lobby, rewind at the credits** — `docs/coverage-plan.md` step 1.3,
+        // and see `ExploringBrain::carry_on_after_the_credits` for why this is the driver's job
+        // rather than the frontier's.
+        let (at_the_lobby, won, rewound) = {
+            let brain = brain.0.lock().expect("not poisoned");
+            (brain.reached_the_lobby, brain.reached_the_end, brain.rewound)
+        };
+        if at_the_lobby && !checkpointed {
+            checkpointed = true;
+            run.checkpoint();
+            println!("[walk:{name}] checkpointed at the Indigo Plateau lobby; the credits are a \
+                      rewind from here rather than the end of the walk");
+        }
+        if won && checkpointed && rewound < MAX_REWINDS {
+            let game = run.fixture().total_cycles.to_duration();
+            println!("[walk:{name}] ⭐ the Hall of Fame, at {:.0}% of the {budget:?} budget — \
+                      rewinding to the lobby and spending the rest of it walking",
+                     100.0 * game.as_secs_f64() / budget.as_secs_f64());
+            run.restart_from_last_checkpoint();
+            brain.0.lock().expect("not poisoned").carry_on_after_the_credits(ELITE_FOUR_DOOR);
+            return false;
+        }
         let brain = brain.0.lock().expect("not poisoned");
         spent_the_budget || brain.reached_the_end || brain.settled(patience)
     }) && !spent_the_budget;
     let elapsed = started.elapsed();
 
-    let (discovered, visited, maps, turns) = {
+    let (discovered, visited, maps, turns, pc_ops) = {
         let brain = brain.0.lock().expect("not poisoned");
-        (brain.discovered(), brain.visited(), brain.maps(), brain.turns)
+        (brain.discovered(), brain.visited(), brain.maps(), brain.turns, brain.pc_ops())
     };
     // Everything the menu offered and the walk never chose is `Unreached` rather than absent.
     let offered = brain.0.lock().expect("not poisoned").offered_ids();
@@ -1757,6 +2108,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
          rate       {:.1} ids discovered per game-minute\n\
          settled    {settled} ({stopped})\n\
          verdicts   {}\n\
+         unreached  {} offered and never chosen, by kind: {:?}\n\
          silent     {:?}\n\
          busiest    {busiest}\n\
          stuck      {stalled_worst} consecutive turns choosing nothing; {rowless} turn(s) had no rows at all\n\
@@ -1766,6 +2118,8 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         start.map,
         discovered as f64 / (game_time.as_secs_f64() / 60.0).max(0.001),
         log.summary(),
+        log.entries().filter(|e| e.verdict == Verdict::Unreached).count(),
+        log.unreached_kinds(),
         log.silent_kinds(),
         busiest = busiest,
         stalled_worst = stalled_worst,
@@ -1778,6 +2132,10 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     // below reaches back into the same run for its MMU.
     let ids: std::collections::BTreeSet<String> =
         log.entries().map(|entry| entry.id.clone()).collect();
+    let unreached: std::collections::BTreeSet<String> = log.entries()
+        .filter(|entry| entry.verdict == Verdict::Unreached)
+        .map(|entry| entry.id.clone())
+        .collect();
     let failures = log.failures();
 
     // §5.3, and it is printed rather than asserted on purpose: the ROM's tables are a cross-check,
@@ -1793,6 +2151,8 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     WalkOutcome {
         name,
         ids,
+        unreached,
+        pc_ops,
         maps,
         failures,
         turns,

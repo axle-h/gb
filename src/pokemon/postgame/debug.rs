@@ -237,6 +237,23 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write(pokered_symbols::wEnemyMonActualCatchRate.address, rate);
     }
 
+    /// **Coverage plan step 1.1** — hold the Repel counter, so a long overworld action can be
+    /// driven to its end without a wild battle in the middle of it.
+    ///
+    /// ⚠️ **Re-applied every tick by its caller rather than set once.** `TryDoWildEncounter`
+    /// decrements this on every overworld step and prints "REPEL's effect wore off" on the step that
+    /// takes it to zero, and 255 is the largest value the byte holds — which a Victory Road boulder
+    /// goal walks through. A test that wants *no* encounters holds the counter up instead of
+    /// spending it.
+    ///
+    /// It suppresses an encounter only where the lead party member out-levels the wild one
+    /// (`wild_encounters.asm`'s `.CantEncounter2`), which is true of every committed endgame
+    /// fixture and of the god party; there is no state here the cartridge could not produce, which
+    /// is why this belongs beside the other `debug_*` writes rather than in the play path.
+    pub fn debug_set_repel_steps(&mut self, steps: u8) {
+        self.mmu_mut().write(pokered_symbols::wRepelRemainingSteps.address, steps);
+    }
+
     /// **Step 7** — hold both sides' battle speed, so a *failed* escape can be arranged.
     ///
     /// `TryRunningFromBattle` leaves the battle outright when the player's speed is greater than or
