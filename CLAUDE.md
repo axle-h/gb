@@ -42,8 +42,11 @@ sweeps of ten starts, zero defects and zero silences in all twenty walks, and a 
 248 and 2 114 ids that did not grow between them** — against 153 maps, 106 defects and 41 silences
 at the 2026-09-09 baseline. **§2.1 is the state to measure against** and names the five real maps
 still out (Cerulean Cave B1F's ladder chain, Cycling Road and its gate, and two single doors); §6's
-turn 2 entry has the argument for each fix and §7.1 the row and the test. **Steps 7 to 9 are what is
-left, and none of them is the walk.**
+turn 2 entry has the argument for each fix and §7.1 the row and the test. ⭐ **Step 7 — the battle
+refusals — was taken the same day**: the seven cells that existed nowhere in the suite are all
+default-tier tests through the deployed stack now (`integration_tests/battle_refusals.rs`), and they
+found three defects, the largest of them that the outcome of *any* bag item used in a battle was
+never reported to the model at all. **Steps 8 and 9 are what is left, and neither is the walk.**
 ⚠️ **§3 is the rules and §6.2 is how to read a number** — the walk's totals
 are a coin flip between several different walks, and CPU load is an input to it, so never build while
 measuring; ⚠️ **§6.1's `TMPDIR` is not decoration**, because a walk's run directory defaults into

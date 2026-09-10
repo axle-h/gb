@@ -86,6 +86,11 @@ mod llm;
 /// a restart. See `docs/coverage-plan.md` §2.
 #[cfg(feature = "llm")]
 pub(crate) mod llm_harness;
+/// **Step 7** — the battle refusals, through `LlmPolicy` and the worker. Default tier: every one of
+/// them starts inside the battle it is about, from a committed mid-battle save. See
+/// `docs/coverage-plan.md` step 7.
+#[cfg(feature = "llm")]
+mod battle_refusals;
 mod vermilion;
 mod celadon;
 mod fuchsia;

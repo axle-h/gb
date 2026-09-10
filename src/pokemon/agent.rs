@@ -784,7 +784,20 @@ enum BattleState {
     /// in a third costume — and reachable from any bag holding a TM or a key item, which is to say
     /// nearly all of them. Selecting by id also means a refusal is the *chosen* item's refusal, so the
     /// policy learns something from it.
-    UsingItem { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16 },
+    ///
+    /// ⚠️ **`reader` is not decoration, and its absence was a silence worth more than every other
+    /// word in this comment.** The whole account of what a bag item *did* is printed while this
+    /// driver is in charge — `ItemUseBall`'s five outcome sentences, `ThrowBallAtTrainerMon`'s two,
+    /// `ItemUseNotTime`'s refusal — and the fallback arm advanced every one of them with a bare
+    /// `press_button(A)`. So a model that threw a Poké Ball at a full-health Oddish was told only
+    /// "Enemy ODDISH used ABSORB!", with no way to tell a failed catch from a lost turn, and a
+    /// trainer blocking a Great Ball charged for the ball and said nothing at all. The reader
+    /// accumulates on the ticks the game is talking (`TextBoxId::MessageBox`; a bag list is drawn in
+    /// the same bottom rows and would otherwise be read as prose) and is **carried out** of this
+    /// state into whatever replaces it, so the existing emit in `WaitingForMenu` reports it together
+    /// with the enemy's reply. `docs/coverage-plan.md` step 7 found it; two of its cells were nothing
+    /// but this.
+    UsingItem { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16, reader: PokemonTextReader },
 }
 
 impl Default for BattleState {
@@ -815,6 +828,48 @@ impl BattleState {
             backing_out: BACKING_OUT_TICKS,
             confirming: 0,
             confirm: None,
+        }
+    }
+
+    /// [`Self::default`], but starting from whatever a sub-state had already read.
+    ///
+    /// ⚠️ **A driver that read something and then handed the state back owes it to the next
+    /// state.** `WaitingForMenu` is the only place a battle's text is ever *emitted*
+    /// (`AgentEvent::text_box_from_reader`, on the tick the main menu comes back), so an exit that
+    /// built a fresh reader threw away everything [`Self::UsingItem`] had collected. Same rule as
+    /// [`PokemonAgent::flush_text_reader`], one level down: the reader is drained where it stops
+    /// being the thing in charge.
+    fn carrying(reader: PokemonTextReader) -> Self {
+        Self::WaitingForMenu {
+            reader,
+            delay: DelayContext::default(),
+            backing_out: 0,
+            confirming: 0,
+            confirm: None,
+        }
+    }
+
+    /// [`Self::backing_out`], carrying what a sub-state had already read — the refusal net's exit.
+    fn backing_out_carrying(reader: PokemonTextReader) -> Self {
+        Self::WaitingForMenu {
+            reader,
+            delay: DelayContext::default(),
+            backing_out: BACKING_OUT_TICKS,
+            confirming: 0,
+            confirm: None,
+        }
+    }
+
+    /// Whatever a sub-state has read so far, taken out of it. Empty for the states that read
+    /// nothing.
+    fn take_reader(&mut self) -> PokemonTextReader {
+        match self {
+            // ⚠️ `message_box_only` left behind rather than a `Default`: a battle screen carries
+            // two HUDs, and a full-screen reader splices them into the front of every message —
+            // see the ⚠️ in `assert_text_box_state`.
+            Self::UsingItem { reader, .. } | Self::WaitingForMenu { reader, .. } =>
+                std::mem::replace(reader, PokemonTextReader::message_box_only()),
+            _ => PokemonTextReader::message_box_only(),
         }
     }
 
@@ -3757,7 +3812,13 @@ CascadeBadge; not cutting".to_string(),
                 // every one of them a bag with a TM or a key item in it.
                 if api.on_screen_text(false).map_or(false, |t| shows_battle_refusal(&t)) {
                     api.toggle_button(JoypadButton::B);
-                    self.set_battle_state(BattleState::backing_out());
+                    // ⚠️ **Carried, not dropped.** The refusal is the one sentence the policy needs
+                    // out of this net — "This isn't the time to use that!" is *why* the item it chose
+                    // did nothing — and the reader that has been collecting it belongs to the
+                    // sub-state this line is about to replace. See `BattleState::UsingItem`'s
+                    // `reader`.
+                    let carried = battle_state.take_reader();
+                    self.set_battle_state(BattleState::backing_out_carrying(carried));
                     return Ok(());
                 }
                 match battle_state {
@@ -4164,6 +4225,7 @@ CascadeBadge; not cutting".to_string(),
                                     self.set_battle_state(BattleState::UsingItem { ticks: 0,
                                         item: item.id, start_qty, entry_hp, press: true, confirmed: false,
                                         delay: DelayContext::default(),
+                                        reader: PokemonTextReader::message_box_only(),
                                     });
                                     return Ok(());
                                 }
@@ -4363,7 +4425,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    BattleState::UsingItem { item, start_qty, entry_hp, press, confirmed, delay: _, ticks } => {
+                    BattleState::UsingItem { item, start_qty, entry_hp, press, confirmed, delay: _, ticks, reader } => {
                         // ⚠️ Same bound and same reason as `Navigating`: this drives six menus deep on
                         // a decision the policy already made and polls nothing on the way. `soak` found
                         // it wedged at `confirmed=false` in Viridian Forest for 300 s — the bag list
@@ -4386,9 +4448,21 @@ CascadeBadge; not cutting".to_string(),
                         // this anyway — the refusal net above catches it in a fraction of the time.
                         const MAX_HEALING_TICKS: u16 = 250;
                         let ticks = *ticks;
+                        // ⚠️ **Read before anything is pressed, and on every tick this state owns.**
+                        // The gate is what a bag list would otherwise cost: it is drawn in the same
+                        // bottom rows a message box is, so a `message_box_only` reader left ungated
+                        // would report the player's own inventory as prose. See
+                        // [`PokemonTextReader::accumulate`] for why the read is separate from the
+                        // press at all.
+                        if api.menu_state()
+                            .is_some_and(|m| m.text_box_id == crate::pokemon::menu::TextBoxId::MessageBox)
+                        {
+                            reader.accumulate(api);
+                        }
+                        let reader = std::mem::replace(reader, PokemonTextReader::message_box_only());
                         if ticks >= MAX_HEALING_TICKS {
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::default());
+                            self.set_battle_state(BattleState::carrying(reader));
                             return Ok(());
                         }
                         use crate::pokemon::item::ItemId;
@@ -4418,20 +4492,25 @@ CascadeBadge; not cutting".to_string(),
                             // advances the "recovered HP" / enemy-turn text and safely backs out of any
                             // leftover bag/party sub-menu (the PokemonList/ItemList B-backout gates) to
                             // reach the next turn's FIGHT menu.
+                            //
+                            // ⚠️ **Carrying what was read.** `ItemUseBall` prints its outcome and
+                            // *then* removes the ball, so the sentence that says what the throw did
+                            // was collected under this state and is reported by the arm that state
+                            // hands to. Dropping it here is the whole of the silence step 7 found.
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::default());
+                            self.set_battle_state(BattleState::carrying(reader));
                             return Ok(());
                         }
                         if active_hp > entry_hp {
                             // Heal bar filling — wait, don't touch the (still-open) party menu.
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1 });
+                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1, reader });
                             return Ok(());
                         }
                         // Two-tick press/release cadence for clean rising edges.
                         if !press {
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
+                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
                             return Ok(());
                         }
 
@@ -4490,7 +4569,7 @@ CascadeBadge; not cutting".to_string(),
 
                         api.release_all_buttons();
                         if let Some(b) = button { api.press_button(b); }
-                        self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1 });
+                        self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
                     }
                 }
             }

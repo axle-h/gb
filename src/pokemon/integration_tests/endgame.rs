@@ -428,6 +428,22 @@ fn probe_stall_actions() {
             mon.stats.hp, mon.status);
     }
     println!("  bag: {:?}", s.bag.iter().map(|i| (i.id, i.quantity)).collect::<Vec<_>>());
+    // ⚠️ **A save cut mid-battle has no map answer worth reading**, and the probe used to print the
+    // grid anyway and say nothing about the fight. Every battle refusal in
+    // `docs/coverage-plan.md` step 7 is argued from a committed mid-battle fixture, and the first
+    // question about one is always which battle it is.
+    if let Some(battle) = s.battle.as_ref() {
+        println!("  battle: {:?}  catch rate {}  enemy trapping {}",
+            battle.battle_type, battle.enemy_catch_rate, battle.enemy_trapping);
+        println!("    yours: {:?} lv{} {}/{}hp speed {}", battle.player.species, battle.player.level,
+            battle.player.current_hp, battle.player.stats.hp, battle.player.stats.speed);
+        println!("    enemy: {:?} lv{} {}/{}hp speed {}", battle.enemy.species, battle.enemy.level,
+            battle.enemy.current_hp, battle.enemy.stats.hp, battle.enemy.stats.speed);
+        for row in crate::llm::tools::battle_menu(&s) {
+            println!("    menu `{}` — {}", row.id, row.description);
+        }
+        return;
+    }
     println!("tile under player: {:?}", s.map.tile_at_checked(s.map.player_position));
     // ⚠️ **The grid, because a missing row is usually a tile rather than a bug in `actions()`.**
     // `MetaTileMap`'s own `Display` legend: `P` player, `_` floor, `O` wall, `S` sprite, `W` warp,

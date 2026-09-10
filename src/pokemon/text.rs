@@ -100,7 +100,26 @@ impl PokemonTextReader {
     /// text that scrolled past on the way out is still reported when the box closes.
     pub fn update_with<A: PokemonApiTrait>(&mut self, api: &mut A, button: JoypadButton) {
         api.toggle_button(button);
+        self.accumulate(api);
+    }
 
+    /// [`Self::update_with`] **without the button**: read this tick's screen into the buffer and
+    /// press nothing.
+    ///
+    /// ⚠️ **This exists so that a driver already pressing its own buttons can read as well, without
+    /// changing a single press.** [`crate::pokemon::agent::BattleState::UsingItem`] walks six menus
+    /// deep on its own two-tick cadence and used to advance the outcome text with a bare
+    /// `press_button(A)` — so every word `ItemUseBall` prints ("Darn! The ODDISH broke free!", "The
+    /// trainer blocked the BALL!", "This isn't the time to use that!") was dismissed unread, and a
+    /// model that threw a ball was told only what the *enemy* then did. Swapping that press for
+    /// `update_with` would have re-timed it: this reader toggles, and the driver presses and releases
+    /// on alternating ticks. So the read is separated from the press, and the driver keeps its own.
+    ///
+    /// ⚠️ **Call it before the press, not after.** A button toggled this tick does not reach the
+    /// emulator until the next `run`, so [`Self::update_with`] reads the screen as it was *before*
+    /// its own press. A caller that pressed first and read second would be reading one tick later
+    /// than every other reader in the agent.
+    pub fn accumulate<A: PokemonApiTrait>(&mut self, api: &A) {
         let Some(screen) = api.on_screen_text(self.message_box_only) else { return };
 
         // ⚠️ **A blank frame is not a page break and must not commit anything.** It is far more
