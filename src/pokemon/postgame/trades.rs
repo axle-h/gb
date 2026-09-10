@@ -307,7 +307,7 @@ fn town_of(centre: Map) -> Map {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pokemon::symbols::{pokered_symbols, DmgPointer, DmgBank};
+    use crate::pokemon::symbols::{pokered_symbols, DmgBank};
     use crate::pokemon::roms;
 
     /// Pin [`TRADES`]' give/get pairs bit-for-bit against `TradeMons`.

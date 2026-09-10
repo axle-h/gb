@@ -9,14 +9,6 @@ pub struct FlagsRegister {
 }
 
 impl FlagsRegister {
-    pub fn new() -> Self {
-        Self {
-            z: false,
-            n: false,
-            h: false,
-            c: false,
-        }
-    }
 
     pub fn from_byte(byte: u8) -> Self {
         Self {

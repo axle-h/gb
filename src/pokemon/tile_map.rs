@@ -6,7 +6,7 @@ use crate::joypad::JoypadButton;
 use crate::pokemon::map::Map;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::map_metadata::{CurrentMap, PlayerFacingDirection};
-use crate::pokemon::tile::{JumpDirection, WarpEvent};
+use crate::pokemon::tile::JumpDirection;
 use crate::pokemon::sprite::Sprite;
 use crate::pokemon::tile::{HiddenObject, MetaTile};
 
@@ -830,7 +830,7 @@ impl MetaTileMap {
     pub fn boulder_push_refusal(&self, boulder: Point8, dir: JoypadButton) -> Option<String> {
         let name = self.sprites.iter()
             .find(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == boulder)
-            .map(|s| s.name.clone());
+            .map(|s| s.name);
         let Some(name) = name else {
             return Some(format!(
                 "There is no boulder at ({}, {}). `read_map` gives the exact position of every one \

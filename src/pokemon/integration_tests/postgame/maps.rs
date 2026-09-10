@@ -8,7 +8,6 @@
 //! Rooted on **H's output**, the chain head — a save with every badge, every HM and Fly, which is
 //! the only state from which a tour of Kanto is one step per room rather than a playthrough.
 
-#[allow(unused_imports)]
 use super::super::*;
 use crate::pokemon::postgame::maps;
 
@@ -125,75 +124,4 @@ fn can_tour_the_southern_islands() {
     for hub in [Map::FuchsiaCity, Map::CinnabarIsland, Map::IndigoPlateau] {
         assert_toured(hub, Duration::from_mins(120));
     }
-}
-
-/// **Task L3/L4** — the report: what a tour of all eleven hubs reaches, and what it does not.
-///
-/// This is the deliverable §8-L asks for in as many words — *"the list of maps that could not be
-/// entered, and why"* — and it is a diagnostic rather than a test because the answer is prose about
-/// the game, not a property of the code. `can_tour_*` above are the tests; this is the write-up they
-/// are derived from, kept runnable so the next agent can re-derive it instead of trusting a comment.
-///
-/// ⚠️ It also prints the **coverage gap**: `postgame::maps::visitable()` counts 220 rooms and the
-/// hub tours only reach the ones hanging off a Fly stop within [`TOUR_DEPTH`] doors. Everything else
-/// — dungeon interiors, the Silph floors, Victory Road — is reached by the workstreams that had a
-/// reason to go there, and this says which is which rather than implying the tour covers Kanto.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_tour_report() {
-    use std::collections::HashSet;
-    let mut reached: HashSet<Map> = HashSet::new();
-    let mut all_missed: Vec<(Map, Map)> = Vec::new();
-    for &hub in maps::FLY_HUBS {
-        let (entered, missed) = tour(hub, Duration::from_mins(150));
-        reached.insert(hub);
-        reached.extend(entered);
-        all_missed.extend(missed.into_iter().map(|m| (hub, m)));
-    }
-
-    println!("\n== L4 report");
-    println!("visitable maps: {}", maps::visitable().len());
-    println!("reached by the hub tours: {}", reached.len());
-    println!("\n-- could not be entered");
-    for (hub, map) in &all_missed {
-        println!("   {map} (from {hub}): {}", match maps::known_unreachable(*map) {
-            Some(why) => why.why(),
-            None => "UNEXPLAINED — investigate",
-        });
-    }
-    println!("\n-- visitable but outside any hub tour (dungeon interiors and the like)");
-    let outside: Vec<Map> = maps::visitable().into_iter().filter(|m| !reached.contains(m)).collect();
-    println!("   {} maps: {outside:?}", outside.len());
-    println!("\n-- known-unreachable set");
-    for map in maps::visitable() {
-        if let Some(why) = maps::known_unreachable(map) {
-            println!("   {map}: {}", why.why());
-        }
-    }
-    // …and the other list, which is easy to forget because these rooms never appear as a *miss*:
-    // the tour does not plan them at all, so nothing in the run above mentions them.
-    println!("\n-- deliberately not entered");
-    for map in maps::visitable() {
-        if let Some(why) = maps::skip_tour(map) {
-            println!("   {map}: {}", why.why());
-        }
-    }
-}
-
-/// Diagnostic for **L2** — what a hub tour is *planning* to visit, with no emulation at all.
-///
-/// [`maps::rooms_off`] walks the ROM's warp tables, and a tour that plans the wrong rooms wastes
-/// emulated minutes before it says so. Run this first when adding a hub or changing `TOUR_DEPTH`.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_tour_plan() {
-    let mut total = 0;
-    for &hub in maps::FLY_HUBS {
-        let rooms = maps::rooms_off(hub, TOUR_DEPTH);
-        total += rooms.len();
-        println!("== {hub}: {} rooms\n   {rooms:?}", rooms.len());
-    }
-    println!("\n{total} rooms across {} hubs at depth {TOUR_DEPTH}", maps::FLY_HUBS.len());
 }

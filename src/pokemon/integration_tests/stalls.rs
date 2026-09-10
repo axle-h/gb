@@ -275,69 +275,6 @@ fn a_safari_menu_cursor_left_on_bait_does_not_repeat_itself() {
 }
 
 
-/// Diagnostic, not a test: replay **every** `.bin` in a directory and print the longest silence each
-/// one still shows. This is the triage half of the hunt loop.
-///
-/// A sweep across seeds drops one artifact per failure (`soak-<state>-seed<N>.bin`), and after a fix
-/// the only question worth asking of the pile is *which of these still reproduce*. Promoting them one
-/// at a time to answer that is far slower than reading the answer off a list — and the list is also
-/// how a fix that helps four cases and misses the fifth shows itself.
-///
-/// ```shell
-/// GB_STALL_DIR=/path/to/artifacts cargo test --release --features diagnostics --bin gb -- \
-///   probe_stall_artifacts --exact --ignored --nocapture
-/// ```
-///
-/// The budget is [`PROBE_BUDGET`] rather than [`ESCAPE_BUDGET`]: a case that is still stuck should be
-/// given long enough that "it escaped after 100 s" cannot be mistaken for "it never escaped".
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
-fn probe_stall_artifacts() {
-    /// How much game time each artifact gets. Longer than a `stalls` case is allowed, on purpose.
-    const PROBE_BUDGET: Duration = Duration::from_secs(180);
-
-    let dir = std::env::var("GB_STALL_DIR").unwrap_or_else(|_| "target/test-artifacts".into());
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        println!("no such directory: {dir}");
-        return;
-    };
-    let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map_or(false, |e| e == "bin"))
-        .collect();
-    paths.sort();
-    println!("[probe] {} save states in {dir}", paths.len());
-    for path in paths {
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
-        if gb.load_state(&bytes).is_err() {
-            println!("[probe] {name}: not a save state");
-            continue;
-        }
-        let mut cache = MapMetadataCache::default();
-        let mut agent = PokemonAgent::new(Box::new(RandomPolicy::seeded(1)));
-        let mut emulated = MachineCycles::ZERO;
-        let (mut worst, mut worst_state) = (Duration::ZERO, String::new());
-        while emulated < MachineCycles::from_duration(PROBE_BUDGET) {
-            let ran = gb.run(AGENT_RESOLUTION);
-            emulated += ran;
-            let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
-            agent.update(&mut api, ran).ok();
-            agent.drain_events();
-            if agent.since_last_policy_poll() > worst {
-                worst = agent.since_last_policy_poll();
-                worst_state = agent.state_debug();
-            }
-        }
-        let where_it_is = PokemonApi::with_cache(&mut gb, &mut cache).game_state()
-            .map_or_else(|_| "unreadable".into(),
-                         |s| format!("{} at {}", s.map.map, s.map.player_position));
-        let verdict = if worst < QUIET_LIMIT { "escapes" } else { "STILL STUCK" };
-        println!("[probe] {name}: {verdict} — worst {worst:?} in {worst_state} — {where_it_is}");
-    }
-}
-
 /// **The deployed run of 2026-09-01, checkpointed inside the jam** — a lv44 Charizard against a
 /// Gastly on Pokémon Tower 3F, with no Silph Scope in the bag.
 ///

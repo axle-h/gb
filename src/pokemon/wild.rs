@@ -46,9 +46,6 @@ pub fn base_exp(species: PokemonSpecies) -> u8 {
     crate::pokemon::mon_gfx::base_stats_entry(species)[BASE_EXP]
 }
 
-/// The ten slots of one encounter block, in ROM order.
-pub type Slots = [(u8, PokemonSpecies); 10];
-
 /// One map's wild encounter data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WildEncounters {
@@ -154,14 +151,6 @@ impl WildEncounters {
         }).sum()
     }
 
-    /// Every species this map can produce on foot *or* on the water.
-    pub fn all_species(&self) -> Vec<PokemonSpecies> {
-        let mut out: Vec<PokemonSpecies> = self.species(Terrain::Grass).into_iter()
-            .chain(self.species(Terrain::Water))
-            .map(|(s, _, _)| s).collect();
-        out.dedup();
-        out
-    }
 }
 
 /// `map`'s wild encounter table, or `None` when it has none at all (every indoor map, and the maps
@@ -174,7 +163,7 @@ pub fn encounters(map: Map) -> Option<WildEncounters> {
     let data = rom_bank_at(bank, u16::from_le_bytes([table[index], table[index + 1]]));
 
     let mut i = 0;
-    let mut block = |data: &[u8], i: &mut usize| -> (u8, Vec<(u8, PokemonSpecies)>) {
+    let block = |data: &[u8], i: &mut usize| -> (u8, Vec<(u8, PokemonSpecies)>) {
         let rate = data[*i];
         *i += 1;
         if rate == 0 { return (0, Vec::new()); }

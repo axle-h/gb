@@ -38,10 +38,6 @@ impl MachineCycles {
         MachineCycles::from_t(Self::CPU_FREQ / hz)
     }
 
-    pub const fn to_hz(self) -> u64 {
-        Self::CPU_FREQ / self.t_cycles()
-    }
-
     pub const fn from_t(ticks: u64) -> Self {
         Self(ticks / 4) // 4 tick = 1 machine cycle
     }

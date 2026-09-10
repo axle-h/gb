@@ -172,35 +172,10 @@ impl Default for Cheats {
 }
 
 impl Cheats {
-    /// Nothing at all, for a caller that wants to turn one thing on.
-    pub fn none() -> Self {
-        Self {
-            badges: None,
-            god_party: false,
-            keep_healthy: false,
-            installed: false,
-            top_ups: 0,
-            refused_in_battle: 0,
-            key_items: None,
-            stocked: false,
-            bag_was_full: Vec::new(),
-            bag_was_shed: Vec::new(),
-        }
-    }
 
     /// Stock the bag with [`COVERAGE_KEY_ITEMS`] and `money`, once.
     pub fn with_key_items(mut self, money: u32) -> Self {
         self.key_items = Some(money);
-        self
-    }
-
-    pub fn with_badges(mut self, badges: Badge) -> Self {
-        self.badges = Some(badges);
-        self
-    }
-
-    pub fn with_god_party(mut self) -> Self {
-        self.god_party = true;
         self
     }
 

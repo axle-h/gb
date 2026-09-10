@@ -201,6 +201,7 @@ impl Audio {
     /// Exists for the same reason [`Self::output_enabled`] does: batching that silently stopped
     /// happening would cost 10% gated and 14% with a listener attached, and nothing would say so.
     /// A test can assert it engaged.
+    #[cfg(test)]
     pub fn pending_channel_cycles(&self) -> u64 {
         self.pending
     }
@@ -738,22 +739,6 @@ impl Audio {
         ((self.access_machine_cycles.saturating_sub(1) as u16) * 2).saturating_add(batch)
     }
 
-    pub fn channel1(&self) -> &SquareWaveChannel {
-        &self.channel1
-    }
-
-    pub fn channel1_mut(&mut self) -> &mut SquareWaveChannel {
-        &mut self.channel1
-    }
-
-    pub fn channel2(&self) -> &SquareWaveChannel {
-        &self.channel2
-    }
-
-    pub fn channel2_mut(&mut self) -> &mut SquareWaveChannel {
-        &mut self.channel2
-    }
-    
     pub fn channel3(&self) -> &WaveChannel {
         &self.channel3
     }
@@ -762,13 +747,6 @@ impl Audio {
         &mut self.channel3
     }
 
-    pub fn channel4(&self) -> &NoiseChannel {
-        &self.channel4
-    }
-
-    pub fn channel4_mut(&mut self) -> &mut NoiseChannel {
-        &mut self.channel4
-    }
 }
 
 /// Contents of the `apu` save-state section. Excludes `output` — the resampler is a sink, not

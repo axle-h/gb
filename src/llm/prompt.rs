@@ -1333,7 +1333,7 @@ mod tests {
 
     #[cfg(feature = "diagnostics")]
     #[test]
-    #[ignore]
+    #[ignore = "probe: prints one turn request per decision kind"]
     fn probe_turn_requests() {
         use crate::llm::protocol::{ChatRequest, Message, StreamOptions};
         use crate::llm::tools;

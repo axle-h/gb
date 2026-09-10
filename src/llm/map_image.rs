@@ -647,15 +647,6 @@ pub fn encode(canvas: &RgbaImage) -> Vec<u8> {
     png.into_inner()
 }
 
-/// The picture as a `data:` URL, ready for [`crate::llm::protocol::Message::user_with_image`].
-pub fn data_url(canvas: &RgbaImage) -> String {
-    let png = encode(canvas);
-    let mut url = String::with_capacity(png.len() * 4 / 3 + 32);
-    url.push_str("data:image/png;base64,");
-    base64::Engine::encode_string(&base64::engine::general_purpose::STANDARD, &png, &mut url);
-    url
-}
-
 /// What the picture is and how to read a coordinate off it. ⚠️ The formula is stated because it is
 /// the whole reason the ruler is there: without it a model cannot turn "the door two squares left of
 /// me" into the id the action menu wants.
@@ -1036,7 +1027,7 @@ mod tests {
     /// top of its feature gate, as `CLAUDE.md`'s table requires of every `probe_`.
     #[cfg(feature = "diagnostics")]
     #[test]
-    #[ignore]
+    #[ignore = "probe: prints what a map picture costs the model"]
     fn probe_map_images() {
         let out = std::path::Path::new("target/map-renders");
         std::fs::create_dir_all(out).expect("a writable target directory");

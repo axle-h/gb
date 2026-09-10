@@ -4,6 +4,12 @@ Read before touching `src/{mmu,mbc,ppu,savestate,schedule,cycles,game_boy}.rs`, 
 reordering a serialised field, and before adding a file to `src/pokemon/data/`. The full arguments
 are in the module docs named below; this is the list of what not to break.
 
+## Not modelled
+
+- M-cycle memory timing, and the DMG OAM corruption bug. Neither has a test; blargg's `mem_timing`,
+  `halt_bug` and `oam_bug` ROMs were carried as permanently-ignored expected failures and are gone.
+  `interrupt_time` stays, and passes.
+
 ## Mappers
 
 - Every mapper resolves its bank register differently. MBC1 remaps a zero selection *then* wraps,

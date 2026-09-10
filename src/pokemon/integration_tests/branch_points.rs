@@ -30,7 +30,6 @@
 //! [`Intent`] against the rendered menu and never by reaching for a `GameState`. An arm that cannot
 //! be expressed as an intent is an arm a model could not take either.
 
-#[allow(unused_imports)]
 use super::*;
 
 use crate::pokemon::integration_tests::godmode::{Intent, ScriptedBrain};
@@ -154,24 +153,6 @@ fn last_menu(run: &LlmRun) -> Vec<String> {
         .next_back()
         .map(|request| request.menu_ids())
         .unwrap_or_default()
-}
-
-/// Diagnostic: what is a branch snapshot's first turn actually offering?
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_branch_menus() {
-    for (name, fixture) in [("oaks-lab", OAKS_LAB), ("mt-moon", MT_MOON), ("dojo", DOJO), ("bike-shop", BIKE_SHOP)] {
-        let (mut run, _) = arm(fixture, "probe", vec![Intent::Wait]);
-        run.tick_until(Duration::from_secs(20), |run| run.endpoint.requests_served() >= 2);
-        println!("== {name}");
-        for (n, request) in run.endpoint.requests().into_iter().enumerate() {
-            println!("  request {n}: tools {:?} location {:?}", request.tool_names(), request.location());
-            for (id, description) in request.menu_rows() {
-                println!("     `{id}` — {description}");
-            }
-        }
-    }
 }
 
 // ── 1. The starter ───────────────────────────────────────────────────────────────────────────────
@@ -667,38 +648,6 @@ fn a_trade_with_nothing_to_give_backs_out_and_says_so() {
     assert!(!was_stuck(&run), "the watchdog fired: an unmakeable trade wedged the party menu");
     println!("[branch-trade-empty] the trade wanted a {:?}, the party had none, and it said so",
         trade.give);
-}
-
-/// Diagnostic: what does the agent see while an in-game trade has the party menu open?
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_trade_party_menu() {
-    use crate::pokemon::symbols::pokered_symbols;
-    let trade = crate::pokemon::postgame::trades::trade_for(PokemonSpecies::Poliwhirl);
-    let (mut run, _) = arm(BIKE_SHOP, "probe-trade", vec![
-        Intent::Enter("CeruleanCity"),
-        Intent::Enter("CeruleanTradeHouse"),
-        Intent::Row("Gambler"),
-        Intent::Row("Gambler"),
-    ]);
-    party_with(&mut run, trade.give, SWAP_MOVES, 1);
-    let mut last = String::new();
-    for _ in 0..4000 {
-        run.tick();
-        let fixture = run.fixture();
-        let mode = fixture.api().game_mode();
-        let menu = fixture.api().mmu().read_menu_state();
-        let give = fixture.api().mmu().read_pointer(&pokered_symbols::wInGameTradeGiveMonSpecies);
-        let which = fixture.api().mmu().read_pointer(&pokered_symbols::wWhichTrade);
-        let ptype = fixture.api().mmu().read_pointer(&pokered_symbols::wPartyMenuTypeOrMessageID);
-        let state = fixture.agent.state_debug();
-        let line = format!("{mode:?} {state} menu={menu:?} give={give:#04x} which={which} ptype={ptype}");
-        if line != last {
-            println!("{line}");
-            last = line;
-        }
-    }
 }
 
 // ── The snapshots, cut ───────────────────────────────────────────────────────────────────────────

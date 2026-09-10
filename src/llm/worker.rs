@@ -82,9 +82,6 @@ pub struct TurnOutcome {
     pub decision: Terminal,
 }
 
-/// Re-exported under the name the plan uses.
-pub type Decision = Terminal;
-
 /// Read tool calls from one assistant message, to be answered at one poll.
 #[derive(Debug, Clone)]
 pub struct ToolBatch {

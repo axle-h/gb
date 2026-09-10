@@ -1,6 +1,6 @@
 use crate::pokemon::battle::{BattleAction, BattleState};
 use crate::pokemon::move_name::{PokemonMoveEffect, PokemonMoveName};
-use crate::pokemon::pokemon::{MoveEffectiveness, Pokemon, PokemonSummary, PokemonTypeCategory};
+use crate::pokemon::pokemon::{MoveEffectiveness, PokemonSummary, PokemonTypeCategory};
 
 fn expected_psywave_damage(level: u8) -> u16 {
     // Psywave deals uniform random damage in [1, floor(1.5 × level)].
@@ -150,7 +150,7 @@ pub fn pick_best_move(battle_state: &BattleState, actions: &[BattleAction], catc
 
 #[cfg(test)]
 mod test {
-    use crate::pokemon::pokemon::{Pokemon, PokemonType};
+    use crate::pokemon::pokemon::Pokemon;
     use crate::pokemon::species::PokemonSpecies;
     use super::*;
 

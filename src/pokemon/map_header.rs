@@ -1,6 +1,5 @@
 use crate::mmu::MMU;
 use crate::pokemon::map::Map;
-use crate::ram::ROM;
 use bitflags::{bitflags, Flags};
 use itertools::Itertools;
 use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};

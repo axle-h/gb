@@ -262,7 +262,6 @@ pub fn pc(state: &GameState, api: &PokemonApi<'_>) -> PcView {
 /// pure confusion. `Display` itself stays, because every dump and probe in the repo prints through
 /// it and the renderer falls back to it for a map with no metadata, so this stays as the
 /// documentation of that alphabet.
-#[allow(dead_code)]
 pub const MAP_LEGEND: &[(char, &str)] = &[
     ('P', "the player"),
     ('_', "walkable"),

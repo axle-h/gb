@@ -148,10 +148,6 @@ impl SquareWaveChannel {
         self.envelope_function.dac_enabled()
     }
 
-    pub fn output(&self) -> u8 {
-        self.output
-    }
-
     pub fn output_f32(&self) -> f32 {
         match self.digital_level() {
             None => 0.0,

@@ -448,23 +448,4 @@ mod tests {
                  slurped it whole would have read all of it");
     }
 
-    /// Against a real transcript: `GB_TRANSCRIPT=/path/to/transcript.jsonl`. Prints how long the
-    /// backlog and the last sequence number take to read, and the peak resident size afterwards.
-    #[test]
-    #[ignore]
-    #[cfg(feature = "diagnostics")]
-    fn probe_real_transcript() {
-        let Ok(path) = std::env::var("GB_TRANSCRIPT") else { return };
-        let path = Path::new(&path);
-        let started = Instant::now();
-        let events = read_since(path, 0);
-        println!("read_since(0): {} events in {:?}", events.len(), started.elapsed());
-        let started = Instant::now();
-        println!("last_seq: {:?} in {:?}", last_seq(path), started.elapsed());
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            for line in status.lines().filter(|l| l.starts_with("VmHWM") || l.starts_with("VmRSS")) {
-                println!("{line}");
-            }
-        }
-    }
 }

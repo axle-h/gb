@@ -92,10 +92,6 @@ pub trait DmgPointerRead {
 
     fn write_pointer(&mut self, pointer: &DmgPointer, value: u8) -> Result<(), String>;
 
-    fn write_pointer_u16_le(&mut self, pointer: &DmgPointer, value: u16) -> Result<(), String>;
-
-    fn write_pointer_u16_be(&mut self, pointer: &DmgPointer, value: u16) -> Result<(), String>;
-
     fn write_pointer_slice(&mut self, pointer: &DmgPointer, value: &[u8]) -> Result<(), String>;
 
     fn read_pointer_pokemon_string(&self, pointer: &DmgPointer) -> PokemonString;
@@ -165,7 +161,7 @@ impl DmgPointerRead for MMU {
 
     fn write_pointer(&mut self, pointer: &DmgPointer, value: u8) -> Result<(), String> {
         match pointer.bank {
-            DmgBank::ROM { bank } => {
+            DmgBank::ROM { bank: _ } => {
                 Err("ROM is not writable".to_string())
             }
             DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
@@ -178,39 +174,9 @@ impl DmgPointerRead for MMU {
         }
     }
 
-    fn write_pointer_u16_le(&mut self, pointer: &DmgPointer, value: u16) -> Result<(), String> {
-        match pointer.bank {
-            DmgBank::ROM { bank } => {
-                Err("ROM is not writable".to_string())
-            }
-            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
-                self.write_u16_le(pointer.address, value);
-                Ok(())
-            }
-            DmgBank::SRAM { .. } => {
-                Err("SRAM banking not implemented".to_string())
-            }
-        }
-    }
-
-    fn write_pointer_u16_be(&mut self, pointer: &DmgPointer, value: u16) -> Result<(), String> {
-        match pointer.bank {
-            DmgBank::ROM { bank } => {
-                Err("ROM is not writable".to_string())
-            }
-            DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
-                self.write_u16_be(pointer.address, value);
-                Ok(())
-            }
-            DmgBank::SRAM { .. } => {
-                Err("SRAM banking not implemented".to_string())
-            }
-        }
-    }
-
     fn write_pointer_slice(&mut self, pointer: &DmgPointer, value: &[u8]) -> Result<(), String> {
         match pointer.bank {
-            DmgBank::ROM { bank } => {
+            DmgBank::ROM { bank: _ } => {
                 Err("ROM is not writable".to_string())
             }
             DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {

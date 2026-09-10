@@ -1,22 +1,15 @@
 /target
 .idea/
-# Test failure artifacts now go to target/test-artifacts/ (save_failure_artifacts), already ignored.
-
-# Claude Code's own per-project state (settings.local.json, session scratch) is local, but
-# `.claude/skills/` is not: those eight skills hold the invariants and the test workflows that
-# CLAUDE.md used to carry in full, so they are versioned with the code they describe.
-.claude/*
-!.claude/skills/
+# Claude Code's own per-project state is local.
+.claude/
 # Compiled golden-vector generator (tools/blip-golden/build.sh builds into target/)
 /tools/blip-golden/gen_golden
 
-# The SPA (W3). `pnpm install && pnpm run build` in `web/` produces `web/dist`, which `rust-embed` bakes
-# into the binary at compile time — build output, not source. The directory itself must exist for the
-# crate to compile at all, which is what the committed `web/dist/.gitkeep` is for.
+# The SPA: `pnpm run build` in `web/` produces `web/dist`. The directory must exist for the crate to
+# compile, which is what the committed `web/dist/.gitkeep` is for.
 /web/node_modules/
 /web/dist/*
 !/web/dist/.gitkeep
 
-# W7's run directories: `gb serve` keeps a run's save state, transcript and the model's notes in
-# `$GB_RUN_DIR/<run-id>/`, defaulting to here. It is a run's state, not the project's.
+# Run directories, `$GB_RUN_DIR` (default `./runs`).
 /runs

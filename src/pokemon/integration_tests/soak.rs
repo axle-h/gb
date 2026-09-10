@@ -434,7 +434,7 @@ fn soak(state: &SoakState) {
             // agent's own state does not reproduce from the save file, and then these lines are the
             // only evidence there is.
             let (screen, menu, buttons) = {
-                let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
+                let api = PokemonApi::with_cache(&mut gb, &mut cache);
                 (api.on_screen_text(false).map(|t| t.replace('\n', " ")), api.menu_state(),
                  format!("{:?}", api.read_joypad_state()))
             };

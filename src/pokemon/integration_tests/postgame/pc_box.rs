@@ -1,7 +1,6 @@
 //! Tests for workstream `pc_box` — see `docs/postgame-coverage-plan.md` §6 and
 //! [`crate::pokemon::postgame::pc_box`].
 
-#[allow(unused_imports)]
 use super::super::*;
 
 /// Workstream A's entry fixture (§9): all 8 badges, party of 4, bag 14/20, `wBoxCount = 0`, and the

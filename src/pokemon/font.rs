@@ -1,4 +1,3 @@
-use std::ops::Add;
 use crate::mmu::{MMU, ROM_BANK_SIZE};
 use crate::pokemon::symbols::pokered_symbols;
 

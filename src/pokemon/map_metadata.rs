@@ -1630,7 +1630,7 @@ mod test {
         let mmu = MMU::from_rom(POKERED).unwrap();
 
         // ── Pallet Town ──────────────────────────────────────────────────────────
-        use crate::pokemon::symbols::pokered_symbols;
+        
         let pt_header = mmu.read_map_header(Map::PalletTown).unwrap();
         let pt_warps  = mmu.read_warp_events(Map::PalletTown, &pt_header).unwrap();
         assert_eq!(pt_warps.len(), 3);
@@ -1752,32 +1752,6 @@ mod test {
                 assert_eq!(to_position.x, 39, "strip idx {i}: should land on Route16 right column (20*2-1)");
                 assert_eq!(to_position.y, i as u8, "strip idx {i}: y should equal strip index");
             }
-        }
-    }
-
-    #[test]
-    fn dump_route1_viridian_connection_data() {
-        let mmu = MMU::from_rom(POKERED).unwrap();
-        let r1 = mmu.read_map_header(Map::Route1).unwrap();
-        println!("Route1: height={} width={}", r1.height, r1.width);
-        if let Some(c) = r1.north_connection {
-            println!("  Route1 north→{:?}: y_align={} x_align={} strip_len={} connected_w={}", c.map, c.y_alignment, c.x_alignment, c.strip_length, c.connected_map_width);
-        }
-        if let Some(c) = r1.south_connection {
-            println!("  Route1 south→{:?}: y_align={} x_align={} strip_len={} connected_w={}", c.map, c.y_alignment, c.x_alignment, c.strip_length, c.connected_map_width);
-        }
-        let vc = mmu.read_map_header(Map::ViridianCity).unwrap();
-        println!("ViridianCity: height={} width={}", vc.height, vc.width);
-        if let Some(c) = vc.north_connection {
-            println!("  ViridianCity north→{:?}: y_align={} x_align={} strip_len={}", c.map, c.y_alignment, c.x_alignment, c.strip_length);
-        }
-        if let Some(c) = vc.south_connection {
-            println!("  ViridianCity south→{:?}: y_align={} x_align={} strip_len={}", c.map, c.y_alignment, c.x_alignment, c.strip_length);
-        }
-        let r2 = mmu.read_map_header(Map::Route2).unwrap();
-        println!("Route2: height={} width={}", r2.height, r2.width);
-        if let Some(c) = r2.south_connection {
-            println!("  Route2 south→{:?}: y_align={} x_align={} strip_len={}", c.map, c.y_alignment, c.x_alignment, c.strip_length);
         }
     }
 

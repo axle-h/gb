@@ -2,43 +2,6 @@
 
 use super::*;
 
-/// Append the **Articuno** that `seafoam_articuno_steps` catches, at the level it is caught (50), with
-/// the moves it is caught with.
-///
-/// ⚠️ **Seeded state, not earned state** — the same device as
-/// [`postgame::legendaries::seed_master_ball`], and it is here because the endgame leg chain has
-/// *diverged from the mainline*. `complete_game_steps` runs `seafoam_articuno_steps` between the
-/// Volcano and Earth badges, so it reaches Victory Road with four party members; but
-/// `post-volcano-lone.bin` — the root this chain hangs off, and one no test produces — was cut before
-/// that leg existed and is explicitly the two-mon "lone" party. Asking a lv56 Venusaur, a lv30 Vaporeon
-/// and the lv24 Machop it catches on arrival to clear Victory Road's nine trainers with no Pokémon
-/// Center inside is asking for something the mainline never asks: it blacks out to Viridian around the
-/// last cooltrainer, twice out of two, on either RNG stream.
-///
-/// Seeding the bird is the cheap half of re-cutting the chain. The honest fix is to re-cut
-/// `post-volcano-lone.bin` out of a Seafoam-era `full_playthrough`; until someone does, this keeps the
-/// leg testing what it is *for* — the Machop catch, the HM04 teach and the boulder puzzle — rather than
-/// a party-strength accident of its seed. Note it is a *generous* Articuno: [`Pokemon::maxed`] gives
-/// max IVs/EVs and the level is then wound back to 50, so it is stronger than one actually caught.
-/// That is deliberate — the point here is to stop the gauntlet deciding the test, not to model the
-/// mainline's bird exactly.
-fn seed_seafoam_articuno(fixture: &mut TestFixture) {
-    use crate::pokemon::pokemon::Pokemon;
-    let mut party = fixture.game_state().pokemon;
-    if party.iter().any(|p| p.species == PokemonSpecies::Articuno) { return; }
-
-    let mut articuno = Pokemon::maxed(PokemonSpecies::Articuno, "ARTICUNO",
-        [PokemonMoveName::Peck, PokemonMoveName::IceBeam, PokemonMoveName::Agility,
-         PokemonMoveName::Mist],
-        fixture.game_state().name.clone(), fixture.game_state().player_id);
-    articuno.experience = PokemonSpecies::Articuno.metadata().experience_group.experience_for_level(50);
-    articuno.recalculate();
-    articuno.current_hp = articuno.stats.hp;
-
-    party.push(articuno);
-    fixture.api().debug_set_party(&party).expect("the lone party has room for another mon");
-}
-
 /// From `post-volcano-badge.bin` (in Blaine's gym with 7 badges — exactly where the mainline is; the
 /// Seafoam detour is no longer on the route): Surf back to Pallet and up to Viridian, then clear
 /// Giovanni's
@@ -388,7 +351,7 @@ fn probe_button_at_state() {
             fixture.gb.run(crate::pokemon::agent::AGENT_RESOLUTION);
             if tick % 25 == 0 {
                 let flags = {
-                    use crate::ram::RAM;
+                    
                     fixture.gb.core().mmu().read(
                         crate::pokemon::symbols::pokered_symbols::wMovementFlags.address)
                 };

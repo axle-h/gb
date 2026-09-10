@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 use crate::joypad::JoypadButton;
-use crate::pokemon::{PokemonApi, PokemonApiTrait};
+use crate::pokemon::PokemonApiTrait;
 
 /// Reads what the game is saying, one frame at a time, out of the tile map.
 ///
@@ -242,10 +242,6 @@ mod tests {
             self.joypad.update_button(button, true)
         }
 
-        fn release_button(&mut self, button: JoypadButton) {
-            self.joypad.update_button(button, false)
-        }
-
         fn toggle_button(&mut self, button: JoypadButton) {
             self.joypad.update_button(button, !self.joypad.is_button_pressed(button))
         }
@@ -283,7 +279,7 @@ mod tests {
         fn pc_box_item_quantity(&self, _item: crate::pokemon::item::ItemId) -> u8 { 0 }
         fn pc_stored_items(&self) -> crate::pokemon::bag::Bag { crate::pokemon::bag::Bag::default() }
 
-        fn on_screen_text(&self, only_message_box: bool) -> Option<String> {
+        fn on_screen_text(&self, _only_message_box: bool) -> Option<String> {
             self.on_screen_text.clone()
         }
 
@@ -324,9 +320,6 @@ mod tests {
             Err("not available in stub".to_string())
         }
 
-        fn write_game_options(&mut self, options: &GameOptions) -> Result<(), String> {
-            Err("not available in stub".to_string())
-        }
     }
 
     /// ⚠️ **A frame that arrives out of order must not duplicate the page.**

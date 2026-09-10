@@ -23,13 +23,9 @@
 //! proves it works by standing where it answers *yes* — which needs a hidden item to *exist*, not to
 //! be collectable.
 
-use crate::geometry::Point8;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
-use crate::pokemon::map_metadata::PlayerFacingDirection;
-use crate::pokemon::policy::{FieldMove, PartyRef, PolicyStep};
-use crate::pokemon::roms;
-use crate::pokemon::symbols::{pokered_symbols, DmgBank, DmgPointer};
+use crate::pokemon::policy::{PartyRef, PolicyStep};
 use crate::pokemon::GameState;
 
 // ── H5: the dex sweep ────────────────────────────────────────────────────────────────────────────

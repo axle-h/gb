@@ -23,8 +23,6 @@ impl DelayContext {
         Self { cycles }
     }
 
-    pub const ZERO: Self = Self::new(MachineCycles::ZERO);
-
     pub fn short() -> Self {
         Self { cycles: SHORT_DELAY_CYCLES }
     }

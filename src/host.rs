@@ -694,7 +694,7 @@ impl EmulatorHost {
     /// unreadable — which it may well be, this being the first frame of a cutscene.
     fn final_state(&mut self) -> (u32, usize, usize, u32, Vec<crate::run::hall_of_fame::PartyMember>, bool) {
         use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
-        let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+        let api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
         let maxed = api.mmu().read_pointer(&pokered_symbols::wPlayTimeMaxed) != 0;
         let Ok(state) = api.game_state() else { return (0, 0, 0, 0, Vec::new(), maxed) };
         let party = state
@@ -1151,7 +1151,7 @@ impl EmulatorHost {
     fn publish_status(&mut self, now: Instant) {
         // `game_state` reads a lot of RAM and can legitimately fail mid-transition. A heartbeat that
         // says "no game state" is far easier to diagnose than one that stops arriving.
-        let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
+        let api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
         let game = api.game_state().ok().map(|state| observe::status(&state, &api));
         let snapshot = StatusSnapshot {
             // ⚠️ **`run_started`, not the process's own clock.** `emulated` beside it is zeroed by
@@ -1833,7 +1833,7 @@ mod tests {
         // periodic one is however many ticks old, and the agent has been walking in the meantime.
         host.checkpoint();
         let before = {
-            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
             api.game_state().expect("a readable state")
         };
         drop(host);
@@ -1851,7 +1851,7 @@ mod tests {
         )
         .expect("the checkpoint loads");
         let after = {
-            let mut api = PokemonApi::with_cache(&mut second.gb, &mut second.map_cache);
+            let api = PokemonApi::with_cache(&mut second.gb, &mut second.map_cache);
             api.game_state().expect("a readable state")
         };
 
@@ -1903,7 +1903,7 @@ mod tests {
             std::thread::sleep(Duration::from_micros(500));
         }
         let played = {
-            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
             api.game_state().expect("a readable state")
         };
         assert!(host.emulated.to_duration() >= Duration::from_secs(8), "the host barely ran");
@@ -1922,12 +1922,12 @@ mod tests {
 
         // The game itself is back at the beginning, and the agent has forgotten the old map.
         let restarted = {
-            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
             api.game_state().expect("a readable state")
         };
         let start = {
             let mut fresh = host_with(Published::new(), |_| {});
-            let mut api = PokemonApi::with_cache(&mut fresh.gb, &mut fresh.map_cache);
+            let api = PokemonApi::with_cache(&mut fresh.gb, &mut fresh.map_cache);
             api.game_state().expect("a readable state")
         };
         assert_eq!(restarted.map.player_position, start.map.player_position,
@@ -2082,7 +2082,7 @@ mod tests {
         }
         assert!(host.emulated.to_duration() >= Duration::from_secs(8), "the host barely ran");
         let played = {
-            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
             api.game_state().expect("a readable state")
         };
 
@@ -2095,7 +2095,7 @@ mod tests {
         assert_eq!(current.get().run_id(), before.run_id(), "a clear must not swap the run directory");
         assert!(!before.path().join("state.gbst").exists(), "a clear must not checkpoint, let alone reset");
         let after = {
-            let mut api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
             api.game_state().expect("a readable state")
         };
         assert_eq!(after.map.map, played.map.map, "the game was restarted rather than left alone");

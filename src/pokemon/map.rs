@@ -331,11 +331,11 @@ pub struct MapSprite {
 }
 
 impl MapSprite {
-    pub const fn new(id: usize, name: &'static str) -> Self {
+    pub const fn new(_id: usize, name: &'static str) -> Self {
         Self { name, hidden_object_id: None }
     }
 
-    pub const fn hidden(id: usize, name: &'static str, hidden_object_id: u8) -> Self {
+    pub const fn hidden(_id: usize, name: &'static str, hidden_object_id: u8) -> Self {
         Self { name, hidden_object_id: Some(hidden_object_id) }
     }
 

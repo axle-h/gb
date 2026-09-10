@@ -836,7 +836,7 @@ mod tests {
         for gap in 0..6 {
             let published = Published::new();
             let mut encoder = VideoEncoder::default();
-            let mut publish = |n: usize, encoder: &mut VideoEncoder| {
+            let publish = |n: usize, encoder: &mut VideoEncoder| {
                 if let Some(delta) = encoder.encode(&frame(n)) {
                     published.publish_video(encoder.keyframe().expect("state exists"), delta);
                 }

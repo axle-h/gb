@@ -27,7 +27,7 @@
 //! Inherited from the mock this replaces; do not simplify it away.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,13 +66,11 @@ pub struct SeenMessage {
 #[derive(Debug, Clone)]
 pub struct SeenTool {
     pub name: String,
-    pub schema: serde_json::Value,
 }
 
 /// Everything a [`Brain`] is allowed to see: the request, as strings.
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
-    pub system: String,
     pub messages: Vec<SeenMessage>,
     pub tools: Vec<SeenTool>,
     /// How many requests this endpoint has answered before this one, from zero.
@@ -164,10 +162,6 @@ impl TurnRequest {
         self.messages.iter().flat_map(|message| message.images.iter().cloned()).collect()
     }
 
-    /// How many messages of each role. The one figure `history does not grow` is asserted on.
-    pub fn role_count(&self, role: &str) -> usize {
-        self.messages.iter().filter(|message| message.role == role).count()
-    }
 }
 
 // ── What a brain answers with ────────────────────────────────────────────────────────────────────
@@ -301,11 +295,6 @@ pub struct MockEndpoint {
 }
 
 impl MockEndpoint {
-    /// Start a mock on an arbitrary loopback port. The runtime lives on its own thread and is never
-    /// joined — the test process ends and takes it with it.
-    pub fn start(brain: Box<dyn Brain>) -> Self {
-        Self::start_with_timeout_hold(brain, Duration::from_secs(2))
-    }
 
     pub fn start_with_timeout_hold(brain: Box<dyn Brain>, timeout_hold: Duration) -> Self {
         let inner = Endpoint {
@@ -355,9 +344,6 @@ impl MockEndpoint {
         self.inner.log.lock().expect("not poisoned").clone()
     }
 
-    pub fn last_request(&self) -> Option<TurnRequest> {
-        self.inner.log.lock().expect("not poisoned").last().cloned()
-    }
 }
 
 /// Flatten one wire message into what a brain is allowed to see.
@@ -400,16 +386,10 @@ async fn completions(State(endpoint): State<Endpoint>, body: String) -> Response
         .iter()
         .map(|tool| SeenTool {
             name: tool["function"]["name"].as_str().unwrap_or_default().to_string(),
-            schema: tool["function"]["parameters"].clone(),
         })
         .collect();
-    let system = messages
-        .iter()
-        .find(|message| message.role == "system")
-        .map_or(String::new(), |message| message.text.clone());
-
     let seen = endpoint.seen.fetch_add(1, Ordering::SeqCst);
-    let request = TurnRequest { system, messages, tools, seen };
+    let request = TurnRequest { messages, tools, seen };
     {
         let mut log = endpoint.log.lock().expect("not poisoned");
         if log.len() == KEPT_REQUESTS {
@@ -705,18 +685,8 @@ impl LlmRunBuilder {
         self
     }
 
-    pub fn max_tool_steps(mut self, steps: usize) -> Self {
-        self.max_tool_steps = steps;
-        self
-    }
-
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
-        self
-    }
-
-    pub fn retry(mut self, retry: RetryPolicy) -> Self {
-        self.retry = retry;
         self
     }
 
@@ -1055,15 +1025,6 @@ impl LlmRun {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("no history at {}: {e}", path.display()));
         serde_json::from_str(&text).expect("history.json is JSON")
-    }
-
-    /// How many messages the live conversation held when the endpoint last saw it. `0` before the
-    /// first request.
-    ///
-    /// ⚠️ **This is the figure the 402 death loop is asserted on** — see `docs/coverage-plan.md`
-    /// §2.2.1 (d). A history that grows across consecutive failures is the ratchet.
-    pub fn messages_last_sent(&self) -> usize {
-        self.endpoint.last_request().map_or(0, |request| request.messages.len())
     }
 
     /// The cartridge's own clock, which is the figure the leaderboard ranks on and therefore the one

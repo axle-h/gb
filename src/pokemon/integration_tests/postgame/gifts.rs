@@ -5,7 +5,6 @@
 //! Saffron and Celadon, so Fly is the difference between one step and a cross-Kanto walk — the same
 //! reasoning C's and F's rows give.
 
-#[allow(unused_imports)]
 use super::super::*;
 
 /// Workstream B's output (§9): Fuchsia City, Fly on Articuno, the Bicycle in the bag (16/20), party
@@ -123,47 +122,6 @@ fn a_full_party_sends_the_silph_lapras_to_the_box() {
     fixture.save_state_named("src/pokemon/data/postgame-lapras.bin").unwrap();
 }
 
-/// Diagnostic for **G3**: what does each of Silph 7F's three arrival points actually reach?
-///
-/// 7F has six warps — the lift at (18,0), stairs to 6F/8F, and three teleport pads — and the floor is
-/// cut into pockets by them, exactly like Victory Road 2F was for D. Kept `#[ignore]`d in the tree
-/// because "which pocket is the Lapras worker in" is the only question this leg has and it is worth
-/// being able to re-ask it.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_silph_7f_pockets() {
-    let dump = |fixture: &mut TestFixture, label: &str| {
-        for _ in 0..50 { fixture.step(); }
-        let state = fixture.game_state();
-        println!("== {label}: {} @ {}", state.map.map, state.map.player_position);
-        for action in state.map.actions() {
-            println!("   {:?} @ {} ({} steps)", action.tile, action.destination, action.route.len());
-        }
-    };
-
-    // 1. The lift door at (18,0) — what `lapras_steps` tried first.
-    let mut fixture = TestFixture::new(AERODACTYL, Duration::from_mins(60), vec![
-        PolicyStep::Fly { to: Map::SaffronCity },
-        PolicyStep::enter(Map::SilphCo1F),
-        PolicyStep::enter(Map::SilphCoElevator),
-        PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 6 },
-    ]);
-    fixture.run_until(|s| s.map.map == Map::SilphCo7F);
-    dump(&mut fixture, "arrived by lift");
-
-    // 2. The rival pocket, reached down 3F's (11,11) pad — the route `silph_giovanni_steps` threads.
-    let mut fixture = TestFixture::new(AERODACTYL, Duration::from_mins(60), vec![
-        PolicyStep::Fly { to: Map::SaffronCity },
-        PolicyStep::enter(Map::SilphCo1F),
-        PolicyStep::enter(Map::SilphCoElevator),
-        PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 2 },
-        PolicyStep::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 3 }) },
-    ]);
-    fixture.run_until(|s| s.map.map == Map::SilphCo7F);
-    dump(&mut fixture, "arrived by the 3F pad");
-}
-
 /// G3's output: Saffron City, party 6, **Lapras in box 1**, dex 10 owned.
 const LAPRAS: &[u8] = include_bytes!("../../data/postgame-lapras.bin");
 
@@ -203,33 +161,6 @@ fn can_beat_the_karate_master_and_take_a_hitmonlee() {
 /// G4's output: Saffron City, party 6 with Hitmonlee, box 1 holding Lapras + Omanyte, bag 15/20,
 /// dex 11 owned.
 const HITMONLEE: &[u8] = include_bytes!("../../data/postgame-hitmonlee.bin");
-
-/// Diagnostic for **G7**: what does each Silph floor's *lift landing* reach?
-///
-/// 7F taught this workstream that a Silph floor is not one room (see [`probe_silph_7f_pockets`]), so
-/// the same question has to be asked of every floor before writing a pickup route: are the item balls
-/// in the pocket the elevator opens onto, or behind a teleport pad? Menu index = floor − 1.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_silph_item_floors() {
-    for (floor, index) in [("2F", 1u8), ("4F", 3), ("6F", 5), ("8F", 7), ("10F", 9)] {
-        let mut fixture = TestFixture::new(HITMONLEE, Duration::from_mins(60), vec![
-            PolicyStep::Fly { to: Map::SaffronCity },
-            PolicyStep::enter(Map::SilphCo1F),
-            PolicyStep::enter(Map::SilphCoElevator),
-            PolicyStep::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: index },
-        ]);
-        fixture.run_until(|s| s.map.map != Map::SilphCoElevator && s.map.map != Map::SilphCo1F
-            && s.map.map != Map::SaffronCity);
-        for _ in 0..50 { fixture.step(); }
-        let state = fixture.game_state();
-        println!("== {floor} (menu index {index}): {} @ {}", state.map.map, state.map.player_position);
-        for action in state.map.actions() {
-            println!("   {:?} @ {} ({} steps)", action.tile, action.destination, action.route.len());
-        }
-    }
-}
 
 /// **Task G7** — the five Silph floors the main quest skips, and everything left on them.
 ///
@@ -430,42 +361,6 @@ fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
     assert_eq!(state.money, money_before, "nothing should have been paid for");
     assert_eq!(state.map.map, Map::Daycare, "the leg ends where it was talking");
     println!("day care declined · party {party_after:?} · ¥{}", state.money);
-}
-
-/// Diagnostic for **G8b**: Route 5's terraces. The Day Care door is at (10,21) and the walk in from
-/// Cerulean lands at (18,1); `enter(Daycare)` from there does nothing at all.
-#[test]
-#[cfg(feature = "diagnostics")]
-#[ignore = "diagnostic — run with --ignored --nocapture"]
-fn probe_route5_terraces() {
-    let mut fixture = TestFixture::new(GIFTS, Duration::from_mins(60), vec![
-        PolicyStep::Fly { to: Map::CeruleanCity },
-        PolicyStep::enter(Map::CeruleanTrashedHouse),
-        PolicyStep::enter_at(Map::CeruleanCity, 27, 9),
-        PolicyStep::enter(Map::Route5),
-    ]);
-    fixture.run_until(|s| s.map.map == Map::Route5);
-    for _ in 0..50 { fixture.step(); }
-    let state = fixture.game_state();
-    println!("== Route5 @ {}", state.map.player_position);
-    for action in state.map.actions() {
-        println!("   {:?} @ {} ({} steps)", action.tile, action.destination, action.route.len());
-    }
-    for y in 0..32u8 {
-        let row: String = (0..20u8).map(|x| match state.map.tile_at_checked(Point8 { x, y }) {
-            Some(MetaTile::Water) => '~',
-            Some(MetaTile::Obstacle) => '#',
-            Some(MetaTile::Empty) => '.',
-            Some(MetaTile::Warp { .. }) => 'W',
-            Some(MetaTile::Connection { .. }) => 'C',
-            Some(MetaTile::Jump(_)) => 'J',
-            Some(MetaTile::Sprite(_)) => 'S',
-            Some(MetaTile::Grass) => 'g',
-            Some(MetaTile::CutTree) => 'T',
-            _ => '?',
-        }).collect();
-        println!("  y{y:>2} {row}");
-    }
 }
 
 /// G8b's output: Route 5, party 6 with Hitmonlee back from the Day Care, ¥44,284.

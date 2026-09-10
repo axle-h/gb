@@ -168,14 +168,6 @@ pub fn known_unreachable(map: Map) -> Option<Unreachable> {
     }
 }
 
-/// The eleven Fly stops, which is how §8-L slices the tour: one test per hub, so a failure costs one
-/// town rather than the whole tour.
-pub const FLY_HUBS: &[Map] = &[
-    Map::PalletTown, Map::ViridianCity, Map::PewterCity, Map::CeruleanCity, Map::LavenderTown,
-    Map::VermilionCity, Map::CeladonCity, Map::FuchsiaCity, Map::CinnabarIsland,
-    Map::SaffronCity, Map::IndigoPlateau,
-];
-
 /// Rooms a tour must **not walk into**, and why. Distinct from [`known_unreachable`]: these can be
 /// entered perfectly well, and that is the problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,17 +197,6 @@ pub enum SkipTour {
     /// end and spent its whole cycle budget in a fight it could not finish, taking Vermilion's tour
     /// with it.
     TrainerGauntlet,
-}
-
-impl SkipTour {
-    pub const fn why(self) -> &'static str {
-        match self {
-            Self::SealsTheDoor => "the door seals behind you until the room's trainer is beaten",
-            Self::CostsAPaidTrip => "entering costs ¥500 and starts the Safari step counter",
-            Self::NeedsTheFloorMenu => "an elevator: the way out is the floor menu, not a door",
-            Self::TrainerGauntlet => "a road lined with trainers; that is BattleTrainer's job",
-        }
-    }
 }
 
 /// Whether the tour should walk past this room's door rather than through it.
