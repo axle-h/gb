@@ -1,0 +1,34 @@
+pub mod activation;
+pub mod audio;
+pub mod boot_palette;
+pub mod cgb_palette;
+pub mod core;
+pub mod cycles;
+pub mod divider;
+pub mod game_boy;
+pub mod geometry;
+pub mod hdma;
+pub mod header;
+pub mod interrupt;
+pub mod joypad;
+pub mod lcd_control;
+pub mod lcd_dma;
+pub mod lcd_palette;
+pub mod lcd_status;
+pub mod mbc;
+pub mod mmu;
+pub mod model;
+pub mod opcode;
+pub mod pointer;
+pub mod ppu;
+pub mod ram;
+pub mod registers;
+pub mod roms;
+pub mod rtc;
+pub mod savestate;
+pub mod schedule;
+pub mod serial;
+pub mod timer;
+
+#[cfg(test)]
+mod test_fixtures;

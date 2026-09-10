@@ -1,0 +1,30 @@
+[package]
+name = "poke-agent-web"
+version = "1.0.0"
+edition = "2024"
+description = "Serves a poke-agent run: the game, the streams and the web UI."
+
+[features]
+# The host's one long test and the two stream benches.
+slow-tests = []
+bench = []
+
+[dependencies]
+gb = { path = "../gb" }
+poke-agent = { path = "../poke-agent" }
+axum = "0.8"
+base64 = "0.22"
+# `/api/video`'s per-connection deflate stream, and the codec bench's yardstick.
+flate2 = "1"
+image = "0.25"
+# `/api/audio`'s Opus encoder. Pure Rust; see docs/web-streams.md for the 48 kHz constraint.
+opus-rs = "0.1.32"
+# The built SPA (`web/dist`), baked into the binary.
+rust-embed = "8.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+strum = "0.27"
+# axum's reactor. The emulator thread is a `std::thread` and never enters it.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "signal"] }
+# `BroadcastStream`: the sync→async bridge, and the only thing that surfaces `Lagged`.
+tokio-stream = { version = "0.1", features = ["sync", "time"] }
