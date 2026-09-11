@@ -7,6 +7,7 @@ use gb::game_boy::GameBoy;
 use gb::model::Model;
 use poke_agent::pokemon::agent::{AgentEvent, PokemonAgent};
 use poke_agent::pokemon::map_metadata::MapMetadataCache;
+use poke_agent::pokemon::options::{SERVED_OPTIONS, keep_game_options};
 use poke_agent::pokemon::policy::{LLM_POLICY_NAME, Policy};
 use poke_agent::pokemon::{PokemonApi, PokemonApiTrait, observe};
 use poke_agent::run::{CurrentRun, RunProgress};
@@ -227,10 +228,17 @@ impl EmulatorHost {
             completed: None,
             last_agent_failure: None,
         };
+        host.keep_served_options();
         if host.config.fresh_game {
             host.name_the_player();
         }
         Ok(host)
+    }
+
+    /// Hold the game to [`SERVED_OPTIONS`], a new run and a resume alike. Called before every
+    /// slice, because the credits' soft reset and Continue restore whatever the save was written with.
+    fn keep_served_options(&mut self) {
+        keep_game_options(self.gb.core_mut().mmu_mut(), &SERVED_OPTIONS);
     }
 
     /// Put the policy's name on the trainer card, if it has one.
@@ -478,6 +486,7 @@ impl EmulatorHost {
             .load_state(poke_agent::pokemon::data::START_OF_GAME)
             .map_err(|e| format!("could not load the start-of-game state: {e}"))?;
         self.map_cache = MapMetadataCache::default();
+        self.keep_served_options();
         self.agent.restart(Some(run.path()));
         // A new game names its trainer again, since the policy may have changed.
         self.name_the_player();
@@ -582,6 +591,7 @@ impl EmulatorHost {
                 self.booted = true;
                 self.published.set_status(RunStatus::Playing);
             }
+            self.keep_served_options();
             // `agent.run`, not `gb.run` and one `agent.update`.
             let result;
             (ran, result) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
@@ -1401,6 +1411,47 @@ mod tests {
         host.publish_video();
         assert!(published.latest_keyframe().is_some_and(|frame| frame.keyframe),
                 "the video encoder was not restarted");
+    }
+
+    /// A resume, a new run and a save restored mid-run all play on the served options.
+    #[test]
+    fn every_run_plays_on_the_served_options() {
+        use poke_agent::pokemon::options::{BattleStyle, GameOptions, GameOptionsReader, GameOptionsWriter, TextSpeed};
+        use poke_agent::run::RunDir;
+
+        let cartridge_defaults = GameOptions {
+            battle_animations_on: true,
+            battle_style: BattleStyle::Shift,
+            text_speed: TextSpeed::Medium,
+        };
+        let options = |host: &EmulatorHost| host.gb.core().mmu().read_game_options();
+
+        // A resume, from a save written before the host held anything.
+        let mut gb = GameBoy::dmg(poke_agent::pokemon::roms::POKERED);
+        gb.load_state(poke_agent::pokemon::data::START_OF_GAME).expect("the start state loads");
+        gb.core_mut().mmu_mut().write_game_options(&cartridge_defaults).expect("writable");
+        let saved = gb.save_state().expect("a state");
+        let scratch = poke_agent::run::Scratch::new("host-options");
+        let validate = |bytes: &[u8]| GameBoy::dmg(poke_agent::pokemon::roms::POKERED).load_state(bytes).is_ok();
+        let (run, _, _) = RunDir::open(&scratch.0, false, "random", &validate).expect("a fresh run");
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let mut host = host_from(&saved, Published::new(), |config| config.run = Some(Arc::clone(&current)));
+        assert_eq!(options(&host), Ok(SERVED_OPTIONS), "a resume kept the save's options");
+
+        // The game putting its own back, as Continue does after the credits.
+        host.gb.core_mut().mmu_mut().write_game_options(&cartridge_defaults).expect("writable");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.emulated == MachineCycles::ZERO && Instant::now() < deadline {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(host.emulated > MachineCycles::ZERO, "the host never ran");
+        assert_eq!(options(&host), Ok(SERVED_OPTIONS), "a tick did not put the served options back");
+
+        // A new run, before its first tick.
+        host.gb.core_mut().mmu_mut().write_game_options(&cartridge_defaults).expect("writable");
+        host.start_new_run().expect("a host with a run directory starts another");
+        assert_eq!(options(&host), Ok(SERVED_OPTIONS), "a new run started on the cartridge's options");
     }
 
     /// The win is noticed, the run filed and the next one started, with the transcript thread live.

@@ -58,7 +58,7 @@ impl TestFixture {
 
         let steps_at_start = policy.steps_remaining();
 
-        let options = crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
+        let options = crate::pokemon::options::HEADLESS_OPTIONS;
         PokemonApi::new(&mut gb).debug_set_options(&options);
 
         // Nothing in this harness ever listens, so the APU does not mix or resample.
@@ -92,9 +92,13 @@ impl TestFixture {
     }
 
     /// Hold this fixture to battle animations on.
-    pub fn with_original_battle_timing(mut self) -> Self {
-        self.options = GameOptions { battle_animations_on: true,
-                                     ..crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS };
+    pub fn with_original_battle_timing(self) -> Self {
+        self.with_options(crate::pokemon::options::SERVED_OPTIONS)
+    }
+
+    /// Hold this fixture to `options` rather than [`crate::pokemon::options::HEADLESS_OPTIONS`].
+    pub fn with_options(mut self, options: GameOptions) -> Self {
+        self.options = options;
         PokemonApi::with_cache(&mut self.gb, &mut self.map_cache).debug_set_options(&self.options);
         self
     }

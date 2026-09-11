@@ -67,7 +67,7 @@ pub mod postgame;
 #[cfg(test)]
 pub(crate) mod integration_tests;
 pub mod data;
-mod options;
+pub mod options;
 pub mod map_metadata;
 pub mod tile;
 mod pokedex;

@@ -2235,16 +2235,16 @@ fn the_header_in_wram_says_which_map_has_actually_been_loaded() {
 #[test]
 fn every_fixture_plays_at_the_fastest_game_options() {
     use crate::pokemon::options::{BattleStyle, GameOptionsReader, TextSpeed};
-    use crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
+    use crate::pokemon::options::HEADLESS_OPTIONS;
 
-    assert_eq!(FAST_FIXTURE_OPTIONS.text_speed, TextSpeed::Fast);
-    assert!(!FAST_FIXTURE_OPTIONS.battle_animations_on);
-    assert_eq!(FAST_FIXTURE_OPTIONS.battle_style, BattleStyle::Set, "SET is the no-switch-prompt one");
+    assert_eq!(HEADLESS_OPTIONS.text_speed, TextSpeed::Fast);
+    assert!(!HEADLESS_OPTIONS.battle_animations_on);
+    assert_eq!(HEADLESS_OPTIONS.battle_style, BattleStyle::Set, "SET is the no-switch-prompt one");
 
     // …and it is live in RAM the moment a fixture exists, before a single tick is run.
     let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
     let live = PokemonApi::new(&mut fixture.gb).mmu().read_game_options().expect("readable");
-    assert_eq!(live, FAST_FIXTURE_OPTIONS, "a fresh fixture is already at the fast options");
+    assert_eq!(live, HEADLESS_OPTIONS, "a fresh fixture is already at the fast options");
 
     // …and it survives the game writing its own back, which is what the per-tick re-apply is for.
     {
@@ -2258,7 +2258,7 @@ fn every_fixture_plays_at_the_fastest_game_options() {
     }
     fixture.step();
     let live = PokemonApi::new(&mut fixture.gb).mmu().read_game_options().expect("readable");
-    assert_eq!(live, FAST_FIXTURE_OPTIONS, "a tick puts the fast options back");
+    assert_eq!(live, HEADLESS_OPTIONS, "a tick puts the fast options back");
 }
 
 /// Every committed fixture's sprite table is complete, as `map_sprites_are_loaded` checks per tick.
