@@ -1,7 +1,7 @@
 //! Item PC storage, deposit and withdraw: face the PC and press A, pick `<PLAYER>'s PC`, the
 //! operation, the item and the quantity, then B until the overworld returns.
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
 use crate::pokemon::encoding::GameMode;

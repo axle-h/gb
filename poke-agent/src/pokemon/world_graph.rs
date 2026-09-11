@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;

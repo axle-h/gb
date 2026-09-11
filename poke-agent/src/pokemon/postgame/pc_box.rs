@@ -119,7 +119,7 @@ impl PcBoxOp {
 pub struct PcBoxState {
     pub op: PcBoxOp,
     /// Coordinate of the PC hidden object, from `MetaTileMap::pc_locations`.
-    pub pc: gb::geometry::Point8,
+    pub pc: poke_core::geometry::Point8,
     /// Counts before any menu was touched, the baselines completion is measured against.
     start_party: u8,
     start_boxed: u8,
@@ -132,7 +132,7 @@ pub struct PcBoxState {
 const TICK_BUDGET: u16 = 1200;
 
 impl PcBoxState {
-    pub fn new(op: PcBoxOp, pc: gb::geometry::Point8, api: &PokemonApi<'_>) -> Self {
+    pub fn new(op: PcBoxOp, pc: poke_core::geometry::Point8, api: &PokemonApi<'_>) -> Self {
         Self {
             op,
             pc,

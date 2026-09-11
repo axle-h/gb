@@ -1,0 +1,10 @@
+[package]
+name = "pokered-sdl"
+version = "0.1.0"
+edition = "2024"
+description = "Pokémon Red, recreated, in a desktop window."
+
+[dependencies]
+pokered = { path = "../pokered" }
+poke-core = { path = "../poke-core" }
+sdl2 = "0.38"

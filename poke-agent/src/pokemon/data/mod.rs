@@ -9,7 +9,7 @@ pub const START_OF_GAME: &[u8] = include_bytes!("start-of-game-state.bin");
 
 /// Picks Pokémon names one at a time in a random order, with no repeats until every name has been
 /// picked (then it reshuffles and starts over).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PokemonNamePicker {
     rng: StdRng,
 

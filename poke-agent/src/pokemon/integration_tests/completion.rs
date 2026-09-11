@@ -7,7 +7,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use gb::mmu::MMU;
-use gb::pointer::DmgPointer;
+use poke_core::pointer::DmgPointer;
 use gb::ram::ROM;
 use strum::IntoEnumIterator;
 

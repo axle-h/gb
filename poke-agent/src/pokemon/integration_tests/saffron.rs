@@ -24,7 +24,7 @@ fn can_enter_saffron() {
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_vaporeon() {
     use crate::pokemon::map::MapSprite as MS;
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     let steps = vec![
         // The free Eevee in the Celadon Mansion roof house, by the back entrance; the front door is
         // the dead-end condos.
@@ -117,7 +117,7 @@ fn can_get_marsh_badge() {
 /// An elevator door you warped onto is taken with a step off and a step back on.
 #[test]
 fn an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     const DOOR: Point8 = Point8 { x: 1, y: 3 };
 
     // No `PolicyStep`, because there is no map to name.
@@ -147,7 +147,7 @@ fn an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on() {
 /// Every teleport pad in Saffron Gym is a row, named by its own square.
 #[test]
 fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
     use crate::pokemon::tile::MetaTile;
     use std::sync::Arc;
@@ -213,7 +213,7 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
 /// An intra-map warp is finished by arriving, because nothing else can say so.
 #[test]
 fn a_teleport_pad_reports_arriving_even_though_the_map_never_changed() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     use crate::pokemon::tile::MetaTile;
     const PAD: Point8 = Point8 { x: 11, y: 11 };
     const LANDING: Point8 = Point8 { x: 1, y: 5 };

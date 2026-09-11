@@ -1,6 +1,6 @@
 //! The Game Corner economy: the Coin Case, coins, selling to a mart, and the prize room.
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};

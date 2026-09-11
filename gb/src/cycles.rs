@@ -12,6 +12,8 @@ impl MachineCycles {
     pub const CPU_FREQ: u64 = 4194304; // 4.194304 MHz t-cycles/s
     pub const PER_SERIAL_BYTE_TRANSFER: MachineCycles = MachineCycles::from_hz(8192 / 8); // 8192 Hz serial transfer rate
     pub const PER_DIVIDER_TICK: MachineCycles = MachineCycles::from_hz(16384);
+    /// One video frame at single speed: 154 scanlines of 456 t-cycles.
+    pub const PER_FRAME: MachineCycles = MachineCycles::from_t(70_224);
 
     pub const fn from_m(cycles: u64) -> Self {
         Self(cycles)

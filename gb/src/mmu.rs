@@ -10,7 +10,6 @@ use crate::hdma::{Hdma, HdmaRequest};
 use crate::interrupt::{InterruptFlags, InterruptFlagsSnapshot, InterruptType};
 use crate::joypad::JoypadRegister;
 use crate::model::{ColorMode, Model};
-use crate::pointer::{DmgBank, DmgPointer};
 use crate::ppu::{CGB_SECTION_VERSION, PPU};
 use crate::ram::{RAM, ROM};
 use crate::savestate::{labels, SectionReader, SectionWriter};
@@ -108,6 +107,8 @@ pub struct MMU {
     joypad_register: JoypadRegister,
     audio: Audio,
     now: u64,
+    /// `(now, address, value)` for every sound register write, while capturing.
+    sound_writes: Option<Vec<(u64, u16, u8)>>,
 }
 
 /// Contents of the `cart` save-state section: everything that describes the cartridge and its
@@ -364,6 +365,7 @@ impl MMU {
             timer: Timer::default(),
             audio: Audio::default(),
             now: 0,
+            sound_writes: None,
         };
         mmu.apply_boot_state();
         Ok(mmu)
@@ -453,6 +455,11 @@ impl MMU {
         self.rom_bank_register = value & (self.rom_bank_count() - 1);
     }
 
+    /// The ROM bank mapped at `0x4000..=0x7FFF`.
+    pub fn rom_bank(&self) -> usize {
+        self.rom_bank_register
+    }
+
     /// Adopt whatever the mapper now says the memory map looks like.
     fn refresh_bank_cache(&mut self) {
         self.rom_bank_register = self.mapper.rom_bank();
@@ -504,14 +511,6 @@ impl MMU {
                 .unwrap_or_else(|| panic!("ROM slice out of bounds: bank={} index={} length={}", bank, index, length))
         } else {
             self.data.get(start..).unwrap_or_else(|| panic!("ROM slice out of bounds: bank={} index={}", bank, index))
-        }
-    }
-
-    pub fn rom_data_from_rom_pointer<L: Into<Option<usize>>>(&self, pointer: &DmgPointer, length: L) -> &[u8] {
-        if let DmgPointer { bank: DmgBank::ROM { bank }, address } = pointer {
-            self.rom_data_from_pointer(*bank as usize, *address, length)
-        } else {
-            panic!("Pointer {} is not a ROM pointer", pointer)
         }
     }
 
@@ -614,6 +613,14 @@ impl MMU {
 
     pub fn audio_mut(&mut self) -> &mut Audio {
         &mut self.audio
+    }
+
+    pub fn capture_sound_writes(&mut self) {
+        self.sound_writes = Some(Vec::new());
+    }
+
+    pub fn take_sound_writes(&mut self) -> Vec<(u64, u16, u8)> {
+        self.sound_writes.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     pub fn divider(&self) -> &Divider {
@@ -1026,7 +1033,12 @@ impl MMU {
             0xFF06 => self.timer.set_modulo(value), // TMA register
             0xFF07 => self.timer.set_control(value, self.now), // TAC register
             0xFF0F => self.interrupt_request.set(value), // IF register (interrupt request flags)
-            0xFF10..=0xFF3F => self.audio.write(address, value),
+            0xFF10..=0xFF3F => {
+                if let Some(writes) = &mut self.sound_writes {
+                    writes.push((self.now, address, value));
+                }
+                self.audio.write(address, value)
+            }
             0xFF40 => self.ppu.lcd_control_mut().set(value), // LCD control register
             0xFF41 => self.ppu.lcd_status_mut().set_stat(value), // LCD status register
             0xFF42 => self.ppu.scroll_mut().y = value, // SCY register

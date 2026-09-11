@@ -1,6 +1,6 @@
 //! Fishing: the three rods, the cast driver, and the policy side of a `Fish` step.
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use gb::mmu::MMU;
 use crate::pokemon::agent::{start_menu_row, AgentEvent, AgentState, OverworldActionAbortedReason, PokemonAgent, StartMenuRow};
@@ -310,7 +310,7 @@ impl PolicyStep {
             Self::Fly { to: Map::LavenderTown },
             Self::enter(Map::Route12),
             Self::enter(Map::Route12Gate1F),
-            Self::EnterMap { to_map: Map::Route12, to_position: Some(gb::geometry::Point8 { x: 10, y: 21 }) },
+            Self::EnterMap { to_map: Map::Route12, to_position: Some(poke_core::geometry::Point8 { x: 10, y: 21 }) },
         ];
         s.push(Self::enter(Map::Route12SuperRodHouse));
         s.extend(std::iter::repeat_n(

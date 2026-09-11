@@ -8,7 +8,7 @@ use encoding::{GameMode, PokemonEncoding};
 use party::PokemonParty;
 use tile_map::MetaTileMap;
 use gb::game_boy::GameBoy;
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::{JoypadButton, JoypadButtonState};
 use gb::mmu::MMU;
 use gb::ram::{RAM, ROM};
@@ -26,19 +26,19 @@ use pokedex::Pokedex;
 use crate::pokemon::map_metadata::{MapMetadataCache, MapMetadataReader};
 use crate::pokemon::strings::PokemonString;
 
-pub mod badge;
-pub mod rom_gfx;
-pub mod badge_gfx;
-pub mod mon_gfx;
+pub use poke_core::badge;
+pub use poke_core::rom_gfx;
+pub use poke_core::badge_gfx;
+pub use poke_core::mon_gfx;
 pub mod learnset;
-pub mod map_gfx;
-pub mod map;
-pub mod pokemon;
-pub mod status;
-pub mod species;
-pub mod move_name;
-pub mod sprite;
-pub mod party;
+pub use poke_core::map_gfx;
+pub use poke_core::map;
+pub use poke_core::pokemon;
+pub use poke_core::status;
+pub use poke_core::species;
+pub use poke_core::move_name;
+pub use poke_core::sprite;
+pub use poke_core::party;
 pub mod agent;
 pub mod actions;
 pub mod battle;
@@ -48,20 +48,20 @@ pub mod policy;
 pub mod llm_policy;
 pub mod tile_map;
 pub mod encoding;
-pub mod strings;
+pub use poke_core::strings;
 pub mod symbols;
 pub mod font;
-pub mod roms;
+pub use poke_core::roms;
 mod text;
 pub mod map_header;
-pub mod item;
+pub use poke_core::item;
 pub mod item_use;
 pub mod bag;
 mod menu;
 pub mod delay;
-pub mod damage;
+pub use poke_core::damage;
 pub mod world_graph;
-pub mod wild;
+pub use poke_core::wild;
 pub mod postgame;
 
 #[cfg(test)]
@@ -412,7 +412,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
         let mut lines = Vec::new();
         let mut current_line = Vec::new();
-        let mut prev_pos: Option<Point8> = None;
+        let mut prev_pos: Option<gb::geometry::Point8> = None;
         for (char_id, pos) in coordinates {
             if only_message_box && pos.y < MESSAGE_BOX_MIN_Y {
                 continue;
@@ -678,8 +678,8 @@ pub struct GameState {
 /// State of the Vermilion Gym two-switch trash-can puzzle that unlocks the door to Lt. Surge.
 #[derive(Debug, Clone)]
 pub struct TrashCanPuzzle {
-    pub first_target: gb::geometry::Point8,
-    pub second_target: gb::geometry::Point8,
+    pub first_target: poke_core::geometry::Point8,
+    pub second_target: poke_core::geometry::Point8,
     pub first_opened: bool,
     pub second_opened: bool,
 }
@@ -701,6 +701,6 @@ fn inventory_quantity(mmu: &MMU, count_ptr: &symbols::DmgPointer, base_ptr: &sym
 
 /// Map coordinate of gym trash can `index` (0..=14): a 5×3 grid at odd columns 1-9 and rows
 /// 7-11, column-major (`HiddenEventsFor_VERMILION_GYM`).
-pub fn trash_can_position(index: u8) -> gb::geometry::Point8 {
-    gb::geometry::Point8 { x: 1 + 2 * (index / 3), y: 7 + 2 * (index % 3) }
+pub fn trash_can_position(index: u8) -> poke_core::geometry::Point8 {
+    poke_core::geometry::Point8 { x: 1 + 2 * (index / 3), y: 7 + 2 * (index % 3) }
 }

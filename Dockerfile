@@ -49,18 +49,24 @@ RUN pnpm run build
 FROM rust:1-bookworm AS build
 WORKDIR /src
 
-# Only what the compile reads, so a doc edit does not invalidate this layer. `poke-agent-sdl` is never
-# built, but its real manifest keeps `Cargo.lock` exact and a stub `main.rs` gives it a target.
+# Only what the compile reads, so a doc edit does not invalidate this layer. The two SDL crates are
+# never built, but their real manifests keep `Cargo.lock` exact and stub `main.rs`es give them targets.
 COPY Cargo.toml Cargo.lock ./
 COPY gb/Cargo.toml ./gb/
 COPY gb/src/ ./gb/src/
-COPY poke-agent/Cargo.toml poke-agent/build.rs ./poke-agent/
+COPY poke-core/Cargo.toml poke-core/build.rs ./poke-core/
+COPY poke-core/src/ ./poke-core/src/
+COPY pokered/Cargo.toml ./pokered/
+COPY pokered/src/ ./pokered/src/
+COPY poke-agent/Cargo.toml ./poke-agent/
 COPY poke-agent/src/ ./poke-agent/src/
 COPY poke-agent-web/Cargo.toml ./poke-agent-web/
 COPY poke-agent-web/src/ ./poke-agent-web/src/
 COPY poke-agent-sdl/Cargo.toml ./poke-agent-sdl/
-RUN mkdir -p poke-agent-sdl/src && echo 'fn main() {}' > poke-agent-sdl/src/main.rs
+COPY pokered-sdl/Cargo.toml ./pokered-sdl/
+RUN for crate in poke-agent-sdl pokered-sdl; do mkdir -p $crate/src && echo 'fn main() {}' > $crate/src/main.rs; done
 COPY --from=rom /pokered/pokered.gbc /pokered/pokered.sym ./vendor/pokered/
+COPY --from=rom /pokered/constants/ ./vendor/pokered/constants/
 COPY --from=web /web/dist ./poke-agent-web/web/dist
 
 # The binary is copied out inside this RUN because `target/` is a cache mount, absent from the image.

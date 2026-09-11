@@ -9,7 +9,7 @@ use crate::pokemon::symbols::pokered_symbols;
 use crate::pokemon::symbols::DmgPointerRead;
 use crate::pokemon::tile::MetaTile;
 use crate::pokemon::world_graph::WorldGraph;
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 
 /// `#[derive(Serialize)]` only when something is going to serialise it.
 macro_rules! view {

@@ -339,7 +339,7 @@ mod tests {
 
     /// Walk a map's `*_Object` structure to its object-event count.
     fn object_event_count(mmu: &MMU, header: &crate::pokemon::map_header::MapHeader) -> u8 {
-        use crate::pokemon::symbols::{DmgBank, DmgPointer};
+        use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
         let ptr = DmgPointer { bank: DmgBank::ROM { bank: header.header_bank },
                                address: header.objects_address };
         let data = mmu.rom_data_from_rom_pointer(&ptr, 0x400);

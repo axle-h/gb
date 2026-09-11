@@ -85,7 +85,7 @@ fn can_get_silph_scope() {
 /// A route four wandering pets stand on is waited out, not called routeless.
 #[test]
 fn a_route_a_wandering_pet_is_standing_on_is_waited_out_rather_than_disputed() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     const STAIRS: Point8 = Point8 { x: 7, y: 1 };
 
     let mut fixture = TestFixture::new(
@@ -108,7 +108,7 @@ fn a_route_a_wandering_pet_is_standing_on_is_waited_out_rather_than_disputed() {
 /// A room whose corridors are both blocked by people is waited out, not called routeless.
 #[test]
 fn a_room_whose_corridors_are_both_blocked_is_waited_out_rather_than_called_routeless() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     use crate::pokemon::tile::MetaTile;
     const BOXED_IN: Point8 = Point8 { x: 0, y: 5 };
 

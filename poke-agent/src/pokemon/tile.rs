@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use crate::pokemon::map::Map;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, strum_macros::IntoStaticStr, Default)]
@@ -158,7 +158,7 @@ impl JumpDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
 
     /// A goal row is identified by its target, and the boulder is free to move under it.
     #[test]

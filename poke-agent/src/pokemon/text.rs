@@ -175,7 +175,7 @@ mod tests {
             false
         }
 
-        fn raw_player_coords(&self) -> gb::geometry::Point8 {
+        fn raw_player_coords(&self) -> poke_core::geometry::Point8 {
             self.game_state.map.player_position
         }
 

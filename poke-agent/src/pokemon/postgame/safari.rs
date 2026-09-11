@@ -1,6 +1,6 @@
 //! The Safari Zone: the step budget, the odds, and the hunt.
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::mmu::MMU;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::battle::{BattleAction, BattleType};

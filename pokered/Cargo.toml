@@ -1,0 +1,19 @@
+[package]
+name = "pokered"
+version = "0.1.0"
+edition = "2024"
+description = "Pokémon Red as a native game: a frame-driven state machine built from the pokered disassembly."
+
+[features]
+slow-tests = []
+
+[dependencies]
+poke-core = { path = "../poke-core" }
+bitflags = { version = "2.9.3", features = ["serde"] }
+rand = "0.10.2"
+rand_pcg = { version = "0.10", features = ["serde"] }
+rmp-serde = "1.3.1"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"

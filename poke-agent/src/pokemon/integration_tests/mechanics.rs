@@ -1542,7 +1542,7 @@ fn using_an_item_the_game_will_not_use_does_not_wedge() {
             // Sailor 1, at (19, 30) on Vermilion's dock, three steps from the fixture.
             Some(crate::pokemon::policy::FieldMove::UseFieldItem {
                 item: ItemId::HelixFossil,
-                target: gb::geometry::Point8 { x: 19, y: 30 },
+                target: poke_core::geometry::Point8 { x: 19, y: 30 },
             })
         }
     }
@@ -1595,7 +1595,7 @@ fn an_item_the_map_refuses_backs_out_rather_than_mashing_for_a_minute() {
         fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
             Some(crate::pokemon::policy::FieldMove::UseFieldItem {
                 item: ItemId::EscapeRope,
-                target: gb::geometry::Point8 { x: 19, y: 30 },
+                target: poke_core::geometry::Point8 { x: 19, y: 30 },
             })
         }
     }
@@ -2490,7 +2490,7 @@ fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
 
 #[test]
 fn a_door_with_somebody_standing_in_it_is_not_a_row_until_they_move() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     const OCCUPIED: Point8 = Point8 { x: 3, y: 7 };
     const BESIDE_IT: Point8 = Point8 { x: 4, y: 7 };
 
@@ -2517,7 +2517,7 @@ fn a_door_with_somebody_standing_in_it_is_not_a_row_until_they_move() {
 /// A pacing pair is chosen once and the map moves under it.
 #[test]
 fn a_pacing_pair_somebody_steps_onto_is_re_picked_rather_than_bumped_into() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     use crate::pokemon::agent::AgentState;
     const PLAYER: Point8 = Point8 { x: 14, y: 6 };
     const BLOCKED: Point8 = Point8 { x: 14, y: 5 };
