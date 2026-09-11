@@ -364,3 +364,22 @@ fn seafoams_boulders_are_pushed_by_their_rows_down_to_articuno() {
         assert!(hidden, "the boulder at {at} never went down its hole");
     }
 }
+
+/// An item ball with tall grass on every side is still a row, and a model can pick it up.
+#[test]
+fn an_item_ringed_by_tall_grass_can_be_picked_up() {
+    use crate::pokemon::item::ItemId;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut run = LlmRun::builder(include_bytes!("../data/viridian-forest.bin"))
+        .named("grass-ringed-ball")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(choosing(":PokeBall", Arc::clone(&seen))));
+    let balls = |run: &mut LlmRun| run.fixture().try_game_state().ok()
+        .and_then(|state| state.bag.iter().find(|item| item.id == ItemId::PokeBall).map(|item| item.quantity))
+        .unwrap_or(0);
+    let before = balls(&mut run);
+    let picked = run.tick_until(PATIENCE, |run| balls(run) > before);
+    let first = seen.lock().expect("not poisoned").overworld_turns.first().cloned().unwrap_or_default();
+    assert!(first.contains("ViridianForest:PokeBall"), "the ball was not offered:\n{first}");
+    assert!(picked, "the ball was never picked up");
+}

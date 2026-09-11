@@ -1070,15 +1070,17 @@ impl MetaTileMap {
                 })
                 .collect();
 
-            let Some((face_dir, dest)) = direct.iter().chain(counter_extra.iter())
+            // Tall grass only where nothing else stands beside it, as in Viridian Forest's west side:
+            // never in place of floor, so no row that already existed moves.
+            let stand = |on: MetaTile| direct.iter().chain(counter_extra.iter())
                 .filter(|(_, p)| {
                     (p.x as usize) < self.width && (p.y as usize) < self.height
-                    && matches!(self.meta_tiles[p.x as usize + p.y as usize * self.width], MetaTile::Empty)
+                    && self.meta_tiles[p.x as usize + p.y as usize * self.width] == on
                     && best_dist_from(p).is_some()
                 })
                 .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
-                .copied()
-            else { continue };
+                .copied();
+            let Some((face_dir, dest)) = stand(MetaTile::Empty).or_else(|| stand(MetaTile::Grass)) else { continue };
 
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);

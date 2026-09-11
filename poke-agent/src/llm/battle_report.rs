@@ -65,6 +65,11 @@ pub struct BattleReport {
     ending: Option<(Side, Option<Side>)>,
     /// The cartridge said the player blacked out.
     blacked_out: bool,
+    /// The last decision was the model's own, which opens no turn of the report's.
+    answering: bool,
+    /// What the game said after the model's own last decision: how the battle ended, a level, an
+    /// evolution. Nothing else carries it once the battle's events are folded into the report.
+    after_answered: Vec<String>,
     /// Where `LlmPolicy::events` stood when this battle began.
     pub events_mark: usize,
 }
@@ -88,6 +93,8 @@ impl BattleReport {
             my_slot: battle.active_party_slot as usize,
             ending: None,
             blacked_out: false,
+            answering: false,
+            after_answered: Vec::new(),
             events_mark,
         })
     }
@@ -95,6 +102,8 @@ impl BattleReport {
     /// The script chose something. Whatever was open is closed against `state` first.
     pub fn decided(&mut self, state: &GameState, action: &BattleAction, prints: Vec<String>) {
         self.close_in_battle(state);
+        self.answering = false;
+        self.after_answered.clear();
         self.open = Some(Turn {
             number: self.closed.len() as u32 + self.asked + 1,
             intent: intent(action),
@@ -111,6 +120,9 @@ impl BattleReport {
     pub fn handed_back(&mut self, state: &GameState) -> Option<String> {
         self.close_in_battle(state);
         self.asked += 1;
+        self.answering = true;
+        // The model's next turn is shown what came before it.
+        self.after_answered.clear();
         let since = std::mem::replace(&mut self.told, self.closed.len());
         if since >= self.closed.len() {
             return None;
@@ -136,6 +148,8 @@ impl BattleReport {
         let quoted = truncated(message, MAX_QUOTE);
         match self.open.as_mut() {
             Some(turn) => turn.said.push(quoted),
+            // Not the last script turn's: it was the model's choice that led here.
+            None if self.answering => self.after_answered.push(quoted),
             None => match self.closed.last_mut() {
                 Some((turn, ..)) => turn.said.push(quoted),
                 None => {}
@@ -244,6 +258,10 @@ impl BattleReport {
 
         out.push_str(&self.turns_from(0));
 
+        if !self.after_answered.is_empty() {
+            out.push_str(&format!("\nAfter your own last choice the game said: {}\n",
+                self.after_answered.iter().map(|said| format!("\"{said}\"")).collect::<Vec<_>>().join(" ")));
+        }
         if let Some((me, foe)) = self.ending.as_ref() {
             match foe {
                 Some(foe) => out.push_str(&format!("\nEnded with {} and {}.\n", standing(foe), standing(me))),
@@ -443,6 +461,24 @@ mod tests {
         kept.decided(&start, &ember(), Vec::new());
         let rendered = kept.finish(Some(&hurt(state(), 20, foe_hp - 9)));
         assert!(rendered.contains(&format!("{foe_hp} → {}", foe_hp - 9)), "{rendered}");
+    }
+
+    /// A battle the model answered to the end keeps what the game said after it, and gives none of
+    /// it to a turn the script took earlier.
+    #[test]
+    fn what_follows_the_models_own_last_choice_is_kept() {
+        let start = state();
+        let mut report = BattleReport::open(&start, 0).unwrap();
+        report.decided(&start, &ember(), Vec::new());
+        report.said("Enemy RATTATA used TACKLE!");
+        let _ = report.handed_back(&start);
+        report.said("Enemy RATTATA fainted! BULBASAUR grew to level 7! BULBASAUR evolved into IVYSAUR!");
+        let rendered = report.finish(None);
+
+        assert!(rendered.contains("After your own last choice"), "{rendered}");
+        assert!(rendered.contains("evolved into IVYSAUR"), "the evolution was lost: {rendered}");
+        let script_turn = rendered.lines().find(|line| line.contains("Ember")).unwrap_or_default();
+        assert!(!script_turn.contains("fainted"), "the model's ending was pinned on the script's turn: {rendered}");
     }
 
     #[test]
