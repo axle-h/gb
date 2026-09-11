@@ -265,6 +265,10 @@ fn probe_stall_actions() {
     for action in s.map.actions() {
         println!("  action {:?} → {} ({} steps)", action.tile, action.destination, action.route.len());
     }
+    // And the menu the model is shown, which is what a missing row is missing from.
+    for row in crate::llm::tools::overworld_menu(&s, None) {
+        println!("  row `{}` — {}", row.id, row.description);
+    }
 }
 
 /// A boulder that will not move says so, instead of being shoved at for a minute.
