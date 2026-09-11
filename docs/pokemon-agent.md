@@ -118,10 +118,10 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - Two arms over one decision must share a damage model: a 0-PP move scoring 122 livelocked the
   Elite-Four switch tactic.
 - A wedged scripted run is silent — no watchdog, and `/api/events` goes on looking healthy.
-- Open: the heal-return oscillation under `MAX_HEAL_HOPS` is a `WorldGraph` landing mismatch. An edge
-  records the geometric border position and `SNAP_THRESHOLD` resolves it to the nearest observed node,
-  two tiles from the pocket the walk lands in on Route 13. No distance threshold separates them; the
-  graph has to learn where a door deposits you.
+- `route_toward` scores every reachable crossing into a neighbour, not only the nearest one
+  `actions()` offers, or a route out of a pocket takes the pocket's own crossing back in for ever.
+  `with_every_crossing` keeps the menu's rows first so a tie is theirs: `full_playthrough` replays
+  their choices.
 
 ## Prose the model and the page read
 

@@ -215,6 +215,49 @@ fn the_route_8_gate_can_be_re_entered_from_its_own_doorstep() {
         .expect("and straight back in from the doorstep, which is what never used to happen");
 }
 
+/// Route 14's north-east pocket, walled in by a trainer, whose only way out is back over the
+/// Route 13 border. From where that crossing lands, the nearest way into Route 14 is the pocket's
+/// own, and a route on to Route 15 has to take another one.
+#[test]
+fn a_route_out_of_a_pocket_does_not_walk_back_into_it() {
+    // Raw landings on Route 14, and the pocket's in the tile map's own coordinates.
+    const MAIN: Point8 = Point8 { x: 19, y: 8 };
+    const POCKET: Point8 = Point8 { x: 19, y: 6 };
+    const IN_THE_POCKET: Point8 = Point8 { x: 20, y: 6 };
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/pocket-route14.bin"),
+        Duration::from_secs(300),
+        vec![
+            // Both sections first, so the graph has seen the pocket and the way on.
+            PolicyStep::enter(Map::Route13),
+            PolicyStep::EnterMap { to_map: Map::Route14, to_position: Some(MAIN) },
+            PolicyStep::enter(Map::Route13),
+            PolicyStep::EnterMap { to_map: Map::Route14, to_position: Some(POCKET) },
+            PolicyStep::Goto { map: Map::Route15, strict: true },
+        ],
+    );
+    for map in [Map::Route13, Map::Route14, Map::Route13] {
+        fixture.try_run_until(|state| state.map.map == map).unwrap_or_else(|| panic!("onto {map}"));
+    }
+    let pocket = fixture.try_run_until(|state| state.map.map == Map::Route14 && state.map.position_settled)
+        .expect("back into the pocket");
+    assert_eq!(pocket.map.player_position, IN_THE_POCKET, "the fixture no longer stands where this is about");
+
+    // Out, across the border lower down, and on: three crossings.
+    let crossings = std::cell::Cell::new(0);
+    let last = std::cell::Cell::new(Map::Route14);
+    let end = fixture.try_run_until(|state| {
+        if state.map.map != last.get() {
+            last.set(state.map.map);
+            crossings.set(crossings.get() + 1);
+        }
+        state.map.map == Map::Route15 || crossings.get() > 6
+    });
+    assert_eq!(end.map(|state| state.map.map), Some(Map::Route15),
+               "never reached Route 15; {} crossings, walking back into the pocket", crossings.get());
+    assert_eq!(crossings.get(), 3);
+}
+
 #[test]
 fn a_water_route_does_not_climb_out_onto_route_21s_islands() {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);

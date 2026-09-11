@@ -264,7 +264,7 @@ impl WorldGraph {
 impl WorldGraph {
     /// Test-only: record a section `(map, entry)` with a fixed set of outgoing edges, mimicking
     /// what `observe` derives from a live map.
-    fn observe_edges(&mut self, map: Map, entry: Point8, edges: &[(Point8, Map, Point8, EdgeKind)]) {
+    pub(crate) fn observe_edges(&mut self, map: Map, entry: Point8, edges: &[(Point8, Map, Point8, EdgeKind)]) {
         let edges = edges
             .iter()
             .map(|&(from, to_map, to, kind)| Edge {
