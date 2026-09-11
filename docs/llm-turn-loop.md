@@ -1,6 +1,6 @@
 # The LLM turn loop, the tools and the prompt
 
-Read before touching anything under `poke-agent/src/llm/`, `pokemon/llm_policy.rs`, or what the
+Read before touching anything under `poke-agent/src/llm/`, `poke-agent/src/pokemon/llm_policy.rs`, or what the
 model is sent. The README tells the story; this is what a change must not break, and where the
 argument lives in the code.
 

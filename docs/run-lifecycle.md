@@ -1,6 +1,6 @@
 # Run lifecycle: a new run in place, a cleared conversation, and the end of the game
 
-Read before touching `poke-agent/src/run/`, `host.rs`'s new-run, clear and completion seams,
+Read before touching `poke-agent/src/run/`, `poke-agent-web/src/host.rs`'s new-run, clear and completion seams,
 `/reset-game`, `POST /api/new-run` or `POST /api/clear`.
 
 ## Starting a new run
