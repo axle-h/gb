@@ -402,6 +402,14 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                     "{prize:?} costs {} coins and you have {}. The clerk in the Game Corner sells \
                      50 coins for ¥1000.", prize.cost(), state.coins));
             }
+            // A machine is an item, and the clerk will not hand over what the bag has no room for.
+            if let Some(tm) = prize.item()
+                && state.bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS
+                && !state.bag.contains(&tm)
+            {
+                return Err("The bag is full: it holds 20 kinds, and the clerk says \"Oops! You don't \
+                            have enough room.\" Toss something first.".to_string());
+            }
             FieldMove::RedeemPrize { prize: *prize }
         }
         FieldMoveRequest::UseElevator { to } => {
@@ -1806,7 +1814,13 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
         MetaTile::Switch { object, ordinal } => {
             let verb = match object {
                 HiddenObject::TrashCan => "search this bin for one of the gym's two switches",
-                HiddenObject::VendingMachine => "buy the cheapest drink from this machine",
+                HiddenObject::VendingMachine => match crate::pokemon::tile_map::VENDING_DRINKS.get(ordinal as usize - 1) {
+                    Some((drink, price)) => return format!(
+                        "buy a {drink} for ¥{price}: the three machines sell the same three drinks, and \
+                         each row buys one of them (you stand at ({}, {}))",
+                        action.destination.x, action.destination.y),
+                    None => "buy a drink from this machine",
+                },
                 HiddenObject::Poster => "look behind the poster",
                 HiddenObject::Statue => "press this statue's switch",
                 HiddenObject::CellSeparator => "run the cell separator to turn Bill back into a person",

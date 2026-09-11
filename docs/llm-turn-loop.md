@@ -21,6 +21,10 @@ argument lives in the code.
   save is behind the conversation, and `CLEARED_NOTE` says an erasure was deliberate — a model
   looking at a run it cannot remember otherwise concludes the game is broken.
 
+- A turn cancelled before it was answered hands its events to the turn that replaces it, and they
+  are spent only when an answer lands. Otherwise what happened while the model was thinking is told
+  to nobody.
+
 ## The tools
 
 - Every terminal tool's `summary` is enforced by `classify` rather than by the schema, because a
@@ -89,10 +93,15 @@ argument lives in the code.
 - Damage is a diff of HP between consecutive decisions and the prose is the cartridge's, because
   there is no per-turn outcome event. The report is rendered into the situation, not appended as a
   message, and `events_mark` takes back the message boxes it already narrates.
+- It takes back its own battle and no more: `events_end` is stamped when `BattleEnded` arrives, so a
+  verdict that lands after it, such as a pickup a trainer's battle interrupted, is still news.
 - A blackout is detected on the cartridge's own sentence, because `wBattleResult` is zeroed before
   anything here runs, and its arm sits above the in-battle arm.
 - `handed_back` returns the turns the script took since the model last chose. Without it a model
   asked mid-battle sees a fight in which its own last decision was silently replaced.
+- What the game says after the model's own last choice is `BattleReport::after_answered`, never the
+  script's last turn: a model's turn opens no report turn, and a walk resumed after the battle asks
+  nothing in between, so the faint, the level and the evolution had nowhere else to go.
 - `take_over` stops the script deciding the rest of *this* battle and nothing more. It cannot be
   scoped to the run: a disarm reached for mid-battle is one nothing brings back.
 

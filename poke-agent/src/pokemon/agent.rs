@@ -522,7 +522,7 @@ pub(crate) enum AgentState {
     PokemartShopping(PokemartState),
 
     /// Teaching an HM/TM to a party member: START→ITEM→bag→USE→party.
-    TeachingMove { item: crate::pokemon::item::ItemId, target_slot: u8, press: bool, entered_menu: bool, settle: u8, evolve_from: Option<crate::pokemon::species::PokemonSpecies> },
+    TeachingMove { item: crate::pokemon::item::ItemId, target_slot: u8, press: bool, entered_menu: bool, settle: u8, evolve_from: Option<crate::pokemon::species::PokemonSpecies>, declined: bool },
 
     /// Cut on the tree the player is facing: START→POKéMON→mon→CUT.
     CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8, slot: u8, move_index: u8, from_row: bool },
@@ -558,7 +558,7 @@ pub(crate) enum AgentState {
     CheckingTrashCan { target: Point8, checked: bool, press: bool, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
 
     /// An elevator panel: face it, pick `floor` from its list, then ride the redirected warp out.
-    UsingElevator { panel: Point8, floor: u8, selected: bool, press: bool },
+    UsingElevator { panel: Point8, floor: u8, selected: bool, press: bool, ticks: u16 },
 
     /// Using a bag item on the sprite at `target`: face it, then START→ITEM→bag→USE.
     UsingFieldItem { item: crate::pokemon::item::ItemId, target: Point8, press: bool, entered_menu: bool, backing_out: u16 },
@@ -688,6 +688,8 @@ pub struct PokemonAgent {
     last_map: Option<Map>,
     /// Trees the agent has cut down, by `(map, expanded tile position)`.
     cut_tiles: std::collections::HashSet<(Map, Point8)>,
+    /// The naming screen open now follows a catch, so its closing is the battle's end.
+    naming_after_battle: bool,
     /// Silph Co door-graphic walls ($18/$24 that won't open), by `(map, tile position)`.
     blocked_tiles: std::collections::HashSet<(Map, Point8)>,
     /// Consecutive A presses on the card-key door in front of the player.
@@ -707,6 +709,8 @@ pub struct PokemonAgent {
     escaping_menus: bool,
     /// The next YES/NO menu is answered NO: a quiz row chosen for that answer.
     answer_no: bool,
+    /// A vending row chose this drink, by its row in the machine's menu.
+    vending_pick: Option<u8>,
 
     /// Ticks in which a newly opened text box may still be a menu the agent inherited.
     menu_handover_ticks: u16,
@@ -776,6 +780,7 @@ impl PokemonAgent {
             route_lost_to_people: false,
             last_map: None,
             cut_tiles: std::collections::HashSet::new(),
+            naming_after_battle: false,
             blocked_tiles: std::collections::HashSet::new(),
             turned_back_tiles: std::collections::HashSet::new(),
             turn_back_watch: None,
@@ -785,6 +790,7 @@ impl PokemonAgent {
             manual_input_held: 0,
             escaping_menus: false,
             answer_no: false,
+            vending_pick: None,
             menu_handover_ticks: 0,
             forget_choice: None,
             pending_pickup: None,
@@ -805,6 +811,7 @@ impl PokemonAgent {
         self.world_graph = WorldGraph::new();
         self.last_map = None;
         self.cut_tiles.clear();
+        self.naming_after_battle = false;
         self.blocked_tiles.clear();
         self.turned_back_tiles.clear();
         self.turn_back_watch = None;
@@ -1203,6 +1210,10 @@ impl PokemonAgent {
     pub fn take_overworld_action(&mut self, action: OverworldAction) {
         self.answer_no = matches!(action.tile,
             MetaTile::Switch { object: crate::pokemon::tile::HiddenObject::Quiz { yes: false }, .. });
+        self.vending_pick = match action.tile {
+            MetaTile::Switch { object: crate::pokemon::tile::HiddenObject::VendingMachine, ordinal } => Some(ordinal - 1),
+            _ => None,
+        };
         self.event(AgentEvent::StartedOverworldAction {
             destination: action.tile.clone(),
             id: action.id(),
@@ -1278,17 +1289,34 @@ impl PokemonAgent {
         }
     }
 
+    /// The naming screen is gone; after a catch that is also the battle gone.
+    fn naming_closed(&mut self) {
+        self.set_state(AgentState::Idle);
+        if std::mem::take(&mut self.naming_after_battle) {
+            self.event(AgentEvent::BattleEnded);
+            // A battle reloads the map, so any tree cut on it has regrown.
+            self.cut_tiles.clear();
+        }
+    }
+
     /// Checks if the naming screen has just opened or closed.
     fn assert_naming_screen(&mut self, game_mode: GameMode, api: &mut PokemonApi) -> Result<(), String> {
         if game_mode == GameMode::NamingScreen {
             if !matches!(self.state, AgentState::NamingPokemon { .. }) {
                 let species = api.naming_screen_species()?;
                 api.release_all_buttons();
+                // A catch: the battle ends when this screen closes, and what it said ends here.
+                if let AgentState::Battle(battle_state) = &self.state {
+                    if let BattleState::WaitingForMenu { reader, .. } = battle_state {
+                        self.event(AgentEvent::text_box_from_reader(reader));
+                    }
+                    self.naming_after_battle = true;
+                }
                 self.set_state(AgentState::NamingPokemon { species, decided: false, ticks: 0 });
             }
         } else if matches!(self.state, AgentState::NamingPokemon { decided: false, .. }) {
             // Closed before the policy decided.
-            self.set_state(AgentState::Idle);
+            self.naming_closed();
         }
         // Once decided, the naming screen reads as `TextBox`, so this does not fire.
 
@@ -1698,12 +1726,12 @@ impl PokemonAgent {
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             }
-                            self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu: false, settle: 0, evolve_from: None });
+                            self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu: false, settle: 0, evolve_from: None, declined: false });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::EvolveWithStone { stone, target_slot, evolve_from }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::TeachingMove { item: stone, target_slot, press: true, entered_menu: false, settle: 0, evolve_from: Some(evolve_from) });
+                            self.set_state(AgentState::TeachingMove { item: stone, target_slot, press: true, entered_menu: false, settle: 0, evolve_from: Some(evolve_from), declined: false });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::CutTree) => {
@@ -1769,7 +1797,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::UseElevator { panel, floor }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected: false, press: true });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected: false, press: true, ticks: 0 });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::UseFieldItem { item, target }) => {
@@ -2110,6 +2138,23 @@ CascadeBadge; not cutting".to_string(),
                 if self.answer_no && let Some(menu) = api.menu_state().filter(|menu| menu.is_yes_no_menu()) {
                     let button = if menu.current_item == 0 { JoypadButton::Down } else { JoypadButton::A };
                     self.answer_no &= button == JoypadButton::Down;
+                    reader.update_with(api, button);
+                    return Ok(());
+                }
+                // A vending row names its drink: the cursor to it, then A, once. The menu is
+                // `VendingMachineMenu`'s, drawn with its first row at (1, 5).
+                if let Some(drink) = self.vending_pick
+                    && let Some(menu) = api.menu_state()
+                        .filter(|menu| (menu.top_menu_item_x, menu.top_menu_item_y) == (1, 5) && menu.current_item <= 3)
+                {
+                    let button = match menu.current_item.cmp(&drink) {
+                        std::cmp::Ordering::Less => JoypadButton::Down,
+                        std::cmp::Ordering::Greater => JoypadButton::Up,
+                        std::cmp::Ordering::Equal => JoypadButton::A,
+                    };
+                    if button == JoypadButton::A {
+                        self.vending_pick = None;
+                    }
                     reader.update_with(api, button);
                     return Ok(());
                 }
@@ -2802,7 +2847,7 @@ CascadeBadge; not cutting".to_string(),
                     }
                 }
             }
-            AgentState::TeachingMove { item, target_slot, press, entered_menu, settle, evolve_from } => {
+            AgentState::TeachingMove { item, target_slot, press, entered_menu, settle, evolve_from, declined } => {
                 use crate::pokemon::menu::TextBoxId;
                 let gs = api.game_state()?;
                 // Done once the move is known or, for a stone, the species has changed.
@@ -2817,12 +2862,12 @@ CascadeBadge; not cutting".to_string(),
                     if game_mode != GameMode::Overworld {
                         api.release_all_buttons();
                         if press { api.press_button(JoypadButton::B); }
-                        self.set_state(AgentState::TeachingMove { item, target_slot, press: !press, entered_menu, settle: 0, evolve_from });
+                        self.set_state(AgentState::TeachingMove { item, target_slot, press: !press, entered_menu, settle: 0, evolve_from, declined });
                         return Ok(());
                     }
                     if settle < 15 {
                         api.release_all_buttons();
-                        self.set_state(AgentState::TeachingMove { item, target_slot, press, entered_menu, settle: settle + 1, evolve_from });
+                        self.set_state(AgentState::TeachingMove { item, target_slot, press, entered_menu, settle: settle + 1, evolve_from, declined });
                         return Ok(());
                     }
                     let msg = match evolve_from {
@@ -2831,6 +2876,22 @@ CascadeBadge; not cutting".to_string(),
                     };
                     self.event(AgentEvent::TextBox { message: msg });
                     api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                // Declining the move to forget ends the teach: the game goes back to the bag, and
+                // teaching again would only ask again.
+                let declined = declined || api.on_screen_text(true).is_some_and(|text| text.contains("did not learn"));
+                if declined {
+                    api.release_all_buttons();
+                    if game_mode != GameMode::Overworld {
+                        if press { api.press_button(JoypadButton::B); }
+                        self.set_state(AgentState::TeachingMove { item, target_slot, press: !press, entered_menu, settle: 0, evolve_from, declined });
+                        return Ok(());
+                    }
+                    self.event(AgentEvent::TextBox {
+                        message: format!("Party slot {target_slot} did not learn the move: no move was chosen to forget"),
+                    });
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -2845,7 +2906,7 @@ CascadeBadge; not cutting".to_string(),
                 // Press and release on alternate ticks, for a fresh rising edge every two.
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu, settle: 0, evolve_from });
+                    self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu, settle: 0, evolve_from, declined });
                     return Ok(());
                 }
 
@@ -2878,7 +2939,7 @@ CascadeBadge; not cutting".to_string(),
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0, evolve_from });
+                self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0, evolve_from, declined });
             }
             AgentState::CuttingTree { press, entered_menu, tree_pos, slot, move_index, from_row } => {
                 if entered_menu && game_mode == GameMode::Overworld {
@@ -3308,7 +3369,18 @@ CascadeBadge; not cutting".to_string(),
                     }
                 }
             }
-            AgentState::UsingElevator { panel, floor, selected, press } => {
+            AgentState::UsingElevator { panel, floor, selected, press, ticks } => {
+                // Every other driver is bounded; without this one a lift that will not answer
+                // takes the rest of the run.
+                const ELEVATOR_BUDGET: u16 = 1200;
+                if ticks > ELEVATOR_BUDGET {
+                    self.event(AgentEvent::TextBox {
+                        message: format!("elevator: floor {floor} was not reached in {ELEVATOR_BUDGET} ticks") });
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let ticks = ticks + 1;
                 let gs = self.observe_state(api)?;
                 // Rode the elevator out.
                 let in_elevator = matches!(gs.map.map,
@@ -3319,7 +3391,12 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 const SPECIAL_LIST_MENU: u8 = 0x04;
-                if !selected && api.list_menu_id() == SPECIAL_LIST_MENU {
+                // `wListMenuID` still reads the floor menu long after it closed, so the screen is
+                // what says the menu is up: a second ride otherwise navigates a menu that is not
+                // there and never opens the one that is.
+                let floor_menu_showing = api.list_menu_id() == SPECIAL_LIST_MENU
+                    && api.on_screen_text(false).is_some_and(|text| text.to_lowercase().contains("floor"));
+                if !selected && floor_menu_showing {
                     // The floor menu scrolls, so compare the absolute index with the target floor.
                     let current = api.menu_state().map(|m| m.list_absolute_index()).unwrap_or(0);
                     api.release_all_buttons();
@@ -3332,12 +3409,12 @@ CascadeBadge; not cutting".to_string(),
                             Ordering::Equal   => { api.press_button(JoypadButton::A); selected = true; }
                         }
                     }
-                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
+                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press, ticks });
                     return Ok(());
                 }
                 if game_mode != GameMode::Overworld {
                     api.toggle_button(JoypadButton::A);
-                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                     return Ok(());
                 }
                 if !selected {
@@ -3345,12 +3422,12 @@ CascadeBadge; not cutting".to_string(),
                         Some([]) => {
                             api.release_all_buttons();
                             if press { api.press_button(JoypadButton::A); }
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press, ticks });
                         }
                         Some(&[btn, ..]) => {
                             api.release_all_buttons();
                             api.press_button(btn);
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                         }
                         _ => {
                             self.event(AgentEvent::TextBox { message: format!("Can't reach elevator panel at {panel}") });
@@ -3366,7 +3443,7 @@ CascadeBadge; not cutting".to_string(),
                         Some(btn) => {
                             api.release_all_buttons();
                             api.press_button(btn);
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                         }
                         None => {
                             self.event(AgentEvent::TextBox { message: "Can't reach the elevator exit warp".into() });
@@ -3455,7 +3532,7 @@ CascadeBadge; not cutting".to_string(),
                     self.event(AgentEvent::TextBox { message: format!(
                         "naming screen for {species:?} never closed in {NAMING_BUDGET} ticks; giving up") });
                     api.release_all_buttons();
-                    self.set_state(AgentState::Idle);
+                    self.naming_closed();
                     return Ok(());
                 }
                 if decided {
@@ -3469,7 +3546,7 @@ CascadeBadge; not cutting".to_string(),
                     );
                     if !still_in_naming {
                         api.release_all_buttons();
-                        self.set_state(AgentState::Idle);
+                        self.naming_closed();
                     } else {
                         self.set_state(AgentState::NamingPokemon { species, decided, ticks: ticks + 1 });
                     }

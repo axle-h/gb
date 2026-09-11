@@ -169,6 +169,7 @@ in_both_animation_modes!(
     a_faint_brings_the_next_pokemon_out,
     a_trainers_last_pokemon_ends_the_battle,
     a_run_that_works_ends_the_battle,
+    the_last_words_of_a_battle_the_model_won_reach_its_next_turn,
 );
 
 fn a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it(options: GameOptions) {
@@ -528,6 +529,18 @@ fn a_trainers_last_pokemon_ends_the_battle(options: GameOptions) {
     assert!(seen.battle_turns.len() >= 2, "one battle turn for a trainer with more than one Pokémon");
     assert!(run.fixture().game_state().battle.is_none(), "still in the trainer battle");
     assert!(!seen.was_stuck, "the watchdog fired around the end of a trainer battle");
+}
+
+/// A battle the model decided itself ends with the game's last words in the next turn: the faint,
+/// the experience, a level gained.
+fn the_last_words_of_a_battle_the_model_won_reach_its_next_turn(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "battle-last-words", vec![choose("fight:*"); 4], options);
+
+    assert!(played_on(&mut run, &seen), "no overworld turn followed the battle");
+    let seen = seen.lock().expect("not poisoned");
+    let told = seen.overworld_turns.iter().chain(seen.battle_turns.iter()).any(|turn| turn.contains("gained"));
+    assert!(told, "the battle's last box never reached the model:\n{}",
+            seen.overworld_turns.first().map_or("<never asked>", String::as_str));
 }
 
 /// SHIFT, which only a human or an old save leaves set: the agent declines every switch offer.

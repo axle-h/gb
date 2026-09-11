@@ -113,6 +113,11 @@ impl Cheats {
             return;
         }
 
+        // A save cut from a cheated run already has the party; installing it again would push
+        // the last of the save's own members out of a full party.
+        if self.god_party && !self.installed && has_god_party(state, self.hm_slaves) {
+            self.installed = true;
+        }
         if self.god_party && !self.installed && state.pokemon.len() > 0 {
             match api.debug_set_party(&god_party(state, self.hm_slaves)) {
                 Ok(()) => self.installed = true,
@@ -153,9 +158,11 @@ impl Cheats {
         }
     }
 
-    /// Whether it is safe to write the party struct: no battle, and the black-out window closed.
+    /// Whether it is safe to write the party struct: the plain overworld, so no battle, no
+    /// black-out window, and no naming screen or catch still writing a new member into the slots.
     fn party_writes_are_safe(&self, api: &PokemonApi<'_>, state: &GameState) -> bool {
-        state.battle.is_none()
+        state.mode == crate::pokemon::encoding::GameMode::Overworld
+            && state.battle.is_none()
             && api.mmu().read_pointer(&pokered_symbols::wIsInBattle)
                 != crate::pokemon::battle::LOST_BATTLE
     }
@@ -172,6 +179,14 @@ impl Cheats {
                     .any(|battle_move| battle_move.pp < battle_move.name.metadata().pp)
         })
     }
+}
+
+/// Whether the named members [`god_party`] would install are already in the party.
+fn has_god_party(state: &GameState, hm_slaves: bool) -> bool {
+    let has = |species, nickname: &str| state.pokemon.iter()
+        .any(|member| member.species == species && member.nickname.to_default_string() == nickname);
+    has(PokemonSpecies::Mewtwo, "MEWTWO")
+        && (!hm_slaves || (has(PokemonSpecies::Lapras, "TERRAIN") && has(PokemonSpecies::Pidgeot, "FLIGHT")))
 }
 
 /// A fighter that cannot lose and, with `hm_slaves`, the field moves that reach the whole map, then
@@ -335,6 +350,12 @@ mod tests {
                    PokemonMoveName::Strength, PokemonMoveName::Flash] {
             assert_eq!(knows(&after, hm), knows(&before, hm), "the party's {hm} changed");
         }
+
+        // A save cut from this run starts the next with the fighter it has, not a second one.
+        let mut again = Cheats::story(500_000);
+        again.apply(&mut fixture.api(), &after);
+        assert!(again.installed, "the fighter already there counts as installed");
+        assert_eq!(fixture.game_state().pokemon, after.pokemon, "the party was written again");
     }
 
     /// The sidecar writes badges but not the party during a battle or the black-out window.

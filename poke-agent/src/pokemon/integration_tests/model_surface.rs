@@ -251,6 +251,84 @@ fn a_prize_is_bought_at_the_game_corner() {
     assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired in the prize room");
 }
 
+/// A prize further down a counter's menu is the one bought, not the first.
+#[test]
+fn a_prize_below_the_first_row_is_bought() {
+    use crate::pokemon::item::ItemId;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let brain = walk_in_then(&["GameCornerPrizeRoom"], vec![
+        field_move(serde_json::json!({ "move": "prize", "item": "Tm50Substitute" })),
+    ], Arc::clone(&seen));
+    let mut run = LlmRun::builder(include_bytes!("../data/postgame-game-corner.bin"))
+        .named("prize-tm")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(brain));
+    run.fixture().api().debug_set_coins(9000);
+    let bought = run.tick_until(PATIENCE, |run| run.fixture().try_game_state()
+        .is_ok_and(|state| state.bag.contains(&ItemId::Tm50Substitute)));
+    let turns = seen.lock().expect("not poisoned").overworld_turns.clone();
+    assert!(bought, "no TM50 was bought; the last turn:\n{}", turns.last().map_or("", String::as_str));
+    assert_eq!(run.fixture().game_state().coins, 9000 - 7700, "TM50 costs 7700 coins");
+}
+
+/// A machine prize with no room in the bag is refused before the walk, with the clerk's reason.
+#[test]
+fn a_machine_prize_is_refused_to_a_full_bag() {
+    use crate::pokemon::item::ItemId;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let brain = walk_in_then(&["GameCornerPrizeRoom"], vec![
+        field_move(serde_json::json!({ "move": "prize", "item": "Tm50Substitute" })),
+    ], Arc::clone(&seen));
+    let mut run = LlmRun::builder(include_bytes!("../data/postgame-game-corner.bin"))
+        .named("prize-full-bag")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(brain));
+    run.fixture().api().debug_set_coins(9000);
+    // Every kind the bag has room for, so the machine would be a twenty-first.
+    let fillers = (1..=255u8).filter_map(ItemId::from_repr)
+        .filter(|id| !id.is_key_item() && !id.is_hm() && *id != ItemId::Tm50Substitute);
+    for filler in fillers {
+        if run.fixture().game_state().bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS { break }
+        if !run.fixture().game_state().bag.contains(&filler) {
+            run.fixture().api().debug_give_item(filler, 1).ok();
+        }
+    }
+    // A field move resolves once the turn has ended, so the refusal opens the next one.
+    let told = run.tick_until(PATIENCE, |_| seen.lock().expect("not poisoned").overworld_turns.iter()
+        .any(|turn| turn.contains("enough room")));
+    assert!(told, "the full bag was not given as the reason");
+    assert_eq!(run.fixture().game_state().coins, 9000, "coins were spent on a prize that could not be held");
+}
+
+/// Every floor a lift serves can be picked, not only the first: the Rocket Hideout's B4F is the
+/// third row of its panel and the one way into Giovanni's half of that floor.
+#[test]
+fn a_lift_goes_to_every_floor_its_panel_lists() {
+    use crate::pokemon::map::Map;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    // Down to B1F, the panel's first floor, and back up to B4F, its third.
+    let brain = walk_in_then(&["RocketHideoutElevator"], vec![
+        field_move(serde_json::json!({ "move": "elevator", "map": "RocketHideoutB1F" })),
+        field_move(serde_json::json!({ "move": "elevator", "map": "RocketHideoutB4F" })),
+    ], Arc::clone(&seen));
+    let mut run = LlmRun::builder(include_bytes!("../data/post-silph-scope.bin"))
+        .named("lift-third-floor")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(brain));
+
+    let down = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        run.fixture().try_game_state().is_ok_and(|state| state.map.map == Map::RocketHideoutB1F)
+    });
+    assert!(down, "the lift never reached B1F");
+    let up = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        run.fixture().try_game_state().is_ok_and(|state| state.map.map == Map::RocketHideoutB4F)
+    });
+    let turns = seen.lock().expect("not poisoned").overworld_turns.clone();
+    assert!(up, "the lift never came back to B4F; the last turn:\n{}", turns.last().map_or("", String::as_str));
+}
+
 /// The Name Rater's party menu is declined, and the conversation hands the run back unchanged.
 #[test]
 fn talking_to_the_name_rater_changes_nothing() {
@@ -363,4 +441,156 @@ fn seafoams_boulders_are_pushed_by_their_rows_down_to_articuno() {
         let hidden = mmu.read(pokered_symbols::wToggleableObjectFlags.address + toggle / 8) & (1 << (toggle % 8)) != 0;
         assert!(hidden, "the boulder at {at} never went down its hole");
     }
+}
+
+/// An item ball with tall grass on every side is still a row, and a model can pick it up.
+#[test]
+fn an_item_ringed_by_tall_grass_can_be_picked_up() {
+    use crate::pokemon::item::ItemId;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut run = LlmRun::builder(include_bytes!("../data/viridian-forest.bin"))
+        .named("grass-ringed-ball")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(choosing(":PokeBall", Arc::clone(&seen))));
+    let balls = |run: &mut LlmRun| run.fixture().try_game_state().ok()
+        .and_then(|state| state.bag.iter().find(|item| item.id == ItemId::PokeBall).map(|item| item.quantity))
+        .unwrap_or(0);
+    let before = balls(&mut run);
+    let picked = run.tick_until(PATIENCE, |run| balls(run) > before);
+    let first = seen.lock().expect("not poisoned").overworld_turns.first().cloned().unwrap_or_default();
+    assert!(first.contains("ViridianForest:PokeBall"), "the ball was not offered:\n{first}");
+    assert!(picked, "the ball was never picked up");
+}
+
+/// Teach Strength to a Mewtwo that knows four moves, answering the move to forget with `forget`.
+fn teaches_strength(forget: Option<u8>, name: &'static str) -> (LlmRun, Arc<Mutex<Seen>>) {
+    use crate::pokemon::item::ItemId;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut walk = walk_in_then(&["CeruleanCity"], vec![
+        field_move(serde_json::json!({ "move": "teach", "item": "Hm04Strength", "slot": 0 })),
+    ], Arc::clone(&seen));
+    let brain = move |request: &TurnRequest| match request.has_tool("forget_move") {
+        true => Reply::call("forget_move", match forget {
+            Some(slot) => serde_json::json!({ "slot": slot }),
+            None => serde_json::json!({}),
+        }),
+        false => walk(request),
+    };
+    let mut run = LlmRun::builder(include_bytes!("../data/completion-bill.bin"))
+        .named(name)
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(brain));
+    run.fixture().api().debug_give_item(ItemId::Hm04Strength, 1).expect("room in the bag");
+    (run, seen)
+}
+
+fn knows_strength(run: &mut LlmRun) -> bool {
+    use crate::pokemon::move_name::PokemonMoveName as Move;
+    run.fixture().try_game_state().is_ok_and(|state|
+        state.pokemon.iter().next().is_some_and(|mon| mon.moves.iter().flatten().any(|m| m.name == Move::Strength)))
+}
+
+/// A Pokémon with four moves forgets the one chosen and learns the HM.
+#[test]
+fn an_hm_replaces_the_move_chosen_to_forget() {
+    let (mut run, seen) = teaches_strength(Some(0), "teach-forget");
+    let taught = run.tick_until(PATIENCE, knows_strength);
+    assert!(taught, "Strength was never learned");
+    assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired while teaching");
+}
+
+/// Keeping all four moves ends the teach, rather than asking again for as long as the run lasts.
+#[test]
+fn declining_the_move_to_forget_ends_the_teach() {
+    let (mut run, seen) = teaches_strength(None, "teach-decline");
+    let told = run.tick_until(PATIENCE, |_| seen.lock().expect("not poisoned").overworld_turns.iter()
+        .any(|turn| turn.contains("did not learn the move")));
+    assert!(told, "no overworld turn said the move was not learned");
+    assert!(!knows_strength(&mut run), "Strength was learned though nothing was forgotten");
+    assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired while teaching");
+}
+
+/// A battle reloads the map and every cut tree grows back, however the battle ends: here with a
+/// catch, whose naming screen stands between the battle and the overworld.
+#[test]
+fn a_tree_grows_back_after_a_battle_that_ends_in_a_catch() {
+    use crate::pokemon::item::ItemId;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let log = Arc::clone(&seen);
+    let (mut cut, mut caught) = (false, false);
+    let brain = move |request: &TurnRequest| {
+        if request.is_summary() {
+            return Reply::Content("Cutting and catching.".to_string());
+        }
+        if request.is_battle() {
+            return Reply::call("choose_battle_action", serde_json::json!({ "id": "item:MasterBall", "summary": "catch" }));
+        }
+        if request.has_tool("set_nickname") {
+            caught = true;
+            return Reply::call("set_nickname", serde_json::json!({ "summary": "keeping the species name" }));
+        }
+        if !request.has_tool("choose_action") {
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        log.lock().expect("not poisoned").overworld_turns.push(request.situation().to_string());
+        let rows = request.menu_rows();
+        let row = |what: &str| rows.iter().find(|(_, description)| description.starts_with(what)).map(|(id, _)| id.clone());
+        let id = if !cut {
+            cut = true;
+            row("cut down the tree at (30, 12)")
+        } else if !caught {
+            row("walk into tall grass")
+        } else {
+            // Out west: through the gate if the way is open, or the tree again.
+            row("take the warp to Route8Gate").or_else(|| row("cut down the tree at (30, 12)"))
+        };
+        match id {
+            Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "on my way" })),
+            None => Reply::Calls(vec![Call::wait(30)]),
+        }
+    };
+    let mut run = LlmRun::builder(include_bytes!("../data/route8-cut-trees.bin"))
+        .named("regrown-tree")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(brain));
+    run.fixture().api().debug_give_item(ItemId::MasterBall, 5).expect("room in the bag");
+
+    let through = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        run.fixture().try_game_state().is_ok_and(|state| state.map.map == crate::pokemon::map::Map::Route8Gate)
+    });
+    let turns = seen.lock().expect("not poisoned").overworld_turns.clone();
+    assert!(through, "never reached the gate; the last turn:\n{}", turns.last().map_or("", String::as_str));
+    assert!(!turns.iter().any(|turn| turn.contains("gave up on the warp to Route8Gate")),
+            "the gate was offered through a tree that had grown back");
+}
+
+/// Each vending row buys the drink it names, not the cheapest: the roof girl trades a different TM
+/// for each of the three.
+#[test]
+fn a_vending_row_buys_the_drink_it_names() {
+    use crate::pokemon::item::ItemId;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut walk = walk_in_then(&["CeladonMart1F", "CeladonMart2F", "CeladonMart3F", "CeladonMart4F",
+                                  "CeladonMart5F", "CeladonMartRoof"], vec![], Arc::clone(&seen));
+    let mut bought = false;
+    let brain = move |request: &TurnRequest| {
+        if !bought && request.location().as_deref() == Some("CeladonMartRoof") && request.has_tool("choose_action")
+            && let Some((id, _)) = request.menu_rows().into_iter().find(|(_, what)| what.starts_with("buy a SODA POP"))
+        {
+            bought = true;
+            return Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "a drink" }));
+        }
+        walk(request)
+    };
+    let mut run = LlmRun::builder(include_bytes!("../data/at-celadon.bin"))
+        .named("vending")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(brain));
+    let held = |run: &mut LlmRun, drink| run.fixture().try_game_state().is_ok_and(|state| state.bag.contains(&drink));
+
+    let got = run.tick_until(PATIENCE, |run| held(run, ItemId::SodaPop));
+    assert!(got, "no Soda Pop came out of the machine");
+    assert!(!held(&mut run, ItemId::FreshWater), "the cheapest drink was bought instead, or as well");
+    assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired at the machine");
 }
